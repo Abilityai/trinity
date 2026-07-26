@@ -15,10 +15,17 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 
 from models import User
-from dependencies import get_current_user, require_admin, get_authorized_agent_by_name, get_owned_agent_by_name
+from dependencies import (
+    get_current_user,
+    require_admin,
+    reject_agent_principal,
+    get_authorized_agent_by_name,
+    get_owned_agent_by_name,
+)
 from database import db
 from db_models import AgentSkill, SkillInfo, AgentSkillsUpdate
-from services.skill_service import skill_service
+from services.skill_service import skill_service, SkillInjectionBusy
+from services.skill_packaging import validate_skill_name
 
 router = APIRouter(prefix="/api", tags=["skills"])
 
@@ -40,7 +47,15 @@ async def list_skills(current_user: User = Depends(get_current_user)):
         SkillInfo(
             name=s["name"],
             description=s.get("description"),
-            path=s["path"]
+            path=s["path"],
+            automation=s.get("automation"),
+            user_invocable=s.get("user_invocable", True),
+            allowed_tools=s.get("allowed_tools"),
+            requires=s.get("requires") or {"packages": [], "binaries": [], "env": []},
+            multi_file=s.get("multi_file", False),
+            file_count=s.get("file_count", 0),
+            size_bytes=s.get("size_bytes", 0),
+            version=s.get("version"),
         )
         for s in skills
     ]
@@ -63,7 +78,20 @@ async def get_skill(
 ):
     """
     Get details for a specific skill including full content.
+
+    **Human/operator surface only** (ent#139). This returns the skill's full
+    content — SKILL.md plus any bundled `scripts/` — so it is executable
+    material, not metadata. An agent-scoped key resolves to its owner user, so
+    before this gate any agent could pull arbitrary executable content out of
+    the library and run it locally: self-acquisition, which is exactly the
+    supply-chain risk the skill runner exists to avoid.
+
+    Agents get skills two supported ways instead: assigned/injected by an
+    operator, or executed on the dedicated runner under a per-skill allow-list.
+    Neither needs raw content over REST. Listing (name + description) stays open
+    so an agent can still *discover* what exists.
     """
+    reject_agent_principal(current_user)
     skill = skill_service.get_skill(skill_name)
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
@@ -114,6 +142,14 @@ async def update_agent_skills(
 
     Owner-only. Replaces all existing skill assignments with the provided list.
     """
+    # The ONE name guard (ent#183): assigned names later reach path math and
+    # in-container execs — a traversal-shaped name must never be persisted.
+    invalid = [s for s in update.skills if not validate_skill_name(s)]
+    if invalid:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid_skill_name: {', '.join(repr(s) for s in invalid[:5])}",
+        )
     count = db.set_agent_skills(
         agent_name=agent_name,
         skill_names=update.skills,
@@ -135,17 +171,16 @@ async def inject_skills(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Inject assigned skills into a running agent.
+    Inject assigned skills into a running agent as full directory packages.
 
-    Copies all assigned skills to the agent's .claude/skills/ directory.
-    Agent must be running.
+    Manual sync is a repair action: force=True re-injects unconditionally
+    (agent start uses force=False and skips version-unchanged skills).
+    Per-skill warnings (missing deps, skipped files) ride the results map.
     """
-    result = await skill_service.inject_skills(agent_name)
-    if not result.get("success") and result.get("skills_failed", 0) > 0:
-        # Partial success or full failure
-        return result
-
-    return result
+    try:
+        return await skill_service.inject_skills(agent_name, force=True)
+    except SkillInjectionBusy as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @router.post("/agents/{agent_name}/skills/{skill_name}")

@@ -13,14 +13,58 @@ unchanged.
 """
 
 import json
+import uuid
 from typing import Optional, List, Dict, Set
 from datetime import datetime
 
-from sqlalchemy import select, update, func, and_, case
+from sqlalchemy import select, update, func, and_, or_, case, delete
 
 from .engine import get_engine, make_insert
 from .tables import operator_queue
 from utils.helpers import utc_now_iso, iso_cutoff
+
+
+# #1632: generous hard "belt" caps enforced at the DB sink itself. The agent
+# ingestion boundary (services/operator_queue_service.py) clamps to far smaller
+# service caps *before* calling create_item, so a clamped agent item never trips
+# these; platform items are small and never trip them either. They exist only as
+# a second layer (#1525's validate-at-boundary-AND-at-sink philosophy) so the
+# "platform bypasses the boundary" exemption stops being solely load-bearing —
+# a caller that skips the service clamp still can't persist a multi-MB field.
+# An order of magnitude above the service caps (title 300 / question 4000 /
+# context 8 KiB / id 256).
+_DB_BELT_TITLE_MAX_BYTES = 4 * 1024
+_DB_BELT_QUESTION_MAX_BYTES = 16 * 1024
+_DB_BELT_CONTEXT_MAX_BYTES = 64 * 1024
+_DB_BELT_ID_MAX = 512
+
+
+def _operator_queue_prune_predicate(
+    retention_days: int, responded_retention_days: int
+):
+    """WHERE clause for the #1142 terminal operator_queue retention sweep.
+
+    #1644: extracted so `prune_terminal_items` and `count_terminal_candidates`
+    share one definition. This predicate is the reason sharing is mandatory rather
+    than merely tidy — it derives a second cutoff (`resp_days`) internally, so any
+    hand-mirrored copy drifts the moment either window is edited.
+
+    `pending` rows are never matched (and so never deleted) — see the caller.
+    """
+    terminal_cutoff = iso_cutoff(hours=retention_days * 24)
+    # `responded` never uses a shorter window than the terminal one.
+    resp_days = max(responded_retention_days, retention_days)
+    responded_cutoff = iso_cutoff(hours=resp_days * 24)
+    return or_(
+        and_(
+            operator_queue.c.status.in_(("acknowledged", "cancelled", "expired")),
+            operator_queue.c.created_at < terminal_cutoff,
+        ),
+        and_(
+            operator_queue.c.status == "responded",
+            operator_queue.c.created_at < responded_cutoff,
+        ),
+    )
 
 
 class OperatorQueueOperations:
@@ -32,6 +76,7 @@ class OperatorQueueOperations:
         return {
             "id": row["id"],
             "agent_name": row["agent_name"],
+            "request_id": row["request_id"],  # #1631 — agent-authored id
             "type": row["type"],
             "status": row["status"],
             "priority": row["priority"],
@@ -55,6 +100,7 @@ class OperatorQueueOperations:
     _SELECT_COLS = (
         operator_queue.c.id,
         operator_queue.c.agent_name,
+        operator_queue.c.request_id,  # #1631 — agent-authored id
         operator_queue.c.type,
         operator_queue.c.status,
         operator_queue.c.priority,
@@ -82,11 +128,50 @@ class OperatorQueueOperations:
             item: Queue item data from agent's operator-queue.json
 
         Returns:
-            The item ID
+            The item ID (the platform-minted uuid of the row that actually
+            exists — on conflict that is the pre-existing row, NOT the uuid this
+            call minted).
         """
-        item_id = item["id"]
+        # #1525: `id` was the last hard-indexed field. The sync loop guards on a
+        # truthy id before calling, but keep the DB boundary self-defensive so an
+        # id-less item can never KeyError-hot-loop here (raise a clear ValueError
+        # the caller quarantines, rather than an opaque KeyError).
+        request_id = item.get("id")
+        if not request_id:
+            raise ValueError("operator-queue item is missing a required 'id'")
+
+        # #1632: generous DB-sink belt. Reject a pathologically large field an
+        # order of magnitude past the service caps (a clamped agent item or a
+        # small platform item never trips this). Raised as ValueError so the sync
+        # loop quarantines it (#1525) rather than hot-looping on an opaque error.
+        if len(str(request_id)) > _DB_BELT_ID_MAX:
+            raise ValueError(f"operator-queue item 'id' exceeds {_DB_BELT_ID_MAX} chars")
+        title = item.get("title")
+        if title and len(str(title).encode("utf-8")) > _DB_BELT_TITLE_MAX_BYTES:
+            raise ValueError(f"operator-queue 'title' exceeds {_DB_BELT_TITLE_MAX_BYTES} bytes")
+        question = item.get("question")
+        if question and len(str(question).encode("utf-8")) > _DB_BELT_QUESTION_MAX_BYTES:
+            raise ValueError(f"operator-queue 'question' exceeds {_DB_BELT_QUESTION_MAX_BYTES} bytes")
+
         options_json = json.dumps(item.get("options")) if item.get("options") else None
         context_json = json.dumps(item.get("context")) if item.get("context") else None
+        if context_json and len(context_json.encode("utf-8")) > _DB_BELT_CONTEXT_MAX_BYTES:
+            raise ValueError(f"operator-queue 'context' exceeds {_DB_BELT_CONTEXT_MAX_BYTES} bytes")
+
+        # #1632: context may be authored as a non-dict (agents write free-form
+        # JSON). Only pull execution_id when it is actually a dict — a str/list
+        # `.get(...)` used to raise AttributeError here and hot-loop the sync.
+        context = item.get("context")
+        context_execution_id = context.get("execution_id") if isinstance(context, dict) else None
+
+        # #1631: the agent's id served both the platform's global row handle AND
+        # the agent's private correlation key — so two agents choosing the same
+        # id collided on the PK and the second item was silently dropped. Split
+        # them: `id` is a platform-minted uuid (globally unique by construction),
+        # the agent's string lives in `request_id`, and uniqueness is scoped per
+        # agent via the (agent_name, request_id) index. The conflict target moves
+        # off `id` to that index, so a same-agent re-insert stays idempotent.
+        new_id = uuid.uuid4().hex
 
         # Agents author operator-queue.json free-form, so the sync boundary must
         # be defensive (#1426): a required field missing from one item used to
@@ -97,8 +182,9 @@ class OperatorQueueOperations:
         # created once and the loop stops (the next cycle sees it via exists()).
         # `created_at` defaults to now (ingest time) per the issue's preferred fix.
         stmt = make_insert(operator_queue).values(
-            id=item_id,
+            id=new_id,
             agent_name=agent_name,
+            request_id=request_id,
             type=item.get("type", "question"),
             status=item.get("status", "pending"),
             priority=item.get("priority", "medium"),
@@ -106,14 +192,26 @@ class OperatorQueueOperations:
             question=item.get("question") or item.get("title") or "(no details provided)",
             options=options_json,
             context=context_json,
-            execution_id=item.get("context", {}).get("execution_id") if item.get("context") else None,
+            execution_id=context_execution_id,
             created_at=item.get("created_at") or utc_now_iso(),
             expires_at=item.get("expires_at"),
-        ).on_conflict_do_nothing(index_elements=["id"])
+        ).on_conflict_do_nothing(index_elements=["agent_name", "request_id"])
 
+        # Insert + re-read in one transaction: on conflict the insert is a no-op
+        # and the surviving row carries a DIFFERENT uuid, so to honour the
+        # documented contract (return the id of the row that exists) the return
+        # must be that row's id, not the `new_id` this call minted and discarded.
         with get_engine().begin() as conn:
             conn.execute(stmt)
-        return item_id
+            row = conn.execute(
+                select(operator_queue.c.id).where(
+                    and_(
+                        operator_queue.c.agent_name == agent_name,
+                        operator_queue.c.request_id == request_id,
+                    )
+                )
+            ).first()
+        return row[0] if row else new_id
 
     def get_item(self, item_id: str) -> Optional[Dict]:
         """Get a single queue item by ID."""
@@ -347,21 +445,115 @@ class OperatorQueueOperations:
             )
             return result.rowcount
 
-    def mark_acknowledged(self, item_id: str) -> bool:
-        """Mark an item as acknowledged by the agent."""
+    def prune_terminal_items(
+        self,
+        retention_days: int,
+        responded_retention_days: int,
+        limit: int = 5000,
+    ) -> int:
+        """#1142: hard-DELETE old terminal operator-queue rows (retention sweep).
+
+        The counterpart to #1017's ``clear_resolved_items`` (which only *hides*
+        via ``cleared_at`` because the 5s sync loop would resurrect a deleted row
+        still ``pending`` in the agent file). By retention age those rows are long
+        settled, so they can be removed:
+
+        - ``acknowledged`` / ``cancelled`` / ``expired`` older than ``retention_days``;
+        - ``responded`` only older than the more generous ``responded_retention_days``
+          — the write-back loop still has to deliver the operator's answer to the
+          agent file, and a stopped agent picks it up on restart, so a young
+          ``responded`` row must survive. ``pending`` rows are never deleted.
+
+        Age is measured on ``created_at`` (always set). Capped at ``limit`` rows
+        per call (select-ids-then-delete, portable across SQLite/PostgreSQL). A
+        disabled window (``retention_days <= 0``) prunes nothing. Returns the
+        count deleted.
+        """
+        if retention_days <= 0 or limit <= 0:
+            return 0
+
+        id_stmt = (
+            select(operator_queue.c.id)
+            .where(
+                _operator_queue_prune_predicate(retention_days, responded_retention_days)
+            )
+            .limit(limit)
+        )
+        with get_engine().begin() as conn:
+            ids = [r[0] for r in conn.execute(id_stmt).all()]
+            if not ids:
+                return 0
+            result = conn.execute(
+                delete(operator_queue).where(operator_queue.c.id.in_(ids))
+            )
+            return result.rowcount
+
+    def count_terminal_candidates(
+        self,
+        retention_days: int,
+        responded_retention_days: int,
+        limit: int,
+    ) -> int:
+        """#1644: how many rows `prune_terminal_items` would DELETE.
+
+        Shares the prune's predicate — which matters more here than anywhere else,
+        because that predicate derives a *second* cutoff internally
+        (``resp_days = max(responded_retention_days, retention_days)``). A
+        hand-mirrored count would drift the first time either knob is edited.
+        """
+        if retention_days <= 0 or limit <= 0:
+            return 0
+        inner = (
+            select(operator_queue.c.id)
+            .where(
+                _operator_queue_prune_predicate(retention_days, responded_retention_days)
+            )
+            .limit(limit)
+            .subquery()
+        )
+        with get_engine().connect() as conn:
+            return int(
+                conn.execute(select(func.count()).select_from(inner)).scalar() or 0
+            )
+
+    def mark_acknowledged(self, agent_name: str, request_id: str) -> Optional[str]:
+        """Mark an item as acknowledged by the agent.
+
+        #1631: scoped to (agent_name, request_id) — the agent's file carries its
+        own `request_id`, not the platform uuid `id`. Matching on `request_id`
+        alone would let agent B's acknowledgement flip agent A's identically-id'd
+        row (a real cross-agent write bug), so the agent_name must be part of the
+        predicate.
+
+        Returns the acknowledged row's platform uuid `id` (or None if no
+        `responded` row matched) — the WS `operator_queue_acknowledged` event and
+        the frontend store both key items by that uuid, so the caller must
+        broadcast it, not the agent's `request_id`.
+        """
         now = utc_now_iso()
         with get_engine().begin() as conn:
             result = conn.execute(
                 update(operator_queue)
                 .where(
                     and_(
-                        operator_queue.c.id == item_id,
+                        operator_queue.c.agent_name == agent_name,
+                        operator_queue.c.request_id == request_id,
                         operator_queue.c.status == "responded",
                     )
                 )
                 .values(status="acknowledged", acknowledged_at=now)
             )
-            return result.rowcount > 0
+            if result.rowcount == 0:
+                return None
+            row = conn.execute(
+                select(operator_queue.c.id).where(
+                    and_(
+                        operator_queue.c.agent_name == agent_name,
+                        operator_queue.c.request_id == request_id,
+                    )
+                )
+            ).first()
+            return row[0] if row else None
 
     def mark_expired(self) -> int:
         """Mark pending items past their expires_at as expired.
@@ -482,12 +674,6 @@ class OperatorQueueOperations:
             "responded_today": responded_today,
         }
 
-    def get_pending_item_ids(self) -> List[str]:
-        """Get IDs of all pending items (for sync service to check)."""
-        stmt = select(operator_queue.c.id).where(operator_queue.c.status == "pending")
-        with get_engine().connect() as conn:
-            return [row[0] for row in conn.execute(stmt).all()]
-
     def get_responded_items_for_agent(self, agent_name: str) -> List[Dict]:
         """Get responded (not yet acknowledged) items for a specific agent.
 
@@ -526,8 +712,36 @@ class OperatorQueueOperations:
             rows = conn.execute(stmt).mappings().all()
         return [self._row_to_item(row) for row in rows]
 
-    def item_exists(self, item_id: str) -> bool:
-        """Check if an item exists in the database."""
-        stmt = select(operator_queue.c.id).where(operator_queue.c.id == item_id)
+    def item_exists(self, agent_name: str, item_id: str) -> bool:
+        """Check whether this agent already created an item for a request id.
+
+        #1631: scoped to (agent_name, request_id). The old id-only check was the
+        collision bug — agent A's id read as "exists" for agent B, so B's item
+        (a distinct request) was never created. `item_id` here is the agent's
+        `request_id`, not the platform uuid `id`.
+        """
+        stmt = select(operator_queue.c.id).where(
+            and_(
+                operator_queue.c.agent_name == agent_name,
+                operator_queue.c.request_id == item_id,
+            )
+        )
         with get_engine().connect() as conn:
             return conn.execute(stmt).first() is not None
+
+    def count_pending_for_agent(self, agent_name: str) -> int:
+        """#1632: count an agent's currently-pending operator-queue rows.
+
+        The primary, Redis-independent depth bound for the ingestion cap: the
+        sync service admits new agent items only while this count (plus what it
+        has admitted this cycle) stays under OPERATOR_QUEUE_MAX_PENDING_PER_AGENT.
+        Dialect-agnostic (SQLite + PostgreSQL, #300).
+        """
+        stmt = select(func.count()).where(
+            and_(
+                operator_queue.c.agent_name == agent_name,
+                operator_queue.c.status == "pending",
+            )
+        )
+        with get_engine().connect() as conn:
+            return int(conn.execute(stmt).scalar() or 0)

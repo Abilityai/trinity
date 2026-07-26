@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from models import DismissAllRequest
 
 from database import db
-from dependencies import get_current_user, AuthorizedAgent
+from dependencies import get_current_user, AuthorizedAgent, assert_agent_access
 from services.agent_service import get_accessible_agents
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from db_models import (
@@ -265,8 +265,7 @@ async def get_notification(
     notification = db.get_notification(notification_id)
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
-    if not db.can_user_access_agent(current_user.username, notification.agent_name):
-        raise HTTPException(status_code=403, detail="Access denied")
+    assert_agent_access(current_user, notification.agent_name)
     return notification
 
 
@@ -284,8 +283,7 @@ async def acknowledge_notification(
     existing = db.get_notification(notification_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Notification not found")
-    if not db.can_user_access_agent(current_user.username, existing.agent_name):
-        raise HTTPException(status_code=403, detail="Access denied")
+    assert_agent_access(current_user, existing.agent_name)
 
     notification = db.acknowledge_notification(
         notification_id,
@@ -316,8 +314,7 @@ async def dismiss_notification(
     existing = db.get_notification(notification_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Notification not found")
-    if not db.can_user_access_agent(current_user.username, existing.agent_name):
-        raise HTTPException(status_code=403, detail="Access denied")
+    assert_agent_access(current_user, existing.agent_name)
 
     notification = db.dismiss_notification(
         notification_id,

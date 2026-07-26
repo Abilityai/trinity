@@ -32,6 +32,21 @@
 - **Key Features**: `GET/PUT/DELETE /api/settings/mcp-url` endpoints, URL validation (requires `http(s)://` and `/mcp` suffix), Settings UI section with save/reset, auto-detect fallback when not configured
 - **Flow**: `docs/memory/feature-flows/platform-settings.md`
 
+### 7.5 Per-Agent MCP Connector (ent#46; OSS-core since #118)
+- **Status**: ✅ Implemented — OSS-core (relocated from the enterprise submodule by #118; originally ent#46/#55/#51)
+- **GitHub Issue**: trinity-enterprise#118 (OSS-core move); ent#46 / ent#55 (original)
+- **Description**: Expose a single agent as a per-agent MCP connector — an end user adds it to their AI client (Claude Code, Cursor, Claude Desktop) in one line, turning the agent's `user_invocable` playbooks into MCP tools. The agent holds all credentials server-side; only a scoped, revocable key reaches the client. Available in **every edition** (no `mcp_connector` entitlement).
+- **Key Features**:
+  - Owner CRUD under `/api/agents/{name}/connector*`: `GET`/`PUT` config (enable toggle + exposed-playbook allow-list), `POST /connector/key` (mint/regenerate — secret returned once, auto-enables), `DELETE /connector/key` (revoke). `GET /connector/playbooks` is connector-key-readable.
+  - Scoped key = a row in the OSS `mcp_api_keys` table with `scope='connector'`, bound to the agent; validated by the existing OSS auth fence (`dependencies._enforce_connector_scope`) which fences a connector key to exactly `POST /{agent}/chat` + `GET /{agent}/connector/playbooks`.
+  - Per-client copy-paste setup snippets (`services/connector_service.build_snippets`): Claude Code CLI + `.mcp.json`, Cursor, Claude Desktop.
+  - Exposed-playbook allow-list (ent#55): `enterprise_connectors.exposed_playbooks` JSON array (NULL ⇒ all `user_invocable`); `user_invocable:false` playbooks are **never** exposed even if listed; `automation:gated` passed through as advisory metadata.
+  - MCP proxy tools (`src/mcp-server/src/tools/connector.ts`, already OSS): `list_playbooks`, `run_playbook`, `ask` — visible only to `scope='connector'` sessions.
+  - UI: `ConnectorChannelPanel.vue` + `ExposedToolsPanel.vue` in the Sharing tab, shown to all agent owners (un-gated).
+- **Schema**: `enterprise_connectors` (name kept for zero-migration adoption of existing enterprise installs) — dual-track (SQLite `db/migrations.py:enterprise_connectors_table` + Alembic `0015_enterprise_connectors`).
+- **Deferred (Part B, blocked on #848 design sign-off)**: email-auth onboarding — inline `request_login`/`verify_login` MCP tools so an external user on the agent's sharing allow-list connects with just their email (no pre-minted key). Tracked separately.
+- **Flow**: `docs/memory/feature-flows/mcp-connector.md`
+
 ---
 
 ## 32. A2A Agent Discoverability (#737)
@@ -105,3 +120,46 @@ runs the same access gate, so ownership/sharing is never bypassed.
 servers (each replica polls + reconciles independently).
 
 ---
+
+## Trinity Helper MCP Server (#1459)
+
+**Description**: A standalone, dependency-light MCP server (`src/helper-mcp/`, npm
+`@abilityai/trinity-docs-mcp`) that exposes the public Trinity Docs Q&A service
+(DOCS-QA-001, `docs/memory/feature-flows/trinity-docs-qa.md`) as MCP tools, so anyone can
+add a grounded "ask Trinity anything" assistant to Claude Code / Claude Desktop / any MCP
+client **without running a Trinity instance**. Pure protocol adapter over the existing
+`ask-trinity` Cloud Function — no new backend/QA logic, no authentication, no credentials.
+Distinct from the main Trinity MCP server (`src/mcp-server/`, requires a Trinity API key).
+
+- **FR-1 — `ask_trinity` tool**: `{question (required, ≤4,000 chars), session_id?
+  (opaque string)}` → POSTs the public endpoint; returns the answer plus the response
+  `session_id` for multi-turn follow-ups. Session expiry is **silent** server-side (an
+  expired/invalid id yields a NEW session with HTTP 200/`SUCCEEDED`) — the tool always
+  returns the effective session_id and appends a context-lost warning when it differs
+  from the input.
+- **FR-2 — `get_agent_requirements` tool**: fetches `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`
+  from raw.githubusercontent.com at call time (living doc, no bundling staleness); on fetch
+  failure returns a static quick-reference fallback + the GitHub URL, never an error-only
+  response. Same tool name/shape as the main MCP server's (per-server namespacing).
+- **FR-3 — Robustness**: 50s abort timeout (under the 60s MCP client default), no
+  auto-retry, `redirect: "error"`, non-JSON response guard, structured error text for
+  non-200 / `state != SUCCEEDED` / empty answer — a tool call never crashes the server.
+  `session_id` is an opaque string end-to-end (live values exceed 2^53; numeric handling
+  would corrupt them).
+- **FR-4 — Distribution**: npx-runnable stdio package; runtime deps = official
+  `@modelcontextprotocol/sdk` + `zod` only (deliberately NOT fastmcp — smaller
+  supply-chain surface); `console.error`-only logging (stdout is the JSON-RPC channel);
+  Node ≥18 guarded at startup. Publish via `.github/workflows/publish-helper-mcp.yml`
+  (npm provenance; one-time manual first publish creates the package, then trusted
+  publishing takes over).
+- **FR-5 — Endpoint override**: `ASK_TRINITY_ENDPOINT` env var (default: the public Cloud
+  Function URL) for self-hosted mirrors and the CI smoke test; logged to stderr when set.
+- **FR-6 — Corpus**: the docs-sync workflow indexes `docs/onboarding/**`,
+  `docs/user-docs/**` (incl. the 264-Q&A FAQ) and `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`
+  so answers cover evaluator/operator questions, not just onboarding.
+
+**Deferred**: hosted remote Streamable-HTTP endpoint + vanity URL + MCP registry listing
+(fast-follow; the official SDK keeps the transport option open); Cloud Function citations
+passthrough (the endpoint returns no citations today — the adapter forwards a `citations`
+field if it ever appears); #1460 (`ask_trinity` inside the main Trinity MCP server —
+shares the same tool name/schema and endpoint-client contract).

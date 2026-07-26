@@ -4,6 +4,7 @@ System settings routes for the Trinity backend.
 Provides endpoints for managing system-wide configuration like the Trinity prompt.
 Admin-only access for modification, read access for all authenticated users.
 """
+import asyncio
 import logging
 import os
 import re
@@ -18,20 +19,25 @@ from models import (
     AgentDefaultAccessPolicyUpdate,
     AgentDefaultResourcesUpdate,
     AgentQuotaUpdate,
+    ProactiveRateLimitsUpdate,
     ApiKeyTest,
     ApiKeyUpdate,
     BrainOrbSettingsUpdate,
+    ElevenLabsSettingsUpdate,
     GitHubTemplatesUpdate,
     MaxParallelTasksCeilingUpdate,
     McpUrlUpdate,
     OpsSettingsUpdate,
+    RetentionAcknowledge,
     SlackConnectRequest,
     SlackSettingsUpdate,
+    TelemetrySharingUpdate,
     User,
 )
 from database import db, SystemSetting, SystemSettingUpdate
-from dependencies import get_current_user
+from dependencies import get_current_user, assert_admin
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services import telemetry_sharing_service
 
 # Import from settings_service (these are re-exported for backward compatibility)
 from services.settings_service import (
@@ -56,6 +62,10 @@ from services.settings_service import (
     MAX_PARALLEL_TASKS_CEILING_MIN,
     MAX_PARALLEL_TASKS_CEILING_MAX,
     get_max_parallel_tasks_ceiling,
+    PROACTIVE_RATE_LIMIT_DEFAULTS,
+    PROACTIVE_RATE_LIMIT_DESCRIPTIONS,
+    PROACTIVE_RATE_LIMIT_MAX,
+    get_proactive_rate_limit,
 )
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -85,12 +95,6 @@ def mask_api_key(key: str) -> str:
 # services.settings_service for proper architecture
 
 
-def require_admin(current_user: User):
-    """Verify user is an admin."""
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-
-
 @router.get("", response_model=List[SystemSetting])
 async def get_all_settings(
     request: Request,
@@ -101,7 +105,7 @@ async def get_all_settings(
 
     Admin-only endpoint to view all configuration values.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         settings = db.get_all_settings()
@@ -182,6 +186,10 @@ async def get_public_feature_flags(
         # points. Lets an operator confirm via the API whether the correlated-
         # failure controls are armed during a soak. NOT a UI surface.
         "redelivery_governor_enabled": REDELIVERY_GOVERNOR_ENABLED,
+        # Outbound voice replies (ent#117) — true when an ElevenLabs key resolves
+        # (stored setting → ELEVENLABS_API_KEY env). Gates the agent-level Voice
+        # config UI + the send_voice_reply capability. Non-sensitive boolean.
+        "tts_available": bool(settings_service.get_elevenlabs_api_key()),
         "platform_default_model": settings_service.get_platform_default_model(),
         # Onboarding (trinity-enterprise#52) — is Claude auth configured at all?
         # Trinity agents can't think without it, so the first-run wizard uses
@@ -195,6 +203,286 @@ async def get_public_feature_flags(
         # enterprise-only tabs cleanly without server-side conditional
         # rendering. Mirrors the deny-list pattern of the other flags.
         "enterprise_features": entitlement_service.list_entitled_features(),
+        # ent#12 Tier-2 opt-in sharing — observability only (the egress gate is
+        # the stored consent + config switch). Default-off; the UI reads it to
+        # show the sharing state without a second round-trip. Non-sensitive bool.
+        "telemetry_sharing_enabled": telemetry_sharing_service.is_consent_enabled(),
+    }
+
+
+@router.get("/telemetry-sharing")
+async def get_telemetry_sharing(current_user: User = Depends(get_current_user)):
+    """Tier-2 opt-in sharing status + an inspectable preview of the exact
+    anonymized payload that would be sent (ent#12). Admin-only. Local read — no
+    egress. The preview lets the operator see precisely what is shared before
+    consenting (AC: payload documented and inspectable before send)."""
+    assert_admin(current_user)
+    status = telemetry_sharing_service.get_status()
+    # Preview over the configured backfill window — what a consent-time share
+    # would contain. Coarse aggregates only; never any PII.
+    status["payload_preview"] = telemetry_sharing_service.build_aggregate_payload(
+        window_days=status.get("backfill_days"), backfill=True
+    )
+    return status
+
+
+@router.put("/telemetry-sharing")
+async def set_telemetry_sharing(
+    body: TelemetrySharingUpdate,
+    current_user: User = Depends(get_current_user),
+):
+    """Set (or revoke) the Tier-2 sharing consent (ent#12). Admin + human-only.
+    Default-off, reversible. On enable, an immediate backfill share is scheduled
+    (fire-and-forget) so the first send includes the disclosed history window;
+    disabling stops egress at the next heartbeat. Audit-logged."""
+    from dependencies import reject_agent_principal
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    if telemetry_sharing_service.is_hard_disabled() and body.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="Telemetry sharing is disabled by configuration "
+            "(TELEMETRY_SHARING_ENABLED / DO_NOT_TRACK); consent cannot enable egress.",
+        )
+
+    was_enabled = telemetry_sharing_service.is_consent_enabled()
+    status = telemetry_sharing_service.set_consent(
+        body.enabled, backfill_days=body.backfill_days
+    )
+
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="telemetry_sharing_consent",
+            source="api",
+            actor_user=current_user,
+            details={"enabled": body.enabled, "backfill_days": status.get("backfill_days")},
+        )
+    except Exception:  # audit is best-effort
+        logger.debug("[telemetry-share] audit log failed", exc_info=True)
+
+    # Consent-time backfill: only on the off→on transition, fire-and-forget.
+    if body.enabled and not was_enabled:
+        asyncio.create_task(telemetry_sharing_service.share_now(backfill=True))
+
+    return status
+
+
+@router.post("/retention/acknowledge")
+async def acknowledge_retention_prune(
+    body: RetentionAcknowledge,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Approve one over-threshold retention prune (#1644).
+
+    THIS ENDPOINT IS THE GATE. The operator-queue alarm the guard raises is
+    informational only — responding to it authorizes nothing. That split is
+    deliberate: the queue item is reachable by principals that must never be able
+    to approve a mass deletion of their own audit trail, and it lives in a table
+    one of the guarded sweeps prunes.
+
+    Human-only. Admin-role alone is NOT sufficient today: an agent-scoped MCP
+    key resolves to its owner *carrying the owner's role*, so on an install whose
+    agents are admin-owned (the default — see cornelius_agent_service.CORNELIUS_OWNER)
+    an agent key passes the admin check. `reject_agent_principal` is therefore
+    applied explicitly here. See abilityai/trinity-ops-agent#232 for the
+    underlying fix.
+
+    The ack is bound to `window_days`: approving a prune at 30 days does not
+    approve one at 1 day. It is single-use — `cleanup_service` consumes it once the
+    prune has actually run, so the guard re-arms.
+    """
+    # Imported in-function: several suites stub `dependencies`, and a
+    # module-level import of a newer symbol breaks them (matches this file's
+    # existing in-function import style).
+    from dependencies import reject_agent_principal
+
+    # #1709: was `require_admin(current_user)` — a NameError (only `assert_admin`
+    # is imported here; `require_admin` is a FastAPI Depends factory, not an
+    # imperative call). The #1310 auth-wiring refactor left the endpoint 500ing on
+    # every request, so the guard's approval path never worked even for a caller.
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    from services.retention_guard import record_acknowledgement
+    from services.settings_service import OPS_SETTINGS_DEFAULTS
+
+    if body.key not in OPS_SETTINGS_DEFAULTS:
+        raise HTTPException(
+            status_code=422, detail=f"unknown retention setting: {body.key}"
+        )
+
+    # Bind the ack to the window actually in force right now, not to whatever the
+    # caller says. Otherwise an operator could be socially-engineered into acking a
+    # window that isn't the one about to run, and the guard would honour it.
+    effective_raw = db.get_setting_value(
+        body.key, OPS_SETTINGS_DEFAULTS.get(body.key, "0")
+    )
+    try:
+        effective = max(int(effective_raw), 0)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{body.key} currently holds a non-integer value; fix it first",
+        )
+    if effective != body.window_days:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{body.key} is currently {effective} days, not {body.window_days}. "
+                "Re-read the alarm and acknowledge the window in force."
+            ),
+        )
+
+    record_acknowledgement(body.key, effective)
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="retention_prune_acknowledged",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={"key": body.key, "window_days": effective},
+    )
+    logger.warning(
+        "[#1644] %s acknowledged an over-threshold retention prune for %s at "
+        "%d days — the next cleanup cycle will delete.",
+        current_user.username, body.key, effective,
+    )
+    return {"success": True, "key": body.key, "window_days": effective}
+
+
+@router.get("/retention")
+async def get_retention_status(
+    current_user: User = Depends(get_current_user),
+):
+    """Effective data-retention windows actually in use, plus the active
+    edition (#1039).
+
+    Reports the value resolved for each operator-tunable class — log archival
+    (env LOG_*), execution log/row, health-check, and agent/schedule
+    soft-delete (OPS settings, DB-row → code-default precedence) — and the
+    audit-log window (separate 365-day integrity floor, exempt from the
+    community floor).
+
+    ``edition`` is ``enterprise`` when the ``retention`` entitlement is present
+    (license-driven once #1040 lands; registry-driven today) and ``community``
+    otherwise. The 5-day community floor is applied by SEEDING a fresh install's
+    rows (#1638) — it is not a clamp, and OSS does not enforce it: any admin may
+    widen a window via ``PUT /api/settings/ops/config``. The enterprise module is
+    the managed, supported surface (audit, ``updated_by``, hot-reload).
+
+    ``source`` per key is ``db-row`` when an explicit setting exists and
+    ``code-default`` when the value is the fallback — the distinction that made
+    #1638 invisible (a ``code-default`` window is one a default change can move
+    under the operator's feet).
+
+    Admin-only.
+    """
+    assert_admin(current_user)
+
+    from services.entitlement_service import entitlement_service
+    from services.settings_service import (
+        COMMUNITY_RETENTION_FLOOR_DAYS,
+        RETENTION_OPS_KEYS,
+    )
+
+    def _ops_int(key: str) -> int:
+        raw = db.get_setting_value(key, OPS_SETTINGS_DEFAULTS.get(key, "0"))
+        try:
+            return max(int(raw), 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _ops_source(key: str) -> str:
+        return "db-row" if db.get_setting_value(key, None) is not None else "code-default"
+
+    entitled = entitlement_service.is_entitled("retention")
+    audit_days = max(int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "365") or 365), 365)
+
+    # #1644: the guard's threshold is a fixed constant, not an operator setting —
+    # reported here for visibility only.
+    from services.retention_guard import (
+        MAX_ROWS_PER_SWEEP,
+        FLOOR_AGENTS,
+        FLOOR_SCHEDULES,
+        evaluate as _guard_evaluate,
+    )
+
+    # #1709: surface the sweeps a cleanup cycle would REFUSE right now, so the
+    # panel can offer an approve control. We re-run the guard live (the exact
+    # logic + count fns cleanup_service uses) rather than reading stale state or
+    # coupling to the operator queue — the result is always fresh and cannot
+    # show a "pending" that's already been acknowledged or pruned. Only the two
+    # low-floor, irreversible sweeps are ack-gated in practice; the agent purge
+    # (floor 0) is the one #1581 depends on. `limit` is bounded to floor+1, so
+    # each check counts at most a handful of rows.
+    _ack_sweeps = (
+        ("agent_soft_delete_retention_days",
+         "Soft-deleted agents (this destroys each agent's workspace/public/shared Docker volumes — irreversible)",
+         FLOOR_AGENTS, db.count_soft_deleted_agents_past_retention),
+        ("schedule_soft_delete_retention_days",
+         "Soft-deleted schedules",
+         FLOOR_SCHEDULES, db.count_soft_deleted_schedules_past_retention),
+    )
+    pending_acknowledgements = []
+    for _key, _label, _floor, _count_fn in _ack_sweeps:
+        _window = _ops_int(_key)
+        if _window <= 0:
+            continue  # sweep disabled → nothing to prune, nothing to approve
+        _verdict = _guard_evaluate(
+            _key, _window,
+            lambda limit, _cf=_count_fn, _w=_window: _cf(_w, limit),
+            floor=_floor,
+        )
+        # Only "over_threshold" is a genuine pending-approval. `count_failed` /
+        # `ack_lookup_failed` are fail-closed error states, not approvable, and
+        # an already-acked sweep returns allowed=True (so it drops off the list —
+        # the single-use, no-stale-state guarantee the panel needs).
+        if not _verdict.allowed and _verdict.reason == "over_threshold":
+            pending_acknowledgements.append({
+                "key": _key,
+                "label": _label,
+                "window_days": _window,
+                "candidate_count": _verdict.candidates,
+                "floor": _floor,
+            })
+
+    return {
+        "edition": "enterprise" if entitled else "community",
+        "community_floor_days": COMMUNITY_RETENTION_FLOOR_DAYS,
+        # #1638: the five OPS windows resolve DB-row → code-default. There is NO
+        # env layer for them (the previously advertised
+        # "enterprise → env → community-default" was never implemented — grep for
+        # EXECUTION_ROW_RETENTION_DAYS et al: zero reads). Only log archival is
+        # env-driven. Claiming an escape hatch that does not exist is what left
+        # operators with no way to pre-empt #1638.
+        "precedence": "db-row → code-default (OPS windows); env (log archival only)",
+        "sources": {k: _ops_source(k) for k in RETENTION_OPS_KEYS},
+        # #1644 blast-radius guard. Reported separately from `windows` because it
+        # is not a retention window — it is the threshold above which a prune is
+        # refused pending an explicit acknowledgement. Editable in EVERY edition
+        # (unlike the windows, whose write path is entitlement-gated): it is a
+        # safety mechanism, not a paid feature.
+        "guard": {
+            "max_rows": MAX_ROWS_PER_SWEEP,
+            "agents_always_require_acknowledgement": True,
+        },
+        # #1709: sweeps a cleanup cycle would refuse right now, awaiting an admin
+        # ack via POST /api/settings/retention/acknowledge. Empty ⇒ nothing pending.
+        "pending_acknowledgements": pending_acknowledgements,
+        "windows": {
+            # Log archival (env-driven; LOG_* escape hatch)
+            "log_retention_days": int(os.getenv("LOG_RETENTION_DAYS", "5")),
+            "log_archive_enabled": os.getenv("LOG_ARCHIVE_ENABLED", "true").lower() == "true",
+            # Execution + health + soft-delete (OPS settings, 0 = disabled)
+            **{k: _ops_int(k) for k in RETENTION_OPS_KEYS},
+            # Audit log — exempt from the community floor (365-day integrity floor)
+            "audit_log_retention_days": audit_days,
+        },
     }
 
 
@@ -213,7 +501,7 @@ async def get_api_keys_status(
 
     Admin-only. Returns masked key info for security.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         # Get Anthropic key
@@ -255,7 +543,7 @@ async def update_anthropic_key(
 
     Admin-only. Key is stored in system settings.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         # Validate format
@@ -301,7 +589,7 @@ async def delete_anthropic_key(
 
     Admin-only. Will fall back to env var if configured.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         deleted = db.delete_setting('anthropic_api_key')
@@ -342,7 +630,7 @@ async def test_anthropic_key(
 
     Admin-only. Makes a lightweight API call to validate the key.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         key = body.api_key.strip()
@@ -403,7 +691,7 @@ async def update_github_pat(
     Admin-only. Token is stored in system settings and auto-propagated to all
     running agents that currently use the global PAT (#211).
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         # Validate format
@@ -460,7 +748,7 @@ async def delete_github_pat(
 
     Admin-only. Will fall back to env var if configured.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         deleted = db.delete_setting('github_pat')
@@ -501,7 +789,7 @@ async def test_github_pat(
 
     Admin-only. Makes a lightweight API call to validate the token.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         key = body.api_key.strip()
@@ -604,7 +892,7 @@ async def get_slack_settings_status(
 
     Admin-only. Returns masked key info for security.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         from services.settings_service import (
@@ -655,7 +943,7 @@ async def update_slack_settings(
 
     Admin-only. All fields are optional - only provided values are updated.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         updated = []
@@ -690,7 +978,7 @@ async def delete_slack_settings(
 
     Admin-only. Will fall back to env vars if configured.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         deleted = []
@@ -731,7 +1019,7 @@ async def get_slack_transport_status(
     Returns transport mode, connection state, and workspace info.
     Admin-only.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     from services.settings_service import get_slack_app_token, get_slack_transport_mode
 
@@ -774,7 +1062,7 @@ async def connect_slack_transport(
     Saves app_token and transport_mode to DB, stops any existing
     transport, and starts a new one. Admin-only.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # Save settings to DB
     if body.app_token is not None:
@@ -847,7 +1135,7 @@ async def install_slack_workspace(
     redirects back to the OAuth callback which stores the bot token
     and redirects to Settings page. Admin-only.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     from services.settings_service import get_slack_client_id
     from services.slack_service import slack_service
@@ -878,7 +1166,7 @@ async def disconnect_slack_transport(
 
     Admin-only.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     transport = getattr(request.app.state, 'slack_transport', None)
     if not transport:
@@ -908,7 +1196,7 @@ async def list_email_whitelist(
 
     Admin-only endpoint.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     whitelist = db.list_whitelist(limit=1000)
 
@@ -927,7 +1215,7 @@ async def add_email_to_whitelist(
     """
     from database import EmailWhitelistAdd
 
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # Parse request
     body = await request.json()
@@ -966,7 +1254,7 @@ async def remove_email_from_whitelist(
 
     Admin-only endpoint.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # Remove from whitelist
     removed = db.remove_from_whitelist(email)
@@ -998,7 +1286,7 @@ async def get_github_templates(
     Admin-only. Returns the configured list or the hardcoded defaults.
     Display names and descriptions are resolved from each repo's template.yaml.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     from config import DEFAULT_GITHUB_TEMPLATE_REPOS
     from services.template_service import _fetch_all_metadata
@@ -1053,7 +1341,7 @@ async def update_github_templates(
 
     Admin-only. Validates owner/repo format for each entry.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # Validate each entry
     for entry in body.templates:
@@ -1083,7 +1371,7 @@ async def delete_github_templates(
 
     Admin-only. Removes the DB override so the system falls back to config.py defaults.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     deleted = settings_service.delete_github_templates()
 
@@ -1174,7 +1462,7 @@ async def update_mcp_url(
 
     Admin-only. Validates URL format (must be http/https, must end with /mcp).
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     validated_url = _validate_mcp_url(body.url)
     db.set_setting(MCP_URL_SETTING_KEY, validated_url)
@@ -1195,7 +1483,7 @@ async def delete_mcp_url(
 
     Admin-only. Removes the custom URL, reverting to hostname-based auto-detection.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     deleted = db.delete_setting(MCP_URL_SETTING_KEY)
 
@@ -1227,7 +1515,7 @@ async def get_agent_quotas(
     Admin-only. Returns quota limits for each role with defaults.
     Admin role is always unlimited and not configurable.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     all_settings = db.get_settings_dict()
 
@@ -1263,7 +1551,7 @@ async def update_agent_quotas(
     Admin-only. Only updates provided fields. Values must be non-negative integers.
     Set to "0" for unlimited.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     updated = []
     for key in AGENT_QUOTA_DEFAULTS:
@@ -1305,7 +1593,7 @@ async def get_agent_default_resources(
 
     Admin-only.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     cpu = db.get_setting_value(AGENT_DEFAULT_CPU_KEY, AGENT_DEFAULT_CPU)
     memory = db.get_setting_value(AGENT_DEFAULT_MEMORY_KEY, AGENT_DEFAULT_MEMORY)
@@ -1334,7 +1622,7 @@ async def update_agent_default_resources(
     Valid CPU values (number of processors): 1, 2, 4, 8, 16
     Valid memory values: 1g, 2g, 4g, 8g, 16g, 32g
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     updated = []
 
@@ -1383,7 +1671,7 @@ async def get_agent_default_access_policy(
     Currently scopes to `require_email` (#1129): when ON, new agents require a
     verified email on incoming DMs / public chat / shared access. Admin-only.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     return {
         "require_email": get_agent_default_require_email(),
@@ -1406,7 +1694,7 @@ async def update_agent_default_access_policy(
     Admin-only. Only the fields provided are updated. Stored in system_settings;
     consumed at agent-creation time. Does NOT rewrite existing agents.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     updated = []
     if body.require_email is not None:
@@ -1454,7 +1742,7 @@ async def get_max_parallel_tasks_ceiling_setting(
     Admin-only. Owners pick a per-agent value within this ceiling.
     Registered before the `/{key}` catch-all (Invariant #4).
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     return {
         "value": get_max_parallel_tasks_ceiling(),
@@ -1478,7 +1766,7 @@ async def update_max_parallel_tasks_ceiling_setting(
     never rewritten. Existing agents above the new ceiling are clamped on the
     next admit.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     if (
         not isinstance(body.value, int)
@@ -1518,6 +1806,87 @@ async def update_max_parallel_tasks_ceiling_setting(
         "default": MAX_PARALLEL_TASKS_CEILING_DEFAULT,
         "min": MAX_PARALLEL_TASKS_CEILING_MIN,
         "max": MAX_PARALLEL_TASKS_CEILING_MAX,
+    }
+
+
+@router.get("/proactive-rate-limits")
+async def get_proactive_rate_limits_setting(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Effective proactive channel-message caps (#1609).
+
+    Admin-only. The five agent-INITIATED anti-spam caps (Slack per-channel /
+    per-agent, Telegram per-group / per-agent, proactive-DM per-recipient),
+    per hour. ``0`` = unlimited. Inbound replies are never subject to these.
+    """
+    assert_admin(current_user)
+    limits = {
+        key: {
+            "value": get_proactive_rate_limit(key),
+            "default": default,
+            "is_default": get_proactive_rate_limit(key) == default
+                          and settings_service.get_setting(key) is None,
+            "description": PROACTIVE_RATE_LIMIT_DESCRIPTIONS.get(key, ""),
+        }
+        for key, default in PROACTIVE_RATE_LIMIT_DEFAULTS.items()
+    }
+    return {"limits": limits, "max": PROACTIVE_RATE_LIMIT_MAX, "window_hours": 1}
+
+
+@router.put("/proactive-rate-limits")
+async def update_proactive_rate_limits_setting(
+    body: ProactiveRateLimitsUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Set proactive channel-message caps (#1609).
+
+    Admin-only. Only provided fields change; each must be an int in
+    ``[0, MAX]`` (``0`` = unlimited, which is warned in the response). Named
+    422 on bad input. Audit-logged. Runtime-resolved — no restart.
+    """
+    assert_admin(current_user)
+
+    # Validate ALL provided fields BEFORE writing any — a mixed valid/invalid body
+    # must be all-or-nothing (a 422 leaves every cap unchanged), not partially
+    # applied.
+    pending = {}
+    for key in PROACTIVE_RATE_LIMIT_DEFAULTS:
+        value = getattr(body, key, None)
+        if value is None:
+            continue
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > PROACTIVE_RATE_LIMIT_MAX:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{key} must be an integer between 0 and {PROACTIVE_RATE_LIMIT_MAX} (0 = unlimited)",
+            )
+        pending[key] = value
+
+    updated, warnings = [], []
+    for key, value in pending.items():
+        db.set_setting(key, str(value))
+        updated.append(key)
+        if value == 0:
+            warnings.append(f"{key} is now UNLIMITED — the anti-spam guardrail is disabled for it.")
+
+    if updated:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="settings_change",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            details={"setting": "proactive_rate_limits", "action": "update", "updated": updated},
+        )
+
+    return {
+        "success": True,
+        "updated": updated,
+        "warnings": warnings,
+        "limits": {key: get_proactive_rate_limit(key) for key in PROACTIVE_RATE_LIMIT_DEFAULTS},
     }
 
 
@@ -1562,7 +1931,7 @@ async def get_brain_orb_settings(
     `gemini_key_configured` reflects the env-only GEMINI_API_KEY secret the
     voice tile additionally requires (boolean only — never the key).
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     from config import GEMINI_API_KEY
 
@@ -1586,7 +1955,7 @@ async def update_brain_orb_settings(
     stored override, reverting it to its env/default value. Takes effect on
     the next request — route gates resolve at request time, no restart.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     from config import GEMINI_API_KEY
     from services.settings_service import BRAIN_ORB_FLAGS
@@ -1655,6 +2024,107 @@ async def update_brain_orb_settings(
     }
 
 
+# ============================================================================
+# ElevenLabs / outbound-voice (TTS) Settings (trinity-enterprise#117)
+# NOTE: These routes MUST be defined BEFORE the /{key} catch-all (Invariant #4).
+# ============================================================================
+
+def _elevenlabs_settings_state() -> dict:
+    """Admin-panel view: key presence + source + default voice (never the key)."""
+    return {
+        "key_configured": bool(settings_service.get_elevenlabs_api_key()),
+        "key_source": settings_service.elevenlabs_key_source(),
+        "default_voice_id": settings_service.get_default_voice_id(),
+    }
+
+
+@router.get("/elevenlabs")
+async def get_elevenlabs_settings(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Get ElevenLabs/voice platform settings (ent#117).
+
+    Admin-only. Registered before the `/{key}` catch-all (Invariant #4). The API
+    key is surfaced as `key_configured: bool` + `key_source` only — never echoed.
+    """
+    assert_admin(current_user)
+    return _elevenlabs_settings_state()
+
+
+@router.put("/elevenlabs")
+async def update_elevenlabs_settings(
+    body: ElevenLabsSettingsUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Set/clear the ElevenLabs API key + platform default voice (ent#117).
+
+    Admin-only, audit-logged (key masked; default voice old→new). Key stored
+    AES-256-GCM encrypted. Runtime-resolved — no restart. `clear: ["api_key",
+    "default_voice_id"]` reverts to env/unset. A field may not be both set and cleared.
+    """
+    assert_admin(current_user)
+
+    clear = body.clear or []
+    valid_clear = {"api_key", "default_voice_id"}
+    unknown = [f for f in clear if f not in valid_clear]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown field(s) in clear: {', '.join(sorted(unknown))}. "
+                   f"Valid: {', '.join(sorted(valid_clear))}",
+        )
+    if "api_key" in clear and body.api_key is not None:
+        raise HTTPException(status_code=400, detail="api_key both set and cleared")
+    if "default_voice_id" in clear and body.default_voice_id is not None:
+        raise HTTPException(status_code=400, detail="default_voice_id both set and cleared")
+
+    before = _elevenlabs_settings_state()
+    changes = {}
+
+    if body.api_key is not None:
+        key = body.api_key.strip()
+        if not key:
+            raise HTTPException(status_code=400, detail="api_key must not be empty (use clear instead)")
+        settings_service.set_elevenlabs_api_key(key)
+        changes["api_key"] = "set"
+    elif "api_key" in clear:
+        settings_service.clear_elevenlabs_api_key()
+        changes["api_key"] = "cleared"
+
+    if body.default_voice_id is not None:
+        voice = body.default_voice_id.strip()
+        if voice:
+            settings_service.set_default_voice_id(voice)
+        else:
+            settings_service.clear_default_voice_id()
+        changes["default_voice_id"] = {"old": before["default_voice_id"], "new": voice or None}
+    elif "default_voice_id" in clear:
+        settings_service.clear_default_voice_id()
+        changes["default_voice_id"] = {"old": before["default_voice_id"], "new": None}
+
+    if changes:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="settings_change",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            details={
+                "setting": "elevenlabs",
+                "action": "update",
+                # Key value never logged — only whether it was set/cleared.
+                "changes": changes,
+            },
+        )
+
+    after = _elevenlabs_settings_state()
+    return {"success": True, **after}
+
+
 @router.get("/{key}")
 async def get_setting(
     key: str,
@@ -1667,7 +2137,7 @@ async def get_setting(
     Returns the setting value or 404 if not found.
     Admin-only for most settings.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         setting = db.get_setting(key)
@@ -1694,7 +2164,7 @@ async def update_setting(
 
     Admin-only endpoint. Creates the setting if it doesn't exist.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     # #506: the fleet ceiling must go through the dedicated range-validated
     # route; block the generic PUT so it can't be written to junk/out-of-range
@@ -1705,6 +2175,49 @@ async def update_setting(
             detail=(
                 "max_parallel_tasks_ceiling must be set via "
                 "PUT /api/settings/max-parallel-tasks-ceiling (range-validated 1–32)"
+            ),
+        )
+
+    # #1609: proactive caps go through the dedicated range-validated route.
+    if key in PROACTIVE_RATE_LIMIT_DEFAULTS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/proactive-rate-limits "
+                f"(range-validated 0–{PROACTIVE_RATE_LIMIT_MAX}, 0 = unlimited)"
+            ),
+        )
+
+    # ent#12: telemetry-sharing consent is a human-only decision. The dedicated
+    # PUT /api/settings/telemetry-sharing enforces reject_agent_principal, the
+    # hard-disabled 409, consent_at stamping, and the dedicated audit action —
+    # this generic PUT has none of those, so an admin-owned agent-scoped key
+    # could otherwise flip egress consent (trinity-ops-agent#232 class). Block
+    # the whole key family.
+    if key.startswith("telemetry_sharing_"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "telemetry_sharing_* must be set via "
+                "PUT /api/settings/telemetry-sharing (admin + human-only, audit-logged)"
+            ),
+        )
+
+    # #1644: the blast-radius guard's own state cannot be writable through an
+    # unvalidated endpoint, or the guard is trivially disarmed by the same route
+    # that causes the bug it exists to catch.
+    #   - an ack row WRITTEN here would pre-approve a mass deletion;
+    #   - the threshold RAISED here would disable the guard fleet-wide.
+    # (DELETE of an ack is deliberately NOT blocked: removing an ack re-arms the
+    # guard, which fails safe.)
+    from services.retention_guard import ACK_KEY_PREFIX
+
+    if key.startswith(ACK_KEY_PREFIX):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "retention acknowledgements must be recorded via "
+                "POST /api/settings/retention/acknowledge (#1644)"
             ),
         )
 
@@ -1791,7 +2304,7 @@ async def delete_setting(
 
     Admin-only endpoint. Returns success even if setting didn't exist.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         deleted = db.delete_setting(key)
@@ -1829,7 +2342,7 @@ async def get_ops_settings(
     Admin-only. Returns both stored values and defaults for ops settings.
     Useful for displaying the ops configuration panel.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         # Get current values from database
@@ -1865,7 +2378,7 @@ async def update_ops_settings(
     Admin-only. Only accepts valid ops setting keys.
     Invalid keys are ignored with a warning.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
 
     try:
         updated = []
@@ -1893,23 +2406,35 @@ async def reset_ops_settings(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Reset all ops settings to their default values.
+    Reset ops settings to their default values.
 
-    Admin-only. Removes all ops settings from the database,
-    causing them to fall back to defaults.
+    Admin-only. Removes ops settings from the database, causing them to fall
+    back to defaults.
+
+    Retention windows (`RETENTION_OPS_KEYS`) are deliberately EXCLUDED (#1638).
+    Deleting one of those rows silently changes how much of the operator's data
+    `cleanup_service` keeps, and a fresh install's seeded community floor would
+    be widened by a button labelled "reset to defaults" — an irreversible-ish
+    side effect nobody expects from a reset. Retention is changed only through
+    the dedicated retention path, where it is an explicit decision.
     """
-    require_admin(current_user)
+    assert_admin(current_user)
+
+    from services.settings_service import RETENTION_OPS_KEYS
 
     try:
         deleted = []
         for key in OPS_SETTINGS_DEFAULTS.keys():
+            if key in RETENTION_OPS_KEYS:
+                continue
             if db.delete_setting(key):
                 deleted.append(key)
 
         return {
             "success": True,
-            "message": "Ops settings reset to defaults",
-            "reset": deleted
+            "message": "Ops settings reset to defaults (retention windows unchanged)",
+            "reset": deleted,
+            "skipped": list(RETENTION_OPS_KEYS),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to reset ops settings: {str(e)}")

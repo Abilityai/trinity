@@ -53,6 +53,7 @@ users = Table(
     Column("updated_at", Text),
     Column("last_login", Text),
     Column("suspended_at", Text),
+    Column("github_pat_encrypted", Text),  # ent#162 — per-user GitHub PAT (AES-256-GCM envelope)
 )
 
 subscription_credentials = Table(
@@ -103,7 +104,17 @@ agent_ownership = Table(
     Column("mcp_exposed", Integer),
     Column("tts_voice_replies_enabled", Integer),  # epic #24/#25: outbound voice-out toggle (shared agent-level)
     Column("tts_voice_id", Text),                  # epic #24/#25: ElevenLabs voice id for spoken replies
+    Column("tts_voice_telegram_enabled", Integer),   # ent#117: per-channel voice-allowed flag
+    Column("tts_voice_slack_enabled", Integer),      # ent#117: per-channel voice-allowed flag
+    Column("tts_voice_whatsapp_enabled", Integer),   # ent#117: per-channel voice-allowed flag
     Column("deleted_at", Text),
+    Column("is_ephemeral", Integer),               # trinity-enterprise#69: 1 = ghost agent (budgeted, hard-discarded)
+    Column("ephemeral_max_executions", Integer),   # trinity-enterprise#69: NULL = no exec budget
+    Column("ephemeral_expires_at", Text),          # trinity-enterprise#69: ALWAYS set for ghosts (no immortal ghost)
+    Column("spawned_by_agent", Text),              # trinity-enterprise#69 Part 2: parent agent name (provenance)
+    Column("spawned_by_key_id", Text),             # trinity-enterprise#69 Part 2: parent MCP key id (stable identity)
+    Column("volume_base_name", Text),              # #1664: data-volume identity (NULL = agent_name); frozen at rename
+    Column("display_label", Text),                 # ent#181: human-facing name (NULL = render agent_name); slug never moves
 )
 
 agent_sharing = Table(
@@ -132,6 +143,21 @@ mcp_api_keys = Table(
     Column("user_id", Integer),
     Column("agent_name", Text),
     Column("scope", Text),
+)
+
+# Per-agent MCP connector config (ent#46; OSS-core since #118). One row per agent:
+# `enabled` + `exposed_playbooks` (JSON array of playbook names; NULL = all
+# user_invocable). The scoped connector KEY is a row in `mcp_api_keys`
+# (scope='connector'), not here. Name kept from the enterprise era so existing
+# installs adopt their data with zero migration.
+enterprise_connectors = Table(
+    "enterprise_connectors",
+    metadata,
+    Column("agent_name", Text, primary_key=True),
+    Column("enabled", Integer),
+    Column("exposed_playbooks", Text),
+    Column("created_at", Text),
+    Column("updated_at", Text),
 )
 
 email_whitelist = Table(
@@ -228,6 +254,16 @@ schedule_executions = Table(
     Column("fan_out_id", Text),
     Column("retry_count", Integer),
     Column("loop_id", Text),
+    Column("claim_token", Text),  # #1081 Phase 0 — dark pull-coordination columns
+    Column("lease_expires_at", Text),  # ISO-8601 UTC; unused until pull phases
+    Column("claimed_by_worker", Text),
+    # #1081 Phase 3 (#429/#1402) — lease-reaper re-delivery counter. DISTINCT from
+    # retry_count (#678 reader-race). Incremented on each lease-expired re-queue;
+    # at MAX_REDELIVERY the row is poison-parked to the operator queue.
+    Column("redelivery_count", Integer),
+    Column("source_channel", Text),           # ent#117: originating channel for voice-reply delivery
+    Column("source_channel_chat_id", Text),   # ent#117: channel destination (chat/channel id)
+    Column("source_channel_thread", Text),    # ent#117: channel thread id (nullable)
 )
 
 agent_loops = Table(
@@ -243,10 +279,13 @@ agent_loops = Table(
     Column("max_duration_seconds", Integer),  # #1156 — wall-clock deadline
     Column("max_cost_usd", Float),  # #1155 — per-loop USD cost budget
     Column("no_progress_threshold", Integer),  # #1157 — doom-loop detection (NULL = disabled)
+    Column("on_failure", Text),  # #1167 — failure policy: 'abort' | 'continue'
+    Column("max_consecutive_failures", Integer),  # #1167 — continue-mode circuit breaker
     Column("model", Text),
     Column("allowed_tools", Text),
     Column("status", Text),
     Column("runs_completed", Integer),
+    Column("failed_runs", Integer),
     Column("stop_reason", Text),
     Column("last_response", Text),
     Column("error", Text),
@@ -274,6 +313,33 @@ agent_loop_runs = Table(
     Column("duration_ms", Integer),
     Column("started_at", Text),
     Column("completed_at", Text),
+)
+
+# Agent self-reminders (#1296). Columns MUST byte-match the DDL in
+# db/schema.py / db/migrations.py / 0028_agent_reminders (schema-parity does NOT
+# import tables.py — the live select() accessor test in tests/unit is the guard).
+agent_reminders = Table(
+    "agent_reminders",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("message", Text),
+    Column("fire_at", Text),
+    Column("status", Text),
+    Column("model", Text),
+    Column("timeout_seconds", Integer),
+    Column("allowed_tools", Text),
+    Column("owner_id", Integer),
+    Column("created_by_email", Text),
+    Column("source_agent_name", Text),
+    Column("source_mcp_key_id", Text),
+    Column("execution_id", Text),
+    Column("fire_attempts", Integer),
+    Column("firing_at", Text),
+    Column("error", Text),
+    Column("created_at", Text),
+    Column("fired_at", Text),
+    Column("cancelled_at", Text),
 )
 
 chat_sessions = Table(
@@ -389,6 +455,18 @@ agent_reports = Table(
     Column("schema_version", Integer),
     Column("period_start", Text),
     Column("period_end", Text),
+    Column("created_at", Text),
+)
+
+product_events = Table(
+    # Local product-event capture — activation funnel, Tier-1 (ent#184).
+    # Local-only, default-on, zero egress. INTEGER autoincrement PK.
+    "product_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("installation_id", Text),
+    Column("event_type", Text),
+    Column("event_context", Text),
     Column("created_at", Text),
 )
 
@@ -571,6 +649,10 @@ agent_sync_state = Table(
     Column("behind_main", Integer),
     Column("ahead_working", Integer),
     Column("behind_working", Integer),
+    Column("git_dir_bytes", Integer),  # #1596: agent .git on-disk size
+    Column("pack_count", Integer),  # #1595: packs from `git count-objects -v`
+    Column("loose_objects", Integer),  # #1595: loose objects (gc-health signal)
+    Column("maintenance_failures", Integer),  # #1595: consecutive failed maintenance
     Column("last_check_at", Text),
     Column("updated_at", Text),
 )
@@ -728,6 +810,7 @@ slack_channel_agents = Table(
     Column("is_dm_default", Integer),
     Column("created_by", Text),
     Column("created_at", Text),
+    Column("allow_proactive", Integer),   # ent#223: per-channel proactive consent
 )
 
 slack_active_threads = Table(
@@ -877,6 +960,7 @@ operator_queue = Table(
     metadata,
     Column("id", Text, primary_key=True),
     Column("agent_name", Text),
+    Column("request_id", Text),  # #1631 — agent-authored id (UNIQUE per agent)
     Column("type", Text),
     Column("status", Text),
     Column("priority", Text),

@@ -95,7 +95,7 @@ jobs:
             echo "No schema-relevant files changed — required check trivially satisfied (self-skip)."
           fi
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: steps.changes.outputs.relevant == 'true'
         with:
           python-version: '3.11'

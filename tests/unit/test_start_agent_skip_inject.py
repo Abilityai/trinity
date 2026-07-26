@@ -225,3 +225,125 @@ class TestStartAgentSkipInject:
         recreate.assert_awaited_once()
         inject_creds.assert_awaited_once_with("agent-c")
         inject_skills.assert_awaited_once_with("agent-c")
+
+
+# ── #1559: soft-delete recovery rebuilds the missing container ─────────────
+class TestRecoverRecreate1559:
+    """start_agent_internal must rebuild a missing container for a recovered
+    (live, non-soft-deleted) agent instead of dead-ending on 404 — and still
+    404 for a genuinely nonexistent agent.
+    Issue: https://github.com/abilityai/trinity/issues/1559
+    """
+    pytestmark = pytest.mark.unit
+
+    def test_start_404s_when_no_container_and_no_owner(self):
+        _mock_docker_service.get_agent_container.return_value = None
+        _mock_db.get_agent_owner.return_value = None
+        try:
+            _run(_mod.start_agent_internal("ghost"))
+            assert False, "expected 404"
+        except _HTTPException as e:
+            assert e.status_code == 404
+
+    def test_start_rebuilds_when_container_missing_but_live(self):
+        # First lookup: no container. Recovered agent → ownership row exists.
+        _mock_docker_service.get_agent_container.return_value = None
+        _mock_db.get_agent_owner.return_value = {"owner_username": "bob"}
+
+        rebuilt = _make_container("created")  # fresh → injection should run
+        recreate = AsyncMock(return_value=rebuilt)
+        inject_creds = AsyncMock(return_value={"status": "success"})
+        inject_skills = AsyncMock(return_value={"status": "success"})
+
+        with patch.object(_mod, "recreate_missing_container", recreate), \
+             patch.object(_mod, "wait_for_agent_ready", AsyncMock()), \
+             patch.object(_mod, "inject_assigned_credentials", inject_creds), \
+             patch.object(_mod, "inject_assigned_skills", inject_skills):
+            result = _run(_mod.start_agent_internal("revived"))
+
+        recreate.assert_awaited_once_with("revived")
+        _mock_docker_utils.container_start.assert_awaited()  # actually started
+        assert result["message"] == "Agent revived started"
+
+    def test_recreate_missing_container_reconstructs_spec_from_volume(self):
+        _mock_db.get_agent_owner.return_value = {"owner_username": "bob"}
+        _mock_db.get_resource_limits.return_value = {}
+        _mock_db.create_agent_mcp_api_key.return_value = Mock(api_key="trinity_mcp_x")
+        # #1665: never renamed -> the pin is NULL and the base IS the name.
+        # (Stub it: an unstubbed MagicMock attribute is truthy and would be
+        # f-stringed straight into the volume name.)
+        _mock_db.get_volume_base_name.side_effect = lambda n: n
+
+        provision = AsyncMock(return_value=_make_container("created"))
+        tmpl = AsyncMock(return_value={"type": "researcher", "runtime": {"type": "codex"}})
+
+        with patch.object(_mod, "_provision_folders_and_run_agent_container", provision), \
+             patch.object(_mod, "_read_template_yaml_from_volume", tmpl), \
+             patch.object(_mod, "_apply_persisted_auth_env", Mock()), \
+             patch.object(_mod, "get_next_available_port", Mock(return_value=2245)), \
+             patch.object(_mod, "get_agent_full_capabilities", Mock(return_value=False)), \
+             patch.object(_mod, "get_agent_default_resources",
+                          Mock(return_value={"cpu": "2", "memory": "4g"})), \
+             patch.object(_mod, "validate_base_image", Mock()):
+            _run(_mod.recreate_missing_container("proj"))
+
+        provision.assert_awaited_once()
+        kwargs = provision.call_args.kwargs
+        # Existing workspace volume reused (never recreated), mounted at home.
+        assert kwargs["base_volumes"] == {
+            "agent-proj-workspace": {"bind": "/home/developer", "mode": "rw"}
+        }
+        # type + runtime recovered from the volume's template.yaml.
+        assert kwargs["labels"]["trinity.agent-type"] == "researcher"
+        assert kwargs["labels"]["trinity.agent-runtime"] == "codex"
+        assert kwargs["env_vars"]["AGENT_RUNTIME"] == "codex"
+        assert kwargs["env_vars"]["AGENT_NAME"] == "proj"
+
+    def test_recreate_missing_container_mounts_a_renamed_agents_real_volume(self):
+        """#1665: rename keeps the volume under the pre-rename base, so recovery
+        must resolve it from the ownership row. Naming off the CURRENT name is
+        silent, not loud — `containers.run` creates the missing volume, so the
+        agent came back on an empty /home/developer with its real data (incl.
+        #1169 data_paths) stranded under the old base."""
+        _mock_db.get_agent_owner.return_value = {"owner_username": "bob"}
+        _mock_db.get_resource_limits.return_value = {}
+        _mock_db.create_agent_mcp_api_key.return_value = Mock(api_key="trinity_mcp_x")
+        _mock_db.get_volume_base_name.side_effect = (
+            lambda n: "old-name" if n == "new-name" else n
+        )
+
+        provision = AsyncMock(return_value=_make_container("created"))
+        with patch.object(_mod, "_provision_folders_and_run_agent_container", provision), \
+             patch.object(_mod, "_read_template_yaml_from_volume", AsyncMock(return_value={})), \
+             patch.object(_mod, "_apply_persisted_auth_env", Mock()), \
+             patch.object(_mod, "get_next_available_port", Mock(return_value=2245)), \
+             patch.object(_mod, "get_agent_full_capabilities", Mock(return_value=False)), \
+             patch.object(_mod, "get_agent_default_resources",
+                          Mock(return_value={"cpu": "2", "memory": "4g"})), \
+             patch.object(_mod, "validate_base_image", Mock()):
+            _run(_mod.recreate_missing_container("new-name"))
+
+        assert provision.call_args.kwargs["base_volumes"] == {
+            "agent-old-name-workspace": {"bind": "/home/developer", "mode": "rw"}
+        }
+
+    def test_workspace_volume_name_falls_back_on_a_db_error(self):
+        """A DB hiccup must not block a rebuild — fall back to the agent name,
+        which is the pre-#1665 behavior and correct for every un-renamed agent."""
+        _mock_db.get_volume_base_name.side_effect = RuntimeError("db down")
+        assert _mod._workspace_volume_name("solo") == "agent-solo-workspace"
+
+    def test_template_read_uses_the_resolved_volume(self):
+        """#1665: the same trap one level down — reading template.yaml off the
+        CURRENT name found nothing for a renamed agent, so recovery silently
+        rebuilt on default agent-type/runtime instead of the committed ones."""
+        _mock_db.get_volume_base_name.side_effect = (
+            lambda n: "old-name" if n == "new-name" else n
+        )
+        run = AsyncMock(return_value=b"type: researcher\n")
+        with patch.object(_mod, "containers_run", run):
+            _run(_mod._read_template_yaml_from_volume("new-name"))
+
+        assert run.call_args.kwargs["volumes"] == {
+            "agent-old-name-workspace": {"bind": "/home/developer", "mode": "ro"}
+        }

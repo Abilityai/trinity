@@ -264,10 +264,58 @@ def test_submodule_registers_audit_and_sso():
     # SSO-OIDC (#32) landed in the submodule via #1303. It self-registers the
     # `sso` feature_id inside `.sso.register` (mirroring the other real modules),
     # so `register_module("sso")` is NOT called here in __init__.py — the pin is
-    # on the import + registration call instead.
-    assert "from .sso import register as register_sso" in src, (
-        "SSO-OIDC (#32) is implemented — __init__.py must import the .sso package"
+    # on the registration call instead.
+    #
+    # ent#196 changed the MECHANISM, not the fact: each module is now registered
+    # through an isolating helper (`_register_module(app, "<name>")`) so one
+    # module's failure can't abort every later module. The old literal
+    # `from .sso import register as register_sso` + `register_sso(app)` pair no
+    # longer appears. Pin the intent — "the submodule registers sso" — not the
+    # import style, so this cross-repo static check doesn't break on a
+    # refactor that preserves behavior.
+    assert '_register_module(app, "sso")' in src or (
+        "from .sso import register as register_sso" in src and "register_sso(app)" in src
+    ), (
+        "SSO-OIDC (#32) is implemented — __init__.py must register the .sso "
+        "package (via _register_module(app, \"sso\") since ent#196, or the "
+        "pre-ent#196 direct import + call)"
     )
-    assert "register_sso(app)" in src, (
-        "SSO-OIDC must be registered on the enterprise app via register_sso(app)"
-    )
+
+
+# --- unregister_module (ent#196) ---------------------------------------------
+
+def test_unregister_module_withdraws_a_claim():
+    """The registration seam is a CLAIM that a feature is present and served.
+    A module that claims its id then fails partway leaves that claim standing
+    with nothing behind it — advertised in feature-flags, UI shown, every call
+    404s. The registering side needs a way to roll its own claim back.
+    """
+    from services.entitlement_service import EntitlementService
+
+    svc = EntitlementService()
+    svc.register_module("thing")
+    assert svc.is_entitled("thing") is True
+
+    assert svc.unregister_module("thing") is True
+    assert svc.is_entitled("thing") is False
+    assert "thing" not in svc.list_entitled_features()
+
+
+def test_unregister_module_is_idempotent():
+    from services.entitlement_service import EntitlementService
+
+    svc = EntitlementService()
+    assert svc.unregister_module("never-registered") is False   # no-op, no raise
+    svc.register_module("thing")
+    assert svc.unregister_module("thing") is True
+    assert svc.unregister_module("thing") is False
+
+
+def test_unregister_module_leaves_other_claims_alone():
+    from services.entitlement_service import EntitlementService
+
+    svc = EntitlementService()
+    svc.register_module("keep")
+    svc.register_module("drop")
+    svc.unregister_module("drop")
+    assert svc.list_entitled_features() == ["keep"]

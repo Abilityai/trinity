@@ -102,9 +102,44 @@ services:
       - WEBHOOK_RATE_LIMIT=${WEBHOOK_RATE_LIMIT:-10}             # triggers per token per 60s
       - WEBHOOK_IP_RATE_LIMIT=${WEBHOOK_IP_RATE_LIMIT:-60}       # pre-auth requests per IP per 60s
       - WEBHOOK_MAX_BODY_BYTES=${WEBHOOK_MAX_BODY_BYTES:-16384}  # request-body cap (413 over)
+      # Agent self-reminders (#1296) — tunable caps (working code defaults).
+      # Prod compose launches standalone (no base merge / env_file), so wire it here too.
+      - REMINDER_MESSAGE_MAX_CHARS=${REMINDER_MESSAGE_MAX_CHARS:-4000}          # max reminder message length
+      - REMINDER_MIN_DELAY_SECONDS=${REMINDER_MIN_DELAY_SECONDS:-60}            # earliest fire (floor)
+      - REMINDER_MAX_DELAY_SECONDS=${REMINDER_MAX_DELAY_SECONDS:-2592000}       # latest fire (30d ceiling)
+      - MAX_PENDING_REMINDERS_PER_AGENT=${MAX_PENDING_REMINDERS_PER_AGENT:-25}  # concurrent pending per agent
+      - MAX_REMINDERS_PER_AGENT_PER_DAY=${MAX_REMINDERS_PER_AGENT_PER_DAY:-100} # rolling 24h creation cap
+      - REMINDER_RATE_LIMIT=${REMINDER_RATE_LIMIT:-30}                          # set_reminder calls per agent per 60s
+      # Operator-queue agent ingestion caps (#1632) — bound a compromised/runaway
+      # agent flooding the queue. Prod launches standalone (no base merge), so wire here too.
+      - OPERATOR_QUEUE_MAX_PENDING_PER_AGENT=${OPERATOR_QUEUE_MAX_PENDING_PER_AGENT:-25}       # per-agent pending-DEPTH cap (primary)
+      - OPERATOR_QUEUE_CREATE_RATE_LIMIT=${OPERATOR_QUEUE_CREATE_RATE_LIMIT:-60}               # per-agent creates / window
+      - OPERATOR_QUEUE_CREATE_RATE_WINDOW=${OPERATOR_QUEUE_CREATE_RATE_WINDOW:-60}             # rate-limit window (s)
+      - OPERATOR_QUEUE_FLEET_CREATE_RATE_LIMIT=${OPERATOR_QUEUE_FLEET_CREATE_RATE_LIMIT:-300}  # fleet-wide creates / window
+      - OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE=${OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE:-500}            # requests scanned / agent / cycle
+      - OPERATOR_QUEUE_MAX_FILE_BYTES=${OPERATOR_QUEUE_MAX_FILE_BYTES:-2097152}                # skip a queue file over this (bytes)
+      - OPERATOR_QUEUE_TITLE_MAX=${OPERATOR_QUEUE_TITLE_MAX:-300}                              # title char cap (truncate)
+      - OPERATOR_QUEUE_QUESTION_MAX=${OPERATOR_QUEUE_QUESTION_MAX:-4000}                       # question char cap (truncate)
+      - OPERATOR_QUEUE_CONTEXT_MAX_BYTES=${OPERATOR_QUEUE_CONTEXT_MAX_BYTES:-8192}             # context byte cap (marker over)
+      - OPERATOR_QUEUE_OPTIONS_MAX_BYTES=${OPERATOR_QUEUE_OPTIONS_MAX_BYTES:-4096}             # options byte cap (dropped over)
+      - OPERATOR_QUEUE_ID_MAX=${OPERATOR_QUEUE_ID_MAX:-256}                                    # max agent-supplied id length
+      - OPERATOR_QUEUE_EXECUTION_ID_MAX=${OPERATOR_QUEUE_EXECUTION_ID_MAX:-128}                # max execution_id kept in a marker
+      - OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS=${OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:-300}  # one flood alert / agent / window
       - GITHUB_PAT=${GITHUB_PAT}
+      # Log Retention & Archival Configuration (#1039)
+      # These were MISSING from prod — prod launches standalone (no base-compose
+      # merge), so an operator-set LOG_RETENTION_DAYS never reached the
+      # container and retention silently fell back to the code default. Default
+      # is the 5-day community floor; enterprise `retention` unlocks longer.
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-5}
+      - LOG_ARCHIVE_ENABLED=${LOG_ARCHIVE_ENABLED:-true}
+      - LOG_CLEANUP_HOUR=${LOG_CLEANUP_HOUR:-3}
       # Host paths for volumes (used when creating agent containers)
       - HOST_TEMPLATES_PATH=${HOST_TEMPLATES_PATH:-${PWD}/config/agent-templates}
+      # First-run default system seed (trinity-enterprise#124): a path to an
+      # operator manifest, or `disabled` to skip seeding. Empty = bundled
+      # config/manifests/default-system.yaml.
+      - TRINITY_DEFAULT_SYSTEM_MANIFEST=${TRINITY_DEFAULT_SYSTEM_MANIFEST:-}
       # Agent /tmp tmpfs size (#1231) — read by capabilities.py to build the
       # agent container mount spec. noexec,nosuid stay fixed; only size tunes.
       # Existing agents pick up a change on recreate, not restart.
@@ -116,6 +151,13 @@ services:
       - AGENT_TOOL_STALL_LIMIT_S=${AGENT_TOOL_STALL_LIMIT_S:-}
       # #946 pull-pilot routing flag (observability mirror of the mcp-server gate).
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # Pull / work-stealing pilot opt-in (#1081 Phase 2) + lease-reaper poison
+      # cap (#429/#1402). Backend-only, process-env (needs a backend restart).
+      # PULL_MODE_PILOT_AGENTS empty = pull fully dark; MAX_REDELIVERY default 3.
+      # Prod compose launches standalone (no env_file merge), so these must be
+      # wired here or the .env levers never reach the container (#1056 class).
+      - PULL_MODE_PILOT_AGENTS=${PULL_MODE_PILOT_AGENTS:-}
+      - MAX_REDELIVERY=${MAX_REDELIVERY:-3}
       # Correlated-failure / thundering-herd controls (#1085) — re-delivery
       # governor. Backend-only; all fail-open and inert until the master flag is
       # on. Prod compose launches standalone (no env_file merge), so the .env
@@ -152,6 +194,26 @@ services:
       # keeps its own internal default (http://backend:8000); intentionally not
       # wired here so it still reaches the backend over the Docker network.
       - BACKEND_URL=${BACKEND_URL:-http://localhost:8000}
+      # Self-signup + operator-intake privacy levers. Read by config.py; mirrors
+      # docker-compose.yml. Prod compose launches standalone (no env_file merge),
+      # so wire it here too — without these lines the .env values are inert (the
+      # #1039 packaging-gap class). PUBLIC_ACCESS_REQUESTS_ENABLED gates
+      # POST /api/access/request (secure default false); OPERATOR_INTAKE_* /
+      # DO_NOT_TRACK is the air-gapped opt-out for the first-run intake POST
+      # (#1486/#1488). OPERATOR_INTAKE_URL keeps its FULL non-empty default — a
+      # bare :- would arrive set-but-empty and shadow the code default (#1076 class).
+      - PUBLIC_ACCESS_REQUESTS_ENABLED=${PUBLIC_ACCESS_REQUESTS_ENABLED:-false}
+      - OPERATOR_INTAKE_ENABLED=${OPERATOR_INTAKE_ENABLED:-true}
+      - DO_NOT_TRACK=${DO_NOT_TRACK:-0}
+      - OPERATOR_INTAKE_URL=${OPERATOR_INTAKE_URL:-https://intake.abilityai.dev/v1/operator-intake}
+      # Tier-2 opt-in fleet telemetry sharing (ent#12): consent-gated aggregate
+      # egress. TELEMETRY_SHARING_ENABLED=false is the hard kill switch
+      # (DO_NOT_TRACK also disables). URL keeps its FULL non-empty default —
+      # a bare :- would arrive set-but-empty and shadow the code default (#1076).
+      - TELEMETRY_SHARING_ENABLED=${TELEMETRY_SHARING_ENABLED:-true}
+      - TELEMETRY_SHARING_URL=${TELEMETRY_SHARING_URL:-https://intake.abilityai.dev/v1/telemetry-share}
+      - TELEMETRY_SHARING_INTERVAL_HOURS=${TELEMETRY_SHARING_INTERVAL_HOURS:-24}
+      - TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS=${TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS:-30}
       # Internal API shared secret (C-003) - for scheduler/agent communication
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
       # Configurable database backend (#300, experimental) — mirrors
@@ -169,6 +231,13 @@ services:
       # (the #1039 packaging-gap class). Default false; safe to flip early
       # (non-202 agent responses fall back to sync). Backend-only.
       - DISPATCH_ASYNC=${DISPATCH_ASYNC:-false}
+      # Dispatch circuit breaker global gate (RELIABILITY-007, #526). Producer-side
+      # per-agent breaker; engages ONLY when this AND the per-agent
+      # agent_ownership.circuit_breaker_enabled toggle are both on. Mirrors
+      # docker-compose.yml; without this line the .env lever is inert in prod (the
+      # #1039 packaging-gap class) and the owner-facing PUT .../circuit-breaker
+      # toggle silently no-ops (#1487). Default false.
+      - DISPATCH_BREAKER_ENABLED=${DISPATCH_BREAKER_ENABLED:-false}
       # Host telemetry (/api/telemetry) — container-stats cache freshness (s) and
       # max concurrent Docker stat fetches per refresh. Mirrors docker-compose.yml;
       # without these lines the .env knobs are inert in prod (the #1039
@@ -192,6 +261,7 @@ services:
       - ./config/agent-templates:/agent-configs/templates:ro
       - ./config/process-templates:/agent-configs/process-templates:ro
       - ./config/process-docs:/app/config/process-docs:ro
+      - ./config/manifests:/app/config/manifests:ro  # Bundled system manifests (first-run seed, ent#124)
       - agent-configs:/agent-configs
       - ${TRINITY_DATA_PATH:-./trinity-data}:/data
       # Read-only access to Vector's logs so log_archive_service.py (reads

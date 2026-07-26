@@ -82,10 +82,11 @@ Checks your agent for Trinity compatibility, creates required files (`template.y
 ### Step 3: Review and improve (optional)
 
 ```bash
-/create-agent:adjust
+/create-agent:review    # Read-only audit — prioritized findings, no changes
+/create-agent:adjust    # Apply the improvements
 ```
 
-Audits your agent against best practices and proposes improvements to CLAUDE.md, skills, and Trinity files.
+`review` audits your agent against best practices without changing anything; `adjust` proposes and applies improvements to CLAUDE.md, skills, and Trinity files.
 
 ## Path C: Ongoing Development
 
@@ -120,7 +121,7 @@ Wizard-created agents include everything needed for Trinity:
 
 ## Next Steps
 
-- [create-agent Plugin](../abilities/create-agent-plugin.md) — All 13 creation wizards explained
+- [create-agent Plugin](../abilities/create-agent-plugin.md) — All 14 creation wizards explained
 - [agent-dev Plugin](../abilities/agent-dev-plugin.md) — Skills, memory systems, backlog, planning
 - [trinity Plugin](../abilities/trinity-plugin.md) — Connect, onboard, deploy, sync workflows
 

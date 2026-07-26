@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from models import User
 from database import db
-from dependencies import get_current_user, AuthorizedAgentByName
+from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
@@ -271,6 +271,9 @@ async def set_agent_permissions(
     current_user: User = Depends(get_current_user)
 ):
     """Set permissions for an agent (full replacement)."""
+    # trinity-enterprise#69 Part 2: permission grants are human-only — a
+    # parent agent must never delegate/re-grant its control to other agents.
+    reject_agent_principal(current_user)
     result = await set_agent_permissions_logic(agent_name, body, current_user, request)
     await platform_audit_service.log(
         event_type=AuditEventType.AUTHORIZATION,
@@ -295,6 +298,8 @@ async def add_agent_permission(
     current_user: User = Depends(get_current_user)
 ):
     """Add permission for an agent to communicate with another agent."""
+    # trinity-enterprise#69 Part 2: permission grants are human-only.
+    reject_agent_principal(current_user)
     result = await add_agent_permission_logic(agent_name, target_agent, current_user, request)
     await platform_audit_service.log(
         event_type=AuditEventType.AUTHORIZATION,
@@ -319,6 +324,8 @@ async def remove_agent_permission(
     current_user: User = Depends(get_current_user)
 ):
     """Remove permission for an agent to communicate with another agent."""
+    # trinity-enterprise#69 Part 2: permission revokes are human-only.
+    reject_agent_principal(current_user)
     result = await remove_agent_permission_logic(agent_name, target_agent, current_user, request)
     await platform_audit_service.log(
         event_type=AuditEventType.AUTHORIZATION,
@@ -458,11 +465,7 @@ async def share_agent_file(
     are rejected.
     """
     # Owner gate (the agent's owner always passes)
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(
-            status_code=403,
-            detail="Only the owner or admin can share files from this agent.",
-        )
+    assert_agent_owner(current_user, agent_name, detail="Only the owner or admin can share files from this agent.")
 
     # Defense in depth: if this is an agent-scoped key, it must be for
     # the same agent. Prevents Agent A's key from being used to share
@@ -506,8 +509,7 @@ async def list_agent_shared_files(
     reuse the shares. That's a capability that belongs with `share_file`
     and `revoke` (both owner-only), not with shared-user read access.
     """
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Only the owner or admin can view shared files")
+    assert_agent_owner(current_user, agent_name, detail="Only the owner or admin can view shared files")
 
     rows = db.list_active_shared_files_for_agent(agent_name)
     files = [
@@ -546,8 +548,7 @@ async def revoke_agent_shared_file(
     Revoke a shared file. Owner/admin only. Idempotent — revoking a
     revoked or missing file returns 204 either way.
     """
-    if not db.can_user_share_agent(current_user.username, agent_name):
-        raise HTTPException(status_code=403, detail="Only the owner can revoke shares")
+    assert_agent_owner(current_user, agent_name, detail="Only the owner can revoke shares")
 
     row = db.get_agent_shared_file(file_id)
     if row and row["agent_name"] != agent_name:

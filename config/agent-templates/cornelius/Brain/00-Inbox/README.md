@@ -20,7 +20,7 @@
 
 ### Content Extractions/
 **What**: AI-processed content waiting for review
-**When**: After using insight-extractor agent
+**When**: After asking Cornelius to extract insights from your content
 **How**:
 - Agent places extracted insights here
 - Review and validate each extraction

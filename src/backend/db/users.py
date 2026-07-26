@@ -261,3 +261,74 @@ class UserOperations:
             if result.rowcount == 0:
                 return None
         return self.get_user_by_username(username)
+
+    # =========================================================================
+    # Per-user GitHub PAT (ent#162)
+    #
+    # A user configures one GitHub token in their own settings; the agent-create
+    # resolver (services/settings_service.resolve_github_pat) reads it live by
+    # owner_id, so a non-admin is not confined to the admin PAT's repo scope.
+    # Stored AES-256-GCM (Invariant #12), same envelope as the per-agent PAT.
+    # Deliberately NOT part of _USER_COLUMNS / _row_to_user_dict — the token must
+    # never ride the general user dict that flows to /api/users/me and friends;
+    # only these dedicated accessors touch the column.
+    # =========================================================================
+
+    def _get_encryption_service(self):
+        """Lazy-load encryption service (same pattern as GitPATMixin)."""
+        from services.credential_encryption import CredentialEncryptionService
+        return CredentialEncryptionService()
+
+    def _encrypt_github_pat(self, pat: str) -> str:
+        svc = self._get_encryption_service()
+        return svc.encrypt({"github_pat": pat})
+
+    def _decrypt_github_pat(self, encrypted: str) -> Optional[str]:
+        try:
+            svc = self._get_encryption_service()
+            return svc.decrypt(encrypted).get("github_pat")
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Failed to decrypt per-user GitHub PAT: {e}"
+            )
+            return None
+
+    def get_user_github_pat(self, user_id: int) -> Optional[str]:
+        """Decrypted per-user GitHub PAT, or None if unset / undecryptable."""
+        stmt = select(users.c.github_pat_encrypted).where(users.c.id == user_id)
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        if not row or not row["github_pat_encrypted"]:
+            return None
+        return self._decrypt_github_pat(row["github_pat_encrypted"])
+
+    def set_user_github_pat(self, user_id: int, pat: str) -> bool:
+        """Store an encrypted per-user PAT. True if the user row was updated."""
+        encrypted = self._encrypt_github_pat(pat)
+        stmt = (
+            update(users)
+            .where(users.c.id == user_id)
+            .values(github_pat_encrypted=encrypted, updated_at=utc_now_iso())
+        )
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount > 0
+
+    def clear_user_github_pat(self, user_id: int) -> bool:
+        """Clear the per-user PAT (revert this user to the global PAT)."""
+        stmt = (
+            update(users)
+            .where(users.c.id == user_id)
+            .values(github_pat_encrypted=None, updated_at=utc_now_iso())
+        )
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount > 0
+
+    def has_user_github_pat(self, user_id: int) -> bool:
+        """True if the user has a personal GitHub PAT configured."""
+        stmt = select(
+            users.c.github_pat_encrypted.isnot(None).label("has_pat")
+        ).where(users.c.id == user_id)
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return bool(row and row["has_pat"])

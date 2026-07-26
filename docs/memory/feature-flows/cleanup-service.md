@@ -1,5 +1,7 @@
 # Feature: Cleanup Service (CLEANUP-001)
 
+> **Updated 2026-07-17 (#1449):** `_sweep_retention_772` gained an **unconditional** `backlog_metadata` PII scrub sub-sweep (`db.scrub_terminal_backlog_metadata`) — NULLs the drain-replay blob (`user_message`/`user_email`/`system_prompt`) on authoritative-terminal rows (`success`/`cancelled`/`skipped`). It is a **security invariant, not age-gated** (no ops-config window — a fixed default avoids the #1638 floor-by-seed trap) and runs every cycle even when all #772 windows are `0`. **FAILED is excluded** (resurrectable to SUCCESS via a late token-gated CAS). Count feeds `CleanupReport.backlog_metadata_scrubbed` + the WAL-checkpoint sum; the blob itself is never logged (count-only). See the extended Retention-sweeps step below.
+
 > **Updated 2026-05-17 (#869):** `WATCHDOG_HTTP_TIMEOUT` increased from 5.0 → 15.0 seconds to handle agents under load. `SlotService._cleanup_stale_slots_for_agent` now reads each slot's `timeout_seconds` from its per-slot metadata HASH (stored at acquire time) instead of using the agent-level default for all slots. Per-slot TTL = `stored_timeout + SLOT_TTL_BUFFER`; falls back to the per-agent default when metadata is absent.
 
 > **Updated 2026-05-11 (#686):** The interactive `chat_with_agent()` handler in `routers/chat.py` is now a second producer of the `claude_session_id='dispatched'` sentinel (parallel of #279). The no-session sweep's correctness assumption now extends to interactive `/chat` executions too. See the updated [`mark_execution_dispatched`](#mark_execution_dispatched-scheduleoperations) and [Fast-fail no-session executions](#cleanup-cycle-run_cleanup) sections.
@@ -49,8 +51,19 @@ Dataclass holding results from a single cleanup cycle:
 - `stale_activities: int` - Activities marked failed
 - `stale_slots: int` - Redis slots cleaned
 - `stale_slot_executions: int` - Execution records failed when their slot was reclaimed (Issue #219)
-- `total` property: Sum of all eight fields
+- `ssh_credentials_expired: int` - Expired ephemeral SSH keys removed from agent `authorized_keys` — Issue #1616
+- `total` property: Sum of all report fields
 - `to_dict()` method: Serializes for API responses
+
+> **Note (stale):** this doc enumerates the original cycle; many sweeps have since
+> been added (soft-delete purge #834, volume reclaim #1581, operator_queue
+> retention #1142, ephemeral GC, lease-reaper #429/#1402, expired-SSH #1616, …) and
+> the `CleanupReport` has grown accordingly. The **authoritative, current sweep
+> list** is the `cleanup_service` row in the [architecture.md Background Services
+> table](../architecture.md). The expired-SSH sweep (`_sweep_expired_ssh_credentials`,
+> #1616) calls `SshService.cleanup_expired_credentials()` to remove an expired key's
+> line from the container `authorized_keys` sshd reads — TTL was previously enforced
+> only on the Redis metadata; see [ssh-access.md](ssh-access.md).
 
 #### CleanupService class (line 48)
 Singleton pattern via global `cleanup_service` instance (line 141).
@@ -137,12 +150,21 @@ Nine sequential operations plus an hourly maintenance gate, each wrapped in indi
    ```
    Three independent sweeps, each gated on its own ops-config retention window (`execution_log_retention_days` default 30, `execution_row_retention_days` default 90, `health_check_retention_days` default 7). `0` disables the corresponding sweep. Per-cycle row budget capped at `RETENTION_CHUNK_SIZE_PER_CYCLE = 5000` so the first post-deploy backfill spreads across multiple ticks rather than holding the write lock end-to-end. All cutoffs use `iso_cutoff()` (Architectural Invariant #16). The two execution sweeps share the partial index `idx_executions_completed_terminal ON schedule_executions(completed_at) WHERE status IN ('success','failed','cancelled','skipped')` (fix: #862 — original #772 used wrong values 'completed'/'terminated' that never matched real rows).
 
+   **`backlog_metadata` PII scrub (#1449)** — a fourth sub-sweep, appended to `_sweep_retention_772` but **NOT gated on any retention window**:
+   ```python
+   report.backlog_metadata_scrubbed = db.scrub_terminal_backlog_metadata(RETENTION_CHUNK_SIZE_PER_CYCLE)
+   ```
+   `backlog_service.enqueue` `json.dumps`es the full drain-replay request — `user_message`/`user_email`/`system_prompt` — into `schedule_executions.backlog_metadata` for queued-task reconstruction. Nothing reads it once a row leaves `status='queued'` (the drain claims only queued rows; the #1083/#1081 result callbacks read the POST payload, not the row's metadata; canary E-04/G-04 are queued-scoped), so on a terminal row it is stale PII bounded only by the 90-day row DELETE. `db.scrub_terminal_backlog_metadata` (`db/schedules.py`) NULLs it via a chunked SELECT-ids-then-`UPDATE … SET backlog_metadata=NULL` (each chunk its own txn), scoped to `status IN ('success','cancelled','skipped')` — the `_AUTHORITATIVE_TERMINALS` set. **FAILED is EXCLUDED**: a FAILED row is resurrectable to SUCCESS via a late token-gated CAS (`park_expired_lease` keeps its `claim_token`), so its drain-replay intent must survive; FAILED PII stays bounded by the row DELETE. The scrub runs **unconditionally** (a security invariant, not an operator knob — a fixed default sidesteps the #1638 floor-by-seed trap) and logs **count-only** (the blob carries PII and is never logged).
+
 8. **WAL checkpoint after reclaim** (Issue #772)
    ```python
-   if (report.execution_logs_pruned + report.execution_rows_pruned + report.health_checks_pruned) > 0:
+   # actual sum also includes soft-delete / idempotency / agent_reports /
+   # operator_queue counts; backlog_metadata_scrubbed (#1449) is in it too
+   if (report.execution_logs_pruned + report.execution_rows_pruned
+           + report.backlog_metadata_scrubbed + report.health_checks_pruned + ...) > 0:
        _wal_checkpoint_truncate()  # PRAGMA wal_checkpoint(TRUNCATE)
    ```
-   Returns freed pages to the OS so the on-disk size actually shrinks. Cheap — runs only when a retention sweep produced work. Full `VACUUM` is delegated to a separate daily APScheduler job in `services/db_vacuum_service.py` (04:30 UTC, autocommit connection) because VACUUM holds an exclusive lock and is unsuitable for the 5-min cadence.
+   Returns freed pages to the OS so the on-disk size actually shrinks. `backlog_metadata_scrubbed` is folded into the sum so a scrub-only cycle still truncates the WAL (#1449). Cheap — runs only when a retention sweep produced work. Full `VACUUM` is delegated to a separate daily APScheduler job in `services/db_vacuum_service.py` (04:30 UTC, autocommit connection) because VACUUM holds an exclusive lock and is unsuitable for the 5-min cadence.
 
 ### Watchdog Reconciliation (Issue #129)
 
@@ -537,7 +559,7 @@ This is a purely backend service. The only "UI" is the two admin API endpoints u
 | File | Role |
 |------|------|
 | `src/backend/services/cleanup_service.py` | Service class, watchdog reconciliation, Phase 3 re-verification (Issue #378), and global instance |
-| `src/backend/db/schedules.py` | `get_running_executions_with_agent_info()` (Issue #129), `mark_execution_failed_by_watchdog()` (Issue #129), `mark_stale_executions_failed()`, `mark_execution_dispatched()`, `mark_no_session_executions_failed()` (Issue #106), `fail_stale_slot_execution()` (Issue #219), `finalize_orphaned_skipped_executions()` (Issue #106), residual-race observability log in `update_execution_status()` (Issue #378) |
+| `src/backend/db/schedules.py` | `get_running_executions_with_agent_info()` (Issue #129), `mark_execution_failed_by_watchdog()` (Issue #129), `mark_stale_executions_failed()`, `mark_execution_dispatched()`, `mark_no_session_executions_failed()` (Issue #106), `fail_stale_slot_execution()` (Issue #219), `finalize_orphaned_skipped_executions()` (Issue #106), `scrub_terminal_backlog_metadata()` (Issue #1449), residual-race observability log in `update_execution_status()` (Issue #378) |
 | `src/backend/db/activities.py` | `mark_stale_activities_failed()` |
 | `src/backend/database.py` | Delegation methods on DatabaseManager |
 | `src/backend/services/slot_service.py` | `cleanup_stale_slots()` Redis cleanup, returns reclaimed IDs (Issue #219), `release_slot()` used by watchdog |
@@ -550,3 +572,5 @@ This is a purely backend service. The only "UI" is the two admin API endpoints u
 | `tests/test_watchdog.py` | API integration tests for watchdog fields (Issue #129) |
 | `tests/test_watchdog_unit.py` | Unit tests for watchdog reconciliation logic (Issue #129), error context tests (Issue #286), Phase 3 re-verify tests (Issue #378) |
 | `tests/unit/test_schedule_status_observability.py` | Residual-race observability log tests (Issue #378) |
+| `tests/unit/test_1449_backlog_metadata_scrub.py` | Real-DB scrub tests: authoritative-terminal NULL-out, FAILED-exclusion, queued/running untouched, chunking/idempotency, canary queued-scope smoke (Issue #1449) |
+| `tests/unit/test_cleanup_inner_sweeps.py` | Cleanup-cycle characterization incl. the #1449 sub-sweep (report field, WAL sum, unconditional-run guard) |

@@ -191,7 +191,7 @@
   - `GET /api/agents/{name}/telegram/groups` — List group configs
   - `PUT /api/agents/{name}/telegram/groups/{id}` — Update group config (trigger mode, welcome settings)
   - `DELETE /api/agents/{name}/telegram/groups/{id}` — Remove group config (deactivates)
-  - `POST /api/agents/{name}/telegram/groups/{chat_id}/messages` — Proactive group messaging (rate limited: 10/hr/group, 100/hr/agent)
+  - `POST /api/agents/{name}/telegram/groups/{chat_id}/messages` — Proactive group messaging (rate limited: 10/hr/group, 100/hr/agent by default — admin-configurable, #1609)
 - **MCP Tools**:
   - `list_channel_groups` — List Telegram groups the agent is connected to
   - `send_group_message` — Send proactive message to a group (supports Telegram HTML, max 4096 chars)
@@ -405,6 +405,15 @@
   client header never forks execution; an underivable key (missing token/body) disables dedup (fail-open,
   never a constant collision).
 
+### Configurable Proactive Message Rate Limits (#1609)
+- **Status**: ✅ Implemented (2026-07-14)
+- **GitHub Issue**: #1609
+- **Description**: The anti-spam caps on **agent-initiated** ("proactive") channel sends — introduced hardcoded by #349/#350/#321 — are admin-configurable. **Inbound replies (DM/@mention/thread via the channel adapters) are NEVER subject to these caps**; only agent-initiated sends are.
+- **Five caps** (per hour, shipped defaults reproduce prior behavior exactly): Slack per-channel (10) / per-agent (100); Telegram per-group (10) / per-agent (100); proactive-DM per-recipient (10).
+- **Config**: `settings_service.get_proactive_rate_limit(key)` — runtime-resolved from `system_settings` (no cache, `--workers 2`-consistent, no migration; #506 shape), fail-open to the shipped default. `0 = unlimited` (disables that cap; the PUT warns). Read at request time by `routers/slack.py`, `routers/telegram.py`, and `services/proactive_message_service.py`.
+- **Endpoints**: `GET/PUT /api/settings/proactive-rate-limits` (admin; registered before the `/{key}` catch-all, which rejects these keys; range-validated `[0, 1000000]` with a named 422; audit-logged). Surfaced in Settings → General ("Proactive message limits" card).
+- **Limiter unification**: Telegram's bespoke per-process in-memory bucket migrated to the shared Redis sliding-window limiter (`services/rate_limiter.py`, #1023) — matching Slack and fixing multi-worker inconsistency. 429 messages name which cap fired.
+
 ### 23.4 Admin Configuration
 - **Status**: ✅ Implemented (2026-03-04)
 - **Requirement ID**: NVM-001
@@ -569,3 +578,62 @@ Edited from the Sharing tab.
   a DB lookup failure degrades to the memory block alone (never blocks a chat).
 - **FR-6 — Group chats**: applied to group channels too (group surfaces are
   public-facing).
+
+### 48.1 Voice Replies v2 — Voice as a Per-Message Capability (trinity-enterprise#117)
+
+**Description**: Reworks outbound voice replies (ElevenLabs TTS) so that voice is
+a **capability the agent chooses per message**, not a hard rule that converts
+every reply to speech. Enabling voice grants the agent the *ability* to speak;
+each channel reply is delivered as **text by default** and becomes a voice note
+only when the agent explicitly asks for it via a new `send_voice_reply` MCP tool.
+Config moves to the agent's Settings surface (channel panels keep only a
+per-channel on/off flag), and the ElevenLabs API key + a platform default voice
+ID become runtime-configurable in platform Settings. OSS-core (the TTS layer,
+adapters, and settings pattern are all OSS). Supersedes the always-voice behavior
+of the epic #24 voice-replies feature.
+
+- **FR-1 — Per-message choice (`send_voice_reply` MCP tool)**: an agent calls
+  `send_voice_reply(text, execution_id, dedup_label?)` during a channel turn; the
+  backend resolves the channel destination from the execution, synthesizes, and
+  delivers the voice note immediately. The agent's normal final text reply is
+  still delivered as text (the agent uses the existing `[NO_REPLY]` marker to
+  suppress it for voice-only). Adapters no longer speak replies unconditionally —
+  text is the default path.
+- **FR-2 — Effect idempotency**: the send is wrapped in
+  `idempotency_service.effect_guard("voice_reply", {recipient, channel}, …)`
+  (#1084) so a re-delivered turn does not double-speak; an in-flight duplicate
+  raises `EffectInProgressError` → 409.
+- **FR-3 — Execution destination persistence**: `schedule_executions` gains
+  `source_channel` / `source_channel_chat_id` / `source_channel_thread` (nullable,
+  dual-track migration per #1183), populated by `message_router` on channel
+  executions, so the tool can reconstruct the exact delivery target (works for
+  groups and unverified users; no lossy email→chat-link guessing, no thread loss).
+- **FR-4 — Agent-level config, channel-level flag**: voice enable + voice
+  selection live once on the agent Settings surface (moved out of the three
+  channel panels). Each channel panel keeps only a per-channel voice on/off flag:
+  `agent_ownership.tts_voice_{telegram,slack,whatsapp}_enabled` (`INTEGER DEFAULT 1`
+  so already-enabled agents keep the capability on every channel; dual-track
+  migration). Effective voice = agent-enabled AND channel flag AND platform TTS
+  available.
+- **FR-5 — Capability advertisement**: the `send_voice_reply` tool is documented
+  in the platform system prompt only when the agent has voice enabled AND the
+  current channel's flag is on, so agents don't attempt voice where it can't
+  deliver.
+- **FR-6 — Fallback preserved**: any synthesis/delivery miss (no key, no voice id,
+  channel flag off, over `TTS_MAX_CHARS`, provider/transcode error) returns
+  not-delivered so the agent falls back to text — never a dropped reply.
+- **FR-7 — ElevenLabs key + default voice in platform Settings**: admin
+  `GET/PUT /api/settings/elevenlabs` sets/clears the key at runtime (no restart),
+  stored AES-256-GCM encrypted (Invariant #12), surfaced as `configured: bool`
+  only. Resolution precedence: stored setting → `ELEVENLABS_API_KEY` env → unavailable,
+  read through an uncached runtime resolver (`--workers 2` safe). A platform
+  default voice ID lives in the same panel; the agent-level voice falls back to it
+  when the agent has no `tts_voice_id`. Changes audit-logged (key masked; default
+  voice old→new). `GET /api/settings/feature-flags` exposes `tts_available`.
+- **FR-8 — Migration of existing agents**: an already-`tts_voice_replies_enabled`
+  agent keeps all three channel flags ON but no longer auto-speaks every reply
+  (behavior change: always-voice → agent-chosen).
+- **API**: `send_voice_reply` MCP tool → `POST /api/agents/{name}/voice-reply`
+  (`AuthorizedAgentByName` + agent-scoped self-check; user-facing channel triggers
+  only); `GET/PUT /api/agents/{name}/voice-replies` extended with per-channel
+  flags + `effective_voice_id`; `GET/PUT /api/settings/elevenlabs`.

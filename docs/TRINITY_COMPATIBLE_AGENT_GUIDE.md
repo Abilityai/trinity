@@ -20,13 +20,14 @@
 10. [Platform Skills](#platform-skills)
 11. [Custom Metrics](#custom-metrics)
 12. [Agent Dashboard](#agent-dashboard)
-13. [Memory Management](#memory-management)
-14. [Content Folder Convention](#content-folder-convention)
-15. [Package Persistence](#package-persistence)
-16. [Compatibility Checklist](#compatibility-checklist)
-17. [Migration Guide](#migration-guide)
-18. [Best Practices](#best-practices)
-19. [Autonomous Agent Design](#autonomous-agent-design)
+13. [Operator Communication Is Asynchronous](#operator-communication-is-asynchronous-fire-and-park--1402)
+14. [Memory Management](#memory-management)
+15. [Content Folder Convention](#content-folder-convention)
+16. [Package Persistence](#package-persistence)
+17. [Compatibility Checklist](#compatibility-checklist)
+18. [Migration Guide](#migration-guide)
+19. [Best Practices](#best-practices)
+20. [Autonomous Agent Design](#autonomous-agent-design)
 
 ---
 
@@ -162,6 +163,24 @@ credentials.json
 # Large generated content - DO NOT COMMIT
 content/
 
+# Bulk data / deps / cache / index dirs - DO NOT COMMIT (#1596)
+# These churn on every run and bloat .git unboundedly under auto-sync.
+# Git sync is for code + state, not datasets/indexes/deps — those belong
+# in data_paths (#1169). Negate per-repo if genuinely needed (e.g. !keep.db).
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+*.sqlite
+*.sqlite3
+*.db
+
 # Claude Code - commit commands/skills/agents, exclude runtime data
 .claude.json
 .claude.json.backup
@@ -171,6 +190,7 @@ content/
 .claude/debug/
 .claude/sessions/
 .claude/shell-snapshots/
+.claude/plugins/
 # Keep: .claude/commands/, .claude/skills/, .claude/agents/, settings.local.json
 
 # Temporary files
@@ -1339,6 +1359,32 @@ When you escalate a stuck stage to the **operator queue**, put the pipeline coor
 Stage advancement, retry, and escalation are owned by your agent: run a single `pipeline-tick` skill on a cron schedule, gated by your `~/.trinity/pre-check` hook so it's near-free when nothing needs attention. That heartbeat ships with the **`agent-dev:add-pipeline`** plugin in [`abilityai/abilities`](https://github.com/abilityai/abilities), **not** with Trinity.
 
 > **Adoption note:** these tools ship as MCP + docs only. Existing agents return `[]` until they adopt this file convention — that's by design, not a bug.
+
+---
+
+## Operator Communication Is Asynchronous (fire-and-park) — #1402
+
+All human/operator communication on Trinity is **asynchronous**, mediated by the operator queue (`~/.trinity/operator-queue.json` ⇄ the Operating Room UI). Design your agent around this from day one:
+
+**The contract: fire-and-park, never block-and-wait.**
+
+1. **Park** the request (approval / question / alert) by appending an entry to the queue file.
+2. **End the turn.** A turn must never wait, poll, or sleep for a human response — a human may answer in minutes or days, and a blocked turn burns its entire timeout budget while pinning platform capacity. Never assume a synchronous human answer is available mid-turn.
+3. **Process responses in a later turn.** At the start of each autonomous run, check the queue file for `status: "responded"` items, act on them, then mark them `"acknowledged"`.
+
+**Ask before irreversible actions.** Before an action the platform cannot undo or verify — payments, emails/messages through the agent's own credentials, public posts, destructive deletions — park an `approval` and end the turn when uncertain. This matters most under re-delivery: pull-mode coordination (#1081) re-runs a turn whose worker died, so a task you receive may have partially run before. Check your own records and the queue file before repeating an irreversible effect; do the reversible parts first and gate only the irreversible step.
+
+**Request IDs must be globally unique.** Derive them from the current execution ID (`approval-{execution_id}-{short-slug}`, execution ID is in the Execution Context block of your system prompt). Date-serial IDs (`req-20260307-001`) collide across agents and a colliding request is silently swallowed; a derived ID also makes a re-park under re-delivery idempotent instead of duplicating the request.
+
+**Plan for the response's return path.** The operator's answer is written back to your queue file within seconds, but only a *future turn* can act on it:
+
+- An agent with a schedule or heartbeat picks it up on the next run — nothing extra needed.
+- An agent with **no** future turn (one-shot webhook/chat tasks) must include resume instructions in the request itself ("after approving, re-trigger schedule X" / "send me a chat message with your decision") — otherwise an approved action never executes.
+- Set `expires_at` on gating requests; an `expired` flip means "not approved — do not proceed."
+
+**This is a compliance contract, not a security boundary.** The agent writes and reads its own queue file, so a misbehaving or prompt-injected agent can skip parking or forge a response. Operators must not treat "the agent asked for approval" as a guarantee; rails that need a hard guarantee belong behind confined Trinity-owned tools, not agent-side judgment. The queue's value here is disciplined recovery plus an audit trail.
+
+The full queue-file protocol (JSON schema, request types, priorities, hygiene) is documented in the platform system prompt every agent receives; the escalation-grouping convention for pipelines is in [Agent-Defined Pipelines](#agent-defined-pipelines-919) above.
 
 ---
 

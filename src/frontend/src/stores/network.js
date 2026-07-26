@@ -19,7 +19,6 @@ export const useNetworkStore = defineStore('network', () => {
   const websocket = ref(null)
   const isConnected = ref(false)
   const intentionalDisconnect = ref(false) // Prevents reconnection after intentional disconnect
-  const nodePositions = ref({}) // Store node positions in localStorage
   const historicalCollaborations = ref([]) // Persistent data from Activity Stream
   const totalCollaborationCount = ref(0)
   const timeRangeHours = ref(24) // Default to last 24 hours
@@ -49,10 +48,11 @@ export const useNetworkStore = defineStore('network', () => {
   // a network blip replays missed events instead of dropping them.
   const lastEventId = ref(null)
 
-  // View mode state (grid | graph | timeline) — default timeline, persisted.
-  // trinity-enterprise#47 adds 'grid' as a third mode; legacy saved values
-  // ('graph'/'timeline') keep working unchanged.
-  const VIEW_MODES = ['grid', 'graph', 'timeline']
+  // View mode state (grid | timeline) — default timeline, persisted.
+  // trinity-enterprise#47 added 'grid'; the legacy 'graph' Vue Flow canvas was
+  // decommissioned (#1689). A persisted 'graph' preference degrades to the
+  // default (timeline) via the VIEW_MODES.includes() guard below.
+  const VIEW_MODES = ['grid', 'timeline']
   const savedViewMode = localStorage.getItem('trinity-dashboard-view')
   const viewMode = ref(VIEW_MODES.includes(savedViewMode) ? savedViewMode : 'timeline')
   const isTimelineMode = computed(() => viewMode.value === 'timeline')
@@ -406,8 +406,10 @@ export const useNetworkStore = defineStore('network', () => {
   }
 
   function convertAgentsToNodes(agentList) {
-    // Load saved positions from localStorage
-    const savedPositions = loadNodePositions()
+    // #1689: node.data still feeds the Timeline tiles; the Graph (Vue Flow)
+    // canvas that consumed node.position/draggable was decommissioned, so
+    // positions are no longer persisted or restored.
+    const savedPositions = {}
 
     // Separate system agent from regular agents
     const systemAgent = agentList.find(a => a.is_system)
@@ -508,7 +510,11 @@ export const useNetworkStore = defineStore('network', () => {
         id: systemAgent.name,
         type: 'system-agent',
         data: {
+          // #1643/#1689: `label` stays the SLUG — it is the Timeline nodeMap
+          // key (agent identity). `display_label` is the human name the tile
+          // renders; NULL means render the slug.
           label: systemAgent.name,
+          display_label: systemAgent.display_label || null,
           status: systemAgent.status,
           type: systemAgent.type || 'system',
           owner: systemAgent.owner,
@@ -542,7 +548,10 @@ export const useNetworkStore = defineStore('network', () => {
           id: agent.name,
           type: 'agent',
           data: {
+            // #1643/#1689: `label` stays the SLUG (Timeline nodeMap key);
+            // `display_label` is the rendered human name (NULL → render the slug).
             label: agent.name,
+            display_label: agent.display_label || null,
             status: agent.status,
             owner: agent.owner,
             runtime: agent.runtime || 'claude-code',
@@ -632,6 +641,12 @@ export const useNetworkStore = defineStore('network', () => {
               agent_name: data.name,
               status: data.type === 'agent_started' ? 'running' : 'stopped'
             })
+          } else if (data.type === 'agent_label_changed') {
+            // ent#181/#1643: fields are nested under data.data (agent_* shape)
+            handleAgentLabelChanged({
+              agent_name: data.data?.name,
+              display_label: data.data?.display_label
+            })
           } else if (data.type === 'agent_deleted') {
             handleAgentDeleted(data)
           } else if (data.type === 'agent_activity') {
@@ -716,6 +731,19 @@ export const useNetworkStore = defineStore('network', () => {
     const agent = agents.value.find(a => a.name === event.agent_name)
     if (agent) {
       agent.status = event.status
+    }
+  }
+
+  function handleAgentLabelChanged(event) {
+    // #1643: a label change is a pure re-render — the slug (node id / data.label)
+    // never moves, so only data.display_label updates.
+    const node = nodes.value.find(n => n.id === event.agent_name)
+    if (node) {
+      node.data.display_label = event.display_label || null
+    }
+    const agent = agents.value.find(a => a.name === event.agent_name)
+    if (agent) {
+      agent.display_label = event.display_label || null
     }
   }
 
@@ -1007,29 +1035,6 @@ export const useNetworkStore = defineStore('network', () => {
     }
   }
 
-  function saveNodePositions() {
-    const positions = {}
-    nodes.value.forEach(node => {
-      positions[node.id] = node.position
-    })
-    localStorage.setItem('trinity-collaboration-node-positions', JSON.stringify(positions))
-  }
-
-  function loadNodePositions() {
-    try {
-      const saved = localStorage.getItem('trinity-collaboration-node-positions')
-      return saved ? JSON.parse(saved) : {}
-    } catch (error) {
-      console.error('Failed to load node positions:', error)
-      return {}
-    }
-  }
-
-  function resetNodePositions() {
-    localStorage.removeItem('trinity-collaboration-node-positions')
-    fetchAgents() // Reload with default positions
-  }
-
   function disconnectWebSocket() {
     // Set flag BEFORE closing to prevent reconnection
     intentionalDisconnect.value = true
@@ -1042,11 +1047,6 @@ export const useNetworkStore = defineStore('network', () => {
       websocket.value = null
       isConnected.value = false
     }
-  }
-
-  function onNodeDragStop(event) {
-    // Save positions when user stops dragging
-    saveNodePositions()
   }
 
   // Fetch context stats from backend
@@ -1304,9 +1304,10 @@ export const useNetworkStore = defineStore('network', () => {
     }
   }
 
-  // View Mode Functions (grid | graph | timeline)
+  // View Mode Functions (grid | timeline). A stale 'graph' preference (#1689)
+  // falls through the includes() guard to the timeline default.
   function setViewMode(mode) {
-    if (!VIEW_MODES.includes(mode)) mode = 'graph'
+    if (!VIEW_MODES.includes(mode)) mode = 'timeline'
     viewMode.value = mode
     localStorage.setItem('trinity-dashboard-view', mode)
 
@@ -1318,13 +1319,13 @@ export const useNetworkStore = defineStore('network', () => {
       console.log('[Collaboration] Switched to Timeline view (live mode)')
     } else {
       stopActivityRefresh()
-      console.log(`[Collaboration] Switched to ${mode === 'grid' ? 'Grid' : 'Graph'} view`)
+      console.log('[Collaboration] Switched to Grid view')
     }
   }
 
   // Legacy function for backwards compatibility
   function setReplayMode(mode) {
-    setViewMode(mode ? 'timeline' : 'graph')
+    setViewMode(mode ? 'timeline' : 'grid')
   }
 
   function startReplay() {
@@ -1794,10 +1795,6 @@ export const useNetworkStore = defineStore('network', () => {
     animateEdge,
     fadeEdgeAnimation,
     clearEdgeAnimation,
-    saveNodePositions,
-    loadNodePositions,
-    resetNodePositions,
-    onNodeDragStop,
     fetchContextStats,
     fetchExecutionStats,
     fetchSlotStats,

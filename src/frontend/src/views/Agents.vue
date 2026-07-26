@@ -299,15 +299,22 @@
                   <router-link
                     :to="`/agents/${agent.name}`"
                     class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-action-primary-600 dark:hover:text-action-primary-400"
-                    :title="agent.name"
+                    :title="agentNameTooltip(agent)"
                   >
-                    {{ agent.name }}
+                    {{ agentDisplayName(agent) }}
                   </router-link>
                   <span
                     v-if="agent.is_system"
                     class="px-1.5 py-0.5 text-[10px] font-semibold bg-accent-purple-100 text-accent-purple-700 dark:bg-accent-purple-900/50 dark:text-accent-purple-300 rounded flex-shrink-0"
                   >
                     SYSTEM
+                  </span>
+                  <span
+                    v-if="agent.ephemeral"
+                    class="px-1.5 py-0.5 text-[10px] font-semibold bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300 rounded flex-shrink-0"
+                    title="Ephemeral agent — budgeted, auto-discarded when its executions or TTL run out (no recovery)"
+                  >
+                    GHOST
                   </span>
                   <RuntimeBadge :runtime="agent.runtime" :show-label="false" class="flex-shrink-0" />
                   <span
@@ -468,9 +475,9 @@
                 <router-link
                   :to="`/agents/${agent.name}`"
                   class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-action-primary-600 dark:hover:text-action-primary-400"
-                  :title="agent.name"
+                  :title="agentNameTooltip(agent)"
                 >
-                  {{ agent.name }}
+                  {{ agentDisplayName(agent) }}
                 </router-link>
                 <span
                   v-if="agent.is_system"
@@ -610,9 +617,9 @@
                 <router-link
                   :to="`/agents/${agent.name}`"
                   class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-action-primary-600 dark:hover:text-action-primary-400 flex-1 min-w-0"
-                  :title="agent.name"
+                  :title="agentNameTooltip(agent)"
                 >
-                  {{ agent.name }}
+                  {{ agentDisplayName(agent) }}
                 </router-link>
                 <span
                   v-if="agent.is_system"
@@ -702,6 +709,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { formatCostCompact } from '../composables/useFormatters'
 import { useAgentsStore } from '../stores/agents'
+import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
 import { useNetworkStore } from '../stores/network'
 import NavBar from '../components/NavBar.vue'
 import CreateAgentModal from '../components/CreateAgentModal.vue'
@@ -821,10 +829,14 @@ const totalAgentCount = computed(() => {
 const displayAgents = computed(() => {
   let agents = isAdmin.value ? agentsStore.sortedAgentsWithSystem : agentsStore.sortedAgents
 
-  // Filter by name
+  // Filter by name — #1642: match BOTH the slug and the display name, so typing
+  // "TOM" finds an agent labelled "TOM" whose slug is `tom-marketing-ops`.
   const nameQuery = filterName.value.trim().toLowerCase()
   if (nameQuery) {
-    agents = agents.filter(agent => agent.name.toLowerCase().includes(nameQuery))
+    agents = agents.filter(agent =>
+      agent.name.toLowerCase().includes(nameQuery) ||
+      agentDisplayName(agent).toLowerCase().includes(nameQuery)
+    )
   }
 
   // Filter by status
@@ -1088,8 +1100,8 @@ async function handleReadOnlyToggle(agent) {
       agentReadOnlyStates.value[agent.name] = newState
       showNotification(
         newState
-          ? `Read-only mode enabled for ${agent.name}`
-          : `Read-only mode disabled for ${agent.name}`,
+          ? `Read-only mode enabled for ${agentDisplayName(agent)}`
+          : `Read-only mode disabled for ${agentDisplayName(agent)}`,
         'success'
       )
     }
@@ -1109,7 +1121,7 @@ const toggleAgentRunning = async (agent) => {
     const result = await agentsStore.toggleAgentRunning(agent.name)
     if (result.success) {
       const action = result.status === 'running' ? 'started' : 'stopped'
-      showNotification(`Agent ${agent.name} ${action}`, 'success')
+      showNotification(`Agent ${agentDisplayName(agent)} ${action}`, 'success')
     } else {
       showNotification(result.error || 'Failed to toggle agent', 'error')
     }

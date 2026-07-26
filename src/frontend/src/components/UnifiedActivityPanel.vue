@@ -208,6 +208,7 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue'
+import { parseUTC } from '@/utils/timestamps'
 import { formatCost } from '../composables/useFormatters'
 import { useAgentsStore } from '../stores/agents'
 
@@ -277,7 +278,7 @@ function selectEntry(entry) {
 
 function formatTime(isoString) {
   if (!isoString) return ''
-  const date = new Date(isoString)
+  const date = parseUTC(isoString)
   return date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 

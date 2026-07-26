@@ -40,7 +40,14 @@
         <!-- Settings Content -->
         <div v-else class="space-y-6">
           <!-- MCP Keys Tab Content (extracted to component, #302) -->
-          <McpKeysTab v-if="activeTab === 'mcp-keys'" />
+          <template v-if="activeTab === 'mcp-keys'">
+            <McpKeysTab />
+            <!-- ent#162: personal GitHub token lives with the user's other
+                 personal credentials on this non-admin tab. -->
+            <div class="mt-6">
+              <UserGitHubPatPanel />
+            </div>
+          </template>
 
           <!-- ent#84 — Fleet-wide agent-to-agent permissions matrix -->
           <div v-if="activeTab === 'agent-permissions'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
@@ -52,6 +59,119 @@
 
           <!-- #32 — Single Sign-On (enterprise, gated by `sso`) -->
           <SsoPanel v-if="activeTab === 'sso'" />
+
+          <!-- Retention Tab Content (#1039) -->
+          <div v-if="activeTab === 'retention'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+            <div class="px-6 py-5">
+              <div class="flex items-center justify-between">
+                <div>
+                  <h3 class="text-lg font-medium text-gray-900 dark:text-gray-100">Data Retention</h3>
+                  <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                    How long Trinity keeps logs, executions, health checks, and soft-deleted agents/schedules.
+                  </p>
+                </div>
+                <span
+                  v-if="retention"
+                  class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium"
+                  :class="retention.edition === 'enterprise'
+                    ? 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200'
+                    : 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200'"
+                >{{ retention.edition === 'enterprise' ? 'Enterprise' : 'Community' }}</span>
+              </div>
+
+              <div v-if="retentionLoading" class="mt-4 text-sm text-gray-500 dark:text-gray-400">Loading…</div>
+              <div v-else-if="retentionError" class="mt-4 text-sm text-red-600 dark:text-red-400">{{ retentionError }}</div>
+
+              <div v-else-if="retention" class="mt-5 space-y-4">
+                <!-- #1709: prunes a cleanup cycle would REFUSE right now, awaiting
+                     an admin's explicit approval. Irreversible (destroys volumes),
+                     so we name exactly what will be deleted before offering approve. -->
+                <div v-if="(retention.pending_acknowledgements || []).length" class="rounded-md bg-amber-50 dark:bg-amber-900/30 border border-amber-300 dark:border-amber-700 p-4">
+                  <h4 class="text-sm font-semibold text-amber-900 dark:text-amber-200">⚠ Deletion awaiting your approval</h4>
+                  <p class="mt-1 text-xs text-amber-800 dark:text-amber-300">
+                    A cleanup cycle wants to permanently delete more than the safety threshold at once. Nothing is deleted until you approve — and approving is <strong>irreversible</strong>. Each approval is single-use.
+                  </p>
+                  <ul class="mt-3 space-y-3">
+                    <li v-for="p in retention.pending_acknowledgements" :key="p.key" class="rounded-md bg-white dark:bg-gray-800 border border-amber-200 dark:border-amber-800 p-3">
+                      <p class="text-sm text-gray-900 dark:text-gray-100">{{ p.label }}</p>
+                      <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                        <strong>{{ p.candidate_count }}</strong> item{{ p.candidate_count === 1 ? '' : 's' }} past the <strong>{{ p.window_days }}-day</strong> window
+                        (<code class="text-[11px]">{{ p.key }}</code>).
+                      </p>
+                      <div class="mt-2 flex items-center gap-3">
+                        <button
+                          @click="acknowledgePrune(p)" :disabled="acknowledgingKey === p.key"
+                          class="inline-flex items-center px-3 py-1.5 text-xs font-medium rounded-md text-white bg-red-600 hover:bg-red-700 disabled:opacity-50"
+                        >{{ acknowledgingKey === p.key ? 'Approving…' : 'Approve deletion' }}</button>
+                        <span v-if="ackErrorKey === p.key && ackError" class="text-xs text-red-600 dark:text-red-400">{{ ackError }}</span>
+                      </div>
+                    </li>
+                  </ul>
+                </div>
+                <!-- Honest empty state (AC #1709) -->
+                <div v-else class="rounded-md bg-gray-50 dark:bg-gray-900/40 border border-gray-200 dark:border-gray-700 p-3">
+                  <p class="text-xs text-gray-500 dark:text-gray-400">
+                    ✓ No deletions are awaiting approval. If a cleanup cycle ever needs to delete more than the safety threshold at once (e.g. several soft-deleted agents reaching their purge date — which destroys their data volumes), it pauses and asks here first.
+                  </p>
+                </div>
+                <p v-if="ackDone" class="text-xs text-green-600 dark:text-green-400">Approved — the next cleanup cycle will delete these, then the guard re-arms (single-use).</p>
+
+                <!-- Community: read-only fixed floor + upgrade hint -->
+                <div v-if="!retentionEntitled" class="rounded-md bg-indigo-50 dark:bg-indigo-900/30 border border-indigo-200 dark:border-indigo-800 p-4">
+                  <p class="text-sm text-indigo-800 dark:text-indigo-200">
+                    The community edition keeps a fixed
+                    <strong>{{ retention.community_floor_days }}-day</strong> retention floor.
+                    An enterprise license unlocks configurable, longer windows — set per class, applied live with no restart.
+                  </p>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div v-for="f in RETENTION_FIELDS" :key="f.key">
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">{{ f.label }}</label>
+                    <div class="mt-1 flex items-center gap-2">
+                      <input
+                        type="number" min="0" max="3650"
+                        v-model.number="retentionForm[f.key]"
+                        :disabled="!retentionEntitled || retentionSaving"
+                        :class="RETENTION_INPUT_CLASS"
+                      />
+                      <span class="text-sm text-gray-500 dark:text-gray-400">days</span>
+                    </div>
+                  </div>
+                  <!-- Audit log — always shown, never editable (integrity floor) -->
+                  <div>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Audit log</label>
+                    <div class="mt-1 flex items-center gap-2">
+                      <input type="number" :value="retention.windows.audit_log_retention_days" disabled
+                        :class="RETENTION_INPUT_CLASS" />
+                      <span class="text-xs text-gray-400">days (365-day integrity floor)</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-if="retentionEntitled" class="flex items-center gap-3 pt-2">
+                  <button
+                    @click="saveRetention" :disabled="retentionSaving"
+                    class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
+                  >{{ retentionSaving ? 'Saving…' : 'Save retention' }}</button>
+                  <span v-if="retentionSaved" class="text-sm text-green-600 dark:text-green-400">Saved — applied live.</span>
+                  <span class="text-xs text-gray-400">0 disables a sweep · values below the {{ retention.community_floor_days }}-day floor are raised to it.</span>
+                </div>
+
+              </div>
+            </div>
+          </div>
+
+          <!-- ent#184 — Activation funnel (local product events). Capture is
+               OSS-core; this operator view is entitlement-gated (`telemetry`).
+               The panel fetches the gated enterprise endpoint itself. -->
+          <ActivationFunnelPanel v-if="activeTab === 'activation'" />
+
+          <!-- ent#12 — Tier-2 opt-in usage sharing. OSS-core, default-off,
+               reversible. Admin-only (General tab), visible in every edition. -->
+          <div v-if="activeTab === 'general'" class="mb-6">
+            <TelemetrySharingPanel />
+          </div>
 
           <!-- Platform Section -->
           <!-- Admin sign-in email (#82 Phase 1) — lets an existing admin bind a
@@ -186,7 +306,9 @@
                       class="block flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
                     >
                       <option value="claude-sonnet-4-6">Claude Sonnet 4.6 — Fast + smart (recommended)</option>
-                      <option value="claude-opus-4-8">Claude Opus 4.8 — Most capable</option>
+                      <option value="claude-fable-5">Claude Fable 5 — Most capable, longest tasks (latest)</option>
+                      <option value="claude-sonnet-5">Claude Sonnet 5 — Fast + smart, 1M context (latest)</option>
+                      <option value="claude-opus-4-8">Claude Opus 4.8 — Most capable Opus</option>
                       <option value="claude-opus-4-7">Claude Opus 4.7</option>
                       <option value="claude-opus-4-6">Claude Opus 4.6</option>
                     </select>
@@ -281,6 +403,44 @@
                   </p>
                 </div>
 
+                <!-- Proactive message limits (#1609) — admin-tunable per-hour caps on agent-INITIATED channel sends -->
+                <div v-if="isAdmin" class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
+                  <h3 class="text-sm font-medium text-gray-700 dark:text-gray-300">Proactive message limits</h3>
+                  <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                    Per-hour caps on messages an agent <span class="font-medium">initiates</span> to Slack, Telegram, and direct messages (anti-spam).
+                    Replies to inbound messages are never limited by these. Set <span class="font-medium">0</span> to disable a cap (unlimited).
+                  </p>
+                  <div class="mt-3 space-y-2.5">
+                    <div v-for="row in PROACTIVE_ROWS" :key="row.key" class="flex items-center gap-3">
+                      <input
+                        type="number"
+                        min="0"
+                        :max="proactiveMax"
+                        v-model.number="proactiveLimits[row.key]"
+                        :disabled="savingProactive"
+                        class="block w-28 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
+                      />
+                      <div class="min-w-0">
+                        <div class="text-sm text-gray-700 dark:text-gray-300">{{ row.label }}</div>
+                        <div class="text-xs text-gray-400">{{ row.hint }}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="mt-3 flex items-center gap-3">
+                    <button
+                      @click="saveProactiveLimits"
+                      :disabled="savingProactive"
+                      class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >Save</button>
+                    <span v-if="proactiveSaveSuccess" class="inline-flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                      <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
+                      Saved
+                    </span>
+                  </div>
+                  <p v-for="w in proactiveWarnings" :key="w" class="mt-1 text-xs text-status-warning-600 dark:text-status-warning-400">⚠ {{ w }}</p>
+                  <p v-if="proactiveError" class="mt-1 text-sm text-status-danger-600 dark:text-status-danger-400">{{ proactiveError }}</p>
+                </div>
+
                 <!-- Brain Orb platform flags (trinity-enterprise#85) -->
                 <div v-if="isAdmin" class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
                   <h3 class="text-sm font-medium text-gray-900 dark:text-white">Brain Orb</h3>
@@ -338,6 +498,85 @@
                   </div>
                   <p v-if="brainOrbError" class="mt-2 text-sm text-status-danger-600 dark:text-status-danger-400">
                     {{ brainOrbError }}
+                  </p>
+                </div>
+
+                <!-- ElevenLabs / Voice platform settings (trinity-enterprise#117) -->
+                <div v-if="isAdmin" class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
+                  <h3 class="text-sm font-medium text-gray-900 dark:text-white">Voice (ElevenLabs)</h3>
+                  <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                    API key + default voice for outbound voice replies. Agents with voice enabled can
+                    reply with a spoken voice note on messaging channels. Changes apply immediately — no restart.
+                  </p>
+
+                  <!-- API key -->
+                  <div class="mt-3">
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                      ElevenLabs API key
+                      <span
+                        v-if="elevenLabs.keyConfigured"
+                        class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-status-success-100 text-status-success-800 dark:bg-status-success-900 dark:text-status-success-200"
+                      >{{ elevenLabs.keySource === 'env' ? 'configured (env)' : 'configured' }}</span>
+                      <span
+                        v-else
+                        class="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300"
+                      >not set</span>
+                    </label>
+                    <div class="flex gap-2">
+                      <input
+                        v-model="elevenLabs.apiKeyInput"
+                        type="password"
+                        :placeholder="elevenLabs.keyConfigured ? 'Enter a new key to replace' : 'Paste your ElevenLabs API key'"
+                        :disabled="savingElevenLabs"
+                        class="flex-1 text-sm border border-gray-300 dark:border-gray-600 rounded-md px-3 py-1.5 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-action-primary-500 disabled:opacity-50"
+                      />
+                      <button
+                        type="button"
+                        @click="saveElevenLabsKey"
+                        :disabled="savingElevenLabs || !elevenLabs.apiKeyInput.trim()"
+                        class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50"
+                      >Save</button>
+                      <button
+                        v-if="elevenLabs.keyConfigured && elevenLabs.keySource === 'override'"
+                        type="button"
+                        @click="clearElevenLabsKey"
+                        :disabled="savingElevenLabs"
+                        class="px-3 py-1.5 text-sm font-medium rounded-md border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+                      >Clear</button>
+                    </div>
+                  </div>
+
+                  <!-- Default voice id -->
+                  <div class="mt-3">
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Default voice ID</label>
+                    <div class="flex gap-2">
+                      <input
+                        v-model="elevenLabs.defaultVoiceId"
+                        type="text"
+                        placeholder="e.g. 21m00Tcm4TlvDq8ikWAM"
+                        :disabled="savingElevenLabs"
+                        class="flex-1 text-sm border border-gray-300 dark:border-gray-600 rounded-md px-3 py-1.5 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-action-primary-500 disabled:opacity-50"
+                      />
+                      <button
+                        type="button"
+                        @click="saveElevenLabsDefaultVoice"
+                        :disabled="savingElevenLabs"
+                        class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50"
+                      >Save</button>
+                    </div>
+                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      Agents without their own voice ID fall back to this one.
+                    </p>
+                  </div>
+
+                  <div v-if="elevenLabsSaveSuccess" class="mt-2 flex items-center text-sm text-status-success-600 dark:text-status-success-400">
+                    <svg class="h-4 w-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                    </svg>
+                    Saved
+                  </div>
+                  <p v-if="elevenLabsError" class="mt-2 text-sm text-status-danger-600 dark:text-status-danger-400">
+                    {{ elevenLabsError }}
                   </p>
                 </div>
               </div>
@@ -1097,7 +1336,7 @@
                                       :key="agent.name"
                                       :value="agent.name"
                                     >
-                                      {{ agent.name }}{{ agentSubscriptionMap[agent.name] ? ` (on ${agentSubscriptionMap[agent.name]})` : '' }}
+                                      {{ agentOptionLabel(agent) }}{{ agentSubscriptionMap[agent.name] ? ` (on ${agentSubscriptionMap[agent.name]})` : '' }}
                                     </option>
                                   </select>
                                   <button
@@ -2066,19 +2305,26 @@ import { useRole } from '../composables/useRole'
 import { useBuildInfo } from '../composables/useBuildInfo'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
+import { useAgentsStore } from '../stores/agents'
+import { agentDisplayName, agentOptionLabel } from '../utils/agentName'
 import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
+import { apiErrorMessage } from '../utils/apiError'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'
+import UserGitHubPatPanel from '../components/settings/UserGitHubPatPanel.vue'
 import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
+import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
+import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
+const agentsStore = useAgentsStore()
 const settingsStore = useSettingsStore()
 // trinity-enterprise#85: refreshed after a Brain Orb flag change so the
 // admin's own Brain tab / route gating updates without a page reload.
@@ -2111,6 +2357,11 @@ const ALL_TABS = [
   { id: 'security',     label: 'Security',     adminOnly: false, requires: '2fa' },
   { id: 'sso',          label: 'SSO',          adminOnly: true,  requires: 'sso' },
   { id: 'agents',       label: 'Agents',       adminOnly: true  },
+  { id: 'retention',    label: 'Retention',    adminOnly: true  },
+  // ent#184 — local product-event activation funnel. Capture is OSS-core;
+  // this operator view is entitlement-gated (`telemetry`), so the tab is hidden
+  // in OSS-only builds. Local-only data, admin-only.
+  { id: 'activation',   label: 'Activation',   adminOnly: true, requires: 'telemetry' },
 ]
 const { isAdmin } = useRole()
 const visibleTabs = computed(() =>
@@ -2159,6 +2410,117 @@ const loadingUsers = ref(false)
 // #995 — enterprise per-user activity audit (gated by user_management).
 // (enterpriseStore is declared near the top — visibleTabs needs it during setup.)
 const umEntitled = computed(() => enterpriseStore.isEntitled('user_management'))
+
+// #1039 — data-retention. The read surface (GET /api/settings/retention) is
+// available in every edition; editing is enterprise-only (PUT to the gated
+// /api/enterprise/retention/config). Community shows the fixed 5-day floor +
+// an upgrade hint.
+const retentionEntitled = computed(() => enterpriseStore.isEntitled('retention'))
+const RETENTION_FIELDS = [
+  { key: 'log_retention_days', label: 'Log archival' },
+  { key: 'execution_log_retention_days', label: 'Execution logs' },
+  { key: 'execution_row_retention_days', label: 'Execution rows' },
+  { key: 'health_check_retention_days', label: 'Health checks' },
+  { key: 'agent_soft_delete_retention_days', label: 'Soft-deleted agents' },
+  { key: 'schedule_soft_delete_retention_days', label: 'Soft-deleted schedules' },
+]
+const retention = ref(null)        // { edition, community_floor_days, windows{} }
+const retentionForm = reactive({}) // editable copy of the OPS/log windows
+
+// Shared styling for this panel's number inputs.
+//
+// The panel's inputs specified `border-gray-300` WITHOUT the `border` class, so
+// no border-width was ever applied and browsers fell back to their default
+// number-input chrome — which is what made them look unstyled. They also had no
+// padding and no focus ring. This matches the app-wide convention used by ~17
+// other inputs (`px-3 py-2 border … focus:ring-action-primary-500`).
+//
+// The `[appearance:textfield]` + `::-webkit-*-spin-button` triple removes the
+// native steppers: nobody nudges a retention window to 90 one click at a time,
+// and the arrows were the loudest thing in a panel whose numbers are typed.
+const RETENTION_INPUT_CLASS =
+  'w-24 px-3 py-2 text-sm rounded-md border border-gray-300 dark:border-gray-600 ' +
+  'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 ' +
+  'focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:border-transparent ' +
+  'disabled:opacity-60 disabled:cursor-not-allowed ' +
+  '[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none ' +
+  '[&::-webkit-inner-spin-button]:appearance-none'
+
+const retentionLoading = ref(false)
+const retentionSaving = ref(false)
+const retentionError = ref('')
+const retentionSaved = ref(false)
+
+// #1709: in-product approval of a guard-refused (over-threshold) retention prune.
+// POST /api/settings/retention/acknowledge is the GATE (admin + human only,
+// window-bound: a 409 means the window in force changed under us). Single-use —
+// after the next cleanup cycle prunes, the guard re-arms and loadRetention()
+// shows the item gone (no stale "approved" state).
+const acknowledgingKey = ref('')
+const ackError = ref('')
+const ackErrorKey = ref('')
+const ackDone = ref(false)
+
+async function acknowledgePrune(item) {
+  acknowledgingKey.value = item.key
+  ackError.value = ''
+  ackErrorKey.value = ''
+  ackDone.value = false
+  try {
+    await axios.post(
+      '/api/settings/retention/acknowledge',
+      { key: item.key, window_days: item.window_days },
+      { headers: authStore.authHeader }
+    )
+    ackDone.value = true
+    await loadRetention()   // the acked sweep is now allowed → drops off pending
+  } catch (e) {
+    ackErrorKey.value = item.key
+    // 409 = window mismatch (the window in force moved); surface the server's
+    // readable message rather than a generic failure.
+    ackError.value = apiErrorMessage(e, 'Failed to approve the deletion.')
+  } finally {
+    acknowledgingKey.value = ''
+  }
+}
+
+async function loadRetention() {
+  retentionLoading.value = true
+  retentionError.value = ''
+  try {
+    const r = await axios.get('/api/settings/retention', { headers: authStore.authHeader })
+    retention.value = r.data
+    for (const f of RETENTION_FIELDS) {
+      retentionForm[f.key] = r.data?.windows?.[f.key]
+    }
+  } catch (e) {
+    retentionError.value = apiErrorMessage(e, 'Failed to load retention settings.')
+  } finally {
+    retentionLoading.value = false
+  }
+}
+
+
+async function saveRetention() {
+  if (!retentionEntitled.value) return
+  retentionSaving.value = true
+  retentionError.value = ''
+  retentionSaved.value = false
+  try {
+    const body = {}
+    for (const f of RETENTION_FIELDS) {
+      const n = parseInt(retentionForm[f.key], 10)
+      if (!Number.isNaN(n)) body[f.key] = n
+    }
+    await axios.put('/api/enterprise/retention/config', body, { headers: authStore.authHeader })
+    retentionSaved.value = true
+    await loadRetention()
+  } catch (e) {
+    retentionError.value = apiErrorMessage(e, 'Failed to save retention settings.')
+  } finally {
+    retentionSaving.value = false
+  }
+}
 const activityUser = ref(null)
 const activityData = ref(null)
 const activityLoading = ref(false)
@@ -2303,6 +2665,21 @@ const maxParallelTasksCeiling = ref(10)
 const ceilingMin = ref(1)
 const ceilingMax = ref(32)
 const savingCeiling = ref(false)
+
+// #1609: admin-tunable proactive channel-message caps (per hour; 0 = unlimited).
+const PROACTIVE_ROWS = [
+  { key: 'slack_proactive_per_channel', label: 'Slack — per channel', hint: 'Proactive messages/hour to one Slack channel' },
+  { key: 'slack_proactive_per_agent', label: 'Slack — per agent', hint: 'Across all Slack channels for one agent' },
+  { key: 'telegram_proactive_per_group', label: 'Telegram — per group', hint: 'Proactive messages/hour to one Telegram group' },
+  { key: 'telegram_proactive_per_agent', label: 'Telegram — per agent', hint: 'Across all Telegram groups for one agent' },
+  { key: 'proactive_dm_per_recipient', label: 'Direct messages — per recipient', hint: 'Proactive DMs/hour to one recipient' },
+]
+const proactiveLimits = ref({})
+const proactiveMax = ref(1000000)
+const savingProactive = ref(false)
+const proactiveSaveSuccess = ref(false)
+const proactiveError = ref('')
+const proactiveWarnings = ref([])
 const ceilingSaveSuccess = ref(false)
 const ceilingError = ref('')
 
@@ -2322,6 +2699,17 @@ const brainOrbGeminiKey = ref(false)
 const savingBrainOrb = ref(false)
 const brainOrbSaveSuccess = ref(false)
 const brainOrbError = ref('')
+
+// ElevenLabs / Voice platform settings (ent#117)
+const elevenLabs = reactive({
+  keyConfigured: false,
+  keySource: 'none',   // override | env | none
+  apiKeyInput: '',
+  defaultVoiceId: '',
+})
+const savingElevenLabs = ref(false)
+const elevenLabsSaveSuccess = ref(false)
+const elevenLabsError = ref('')
 const savingPublicUrl = ref(false)
 const publicUrlSaveSuccess = ref(false)
 
@@ -2485,7 +2873,9 @@ async function loadSettings() {
       loadPlatformDefaultModel(),
       loadDefaultAccessPolicy(),
       loadMaxParallelTasksCeiling(),
+      loadProactiveLimits(),
       loadBrainOrbSettings(),
+      loadElevenLabsSettings(),
       loadApiKeyStatus(),
       loadSlackSettings(),
       loadSlackTransportStatus(),
@@ -2768,6 +3158,37 @@ async function saveMaxParallelTasksCeiling() {
   }
 }
 
+// #1609: proactive channel-message caps
+async function loadProactiveLimits() {
+  try {
+    const { data } = await axios.get('/api/settings/proactive-rate-limits', { headers: authStore.authHeader })
+    const next = {}
+    for (const key of Object.keys(data.limits || {})) next[key] = data.limits[key].value
+    proactiveLimits.value = next
+    if (data.max) proactiveMax.value = data.max
+  } catch {
+    // non-critical; card shows the shipped defaults
+  }
+}
+
+async function saveProactiveLimits() {
+  savingProactive.value = true
+  proactiveSaveSuccess.value = false
+  proactiveError.value = ''
+  proactiveWarnings.value = []
+  try {
+    const { data } = await axios.put('/api/settings/proactive-rate-limits', { ...proactiveLimits.value }, { headers: authStore.authHeader })
+    proactiveWarnings.value = data.warnings || []
+    proactiveSaveSuccess.value = true
+    setTimeout(() => { proactiveSaveSuccess.value = false }, 3000)
+    await loadProactiveLimits()
+  } catch (e) {
+    proactiveError.value = e.response?.data?.detail || 'Failed to save proactive message limits'
+  } finally {
+    savingProactive.value = false
+  }
+}
+
 // trinity-enterprise#85: Brain Orb platform flags
 function applyBrainOrbState(data) {
   for (const key of Object.keys(brainOrb)) {
@@ -2809,6 +3230,55 @@ async function putBrainOrbSettings(payload) {
   } finally {
     savingBrainOrb.value = false
   }
+}
+
+// ElevenLabs / Voice platform settings (ent#117)
+function applyElevenLabsState(state) {
+  elevenLabs.keyConfigured = !!state.key_configured
+  elevenLabs.keySource = state.key_source || 'none'
+  elevenLabs.defaultVoiceId = state.default_voice_id || ''
+}
+
+async function loadElevenLabsSettings() {
+  try {
+    const { data } = await axios.get('/api/settings/elevenlabs', { headers: authStore.authHeader })
+    applyElevenLabsState(data)
+  } catch {
+    // non-critical; panel shows unconfigured
+  }
+}
+
+async function putElevenLabsSettings(payload) {
+  savingElevenLabs.value = true
+  elevenLabsSaveSuccess.value = false
+  elevenLabsError.value = ''
+  try {
+    const { data } = await axios.put('/api/settings/elevenlabs', payload, { headers: authStore.authHeader })
+    applyElevenLabsState(data)
+    elevenLabs.apiKeyInput = ''
+    elevenLabsSaveSuccess.value = true
+    setTimeout(() => { elevenLabsSaveSuccess.value = false }, 3000)
+    // Refresh the tts_available feature flag the rest of this session gates on.
+    sessionsStore.loadFeatureFlags(true).catch(() => {})
+  } catch (e) {
+    elevenLabsError.value = e.response?.data?.detail || 'Failed to save voice settings'
+    await loadElevenLabsSettings()
+  } finally {
+    savingElevenLabs.value = false
+  }
+}
+
+async function saveElevenLabsKey() {
+  if (!elevenLabs.apiKeyInput.trim()) return
+  await putElevenLabsSettings({ api_key: elevenLabs.apiKeyInput.trim() })
+}
+
+async function clearElevenLabsKey() {
+  await putElevenLabsSettings({ clear: ['api_key'] })
+}
+
+async function saveElevenLabsDefaultVoice() {
+  await putElevenLabsSettings({ default_voice_id: elevenLabs.defaultVoiceId.trim() })
 }
 
 // Public URL methods
@@ -3614,7 +4084,7 @@ async function assignAgentToSubscription(subName, agentName) {
 }
 
 async function unassignAgentFromSubscription(agentName) {
-  if (!confirm(`Remove "${agentName}" from this subscription?\n\nIf the agent is running, it will be restarted.`)) return
+  if (!confirm(`Remove "${agentsStore.displayNameForSlug(agentName)}" from this subscription?\n\nIf the agent is running, it will be restarted.`)) return
   unassigningAgent.value = agentName
   error.value = null
   try {
@@ -3668,6 +4138,9 @@ onMounted(() => {
   // #995: enterprise entitlements — cached/no-op if NavBar already loaded.
   // Gates the per-user activity column in User Management.
   enterpriseStore.loadFeatureFlags().catch(() => {})
+
+  // #1039: data-retention read surface (available in every edition).
+  if (isAdmin.value) loadRetention().catch(() => {})
 
   // Handle Slack OAuth callback
   if (route.query.slack === 'installed') {

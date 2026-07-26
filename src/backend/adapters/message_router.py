@@ -25,6 +25,7 @@ from database import db
 from services.docker_service import get_agent_container
 from services.platform_prompt_service import (
     build_public_channel_caller_prompt,
+    build_voice_capability_prompt,
     format_user_memory_block,
     summarize_user_memory_background,
 )
@@ -85,6 +86,13 @@ def _get_channel_timeout() -> int:
 def _get_channel_allowed_tools() -> List[str]:
     raw = settings_service.get_setting("channel_allowed_tools", _DEFAULT_CHANNEL_ALLOWED_TOOLS)
     return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def _join_caller_prompts(*parts: Optional[str]) -> Optional[str]:
+    """Join non-empty caller-prompt fragments with blank lines. Returns None when
+    all are empty (so ``execute_task(system_prompt=None)`` stays the default)."""
+    kept = [p for p in parts if p and p.strip()]
+    return "\n\n".join(kept) if kept else None
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +435,20 @@ class ChannelMessageRouter:
         if not allowed:
             return
 
+        # 5c. Record the client on the Sharing-tab roster (#1533). Deliberately
+        # placed *after* the access gate: firing it earlier would let any
+        # unauthenticated stranger who messages the bot create unbounded
+        # chat-link rows. Groups are skipped — a chat link is a DM concept, so
+        # counting group traffic would list members who never DM'd the agent.
+        # Best-effort: a counter write must never block message processing.
+        if not is_group:
+            try:
+                await adapter.record_inbound_activity(message, agent_name)
+            except Exception as e:
+                logger.warning(
+                    f"[ROUTER:{channel}] record_inbound_activity failed for {agent_name}: {e}"
+                )
+
         # 6. Get/create session
         logger.debug(f"[ROUTER:{channel}] Step 6 - creating session")
         session_identifier = adapter.get_session_identifier(message)
@@ -545,6 +567,11 @@ class ChannelMessageRouter:
                     f"[ROUTER:{channel}] memory fetch failed for {verified_email}: {e}"
                 )
 
+        # ent#117: advertise the send_voice_reply capability only when voice is
+        # enabled for this agent AND allowed on this channel (channel-aware, FR-5),
+        # folded into the channel caller prompt below.
+        voice_capability_prompt = build_voice_capability_prompt(agent_name, channel)
+
         # Security: restrict tools for public channel users
         # No file access (Read exposes .env/credentials), no Bash, no Write/Edit
         # Configurable via settings_service (default: WebSearch, WebFetch)
@@ -560,6 +587,13 @@ class ChannelMessageRouter:
         if has_readable_files and "Read" not in public_allowed_tools:
             public_allowed_tools = public_allowed_tools + ["Read"]
 
+        # ent#117: channel turns run headless with a restricted `--allowedTools`, which
+        # otherwise blocks every MCP tool. When the voice capability is advertised, also
+        # allow the one MCP tool the agent needs to act on it (`mcp__trinity__send_voice_reply`).
+        _VOICE_REPLY_TOOL = "mcp__trinity__send_voice_reply"
+        if voice_capability_prompt and _VOICE_REPLY_TOOL not in public_allowed_tools:
+            public_allowed_tools = public_allowed_tools + [_VOICE_REPLY_TOOL]
+
         try:
             task_execution_service = get_task_execution_service()
 
@@ -572,11 +606,19 @@ class ChannelMessageRouter:
                 allowed_tools=public_allowed_tools,
                 # #894: per-agent public-channel model override (None → platform default).
                 model=db.get_public_channel_model(agent_name),
-                # #1205: public/channel custom instructions + MEM-001 memory.
-                system_prompt=build_public_channel_caller_prompt(
-                    agent_name, memory_system_prompt
+                # #1205: public/channel custom instructions + MEM-001 memory,
+                # plus the ent#117 voice capability when enabled for this channel.
+                system_prompt=_join_caller_prompts(
+                    build_public_channel_caller_prompt(agent_name, memory_system_prompt),
+                    voice_capability_prompt,
                 ),
                 images=image_data or None,
+                # ent#117: persist the channel delivery target so the
+                # send_voice_reply MCP tool can reconstruct where to deliver a
+                # voice note from the execution_id alone.
+                source_channel=channel,
+                source_channel_chat_id=str(message.channel_id) if message.channel_id is not None else None,
+                source_channel_thread=str(message.thread_id) if message.thread_id is not None else None,
             )
 
             if result.status in ("failed", "cancelled"):
@@ -742,6 +784,20 @@ class ChannelMessageRouter:
         (the caller short-circuits). Both return silently — there is no token to
         reply with on the no-token path.
         """
+        # ent#222: if the event was received by an agent's DEDICATED Slack bot,
+        # that agent wins over the channel binding and its own bot token is used
+        # for the reply. Inert for non-Slack / OSS-only (no resolver registered).
+        from adapters import per_agent_bot
+        pab_agent = per_agent_bot.resolve_from_message(message)
+        if pab_agent:
+            pab_token = per_agent_bot.get_token(pab_agent)
+            if pab_token:
+                logger.debug(f"[ROUTER:{channel}] per-agent bot → agent {pab_agent}")
+                return pab_agent, pab_token
+            # Binding without a usable token → fall through to channel routing.
+            logger.warning(f"[ROUTER:{channel}] per-agent bot for {pab_agent} has no token; "
+                           "falling back to channel routing")
+
         agent_name = await adapter.get_agent_name(message)
         logger.debug(f"[ROUTER:{channel}] Step 1 - resolved agent: {agent_name}")
         if not agent_name:

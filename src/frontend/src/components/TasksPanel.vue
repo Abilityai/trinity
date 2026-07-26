@@ -402,7 +402,7 @@
               <div>
                 <h3 class="text-lg font-medium text-gray-900 dark:text-white">Execution Log</h3>
                 <p v-if="logData" class="text-xs text-gray-500 dark:text-gray-400">
-                  {{ logData.status }} • {{ logData.started_at ? new Date(logData.started_at).toLocaleString() : '' }}
+                  {{ logData.status }} • {{ logData.started_at ? parseUTC(logData.started_at).toLocaleString() : '' }}
                 </p>
               </div>
               <button
@@ -530,6 +530,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import axios from 'axios'
+import { parseUTC } from '@/utils/timestamps'
 import { useAuthStore } from '../stores/auth'
 import { formatCost, formatCostCompact } from '../composables/useFormatters'
 import ModelSelector from './ModelSelector.vue'
@@ -1105,7 +1106,7 @@ async function clearQueue() {
 // Format helpers
 function formatRelativeTime(dateStr) {
   if (!dateStr) return ''
-  const date = new Date(dateStr)
+  const date = parseUTC(dateStr)
   const now = new Date()
   const diff = (now - date) / 1000
 

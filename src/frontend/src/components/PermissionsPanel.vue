@@ -49,7 +49,10 @@
                 class="h-4 w-4 text-action-primary-600 focus:ring-action-primary-500 border-gray-300 dark:border-gray-600 rounded dark:bg-gray-700"
               />
               <div class="flex-1">
-                <span class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ targetAgent.name }}</span>
+                <span
+                  class="text-sm font-medium text-gray-900 dark:text-gray-100"
+                  :title="agentNameTooltip(agentsStore.agentRefForSlug(targetAgent.name))"
+                >{{ agentDisplayName(agentsStore.agentRefForSlug(targetAgent.name)) }}</span>
                 <span v-if="targetAgent.type" class="ml-2 text-xs text-gray-500 dark:text-gray-400">[{{ targetAgent.type }}]</span>
               </div>
               <span :class="[
@@ -101,6 +104,7 @@
 <script setup>
 import { computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
+import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
 import { useAgentPermissions } from '../composables/useAgentPermissions'
 
 const props = defineProps({

@@ -8,7 +8,7 @@ Agents are created from templates or from scratch. Each agent runs as an isolate
 
 **Template sources** define where agent blueprints come from:
 
-- **GitHub Template** -- A repository in `github:Org/repo` format. Supports branch selection with `github:Org/repo@branch`. Private repos require a GitHub PAT.
+- **GitHub Template** -- A repository in `github:Org/repo` format. Supports branch selection with `github:Org/repo@branch`. **Public** repos clone with **no GitHub token** -- Trinity clones them anonymously. This is **source-mode only**: an anonymous clone can't push back, so pushing, Working-Branch mode, and fork-to-own still require a token. Private repos require a GitHub PAT.
 - **Admin-Configured Templates** -- GitHub repos configured by an admin in Settings. Metadata (name, description, resources, MCP servers) is fetched from each repo's `template.yaml` via the GitHub API and cached for 10 minutes. These appear as cards on the Templates page (`/templates`).
 - **Local Templates** -- Auto-discovered from the `config/agent-templates/` directory and shown as a curated **Starter Templates** section on the Templates page. The recommended starters (`scout`, `sage`, `scribe`) are ordered first; internal test and demo fixtures (marked `hidden: true` in their `template.yaml`) are hidden from the list but stay creatable by id.
 - **From Scratch** -- Creates a minimal agent with a default `CLAUDE.md`.
@@ -27,6 +27,11 @@ Agents are created from templates or from scratch. Each agent runs as an isolate
 - `claude-code` (default)
 - `codex`
 - `gemini-cli`
+
+**Display label vs. slug** distinguishes an agent's two names:
+
+- The **`name`** is a lowercase-hyphens **slug**. It is immutable, guarantees uniqueness, and is what URLs, MCP tool names, schedules, and webhooks resolve to.
+- The **display label** is a separate, editable, human-facing name. It is non-unique and presentation-only; when blank it renders as the slug. You can set it at creation via the optional `display_label` field (max 120 characters), and change it later — see [Managing Agents](managing-agents.md#display-label).
 
 ## How It Works
 
@@ -53,8 +58,9 @@ The 10 gitignore-related findings offer a one-click **Fix** button: Trinity rewr
 
 1. Click **Create Agent** on the Dashboard or Agents page.
 2. Select a template source. GitHub templates display as cards with metadata from `template.yaml`.
-3. Enter an agent name (lowercase, hyphens only).
-4. Click **Create**.
+3. Enter an agent name (lowercase, hyphens only) — this is the immutable slug.
+4. Optionally set a **display label** (max 120 characters) — the friendly name shown across the UI. Leave it blank to render under the slug.
+5. Click **Create**.
 
 ### API
 
@@ -65,6 +71,7 @@ Authorization: Bearer <token>
 
 {
   "name": "my-agent",
+  "display_label": "My Agent",
   "template": "github:Org/repo@branch"
 }
 ```
@@ -101,6 +108,7 @@ The agent's container is labeled so it can be discovered and managed by the plat
 - Agent names must be unique, lowercase, with hyphens allowed. No spaces or special characters.
 - The `base_image` must match the configured allowlist. Requests for blocked images return HTTP 403.
 - Private GitHub repositories require a GitHub PAT to be configured before use as a template source.
+- A public GitHub template clones with no token, but only in **source mode**. The anonymous clone can't push, so pushing changes back, Working-Branch mode, and fork-to-own still require a token.
 - Template metadata from GitHub is cached for 10 minutes. Changes to `template.yaml` may not appear immediately.
 
 ## See Also

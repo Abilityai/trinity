@@ -241,6 +241,44 @@ export class TrinityClient {
   /**
    * Public request method for custom API calls
    */
+  // --- Shared sessions / rooms (ent#169) ------------------------------------
+  // A room is a shared persistent RECORD; membership is the grant, so an
+  // agent-scoped key reaches exactly the rooms its agent belongs to and the
+  // backend answers a uniform 404 otherwise.
+
+  async createRoom(body: {
+    name: string;
+    agents: string[];
+    topic?: string;
+    max_messages?: number;
+    max_cost_usd?: number;
+    ttl_hours?: number;
+    scribe?: string;
+  }): Promise<any> {
+    return this.request("POST", "/api/rooms", body);
+  }
+
+  async listRooms(): Promise<{ rooms: any[] }> {
+    return this.request("GET", "/api/rooms");
+  }
+
+  async readRoom(roomId: string, since = 0): Promise<any> {
+    return this.request(
+      "GET",
+      `/api/rooms/${encodeURIComponent(roomId)}?since=${encodeURIComponent(String(since))}`
+    );
+  }
+
+  async postToRoom(roomId: string, content: string): Promise<any> {
+    return this.request("POST", `/api/rooms/${encodeURIComponent(roomId)}/messages`, {
+      content,
+    });
+  }
+
+  async closeRoom(roomId: string, reason?: string): Promise<any> {
+    return this.request("POST", `/api/rooms/${encodeURIComponent(roomId)}/close`, { reason });
+  }
+
   async request<T>(
     method: string,
     path: string,
@@ -326,6 +364,35 @@ export class TrinityClient {
       "GET",
       `/api/agents/${encodeURIComponent(name)}/connector/playbooks`
     );
+  }
+
+  /**
+   * Skills the calling agent is permitted to execute on the skill runner
+   * (ent#139). The acting agent is resolved server-side from the API key, so
+   * an agent-scoped key can never ask on another agent's behalf.
+   * Returns `enabled: false` with an empty list when the feature is off.
+   */
+  async getRunnableSkills(): Promise<{
+    caller_agent: string;
+    enabled: boolean;
+    skills: Array<{ name: string; description?: string; version?: string }>;
+  }> {
+    return this.request("GET", "/api/enterprise/skill-runner/available");
+  }
+
+  /**
+   * Execute one library skill on the skill runner (ent#139). Server-side the
+   * per-skill allow-list is re-checked at dispatch — this client never decides
+   * what is runnable.
+   */
+  async runSkill(
+    skillName: string,
+    input?: string
+  ): Promise<{ skill: string; result: string; cost?: number; execution_id?: string }> {
+    return this.request("POST", "/api/enterprise/skill-runner/run", {
+      skill_name: skillName,
+      input,
+    });
   }
 
   /**
@@ -532,21 +599,20 @@ export class TrinityClient {
   }
 
   /**
-   * Generate ephemeral SSH credentials for direct agent access
-   * For key auth, client supplies their public key (private key never leaves client)
-   * For password auth, server generates ephemeral password
+   * Generate ephemeral, key-based SSH credentials for direct agent access.
+   * The client supplies their public key (the private key never leaves the client).
+   * Password auth was removed (#1615) — key auth is the only method.
    * @param name - Agent name
    * @param ttlHours - Credential validity in hours (0.1-24, default: 4)
-   * @param authMethod - Authentication method: "key" (default) or "password"
-   * @param publicKey - Client's SSH public key (required for "key" auth)
+   * @param publicKey - Client's SSH public key (required)
    */
   async createSshAccess(
     name: string,
     ttlHours: number = 4,
-    authMethod: "key" | "password" = "key",
     publicKey?: string
   ): Promise<SshAccessResponse> {
-    const body: Record<string, unknown> = { ttl_hours: ttlHours, auth_method: authMethod };
+    // #1615: key-based auth only (password auth removed).
+    const body: Record<string, unknown> = { ttl_hours: ttlHours, auth_method: "key" };
     if (publicKey) {
       body.public_key = publicKey;
     }
@@ -737,6 +803,9 @@ export class TrinityClient {
       // SELF-EXEC-001: Self-task options
       inject_result?: boolean;
       chat_session_id?: string;
+      // ent#224: the CALLER's execution id, so the delegated task inherits the
+      // originating channel/thread and its completion can be reported back.
+      parent_execution_id?: string;
     },
     sourceAgent?: string,
     mcpKeyInfo?: { keyId?: string; keyName?: string },
@@ -777,6 +846,7 @@ export class TrinityClient {
       // SELF-EXEC-001: Self-task options for result injection
       inject_result: options?.inject_result,
       chat_session_id: options?.chat_session_id,
+      parent_execution_id: options?.parent_execution_id,   // ent#224
     };
 
     // Async mode returns immediately; sync mode waits for full execution.
@@ -1446,6 +1516,31 @@ export class TrinityClient {
     );
   }
 
+  /**
+   * Deliver one reply of the current channel turn as a spoken voice note
+   * (trinity-enterprise#117). The backend resolves the channel destination from
+   * the execution_id and gates on the agent + per-channel voice flags. Fail-soft:
+   * returns delivered=false (not an error) when voice can't be delivered.
+   */
+  async sendVoiceReply(
+    agentName: string,
+    data: {
+      text: string;
+      execution_id: string;
+      dedup_label?: string;
+    }
+  ): Promise<{
+    delivered: boolean;
+    channel?: string;
+    reason?: string;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/voice-reply`,
+      data
+    );
+  }
+
   // ============================================================================
   // VoIP Telephony (VOIP-001, #1056)
   // ============================================================================
@@ -2013,6 +2108,8 @@ export class TrinityClient {
       max_duration_seconds?: number;
       max_cost_usd?: number;
       no_progress_threshold?: number;
+      on_failure?: "abort" | "continue";
+      max_consecutive_failures?: number;
       model?: string;
       allowed_tools?: string[];
     }
@@ -2021,6 +2118,7 @@ export class TrinityClient {
     status: string;
     agent_name: string;
     max_runs: number;
+    on_failure?: string;
   }> {
     return this.request(
       "POST",
@@ -2042,6 +2140,55 @@ export class TrinityClient {
     return this.request(
       "POST",
       `/api/loops/${encodeURIComponent(loopId)}/stop`
+    );
+  }
+
+  // ============================================================================
+  // Agent Self-Reminders (#1296)
+  // ============================================================================
+
+  async setReminder(
+    agentName: string,
+    data: {
+      message: string;
+      delay_seconds?: number;
+      fire_at?: string;
+      model?: string;
+      timeout_seconds?: number;
+      allowed_tools?: string[];
+    }
+  ): Promise<{
+    id: string;
+    agent_name: string;
+    message: string;
+    fire_at: string;
+    status: string;
+    created_at: string;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/reminders`,
+      data
+    );
+  }
+
+  async listReminders(agentName: string, status?: string): Promise<unknown> {
+    const query = status
+      ? `?status=${encodeURIComponent(status)}`
+      : "";
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/reminders${query}`
+    );
+  }
+
+  async cancelReminder(
+    agentName: string,
+    reminderId: string
+  ): Promise<{ id: string; status: string }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/reminders/${encodeURIComponent(reminderId)}/cancel`
     );
   }
 

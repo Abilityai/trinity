@@ -16,24 +16,17 @@ from fastapi import APIRouter, Depends, Query
 from database import db
 from dependencies import get_current_user
 from models import FleetExecutionStats, FleetExecutionSummary, User
-from services.agent_service.helpers import accessible_agent_names
+from services.agent_service.helpers import accessible_agent_names, narrow_to_agent
 
 router = APIRouter(prefix="/api/executions", tags=["executions"])
 
 _VALID_STATUSES = {"running", "queued", "success", "failed", "error", "cancelled", "skipped"}
-_VALID_TRIGGERS = {"schedule", "manual", "agent", "mcp", "chat", "session", "public", "webhook", "fan_out", "loop"}
+# NOTE: this is a filter ALLOW-LIST, not a DB enum — `triggered_by` is a plain
+# TEXT column. An unknown value here degrades to "no filter" (see below), which
+# silently returns EVERY execution instead of none, so a trigger that reaches
+# this endpoint must be listed or its filter lies. `room` is ent#169.
+_VALID_TRIGGERS = {"schedule", "manual", "agent", "mcp", "chat", "session", "public", "webhook", "fan_out", "loop", "reminder", "room"}
 _VALID_HOURS = {0, 1, 6, 24, 168, 720}  # 0 = all-time
-
-
-def _narrow_to_agent(
-    agent_names: Optional[List[str]], agent: Optional[str]
-) -> Optional[List[str]]:
-    """Narrow the accessible-agent set to a single agent if ?agent= is provided."""
-    if not agent:
-        return agent_names
-    if agent_names is None:
-        return [agent]  # admin: any single agent is fine
-    return [agent] if agent in agent_names else []  # non-admin: access-gate
 
 
 @router.get("/stats", response_model=FleetExecutionStats)
@@ -43,7 +36,7 @@ async def get_fleet_execution_stats(
     current_user: User = Depends(get_current_user),
 ):
     """Aggregate stat-card data for the Unified Executions Dashboard header."""
-    agent_names = _narrow_to_agent(accessible_agent_names(current_user), agent)
+    agent_names = narrow_to_agent(accessible_agent_names(current_user), agent)
     effective_hours = hours if hours in _VALID_HOURS else 24
     stats = db.get_fleet_execution_stats(agent_names, hours=effective_hours)
     return FleetExecutionStats(**stats)
@@ -61,7 +54,7 @@ async def list_fleet_executions(
     current_user: User = Depends(get_current_user),
 ):
     """List executions across all accessible agents with optional filters."""
-    agent_names = _narrow_to_agent(accessible_agent_names(current_user), agent)
+    agent_names = narrow_to_agent(accessible_agent_names(current_user), agent)
     rows = db.get_fleet_executions(
         agent_names,
         status=status if status in _VALID_STATUSES else None,

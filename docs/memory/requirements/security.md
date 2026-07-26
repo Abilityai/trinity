@@ -217,6 +217,36 @@
 - **Contract note**: access-first inline handlers stay **uniform 403** (already self-uniform); `DELETE /{agent_name}` stays 403 (system-agent semantics). The rule is *self-uniform, never 404-then-403* — not "always 404".
 - **Tests**: `tests/unit/test_186_enumeration_uniformity.py` (real-DB dep uniformity + email body/no-429 + Tier-4 wiring guard); flipped asserts in `tests/test_access_control.py` and dep-override unit tests.
 
+### 20.8 CI Secret Scanning (#1164)
+- **Status**: ✅ Implemented (#1164)
+- **GitHub Issue**: #1164 (Epic #1054 Security Hardening) — the deferred prevention half of #1158 / PR #1162
+- **Priority**: MEDIUM (theme-security, complexity-low)
+- **Description**: Commit-time secret scanner (`gitleaks` MIT CLI) that fails any PR whose changes introduce a credential — closing the #1158 gap where an embedded `re_`-prefixed Resend key shipped in the published CLI and was only caught by a later audit. Public repo → a committed secret is world-readable and permanent, so the guard runs on **every** PR (no path filter, no label gate — #878 lesson).
+- **Key Features**:
+  - `.github/workflows/secret-scan.yml`: the `gitleaks` **binary** (not the org-licensed `gitleaks/gitleaks-action`, which requires a paid `GITLEAKS_LICENSE` for org-owned repos and fails run 1), version + sha256-pinned, `permissions: contents: read`, scoped to the PR/push **commit range** via `git merge-base` (`--log-opts`). The `--exit-code 2` tri-branch distinguishes clean (0) / finding (2 → fail) / scanner-error (other → fail closed).
+  - `.gitleaks.toml`: default ruleset (`[extend] useDefault = true`, keeping `sk-`/`ghp_`/`xox*`/`AKIA` + built-in stopwords) + a custom `trinity-resend-api-key` rule (`re_`-prefixed, entropy floor 3.8) + repo-specific allowlists. The v8.30.1 default set has **no** Resend rule, so the custom rule is the sole `re_` coverage; the repo-prefixed id can never override a future default rule.
+  - `--redact=100`: findings are masked in the (public) CI log so a match never re-leaks the secret (learnings #1595: CI output is a credential sink).
+- **Distinct from GUARD-002 (§28.2)**: GUARD-002 is a **runtime** hook that scans agent stdout/stderr at execution time; §20.8 is **commit-time source** scanning. Complementary layers, not a duplicate.
+- **Enforcement status (be honest)**: the workflow runs on every PR, but the check is **NON-BLOCKING until a repo admin adds `secret-scan` to `dev`/`main` branch protection** (a repo-settings toggle a code PR cannot perform, tracked as a follow-up). Its unconditional trigger is precisely what makes requiring it safe (never left "Expected — waiting"). Until then, prevention is **detection-only** — a red scan does not block merge, so #1164 is "detection shipped; enforcement = follow-up", not "cannot reland / solved".
+- **Non-scanned zones**: `tests/**` (~192 intentionally-fake fixtures), `docs/memory/**` (the live engineering docs — architecture/requirements/feature-flows — carry API-usage examples: curl `Authorization: Bearer` commands, truncated JWTs, `KEY=`/`condition=` samples the default `curl-auth-header`/`generic-api-key` rules flag; 8 such FPs were verified during #1164), and `docs/archive|releases|security-reports/**` (historical records; the CSO reports hold secret-pattern examples) are blanket path allowlists — gitleaks pre-skips allowlisted paths before per-finding regex, so these are documented non-scanned zones rather than a narrowing that wouldn't hold. A real credential belongs in `.env`/injection, never a test/doc file; GUARD-002 runtime scanning + human review are the complementary layers. `.env.example` is deliberately **NOT** excluded (a real key pasted there fires). *(Scope note for review: only `docs/memory/**` is excluded, not all of `docs/**` — a broader `docs/**` exclusion is deferred to reviewer judgement; other doc trees stay scanned and rely on the inline `gitleaks:allow` escape hatch for any example FP.)*
+- **Honest limit**: the custom rule catches a **verbatim** `re_`-body key. It does **NOT** catch a re-split / XOR-obfuscated secret — verified: the settled #1158 leak's two base85 halves are undetectable by gitleaks under both `useDefault` and this config (neither half is a `re_` key nor keyword-adjacent, and generic entropy on base85 is unreliable in a codebase full of legitimate encoded data). Regex+entropy is defense-in-depth against a *re-land*; **credential rotation** (done in #1158) is the real defense against the original leak. Because the halves produce no finding, `.gitleaksignore` carries no #1158 fingerprint (documented there); it is a non-load-bearing baseline for any future known historical finding, and the range-scoped CI gate does not depend on it.
+
+### 20.9 Stored User Credential — Per-User GitHub PAT (ent#162)
+- **Status**: ✅ Implemented (v0.8.5 payload).
+- **Credential-storage summary (cross-reference)**: the per-user GitHub token is a
+  **stored user credential** — a new credential-bearing column
+  `users.github_pat_encrypted`, an **AES-256-GCM JSON envelope** under
+  **Invariant #12** (plaintext persistence forbidden; the column is listed among
+  the Invariant #12 tables in `architecture.md`). Set/cleared self-service by its
+  owner only; **the token is never echoed on read** (status/`configured` flag
+  only) — a standing requirement, not just current behavior. Resolution keys on
+  **agent ownership**, never a calling/sharing user, so a sharee cannot inject
+  their PAT as an agent's git identity.
+- **Full requirement (capability + resolution ladders + persist carve-out)**:
+  `docs/memory/requirements/github.md` §11.10 — this section is the
+  security-surface pointer; the resolution mechanics and the recreate-vs-create
+  ladder distinction live there.
+
 ---
 
 ## 26. Operator Queue & Operating Room (OPS-001)
@@ -259,6 +289,24 @@
 - **Status**: ⏳ Not Started
 - **Requirement ID**: OPS-001-MCP
 - **Description**: MCP tools for programmatic queue access — list items, respond to requests, get stats. Enables orchestrator agents to auto-process queue items.
+
+### 26.7 Ingestion Rate / Depth / Size Caps (OPS-001-CAPS)
+- **Status**: ✅ Implemented (2026-07-17, #1632)
+- **Requirement ID**: OPS-001-CAPS
+- **Priority**: HIGH (blocks pull-mode default-ON, #1081 / #1402)
+- **Description**: The operator-queue **create path** (the agent-authored `~/.trinity/operator-queue.json` sync ingestion boundary in `_sync_agent`) previously accepted unbounded agent input with no per-agent ingestion cap. #1402 makes this queue the **approval channel for irreversible actions** (payments, destructive ops), so a compromised / prompt-injected agent that floods plausible "approve this" items causes **operator fatigue → reflexive approval**. XSS is already handled (DOMPurify); the exposure is **volume + social engineering**. The fix must bound a **hostile** agent, not just a runaway. Two independent bounds plus field hygiene, all at the one agent-authored seam:
+  - **Depth cap (primary, DB-measured ⇒ Redis-independent)**: `db.count_operator_queue_pending_for_agent(agent)` is computed once per cycle; new items are admitted only while `pending + admitted < OPERATOR_QUEUE_MAX_PENDING_PER_AGENT` (default **25**). At the cap, ingestion **stops** (`break`, not drip — avoids the C1 per-cycle DoS of re-scanning a growing file) and the surplus is held behind **one aggregated summary alert**. Bounds per-agent pending rows to `MAX_PENDING (+ platform items)` regardless of Redis.
+  - **Rate cap (burst smoothing, Redis, fail-open)**: per-agent `rate_limiter.check("operator_queue_create:{agent}", OPERATOR_QUEUE_CREATE_RATE_LIMIT=60, OPERATOR_QUEUE_CREATE_RATE_WINDOW=60)` + fleet-level `check("operator_queue_create:_fleet", OPERATOR_QUEUE_FLEET_CREATE_RATE_LIMIT=300, 60)` at the real create point only. Denied → item held this cycle, `break` the new-item scan. The fleet cap bounds a colluding / shared-upstream-injected fleet in aggregate (#1402 threat model, #1085 governor precedent).
+  - **Field hygiene (`_clamp_ingested_item`, total helper, run INSIDE the #1525 create try/except)**: `title` truncated to `OPERATOR_QUEUE_TITLE_MAX` (300), `question` to `OPERATOR_QUEUE_QUESTION_MAX` (4000) — **truncate-with-marker** (losing a real approval is worse than a clamped one); `context` serialized >`OPERATOR_QUEUE_CONTEXT_MAX_BYTES` (8192) → replaced by a `{"_truncated":true,"_original_bytes":N,"execution_id":<validated ≤128 or dropped>}` marker (so the context cap can't be defeated by a verbatim `execution_id`); non-dict `context` → `{}` (fixes the pre-existing `create_item` `.get` crash class); `options` serialized >`OPERATOR_QUEUE_OPTIONS_MAX_BYTES` (4096) → dropped-with-marker; agent-supplied `created_at` **normalized to ingest time** (defeats future-date sort-pinning; `expires_at` still honored); `priority` validate-only (unknown → `medium`; legit `critical` untouched — the depth cap already bounds critical *volume*).
+  - **Reserved-id guard + malformed-id reject**: an agent item whose `id` starts with a platform-reserved prefix (`queue-flood-`, `poison-`, `cb-dormant-`, `sync-failing-`, `git-bloat-`, `skill-not-found-`, `val_`) is **rejected** so an agent can't pre-create (and thereby self-suppress via `on_conflict_do_nothing`) its own flood alarm or the #1402 poison alert; an `id` longer than `OPERATOR_QUEUE_ID_MAX` (256) or not matching `^[A-Za-z0-9._:-]+$` is rejected (a PK can't be safely rewritten).
+  - **Leader lock** (`opqueue:leader`, mirror monitoring #1464): only the lease-holding uvicorn worker runs `_poll_cycle`, so `--workers 2` no longer double-charges the limiter, double-broadcasts the alert, or double-scans the file. Fail-open to leader on Redis down.
+  - **Summary/flood alert**: when depth-held or rate-skipped items occur, **one** `type:"alert"` operator-queue item is emitted via a platform **direct-DB create** (exempt), with an un-guessable `queue-flood-{agent}-{utc_now_iso()}` id, priority `high`, softened wording, and an in-memory `FLOOD_ALERT_COOLDOWN_SECONDS` (300) cooldown so it fires once per episode; wrapped so an emit failure never kills the sync.
+  - **Generous DB belt** (`create_item`): rejects (`ValueError`) `title`>4 KiB, `question`>16 KiB, serialized `context`>64 KiB, `id`>512 — an order of magnitude above the service caps so platform items never trip it, but the "platform bypasses the boundary" invariant stops being solely load-bearing (#1525 two-layer philosophy: validate at the boundary AND at the sink).
+  - **Platform exemption made true**: `validation_service._notify_operator_on_failure` now creates its notification via a **direct** `db.create_operator_queue_item(...)` instead of writing into the agent file (which would flow through `_sync_agent` and be capped) — this restores exemption-by-construction and fixes the pre-existing latent bug where it `.append`ed to a bare list the sync loop can't parse.
+- **Fail-open policy**: the rate/fleet limiters fail open to the per-worker in-process window; the **DB depth cap** is the Redis-independent hard bound, so fail-open never leaves the channel unbounded (a Redis outage is covered by the depth cap, not by a fail-closed defer that would delay legit escalations).
+- **Env knobs** (all env-tunable, generous by design — "cap a hostile/runaway agent, not throttle normal use"): `OPERATOR_QUEUE_CREATE_RATE_LIMIT` (60), `OPERATOR_QUEUE_CREATE_RATE_WINDOW` (60), `OPERATOR_QUEUE_FLEET_CREATE_RATE_LIMIT` (300), `OPERATOR_QUEUE_MAX_PENDING_PER_AGENT` (25), `OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE` (500), `OPERATOR_QUEUE_MAX_FILE_BYTES` (2 MiB), `OPERATOR_QUEUE_TITLE_MAX` (300), `OPERATOR_QUEUE_QUESTION_MAX` (4000), `OPERATOR_QUEUE_CONTEXT_MAX_BYTES` (8192), `OPERATOR_QUEUE_OPTIONS_MAX_BYTES` (4096), `OPERATOR_QUEUE_ID_MAX` (256), `OPERATOR_QUEUE_EXECUTION_ID_MAX` (128), `OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS` (300).
+- **Files**: `src/backend/services/operator_queue_service.py`, `src/backend/db/operator_queue.py`, `src/backend/services/validation_service.py`, `src/backend/database.py`
+- **Tests**: `tests/unit/test_1632_operator_queue_caps.py`
 
 ---
 

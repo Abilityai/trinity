@@ -50,6 +50,10 @@ It's a single per-agent switch under "Who can chat with this agent?" on the Shar
 
 Sharing grants a Trinity account holder interact access through the logged-in UI. A public link is a shareable URL that lets anyone chat with the agent without logging in — optionally with email verification, rate limits, and a custom welcome message. Public-link conversations persist across page refreshes, and logged-in Trinity users get a history dropdown to resume past sessions. Create links under **Sharing** → **Distribution** → **Public links** on the agent detail page. See [Public Links](../sharing-and-access/public-links.md).
 
+## What's the difference between a public link, sharing, and the customer portal?
+
+Three ways to give someone access, for three audiences. A **public link** is a single anonymous chat URL for one agent — no sign-in, no saved history, one agent per link. **Sharing** gives another Trinity operator interact-level access to an agent through the logged-in admin UI. The **customer portal** is an enterprise-tier, signed-in web app where a named external client verifies their email, picks among the agents shared with them, holds multiple saved conversations with per-agent history, and uploads files — a branded client workspace, not an anonymous URL and not the operator UI. The portal is gated to the paid tier and is not available in community builds. See [Customer Portal](../sharing-and-access/customer-portal.md).
+
 ## How do I keep a growing fleet of agents organized?
 
 Use tags and saved views. Tag agents from the agent detail page (or via API/MCP); tags show as colored badges on agent tiles, group agents into tag clouds on the Dashboard, and drive filters on the Agents page that persist as you navigate. For filter combinations you use often, create a **System View** — a saved filter of tags plus other criteria that persists across sessions. See [Tags and Organization](../sharing-and-access/tags-and-organization.md).

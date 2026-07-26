@@ -331,6 +331,42 @@
   - Pinia store with 30s polling + `agent_activity` WebSocket refresh guard
 - **Flow**: `docs/memory/feature-flows/executions-dashboard.md`
 
+### 10.13 Pull-Mode Re-Delivery Cap & Async Operator Human-Gate (#1402)
+- **Status**: ✅ Implemented — cap/park mechanism shipped 2026-07-12 (#1550, Phase 3); async-contract surface shipped 2026-07-15 (#1402)
+- **GitHub Issue**: #1402 (sub of #1081); companion #1401 (recovery trace); pull-path prompt delivery was #1629 (fixed in #1633, merged to dev — see below)
+- **Description**: Under pull/work-stealing (#1081), lease-expiry re-delivery re-runs failed turns. Two cases must escalate to a human instead of looping: a **poison task** that fails every re-delivery, and an **irreversible-and-un-confineable effect** the platform cannot make safe (agent's own keys / `gh` / `curl` — no confined Trinity tool in the path). Both land in the **asynchronous operator queue** (OPS-001). There are **no synchronous user gates**: a turn that needs a human parks a request and ENDS — it never holds a worker waiting on a person.
+- **Re-delivery cap (mechanism — shipped Phase 3)**:
+  - `schedule_executions.redelivery_count` + fleet-wide `MAX_REDELIVERY` (env, default 3); distinct from #678's `retry_count` (reader-race auto-retry).
+  - Under the cap the lease reaper re-queues the SAME row (`execution_id` preserved — effect_guard #1084 and idempotency #525 are execution_id-scoped); at the cap it poison-parks: operator alert FIRST (idempotent `poison-{execution_id}` item), then CAS-FAILs the row (`poison_lease` tag) — never silently dropped.
+  - **Counter semantics: raw attempts, NO reset-on-progress.** Partial progress is invisible to the platform (the #548/#333 trace-fidelity gap), and resetting on apparent progress would let an intermittently-progressing poison task loop forever. Re-litigating requires new trace-fidelity evidence, not a config change.
+  - Per-agent cap override: **deferred** (seam documented in `lease_reaper_service.get_max_redelivery`). Design note: a per-agent cap of 0 is the only *deterministic platform-side* park-first lever for effect-bearing pilot agents — every lease expiry escalates straight to a human (tradeoff: every transient crash becomes an operator interrupt). Record kept so the future pilot decision isn't re-derived.
+- **Async human-gate contract (AUTHORED CONTRACT, NOT ENFORCEMENT)**: the platform cannot intercept un-confineable effects by definition; the lever is the contract surfaced to agents in the platform system prompt (`platform_prompt_service.PLATFORM_INSTRUCTIONS` → Operator Communication) and `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`:
+  - **Fire-and-park, never block-and-wait**: park the request → end the turn → process `responded` items at the start of a later turn. Task-mode guidance (`_mode_guidance`) carries an explicit carve-out so "execute to completion, don't ask questions" doesn't contradict parking.
+  - **Ask before irreversible actions**: payments, messages/emails through the agent's own credentials, public posts, destructive deletions — park an `approval` first when uncertain; do reversible parts first, gate only the irreversible step.
+  - **Collision-safe request ids**: derived from the current execution id (`approval-{execution_id}-{slug}`) — execution-id derivation makes re-parks under re-delivery idempotent. Cross-agent uniqueness is now enforced platform-side (#1631, shipped): `operator_queue.id` is a platform-minted uuid and the agent's string moves to a surrogate `request_id` column with `UNIQUE(agent_name, request_id)`, so two agents reusing the same id no longer collide (previously `operator_queue.id` was a global PK with `on_conflict_do_nothing` that silently swallowed the loser).
+  - **No-next-turn limitation (documented, not solved)**: responses are written back to the agent's queue file within ~5s but are processed only at a future turn; an agent with no schedule/heartbeat must include resume instructions in the request. The respond→re-trigger dispatch path is a deferred follow-up (#1630). Recommended `expires_at`; an `expired` flip means "not approved — do not proceed".
+  - The gate is **honor-system** — a compliance/recovery contract and audit trail, not a security boundary (the agent writes and reads its own queue file). Rails needing a hard guarantee use confined Trinity-owned tools (#1408) or stay human-operated.
+- **Still blocking pull default-on for effect-bearing agents** (closing #1402 does NOT green-light it): trace fidelity #548/#333; #1401 `prior_trace` injection (claim-response field reserved, unwired); fail-closed `execution_id` injection (§10.10.1 gate); operator-queue flooding caps (#1632 — the approval channel has no rate limit or size caps).
+- **No longer blocking**: pull-path platform-prompt delivery + re-delivery banner — #1629, fixed by #1633 (`services/pull_coordination_service.py` composes the platform prompt on the claim path, fail-open). The issue stays open until the next release cut per the SDLC; the code is on dev, so pull-claimed turns DO receive this contract.
+- **Flow**: `docs/memory/feature-flows/operating-room.md` (queue protocol + poison-park); `docs/memory/feature-flows/cleanup-service.md` (reaper scheduling)
+
+### 10.14 Agent Self-Reminders (#1296)
+- **Status**: ✅ Implemented — #1296 (P2, theme-devex)
+- **GitHub Issue**: #1296 (sub of Epic #1045 "Agent Infrastructure")
+- **Description**: While running, an agent schedules a **one-shot, future re-invocation of itself** with a message it picks ("remind me to check this PR in 2h", "follow up tomorrow 9am"). The time-deferred sibling of `run_agent_loop` (§38): a loop runs iterations back-to-back *now*; a reminder fires *once, later*. When the timer fires, Trinity dispatches a **normal execution of that same agent** carrying the reminder message, through the standard `capacity_manager` admit/slot path (shares the agent's `max_parallel_tasks` budget, exactly like loops), with `triggered_by="reminder"`. The agent can **list** pending reminders and **cancel** one before it fires.
+- **Storage**: dedicated durable `agent_reminders` table (NOT an overload of the cron `agent_schedules` table, whose every consumer assumes a NOT-NULL cron). Reminder executions still land in `schedule_executions` (via the standard dispatch), so Executions/Overview visibility is preserved regardless of storage. 5-state machine: `pending → firing → fired` (delivered), `firing → pending` (transient-failure release for retry), `firing → failed` (bounded-attempts terminal), `pending → cancelled`.
+- **Fire home = the standalone `src/scheduler/` container** (single-instance), NOT the `--workers 2` backend (an in-backend timer would double-fire without a leader lock). One-shot APScheduler `DateTrigger` per pending reminder, armed from the DB (near-clone of the RETRY-001 machinery). Discovery: boot recovery (`initialize()` reconcile after `_recover_pending_retries`) + the 60s sync-loop reconcile (`_reconcile_reminders`, its **own** try/except independent of the cron-sync try) + the full-reload path (`reload_schedules()`).
+- **AC #1 (create)**: via an agent-scoped MCP key, schedule a one-shot self-reminder with **either** `fire_at` (absolute ISO) **XOR** `delay_seconds` (relative) + a message.
+- **AC #2 (fire)**: dispatch a normal execution of the same agent through `capacity_manager` admit/slot (no parallel dispatch path); `triggered_by="reminder"` reflected on the execution row, in the Overview "Reminders" bucket, the fleet Executions `?triggered_by=` filter, and the FAILED-alert classification.
+- **AC #3 (durable)**: survives a backend/scheduler restart and still fires (or is deterministically reconciled when past-due). Delivery is **at-least-once, bounded, observable**: the `firing` intermediate makes the fire atomic (single-fire) while letting a fire that did NOT land (backend warmup 503, connection failure, crash mid-fire) be retried by the reconcile, bounded at `MAX_REMINDER_FIRE_ATTEMPTS` (default 3) → terminal `failed`. A dispatch TimeoutException is treated as **outcome-unknown → assume-dispatched** (`firing→fired`, execution row NOT force-FAILED — let the poll finalize) to avoid a double-execution on the common "backend slow, task ran" case; only a clean pre-start failure (non-200 / connection error) marks the attempt FAILED (status-guarded) and retries.
+- **AC #4 (list/cancel)**: `GET .../reminders` (default `?status=pending`) and `POST .../reminders/{id}/cancel` (CAS `pending → cancelled`, tenant-scoped by `agent_name`; already-cancelled → 200 no-op; fired → 409; foreign id → uniform 404).
+- **AC #5 (self-only auth)**: an agent-scoped key may set/list/cancel reminders **only for itself** — the exact reports self-gate (`current_user.agent_name == name`) on top of `AuthorizedAgent`; a sibling agent the owner shares → 403. Connector-scoped callers are rejected (`_reject_connector_principal` + off the connector allowlist — reminders schedule future budget-consuming executions, which a consumption-only connector key must not). Ephemeral/ghost keys are 403'd (reminders deliberately OUT of the #69 ghost-key fence — a pending reminder can outlive a discarded ghost).
+- **AC #6 (idempotency)**: create accepts `Idempotency-Key` (Invariant #18); absent → the backend auto-derives a key over the **raw input** (`agent_name`, `message`, and the literal `delay_seconds=N`/`fire_at=<string>` spec, NOT the resolved instant — else a `delay_seconds` retry resolves a different instant each call and defeats dedup). Terminal (`cancelled`/`fired`) stored rows are **excluded from replay** so a cancel-then-recreate-identical yields a fresh pending reminder. The fire boundary is idempotency-keyed for free via `sched:{execution_id}`.
+- **AC #7 (abuse bounds)**, env-tunable, enforced at create: `MAX_PENDING_REMINDERS_PER_AGENT` (default 25 → 429 on a real pending count), a **durable** `MAX_REMINDERS_PER_AGENT_PER_DAY` (default 100 → 429, the non-fail-open backstop against self-perpetuation since a reminder can itself call `set_reminder`), `REMINDER_MIN_DELAY_SECONDS` (default 60, ≥ the 60s reload interval so a reminder can be armed before it is due), `REMINDER_MAX_DELAY_SECONDS` (default 30 days, < the 180-day soft-delete name reservation), `REMINDER_MESSAGE_MAX_CHARS` (default 4000), a per-agent create rate-limit (`agent_reminder:{name}`, fail-open flood guard), and a **timeout clamp to the agent cap** (the #929 primitive → 400 if above, so a reminder can't hold a slot past the operator-set `execution_timeout_seconds`).
+- **Autonomy hold**: `get_active_reminders` filters `autonomy_enabled=1` AND `deleted_at IS NULL` — disabling an agent's autonomy holds its pending reminders (they resume, past-due-fire, when re-enabled); a soft-deleted/renamed agent's reminders follow via the `AGENT_REFS` cascade (CASCADE policy → wiped on purge, re-keyed on rename).
+- **Retention**: `agent_reminders_retention_days` (default 90, `0` = off) — the cleanup sweep DELETEs terminal (`fired`/`cancelled`/`failed`) rows past the window (`pending`/`firing` never deleted), chunked, gated through the #1644 blast-radius guard; registered in `RETENTION_OPS_KEYS`, surfaced read-only at `GET /api/settings/retention`. #1638 floor discipline: the default is the wide/safe value.
+- **Flow**: `docs/memory/feature-flows/agent-self-reminders.md`
+
 ---
 
 ## 34. Agent-Defined Pipelines (#919)
@@ -701,5 +737,30 @@
 - **Out of scope**: fuzzy/semantic similarity; progress-identity vs
   response-identity (a tool-call/external-effect fingerprint); persisting
   the fingerprint/counter; retro-applying detection to in-flight loops.
+
+### 38.5 Configurable Loop Failure Policy (#1167)
+
+**Description**: A per-loop policy controls what happens when an iteration
+fails. Default is fail-fast (backward compatible); `continue` mode tolerates a
+failed iteration and proceeds, bounded so a fully-broken agent still terminates.
+
+- **FR-1 — `on_failure`**: `abort` (default — first failed iteration ends the
+  loop as `failed`/`stop_reason=error`, current behavior) or `continue`.
+- **FR-2 — `max_consecutive_failures`** (default 3, range 1–100): in `continue`
+  mode the loop aborts as `failed` with `stop_reason=max_consecutive_failures`
+  once this many iterations fail in a row; a success resets the streak.
+- **FR-3 — Both failure surfaces** honored: a raised exception from
+  `execute_task` AND a non-success `TaskExecutionResult` (TIMEOUT / AGENT_ERROR
+  / CIRCUIT_OPEN / AUTH). Each failed iteration finalizes its `agent_loop_runs`
+  row as `failed`, then (continue mode) the loop proceeds to the next run.
+- **FR-4 — Terminal status**: a continue-mode loop that reaches `max_runs` (or
+  matches its stop-signal) with ≥1 tolerated failure finalizes as
+  `completed_with_errors`; the `failed_runs` count is surfaced on the loop row
+  and API/UI.
+- **FR-5 — `{{previous_response}}`**: carries the last *successful* response — a
+  failed iteration does not overwrite it.
+- **FR-6 — Plumbed through all surfaces** (Invariant #13): `agent_loops` schema
+  + migration, `POST /api/agents/{name}/loops`, MCP `run_agent_loop`, and the
+  Loops panel UI. Unset = `abort`, a strict no-op for existing callers.
 
 ---

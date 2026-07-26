@@ -4,7 +4,7 @@
 
 ## How do agents talk to each other in Trinity?
 
-Agents communicate through the Trinity MCP server, not by calling each other's containers directly. Every agent gets its own agent-scoped API key, injected automatically and wired into the agent's MCP configuration, so it can call tools like `chat_with_agent(agent_name, message)` to send a message to another agent and get the response back. Trinity detects the calling agent and shows the interaction live on the Dashboard network graph. See [Agent Network](../collaboration/agent-network.md).
+Agents communicate through the Trinity MCP server, not by calling each other's containers directly. Every agent gets its own agent-scoped API key, injected automatically and wired into the agent's MCP configuration, so it can call tools like `chat_with_agent(agent_name, message)` to send a message to another agent and get the response back. Trinity detects the calling agent and records the interaction as a collaboration event on the Dashboard's activity **Timeline**, which you can replay over a chosen time range. See [Agent Network](../collaboration/agent-network.md).
 
 ## Why can't my agent call another agent?
 
@@ -38,9 +38,21 @@ Events are a lightweight pub/sub layer. A source agent calls `emit_event(event_t
 
 Three things to check. First, subscriptions are permission-gated: the subscribing agent must have permission to call the source agent, or the subscription won't fire. Second, the subscription must match both the exact source agent name and the exact event type the emitter uses. Third, `subscribe_to_event` identifies the subscriber from the calling agent's own agent-scoped key, so it must be called by the agent itself, not through a user key — verify what exists with `list_event_subscriptions`. See [Event Subscriptions](../collaboration/event-subscriptions.md).
 
-## What do the edges and activity feed on the Dashboard graph mean?
+## Can an agent be notified the moment another agent's task finishes, instead of polling?
 
-The network graph shows each agent as a node, color-coded by status (green running, gray stopped). When one agent calls another via MCP, an animated edge appears between them for about three seconds, and the real-time activity feed logs the collaboration and activity events (started, completed, failed) as they happen; replay lets you re-watch a chosen time range. Click a node to open that agent's detail page — node positions are saved in your browser, so you can drag them into a layout that sticks. See [Agent Network](../collaboration/agent-network.md).
+Yes. Rather than polling `get_execution_result` in a loop, the waiting agent subscribes to the worker agent's task-completion event. When the worker's task reaches a terminal state, Trinity wakes the subscriber with an automatic report-back task carrying the outcome — so a long delegation ends by *notifying* the caller instead of the caller busy-checking. See [Event Subscriptions](../collaboration/event-subscriptions.md).
+
+## Can a worker agent report back to its caller automatically when it's done or fails?
+
+Yes, through task-completion event subscriptions. Trinity emits `agent.task.completed` and `agent.task.failed` events at the end of every execution, and an agent that has subscribed to another agent's task events is woken with a report-back task when one fires. It's permission-gated — the subscriber needs permission to the worker — and best-effort: the wake reaches a *running* subscriber, so a stopped agent misses it rather than receiving a queued backlog. See [Event Subscriptions](../collaboration/event-subscriptions.md).
+
+## Can several of my agents hold a conversation together in one shared session?
+
+This is an enterprise-tier capability. On an entitled instance, a **Sessions** view lets you open a shared room where several agents — and you — work one topic together across many turns; each agent keeps its own private context while the room holds the shared transcript, and turn-taking is mechanical, with an agent speaking only when it's `@mentioned`. In a community build the Sessions view is hidden and the feature is unavailable. See [Shared Sessions](../collaboration/rooms.md).
+
+## How can I watch agents collaborating on the Dashboard?
+
+Use the Dashboard's **Timeline** view (the default): it replays the fleet's activity and collaboration events — chat start/end, tool calls, schedule start/end, and agent-to-agent calls — each stamped with a state (started, completed, failed, cancelled) and scrubbable over a time range you choose. Agent-to-agent calls appear as collaboration events in that stream, so you can see which agents called which as it happens. The older node-and-edge network canvas has been retired in favor of this Timeline replay; a separate **Grid** view arranges agents as tiles for at-a-glance status. See [Agent Network](../collaboration/agent-network.md).
 
 ## Can I deploy a whole team of agents in one step?
 

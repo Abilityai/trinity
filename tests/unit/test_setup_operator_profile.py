@@ -112,13 +112,14 @@ def test_email_registered_and_intake_scheduled(patched):
     assert patched.settings["setup_completed"] == "true"
     funcs = _task_funcs(bg)
     assert setup.submit_operator_intake in funcs  # intake scheduled (consent)
-    # ent#107: Cornelius seed is always scheduled after setup completes.
-    assert setup.cornelius_agent_service.ensure_seeded in funcs
+    # ent#107/ent#124: the first-run seed pass (Cornelius + default system)
+    # is always scheduled after setup completes.
+    assert setup.ensure_first_run_seeded in funcs
 
 
 def test_email_only_completes_setup_cleanly(patched):
     """Email but no company/consent — completes, binds email, no intake (but the
-    Cornelius seed is still scheduled)."""
+    first-run seed pass is still scheduled)."""
     bg = BackgroundTasks()
     res = _run(_req(email="solo@acme.com"), bg)
 
@@ -128,7 +129,7 @@ def test_email_only_completes_setup_cleanly(patched):
     assert patched.settings["setup_completed"] == "true"
     funcs = _task_funcs(bg)
     assert setup.submit_operator_intake not in funcs  # no consent → no intake
-    assert setup.cornelius_agent_service.ensure_seeded in funcs  # ent#107
+    assert setup.ensure_first_run_seeded in funcs  # ent#107/ent#124
 
 
 def test_email_without_consent_registers_but_no_intake(patched):
@@ -140,7 +141,7 @@ def test_email_without_consent_registers_but_no_intake(patched):
     assert patched.users["admin"]["email"] == "me@acme.com"
     funcs = _task_funcs(bg)
     assert setup.submit_operator_intake not in funcs  # no consent → no intake
-    assert setup.cornelius_agent_service.ensure_seeded in funcs  # ent#107
+    assert setup.ensure_first_run_seeded in funcs  # ent#107/ent#124
 
 
 def test_invalid_email_rejected_before_any_write(patched):

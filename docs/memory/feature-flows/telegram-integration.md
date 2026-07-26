@@ -211,9 +211,9 @@ Indexes: `agent_name`, `bot_id`, `webhook_secret`
 | telegram_user_id | TEXT | Telegram user ID |
 | telegram_username | TEXT | Optional @username |
 | session_id | TEXT | Public chat session reference |
-| message_count | INTEGER | Incremented per message |
+| message_count | INTEGER | Inbound DMs from this client; incremented by `record_inbound()` (#1533). Not backfilled — counting starts at deploy |
 | created_at | TEXT | ISO timestamp |
-| last_active | TEXT | ISO timestamp |
+| last_active | TEXT | ISO timestamp; `record_inbound()` is its only live writer (#1533) |
 
 Unique constraint: `(binding_id, telegram_user_id)`
 
@@ -226,8 +226,7 @@ Unique constraint: `(binding_id, telegram_user_id)`
 - `get_all_bindings()` — For webhook reconciliation on startup
 - `update_webhook_url()` / `update_last_update_id()` — Field updates
 - `delete_binding()` — Cascading delete of chat links + binding
-- `get_or_create_chat_link()` — Upsert for Telegram user tracking
-- `increment_message_count()` — Stats tracking
+- `record_inbound()` — Single atomic `INSERT … ON CONFLICT DO UPDATE` per delivered inbound DM (#1533): creates the chat link on the client's first message, then bumps `message_count`, refreshes `last_active`, and `COALESCE`s in a newly-known `telegram_username`. Called from `TelegramAdapter.record_inbound_activity` via the router's step-5c hook — after the access gate, never for group messages
 
 ### Delegation: `src/backend/database.py:1296-1330`
 
@@ -241,8 +240,7 @@ The `Database` singleton delegates all Telegram operations to `TelegramChannelOp
 - `db.update_telegram_webhook_url()` → `_telegram_channel_ops.update_webhook_url()`
 - `db.update_telegram_last_update_id()` → `_telegram_channel_ops.update_last_update_id()`
 - `db.delete_telegram_binding()` → `_telegram_channel_ops.delete_binding()`
-- `db.get_or_create_telegram_chat_link()` → `_telegram_channel_ops.get_or_create_chat_link()`
-- `db.increment_telegram_message_count()` → `_telegram_channel_ops.increment_message_count()`
+- `db.record_telegram_inbound()` → `_telegram_channel_ops.record_inbound()`
 
 ## Security
 
@@ -553,6 +551,26 @@ Body: { "message": "Hello group!" }
 }
 ```
 
+**Session history (#1649)** — on confirmed delivery the broadcast is appended to a
+channel session via `services/channel_history.py`, with `#903` shared-thread
+attribution (role `assistant`, `sender_label` = agent, **`sender_email=None`** so a
+broadcast is never folded into one participant's MEM-001 memory). Persisted only on
+success — a failed send writes no phantom turn — and fail-soft, since the message is
+already delivered by then.
+
+> **Known limitation — the agent still does not RECALL its own group broadcast.**
+> A Telegram group session is keyed per *(sender, chat)* (`get_session_identifier`
+> has no group branch), and a broadcast has no human sender. It is therefore filed
+> under a **synthetic agent-sender key** (`{bot_id}:{agent}:{chat_id}`) that nothing
+> else writes to — so no participant's inbound session contains it, and a reply in
+> the group won't carry it into context. This is deliberate: it makes the message
+> recorded, auditable, and attributable without changing existing group-session
+> behaviour. Real recall needs a per-chat group session, which is a behaviour change
+> for every existing inbound group conversation — a separate decision, not this fix.
+> Contrast Slack channels (thread-scoped), where the broadcast IS filed at the ts an
+> in-thread reply resolves to, so recall works. `tests/unit/test_1649_group_message_history.py`
+> pins this asymmetry so neither half drifts unnoticed.
+
 **MCP Tools** (`src/mcp-server/src/tools/channels.ts`):
 
 | Tool | Description |
@@ -608,7 +626,7 @@ The unique index remains `UNIQUE(binding_id, telegram_user_id)`.
 
 Added to `TelegramChannelOperations`:
 
-- `get_chat_link(binding_id, telegram_user_id)` — lookup without auto-create (the existing `get_or_create_chat_link` upserts, which is wrong for a pure "is this user verified?" read)
+- `get_chat_link(binding_id, telegram_user_id)` — lookup without auto-create (`record_inbound()` upserts and counts, which is wrong for a pure "is this user verified?" read)
 - `get_verified_email(binding_id, telegram_user_id) -> str | None`
 - `set_verified_email(binding_id, telegram_user_id, email)` — `INSERT OR IGNORE` to ensure the row exists, then `UPDATE` to set `verified_email` + `verified_at`
 - `clear_verified_email(binding_id, telegram_user_id)` — nulls both columns

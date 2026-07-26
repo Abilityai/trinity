@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from models import RenameAgentRequest, User
 from database import db
-from dependencies import get_current_user
+from dependencies import get_current_user, reject_agent_principal
 from services.docker_service import get_agent_container
 from services.docker_utils import container_stop, container_rename
 from services.image_generation_prompts import AVATAR_EMOTIONS
@@ -50,6 +50,8 @@ async def rename_agent_endpoint(
     Body:
     - new_name: The new name for the agent
 
+    trinity-enterprise#69 Part 2: rename is human-only (agent-scoped keys 403).
+
     Returns:
     - message: Success message
     - old_name: Previous agent name
@@ -57,6 +59,8 @@ async def rename_agent_endpoint(
 
     Note: The agent will be briefly stopped and restarted during rename.
     """
+    # trinity-enterprise#69 Part 2: rename is a human-only operation.
+    reject_agent_principal(current_user)
     # Check if user can rename this agent
     if not db.can_user_rename_agent(current_user.username, agent_name):
         # Check if it's a system agent for better error message
@@ -93,6 +97,34 @@ async def rename_agent_endpoint(
     if existing:
         raise HTTPException(status_code=409, detail=f"Agent with name '{sanitized_name}' already exists")
 
+    # #1671: a free NAME does not mean a free VOLUME BASE. Rename keeps the
+    # agent's volumes under its existing base, so a previously-renamed agent
+    # still claims its old name's base — and renaming a second agent into that
+    # base gives it two claimants. That is the #1667 silent-adopt disclosure via
+    # the one producer #1664 left ungated (`get_public_volume_name` names off
+    # the LIVE name, so the new holder get-then-creates onto the old agent's
+    # `agent-{name}-public`), and it strands both bases: with two claimants the
+    # purge guard skips them and the orphan sweep never reclaims them.
+    #
+    # `exclude_agent` = this agent: only ANOTHER row's claim blocks. Renaming an
+    # agent back to a name it already owns the base of (`B`->`A`->`B`) is
+    # legitimate and leaves a single claimant.
+    #
+    # Raised BEFORE the container is stopped/renamed — nothing is half-done on
+    # refusal. `db.rename_agent` re-checks inside its transaction (the
+    # chokepoint that closes the check-then-write gap, #1445 pattern); this gate
+    # exists so the caller gets an actionable 409 instead of that path's generic
+    # 500.
+    if db.is_volume_base_reserved(sanitized_name, exclude_agent=agent_name):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Name '{sanitized_name}' is unavailable: its data volumes still "
+                f"belong to another agent (that agent was renamed and kept them). "
+                f"Pick a different name."
+            ),
+        )
+
     # Get the container
     container = get_agent_container(agent_name)
     if not container:
@@ -122,12 +154,21 @@ async def rename_agent_endpoint(
         # re-injects derive(new_name). Same recreate-on-next-start path the label/
         # volume changes above already depend on.
 
-        # Rename Docker volume
-        # Docker doesn't support renaming volumes directly
-        # We need to create a new volume, copy data, and remove old one
-        # For simplicity in this implementation, we'll keep the volume name
-        # and update the container mount on next start
-        # This is handled by recreate_container_with_updated_config
+        # Docker volumes are NOT renamed: Docker supports neither renaming a
+        # volume nor editing its (immutable) labels, so copying gigabytes of
+        # `/home/developer` on every rename is the only alternative. The agent
+        # keeps its existing `agent-{old_name}-*` volumes and the container
+        # carries the same mounts forward (recreate_container_with_updated_config
+        # rebuilds the mount set from the old container's Mounts).
+        #
+        # #1664: that makes the volume's own identity (name + `trinity.agent-name`
+        # label) permanently stale, which the #1581 orphan sweep once read as
+        # "this volume's agent no longer exists" — and force-removed the LIVE
+        # agent's home volume during a recreate gap. `db.rename_agent` therefore
+        # pins `agent_ownership.volume_base_name = old_name` atomically with the
+        # rename; the sweep resolves ownership from that, never from the volume.
+        # Anything that needs this agent's volume names must ask
+        # `db.get_volume_base_name(agent)` — NOT f"agent-{agent_name}-workspace".
 
         # Update database references
         if not db.rename_agent(agent_name, sanitized_name):
@@ -138,15 +179,21 @@ async def rename_agent_endpoint(
                 detail="Failed to update database. Agent name may already be taken."
             )
 
-        # RELIABILITY-004 / #307: the heartbeat `seen` marker has no TTL and is
-        # keyed by agent name, so a rename would orphan the old name's key
-        # forever. Clear the old name's heartbeat keys; the renamed container
-        # re-sets `seen` under the new name on its next beat. Best-effort.
+        # #1560 / RELIABILITY-004 (#307): every per-agent Redis keyspace is keyed
+        # by name, so a rename orphans all of them under the old name — the
+        # heartbeat `seen` marker (no TTL), both circuit breakers, and the slot
+        # ZSET. The new name is swept too: it may have been used by an agent that
+        # the retention purge has since removed, whose breaker verdict would
+        # otherwise be inherited here. The container is stopped for the whole
+        # rename, so neither sweep can race an in-flight execution's slot. The
+        # renamed container re-establishes its own state on next beat/dispatch.
+        # Best-effort.
         try:
-            from services import heartbeat_service
-            heartbeat_service.clear_heartbeat(agent_name)
+            from services.agent_runtime_state import clear_agent_runtime_state
+            await clear_agent_runtime_state(agent_name)
+            await clear_agent_runtime_state(sanitized_name)
         except Exception as e:
-            logger.warning(f"Failed to clear heartbeat keys for old name {agent_name}: {e}")
+            logger.warning(f"Failed to clear Redis runtime state on rename {agent_name} -> {sanitized_name}: {e}")
 
         # Rename cached avatar, reference, and emotion image files (AVATAR-001, AVATAR-002)
         try:

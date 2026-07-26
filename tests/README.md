@@ -1,5 +1,14 @@
 # Trinity Tests
 
+> ⚠️ **This suite mutates the target instance.** The API fixtures **create and
+> delete real agents** on whatever `TRINITY_API_URL` points at. **Point it at a
+> local dev instance — never staging/production.** Every agent the suite creates
+> is named with the `pytest-ephemeral-` prefix and torn down by name; the suite
+> **never deletes an agent it did not create**. A leftover-sweep for crashed
+> runs is **OFF by default** — enable with `TRINITY_TEST_CLEANUP_SWEEP=1`, and
+> even then it only removes `pytest-ephemeral-` agents on a localhost target
+> (#1558).
+
 ## Quick start
 
 ```bash

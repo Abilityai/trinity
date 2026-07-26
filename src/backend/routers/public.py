@@ -24,7 +24,7 @@ from database import (
     PublicChatResponse,
     PublicChatMessage
 )
-from dependencies import get_current_user
+from dependencies import get_current_user, assert_owns
 from models import ClearSessionResponse, PublicChatHistoryResponse, User
 from routers.auth import check_login_rate_limit, record_login_attempt, get_redis_client
 from services.agent_auth import agent_httpx_client
@@ -1131,8 +1131,7 @@ async def get_public_link_session_detail(
     if session.agent_name != agent_name:
         raise HTTPException(status_code=403, detail="Session does not belong to this agent")
 
-    if session.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="You don't have access to this session")
+    assert_owns(current_user, session.user_id, detail="You don't have access to this session")
 
     messages = db.get_chat_messages(session_id, limit=limit)
 

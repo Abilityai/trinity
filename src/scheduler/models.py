@@ -98,6 +98,30 @@ class ScheduleExecution:
 
 
 @dataclass
+class Reminder:
+    """A durable one-shot agent self-reminder (#1296).
+
+    ``fire_at``/``firing_at`` are **naive UTC** datetimes (parsed via
+    ``parse_scheduler_ts``) so a ``DateTrigger(run_date=fire_at)`` under the
+    scheduler's ``timezone=pytz.UTC`` is interpreted correctly, and the
+    ``fire_at < datetime.utcnow()`` past-due comparison never hits the
+    offset-aware-vs-naive ``TypeError`` (#1472/#1474).
+    """
+    id: str
+    agent_name: str
+    message: str
+    fire_at: datetime
+    status: str  # pending | firing | fired | cancelled | failed
+    fire_attempts: int = 0
+    firing_at: Optional[datetime] = None
+    model: Optional[str] = None
+    timeout_seconds: Optional[int] = None
+    allowed_tools: Optional[List[str]] = None
+    execution_id: Optional[str] = None
+    error: Optional[str] = None
+
+
+@dataclass
 class AgentTaskMetrics:
     """Metrics extracted from agent task response."""
     context_used: int = 0

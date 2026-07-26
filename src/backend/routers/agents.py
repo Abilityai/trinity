@@ -23,13 +23,15 @@ from models import (
     DeployLocalRequest,
     ExecutionResultEnvelope,
     HeartbeatPayload,
+    AgentLabelUpdate,
     McpExposedUpdate,
     VoiceRepliesUpdate,
+    VoiceReplyRequest,
     TaskExecutionStatus,
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser
+from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -102,7 +104,8 @@ async def create_agent_internal(
     config: AgentConfig,
     current_user: User,
     request: Request,
-    skip_name_sanitization: bool = False
+    skip_name_sanitization: bool = False,
+    adopt_existing_workspace: bool = False
 ) -> AgentStatus:
     """
     Internal function to create an agent.
@@ -114,7 +117,8 @@ async def create_agent_internal(
         current_user=current_user,
         request=request,
         skip_name_sanitization=skip_name_sanitization,
-        ws_manager=manager
+        ws_manager=manager,
+        adopt_existing_workspace=adopt_existing_workspace
     )
 
 
@@ -153,9 +157,14 @@ async def list_agents_endpoint(
     # Add tags to each agent in response
     agent_names = [a.get("name") for a in agents]
     all_tags = db.get_tags_for_agents(agent_names)
+    # ent#181: the human-facing label, batched like tags — a per-agent read here
+    # would be an N+1 on the fleet's hottest endpoint. Agents without a label
+    # are absent from the map and render under their slug, as they do today.
+    all_labels = db.get_display_labels_for_agents(agent_names)
 
     for agent in agents:
         agent["tags"] = all_tags.get(agent.get("name"), [])
+        agent["display_label"] = all_labels.get(agent.get("name"))
 
     return agents
 
@@ -273,6 +282,7 @@ async def get_all_sync_health(
             "behind_main": (row or {}).get("behind_main") or 0,
             "ahead_working": (row or {}).get("ahead_working") or 0,
             "ahead_main": (row or {}).get("ahead_main") or 0,
+            "git_dir_bytes": (row or {}).get("git_dir_bytes"),  # #1596 bloat curve
         })
     return {"agents": entries}
 
@@ -385,6 +395,11 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
                                db.is_agent_shared_with_user(agent_name, current_user.username)
     agent_dict["is_system"] = owner.get("is_system", False) if owner else False
     agent_dict["can_share"] = db.can_user_share_agent(current_user.username, agent_name)
+    # ent#181: the detail endpoint is what AgentHeader loads on page open — it
+    # must carry the label too, or the header shows the slug until the first
+    # edit and the surfaces disagree (§1.3.1 FR-3). One extra read; not the list
+    # path, so a per-agent call is fine here.
+    agent_dict["display_label"] = db.get_display_label(agent_name)
     agent_dict["can_delete"] = db.can_user_delete_agent(current_user.username, agent_name)
     agent_dict["autonomy_enabled"] = db.get_autonomy_enabled(agent_name)
     read_only_data = db.get_read_only_mode(agent_name)
@@ -468,8 +483,48 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     if not db.can_user_delete_agent(current_user.username, agent_name):
         raise HTTPException(status_code=403, detail="You don't have permission to delete this agent")
 
+    # trinity-enterprise#69 Part 2: agent-scoped callers may delete/discard
+    # ONLY agents they spawned (interim until #948 capability tokens).
+    enforce_agent_spawn_scope(current_user, agent_name)
+
+    # trinity-enterprise#69: ephemeral agents route to HARD discard — no
+    # soft-delete, no 180d name reservation. This branch runs BEFORE the
+    # container lookup: a half-discarded ghost (crash residue: live row, no
+    # container) must be force-discardable, never 404.
+    eph_info = db.get_agent_ephemeral_info(agent_name)
+    if isinstance(eph_info, dict) and eph_info.get("is_ephemeral"):
+        from services.agent_service.ephemeral import discard_ephemeral_agent
+        discarded = await discard_ephemeral_agent(agent_name, reason="deleted_by_request")
+        if manager:
+            await manager.broadcast(json.dumps({
+                "event": "agent_deleted",
+                "data": {"name": agent_name}
+            }))
+        # Honest status (review LOW): False = another discard already in
+        # flight (lock contention) or already gone — both converge via GC.
+        return {
+            "message": (
+                f"Ephemeral agent {agent_name} discarded"
+                if discarded
+                else f"Ephemeral agent {agent_name} discard already in progress"
+            )
+        }
+
+    # #1747: an agent's identity lives in `agent_ownership`, not in Docker.
+    # This used to 404 whenever the container was missing, which left an agent
+    # with a live row simultaneously invisible (the listing is Docker-as-truth),
+    # undeletable, and still holding its own name — escapable only by calling
+    # `/start` on an agent you cannot see. Agents reach that state routinely:
+    # the #834 Phase 1c recovery flow leaves them there BY DESIGN (metadata-only,
+    # "operator runs POST /start"), as does any docker prune / daemon reset or a
+    # crash between the row write and container creation.
+    #
+    # Decide existence from the ROW and treat the container as best-effort
+    # cleanup — exactly what the ephemeral branch above already does for the same
+    # "live row, no container" residue. An already-soft-deleted agent still 404s:
+    # it is deleted, and `is_agent_live` is False for it.
     container = get_agent_container(agent_name)
-    if not container:
+    if not container and not db.is_agent_live(agent_name):
         raise HTTPException(status_code=404, detail="Agent not found")
 
     # Issue #834 Phase 1a: agent delete is now a SOFT-delete. We stop +
@@ -482,11 +537,20 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     # (default 180). At that point the #816 cascade_delete primitive
     # tears down all the child rows and on-disk artifacts in one shot.
 
-    try:
-        await container_stop(container)
-        await container_remove(container)
-    except Exception as e:
-        logger.warning(f"Error stopping/removing container: {e}")
+    if container:
+        try:
+            await container_stop(container)
+            await container_remove(container)
+        except Exception as e:
+            logger.warning(f"Error stopping/removing container: {e}")
+    else:
+        # Nothing to tear down. Everything below — soft-delete, queue cancel,
+        # Redis keyspace clearing, name reservation — keys off the agent NAME,
+        # so the delete completes normally without a container (#1747).
+        logger.info(
+            f"Deleting {agent_name} with no container present (#1747) — "
+            "proceeding with the ownership-row delete"
+        )
 
     # BACKLOG-001: in-flight queued tasks can't be recovered (the
     # container is gone), so cancel them now rather than waiting for
@@ -500,16 +564,17 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
     except Exception as e:
         logger.warning(f"Failed to cancel backlog for agent {agent_name}: {e}")
 
-    # RELIABILITY-004 / #307: clear the agent's heartbeat Redis keys now. The
-    # `seen` marker has no TTL, so without this it would leak past delete; the
-    # hb/misses keys self-expire but are cleared too for cleanliness. The
-    # watch loop bounds itself to live agents, so a stopped container is never
-    # read regardless — this just stops the slow key accumulation. Best-effort.
+    # #1560 / RELIABILITY-004 (#307): clear every per-agent Redis keyspace in one
+    # sweep — heartbeat markers (the `seen` key has no TTL), both circuit
+    # breakers, and the execution slots. The breakers are keyed by name, so
+    # leaving them behind hands a dead agent's verdict to whatever agent next
+    # takes this name. The container was removed above, so clearing slots cannot
+    # race a live execution. Best-effort: never blocks the delete.
     try:
-        from services import heartbeat_service
-        heartbeat_service.clear_heartbeat(agent_name)
+        from services.agent_runtime_state import clear_agent_runtime_state
+        await clear_agent_runtime_state(agent_name)
     except Exception as e:
-        logger.warning(f"Failed to clear heartbeat keys for agent {agent_name}: {e}")
+        logger.warning(f"Failed to clear Redis runtime state for agent {agent_name}: {e}")
 
     # Mark the row as soft-deleted. Children stay until the retention
     # sweep; the unique constraint on agent_name naturally blocks reuse
@@ -544,6 +609,9 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
 @router.post("/{agent_name}/start")
 async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request, current_user: CurrentUser):
     """Start an agent."""
+    # trinity-enterprise#69 Part 2: agent-scoped callers manage only agents
+    # they spawned (interim until #948 capability tokens).
+    enforce_agent_spawn_scope(current_user, agent_name)
     try:
         result = await start_agent_internal(agent_name)
         invalidate_context_stats_cache()  # PERF-269
@@ -589,6 +657,9 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
 @router.post("/{agent_name}/stop")
 async def stop_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request, current_user: CurrentUser):
     """Stop an agent."""
+    # trinity-enterprise#69 Part 2: agent-scoped callers manage only agents
+    # they spawned (interim until #948 capability tokens).
+    enforce_agent_spawn_scope(current_user, agent_name)
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -792,6 +863,89 @@ async def set_circuit_breaker_endpoint(
 
 
 # ============================================================================
+# Display Label (ent#181)
+# ============================================================================
+
+
+@router.get("/{agent_name}/label")
+async def get_agent_label_endpoint(
+    agent_name: AuthorizedAgentByName,
+    current_user: CurrentUser,
+):
+    """The agent's human-facing label (ent#181).
+
+    `label` is None when none is set — deliberately not coerced to the slug, so
+    the UI can show an empty field rather than pre-filling the slug and inviting
+    someone to "edit" a name they never chose. `display_name` is the resolved
+    value to render; `agent_name` is the immutable slug everything else keys on.
+    """
+    label = db.get_display_label(agent_name)
+    return {
+        "agent_name": agent_name,
+        "label": label,
+        "display_name": label or agent_name,
+    }
+
+
+@router.put("/{agent_name}/label")
+async def set_agent_label_endpoint(
+    agent_name: OwnedAgentByName,
+    body: AgentLabelUpdate,
+    current_user: CurrentUser,
+):
+    """Set or clear the agent's label (ent#181). Owner-only.
+
+    Changes ONE column. Nothing restarts, nothing is re-keyed: the slug — and
+    with it every route, container, volume, MCP key, A2A card and `agent_name`
+    row — is untouched. That is what separates this from `PUT /rename`
+    (RENAME-001), which must stop the container, rewrite ~20 tables, and still
+    leaves the agent's volumes under the old base (#1664/#1665/#1667/#1669/#1671).
+
+    A blank label clears it (the agent renders under its slug again) rather than
+    storing an empty string, which would render as a nameless agent everywhere.
+    """
+    if not db.set_display_label(agent_name, body.label):
+        # The dependency already proved access; a miss here means the row is
+        # gone or soft-deleted underneath us.
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    label = db.get_display_label(agent_name)
+
+    # ent#1640: audit the label change (set vs clear). Best-effort — never blocks
+    # the (already-committed) write. `label` is the resolved stored value.
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.AGENT_LIFECYCLE,
+            event_action="set_display_label" if label else "clear_display_label",
+            source="api",
+            actor_user=current_user,
+            target_type="agent",
+            target_id=agent_name,
+            details={"display_label": label},
+        )
+    except Exception:
+        logger.debug("[#1640] display-label audit log failed", exc_info=True)
+
+    if manager:
+        await manager.broadcast(json.dumps({
+            # `event` is the field the frontend WS client switches on; `type`
+            # is the normalized filter field. Both, matching agent_started etc.
+            "event": "agent_label_changed",
+            "type": "agent_label_changed",
+            "data": {
+                "name": agent_name,
+                "display_label": label,
+                "display_name": label or agent_name,
+            },
+        }))
+    return {
+        "agent_name": agent_name,
+        "label": label,
+        "display_name": label or agent_name,
+    }
+
+
+# ============================================================================
 # MCP Exposure Toggle (#846)
 # ============================================================================
 
@@ -866,19 +1020,26 @@ async def get_voice_replies_endpoint(
     agent_name: AuthorizedAgentByName,
     current_user: CurrentUser,
 ):
-    """Shared per-agent outbound-voice config (epic #24 / #25).
+    """Per-agent outbound-voice config (epic #24 / #25; v2 ent#117).
 
-    Returns the toggle + configured ElevenLabs voice id, plus ``available`` —
-    whether the platform has TTS configured at all (``ELEVENLABS_API_KEY``) — so
-    the UI can show an inactive state instead of a dead toggle.
+    Returns the agent-level toggle + voice id, the per-channel voice-allowed flags,
+    the ``effective_voice_id`` (agent voice id else platform default), and
+    ``available`` — whether the platform has TTS configured at all — so the UI can
+    show an inactive state instead of a dead toggle. ``default_voice_id`` is the
+    platform default the agent falls back to when it has no voice of its own.
     """
     import services.tts_service as tts_service
+    from services.settings_service import settings_service
 
     cfg = db.get_tts_config(agent_name)
+    default_voice = settings_service.get_default_voice_id()
     return {
         "agent_name": agent_name,
         "enabled": cfg["enabled"],
         "voice_id": cfg["voice_id"],
+        "channels": cfg["channels"],
+        "effective_voice_id": cfg["voice_id"] or default_voice,
+        "default_voice_id": default_voice,
         "available": tts_service.is_available(),
     }
 
@@ -889,16 +1050,31 @@ async def set_voice_replies_endpoint(
     body: VoiceRepliesUpdate,
     current_user: CurrentUser,
 ):
-    """Enable/disable spoken replies and set the ElevenLabs voice id (owner-only).
+    """Update per-agent voice config (owner-only; ent#117 partial update).
 
-    Enabling requires a ``voice_id``. When on, channel adapters (Telegram first)
-    speak replies via the shared TTS service, falling back to text on any failure
-    or when the reply exceeds the shared cost cap.
+    Agent-level fields (``enabled`` + ``voice_id``, from the Settings surface) and
+    per-channel voice-allowed flags (``channels``, from the channel panels) can be
+    updated together or independently. Enabling requires an effective voice id:
+    ``voice_id`` in the body, else a platform default voice. When enabled, the agent
+    gains the ``send_voice_reply`` capability on channels whose flag is on; voice is
+    no longer sent unconditionally — the agent chooses per message.
     """
-    if body.enabled and not body.voice_id:
-        raise HTTPException(status_code=400, detail="voice_id is required to enable voice replies")
+    from services.settings_service import settings_service
 
-    db.set_tts_config(agent_name, body.enabled, body.voice_id)
+    if body.enabled is None and body.channels is None:
+        raise HTTPException(status_code=400, detail="provide 'enabled' and/or 'channels'")
+
+    if body.enabled is not None:
+        if body.enabled and not (body.voice_id or settings_service.get_default_voice_id()):
+            raise HTTPException(
+                status_code=400,
+                detail="a voice_id is required to enable voice replies (or set a platform default voice)",
+            )
+        db.set_tts_config(agent_name, body.enabled, body.voice_id)
+
+    if body.channels is not None:
+        db.set_tts_channel_flags(agent_name, body.channels)
+
     await platform_audit_service.log(
         event_type=AuditEventType.CONFIGURATION,
         event_action="voice_replies_config",
@@ -906,14 +1082,69 @@ async def set_voice_replies_endpoint(
         actor_user=current_user,
         target_type="agent",
         target_id=agent_name,
-        details={"enabled": body.enabled, "has_voice_id": bool(body.voice_id)},
+        details={
+            "enabled": body.enabled,
+            "has_voice_id": bool(body.voice_id),
+            "channels": body.channels,
+        },
     )
     cfg = db.get_tts_config(agent_name)
+    default_voice = settings_service.get_default_voice_id()
     return {
         "agent_name": agent_name,
         "enabled": cfg["enabled"],
         "voice_id": cfg["voice_id"],
+        "channels": cfg["channels"],
+        "effective_voice_id": cfg["voice_id"] or default_voice,
     }
+
+
+@router.post("/{agent_name}/voice-reply")
+async def send_voice_reply_endpoint(
+    agent_name: AuthorizedAgentByName,
+    body: VoiceReplyRequest,
+    current_user: CurrentUser,
+):
+    """Deliver one reply of the current channel turn as a voice note (ent#117).
+
+    Backs the ``send_voice_reply`` MCP tool. Self-gated (an agent-scoped key may
+    only speak as itself). Resolves the channel destination from the execution and
+    delivers via the channel's send primitive. Fail-soft: gating/synthesis/delivery
+    misses return ``{delivered: false, reason}`` (HTTP 200) so the agent falls back
+    to text; an in-flight duplicate for the same turn returns 409.
+    """
+    from services import voice_reply_service, idempotency_service
+
+    # Self-gate (mirrors reports / heartbeat): an agent-scoped key can only speak
+    # as itself; a user-scoped key already passed AuthorizedAgentByName.
+    if current_user.agent_name and current_user.agent_name != agent_name:
+        raise HTTPException(status_code=403, detail="Agent-scoped key may only speak as itself")
+
+    execution = db.get_execution(body.execution_id)
+    if not execution or execution.agent_name != agent_name:
+        return {"delivered": False, "reason": "execution_not_found"}
+
+    # Only user-facing channel turns have a deliverable voice destination.
+    channel = execution.source_channel or execution.triggered_by
+    if channel not in ("telegram", "slack", "whatsapp"):
+        return {"delivered": False, "channel": channel, "reason": "not_a_channel_turn"}
+    if not execution.source_channel_chat_id:
+        return {"delivered": False, "channel": channel, "reason": "no_destination"}
+
+    try:
+        result = await voice_reply_service.send_voice_reply(
+            agent_name=agent_name,
+            channel=channel,
+            chat_id=execution.source_channel_chat_id,
+            thread_id=execution.source_channel_thread,
+            text=body.text,
+            execution_id=body.execution_id,
+            dedup_label=body.dedup_label or "",
+        )
+    except idempotency_service.EffectInProgressError:
+        raise HTTPException(status_code=409, detail="A voice note for this turn is already being sent")
+
+    return {"delivered": result.delivered, "channel": result.channel, "reason": result.reason}
 
 
 # ============================================================================

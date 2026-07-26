@@ -32,7 +32,7 @@
           class="flex-1 text-xs rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 focus:ring-blue-500 focus:border-blue-500"
         >
           <option value="">All Agents</option>
-          <option v-for="name in store.agentNames" :key="name" :value="name">{{ name }}</option>
+          <option v-for="name in store.agentNames" :key="name" :value="name">{{ agentOptionLabel(agentsStore.agentRefForSlug(name)) }}</option>
         </select>
         <select
           :value="store.filters.status"
@@ -82,7 +82,7 @@
 
             <!-- Bottom row: agent + time + status -->
             <div class="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-              <span class="truncate">{{ item.agent_name }}</span>
+              <span class="truncate" :title="agentNameTooltip(agentsStore.agentRefForSlug(item.agent_name))">{{ item.agent_name }}</span>
               <span>&middot;</span>
               <span class="flex-shrink-0">{{ timeAgo(item.created_at) }}</span>
               <span v-if="item.status !== 'pending'" class="flex-shrink-0">
@@ -117,8 +117,11 @@
 <script setup>
 import { h } from 'vue'
 import { useOperatorQueueStore } from '../../stores/operatorQueue'
+import { useAgentsStore } from '../../stores/agents'
+import { agentNameTooltip, agentOptionLabel } from '../../utils/agentName'
 
 const store = useOperatorQueueStore()
+const agentsStore = useAgentsStore()
 
 function priorityColor(priority) {
   const colors = {

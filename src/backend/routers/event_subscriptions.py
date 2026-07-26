@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from models import EmitEventRequest
 
 from database import db
-from dependencies import get_current_user, AuthorizedAgent, OwnedAgent
+from dependencies import get_current_user, AuthorizedAgent, OwnedAgent, assert_agent_owner
 from db_models import (
     User,
     EventSubscriptionCreate,
@@ -26,6 +26,8 @@ from db_models import (
     AgentEvent,
     AgentEventList,
 )
+from services import event_dispatch_service
+from services.event_dispatch_service import RESERVED_EVENT_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -51,29 +53,12 @@ def set_filtered_websocket_manager(manager):
 # ============================================================================
 # Helpers
 # ============================================================================
-
-def _interpolate_template(template: str, payload: dict) -> str:
-    """
-    Replace {{payload.field}} placeholders with actual values.
-
-    Supports nested access: {{payload.nested.field}}
-    Missing fields are left as-is.
-    """
-    def replacer(match):
-        path = match.group(1)  # e.g., "payload.pred_id"
-        parts = path.split(".")
-        # Skip the leading "payload" prefix
-        if parts and parts[0] == "payload":
-            parts = parts[1:]
-        value = payload
-        for part in parts:
-            if isinstance(value, dict) and part in value:
-                value = value[part]
-            else:
-                return match.group(0)  # Leave placeholder as-is
-        return str(value)
-
-    return re.sub(r"\{\{(payload(?:\.[a-zA-Z0-9_]+)+)\}\}", replacer, template)
+#
+# EVT-001 dispatch primitives (`trigger_subscription`, `_interpolate_template`,
+# `_get_internal_token`) moved to `services/event_dispatch_service.py` so a
+# service (`task_execution_service`) can reuse them without importing a router
+# (Invariant #1). `_broadcast_event` stays here — it closes over this module's
+# WebSocket manager globals.
 
 
 async def _broadcast_event(event: AgentEvent, subscriptions_triggered: int):
@@ -94,77 +79,35 @@ async def _broadcast_event(event: AgentEvent, subscriptions_triggered: int):
         await _filtered_websocket_manager.broadcast_filtered(ws_event)
 
 
-async def _trigger_subscription(
-    subscription: EventSubscription,
-    event: AgentEvent,
-):
-    """
-    Send an async task to the subscribing agent with the interpolated message.
-
-    Uses the backend's internal task endpoint to avoid circular MCP calls.
-    """
-    import httpx
-
-    # Interpolate payload into target message
-    message = subscription.target_message
-    if event.payload:
-        message = _interpolate_template(message, event.payload)
-
-    # Add event context to the message
-    message = (
-        f"[Event from {event.source_agent}: {event.event_type}]\n\n"
-        f"{message}"
-    )
-
-    try:
-        # Call the agent's task endpoint directly (async, fire-and-forget)
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"http://localhost:8000/api/agents/{subscription.subscriber_agent}/task",
-                json={
-                    "message": message,
-                    "async_mode": True,  # Fire-and-forget
-                    "system_prompt": (
-                        f"This task was triggered by an event subscription. "
-                        f"Source agent: {event.source_agent}, "
-                        f"Event type: {event.event_type}, "
-                        f"Event ID: {event.id}"
-                    ),
-                },
-                headers={
-                    "Authorization": f"Bearer {_get_internal_token()}",
-                    "X-Source-Agent": event.source_agent,
-                    "X-Via-MCP": "true",
-                },
-            )
-            if response.status_code >= 400:
-                logger.warning(
-                    f"[EVT-001] Failed to trigger subscription {subscription.id} "
-                    f"on {subscription.subscriber_agent}: {response.status_code} {response.text[:200]}"
-                )
-            else:
-                logger.info(
-                    f"[EVT-001] Triggered subscription {subscription.id}: "
-                    f"{event.source_agent}.{event.event_type} -> {subscription.subscriber_agent}"
-                )
-    except Exception as e:
-        logger.error(
-            f"[EVT-001] Error triggering subscription {subscription.id} "
-            f"on {subscription.subscriber_agent}: {e}"
+def _reject_reserved_self_subscription(source_agent: str, subscriber_agent: str, event_type: str):
+    """#1578 loop-safety: block a self-subscription to the reserved ``agent.task.*``
+    namespace (``source == subscriber``) — the trivial self-wake loop. Enforced on
+    BOTH create and update so a benign ``foo.bar`` self-sub can't be PUT into the
+    reserved namespace to dodge the create-time guard. Cross-agent subscriptions
+    to ``agent.task.*`` are fully allowed (that IS the report-back use case)."""
+    if event_type.startswith(RESERVED_EVENT_PREFIX) and source_agent == subscriber_agent:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"An agent cannot subscribe to its own '{RESERVED_EVENT_PREFIX}*' events "
+                f"(self-wake loop). Subscribe another agent to these system-emitted "
+                f"completion events instead."
+            ),
         )
 
 
-def _get_internal_token() -> str:
-    """Get a JWT token for internal API calls."""
-    from jose import jwt
-    from config import SECRET_KEY, ALGORITHM
-    from datetime import datetime, timedelta
-
-    payload = {
-        "sub": "admin",
-        "exp": datetime.utcnow() + timedelta(minutes=5),
-    }
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+def _reject_reserved_emit(event_type: str):
+    """#1578 loop-safety: the ``agent.task.*`` namespace is reserved for the
+    backend's deterministic completion emitter — an agent emitting into it would
+    spoof a completion. Rejected on both emit routes (400)."""
+    if event_type.startswith(RESERVED_EVENT_PREFIX):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"The '{RESERVED_EVENT_PREFIX}*' namespace is reserved for "
+                f"backend-emitted task-completion events and cannot be emitted by an agent."
+            ),
+        )
 
 
 # ============================================================================
@@ -216,6 +159,9 @@ async def create_event_subscription(
             status_code=400,
             detail="event_type must be a dot-separated identifier (e.g., 'prediction.resolved')",
         )
+
+    # #1578: block a reserved-namespace self-subscription (self-wake loop).
+    _reject_reserved_self_subscription(data.source_agent, name, data.event_type)
 
     try:
         subscription = db.create_event_subscription(
@@ -310,16 +256,21 @@ async def update_event_subscription(
         raise HTTPException(status_code=404, detail="Event subscription not found")
 
     # Only owner or admin can update
-    if not db.can_user_share_agent(current_user.username, existing.subscriber_agent):
-        raise HTTPException(
-            status_code=403,
-            detail="Only the owner can modify event subscriptions",
-        )
+    assert_agent_owner(current_user, existing.subscriber_agent, detail="Only the owner can modify event subscriptions")
 
     if data.event_type and not re.match(r"^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)*$", data.event_type):
         raise HTTPException(
             status_code=400,
             detail="event_type must be a dot-separated identifier",
+        )
+
+    # #1578: apply the reserved-namespace self-sub guard on the PUT route too —
+    # else a benign `foo.bar` self-subscription could be updated to
+    # `agent.task.completed`, dodging the create-time guard. Use the persisted
+    # source/subscriber; only re-check when the event_type is being changed.
+    if data.event_type:
+        _reject_reserved_self_subscription(
+            existing.source_agent, existing.subscriber_agent, data.event_type
         )
 
     updated = db.update_event_subscription(
@@ -342,11 +293,7 @@ async def delete_event_subscription(
         raise HTTPException(status_code=404, detail="Event subscription not found")
 
     # Only owner or admin can delete
-    if not db.can_user_share_agent(current_user.username, existing.subscriber_agent):
-        raise HTTPException(
-            status_code=403,
-            detail="Only the owner can delete event subscriptions",
-        )
+    assert_agent_owner(current_user, existing.subscriber_agent, detail="Only the owner can delete event subscriptions")
 
     db.delete_event_subscription(subscription_id)
     return {"status": "deleted", "subscription_id": subscription_id}
@@ -384,6 +331,9 @@ async def emit_event(
             detail="event_type must be a dot-separated identifier (e.g., 'prediction.resolved')",
         )
 
+    # #1578: agents may not emit into the backend-reserved completion namespace.
+    _reject_reserved_emit(data.event_type)
+
     # Find matching subscriptions
     matching_subs = db.find_matching_event_subscriptions(source_agent, data.event_type)
 
@@ -402,7 +352,7 @@ async def emit_event(
 
     # Trigger matching subscriptions (fire-and-forget)
     for sub in matching_subs:
-        asyncio.create_task(_trigger_subscription(sub, event))
+        asyncio.create_task(event_dispatch_service.trigger_subscription(sub, event))
 
     # Broadcast event via WebSocket
     await _broadcast_event(event, len(matching_subs))
@@ -429,6 +379,9 @@ async def emit_event_for_agent(
             detail="event_type must be a dot-separated identifier",
         )
 
+    # #1578: agents may not emit into the backend-reserved completion namespace.
+    _reject_reserved_emit(data.event_type)
+
     matching_subs = db.find_matching_event_subscriptions(name, data.event_type)
 
     event = db.create_agent_event(
@@ -444,7 +397,7 @@ async def emit_event_for_agent(
     )
 
     for sub in matching_subs:
-        asyncio.create_task(_trigger_subscription(sub, event))
+        asyncio.create_task(event_dispatch_service.trigger_subscription(sub, event))
 
     await _broadcast_event(event, len(matching_subs))
 

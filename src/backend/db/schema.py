@@ -45,7 +45,8 @@ TABLES = {
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             last_login TEXT,
-            suspended_at TEXT
+            suspended_at TEXT,
+            github_pat_encrypted TEXT
         )
     """,
 
@@ -99,7 +100,17 @@ TABLES = {
             mcp_exposed INTEGER DEFAULT 0,
             tts_voice_replies_enabled INTEGER DEFAULT 0,
             tts_voice_id TEXT,
+            tts_voice_telegram_enabled INTEGER DEFAULT 1,
+            tts_voice_slack_enabled INTEGER DEFAULT 1,
+            tts_voice_whatsapp_enabled INTEGER DEFAULT 1,
             deleted_at TEXT,
+            is_ephemeral INTEGER DEFAULT 0,
+            ephemeral_max_executions INTEGER,
+            ephemeral_expires_at TEXT,
+            spawned_by_agent TEXT,
+            spawned_by_key_id TEXT,
+            volume_base_name TEXT,
+            display_label TEXT,
             FOREIGN KEY (owner_id) REFERENCES users(id),
             FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)
         )
@@ -136,6 +147,19 @@ TABLES = {
             agent_name TEXT,
             scope TEXT DEFAULT 'user',
             FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """,
+
+    # Per-agent MCP connector config (ent#46; OSS-core since #118). Kept the
+    # `enterprise_connectors` name so existing enterprise installs adopt their data
+    # with zero migration. The scoped key lives in mcp_api_keys (scope='connector').
+    "enterprise_connectors": """
+        CREATE TABLE IF NOT EXISTS enterprise_connectors (
+            agent_name TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            exposed_playbooks TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         )
     """,
 
@@ -243,6 +267,13 @@ TABLES = {
             fan_out_id TEXT,
             retry_count INTEGER DEFAULT 0,
             loop_id TEXT,
+            claim_token TEXT,
+            lease_expires_at TEXT,
+            claimed_by_worker TEXT,
+            redelivery_count INTEGER DEFAULT 0,
+            source_channel TEXT,
+            source_channel_chat_id TEXT,
+            source_channel_thread TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -262,10 +293,13 @@ TABLES = {
             max_duration_seconds INTEGER,
             max_cost_usd REAL,
             no_progress_threshold INTEGER,
+            on_failure TEXT NOT NULL DEFAULT 'abort',
+            max_consecutive_failures INTEGER NOT NULL DEFAULT 3,
             model TEXT,
             allowed_tools TEXT,
             status TEXT NOT NULL,
             runs_completed INTEGER NOT NULL DEFAULT 0,
+            failed_runs INTEGER NOT NULL DEFAULT 0,
             stop_reason TEXT,
             last_response TEXT,
             error TEXT,
@@ -294,6 +328,33 @@ TABLES = {
             started_at TEXT NOT NULL,
             completed_at TEXT,
             FOREIGN KEY (loop_id) REFERENCES agent_loops(id)
+        )
+    """,
+
+    # Agent self-reminders (#1296) — durable one-shot deferred self-trigger.
+    # The standalone scheduler arms a DateTrigger per pending row and, on fire,
+    # dispatches a normal execution of the same agent (triggered_by="reminder").
+    "agent_reminders": """
+        CREATE TABLE IF NOT EXISTS agent_reminders (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            message TEXT NOT NULL,
+            fire_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            model TEXT,
+            timeout_seconds INTEGER,
+            allowed_tools TEXT,
+            owner_id INTEGER,
+            created_by_email TEXT,
+            source_agent_name TEXT,
+            source_mcp_key_id TEXT,
+            execution_id TEXT,
+            fire_attempts INTEGER NOT NULL DEFAULT 0,
+            firing_at TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            fired_at TEXT,
+            cancelled_at TEXT
         )
     """,
 
@@ -438,6 +499,21 @@ TABLES = {
             period_end TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """,
+
+    # -------------------------------------------------------------------------
+    # Local product-event capture — activation funnel, Tier-1 (ent#184)
+    # Local-only, default-on, zero egress. Wizard step transitions are emitted;
+    # first-value events are derived on read from audit_log/agent_activities.
+    # -------------------------------------------------------------------------
+    "product_events": """
+        CREATE TABLE IF NOT EXISTS product_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            installation_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            event_context TEXT,
+            created_at TEXT NOT NULL
         )
     """,
 
@@ -657,6 +733,10 @@ TABLES = {
             behind_main INTEGER DEFAULT 0,
             ahead_working INTEGER DEFAULT 0,
             behind_working INTEGER DEFAULT 0,
+            git_dir_bytes INTEGER,
+            pack_count INTEGER,
+            loose_objects INTEGER,
+            maintenance_failures INTEGER DEFAULT 0,
             last_check_at TEXT,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name)
@@ -847,6 +927,12 @@ TABLES = {
             is_dm_default INTEGER DEFAULT 0,
             created_by TEXT,
             created_at TEXT NOT NULL,
+            -- ent#223: per-channel proactive consent. In an open Slack workspace
+            -- users never authenticate, so the per-recipient email consent
+            -- (agent_sharing.allow_proactive) has nobody to key on; for Slack the
+            -- consent unit is the CHANNEL BINDING. Deny by default: binding an
+            -- agent is not itself consent to unprompted posts.
+            allow_proactive INTEGER DEFAULT 0,
             UNIQUE(team_id, slack_channel_id),
             FOREIGN KEY (agent_name) REFERENCES agent_ownership(agent_name) ON DELETE CASCADE
         )
@@ -1019,6 +1105,7 @@ TABLES = {
         CREATE TABLE IF NOT EXISTS operator_queue (
             id TEXT PRIMARY KEY,
             agent_name TEXT NOT NULL,
+            request_id TEXT,
             type TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
             priority TEXT NOT NULL DEFAULT 'medium',
@@ -1314,6 +1401,11 @@ INDEXES = [
     # Serves the retention sweep's `WHERE created_at < cutoff` scan (#918).
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_created ON agent_reports(created_at)",
 
+    # Product-event capture (ent#184): funnel aggregation groups by event_type,
+    # backfill/query orders by created_at.
+    "CREATE INDEX IF NOT EXISTS idx_product_events_type_created ON product_events(event_type, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_product_events_created ON product_events(created_at)",
+
     # Permission indexes
     "CREATE INDEX IF NOT EXISTS idx_permissions_source ON agent_permissions(source_agent)",
     "CREATE INDEX IF NOT EXISTS idx_permissions_target ON agent_permissions(target_agent)",
@@ -1384,6 +1476,10 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_operator_queue_priority ON operator_queue(priority)",
     "CREATE INDEX IF NOT EXISTS idx_operator_queue_type ON operator_queue(type)",
     "CREATE INDEX IF NOT EXISTS idx_operator_queue_created ON operator_queue(created_at DESC)",
+    # #1631: agent-authored request ids only need per-agent uniqueness. The
+    # platform-minted `id` (uuid) is the global handle; `request_id` carries the
+    # agent's string, so two agents can reuse the same id without collision.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_queue_agent_request ON operator_queue(agent_name, request_id)",
 
     # Nevermined payment indexes (NVM-001)
     "CREATE INDEX IF NOT EXISTS idx_nvm_config_agent ON nevermined_agent_config(agent_name)",
@@ -1481,6 +1577,13 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_loop_runs_loop ON agent_loop_runs(loop_id, run_number)",
     "CREATE INDEX IF NOT EXISTS idx_executions_loop ON schedule_executions(loop_id) "
     "WHERE loop_id IS NOT NULL",
+
+    # Agent self-reminders (#1296)
+    "CREATE INDEX IF NOT EXISTS idx_agent_reminders_agent ON agent_reminders(agent_name)",
+    # Partial index covers BOTH the pending-scan and the stale-firing reclaim
+    # (the reconcile reads pending ∪ firing).
+    "CREATE INDEX IF NOT EXISTS idx_agent_reminders_active "
+    "ON agent_reminders(fire_at) WHERE status IN ('pending', 'firing')",
 ]
 
 

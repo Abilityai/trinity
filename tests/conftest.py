@@ -1,6 +1,14 @@
 """
 Shared pytest fixtures for Trinity API tests.
 
+⚠️  THIS SUITE MUTATES THE TARGET INSTANCE. The API fixtures CREATE and DELETE
+real agents on whatever ``TRINITY_API_URL`` points at. Point it at a local dev
+instance — never staging/production. Every agent the suite creates is named
+with the ``pytest-ephemeral-`` prefix and is torn down by name; the suite never
+deletes an agent it did not create. The optional leftover-sweep (for crashed
+runs) is OFF by default and, even when enabled, only removes
+``pytest-ephemeral-`` agents on a localhost target (#1558).
+
 OPTIMIZATION NOTES (2025-12-09):
 - Module-scoped agent fixture: Creates ONE agent per test FILE (not per test)
 - Session-scoped shared agent: Single agent for tests that can share
@@ -12,6 +20,9 @@ Configuration:
 - TRINITY_TEST_PASSWORD: Test user password (default: password)
 - TRINITY_MCP_API_KEY: MCP API key for authenticated tests
 - TEST_AGENT_NAME: Pre-existing agent for agent-server tests
+- TRINITY_TEST_CLEANUP_SWEEP: opt-in (1/true) — sweep leftover
+  ``pytest-ephemeral-`` agents from prior crashed runs at session start.
+  Refuses unless TRINITY_API_URL is localhost. Default OFF (#1558).
 """
 
 # Skip test files that require backend context (can't be run from test suite)
@@ -274,6 +285,12 @@ _SYS_MODULES_INVARIANT_KEYS = (
 _SYS_MODULES_BASELINE = {
     k: sys.modules.get(k) for k in _SYS_MODULES_INVARIANT_KEYS
 }
+# #1481: db.schedules is now a package — baseline any loaded db.schedules.<slice>
+# children too (prefix match, so a future sub-split needs no edit) so cross-file
+# pollution of a submodule is restored to its canonical object, not just the parent.
+_SYS_MODULES_BASELINE.update(
+    {k: sys.modules[k] for k in list(sys.modules) if k.startswith("db.schedules.")}
+)
 
 
 def _restore_invariant_sys_modules() -> None:
@@ -311,7 +328,15 @@ def _restore_sys_modules_baseline_762():
     _restore_invariant_sys_modules()
 
 from utils.api_client import TrinityApiClient, ApiConfig
-from utils.cleanup import ResourceTracker, cleanup_test_agent
+from utils.cleanup import (
+    ResourceTracker,
+    cleanup_test_agent,
+    register_created_agent,
+    session_created_agents,
+    select_sweepable_agents,
+    is_local_target,
+    EPHEMERAL_AGENT_PREFIX,
+)
 
 
 def pytest_configure(config):
@@ -358,28 +383,61 @@ def api_config() -> ApiConfig:
 def api_client(api_config: ApiConfig) -> Generator[TrinityApiClient, None, None]:
     """Create authenticated API client for the test session.
 
-    Also cleans up leftover test agents from prior runs to avoid quota exhaustion.
+    #1558: the previous version deleted EVERY agent named ``test-*`` on the
+    target instance at session start — silent, unprompted data loss that
+    destroyed real user agents. The leftover-sweep is now:
+      - OFF by default (opt-in via ``TRINITY_TEST_CLEANUP_SWEEP``),
+      - localhost-only (refuses staging/prod), and
+      - scoped to the suite's own ``pytest-ephemeral-`` prefix — never the
+        broad ``test-`` a human might use.
+    Agents this session creates are registered and reclaimed by name at the end
+    (belt-and-suspenders over each fixture's own teardown).
     """
+    import sys
+
     client = TrinityApiClient(api_config)
     try:
         client.authenticate()
 
-        # Clean up leftover test agents from prior runs
+        # Opt-in leftover-sweep for crashed prior runs. select_sweepable_agents
+        # is fail-closed: [] unless enabled AND localhost, and only ever returns
+        # provably suite-owned names.
+        sweep_enabled = os.getenv("TRINITY_TEST_CLEANUP_SWEEP", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if sweep_enabled and not is_local_target(api_config.base_url):
+            print(
+                f"\n[conftest] TRINITY_TEST_CLEANUP_SWEEP set but target "
+                f"'{api_config.base_url}' is not localhost — refusing to sweep (#1558)",
+                file=sys.stderr,
+            )
         try:
             response = client.get("/api/agents")
             if response.status_code == 200:
-                agents = response.json()
-                leftover = [a["name"] for a in agents if a["name"].startswith("test-")]
+                names = [a["name"] for a in response.json()]
+                leftover = select_sweepable_agents(
+                    names, api_config.base_url, enabled=sweep_enabled
+                )
                 for name in leftover:
-                    cleanup_test_agent(client, name)
+                    cleanup_test_agent(client, name, require_suite_owned=True)
                 if leftover:
-                    import sys
-                    print(f"\n[conftest] Cleaned up {len(leftover)} leftover test agents", file=sys.stderr)
+                    print(
+                        f"\n[conftest] Swept {len(leftover)} leftover "
+                        f"'{EPHEMERAL_AGENT_PREFIX}' agent(s)",
+                        file=sys.stderr,
+                    )
         except Exception:
             pass  # Best-effort cleanup
 
         yield client
     finally:
+        # Reclaim any agent this session created that a fixture teardown missed
+        # (e.g. a crashed fixture). Only touches registered, suite-owned names.
+        for name in session_created_agents():
+            try:
+                cleanup_test_agent(client, name, require_suite_owned=True)
+            except Exception:
+                pass
         client.close()
 
 
@@ -415,8 +473,16 @@ def ws_ticket(api_client: TrinityApiClient) -> Callable[[], str]:
 
 @pytest.fixture(scope="function")
 def test_agent_name() -> str:
-    """Generate unique test agent name."""
-    return f"test-api-agent-{uuid.uuid4().hex[:8]}"
+    """Generate unique test agent name.
+
+    #1558: uses the dedicated ``pytest-ephemeral-`` prefix (never the broad
+    ``test-``) and registers the name so it's reclaimed at session end even if a
+    test forgets its own teardown. Registering an unused name is harmless — the
+    reclaim is 404-tolerant.
+    """
+    name = f"{EPHEMERAL_AGENT_PREFIX}agent-{uuid.uuid4().hex[:8]}"
+    register_created_agent(name)
+    return name
 
 
 @pytest.fixture(scope="function")
@@ -445,9 +511,11 @@ def test_schedule_name() -> str:
 @pytest.fixture(scope="module")
 def module_agent_name(request) -> str:
     """Generate unique agent name for the module."""
-    # Use module name to create predictable but unique name
+    # Use module name to create predictable but unique name (#1558: ephemeral prefix)
     module_name = request.module.__name__.replace("test_", "").replace("_", "-")[:20]
-    return f"test-{module_name}-{uuid.uuid4().hex[:6]}"
+    name = f"{EPHEMERAL_AGENT_PREFIX}{module_name}-{uuid.uuid4().hex[:6]}"
+    register_created_agent(name)
+    return name
 
 
 @pytest.fixture(scope="module")
@@ -509,7 +577,8 @@ def stopped_agent(
     Creates agent, waits for it to start, then stops it.
     OPTIMIZED: scope="module" - one stopped agent per test file.
     """
-    agent_name = f"test-stopped-{uuid.uuid4().hex[:6]}"
+    agent_name = f"{EPHEMERAL_AGENT_PREFIX}stopped-{uuid.uuid4().hex[:6]}"
+    register_created_agent(agent_name)
 
     # Create the agent
     response = api_client.post(
@@ -558,7 +627,8 @@ def shared_agent(api_client: TrinityApiClient, request) -> Generator[dict, None,
     - Test agent creation/deletion
     - Need a clean agent state
     """
-    agent_name = f"test-shared-session-{uuid.uuid4().hex[:6]}"
+    agent_name = f"{EPHEMERAL_AGENT_PREFIX}shared-{uuid.uuid4().hex[:6]}"
+    register_created_agent(agent_name)
 
     # Create agent
     response = api_client.post(

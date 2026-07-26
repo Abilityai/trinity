@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import axios from 'axios'
 import { useAuthStore } from './auth'
 import { useNetworkStore } from './network'
+import { agentDisplayName } from '../utils/agentName'
 
 export const useAgentsStore = defineStore('agents', {
   state: () => ({
@@ -18,6 +19,21 @@ export const useAgentsStore = defineStore('agents', {
   }),
 
   getters: {
+    // #1643: slug → human display name, resolved off the loaded agents.
+    // Operational payloads (executions, operator queue, monitoring) carry only
+    // the slug; this is the single slug→display resolver so those dense surfaces
+    // never grow a mutable presentation field of their own. It stays live via
+    // the agent_label_changed WS handler that updates the cached agent. Unknown
+    // slug (agent not loaded / already gone) → the slug itself.
+    displayNameForSlug() {
+      return (slug) => agentDisplayName(this.agents.find(a => a.name === slug) || slug)
+    },
+    // #1643: the agent object for a slug, or the bare slug when not loaded — feed
+    // it to agentNameTooltip / hasDistinctLabel where a dense row keeps the slug
+    // primary and shows the label on hover.
+    agentRefForSlug() {
+      return (slug) => this.agents.find(a => a.name === slug) || slug
+    },
     // Filter out system agents for regular lists
     userAgents() {
       return this.agents.filter(agent => !agent.is_system)
@@ -51,11 +67,16 @@ export const useAgentsStore = defineStore('agents', {
           case 'created_asc':
             sorted.sort((a, b) => new Date(a.created || 0) - new Date(b.created || 0))
             break
+          // #1642: "Name (A-Z/Z-A)" sorts by what the user sees — the display
+          // name when set, else the slug (agentDisplayName). Sorting by the slug
+          // while the row renders the label would order the list by an invisible
+          // key. Actions still key on the slug elsewhere; only the sort comparator
+          // changes.
           case 'name_asc':
-            sorted.sort((a, b) => a.name.localeCompare(b.name))
+            sorted.sort((a, b) => agentDisplayName(a).localeCompare(agentDisplayName(b)))
             break
           case 'name_desc':
-            sorted.sort((a, b) => b.name.localeCompare(a.name))
+            sorted.sort((a, b) => agentDisplayName(b).localeCompare(agentDisplayName(a)))
             break
           case 'status':
             sorted.sort((a, b) => (b.status === 'running' ? 1 : 0) - (a.status === 'running' ? 1 : 0))
@@ -363,6 +384,22 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // ent#181: set or clear an agent's human-facing label. `label: null` clears
+    // it and the agent renders under its slug again. Goes through the shared
+    // axios client + auth interceptor (Invariant #7) — unlike the legacy slug
+    // rename in AgentDetail.vue, which hand-rolls fetch + Authorization.
+    async setAgentLabel(name, label) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/label`, { label }, {
+        headers: authStore.authHeader
+      })
+      // Keep the cached agent in step so every surface re-renders with the new
+      // label without a refetch.
+      const cached = this.agents.find(a => a.name === name)
+      if (cached) cached.display_label = response.data.label
+      return response.data
+    },
+
     async getAgentInfo(name) {
       const authStore = useAuthStore()
       const response = await axios.get(`/api/agents/${name}/info`, {
@@ -444,6 +481,18 @@ export const useAgentsStore = defineStore('agents', {
       const response = await axios.get(`/api/agents/${name}/access`, {
         headers: authStore.authHeader
       })
+      return response.data
+    },
+
+    // #1577: toggle the per-recipient allow_proactive flag on an agent_sharing
+    // row (#321/#376). Owner/admin only; returns the persisted state.
+    async setProactive(name, email, allow) {
+      const authStore = useAuthStore()
+      const response = await axios.put(
+        `/api/agents/${name}/shares/proactive`,
+        { email, allow_proactive: allow },
+        { headers: authStore.authHeader }
+      )
       return response.data
     },
 

@@ -71,6 +71,17 @@
                  is hidden entirely. The store's `featureFlagsLoaded`
                  guard means the link doesn't flicker on first paint
                  (loadFeatureFlags fires in onMounted below). -->
+            <!-- Shared sessions (ent#170) — visible only when the rooms
+                 backend is entitled (shared_sessions). Hidden entirely in
+                 OSS/unentitled builds, like every enterprise surface. -->
+            <router-link
+              v-if="enterpriseStore.isEntitled('shared_sessions')"
+              to="/sessions"
+              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
+              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path.startsWith('/sessions') }"
+            >
+              Sessions
+            </router-link>
             <router-link
               v-if="enterpriseStore.hasAnyEnterprise"
               to="/enterprise"

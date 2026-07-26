@@ -559,6 +559,10 @@ onBeforeUnmount(() => {
   --gv-badge-warn-tx: #a16207;
   --gv-badge-sys-bg: #f3e8ff;
   --gv-badge-sys-tx: #7e22ce;
+  /* ent#139 skill-runner class: teal, distinct from system purple */
+  --gv-badge-runner-bg: #ccfbf1;
+  --gv-badge-runner-tx: #0f766e;
+  --gv-ring-runner: #2dd4bf;
   --gv-sys-tile: rgba(250, 245, 255, 0.9);
   --gv-sys-border: #e9d5ff;
   --gv-sys-btn-bg: #faf5ff;
@@ -620,6 +624,9 @@ onBeforeUnmount(() => {
   --gv-badge-warn-tx: #fde047;
   --gv-badge-sys-bg: rgba(88, 28, 135, 0.5);
   --gv-badge-sys-tx: #d8b4fe;
+  --gv-badge-runner-bg: rgba(19, 78, 74, 0.55);
+  --gv-badge-runner-tx: #5eead4;
+  --gv-ring-runner: #0d9488;
   --gv-sys-tile: rgba(88, 28, 135, 0.3);
   --gv-sys-border: rgba(126, 34, 206, 0.5);
   --gv-sys-btn-bg: rgba(88, 28, 135, 0.3);

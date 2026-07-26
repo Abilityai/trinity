@@ -33,9 +33,8 @@ from models import (
     REPORT_PAYLOAD_MAX_BYTES,
     User,
 )
-from routers.executions import _narrow_to_agent
 from services import rate_limiter, report_service
-from services.agent_service.helpers import accessible_agent_names
+from services.agent_service.helpers import accessible_agent_names, narrow_to_agent
 
 router = APIRouter(prefix="/api", tags=["reports"])
 
@@ -133,7 +132,7 @@ async def get_fleet_report_stats(
     current_user: User = Depends(get_current_user),
 ):
     """Aggregate stat-card data for the fleet Reports view."""
-    agent_names = _narrow_to_agent(accessible_agent_names(current_user), agent)
+    agent_names = narrow_to_agent(accessible_agent_names(current_user), agent)
     effective_hours = hours if hours in _VALID_HOURS else 168
     stats = db.get_fleet_report_stats(
         agent_names, report_type=report_type, hours=effective_hours or None
@@ -152,7 +151,7 @@ async def list_fleet_reports(
     current_user: User = Depends(get_current_user),
 ):
     """List reports across all accessible agents (metadata only)."""
-    agent_names = _narrow_to_agent(accessible_agent_names(current_user), agent)
+    agent_names = narrow_to_agent(accessible_agent_names(current_user), agent)
     effective_hours = hours if hours in _VALID_HOURS else 168
     rows = db.get_fleet_reports(
         agent_names,

@@ -101,7 +101,16 @@ def _load_settings_module():
         SystemSettingUpdate=_SystemSettingUpdate,
     )
 
-    _stub("dependencies", get_current_user=MagicMock())
+    _stub(
+        "dependencies",
+        get_current_user=MagicMock(),
+        # #1310: routers now import the imperative auth helpers from dependencies.
+        assert_admin=MagicMock(),
+        assert_agent_access=MagicMock(),
+        assert_agent_owner=MagicMock(),
+        assert_owns_or_admin=MagicMock(),
+        assert_owns=MagicMock(),
+    )
 
     _stub(
         "services.platform_audit_service",
@@ -132,6 +141,10 @@ def _load_settings_module():
         MAX_PARALLEL_TASKS_CEILING_MIN=1,
         MAX_PARALLEL_TASKS_CEILING_MAX=32,
         get_max_parallel_tasks_ceiling=MagicMock(return_value=10),
+        PROACTIVE_RATE_LIMIT_DEFAULTS={},  # #1609
+        PROACTIVE_RATE_LIMIT_DESCRIPTIONS={},
+        PROACTIVE_RATE_LIMIT_MAX=1000000,
+        get_proactive_rate_limit=MagicMock(return_value=10),
     )
     # settings.py module-level imports VALID_CPU/VALID_MEMORY from the
     # container-spec module (#1197); stub it so the standalone load completes.

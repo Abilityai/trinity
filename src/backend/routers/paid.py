@@ -299,6 +299,19 @@ async def paid_chat(
             headers={"X-Idempotent-Replay": "true"},
         )
 
+    # EXEC-023 (#1672): reject the #1083 dispatch sentinels as a resume target on the
+    # paid path too — 'dispatched'/'dispatched_async' are never a resumable session, so
+    # `--resume dispatched_async` would just fail. Scoped slice only: unlike the
+    # authenticated /task gate, there is no Trinity `current_user` here (an anonymous
+    # x402 payer, session_id self-asserted), so full payer→session ownership can't be
+    # enforced without a payer-identity binding that doesn't exist yet — tracked as a
+    # follow-up, not silently ignored.
+    if request_body.session_id in ("dispatched", "dispatched_async"):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "This execution was never assigned a resumable session."},
+        )
+
     # Step 3: Execute task
     task_service = get_task_execution_service()
     try:

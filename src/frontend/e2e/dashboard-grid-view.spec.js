@@ -3,10 +3,11 @@ import { test, expect } from '@playwright/test'
 /**
  * Dashboard Grid view e2e (trinity-enterprise#47).
  *
- * The Grid is a third dashboard mode alongside Graph and Timeline: a
- * magnetic tile canvas on an unbounded pan/zoom lattice. These specs cover
- * the mode toggle + persistence, tile rendering, drag-to-cell with swap,
- * tidy/reset, and that the existing Graph/Timeline modes are untouched.
+ * The Grid is a dashboard mode alongside Timeline (the legacy Graph / Vue Flow
+ * canvas was decommissioned in #1689): a magnetic tile canvas on an unbounded
+ * pan/zoom lattice. These specs cover the mode toggle + persistence, tile
+ * rendering, drag-to-cell with swap, tidy/reset, and that the Timeline mode is
+ * untouched.
  *
  * Runs against a live stack — every install has at least `trinity-system`,
  * so no fixtures are needed. Layout state is reset per test via
@@ -108,17 +109,16 @@ test.describe('dashboard grid view (trinity-enterprise#47)', () => {
     }
   })
 
-  test('@smoke graph and timeline modes still work alongside grid', async ({ page }) => {
+  test('@smoke timeline mode still works alongside grid', async ({ page }) => {
     await gotoGrid(page)
 
-    // Graph: Vue Flow mounts, grid tears down.
-    await page.getByRole('button', { name: 'graph', exact: true }).click()
-    await expect(page.locator('.vue-flow')).toBeVisible({ timeout: 15000 })
+    // Timeline: replay timeline mounts, grid tears down.
+    // (the Graph / Vue Flow mode was decommissioned in #1689)
+    await page.getByRole('button', { name: 'timeline', exact: true }).click()
     await expect(page.locator('.fleet-canvas')).toHaveCount(0)
 
-    // Timeline: replay timeline mounts, graph tears down.
-    await page.getByRole('button', { name: 'timeline', exact: true }).click()
-    await expect(page.locator('.vue-flow')).toHaveCount(0)
-    await expect(page.locator('.fleet-canvas')).toHaveCount(0)
+    // Back to grid: the fleet canvas remounts.
+    await page.getByRole('button', { name: 'grid', exact: true }).click()
+    await expect(page.locator('.fleet-canvas')).toBeVisible({ timeout: 15000 })
   })
 })

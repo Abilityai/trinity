@@ -1,26 +1,95 @@
 name: frontend-e2e
 
-# Runs only when a PR carries the `ui` label. Adds a browser test layer for
-# UI changes; gated to avoid spending ~5 min of CI on every backend PR.
-# Trigger manually by adding the `ui` label to a PR.
+# Playwright @smoke layer for the frontend.
+#
+# TRIGGERS (issue #1526 — the suite used to run ONLY on `ui`-labeled PRs, so it
+# rotted silently and sat red on `dev` for weeks):
+#   1. Nightly schedule on `dev`     — the always-visible signal; a red night
+#      opens/updates a tracking issue (see the `report` job), à la #1185.
+#   2. Any PR that touches `src/frontend/**` — runs automatically (the `changes`
+#      job computes this), so frontend authors see their own breakage.
+#   3. The `ui` label — still works as a manual opt-in on NON-frontend PRs (and
+#      to force a run), preserved for the heavier @visual/@interactive tiers (#596).
+#   4. workflow_dispatch — manual/on-demand.
+#
+# DECISION (AC of #1526): this is **advisory**, not a required merge gate. The
+# recurring failure class is modal/overlay flake on a fresh zero-user-agent stack
+# (onboarding wizard, ensure-default MCP-key modal), so promoting it to a hard gate
+# like #715's unit gate needs a flake budget first (#596). Nightly-on-dev + auto-run
+# on frontend PRs gives the visible signal without blocking merges on a suite that
+# isn't flake-hardened yet. Revisit gating after #596 lands the baseline story.
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
+  schedule:
+    - cron: '0 7 * * *'   # 07:00 UTC — nightly on dev
+  workflow_dispatch:
+
+# No top-level permissions — each job declares its own narrow scope.
+permissions: {}
+
+concurrency:
+  # One run per PR (cancel superseded pushes); scheduled/dispatch runs keyed by ref
+  # so a nightly never cancels a PR run and vice versa.
+  group: frontend-e2e-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # changes — PR-only: does this PR touch the frontend? Dependency-free (gh diff),
+  # so a frontend PR runs e2e automatically without the `ui` label.
+  # ---------------------------------------------------------------------------
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - id: filter
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          files=$(gh pr diff ${{ github.event.pull_request.number }} \
+            --repo "${{ github.repository }}" --name-only)
+          if echo "$files" | grep -qE '^src/frontend/'; then
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "frontend=false" >> "$GITHUB_OUTPUT"
+          fi
+
   e2e:
-    if: contains(github.event.pull_request.labels.*.name, 'ui')
+    needs: changes
+    # Run when: nightly / manual dispatch, OR the PR touched the frontend, OR the
+    # PR carries the `ui` label (manual opt-in, e.g. a non-frontend PR). `always()`
+    # so a skipped `changes` job (schedule/dispatch) doesn't gate this out.
+    if: >-
+      always() &&
+      ( github.event_name == 'schedule'
+        || github.event_name == 'workflow_dispatch'
+        || needs.changes.outputs.frontend == 'true'
+        || contains(github.event.pull_request.labels.*.name, 'ui') )
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: src/frontend
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          # PR events check out the merge ref (default); scheduled/dispatch runs
+          # target `dev` explicitly (github.ref would otherwise be the default branch).
+          ref: ${{ github.event_name == 'pull_request' && github.ref || 'dev' }}
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '20'
           cache: 'npm'
@@ -73,6 +142,14 @@ jobs:
           echo "ADMIN_PASSWORD=$ADMIN_PASSWORD" >> .env
           echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" >> .env
           echo "SECRET_KEY=$(openssl rand -hex 32)" >> .env
+          # Keep the e2e baseline at zero user agents (learnings 2026-07-08):
+          # the sentinel disables the ent#124 starter-fleet seeder explicitly.
+          # NOTE it does NOT gate the Cornelius seeder (ent#107, no disable
+          # knob) — Cornelius stays un-seeded here only by timing: the lifespan
+          # gate reads setup_completed=false at boot and the docker-exec flip
+          # below never re-triggers it. If this workflow ever completes setup
+          # via the real endpoint, Cornelius will seed and break the baseline.
+          echo "TRINITY_DEFAULT_SYSTEM_MANIFEST=disabled" >> .env
           ./scripts/deploy/start.sh
 
       - name: Wait for backend health
@@ -86,9 +163,9 @@ jobs:
           echo "backend never became healthy"; exit 1
 
       # Issue #874 regression guards (`verify-non-root`,
-      # `verify-prod-frontend-uid`) moved to .github/workflows/container-security.yml
-      # so they run unconditionally on infrastructure PRs (this workflow
-      # is `ui`-label gated and would otherwise skip them on backend PRs).
+      # `verify-prod-frontend-uid`) live in .github/workflows/container-security.yml
+      # so they run unconditionally on infrastructure PRs (this workflow's e2e job
+      # is conditionally triggered and would otherwise skip them on backend PRs).
 
       - name: Skip first-time setup wizard
         working-directory: ${{ github.workspace }}
@@ -131,3 +208,73 @@ jobs:
             src/frontend/e2e/test-results/
             trinity-logs.txt
           retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # report — nightly-only durable signal (#1526 AC). On a red nightly, open or
+  # update a single tracking issue linking the failing run; on a green nightly,
+  # close it. PR runs already surface a failing check, so this is schedule-only.
+  # ---------------------------------------------------------------------------
+  report:
+    needs: e2e
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v9
+        env:
+          E2E_RESULT: ${{ needs.e2e.result }}
+        with:
+          script: |
+            const marker = '<!-- frontend-e2e-nightly-tracker -->';
+            const failed = process.env.E2E_RESULT === 'failure';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            // Find the single open tracking issue by marker (label-scoped).
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'frontend-e2e-nightly',
+              per_page: 100,
+            });
+            const tracker = open.find(i => (i.body || '').includes(marker));
+
+            if (failed) {
+              const body = `${marker}\n**The \`frontend-e2e\` nightly @smoke suite is red on \`dev\`.**\n\n` +
+                `Latest failing run: ${runUrl}\n\n` +
+                `This is the visible signal from #1526 — a spec is drifting against \`dev\`. Reproduce locally with ` +
+                `\`cd src/frontend && npm run test:e2e:smoke\` (see \`.github/workflows/frontend-e2e.yml\`). ` +
+                `If it's modal/overlay flake on the fresh stack, pre-seed dismissal state in \`e2e/auth.setup.js\` (#1508 pattern).`;
+              if (tracker) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: tracker.number,
+                  body: `🔴 Still red as of ${new Date().toISOString().slice(0, 10)} — ${runUrl}`,
+                });
+                core.info(`Updated tracking issue #${tracker.number}.`);
+              } else {
+                const created = await github.rest.issues.create({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  title: 'frontend-e2e nightly @smoke suite is red on dev',
+                  body,
+                  labels: ['frontend-e2e-nightly', 'type-bug', 'theme-devex', 'priority-p2'],
+                });
+                core.info(`Opened tracking issue #${created.data.number}.`);
+              }
+            } else if (tracker) {
+              // Green nightly — close the tracker so it doesn't rot.
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: tracker.number,
+                body: `🟢 Nightly @smoke suite green on \`dev\` as of ${new Date().toISOString().slice(0, 10)} — closing. ${runUrl}`,
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: tracker.number, state: 'closed',
+              });
+              core.info(`Closed tracking issue #${tracker.number} (nightly green).`);
+            } else {
+              core.info('Nightly green and no open tracker — nothing to do.');
+            }

@@ -11,10 +11,13 @@ from routers.settings. Now all settings retrieval logic lives here, and
 routers.settings re-exports these functions for backward compatibility.
 """
 import json
+import logging
 import os
 import time
 from typing import List, Optional
 from database import db
+
+logger = logging.getLogger(__name__)
 
 # Platform default model (#831)
 PLATFORM_DEFAULT_MODEL_KEY = "platform_default_model"
@@ -30,6 +33,8 @@ _PLATFORM_MODEL_CACHE_TTL = 60.0
 # this set after it was saved is treated as unset (→ platform default) by
 # `db.get_public_channel_model`, matching the #1080 graceful-degradation posture.
 PUBLIC_CHANNEL_MODELS = frozenset({
+    "claude-fable-5",
+    "claude-sonnet-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",
@@ -47,6 +52,42 @@ def is_valid_public_channel_model(model: str) -> bool:
 # Ops Settings Configuration - moved from routers/settings.py
 # ============================================================================
 
+# Re-exported from config.py (a leaf module) — database.py seeds these during
+# init_database(), which runs at import, and this module imports `db` from
+# database, so defining them here would be a circular import (#1638). Importers
+# keep using `from services.settings_service import ...`.
+from config import (  # noqa: E402
+    COMMUNITY_FRESH_INSTALL_SEED,  # noqa: F401  (re-export)
+    COMMUNITY_RETENTION_FLOOR_DAYS,  # noqa: F401  (re-export)
+)
+
+# The operator-tunable retention OPS-settings keys reported by
+# `GET /api/settings/retention` (audit log excluded — separate env-driven
+# 365-day floor). Membership here means "is a retention window"; it does NOT
+# mean "gets the community floor" — that set is COMMUNITY_FRESH_INSTALL_SEED.
+RETENTION_OPS_KEYS = (
+    "execution_log_retention_days",
+    "execution_row_retention_days",
+    "health_check_retention_days",
+    "agent_soft_delete_retention_days",
+    "schedule_soft_delete_retention_days",
+    # #1644: these two ARE retention windows and were missing here, so three
+    # readers were silently blind to them:
+    #   - `POST /api/settings/ops/reset` skips only RETENTION_OPS_KEYS, so it
+    #     DELETED these two rows while reporting "retention windows unchanged";
+    #   - `GET /api/settings/retention` never reported them;
+    #   - `log_effective_retention_windows()` never logged them at boot — the
+    #     exact observability gap that made #1638 invisible.
+    # Membership means "is a retention window"; it does NOT mean "gets the
+    # community floor" (that set is COMMUNITY_FRESH_INSTALL_SEED, unchanged).
+    "agent_reports_retention_days",
+    "operator_queue_retention_days",
+    # #1296: terminal agent_reminders rows (fired/cancelled/failed). A retention
+    # window (surfaced/logged/reset-protected), NOT a community-floor key.
+    "agent_reminders_retention_days",
+)
+
+
 # Default values for ops settings (as specified in requirements)
 OPS_SETTINGS_DEFAULTS = {
     "ops_context_warning_threshold": "75",  # Context % to trigger warning
@@ -58,27 +99,48 @@ OPS_SETTINGS_DEFAULTS = {
     "ops_log_retention_days": "7",  # Days to keep container logs
     "ops_health_check_interval": "60",  # Seconds between health checks
     "ssh_access_enabled": "false",  # Enable SSH access via MCP tool
+    # RETENTION DEFAULTS — READ THIS BEFORE CHANGING A NUMBER BELOW (#1638).
+    #
+    # These are the fallback used at PRUNE time for an install with no
+    # `system_settings` row, which is the default state for every install that
+    # never touched retention. Lowering one of them silently hard-DELETEs the
+    # existing data of every such install, ~seconds after its next boot, with no
+    # error and a green /health. That is #1638; it cost ~3 months of execution
+    # history on a real instance.
+    #
+    # So: these stay at the widest (safest) historical value. The #1039
+    # community floor is applied to NEW installs by seeding rows
+    # (COMMUNITY_FRESH_INSTALL_SEED), which only ever touches an empty DB.
+    # If you want to shrink a window for existing installs, that is a migration
+    # + a docs/migrations/ entry + an operator decision — not an edit here.
+    #
     # Issue #772: retention policy for execution_log + agent_health_checks.
     # "0" disables that prune step.
-    "execution_log_retention_days": "30",  # Null `execution_log` TEXT after N days
-    "execution_row_retention_days": "90",  # DELETE schedule_executions rows after N days
-    "health_check_retention_days": "7",   # DELETE agent_health_checks rows after N days
+    "execution_log_retention_days": "30",  # Null `execution_log` TEXT after N days (#772)
+    "execution_row_retention_days": "90",  # DELETE schedule_executions rows after N days (#772)
+    "health_check_retention_days": "7",    # DELETE agent_health_checks rows after N days (#772)
     # Issue #834 Phase 1a: soft-delete retention for agents. After
     # DELETE /api/agents/{name}, the agent_ownership row is marked
     # `deleted_at = NOW` and child rows are preserved. The cleanup
     # sweep hard-deletes rows older than this many days (cascading
-    # child tables via #816's purge primitive). "0" disables the
-    # sweep entirely — soft-deleted rows then persist until manually
-    # purged.
+    # child tables via #816's purge primitive) AND removes the agent's
+    # data volumes (#1581). "0" disables the sweep entirely.
+    # #1638: EXEMPT from the community floor in every edition — this is a
+    # recovery window whose expiry destroys agent workspaces, not a log window.
     "agent_soft_delete_retention_days": "180",
-    # Issue #834 Phase 1b: per-schedule soft-delete. Schedules are
-    # higher-churn than agents (users tweak/replace cron expressions
-    # often), so default is shorter than the agent window. "0"
-    # disables the sweep.
+    # Issue #834 Phase 1b: per-schedule soft-delete. "0" disables the sweep.
     "schedule_soft_delete_retention_days": "30",
     # Issue #918: retention for agent_reports. Rows older than this many days
     # are deleted by the cleanup sweep. "0" disables the sweep.
     "agent_reports_retention_days": "90",
+    # Issue #1142: retention for terminal operator_queue rows
+    # (acknowledged/cancelled/expired). "0" disables the sweep. `responded` rows
+    # get a more generous fixed floor (never deleted younger than #772's guard).
+    "operator_queue_retention_days": "90",
+    # Issue #1296: retention for TERMINAL agent_reminders (fired/cancelled/
+    # failed). Rows older than this many days are deleted; pending/firing never
+    # deleted. "0" disables the sweep. Wide/safe default per the #1638 floor rule.
+    "agent_reminders_retention_days": "90",
 }
 
 # Descriptions for each ops setting
@@ -98,6 +160,8 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "agent_soft_delete_retention_days": "Days to retain soft-deleted agents before hard-purge (default: 180, 0 = disabled, #834)",
     "schedule_soft_delete_retention_days": "Days to retain soft-deleted schedules before hard-purge (default: 30, 0 = disabled, #834)",
     "agent_reports_retention_days": "Days to retain agent_reports rows (default: 90, 0 = disabled, #918)",
+    "operator_queue_retention_days": "Days to retain terminal operator_queue rows (acknowledged/cancelled/expired; default: 90, 0 = disabled, #1142)",
+    "agent_reminders_retention_days": "Days to retain terminal agent_reminders rows (fired/cancelled/failed; default: 90, 0 = disabled, #1296)",
 }
 
 
@@ -136,6 +200,64 @@ class SettingsService:
         if key:
             return key
         return os.getenv('GOOGLE_API_KEY', '')
+
+    # =========================================================================
+    # ElevenLabs / outbound-voice (TTS) settings (trinity-enterprise#117)
+    # =========================================================================
+    #
+    # The key is stored AES-256-GCM encrypted (Invariant #12) under
+    # ``elevenlabs_api_key_encrypted`` — unlike the plaintext anthropic/github/google
+    # keys above — because it is a delivery secret with no env-only precedent to honor.
+    # Resolution precedence: stored (encrypted) setting → ``ELEVENLABS_API_KEY`` env →
+    # unavailable. Uncached (one SQLite read per call) for --workers 2 consistency, and
+    # fail-open (any decrypt/read error falls back to env) so a bad row never 500s the
+    # voice path or the feature-flags endpoint.
+
+    _ELEVENLABS_KEY_SETTING = 'elevenlabs_api_key_encrypted'
+    _DEFAULT_VOICE_SETTING = 'tts_default_voice_id'
+
+    def get_elevenlabs_api_key(self) -> str:
+        """Resolve the ElevenLabs API key: decrypted stored setting → env → ''."""
+        envelope = self.get_setting(self._ELEVENLABS_KEY_SETTING)
+        if envelope:
+            try:
+                from services.credential_encryption import CredentialEncryptionService
+                decrypted = CredentialEncryptionService().decrypt(envelope)
+                key = (decrypted.get('elevenlabs_api_key') or '').strip()
+                if key:
+                    return key
+            except Exception as e:
+                logger.error(f"Failed to decrypt ElevenLabs API key setting: {e}")
+        return os.getenv('ELEVENLABS_API_KEY', '')
+
+    def elevenlabs_key_source(self) -> str:
+        """Report where the key resolves from, for the admin panel: override|env|none."""
+        if self.get_setting(self._ELEVENLABS_KEY_SETTING):
+            return 'override'
+        if os.getenv('ELEVENLABS_API_KEY', '').strip():
+            return 'env'
+        return 'none'
+
+    def set_elevenlabs_api_key(self, key: str) -> None:
+        """Encrypt + persist the ElevenLabs API key (AES-256-GCM envelope)."""
+        from services.credential_encryption import CredentialEncryptionService
+        envelope = CredentialEncryptionService().encrypt({'elevenlabs_api_key': key.strip()})
+        db.set_setting(self._ELEVENLABS_KEY_SETTING, envelope)
+
+    def clear_elevenlabs_api_key(self) -> bool:
+        """Remove the stored key (reverts to env/unavailable)."""
+        return db.delete_setting(self._ELEVENLABS_KEY_SETTING)
+
+    def get_default_voice_id(self) -> Optional[str]:
+        """Platform default ElevenLabs voice id (plaintext setting; NULL when unset)."""
+        value = self.get_setting(self._DEFAULT_VOICE_SETTING)
+        return (value or '').strip() or None
+
+    def set_default_voice_id(self, voice_id: str) -> None:
+        db.set_setting(self._DEFAULT_VOICE_SETTING, voice_id.strip())
+
+    def clear_default_voice_id(self) -> bool:
+        return db.delete_setting(self._DEFAULT_VOICE_SETTING)
 
     # =========================================================================
     # Slack Integration Settings (SLACK-001)
@@ -371,6 +493,60 @@ def get_github_pat() -> str:
     return settings_service.get_github_pat()
 
 
+def get_github_pat_for_agent(agent_name: str) -> str:
+    """Resolve a GitHub PAT for an agent: per-agent PAT → global.
+
+    This is the **2-tier** ladder used by the recreate/restart env-rebuild path
+    (services/agent_service/lifecycle.py, helpers.check_github_pat_env_matches).
+    It deliberately does NOT consult the per-user tier (ent#162): re-deriving a
+    live per-user PAT here would make ``check_github_pat_env_matches`` reactive,
+    so adding/rotating a personal PAT in Settings would force-recreate the
+    owner's running agents and kill in-flight work. The per-user tier is a
+    create-time input only — see ``resolve_github_pat`` below.
+
+    Relocated from ``routers/git.py`` so services stop importing a router
+    (Invariant #1); ``routers/git.py`` re-exports it for backward compatibility.
+    """
+    agent_pat = db.get_agent_github_pat(agent_name)
+    if agent_pat:
+        return agent_pat
+    return get_github_pat()
+
+
+def resolve_github_pat(agent_name: Optional[str] = None,
+                       owner_id: Optional[int] = None) -> tuple:
+    """Resolve a GitHub PAT with tier provenance, for the agent-CREATE path (ent#162).
+
+    Returns ``(pat, tier)`` where ``tier`` is one of:
+      - ``"per_agent"`` — the agent already has its own PAT (explicit override)
+      - ``"per_user"``  — the owner's personal PAT, read **live** by ``owner_id``
+      - ``"global"``    — the admin-set / env global PAT
+      - ``"none"``      — nothing configured (``pat`` is ``""``)
+
+    The tier is what the create path keys its persist decision on: persist the
+    resolved value as the agent's #347 per-agent PAT for ``per_agent``/``per_user``,
+    but **NEVER** for ``global``. A global-fallback agent must keep
+    ``github_pat_encrypted`` NULL so ``github_pat_propagation_service`` continues
+    to reach it on admin global-PAT rotation (ent#162 Decision 2).
+
+    ``owner_id`` is the agent owner's user id — resolution keys on ownership only,
+    never on a calling/sharing user, so a sharee can never inject their PAT as the
+    agent's git identity.
+    """
+    if agent_name:
+        agent_pat = db.get_agent_github_pat(agent_name)
+        if agent_pat:
+            return agent_pat, "per_agent"
+    if owner_id is not None:
+        user_pat = db.get_user_github_pat(owner_id)
+        if user_pat:
+            return user_pat, "per_user"
+    global_pat = get_github_pat()
+    if global_pat:
+        return global_pat, "global"
+    return "", "none"
+
+
 def get_google_api_key() -> str:
     """Get Google API key from settings, fallback to env var."""
     return settings_service.get_google_api_key()
@@ -459,6 +635,45 @@ AGENT_QUOTA_DESCRIPTIONS = {
     "max_agents_operator": "Maximum agents an operator can own (0 = unlimited, default: 3)",
     "max_agents_user": "Maximum agents a regular user can own (0 = unlimited, default: 1)",
 }
+
+# trinity-enterprise#69 — ephemeral "ghost" agent limits. Separate from the
+# durable per-role quota (burst parallelism is the use case; the durable quota
+# would starve it). NO admin exemption — the spawner is usually an agent-scoped
+# key that resolves to its owner (often an admin), and this quota exists to
+# bound runaway spawning, not to police humans.
+EPHEMERAL_AGENT_DEFAULTS = {
+    "max_ephemeral_agents_per_owner": "5",
+    "ephemeral_ttl_ceiling_seconds": "86400",  # 24h
+}
+
+
+def get_ephemeral_agent_quota() -> int:
+    """Max live ephemeral agents per owner (0 = unlimited, default 5)."""
+    value = settings_service.get_setting("max_ephemeral_agents_per_owner")
+    if value is not None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            pass
+    return int(EPHEMERAL_AGENT_DEFAULTS["max_ephemeral_agents_per_owner"])
+
+
+def get_ephemeral_ttl_ceiling_seconds() -> int:
+    """Hard TTL ceiling for ephemeral agents (default 24h).
+
+    Every ghost gets ``ephemeral_expires_at`` stamped at creation — when the
+    caller gives only ``max_executions``, the TTL defaults to this ceiling so
+    no ghost is immortal. A requested TTL above the ceiling is a 400.
+    """
+    value = settings_service.get_setting("ephemeral_ttl_ceiling_seconds")
+    if value is not None:
+        try:
+            ceiling = int(value)
+            if ceiling > 0:
+                return ceiling
+        except (TypeError, ValueError):
+            pass
+    return int(EPHEMERAL_AGENT_DEFAULTS["ephemeral_ttl_ceiling_seconds"])
 
 
 def get_agent_quota_for_role(role: str) -> int:
@@ -603,6 +818,62 @@ def get_max_parallel_tasks_ceiling() -> int:
     if parsed > MAX_PARALLEL_TASKS_CEILING_MAX:
         return MAX_PARALLEL_TASKS_CEILING_MAX
     return parsed
+
+
+# ============================================================================
+# Proactive channel-message rate limits (#1609)
+# ============================================================================
+#
+# Admin-tunable anti-spam caps on agent-INITIATED ("proactive") sends —
+# introduced hardcoded by #349/#350/#321. Inbound replies (DM/@mention/thread
+# via the channel adapters) are NEVER gated by these. All share a fixed 1-hour
+# window (as shipped). ``0`` = unlimited (disabled), matching the agent-quota
+# convention; the PUT warns when a cap is disabled. Runtime-resolved (no cache,
+# ``--workers 2``-consistent, no migration — same rationale as #506).
+
+PROACTIVE_RATE_LIMIT_WINDOW_SECONDS = 3600  # 1 hour, fixed (matches #349/#350/#321)
+# key → shipped default (the pre-#1609 hardcoded value). Defaults reproduce
+# current behavior exactly.
+PROACTIVE_RATE_LIMIT_DEFAULTS = {
+    "slack_proactive_per_channel": 10,
+    "slack_proactive_per_agent": 100,
+    "telegram_proactive_per_group": 10,
+    "telegram_proactive_per_agent": 100,
+    "proactive_dm_per_recipient": 10,
+}
+PROACTIVE_RATE_LIMIT_DESCRIPTIONS = {
+    "slack_proactive_per_channel": "Max proactive Slack messages per hour to a single channel (0 = unlimited)",
+    "slack_proactive_per_agent": "Max proactive Slack messages per hour across all channels for one agent (0 = unlimited)",
+    "telegram_proactive_per_group": "Max proactive Telegram messages per hour to a single group (0 = unlimited)",
+    "telegram_proactive_per_agent": "Max proactive Telegram messages per hour across all groups for one agent (0 = unlimited)",
+    "proactive_dm_per_recipient": "Max proactive direct messages per hour to a single recipient (0 = unlimited)",
+}
+PROACTIVE_RATE_LIMIT_MAX = 1_000_000  # sanity upper bound
+
+
+def get_proactive_rate_limit(key: str) -> int:
+    """Fail-open read-through for a #1609 proactive cap (per hour).
+
+    Returns the configured integer (``0`` = unlimited → callers skip the limiter),
+    the shipped default on an absent/garbage value, clamped into ``[0, MAX]`` so
+    a stray store value can neither fail-closed the channel nor overflow. No
+    per-process cache (``--workers 2`` consistency), fail-open on a settings-read
+    failure so a proactive send is never blocked by a DB hiccup.
+    """
+    default = PROACTIVE_RATE_LIMIT_DEFAULTS.get(key, 0)
+    try:
+        raw = settings_service.get_setting(key)
+    except Exception:
+        return default
+    if raw is None:
+        return default
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return default
+    if parsed < 0:
+        return default
+    return min(parsed, PROACTIVE_RATE_LIMIT_MAX)
 
 
 def clamp_to_ceiling(n: int) -> int:

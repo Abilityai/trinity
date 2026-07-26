@@ -38,8 +38,15 @@ from services.agent_call_limiter import (
     acquire_agent_call_slot,
 )
 from services.agent_client import CircuitState
-from services.capacity_manager import CapacityFull, CircuitOpen, get_capacity_manager
+from services.capacity_manager import (
+    CapacityFull,
+    CircuitOpen,
+    EphemeralBudgetExhausted,
+    get_capacity_manager,
+)
 from services.dispatch_breaker import DispatchBreaker
+from services import event_dispatch_service
+from services import channel_completion_report
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from services.settings_service import settings_service
 from utils.credential_sanitizer import sanitize_dict, sanitize_execution_log, sanitize_response, sanitize_text
@@ -92,6 +99,7 @@ class TaskExecutionErrorCode(str, Enum):
     RECONCILED = "reconciled"       # Terminal write lost the CAS; row reflects another writer's terminal (#671/H4)
     LEASE_EXPIRED = "lease_expired" # Fire-and-forget lease expired — no callback before slot TTL (#1083)
     SKILL_NOT_FOUND = "skill_not_found"  # Slash-command message didn't resolve to an installed skill (#1410)
+    EPHEMERAL_EXHAUSTED = "ephemeral_exhausted"  # Ghost agent budget spent — expired TTL or exec count (trinity-enterprise#69)
 
 
 @dataclass
@@ -248,7 +256,7 @@ def _is_reader_race_signature(detail) -> bool:
 # interactive-ish trigger (a user's /task, mcp, or public turn) still classifies
 # as FAILED but the caller already sees the "Unknown command" reply, so no alert.
 _AUTONOMOUS_TRIGGERS = frozenset(
-    {"schedule", "webhook", "loop", "event", "fan_out", "agent"}
+    {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder"}
 )
 
 # The agent runtime (Claude Code) answers a slash-command that doesn't resolve
@@ -737,6 +745,42 @@ async def _record_dispatch_terminal(
         _spawn_bg(_audit_circuit_transition(agent_name, "closed"))
 
 
+async def _maybe_discard_exhausted_ephemeral(agent_name: str) -> None:
+    """trinity-enterprise#69: budget hook — runs as a BACKGROUND task after a
+    CAS-won terminal (spawned via ``_spawn_bg`` so the finalize path pays
+    nothing and an exception here can never leak a slot lease).
+
+    Counts ALL budget-consuming terminals (success/failed/cancelled) and
+    triggers the hard discard once the ghost's ``ephemeral_max_executions`` is
+    reached. ``/chat`` finalizes its terminals outside ``apply_result`` — that
+    surface's exhaustion is admission-gated immediately (CapacityManager) and
+    discard lags to the GC sweep (≤5 min), by design. Fail-open everywhere.
+    """
+    try:
+        info = db.get_agent_ephemeral_info(agent_name)
+        if not isinstance(info, dict) or not info.get("is_ephemeral"):
+            return
+        max_exec = info.get("ephemeral_max_executions")
+        if not max_exec:
+            return
+        usage = db.count_ephemeral_budget_usage(agent_name)
+        if usage["terminal"] < max_exec:
+            return
+        # Lazy import: services.agent_service.ephemeral imports capacity/db
+        # machinery — a module-level import here would be circular.
+        from services.agent_service.ephemeral import discard_ephemeral_agent
+
+        logger.info(
+            f"[TaskExecService] Ephemeral budget reached for {agent_name} "
+            f"({usage['terminal']}/{max_exec}) — discarding"
+        )
+        await discard_ephemeral_agent(agent_name, reason="budget_exhausted")
+    except Exception as e:  # fail-open: budget enforcement backstopped by GC
+        logger.warning(
+            f"[TaskExecService] ephemeral budget hook failed for {agent_name}: {e}"
+        )
+
+
 async def _write_terminal_and_gate(
     execution_id: Optional[str],
     activity_id: Optional[str],
@@ -748,6 +792,7 @@ async def _write_terminal_and_gate(
     context_used: Optional[int] = None,
     context_max: Optional[int] = None,
     retry_count: Optional[int] = None,
+    agent_name: Optional[str] = None,
 ) -> bool:
     """Write a non-success terminal through the CAS and gate the activity
     completion on winning it (#671/H4).
@@ -783,7 +828,55 @@ async def _write_terminal_and_gate(
             status=activity_status,
             error=error,
         )
+    # #1578: the timeout / budget-exhausted / unexpected-exception (+ inline
+    # circuit-open/capacity/ephemeral) failure terminals that never reach
+    # apply_result also emit agent.task.failed — the exact "long task wedged,
+    # orchestrator never woken" case the feature exists for. CAS-won only;
+    # fire-and-forget + fail-open. `agent_name` threaded from the execute_task
+    # callers (all have it in scope).
+    if won and agent_name:
+        event_dispatch_service.spawn_task_terminal_event(
+            agent_name,
+            execution_id,
+            terminal_status=status,
+            summary_or_error=error,
+            cost=cost,
+        )
+        # ent#224: tell the originating Slack channel/thread the job ended.
+        # Failure terminals report too — a silent failure is the bug this closes.
+        # No-ops unless the execution INHERITED channel context (never for an
+        # inline channel turn, which the adapter already answered).
+        channel_completion_report.spawn_completion_report(
+            execution_id=execution_id,
+            agent_name=agent_name,
+            status=str(getattr(status, "value", status)),
+            summary_or_error=error,
+        )
     return won
+
+
+# ---------------------------------------------------------------------------
+# Circuit-breaker fast-fail messaging (#1557)
+# ---------------------------------------------------------------------------
+
+def _circuit_breaker_error(transport_open: bool, dispatch_open: bool) -> str:
+    """Honest fast-fail reason for an open circuit, by which breaker fired.
+
+    The two breakers mean different things and an operator acts differently on
+    each: the *transport* breaker (``CircuitState``, #631) opens on TCP
+    connect failures — the agent is unreachable; the *dispatch* breaker
+    (``DispatchBreaker``, #526) opens on repeated AUTH/503 — the agent answers
+    but its subscription/credentials are failing. The old blanket
+    "agent is unhealthy" text lied for the (common) transport case and, before
+    #1557, also fired for a merely *paused* agent. Every branch keeps the
+    substring ``circuit breaker open`` (asserted by
+    ``tests/integration/test_1560_breaker_lifecycle.py``).
+    """
+    if transport_open and dispatch_open:
+        return "Agent unreachable and auth-failing — transport and dispatch circuit breaker open"
+    if dispatch_open:
+        return "Agent auth failing — dispatch circuit breaker open (repeated 503/AUTH from the agent)"
+    return "Agent unreachable — transport circuit breaker open (no TCP response from the agent)"
 
 
 # ---------------------------------------------------------------------------
@@ -826,6 +919,9 @@ class TaskExecutionService:
         attempt: Optional[int] = None,
         images: Optional[list] = None,
         dispatch_gate_checked: bool = False,
+        source_channel: Optional[str] = None,
+        source_channel_chat_id: Optional[str] = None,
+        source_channel_thread: Optional[str] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -901,6 +997,9 @@ class TaskExecutionService:
                 fan_out_id=fan_out_id,
                 loop_id=loop_id,
                 subscription_id=_exec_sub_id,
+                source_channel=source_channel,
+                source_channel_chat_id=source_channel_chat_id,
+                source_channel_thread=source_channel_thread,
             )
             execution_id = execution.id if execution else None
 
@@ -971,6 +1070,29 @@ class TaskExecutionService:
                         error=error_msg,
                         error_code=TaskExecutionErrorCode.CIRCUIT_OPEN,
                     )
+                except EphemeralBudgetExhausted as e:
+                    # trinity-enterprise#69: ghost budget spent — fast-fail
+                    # before any agent call; nothing was admitted or enqueued.
+                    # Discard itself is driven by the apply_result hook / GC
+                    # sweep, never from the admission path.
+                    error_msg = f"ephemeral_exhausted: ghost agent budget spent ({e.reason})"
+                    logger.info(
+                        f"[TaskExecService] Ephemeral budget gate denied {agent_name} "
+                        f"({e.reason}); fast-failing execution {execution_id}"
+                    )
+                    if execution_id:
+                        db.update_execution_status(
+                            execution_id=execution_id,
+                            status=TaskExecutionStatus.FAILED,
+                            error=error_msg,
+                        )
+                    return TaskExecutionResult(
+                        execution_id=execution_id or "",
+                        status=TaskExecutionStatus.FAILED,
+                        response="",
+                        error=error_msg,
+                        error_code=TaskExecutionErrorCode.EPHEMERAL_EXHAUSTED,
+                    )
 
             # ---- 3. Track activity start -------------------------------------
             activity_details = {
@@ -1013,7 +1135,7 @@ class TaskExecutionService:
                     DispatchBreaker(agent_name).to_dict().get("state") == "open"
                 )
             if transport_open or dispatch_open:
-                error_msg = "Agent circuit breaker open — agent is unhealthy"
+                error_msg = _circuit_breaker_error(transport_open, dispatch_open)
                 logger.warning(f"[TaskExecService] CB open, fast-failing execution {execution_id} for {agent_name}")
                 # #671/H4: route the terminal write through the CAS — the
                 # activity is completed only if this writer won (a lost CAS to a
@@ -1024,6 +1146,7 @@ class TaskExecutionService:
                     status=TaskExecutionStatus.FAILED,
                     activity_status=ActivityState.FAILED,
                     error=error_msg,
+                    agent_name=agent_name,  # #1578: emit agent.task.failed on won
                 )
                 return TaskExecutionResult(
                     execution_id=execution_id or "",
@@ -1459,6 +1582,7 @@ class TaskExecutionService:
                 status=TaskExecutionStatus.FAILED,
                 activity_status=ActivityState.FAILED,
                 error=error_msg,
+                agent_name=agent_name,  # #1578: emit agent.task.failed on won
             )
             return TaskExecutionResult(
                 execution_id=execution_id or "",
@@ -1489,6 +1613,7 @@ class TaskExecutionService:
                 status=TaskExecutionStatus.FAILED,
                 activity_status=ActivityState.FAILED,
                 error=error_msg,
+                agent_name=agent_name,  # #1578: emit agent.task.failed on won
             )
             return TaskExecutionResult(
                 execution_id=execution_id or "",
@@ -1580,6 +1705,7 @@ class TaskExecutionService:
                 status=TaskExecutionStatus.FAILED,
                 activity_status=ActivityState.FAILED,
                 error=error_msg,
+                agent_name=agent_name,  # #1578: emit agent.task.failed on won
             )
             return TaskExecutionResult(
                 execution_id=execution_id or "",
@@ -1757,6 +1883,29 @@ class TaskExecutionService:
             await _record_dispatch_terminal(agent_name, breaker_enabled, None)
             if release_slot and eid:
                 await capacity.release(agent_name, eid)
+            # trinity-enterprise#69: post-CAS-win budget check, backgrounded
+            # AFTER slot release so a discard can never wedge the finalizer.
+            _spawn_bg(_maybe_discard_exhausted_ephemeral(agent_name))
+            # #1578: fire the deterministic completion event on the CAS-won branch
+            # only (a lost CAS reconciles above and never reaches here — no
+            # double-wake). Fire-and-forget + fail-open — never affects the
+            # billed terminal.
+            event_dispatch_service.spawn_task_terminal_event(
+                agent_name,
+                eid,
+                terminal_status=TaskExecutionStatus.SUCCESS,
+                summary_or_error=sanitized_resp,
+                duration_ms=envelope.execution_time_ms,
+                cost=total_cost,
+            )
+            # ent#224: report the finished job back to its originating Slack
+            # channel/thread (no-op unless the context was inherited).
+            channel_completion_report.spawn_completion_report(
+                execution_id=eid,
+                agent_name=agent_name,
+                status="success",
+                summary_or_error=sanitized_resp,
+            )
 
             return TaskExecutionResult(
                 execution_id=eid or "",
@@ -1843,6 +1992,21 @@ class TaskExecutionService:
                 logger.debug("[#1085] governor record skipped", exc_info=True)
         if won and release_slot and eid:
             await capacity.release(agent_name, eid)
+        if won:
+            # trinity-enterprise#69: failed/cancelled terminals consume budget
+            # too — same backgrounded post-release hook as the success branch.
+            _spawn_bg(_maybe_discard_exhausted_ephemeral(agent_name))
+            # #1578: fire agent.task.failed on the CAS-won branch only. The
+            # persisted status (FAILED or CANCELLED, #679) is carried in the
+            # event payload; a lost CAS skips all side effects (no emit).
+            event_dispatch_service.spawn_task_terminal_event(
+                agent_name,
+                eid,
+                terminal_status=envelope.status,
+                summary_or_error=envelope.error,
+                duration_ms=envelope.execution_time_ms,
+                cost=salvage_cost,
+            )
 
         return TaskExecutionResult(
             execution_id=eid or "",

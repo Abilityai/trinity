@@ -63,8 +63,36 @@
         </div>
       </div>
 
+      <!-- Proactive consent (ent#223) — in an open Slack workspace nobody
+           authenticates, so consent is per-CHANNEL, not per-recipient. -->
+      <div class="mt-4 flex items-start justify-between gap-3 pt-3 border-t border-gray-200 dark:border-gray-700">
+        <div class="min-w-0">
+          <div class="text-sm font-medium text-gray-900 dark:text-gray-100">
+            Allow proactive messages
+          </div>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+            Lets this agent post to #{{ channel.channel_name }} without being asked first
+            (task updates, alerts). Replies to a user always work regardless.
+          </p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          :aria-checked="String(!!channel.allow_proactive)"
+          @click="toggleProactive"
+          :disabled="togglingProactive"
+          class="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          :class="channel.allow_proactive ? 'bg-action-primary-600' : 'bg-gray-300 dark:bg-gray-600'"
+        >
+          <span
+            class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform"
+            :class="channel.allow_proactive ? 'translate-x-6' : 'translate-x-1'"
+          />
+        </button>
+      </div>
+
       <!-- Voice replies (epic #24 / #26) — shared agent-level TTS control -->
-      <VoiceRepliesControl :agent-name="agentName" class="mt-4" />
+      <VoiceChannelToggle :agent-name="agentName" channel="slack" class="mt-4" />
     </div>
 
     <!-- Unbound State -->
@@ -95,7 +123,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import axios from 'axios'
-import VoiceRepliesControl from './VoiceRepliesControl.vue'
+import VoiceChannelToggle from './VoiceChannelToggle.vue'
 
 const props = defineProps({
   agentName: {
@@ -110,6 +138,7 @@ const unbinding = ref(false)
 const makingDefault = ref(false)
 const accessDenied = ref(false)
 const channel = ref({ bound: false })
+const togglingProactive = ref(false)
 const message = ref(null)
 
 const dmDefaultTooltip =
@@ -185,6 +214,34 @@ async function unbindChannel() {
     message.value = { type: 'error', text: detail }
   } finally {
     unbinding.value = false
+  }
+}
+
+async function toggleProactive() {
+  // ent#223: per-channel proactive consent. Optimistic-free — we re-read the
+  // binding so the switch always reflects what the backend actually stored.
+  togglingProactive.value = true
+  message.value = null
+  const next = !channel.value.allow_proactive
+  try {
+    await axios.put(
+      `/api/agents/${props.agentName}/slack/channels/${channel.value.channel_id}/proactive`,
+      { allow_proactive: next }
+    )
+    message.value = {
+      type: 'success',
+      text: next ? 'Proactive messages enabled for this channel' : 'Proactive messages disabled',
+    }
+    await loadChannel()
+    setTimeout(() => { message.value = null }, 3000)
+  } catch (e) {
+    const detail = e.response?.data?.detail
+    message.value = {
+      type: 'error',
+      text: (detail && (detail.message || detail)) || 'Failed to update proactive setting',
+    }
+  } finally {
+    togglingProactive.value = false
   }
 }
 

@@ -36,7 +36,10 @@
 > breaker (#631) always, and the dispatch breaker only on the
 > `slot_already_held and not dispatch_gate_checked` drain path via a non-probe
 > state read (`DispatchBreaker(...).to_dict()["state"] == "open"`), so it never
-> double-consumes a half-open probe an upstream `acquire()` gate already admitted;
+> double-consumes a half-open probe an upstream `acquire()` gate already admitted
+> — its fast-fail reason is built by `_circuit_breaker_error(transport_open,
+> dispatch_open)` (#1557), which names the breaker that fired (transport →
+> *unreachable*, dispatch → *auth-dead*) instead of a blanket "agent is unhealthy";
 > (3) outcome recording at the terminals — `_record_dispatch_terminal(agent, enabled, None)`
 > at the success terminal (resets the consecutive-failure counter) and the same
 > with `error_code=AUTH` at the HTTP-error terminal, **gated on `error_code == AUTH`**
@@ -58,6 +61,8 @@
 
 ## Overview
 Service that encapsulates the task-execution lifecycle (execution record, slot management, activity tracking, agent HTTP call with retry, credential sanitization, response persistence). Used by most — but not all — execution paths.
+
+> **Sync-chat sibling (#1483).** `routers/chat.py`'s `/chat` path does NOT go through `execute_task`: sync-chat has its own `chat_sessions` persistence + collaboration-activity completion + `mode="chat"` prompt. That divergent applier is now `chat_execution_service.run_chat_turn` (extracted from the router, **declared transitional**). The `/task` split delegates its sync/async paths to **this** service's `execute_task` / `apply_result` — the split adds no second terminal applier, keeping the pull-migration single-applier seams (`apply_result`/`_write_terminal_and_gate`/#1083 callback) byte-untouched. Converging `run_chat_turn` onto `execute_task` is a tracked follow-up (a genuine behavior change, out of #1483's scope).
 
 ## User Story
 As the platform, I want task execution paths (authenticated sync tasks, public link chat, scheduled executions) to use a shared orchestration service so that these executions get consistent tracking, slot enforcement, credential sanitization, and dashboard visibility.
@@ -507,3 +512,4 @@ Expected response from agent:
 - [continue-execution-as-chat.md](continue-execution-as-chat.md) -- EXEC-023, resume_session_id support
 - [scheduler-service.md](scheduler-service.md) -- dedicated scheduler that calls this service via internal API
 - [dispatch-circuit-breaker.md](dispatch-circuit-breaker.md) -- #526 per-agent dispatch breaker; this service is its outcome-recording producer (AUTH-only) and owns the drain-on-open backgrounding
+- [task-completion-events.md](task-completion-events.md) -- #1578 system-emitted `agent.task.completed`/`failed` at this service's CAS-won terminals (`apply_result` ×2 + `_write_terminal_and_gate`)

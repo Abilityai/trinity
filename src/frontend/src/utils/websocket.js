@@ -6,6 +6,7 @@ import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useExecutionsStore } from '../stores/executions'
 import { useLoopsStore } from '../stores/loops'
 import { useReportsStore, useFleetReportsStore } from '../stores/reports'
+import { useRoomsStore } from '../stores/rooms'
 
 const ws = ref(null)
 const isConnected = ref(false)
@@ -25,6 +26,7 @@ export function useWebSocket() {
   const notificationsStore = useNotificationsStore()
   const operatorQueueStore = useOperatorQueueStore()
   const executionsStore = useExecutionsStore()
+  const roomsStore = useRoomsStore()
   const loopsStore = useLoopsStore()
   const reportsStore = useReportsStore()
   const fleetReportsStore = useFleetReportsStore()
@@ -124,6 +126,13 @@ export function useWebSocket() {
       case 'agent_stopped':
         agentsStore.updateAgentStatus(data.data.name, 'stopped')
         break
+      case 'agent_label_changed': {
+        // ent#181: reflect a label change made on another client. The slug
+        // (name) never moves, so this is a pure re-render, no list mutation.
+        const target = agentsStore.agents.find(a => a.name === data.data.name)
+        if (target) target.display_label = data.data.display_label
+        break
+      }
       case 'agent_notification':
         // Real-time notification from an agent
         // The WebSocket event contains: notification_id, agent_name, notification_type, title, priority, category, timestamp
@@ -169,6 +178,12 @@ export function useWebSocket() {
         if (data.type === 'agent_report') {
           reportsStore.handleWebSocketEvent(data)
           fleetReportsStore.handleWebSocketEvent(data)
+        }
+        // ent#170: shared-session (room) events. Thin payloads (room_id + seq /
+        // state / stop_reason); the store filters to the room on screen and
+        // refetches over REST (#918 pattern). No-op when Sessions isn't mounted.
+        if (data.type === 'room_message' || data.type === 'room_participant_state' || data.type === 'room_closed') {
+          roomsStore.handleWebSocketEvent(data)
         }
         break
     }

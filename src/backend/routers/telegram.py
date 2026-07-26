@@ -23,6 +23,8 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, Depends
 
 from database import db
+from services import channel_history, rate_limiter
+from services.settings_service import get_proactive_rate_limit
 from dependencies import get_current_user, OwnedAgentByName
 from models import (
     TelegramBindingResponse,
@@ -338,52 +340,11 @@ async def delete_telegram_group(
 # Proactive Group Messaging (Issue #349)
 # =========================================================================
 
-# Rate limiting constants
-_PROACTIVE_RATE_LIMIT_PER_GROUP = 10     # messages per hour per group
-_PROACTIVE_RATE_LIMIT_PER_AGENT = 100    # messages per hour per agent
+# Proactive caps via the shared sliding-window limiter (#1023) — Redis-backed, so
+# consistent across workers (the old per-process in-memory bucket was not). The
+# per-group / per-agent limits are admin-configurable (#1609), sourced from
+# settings at request time (0 = unlimited). Window fixed at 1 hour.
 _PROACTIVE_RATE_LIMIT_WINDOW = 3600      # 1 hour in seconds
-
-# In-memory rate limit buckets (agent:group → timestamps)
-_proactive_rate_buckets: dict = {}
-
-
-def _check_proactive_rate_limit(agent_name: str, chat_id: str) -> tuple[bool, str]:
-    """
-    Check rate limits for proactive messaging.
-
-    Returns (allowed, error_message). If not allowed, error_message explains why.
-    """
-    import time
-
-    now = time.time()
-    window = _PROACTIVE_RATE_LIMIT_WINDOW
-
-    # Clean old entries
-    group_key = f"{agent_name}:{chat_id}"
-    agent_key = f"{agent_name}:*"
-
-    # Group-level check
-    group_bucket = _proactive_rate_buckets.get(group_key, [])
-    group_bucket = [t for t in group_bucket if now - t < window]
-    _proactive_rate_buckets[group_key] = group_bucket
-
-    if len(group_bucket) >= _PROACTIVE_RATE_LIMIT_PER_GROUP:
-        return False, f"Rate limited: max {_PROACTIVE_RATE_LIMIT_PER_GROUP} messages/hour to this group"
-
-    # Agent-level check (sum across all groups)
-    agent_total = 0
-    for key, bucket in list(_proactive_rate_buckets.items()):
-        if key.startswith(f"{agent_name}:"):
-            cleaned = [t for t in bucket if now - t < window]
-            _proactive_rate_buckets[key] = cleaned
-            agent_total += len(cleaned)
-
-    if agent_total >= _PROACTIVE_RATE_LIMIT_PER_AGENT:
-        return False, f"Rate limited: max {_PROACTIVE_RATE_LIMIT_PER_AGENT} proactive messages/hour"
-
-    # Allow and record
-    _proactive_rate_buckets[group_key] = group_bucket + [now]
-    return True, ""
 
 
 @auth_router.post("/{agent_name}/telegram/groups/{chat_id}/messages")
@@ -409,10 +370,21 @@ async def send_telegram_group_message(
     if not target_group:
         raise HTTPException(status_code=404, detail="Group not found or not active for this agent")
 
-    # Check rate limits
-    allowed, error_msg = _check_proactive_rate_limit(agent_name, chat_id)
-    if not allowed:
-        raise HTTPException(status_code=429, detail=error_msg)
+    # Rate limit: per-group then per-agent, caps from settings (#1609; 0 = skip).
+    per_group = get_proactive_rate_limit("telegram_proactive_per_group")
+    per_agent = get_proactive_rate_limit("telegram_proactive_per_agent")
+    if per_group > 0:
+        rate_limiter.enforce(
+            f"telegram_proactive:{agent_name}:{chat_id}",
+            per_group, _PROACTIVE_RATE_LIMIT_WINDOW,
+            detail=f"Too many messages to this group (cap {per_group}/hour).",
+        )
+    if per_agent > 0:
+        rate_limiter.enforce(
+            f"telegram_proactive:{agent_name}",
+            per_agent, _PROACTIVE_RATE_LIMIT_WINDOW,
+            detail=f"Too many proactive messages from this agent (cap {per_agent}/hour).",
+        )
 
     # Validate message length
     if not request.message or not request.message.strip():
@@ -453,6 +425,30 @@ async def send_telegram_group_message(
                 )
 
             result = response.json().get("result", {})
+
+            # #1649: record the broadcast in a channel session so it is not
+            # simply lost. Telegram group sessions are keyed per (sender, chat)
+            # — the adapter has no group branch — and a broadcast has no human
+            # sender, so it is filed under a SYNTHETIC agent-sender key.
+            #
+            # Known limitation, deliberate: nothing else writes to that key, so
+            # no participant's inbound session contains this message and the
+            # agent still will NOT recall its broadcast when someone replies in
+            # the group. This is honest bookkeeping (the message is recorded,
+            # auditable, and attributable) — not a recall fix. Fixing recall
+            # needs a per-chat group session, which changes existing inbound
+            # group behaviour and is a separate decision.
+            channel_history.persist_outbound_group_message(
+                agent_name=agent_name,
+                channel="telegram",
+                session_identifier=channel_history.session_key_for_telegram_group(
+                    bot_id=binding.get("bot_id", ""),
+                    sender_id=agent_name,   # synthetic: the agent is the speaker
+                    chat_id=chat_id,
+                ),
+                text=request.message,
+            )
+
             return {
                 "ok": True,
                 "message_id": result.get("message_id"),

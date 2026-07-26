@@ -21,6 +21,14 @@ fields are placeholders until their invariants land.
 The three Phase 1 invariants (S-01, E-02, L-03) all read overlapping
 state. Splitting state collection out gives three things:
 
+Note on the `inspect()` column/table guards below: they reflect the *actual*
+live DB (SQLite PRAGMA or PG information_schema, transparently) so a minimal or
+older test/agent DDL missing an optional column degrades to a fail-open skip
+instead of a hard SELECT error. They are a minimal-DDL / older-image
+test-compatibility shim, NOT load-bearing for PG correctness (the full schema is
+always present at Alembic head), and are retirable post-SQLite-EOS
+(2026-09-01, #1278).
+
 1. **One consistent view per cycle.** All invariants see the same
    `Snapshot` instance, so per-check timing drift cannot introduce
    spurious mismatches — e.g. L-03 reading the SQL `agent_ownership`
@@ -40,16 +48,21 @@ deliberately accepts sub-second inconsistencies (a real bug persists
 across a 5-minute cycle by definition; transient races self-resolve
 and are not what we're trying to catch).
 
-Backend seam (#300 / #1450): most collector reads still go through the raw
-sqlite3 `db.connection.get_db_connection()` at DB_PATH — a #300 follow-up
-migrates them to `get_engine()`/DATABASE_URL. B-01's queued Side B is the
-first read migrated: `_collect_queued_ids_via_engine` reads through
-`get_engine()` so both B-01 sides honor DATABASE_URL and stay
-backend-consistent on Postgres (the accessor already did). The collector is
-therefore *half-migrated* — B-01's queued id-set is engine-backed while the
-running-side / known-agents / orphan reads remain raw-sqlite. That split is
-invisible on SQLite (one file) and tracked for the running side in the
-collector-wide migration follow-up.
+Backend seam (#300 / #1450 / #1540): all SQL-tier collector reads route through
+the `get_engine()`/DATABASE_URL seam (`db/engine.py` + `db/tables.py`), so the
+harness reads the live configured backend — SQLite OR PostgreSQL — not a stale
+`/data/trinity.db`. B-01's queued Side B was the first read migrated (#1450);
+#1540 finished the job for the remaining collectors (`_collect_known_agents`,
+`_collect_executions`, `_collect_terminal_executions`, `_collect_terminal_rows`,
+`_collect_enabled_schedules`, `_collect_orphan_refs`). Before #1540 those raw
+`db.connection.get_db_connection()` reads deliberately ignored a non-SQLite
+DATABASE_URL, so on PostgreSQL `_collect_known_agents` returned zero rows → the
+whole per-agent loop never ran → S-01/E-05/B-02/E-04/G-04/B-01 (and the
+fleet-wide E-02/E-03/G-03/E-06/L-03 reads) went vacuously green. The collector
+no longer imports `db.connection`. The `sources_unavailable` labels below keep
+their historical `sqlite.*` prefixes on purpose: several invariants skip on that
+exact string prefix (see the note at `collect_snapshot`), so the labels are an
+internal skip contract, not a live backend claim.
 """
 
 import logging
@@ -79,6 +92,34 @@ TERMINAL_EXECUTION_STATUSES = (
 _TERMINAL_SQL_LIST = ", ".join(f"'{s}'" for s in TERMINAL_EXECUTION_STATUSES)
 
 
+# E-03 / G-03 (#1077) terminal subset — success/failed/cancelled ONLY, and
+# deliberately NOT reusing `TERMINAL_EXECUTION_STATUSES` / `_TERMINAL_SQL_LIST`
+# above, which include `skipped`. A `skipped` execution (an empty-stdout
+# pre-check, #454) legitimately has no `completed_at`/`duration_ms`, so pulling
+# it into the terminal-row set would make E-03 (completed_at populated) fire on
+# a perfectly healthy row.
+_E03_TERMINAL_STATUSES = (
+    TaskExecutionStatus.SUCCESS.value,
+    TaskExecutionStatus.FAILED.value,
+    TaskExecutionStatus.CANCELLED.value,
+)
+
+# Head-room past the per-agent execution timeout when sizing the terminal-row
+# window (see `_collect_terminal_rows`). Matches `SLOT_TTL_BUFFER` in
+# services/slot_service.py and the E-01 invariant's buffer — hard-coded so the
+# canary stays insulated from runtime config drift.
+TERMINAL_WINDOW_BUFFER_SECONDS = 300
+
+# Cap on terminal rows pulled per cycle. `schedule_executions` has no
+# (status, started_at) index and retains terminal rows 90 days, so an unbounded
+# window scan is a full scan every 5 min. E-03/G-03 are a leading-edge
+# regression tripwire — a live malformed-row bug fires continuously on fresh
+# rows — not a backfill audit, so bounding the scan is an accepted coverage
+# tradeoff (logged via a `sampled` flag when hit). Mirrors the analytics
+# 5000-row cap.
+_TERMINAL_ROWS_CAP = 5000
+
+
 # Tables whose `agent_name` column references `agent_ownership.agent_name`.
 # Used by L-03 (delete cascades) to scan for orphan rows.
 #
@@ -91,6 +132,12 @@ _TERMINAL_SQL_LIST = ", ".join(f"'{s}'" for s in TERMINAL_EXECUTION_STATUSES)
 #
 # The list intentionally errs on the side of catching more orphans rather
 # than fewer; false positives surface as L-03 violations operators triage.
+# #1644: mirrors services.retention_guard.ALARM_AGENT_NAME. Duplicated as a
+# literal rather than imported: `canary/` is a deterministic read-only library
+# that must not pull a service (which imports `database`) into its import graph.
+# `tests/unit/test_1644_retention_guard.py` asserts the two stay equal.
+_RETENTION_GUARD_AGENT = "_retention-guard"
+
 ORPHAN_SCAN_TABLES = [
     ("agent_sharing", "agent_name", None),
     ("agent_schedules", "agent_name", None),
@@ -107,7 +154,18 @@ ORPHAN_SCAN_TABLES = [
     ("agent_tags", "agent_name", None),
     ("agent_shared_files", "agent_name", None),
     ("agent_public_links", "agent_name", None),
-    ("operator_queue", "agent_name", "status = 'pending'"),
+    # #1644: exclude the retention guard's reserved sentinel. L-03 hunts GHOST
+    # AGENTS — rows referencing an agent_name that a delete should have cascaded
+    # away. `_retention-guard` is not an agent and never was: it is a platform
+    # alarm host, deliberately un-createable (leading '_' is stripped by
+    # sanitize_agent_name), so it can never appear in agent_ownership and would
+    # otherwise report a permanent, un-fixable orphan. This narrows the predicate
+    # to what the invariant actually means; it does not weaken it.
+    (
+        "operator_queue",
+        "agent_name",
+        f"status = 'pending' AND agent_name != '{_RETENTION_GUARD_AGENT}'",
+    ),
     ("access_requests", "agent_name", "status = 'pending'"),
     # #918 — CASCADE table holding agent-published report payloads (can be
     # sensitive); watch for orphans referencing a deleted agent.
@@ -159,15 +217,23 @@ class AgentSnapshot:
     running_exec_ids: Set[str] = field(default_factory=set)
     # `started_at` per running id (ISO); used by S-01 grace + E-01 / E-05 age.
     running_started_at: Dict[str, str] = field(default_factory=dict)
+    # `lease_expires_at` per running id (ISO str, or None). A non-NULL value
+    # marks a #1081-Phase-3 pull-CLAIMED row: it is `status='running'` but is
+    # owned EXCLUSIVELY by the lease-reaper and NEVER enters the slot ZSET (a
+    # claim is a pure SQL UPDATE with no ZADD). S-01 uses this to exclude leased
+    # rows from the SQL side of its slot–row bijection, so a legitimately-
+    # unslotted pull row is not flagged `in_sql_only`. Only S-01 reads this;
+    # E-01/E-02/E-05 keep seeing the full `running_exec_ids` unchanged.
+    running_lease_expires_at: Dict[str, Optional[str]] = field(default_factory=dict)
     # `claude_session_id` per running id (str or None); used by E-05 to detect
     # dispatched rows that never acquired a backing session.
     running_claude_session_ids: Dict[str, Optional[str]] = field(default_factory=dict)
-    # Raw-sqlite queued id-set from `_collect_executions` (reads
-    # `db.connection.get_db_connection()` at DB_PATH). Consumed by B-02 and
-    # E-02. **No longer B-01's Side B** (#1450): on Postgres this raw-sqlite
-    # file diverges from the `get_engine()`/DATABASE_URL backend the accessor
-    # uses, so B-01 moved to `queued_ids_via_engine` below to keep both of its
-    # sides on the same backend.
+    # Queued id-set from `_collect_executions` (engine seam since #1540). Consumed
+    # by B-02 and E-02. **No longer B-01's Side B** (#1450): B-01 uses the
+    # dedicated `queued_ids_via_engine` below (an independent `SELECT id` code
+    # path) so its two sides compare like-for-like against the accessor. Before
+    # #1540 this read raw-sqlite and diverged from the engine backend on
+    # Postgres; both now honor DATABASE_URL.
     queued_exec_ids: Set[str] = field(default_factory=set)
     # `db.get_queued_count(name)` — the production accessor BacklogService
     # calls on every enqueue/drain (goes through `get_engine()`, honoring
@@ -189,6 +255,17 @@ class AgentSnapshot:
     # completed) → B-01 skips this agent rather than comparing against a
     # different backend's row set.
     queued_ids_via_engine: Optional[Set[str]] = None
+    # E-04 / G-04 input (#1077): per-queued-execution metadata
+    # `{eid: {"queued_at": ..., "backlog_metadata": ...}}`, scoped STRICTLY to
+    # `status='queued'` rows in `_collect_executions` — never terminal rows, so
+    # #1449 (deferred; NULLs `backlog_metadata` on terminal rows) cannot make
+    # E-04 false-fire. Populated only when the `queued_at` + `backlog_metadata`
+    # columns both exist (BACKLOG-001); on an older/minimal DDL the map is left
+    # empty for that agent so E-04/G-04 skip its queued eids (older-image
+    # fail-open). An eid in `queued_exec_ids` but ABSENT from this map means the
+    # metadata columns weren't observable — E-04/G-04 skip it; a PRESENT entry
+    # with a NULL value is a real E-04 violation.
+    queued_meta: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Per-slot Redis TTL on the companion `agent:slot:{name}:{eid}` HASH.
     # Value semantics from `redis.ttl()`: positive int = seconds until
     # expiry; -2 = key does not exist; -1 = key exists with no TTL. S-03
@@ -244,6 +321,13 @@ class Snapshot:
     # never advanced — the "Next: Nd ago" bug, #1472). Empty means the read was
     # skipped (recorded in sources_unavailable).
     enabled_schedules: List[Dict[str, Any]] = field(default_factory=list)
+    # E-03 / G-03 input (#1077): recent terminal execution rows
+    # ({id, agent_name, status, started_at, completed_at, duration_ms}),
+    # windowed on `started_at` (NOT `completed_at` — E-03 must see rows whose
+    # `completed_at` is NULL). Scoped to success/failed/cancelled (never
+    # `skipped`). Empty when the collection was skipped (older/minimal DDL
+    # missing `completed_at`/`duration_ms`, recorded in `sources_unavailable`).
+    terminal_rows: List[Dict[str, Any]] = field(default_factory=list)
     # Diagnostics — empty on a clean cycle.
     sources_unavailable: List[str] = field(default_factory=list)
 
@@ -254,27 +338,45 @@ class Snapshot:
 
 
 def _collect_known_agents() -> List[Dict[str, Any]]:
-    """Read agent_ownership rows. One source of truth for valid agent names."""
-    from db.connection import get_db_connection
+    """Read agent_ownership rows. One source of truth for valid agent names.
 
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        # Intentionally NOT filtering `deleted_at IS NULL` (#834). The
-        # canary's `known_agents` set drives L-03 (orphan-row detection)
-        # — soft-deleted-pending-purge agents legitimately have child
-        # rows in the live tables until the retention sweep runs.
-        # Treating them as "unknown" would surface those preserved rows
-        # as false-positive orphans.
-        cursor.execute(
-            """
-            SELECT agent_name,
-                   COALESCE(is_system, 0) AS is_system,
-                   COALESCE(max_parallel_tasks, 3) AS max_parallel_tasks,
-                   COALESCE(execution_timeout_seconds, 900) AS execution_timeout_seconds
-            FROM agent_ownership
-            """
-        )
-        return [dict(row) for row in cursor.fetchall()]
+    Reads through the `get_engine()`/DATABASE_URL seam (#1540) so the harness
+    sees the live configured backend (SQLite OR PostgreSQL). This is the
+    load-bearing un-blinding read: on PostgreSQL the old raw-sqlite path returned
+    zero rows → `snap.agents` empty → the entire per-agent loop
+    (S-01/E-05/B-02/E-04/G-04 and B-01) went vacuously green.
+    """
+    from sqlalchemy import func, select
+    from db.engine import get_engine
+    from db.tables import agent_ownership
+
+    # func.coalesce keeps the raw SQL's COALESCE(...) defaults AT the query so a
+    # NULL column never flows through as `int(None)` downstream (948/955).
+    # Intentional default note: execution_timeout_seconds coalesces to 900 (the
+    # collector's historical fallback, snapshot.py) — deliberately NOT the newer
+    # schema default 3600 (#665). This value sizes the E-01 window and the
+    # terminal-row `max_timeout`; preserving 900 keeps a faithful read-repoint
+    # (unifying to 3600 would change when E-01 fires — a separate behavior
+    # change, out of scope for #1540). Post-#665 the column is effectively always
+    # populated, so the fallback is near-dead — it only matters for a NULL-timeout
+    # row a migrated DB shouldn't have.
+    stmt = select(
+        agent_ownership.c.agent_name,
+        func.coalesce(agent_ownership.c.is_system, 0).label("is_system"),
+        func.coalesce(agent_ownership.c.max_parallel_tasks, 3).label(
+            "max_parallel_tasks"
+        ),
+        func.coalesce(agent_ownership.c.execution_timeout_seconds, 900).label(
+            "execution_timeout_seconds"
+        ),
+    )
+    # Intentionally NOT filtering `deleted_at IS NULL` (#834). The canary's
+    # `known_agents` set drives L-03 (orphan-row detection) — soft-deleted-
+    # pending-purge agents legitimately have child rows in the live tables until
+    # the retention sweep runs. Treating them as "unknown" would surface those
+    # preserved rows as false-positive orphans.
+    with get_engine().connect() as conn:
+        return [dict(row) for row in conn.execute(stmt).mappings().all()]
 
 
 def _collect_executions(agent_name: str) -> Dict[str, Any]:
@@ -284,32 +386,59 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
     query so the canary cycle stays O(N agents) and never grows per-row.
     The column has been on `schedule_executions` since #106; rows predating
     that migration return NULL and are tolerated by the E-05 grace window.
-    """
-    from db.connection import get_db_connection
 
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        # `claude_session_id` may not exist in the minimal test DDLs; guard
-        # with a PRAGMA introspection and select * if absent so the unit
-        # tests don't have to mirror every production column.
-        cursor.execute("PRAGMA table_info(schedule_executions)")
-        cols = {c["name"] for c in cursor.fetchall()}
+    Also captures `queued_at` + `backlog_metadata` for **queued** rows (E-04 /
+    G-04, #1077) in the same query, keyed by execution_id in `queued_meta`.
+    Both columns are PRAGMA-guarded (added by BACKLOG-001): when either is
+    absent (older/minimal DDL) `queued_meta` is left empty so E-04/G-04 skip
+    those eids (older-image fail-open) rather than firing on a column that never
+    existed. The metadata is read STRICTLY off queued rows — never terminal ones
+    — so #1449 (deferred; NULLs `backlog_metadata` on terminal rows) can't make
+    E-04 false-fire.
+    """
+    from sqlalchemy import inspect, select
+    from db.engine import get_engine
+    from db.tables import schedule_executions
+
+    out: Dict[str, Any] = {
+        "running": set(),
+        "queued": set(),
+        "started_at": {},
+        "claude_session_ids": {},
+        "lease_expires_at": {},
+        "queued_meta": {},
+    }
+    with get_engine().connect() as conn:
+        # `claude_session_id` may not exist in the minimal test DDLs (or a
+        # pre-#106 DB); reflect the LIVE columns and select only what exists so
+        # the unit tests don't have to mirror every production column. `inspect()`
+        # reflects the actual backend (SQLite PRAGMA / PG information_schema), so
+        # the fail-open guard behaves identically to the old raw PRAGMA path.
+        c = schedule_executions.c
+        cols = {col["name"] for col in inspect(conn).get_columns("schedule_executions")}
         has_session_col = "claude_session_id" in cols
-        select_cols = "id, status, started_at"
+        # #1081 Phase 3: `lease_expires_at` marks a pull-claimed row. Guarded
+        # like `claude_session_id` so minimal test DDLs (or a pre-migration DB)
+        # that lack the column still collect — absent ⇒ every row is non-leased.
+        has_lease_col = "lease_expires_at" in cols
+        # E-04/G-04 (#1077): both queued-metadata columns must exist to observe
+        # queued metadata at all. Guard on BOTH (they land together in
+        # BACKLOG-001) so a partial DDL degrades to older-image fail-open.
+        has_queued_meta = "queued_at" in cols and "backlog_metadata" in cols
+        select_cols = [c.id, c.status, c.started_at]
         if has_session_col:
-            select_cols += ", claude_session_id"
-        cursor.execute(
-            f"SELECT {select_cols} FROM schedule_executions "
-            "WHERE agent_name = ? AND status IN ('running', 'queued')",
-            (agent_name,),
+            select_cols.append(c.claude_session_id)
+        if has_lease_col:
+            select_cols.append(c.lease_expires_at)
+        if has_queued_meta:
+            select_cols += [c.queued_at, c.backlog_metadata]
+        stmt = select(*select_cols).where(
+            c.agent_name == agent_name,
+            c.status.in_(("running", "queued")),
         )
-        out: Dict[str, Any] = {
-            "running": set(),
-            "queued": set(),
-            "started_at": {},
-            "claude_session_ids": {},
-        }
-        for row in cursor.fetchall():
+        # A `.mappings()` row carries ONLY the selected columns, so the optional
+        # reads below MUST stay gated on the `has_*` flags (else KeyError).
+        for row in conn.execute(stmt).mappings():
             if row["status"] == "running":
                 out["running"].add(row["id"])
                 if row["started_at"]:
@@ -317,9 +446,20 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
                 out["claude_session_ids"][row["id"]] = (
                     row["claude_session_id"] if has_session_col else None
                 )
+                out["lease_expires_at"][row["id"]] = (
+                    row["lease_expires_at"] if has_lease_col else None
+                )
             elif row["status"] == "queued":
                 out["queued"].add(row["id"])
-        return out
+                if has_queued_meta:
+                    # A NULL value here IS a violation (real E-04 case); leaving
+                    # the eid out of the map only happens when the columns are
+                    # absent (older image → skipped above).
+                    out["queued_meta"][row["id"]] = {
+                        "queued_at": row["queued_at"],
+                        "backlog_metadata": row["backlog_metadata"],
+                    }
+    return out
 
 
 def _collect_zombie_counts() -> Dict[str, Any]:
@@ -469,45 +609,126 @@ def _collect_terminal_executions(window_minutes: int = 30) -> Dict[str, str]:
     reversal alert prints that back to the operator, and a placeholder
     string ("terminal") would erase the forensic value of the alert.
     """
-    from db.connection import get_db_connection
+    from sqlalchemy import select
+    from db.engine import get_engine
+    from db.tables import schedule_executions
 
-    placeholders = ",".join("?" * len(TERMINAL_EXECUTION_STATUSES))
+    # Invariant #16: Python-computed ISO-Z cutoff bound as a per-dialect param
+    # (never `datetime('now', ...)`). Core binds `cutoff` for us.
     cutoff = iso_cutoff(minutes=int(window_minutes))
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            f"""
-            SELECT id, status FROM schedule_executions
-            WHERE status IN ({placeholders})
-              AND completed_at > ?
-            """,
-            (*TERMINAL_EXECUTION_STATUSES, cutoff),
+    stmt = select(schedule_executions.c.id, schedule_executions.c.status).where(
+        schedule_executions.c.status.in_(TERMINAL_EXECUTION_STATUSES),
+        schedule_executions.c.completed_at > cutoff,
+    )
+    with get_engine().connect() as conn:
+        return {row["id"]: row["status"] for row in conn.execute(stmt).mappings()}
+
+
+def _collect_terminal_rows(window_seconds: int) -> Dict[str, Any]:
+    """Recent terminal rows for E-03 (`completed_at` populated) + G-03
+    (`started_at <= completed_at`), windowed on `started_at`.
+
+    Window on `started_at`, NOT `completed_at`: E-03 must be able to see a
+    terminal row whose `completed_at` is NULL — the very bug it guards — and a
+    `completed_at` window would filter those out. Scoped to
+    success/failed/cancelled via the LOCAL `_E03_TERMINAL_STATUSES` list; the
+    module-level `_TERMINAL_SQL_LIST` also includes `skipped`, which
+    legitimately has no `completed_at`/`duration_ms` and would false-fire E-03.
+
+    Column-absent vs value-NULL: if `completed_at` or `duration_ms` is missing
+    from a minimal/older DDL, the whole collection is skipped (reported via the
+    returned `unavailable`) so E-03/G-03 skip the cycle — defaulting an *absent*
+    column to None would make E-03 fire on every row. A NULL *value* is a real
+    violation; an absent *column* is a source gap.
+
+    Bounded `ORDER BY started_at DESC LIMIT _TERMINAL_ROWS_CAP`: see the
+    constant's rationale (no index, 90-day retention, tripwire-not-audit).
+
+    Returns ``{"rows": List[Dict], "unavailable": Optional[str],
+    "sampled": bool}``.
+    """
+    from sqlalchemy import inspect, select
+    from db.engine import get_engine
+    from db.tables import schedule_executions
+
+    # `iso_cutoff` is minute-granular (keyword-only `minutes`); round the
+    # second-granular window UP so it never shrinks below the requested span
+    # (a slightly larger window can never miss a just-completed terminal row).
+    # Invariant #16: Python-computed ISO-Z cutoff, bound as a param by Core.
+    cutoff_minutes = (int(window_seconds) + 59) // 60
+    cutoff = iso_cutoff(minutes=cutoff_minutes)
+    c = schedule_executions.c
+    with get_engine().connect() as conn:
+        # Reflect LIVE columns (SQLite PRAGMA / PG information_schema): a
+        # minimal/older DDL missing completed_at/duration_ms skips the whole
+        # collection (source gap) rather than defaulting an absent column to
+        # None and false-firing E-03 on every row.
+        cols = {col["name"] for col in inspect(conn).get_columns("schedule_executions")}
+        missing = [name for name in ("completed_at", "duration_ms") if name not in cols]
+        if missing:
+            return {
+                "rows": [],
+                "unavailable": (
+                    "schedule_executions missing column(s): " + ", ".join(missing)
+                ),
+                "sampled": False,
+            }
+        # Fetch one past the cap so we can flag when the window was truncated
+        # without a second COUNT query.
+        stmt = (
+            select(
+                c.id, c.agent_name, c.status, c.started_at, c.completed_at, c.duration_ms
+            )
+            .where(c.status.in_(_E03_TERMINAL_STATUSES), c.started_at > cutoff)
+            .order_by(c.started_at.desc())
+            .limit(_TERMINAL_ROWS_CAP + 1)
         )
-        return {row["id"]: row["status"] for row in cursor.fetchall()}
+        fetched = list(conn.execute(stmt).mappings())
+        sampled = len(fetched) > _TERMINAL_ROWS_CAP
+        rows = [
+            {
+                "id": r["id"],
+                "agent_name": r["agent_name"],
+                "status": r["status"],
+                "started_at": r["started_at"],
+                "completed_at": r["completed_at"],
+                "duration_ms": r["duration_ms"],
+            }
+            for r in fetched[:_TERMINAL_ROWS_CAP]
+        ]
+        if sampled:
+            logger.warning(
+                "canary terminal-row collector hit the %d-row cap "
+                "(window=%ds); E-03/G-03 coverage is leading-edge only "
+                "this cycle",
+                _TERMINAL_ROWS_CAP,
+                window_seconds,
+            )
+        return {"rows": rows, "unavailable": None, "sampled": sampled}
 
 
 def _collect_enabled_schedules() -> List[Dict[str, Any]]:
     """Enabled, non-deleted schedules → {schedule_id, agent_name, next_run_at}
     for E-06 (stale next_run_at detection, #1472). Mirrors the scheduler's own
     read predicate (`enabled = 1 AND deleted_at IS NULL`)."""
-    from db.connection import get_db_connection
+    from sqlalchemy import select
+    from db.engine import get_engine
+    from db.tables import agent_schedules
 
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT id, agent_name, next_run_at
-            FROM agent_schedules
-            WHERE enabled = 1 AND deleted_at IS NULL
-            """
-        )
+    # `enabled` is INTEGER on both backends (Trinity keeps SQLite-style integer
+    # booleans; the Alembic baseline reuses the same DDL), so `== 1` is correct
+    # on PostgreSQL too — no boolean-type surprise.
+    stmt = select(
+        agent_schedules.c.id, agent_schedules.c.agent_name, agent_schedules.c.next_run_at
+    ).where(agent_schedules.c.enabled == 1, agent_schedules.c.deleted_at.is_(None))
+    with get_engine().connect() as conn:
         return [
             {
                 "schedule_id": row["id"],
                 "agent_name": row["agent_name"],
                 "next_run_at": row["next_run_at"],
             }
-            for row in cursor.fetchall()
+            for row in conn.execute(stmt).mappings()
         ]
 
 
@@ -517,42 +738,83 @@ def _collect_orphan_refs(known_agents: Set[str]) -> List[OrphanRef]:
     Driven by ORPHAN_SCAN_TABLES. Each tuple is (table, column, optional
     SQL filter clause that further narrows what counts as 'live').
     """
-    from db.connection import get_db_connection
+    # LAZY imports (Invariant: canary stays a low-dependency leaf; a module-level
+    # `db.tables` import would force `db/__init__` at canary import time and
+    # change the reimport-fixture failure surface — eng-review #3).
+    from sqlalchemy import inspect, literal, select, text
+    from db.engine import get_engine
+    from db.tables import (
+        access_requests,
+        agent_public_links,
+        agent_reports,
+        agent_schedules,
+        agent_shared_files,
+        agent_sharing,
+        agent_skills,
+        agent_tags,
+        chat_sessions,
+        mcp_api_keys,
+        operator_queue,
+        schedule_executions,
+    )
 
     refs: List[OrphanRef] = []
     if not known_agents:
         return refs  # nothing to compare against; scan would mark every row
 
-    placeholder_list = ",".join("?" * len(known_agents))
-    known_params = list(known_agents)
+    # Static name→Table map for the ORPHAN_SCAN_TABLES entries. The PK is derived
+    # from the STATIC Table (`primary_key.columns`), NEVER from reflection:
+    # `agent_tags` is composite-PK `(agent_name, tag)` in production but is
+    # declared single-`id` in some minimal test DDLs, so a reflected `["id"]`
+    # would `KeyError` on the static Table that has no `id` → crash/blind L-03
+    # (#1540 HIGH). `inspect().has_table` is used ONLY for the existence gate.
+    _TABLE_BY_NAME = {
+        t.name: t
+        for t in (
+            agent_sharing,
+            agent_schedules,
+            schedule_executions,
+            chat_sessions,
+            agent_skills,
+            agent_tags,
+            agent_shared_files,
+            agent_public_links,
+            operator_queue,
+            access_requests,
+            agent_reports,
+        )
+    }
+    # Fail loud if a future ORPHAN_SCAN_TABLES addition lacks a db.tables entry,
+    # at first call rather than silently skipping the table.
+    _unmapped = [t for t, _, _ in ORPHAN_SCAN_TABLES if t not in _TABLE_BY_NAME]
+    assert not _unmapped, (
+        f"ORPHAN_SCAN_TABLES has no db.tables entry for: {_unmapped}"
+    )
 
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
+    with get_engine().connect() as conn:
+        insp = inspect(conn)
         for table, column, extra_filter in ORPHAN_SCAN_TABLES:
-            # Discover the primary-key column name so we can return a
-            # stable row_id without hardcoding per-table schemas.
-            cursor.execute(f"PRAGMA table_info({table})")
-            cols = cursor.fetchall()
-            if not cols:
+            if not insp.has_table(table):
                 # Table not present (test DB or partial install). Skip.
                 continue
-            pk_col = next((c["name"] for c in cols if c["pk"]), None)
-            if pk_col is None:
-                # Composite-PK or no-PK tables get a synthetic row_id.
-                pk_expr = f"'{table}-row'"
-            else:
-                pk_expr = pk_col
-
-            where = f"{column} NOT IN ({placeholder_list})"
+            tbl = _TABLE_BY_NAME[table]
+            agent_col = tbl.c[column]
+            # PK from the STATIC Table (Column objects). Single-column → index
+            # the Column directly; composite (agent_tags) → synthetic row_id.
+            pk_cols = list(tbl.primary_key.columns)
+            row_id = pk_cols[0] if len(pk_cols) == 1 else literal(f"{table}-row")
+            stmt = select(
+                row_id.label("row_id"), agent_col.label("agent_name")
+            ).where(agent_col.notin_(known_agents))
             if extra_filter:
-                where += f" AND ({extra_filter})"
-
-            cursor.execute(
-                f"SELECT {pk_expr} AS row_id, {column} AS agent_name "
-                f"FROM {table} WHERE {where}",
-                known_params,
-            )
-            for row in cursor.fetchall():
+                # SECURITY: every `extra_filter` fragment is a module-level
+                # constant literal from ORPHAN_SCAN_TABLES (never user input) and
+                # plain standard SQL valid on both SQLite and PG — not an
+                # injection vector. Table/column names likewise come only from
+                # the hard-coded ORPHAN_SCAN_TABLES list. These MUST stay
+                # compile-time constants.
+                stmt = stmt.where(text(extra_filter))
+            for row in conn.execute(stmt).mappings():
                 refs.append(
                     OrphanRef(
                         table=table,
@@ -563,19 +825,13 @@ def _collect_orphan_refs(known_agents: Set[str]) -> List[OrphanRef]:
                 )
 
         # Agent-scoped MCP keys: same logic, separate filter on `scope`.
-        cursor.execute("PRAGMA table_info(mcp_api_keys)")
-        cols = cursor.fetchall()
-        if cols:
-            cursor.execute(
-                f"""
-                SELECT id, agent_name FROM mcp_api_keys
-                WHERE scope = 'agent'
-                  AND agent_name IS NOT NULL
-                  AND agent_name NOT IN ({placeholder_list})
-                """,
-                known_params,
+        if insp.has_table("mcp_api_keys"):
+            stmt = select(mcp_api_keys.c.id, mcp_api_keys.c.agent_name).where(
+                mcp_api_keys.c.scope == "agent",
+                mcp_api_keys.c.agent_name.isnot(None),
+                mcp_api_keys.c.agent_name.notin_(known_agents),
             )
-            for row in cursor.fetchall():
+            for row in conn.execute(stmt).mappings():
                 refs.append(
                     OrphanRef(
                         table="mcp_api_keys",
@@ -669,10 +925,21 @@ def collect_snapshot() -> Snapshot:
     `sources_unavailable` and the snapshot is still returned with whatever
     succeeded. Invariant checks are responsible for skipping cycles when
     their required sources are absent — see each invariant for the policy.
+
+    ⚠ Label contract (#1540): the `sqlite.*` prefixes on the SQL-source
+    `sources_unavailable` entries below are a LOAD-BEARING internal skip contract,
+    NOT a live backend claim. Several invariants fail-open on the exact string
+    PREFIX — l03_delete_cascades matches `"sqlite.orphan_refs"`,
+    e02_no_phantom_reversal matches `"sqlite.terminal_executions"`. The reads now
+    route through the engine seam (may be PostgreSQL), but these labels MUST stay
+    verbatim; renaming them to `engine.*`/`sql.*` would silently disable those
+    fail-open skips (a check would run against empty data and could false-fire).
+    A future rename MUST update every consuming invariant's `startswith(...)` in
+    the SAME PR. Guarded by the engine-down skip test in test_canary_invariants.
     """
     snap = Snapshot(snapshot_time=utc_now_iso())
 
-    # SQLite: agent_ownership is the source of truth for "known agents".
+    # agent_ownership is the source of truth for "known agents" (engine seam).
     try:
         agent_rows = _collect_known_agents()
     except Exception as exc:
@@ -709,6 +976,8 @@ def collect_snapshot() -> Snapshot:
                 "queued": set(),
                 "started_at": {},
                 "claude_session_ids": {},
+                "lease_expires_at": {},
+                "queued_meta": {},
             }
 
         # B-01 inputs (#1450): both sides go through the `get_engine()` seam so
@@ -770,7 +1039,9 @@ def collect_snapshot() -> Snapshot:
                 running_exec_ids=execs["running"],
                 running_started_at=execs.get("started_at", {}),
                 running_claude_session_ids=execs.get("claude_session_ids", {}),
+                running_lease_expires_at=execs.get("lease_expires_at", {}),
                 queued_exec_ids=execs["queued"],
+                queued_meta=execs.get("queued_meta", {}),
                 queued_count_via_service=queued_via_service,
                 queued_ids_via_engine=engine_qids,
             )
@@ -796,6 +1067,25 @@ def collect_snapshot() -> Snapshot:
     except Exception as exc:
         logger.exception("canary snapshot: enabled schedules read failed")
         snap.sources_unavailable.append(f"sqlite.enabled_schedules: {exc}")
+
+    # SQLite: recent terminal rows for E-03 (completed_at populated) + G-03
+    # (started_at <= completed_at). Window off the MAX per-agent execution
+    # timeout so a just-completed max-timeout task (per-agent cap 60–7200s,
+    # #922) whose started_at is up to its timeout ago is still in-window;
+    # default 900s when no agents exist. Principled, not a hardcoded 120min.
+    max_timeout = max(
+        (int(r["execution_timeout_seconds"]) for r in agent_rows), default=900
+    )
+    try:
+        terminal = _collect_terminal_rows(max_timeout + TERMINAL_WINDOW_BUFFER_SECONDS)
+        snap.terminal_rows = terminal["rows"]
+        if terminal["unavailable"]:
+            snap.sources_unavailable.append(
+                f"sqlite.terminal_rows: {terminal['unavailable']}"
+            )
+    except Exception as exc:
+        logger.exception("canary snapshot: terminal-row read failed")
+        snap.sources_unavailable.append(f"sqlite.terminal_rows: {exc}")
 
     # Redis: drain-tick heartbeat for B-02. Reuses the slot_service Redis
     # client (same one used by `_collect_redis_slot_state` above). On

@@ -18,11 +18,15 @@ from typing import Optional, Literal
 from database import db
 from services import idempotency_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services.settings_service import get_proactive_rate_limit  # #1609
 
 logger = logging.getLogger(__name__)
 
-# Rate limiting configuration
-RATE_LIMIT_MAX_PER_HOUR = 10  # messages per recipient per hour
+# Rate limiting configuration. The per-recipient cap is admin-configurable
+# (#1609) — sourced from settings at check time via
+# ``settings_service.get_proactive_rate_limit("proactive_dm_per_recipient")``
+# (0 = unlimited). RATE_LIMIT_MAX_PER_HOUR remains the shipped default there.
+RATE_LIMIT_MAX_PER_HOUR = 10  # messages per recipient per hour (default)
 RATE_LIMIT_WINDOW_SECONDS = 3600  # 1 hour
 
 
@@ -58,6 +62,13 @@ class DeliveryResult:
     channel: str
     message_id: Optional[str] = None
     error: Optional[str] = None
+    # #1600: the recipient's channel-session key, set by the `_deliver_*` helper
+    # on success so the caller can persist the outbound turn into the SAME
+    # session an inbound reply will use. Each helper derives it by calling its
+    # own adapter's `get_session_identifier()` — never by re-deriving the format
+    # here, which would drift from the adapter and silently mint a second
+    # session. None ⇒ the channel can't resolve a session (nothing to persist).
+    session_identifier: Optional[str] = None
 
 
 class ProactiveMessageService:
@@ -94,6 +105,11 @@ class ProactiveMessageService:
 
     def _check_rate_limit(self, agent_name: str, recipient_email: str) -> bool:
         """Check if sending is allowed under rate limits. Returns True if OK."""
+        # #1609: admin-configurable per-recipient cap; 0 = unlimited.
+        limit = get_proactive_rate_limit("proactive_dm_per_recipient")
+        if limit <= 0:
+            return True
+
         redis = self._get_redis()
         if not redis:
             # Redis unavailable — allow (degraded mode)
@@ -105,7 +121,7 @@ class ProactiveMessageService:
             count = redis.get(key)
             if count is None:
                 return True
-            return int(count) < RATE_LIMIT_MAX_PER_HOUR
+            return int(count) < limit
         except Exception as e:
             logger.warning(f"Rate limit check failed: {e}")
             return True
@@ -266,6 +282,14 @@ class ProactiveMessageService:
                 )
                 if result.success:
                     self._increment_rate_limit(agent_name, recipient_email)
+                    # #1600: record the outbound turn in the recipient's channel
+                    # session so the agent's next turn knows what it sent.
+                    # Deliberately here and not in `_deliver_*`: those helpers are
+                    # shared with `send_access_grant_notification`, whose
+                    # persistence is out of scope (#951). Keeping the call on the
+                    # send_message path draws that line structurally rather than
+                    # with a flag.
+                    self._persist_outbound(agent_name, recipient_email, text, result)
                     await self._audit_send(
                         agent_name, recipient_email, ch, True,
                         message_preview=message_preview
@@ -336,6 +360,72 @@ class ProactiveMessageService:
         )
         return result
 
+    def _persist_outbound(
+        self,
+        agent_name: str,
+        recipient_email: str,
+        text: str,
+        result: DeliveryResult,
+    ) -> None:
+        """Append a delivered proactive message to the recipient's channel history (#1600).
+
+        Without this the agent has no record of its own outreach: the next inbound
+        turn builds context from `build_public_chat_context`, which only ever saw
+        turns the message router persisted. The agent then repeats itself,
+        contradicts the message, or can't parse the reply ("yes, sounds good" — to
+        what?).
+
+        Attribution mirrors router step 11 (#903): role `assistant`, `sender_label`
+        = agent name, and `sender_email` = the recipient. A proactive send always
+        targets ONE verified email — i.e. a DM, a single-participant session — so
+        `_assistant_sender_email`'s rule ("stamp the email for single-participant
+        sessions, None for shared threads") resolves to the recipient. That keeps
+        sender-filtered MEM-001 summarization folding these into the right user's
+        memory (#903, AC-7).
+
+        Called ONLY on confirmed delivery, so a failed send never writes a phantom
+        assistant turn (AC-5).
+
+        The session is created if absent rather than skipped: the chat-link
+        `session_id` column this was expected to key off is **never written by any
+        code path** (#1600 — a vestigial column), so "reuse the existing session"
+        isn't available. `get_or_create_public_chat_session` with the adapter's own
+        identifier lands in exactly the session a later inbound reply resolves to.
+
+        Fail-soft: the message is already delivered, so a persistence error must
+        never surface as a delivery failure. It's logged loudly instead — a silent
+        swallow here is what made the original bug invisible.
+        """
+        if not result.session_identifier:
+            logger.warning(
+                "[#1600] proactive %s message to %s delivered but NOT persisted: "
+                "no session identifier resolved for agent %s",
+                result.channel, recipient_email, agent_name,
+            )
+            return
+        try:
+            session = db.get_or_create_public_chat_session(
+                agent_name, result.session_identifier, result.channel
+            )
+            session_id = session.id if hasattr(session, "id") else session["id"]
+            db.add_public_chat_message(
+                session_id,
+                "assistant",
+                text,
+                sender_email=recipient_email,
+                sender_label=agent_name,
+            )
+            logger.debug(
+                "[#1600] persisted proactive %s message to session %s",
+                result.channel, session_id,
+            )
+        except Exception:
+            logger.error(
+                "[#1600] failed to persist delivered proactive %s message for agent %s "
+                "— the message WAS delivered; history will be missing this turn",
+                result.channel, agent_name, exc_info=True,
+            )
+
     async def _deliver_via_channel(
         self,
         agent_name: str,
@@ -363,6 +453,7 @@ class ProactiveMessageService:
         text: str,
     ) -> DeliveryResult:
         """Deliver via Telegram."""
+        from adapters.base import NormalizedMessage
         from adapters.telegram_adapter import TelegramAdapter
 
         # Get binding for this agent
@@ -395,10 +486,23 @@ class ProactiveMessageService:
             )
             if result:
                 message_id = result.get("message_id")
+                # #1600: resolve the recipient's session key through the adapter
+                # itself. A Telegram DM's chat_id IS the user id (the send above
+                # relies on the same fact), and `bot_id` is read from the binding
+                # exactly as telegram_webhook injects it — so this reproduces the
+                # inbound key byte-for-byte instead of guessing at the format.
+                probe = NormalizedMessage(
+                    sender_id=str(chat_id),
+                    text="",
+                    channel_id=str(chat_id),
+                    timestamp="",
+                    metadata={"bot_id": binding.get("bot_id", ""), "is_group": False},
+                )
                 return DeliveryResult(
                     success=True,
                     channel="telegram",
                     message_id=str(message_id) if message_id else None,
+                    session_identifier=adapter.get_session_identifier(probe),
                 )
             else:
                 return DeliveryResult(success=False, channel="telegram", error="Send failed")
@@ -413,6 +517,8 @@ class ProactiveMessageService:
         text: str,
     ) -> DeliveryResult:
         """Deliver via Slack DM."""
+        from adapters.base import NormalizedMessage
+        from adapters.slack_adapter import SlackAdapter
         from services.slack_service import slack_service
 
         # Get Slack workspace connections
@@ -445,7 +551,25 @@ class ProactiveMessageService:
             )
 
             if success:
-                return DeliveryResult(success=True, channel="slack")
+                # #1600: Slack has no chat-link table, but the DM session key is
+                # `team:sender:channel` — and all three are already resolved
+                # above (workspace team_id, the looked-up user, the opened DM
+                # channel). So Slack persists the same as the others rather than
+                # being documented as a known limitation. `is_dm=True` selects
+                # the adapter's DM branch, which is what an inbound DM from this
+                # user takes.
+                probe = NormalizedMessage(
+                    sender_id=str(user["id"]),
+                    text="",
+                    channel_id=str(channel_id),
+                    timestamp="",
+                    metadata={"team_id": workspace.get("team_id"), "is_dm": True},
+                )
+                return DeliveryResult(
+                    success=True,
+                    channel="slack",
+                    session_identifier=SlackAdapter().get_session_identifier(probe),
+                )
             else:
                 return DeliveryResult(success=False, channel="slack", error=error)
 
@@ -467,6 +591,7 @@ class ProactiveMessageService:
         agent owner is responsible for configuring approved message templates
         for out-of-window outreach.
         """
+        from adapters.base import NormalizedMessage
         from adapters.whatsapp_adapter import WhatsAppAdapter
 
         binding = db.get_whatsapp_binding(agent_name)
@@ -507,10 +632,21 @@ class ProactiveMessageService:
                     )
                 last_sid = result.get("sid") or last_sid
 
+            # #1600: same session key an inbound WhatsApp DM resolves to —
+            # derived by the adapter, not re-implemented here. sender_id IS the
+            # wa phone, which is what the chat link stores.
+            probe = NormalizedMessage(
+                sender_id=str(chat_link["wa_user_phone"]),
+                text="",
+                channel_id=str(chat_link["wa_user_phone"]),
+                timestamp="",
+                metadata={"binding_id": binding["id"]},
+            )
             return DeliveryResult(
                 success=True,
                 channel="whatsapp",
                 message_id=str(last_sid) if last_sid else None,
+                session_identifier=adapter.get_session_identifier(probe),
             )
         except Exception as e:
             logger.error(f"WhatsApp delivery failed: {e}")

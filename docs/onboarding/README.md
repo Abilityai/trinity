@@ -206,7 +206,7 @@ Once you've completed the onboarding guides, explore:
 
 Check out these public agent templates for inspiration:
 
-- **[Cornelius](https://github.com/abilityai/agent-cornelius)** — Knowledge Base Manager
+- **[Cornelius](https://github.com/Abilityai/cornelius)** — Knowledge Base Manager
 - **[Corbin](https://github.com/abilityai/agent-corbin)** — Business Assistant
 - **[Ruby](https://github.com/abilityai/agent-ruby)** — Content Creator
 

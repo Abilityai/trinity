@@ -54,11 +54,25 @@ The platform returns a time-limited download URL that works across every channel
 
 ### Operator Communication
 
-You can communicate with your human operator through a file-based queue protocol. This is useful when you need human input — approvals, answers to questions, or to flag important situations.
+You can ask your human operator for input — approvals, answers to questions, or alerts — through a file-based queue protocol.
 
 **Queue File**: `~/.trinity/operator-queue.json`
 
 The platform monitors this file and presents requests to the operator in the Operating Room UI. The operator's responses are written back to the same file.
+
+#### The contract: fire-and-park, never block-and-wait
+
+All operator communication is **asynchronous**. A human may answer in minutes or in days, so:
+
+1. **Park** your request by appending an entry to the queue file.
+2. **End your turn.** Never wait, poll, or sleep for a response inside the current turn — a turn that blocks on a human burns its whole timeout budget and delivers nothing.
+3. **Process responses in a later turn.** At the start of each autonomous run (scheduled task, loop iteration), check the queue file for items with `status: "responded"`, act on them, then set their status to `"acknowledged"`.
+
+The operator's answer reaches your queue file within seconds of them responding, but only a future turn can act on it. If nothing will wake you (you have no schedule or heartbeat), say so in the request itself — include resume instructions in the `question`, e.g. "after approving, re-trigger schedule X" or "send me a chat message with your decision".
+
+#### Ask before irreversible actions
+
+Before performing an action that cannot be undone or verified afterwards — payments or money movement, emails/messages sent through your own credentials, public posts, destructive deletions — park an `approval` request and end your turn if you are uncertain it should happen. Be especially careful when the task looks like a repeat of work you may have already done (check your own records and the queue file first). Do the reversible parts of the task now; gate only the irreversible step.
 
 #### How to Use
 
@@ -69,7 +83,7 @@ The platform monitors this file and presents requests to the operator in the Ope
   "$schema": "operator-queue-v1",
   "requests": [
     {
-      "id": "req-20260307-001",
+      "id": "approval-<execution_id>-deploy",
       "type": "approval",
       "status": "pending",
       "priority": "high",
@@ -77,20 +91,25 @@ The platform monitors this file and presents requests to the operator in the Ope
       "question": "Full description with context. Markdown supported.",
       "options": ["approve", "reject"],
       "context": { "relevant_key": "relevant_value" },
-      "created_at": "2026-03-07T10:00:00Z"
+      "created_at": "2026-03-07T10:00:00Z",
+      "expires_at": "2026-03-09T10:00:00Z"
     }
   ]
 }
 ```
 
+**Request IDs must be globally unique.** Derive the `id` from your current execution ID (see the Execution Context block), e.g. `approval-{execution_id}-{short-slug}`. Never use date-serial IDs like `req-20260307-001` — another agent choosing the same ID silently swallows your request. Re-using your own derived ID when the same task runs again is safe and intentional: it prevents duplicate requests.
+
 **Request types:**
-- `approval` — You need a yes/no or multi-choice decision. Provide `options` array.
+- `approval` — You need a yes/no or multi-choice decision. Provide `options` array. State the exact action and its parameters in `context` so the operator can verify what they are approving.
 - `question` — You need freeform guidance. No `options` needed.
 - `alert` — You're reporting a situation. No decision needed, just acknowledgement.
 
 **Priority levels:** `critical`, `high`, `medium`, `low`
 
-**Check for responses** by reading the file and looking for items with `status: "responded"`. The platform will set `response`, `responded_by`, and `responded_at` fields.
+**Set `expires_at`** on requests that gate an action. If it passes without a response the platform marks the item `expired` — treat that as "not approved; do not proceed."
+
+**Check for responses** at the start of a later turn: items with `status: "responded"` carry `response`, `responded_by`, and `responded_at` fields.
 
 **After processing a response**, update the item's status to `"acknowledged"`.
 
@@ -477,11 +496,19 @@ def _render_collaborators(ctx: ExecutionContext) -> Optional[str]:
 
 
 def _mode_guidance(mode: str) -> str:
+    # The task-mode carve-out below is the #1402 async human-gate contract:
+    # without it, "execute to completion — do not ask questions" directly
+    # contradicts the Operator Communication instruction to park an approval
+    # before an irreversible action. Sentinel phrase "fire-and-park" is
+    # test-locked (tests/unit/test_1402_prompt_contract.py).
     if mode == "chat":
         return "Interactive session. You may ask clarifying questions if the request is ambiguous."
     return (
         "Autonomous execution. Do not ask clarifying questions — execute to completion "
-        "and return your results. Plan your work to finish well within the timeout budget."
+        "and return your results. Plan your work to finish well within the timeout budget. "
+        "One exception: an irreversible action that needs operator approval — park an "
+        "approval request in the operator queue and end your turn (fire-and-park); "
+        "never block the turn waiting for the response."
     )
 
 
@@ -641,6 +668,38 @@ def build_public_channel_caller_prompt(
         public_prompt = None
     parts = [p for p in (public_prompt, memory_system_prompt) if p and p.strip()]
     return "\n\n".join(parts) if parts else None
+
+
+def build_voice_capability_prompt(agent_name: str, channel: str) -> Optional[str]:
+    """Advertise the ``send_voice_reply`` capability (ent#117) — ONLY when voice is
+    enabled for the agent AND allowed on ``channel`` AND platform TTS is configured,
+    so the agent never attempts voice where it can't be delivered (FR-5).
+
+    Returns an instruction fragment to fold into the channel caller prompt, or None.
+    Never raises — a lookup failure degrades to no advertisement (the tool still
+    self-gates server-side)."""
+    try:
+        import services.tts_service as tts_service
+        if not tts_service.is_available():
+            return None
+        cfg = db.get_tts_config(agent_name)
+        if not cfg.get("enabled"):
+            return None
+        if not cfg.get("channels", {}).get(channel, False):
+            return None
+    except Exception as e:  # noqa: BLE001 — never block a chat on this
+        logger.warning("voice-capability prompt check failed for %s: %s", agent_name, e)
+        return None
+    return (
+        "## Speaking (voice replies)\n"
+        "You can reply with a spoken voice note on this channel using the "
+        "`send_voice_reply` tool (pass your current execution_id). Your replies are "
+        "TEXT by default — only use voice when a spoken reply genuinely fits (a short "
+        "confirmation, greeting, or answer meant to be heard). Keep spoken text short. "
+        "After sending a voice note, end your turn with `[NO_REPLY]` if you do NOT also "
+        "want the same content sent as text. If voice can't be delivered the tool tells "
+        "you and you should just reply with text."
+    )
 
 
 def is_execution_context_enabled() -> bool:

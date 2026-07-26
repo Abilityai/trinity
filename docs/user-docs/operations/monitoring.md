@@ -78,16 +78,45 @@ A background service that automatically recovers stuck resources:
 
 ### Retention Sweeps
 
-The same cleanup service runs daily retention sweeps to keep the database lean:
+The same cleanup service runs retention sweeps to keep the database lean. Setting any window to `0` disables that sweep.
 
 | Sweep | Default | Setting |
 |-------|---------|---------|
 | `schedule_executions.execution_log` nulled past | 30 days | `execution_log_retention_days` |
 | Terminal `schedule_executions` rows deleted past | 90 days | `execution_row_retention_days` |
 | `agent_health_checks` rows deleted past | 7 days | `health_check_retention_days` |
-| `audit_log` rows deleted past | 365 days | `AUDIT_LOG_RETENTION_DAYS` (floor 365) |
+| Agent soft-delete purged past | 180 days | `agent_soft_delete_retention_days` |
+| Schedule soft-delete purged past | 30 days | `schedule_soft_delete_retention_days` |
+| Agent reports deleted past | 90 days | `agent_reports_retention_days` |
+| Terminal operator-queue rows deleted past | 90 days | `operator_queue_retention_days` |
+| `audit_log` rows deleted past | 365 days | `AUDIT_LOG_RETENTION_DAYS` (floor 365, exempt) |
 
-Each sweep is capped at 5,000 rows per cycle, so the first post-deploy backfill spans hours, not minutes. Setting any retention value to `0` disables that sweep. A daily VACUUM at 04:30 UTC reclaims freed pages.
+The **agent soft-delete** purge is special: it destroys the agent's data volumes, so it is a recovery window, not a log window — it is **exempt** from the community floor below.
+
+The 5,000-row figure some tooling reports bounds each **transaction**, not each sweep. Most prunes drain the whole candidate set in one sweep; the real bound on destruction is the blast-radius guard below, not chunking. A daily VACUUM at 04:30 UTC reclaims freed pages.
+
+#### Community floor (fresh installs)
+
+Fresh community installs are **seeded** with a 5-day minimum retention on the log windows. This applies to **new installs only** — it is never a retroactive change to an existing install, and the agent soft-delete window is exempt in every edition. Any admin can widen a window at any time.
+
+#### Blast-radius guard & admin approval
+
+A sweep that would delete more than a fixed safety threshold (**1,000 rows**) of a single table **refuses** to run, logs an error, and raises an operator-queue alarm instead of deleting. An admin must then approve it in **Settings → the retention panel**, which shows a pending-acknowledgements banner.
+
+The approval is:
+
+- **Admin- and human-only** — agent-scoped keys cannot approve.
+- **Bound to the exact window in force** — approving names the deletion it authorizes; a mismatched window is rejected.
+- **Single-use** — the guard re-arms after the prune runs, so each over-threshold sweep needs its own approval.
+
+Agent-purge sweeps always require an acknowledgement because every one destroys data volumes.
+
+Endpoints:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/settings/retention` | GET | Effective windows (per-window value + source), edition, community-floor days, the read-only guard threshold, and pending acknowledgements (admin) |
+| `/api/settings/retention/acknowledge` | POST | Approve one over-threshold prune — body `{key, window_days}` (admin, human-only) |
 
 ## Real-Time Event Reliability
 

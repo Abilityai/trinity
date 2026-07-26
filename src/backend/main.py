@@ -54,7 +54,9 @@ from routers.credentials import router as credentials_router
 from routers.templates import router as templates_router
 from routers.sharing import router as sharing_router, set_websocket_manager as set_sharing_ws_manager
 from routers.mcp_keys import router as mcp_keys_router
-from routers.chat import router as chat_router, set_websocket_manager as set_chat_ws_manager
+from routers.chat import router as chat_router
+from services.chat_persistence_service import set_websocket_manager as set_chat_persistence_ws_manager
+from services.chat_execution_service import set_websocket_manager as set_chat_execution_ws_manager
 from routers.sessions import router as sessions_router  # SESSION_TAB_2026-04 Phase 2
 from routers.fan_out import router as fan_out_router
 from routers.schedules import router as schedules_router
@@ -79,12 +81,15 @@ from routers.audit_log import router as audit_log_router  # SEC-001 / Issue #20
 from routers.canary import router as canary_router  # CANARY-001 / Issue #411
 from routers.compatibility import router as compatibility_router  # #668 agent compatibility
 from routers.skills import router as skills_router
-from routers.internal import router as internal_router
+from routers.internal import router as internal_router, pull_router as internal_pull_router
 from routers.tags import router as tags_router
 from routers.system_views import router as system_views_router
 from routers.notifications import router as notifications_router, set_websocket_manager as set_notifications_ws_manager, set_filtered_websocket_manager as set_notifications_filtered_ws_manager
 from routers.reports import router as reports_router
+from routers.product_events import router as product_events_router
+from routers.reminders import router as reminders_router
 from services.report_service import set_websocket_manager as set_reports_ws_manager, set_filtered_websocket_manager as set_reports_filtered_ws_manager
+from routers.connector import router as connector_router  # per-agent MCP connector (ent#46, OSS-core #118)
 from routers.subscriptions import router as subscriptions_router
 from routers.monitoring import router as monitoring_router, set_websocket_manager as set_monitoring_ws_manager, set_filtered_websocket_manager as set_monitoring_filtered_ws_manager
 from routers.slack import public_router as slack_public_router, auth_router as slack_auth_router
@@ -117,7 +122,12 @@ from services.activity_service import activity_service
 
 # Import system agent service
 from services.system_agent_service import system_agent_service
-from services.cornelius_agent_service import cornelius_agent_service
+from services.system_seed_service import ensure_first_run_seeded
+
+# Strong reference to the lifespan first-run seed task — a bare create_task is
+# GC-collectable mid-flight (the #1083 asyncio footgun), and the seed pass is
+# long-lived (Cornelius + a multi-agent deploy + starts).
+_first_run_seed_task: Optional[asyncio.Task] = None
 
 # Import log archive service
 from services.log_archive_service import log_archive_service
@@ -241,7 +251,8 @@ set_agents_filtered_ws_manager(filtered_manager)
 set_agent_rename_ws_manager(manager)
 set_agent_rename_filtered_ws_manager(filtered_manager)
 set_sharing_ws_manager(manager)
-set_chat_ws_manager(manager)
+set_chat_persistence_ws_manager(manager)  # #1483: chat_response_ready broadcast
+set_chat_execution_ws_manager(manager)    # #1483: agent_collaboration + self_task broadcasts
 set_public_links_ws_manager(manager)
 set_notifications_ws_manager(manager)
 set_notifications_filtered_ws_manager(filtered_manager)
@@ -397,20 +408,24 @@ async def lifespan(app: FastAPI):
             logger.error(f"Error deploying system agent: {e}")
             # Don't fail startup - system agent is important but not critical for platform operation
 
-        # Seed the default Cornelius agent on a fresh install (ent#107). This is the
-        # UPGRADE / safety-net path: a fresh install's FIRST seed happens from the
-        # setup-completion hook (routers/setup.py, right after the admin is created),
-        # but an already-set-up empty install upgraded to this version has no such
-        # hook to fire — so seed here on the first post-upgrade boot. Gated on
-        # setup_completed (the admin owner must exist) and fire-and-forget via
-        # create_task so a container create never blocks readiness. The service is
-        # idempotent, first-run-only, fresh-install-scoped, and Redis-locked across
-        # workers, so scheduling it in every worker is safe.
+        # First-run seeding on a fresh install: Cornelius (ent#107) + the default
+        # system manifest (trinity-enterprise#124), sequenced under ONE persisted
+        # freshness verdict by system_seed_service.ensure_first_run_seeded. This is
+        # the UPGRADE / safety-net path: a fresh install's FIRST seed happens from
+        # the setup-completion hook (routers/setup.py, right after the admin is
+        # created), but an already-set-up empty install upgraded to this version has
+        # no such hook to fire — so seed here on the first post-upgrade boot. Gated
+        # on setup_completed (the admin owner must exist) and fire-and-forget so a
+        # container create never blocks readiness; the task handle is held in a
+        # module global (asyncio GC footgun). Both seeders are idempotent,
+        # first-run-only, fresh-install-scoped, and Redis-locked across workers, so
+        # scheduling this in every worker is safe.
         try:
             if _db.get_setting_value('setup_completed', 'false') == 'true':
-                asyncio.create_task(cornelius_agent_service.ensure_seeded())
+                global _first_run_seed_task
+                _first_run_seed_task = asyncio.create_task(ensure_first_run_seeded())
         except Exception as e:
-            logger.error(f"Error scheduling Cornelius seed: {e}")
+            logger.error(f"Error scheduling first-run seed: {e}")
     else:
         logger.info("Docker not available - running in demo mode")
 
@@ -472,6 +487,19 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Error starting session cleanup service: {e}")
     asyncio.create_task(_start_session_cleanup_delayed())
+
+    # ent#12: Tier-2 opt-in telemetry-sharing heartbeat. Sleeps-first (no boot
+    # burst) and is inert unless the operator opted in AND the config switch is
+    # on — a cheap consent read otherwise. Staggered +9s.
+    async def _start_telemetry_sharing_delayed():
+        await asyncio.sleep(9)
+        try:
+            from services.telemetry_sharing_service import telemetry_sharing_service
+            telemetry_sharing_service.start()
+            logger.info("Telemetry-sharing heartbeat started (staggered +9s)")
+        except Exception as e:
+            logger.error(f"Error starting telemetry-sharing service: {e}")
+    asyncio.create_task(_start_telemetry_sharing_delayed())
 
     # Issue #389: Sync health service — 60s poll cadence, staggered +5s.
     async def _start_sync_health_delayed():
@@ -934,10 +962,14 @@ app.include_router(canary_router)  # CANARY-001 / #411: Invariant violations
 app.include_router(compatibility_router)  # #668: Agent compatibility validation
 app.include_router(skills_router) # Skills Management System
 app.include_router(internal_router)  # Internal agent-to-backend endpoints (no auth)
+app.include_router(internal_pull_router)  # #1081 pull seams — dual auth: internal secret OR agent's own scoped MCP key
 app.include_router(tags_router)  # Agent Tags (ORG-001)
 app.include_router(system_views_router)  # System Views (ORG-001 Phase 2)
 app.include_router(notifications_router)  # Agent Notifications (NOTIF-001)
 app.include_router(reports_router)  # Agent Reports (#918)
+app.include_router(product_events_router)  # Local product-event capture (ent#184)
+app.include_router(reminders_router)  # Agent Self-Reminders (#1296)
+app.include_router(connector_router)  # Per-agent MCP connector (ent#46, OSS-core #118)
 app.include_router(messages_router)  # Proactive Messaging (#321)
 app.include_router(public_memory_router)  # MEM-001 write path (#888)
 app.include_router(subscriptions_router)  # Subscription Management (SUB-001)
@@ -989,33 +1021,61 @@ app.include_router(ws_tickets_router)  # WebSocket auth tickets (#550)
 # repo is restructured into `backend/` and `frontend/` subdirs so the
 # same repo can be dual-mounted (`src/backend/enterprise/` for Python,
 # `src/frontend/src/enterprise/` for Vite).
-try:
-    from enterprise.backend import register_enterprise  # type: ignore[import-not-found]
-    register_enterprise(app)
-    # `print(..., flush=True)`: this import block runs at module init,
-    # which is BEFORE `lifespan` calls `setup_logging()`. The default
-    # Python logger drops INFO-level records, so `logger.info` here
-    # would be silently swallowed. Print to stdout instead — docker
-    # logs captures it for ops + the CI workflow greps for it.
-    print("Trinity Enterprise modules registered", flush=True)
-except ImportError:
-    print(
-        "Trinity Enterprise submodule not present — OSS-only build "
-        "(this is normal; enterprise modules are an optional private submodule)",
-        flush=True,
-    )
-except Exception as e:
-    # A BUG in enterprise registration (schema init, migration, router
-    # mount, pusher start) must NOT take down the core platform. Degrade
-    # to OSS-only and surface loudly instead of crashing boot. Any modules
-    # that registered before the failure stay active; the rest are absent
-    # (their entitlement simply won't appear in feature-flags). (#995/#997)
+def _report_enterprise_failure(exc: BaseException) -> None:
+    """Surface a real enterprise-registration failure loudly.
+
+    A BUG in registration (schema init, migration, router mount, a bad import)
+    must NOT take down the core platform — degrade and report instead of
+    crashing boot. Modules that registered before the failure stay active.
+    """
     import traceback
     print(
-        f"Trinity Enterprise registration FAILED — continuing OSS-only: {e!r}",
+        f"Trinity Enterprise registration FAILED — continuing OSS-only: {exc!r}",
         flush=True,
     )
     traceback.print_exc()
+
+
+try:
+    from enterprise.backend import register_enterprise  # type: ignore[import-not-found]
+except ModuleNotFoundError as e:
+    # SCOPE: this arm covers ONLY the top-level import. It used to wrap
+    # `register_enterprise(app)` too, so a ModuleNotFoundError raised deep inside
+    # a module's `register()` — enterprise modules lazily import OSS seams there
+    # — was reported as the calm line below. On a MOUNTED install that message is
+    # actively false, the diagnostic traceback never printed, and the failing
+    # module's routes could stay mounted-but-unentitled, 403-ing forever with
+    # nothing in the logs connecting the two (#1653, spotted by @vybe).
+    #
+    # Even here "not present" is only true when the missing module IS the
+    # enterprise package. If `enterprise.backend` imports some third-party
+    # package that isn't installed, that is a real failure wearing the same
+    # exception type — so check which module went missing.
+    if (e.name or "").split(".")[0] == "enterprise":
+        print(
+            "Trinity Enterprise submodule not present — OSS-only build "
+            "(this is normal; enterprise modules are an optional private submodule)",
+            flush=True,
+        )
+    else:
+        _report_enterprise_failure(e)
+except ImportError as e:
+    # A non-ModuleNotFoundError ImportError from the top-level import (e.g. the
+    # package exists but imports a name that doesn't) is a real bug, not an
+    # absent submodule.
+    _report_enterprise_failure(e)
+else:
+    try:
+        register_enterprise(app)
+        # `print(..., flush=True)`: this block runs at module init, BEFORE
+        # `lifespan` calls `setup_logging()`. The default Python logger drops
+        # INFO records, so `logger.info` here would be silently swallowed. Print
+        # to stdout — docker logs captures it and CI greps for this exact string.
+        print("Trinity Enterprise modules registered", flush=True)
+    except Exception as e:
+        # ANY failure inside registration is a bug and gets the diagnostic —
+        # including ModuleNotFoundError, which is why this is a separate try.
+        _report_enterprise_failure(e)
 
 
 # WebSocket endpoint

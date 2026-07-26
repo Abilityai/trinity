@@ -261,6 +261,35 @@ export function createAgentTools(
             "Branch to track for this agent. Default: 'main'. " +
             "Can also be specified in template URL as 'github:owner/repo@branch'."
           ),
+        ephemeral: z
+          .object({
+            max_executions: z
+              .number()
+              .int()
+              .min(1)
+              .max(100)
+              .optional()
+              .describe("Discard after this many terminal executions (1-100)"),
+            ttl_seconds: z
+              .number()
+              .int()
+              .min(60)
+              .optional()
+              .describe(
+                "Discard after this many seconds (60..platform ceiling, default ceiling 24h)"
+              ),
+          })
+          .optional()
+          .describe(
+            "Create as an ephemeral 'ghost' agent: budgeted, volume-less, hard-discarded " +
+            "when the budget is exhausted (no soft-delete/recovery). At least one of " +
+            "max_executions/ttl_seconds is required; a TTL is always stamped so no ghost is " +
+            "immortal. The server suffixes the name for uniqueness — use the returned name. " +
+            "Ghost keys are restricted to heartbeat/reports/notifications/self-info. " +
+            "Intended for heterogeneous per-repo jobs (a different repo/config per ghost); " +
+            "for burst parallelism on ONE agent use fan_out instead. " +
+            "Requires the ephemeral_agents entitlement (403 otherwise)."
+          ),
       }),
       execute: async (
         args: {
@@ -272,6 +301,7 @@ export function createAgentTools(
           mcp_servers?: string[];
           custom_instructions?: string;
           source_branch?: string;
+          ephemeral?: { max_executions?: number; ttl_seconds?: number };
         },
         context: any
       ) => {
@@ -289,6 +319,7 @@ export function createAgentTools(
           mcp_servers: args.mcp_servers,
           custom_instructions: args.custom_instructions,
           source_branch: args.source_branch,
+          ephemeral: args.ephemeral,
         };
 
         // Get auth context from FastMCP session (set by authenticate callback)
@@ -357,9 +388,13 @@ export function createAgentTools(
     deleteAgent: {
       name: "delete_agent",
       description:
-        "Delete an agent from the Trinity platform. " +
-        "This will stop the agent container and remove it. " +
-        "Requires admin access. This action is irreversible.",
+        "Delete an agent from the Trinity platform (owner or admin). " +
+        "Durable agents are SOFT-deleted: the container is removed but data is " +
+        "recoverable by an admin until the retention window (default 180d) expires. " +
+        "Ephemeral 'ghost' agents are HARD-discarded immediately: container, storage, " +
+        "and DB rows are purged with no recovery — this is also how a parent agent " +
+        "discards a ghost it spawned before its budget expires. Agent-scoped keys may " +
+        "only delete agents they spawned.",
       parameters: z.object({
         name: z.string().describe("The name of the agent to delete"),
       }),
@@ -633,11 +668,11 @@ export function createAgentTools(
     getAgentSshAccess: {
       name: "get_agent_ssh_access",
       description:
-        "Generate ephemeral SSH credentials for direct terminal access to an agent container. " +
-        "Supports two auth methods: 'key' (provide your public key) or 'password' (one-liner with sshpass). " +
-        "Credentials expire automatically (default: 4 hours). Agent must be running. " +
-        "For key auth: generate a keypair locally (ssh-keygen -t ed25519) and provide the PUBLIC key. " +
-        "The server never generates or handles private keys. Admin only.",
+        "Generate ephemeral, key-based SSH credentials for direct terminal access to an agent container. " +
+        "Generate a keypair locally (ssh-keygen -t ed25519) and provide the PUBLIC key; the server injects " +
+        "it into the container and it expires automatically (default: 4 hours). Agent must be running. " +
+        "The server never generates or handles private keys. Admin only. " +
+        "(Password auth was removed — it never worked; key auth is the only method.)",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent to access"),
         ttl_hours: z
@@ -645,26 +680,20 @@ export function createAgentTools(
           .optional()
           .default(4)
           .describe("How long the SSH key should be valid (0.1-24 hours, default: 4)"),
-        auth_method: z
-          .enum(["key", "password"])
-          .optional()
-          .default("key")
-          .describe("Authentication method: 'key' for SSH public key injection (more secure), 'password' for one-liner with sshpass (convenient, requires sshpass installed)"),
         public_key: z
           .string()
-          .optional()
-          .describe("Your SSH public key (required for 'key' auth method). Generate with: ssh-keygen -t ed25519. Provide the contents of ~/.ssh/id_ed25519.pub"),
+          .describe("Your SSH public key (required). Generate with: ssh-keygen -t ed25519. Provide the contents of ~/.ssh/id_ed25519.pub"),
       }),
       execute: async (
-        { agent_name, ttl_hours = 4, auth_method = "key", public_key }: { agent_name: string; ttl_hours?: number; auth_method?: "key" | "password"; public_key?: string },
+        { agent_name, ttl_hours = 4, public_key }: { agent_name: string; ttl_hours?: number; public_key?: string },
         context?: { session?: McpAuthContext }
       ) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
 
-        console.log(`[get_agent_ssh_access] Generating SSH access for agent '${agent_name}' (TTL: ${ttl_hours}h, method: ${auth_method})`);
+        console.log(`[get_agent_ssh_access] Generating key-based SSH access for agent '${agent_name}' (TTL: ${ttl_hours}h)`);
 
-        const response = await apiClient.createSshAccess(agent_name, ttl_hours, auth_method, public_key);
+        const response = await apiClient.createSshAccess(agent_name, ttl_hours, public_key);
 
         return JSON.stringify(response, null, 2);
       },
@@ -887,9 +916,13 @@ export function createAgentTools(
       description:
         "Set a per-agent GitHub Personal Access Token. " +
         "The PAT is validated against GitHub API before saving and encrypted at rest. " +
-        "When set, git operations for this agent will use this PAT instead of the global PAT. " +
+        "When set, this agent uses this PAT (instead of the global PAT) for git AND " +
+        "for the `gh` CLI / GitHub REST API — the container exposes it as GITHUB_PAT " +
+        "plus GH_TOKEN/GITHUB_TOKEN, so `gh` and `gh api` auto-authenticate (#1574). " +
+        "The token must carry the scopes the operation needs (e.g. `repo`, or Issues: " +
+        "Read and write) — wiring makes it available but cannot grant missing scopes. " +
         "To clear the PAT and revert to global, pass an empty string. " +
-        "Note: Agent must be restarted for git operations to use the new PAT.",
+        "Note: Agent must be restarted for the new PAT to take effect.",
       parameters: z.object({
         agent_name: z
           .string()

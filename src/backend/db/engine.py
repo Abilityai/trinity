@@ -10,9 +10,10 @@ SQLite stays the zero-config default — nothing changes without DATABASE_URL.
 
 All 44 db modules route through this engine via SQLAlchemy Core. The raw
 sqlite3 context manager in `db/connection.py` remains for sqlite-specific
-maintenance paths (PRAGMA migrations, WAL checkpoint, VACUUM, the /health
-migration gate — all gated to `is_sqlite()` at their call sites) and for the
-default-off canary snapshot reader (PG support is a #300 follow-up).
+maintenance paths only (PRAGMA migrations, WAL checkpoint, VACUUM, the /health
+migration gate — all gated to `is_sqlite()` at their call sites). The canary
+snapshot reader was migrated onto this engine seam in #1540, so it now honors
+DATABASE_URL like every other read path.
 """
 
 import os

@@ -56,33 +56,74 @@
         <div>
           <div class="flex items-center gap-2">
             <!-- Editable agent name -->
-            <template v-if="isEditingName">
+            <!-- ent#181: the demoted slug rename. Separate mode, explicit copy —
+                 it stops the container, re-keys ~20 tables and leaves the
+                 agent's volumes under the old name (#1664). -->
+            <template v-if="isEditingSlug">
+              <input
+                ref="slugInput"
+                v-model="editedSlug"
+                type="text"
+                class="text-2xl font-bold text-gray-900 dark:text-white bg-transparent border-b-2 border-status-warning-500 focus:outline-none py-0 px-0 font-mono"
+                :class="{ 'border-status-danger-500': nameError }"
+                @keydown.enter="saveSlug"
+                @keydown.escape="cancelEditSlug"
+              />
+              <button
+                @click="saveSlug"
+                class="px-2 py-0.5 text-xs rounded bg-status-warning-600 text-white hover:bg-status-warning-700"
+              >Rename id</button>
+              <button
+                @click="cancelEditSlug"
+                class="px-2 py-0.5 text-xs rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300"
+              >Cancel</button>
+              <span v-if="nameError" class="text-xs text-status-danger-500">{{ nameError }}</span>
+              <span v-else class="text-xs text-status-warning-600 dark:text-status-warning-400">
+                Changes the agent's id: restarts it, re-keys its URLs and MCP keys, and its
+                existing data volumes stay under the old id. To just change the displayed
+                name, cancel and use the pencil.
+              </span>
+            </template>
+            <template v-else-if="isEditingName">
               <input
                 ref="nameInput"
                 v-model="editedName"
                 type="text"
                 class="text-2xl font-bold text-gray-900 dark:text-white bg-transparent border-b-2 border-action-primary-500 focus:outline-none focus:border-action-primary-600 py-0 px-0"
                 :class="{ 'border-status-danger-500': nameError }"
+                :placeholder="agent.name"
                 @keydown.enter="saveName"
                 @keydown.escape="cancelEditName"
                 @blur="saveName"
               />
               <span v-if="nameError" class="text-xs text-status-danger-500">{{ nameError }}</span>
+              <span v-else class="text-xs text-gray-400 dark:text-gray-500">
+                Display label — empty resets to <code class="font-mono">{{ agent.name }}</code>
+                <button
+                  @mousedown.prevent="startEditSlug"
+                  class="ml-2 underline hover:text-gray-600 dark:hover:text-gray-300"
+                >Rename the id instead…</button>
+              </span>
             </template>
             <template v-else>
-              <h1 class="text-2xl font-bold text-gray-900 dark:text-white">{{ agent.name }}</h1>
-              <!-- Rename pencil icon (only for owners/admins, not system agents) -->
+              <h1 class="text-2xl font-bold text-gray-900 dark:text-white">{{ displayName }}</h1>
+              <!-- ent#181: the pencil edits the LABEL. The slug never moves. -->
               <button
                 v-if="agent.can_share && !agent.is_system"
                 @click="startEditName"
                 class="text-gray-400 dark:text-gray-500 hover:text-action-primary-600 dark:hover:text-action-primary-400 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                title="Rename agent"
+                title="Rename label"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
                 </svg>
               </button>
             </template>
+          </div>
+          <!-- ent#181 FR-4: the slug is what URLs, MCP keys, containers and
+               volumes key on — keep it visible when a label hides it. -->
+          <div v-if="showsSlug" class="mt-0.5">
+            <code class="text-xs font-mono text-gray-400 dark:text-gray-500">{{ agent.name }}</code>
           </div>
           <div class="flex items-center space-x-2 mt-1.5">
             <!-- Status badge -->
@@ -103,6 +144,14 @@
             </span>
             <!-- Runtime badge (Claude/Gemini) -->
             <RuntimeBadge :runtime="agent.runtime" />
+            <!-- Ephemeral ghost badge (trinity-enterprise#69) -->
+            <span
+              v-if="agent.ephemeral"
+              class="px-2 py-0.5 text-xs font-semibold rounded-full bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300"
+              title="Ephemeral agent — budgeted, auto-discarded when its executions or TTL run out (no recovery)"
+            >
+              GHOST
+            </span>
             <!-- System agent badge -->
             <span
               v-if="agent.is_system"
@@ -466,6 +515,7 @@ import { ref, computed, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import AgentAvatar from './AgentAvatar.vue'
 import RuntimeBadge from './RuntimeBadge.vue'
+import { agentDisplayName, hasDistinctLabel } from '../utils/agentName'
 import SparklineChart from './SparklineChart.vue'
 import RunningStateToggle from './RunningStateToggle.vue'
 import AutonomyToggle from './AutonomyToggle.vue'
@@ -477,6 +527,14 @@ import { useFormatters } from '../composables'
 const isEditingName = ref(false)
 const editedName = ref('')
 const nameError = ref('')
+
+// ent#181: one resolution helper, never `label || name` inline — a name resolved
+// differently per surface shows one agent under two names (§1.3.1 FR-3).
+const isEditingSlug = ref(false)
+const editedSlug = ref('')
+const slugInput = ref(null)
+const displayName = computed(() => agentDisplayName(props.agent))
+const showsSlug = computed(() => hasDistinctLabel(props.agent))
 const nameInput = ref(null)
 
 const props = defineProps({
@@ -614,10 +672,12 @@ const emit = defineEmits([
   'add-tag',
   'remove-tag',
   'rename',
+  'set-label',
   'open-avatar-modal',
   'cycle-emotion',
   'change-subscription'
 ])
+
 
 const router = useRouter()
 
@@ -629,9 +689,14 @@ function goToBrain() {
   router.push({ name: 'AgentBrainOrb', params: { name: props.agent.name } })
 }
 
-// Name editing functions
+// Label editing (ent#181). The pencil edits `display_label`; the slug
+// (`agent.name`) is untouched — a slug rename is the separate, heavyweight
+// operation behind "Advanced" below.
 function startEditName() {
-  editedName.value = props.agent.name
+  // Pre-fill the LABEL, not the slug: pre-filling the slug invites someone to
+  // "edit" a name they never chose and turns a label edit into a lookalike of
+  // the destructive rename.
+  editedName.value = props.agent.display_label || ''
   nameError.value = ''
   isEditingName.value = true
   nextTick(() => {
@@ -648,21 +713,54 @@ function cancelEditName() {
 
 function saveName() {
   const trimmed = editedName.value.trim()
+  const current = props.agent.display_label || ''
 
-  // Validate
-  if (!trimmed) {
-    nameError.value = 'Name cannot be empty'
-    return
-  }
-
-  if (trimmed === props.agent.name) {
+  if (trimmed === current) {
     cancelEditName()
     return
   }
-
-  // Emit rename event for parent to handle
-  emit('rename', trimmed)
+  // Empty CLEARS the label (the agent renders under its slug again) — it is not
+  // an error. "No label" is a valid state, and an empty string would render as
+  // a nameless agent everywhere.
+  emit('set-label', trimmed || null)
   isEditingName.value = false
+  nameError.value = ''
+}
+
+// ent#181: the slug rename, demoted. Same emit as before (`rename` ->
+// PUT /rename) — only its prominence and its copy change. Kept rather than
+// removed: owners who genuinely need to re-key an agent still can.
+function startEditSlug() {
+  isEditingName.value = false
+  editedSlug.value = props.agent.name
+  nameError.value = ''
+  isEditingSlug.value = true
+  nextTick(() => {
+    slugInput.value?.focus()
+    slugInput.value?.select()
+  })
+}
+
+function cancelEditSlug() {
+  isEditingSlug.value = false
+  editedSlug.value = ''
+  nameError.value = ''
+}
+
+function saveSlug() {
+  const trimmed = editedSlug.value.trim()
+  if (!trimmed) {
+    nameError.value = 'Id cannot be empty'
+    return
+  }
+  if (trimmed === props.agent.name) {
+    cancelEditSlug()
+    return
+  }
+  // No @blur save here, unlike the label editor: re-keying an agent should take
+  // a deliberate click, not a stray focus change.
+  emit('rename', trimmed)
+  isEditingSlug.value = false
   nameError.value = ''
 }
 

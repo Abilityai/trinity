@@ -204,3 +204,40 @@ def test_count_non_system_agents_real_db_facade():
     n = real_db.count_non_system_agents()
     assert isinstance(n, int)
     assert n >= 0
+
+
+# --- precomputed freshness verdict (trinity-enterprise#124) --------------------
+
+def test_injected_fresh_true_skips_own_count(env):
+    """The ent#124 orchestrator's verdict replaces the live count — sibling-
+    seeded agents (the starter fleet) must not flip a fresh install to
+    'not fresh' on a retry pass."""
+    env.monkeypatch.setattr(
+        cas.db, "count_non_system_agents",
+        lambda: (_ for _ in ()).throw(AssertionError("must not count when verdict injected")),
+    )
+
+    result = asyncio.run(svc.ensure_seeded(fresh=True))
+
+    env.provision.assert_awaited_once()
+    assert result["action"] == "created"
+
+
+def test_injected_fresh_false_converges_flag_without_provisioning(env):
+    env.monkeypatch.setattr(cas.db, "count_non_system_agents", lambda: 0)
+
+    result = asyncio.run(svc.ensure_seeded(fresh=False))
+
+    env.provision.assert_not_awaited()
+    assert env.settings.get("cornelius_seeded") == "true"
+    assert result["action"] == "skipped_not_fresh"
+
+
+def test_fresh_none_preserves_legacy_count_path(env):
+    env.monkeypatch.setattr(cas.db, "count_non_system_agents", lambda: 3)
+
+    result = asyncio.run(svc.ensure_seeded(fresh=None))
+
+    env.provision.assert_not_awaited()
+    assert env.settings.get("cornelius_seeded") == "true"
+    assert result["action"] == "skipped_not_fresh"

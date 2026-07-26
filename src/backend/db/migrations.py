@@ -2500,6 +2500,72 @@ def _migrate_agent_loops_tables(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_reminders_table(cursor, conn):
+    """Create the agent_reminders table + indexes (#1296).
+
+    Durable one-shot deferred self-trigger: an agent schedules a future
+    re-invocation of itself. The standalone scheduler arms a DateTrigger per
+    pending row and, on fire, dispatches a normal execution of the same agent
+    (``triggered_by="reminder"``). Mirrored by Alembic 0028_agent_reminders and
+    the DDL in ``db/schema.py`` / MetaData in ``db/tables.py``. Kept
+    byte-consistent across all four.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_reminders (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            message TEXT NOT NULL,
+            fire_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            model TEXT,
+            timeout_seconds INTEGER,
+            allowed_tools TEXT,
+            owner_id INTEGER,
+            created_by_email TEXT,
+            source_agent_name TEXT,
+            source_mcp_key_id TEXT,
+            execution_id TEXT,
+            fire_attempts INTEGER NOT NULL DEFAULT 0,
+            firing_at TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            fired_at TEXT,
+            cancelled_at TEXT
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_reminders_agent "
+        "ON agent_reminders(agent_name)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_reminders_active "
+        "ON agent_reminders(fire_at) WHERE status IN ('pending', 'firing')"
+    )
+    conn.commit()
+
+
+def _migrate_agent_loops_failure_policy(cursor, conn):
+    """Add per-loop failure-policy columns to agent_loops (#1167).
+
+    `on_failure` ('abort'|'continue', default 'abort' = current fail-fast
+    behavior), `max_consecutive_failures` (bounds continue mode), and a
+    `failed_runs` counter for the terminal summary.
+    """
+    _safe_add_column(
+        cursor, "agent_loops", "on_failure",
+        "ALTER TABLE agent_loops ADD COLUMN on_failure TEXT NOT NULL DEFAULT 'abort'",
+    )
+    _safe_add_column(
+        cursor, "agent_loops", "max_consecutive_failures",
+        "ALTER TABLE agent_loops ADD COLUMN max_consecutive_failures INTEGER NOT NULL DEFAULT 3",
+    )
+    _safe_add_column(
+        cursor, "agent_loops", "failed_runs",
+        "ALTER TABLE agent_loops ADD COLUMN failed_runs INTEGER NOT NULL DEFAULT 0",
+    )
+    conn.commit()
+
+
 def _migrate_users_suspended_at(cursor, conn):
     """#995 — user deactivation primitive.
 
@@ -2549,6 +2615,46 @@ def _migrate_operator_queue_cleared_at(cursor, conn):
         "operator_queue",
         "cleared_at",
         "ALTER TABLE operator_queue ADD COLUMN cleared_at TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_operator_queue_request_id(cursor, conn):
+    """#1631 — split the operator_queue `id`'s two jobs.
+
+    `id` was populated with an AGENT-AUTHORED correlation string from the
+    agent's ~/.trinity/operator-queue.json, but it is ALSO the fleet-wide
+    PRIMARY KEY. Two agents picking the same id → the second agent's item was
+    silently never created (the id-only exists() guard short-circuited it).
+
+    Split the jobs: `id` becomes a platform-minted uuid (global handle), and
+    the agent's string moves to a new `request_id` column scoped UNIQUE per
+    agent. Backfill existing rows with their own id (already unique fleet-wide,
+    so it can't violate the new (agent_name, request_id) index) and keeps old
+    rows addressable by request_id. Additive — no rebuild.
+
+    Idempotent (the runner calls migrations twice from init_database, and a
+    fresh install already has the column + index via db/schema.py) and tolerant
+    of the pre-operator_queue "no such table" case, like the sibling migration.
+    """
+    try:
+        added = _safe_add_column(
+            cursor,
+            "operator_queue",
+            "request_id",
+            "ALTER TABLE operator_queue ADD COLUMN request_id TEXT",
+        )
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e).lower():
+            return  # table not created yet (migration ordering on a bare DB)
+        raise
+    # Backfill only unbackfilled rows so a re-run is a no-op.
+    cursor.execute(
+        "UPDATE operator_queue SET request_id = id WHERE request_id IS NULL"
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_operator_queue_agent_request "
+        "ON operator_queue(agent_name, request_id)"
     )
     conn.commit()
 
@@ -2661,6 +2767,30 @@ def _migrate_agent_ownership_tts_voice(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_ephemeral(cursor, conn):
+    """trinity-enterprise#69 — ephemeral "ghost" agents + spawn provenance.
+
+    Adds the ephemeral-lifecycle columns to ``agent_ownership``:
+    ``is_ephemeral INTEGER DEFAULT 0`` (1 = budgeted ghost, hard-discarded at
+    budget), ``ephemeral_max_executions INTEGER`` (NULL = no exec budget),
+    ``ephemeral_expires_at TEXT`` (ALWAYS stamped for ghosts — no immortal
+    ghost; also the durable discard-intent marker), and the Part 2 spawn
+    provenance ``spawned_by_agent TEXT`` + ``spawned_by_key_id TEXT`` (set for
+    ANY agent-spawned creation, durable or ephemeral). All additive, nullable /
+    default-0 — existing rows unaffected. Mirrored by Alembic
+    0016_agent_ownership_ephemeral for PostgreSQL.
+    """
+    for col, ddl in (
+        ("is_ephemeral", "ALTER TABLE agent_ownership ADD COLUMN is_ephemeral INTEGER DEFAULT 0"),
+        ("ephemeral_max_executions", "ALTER TABLE agent_ownership ADD COLUMN ephemeral_max_executions INTEGER"),
+        ("ephemeral_expires_at", "ALTER TABLE agent_ownership ADD COLUMN ephemeral_expires_at TEXT"),
+        ("spawned_by_agent", "ALTER TABLE agent_ownership ADD COLUMN spawned_by_agent TEXT"),
+        ("spawned_by_key_id", "ALTER TABLE agent_ownership ADD COLUMN spawned_by_key_id TEXT"),
+    ):
+        _safe_add_column(cursor, "agent_ownership", col, ddl)
+    conn.commit()
+
+
 def _migrate_agent_loops_no_progress(cursor, conn):
     """#1157 — no-progress / doom-loop detection.
 
@@ -2721,6 +2851,304 @@ def _migrate_agent_reports_table(cursor, conn):
     )
     conn.commit()
     print("Created agent_reports table (#918)")
+
+
+def _migrate_agent_ownership_tts_channel_flags(cursor, conn):
+    """trinity-enterprise#117 — per-channel voice-allowed flags.
+
+    Adds ``tts_voice_{telegram,slack,whatsapp}_enabled INTEGER DEFAULT 1`` to
+    ``agent_ownership``. Voice enablement + voice selection stay agent-level
+    (``tts_voice_replies_enabled`` / ``tts_voice_id``); these three flags let an
+    owner allow/deny voice per channel. DEFAULT 1 so an already-enabled agent keeps
+    the capability on every channel (the behavior change is always-voice →
+    agent-chosen, not a loss of channel coverage). Mirrored by Alembic
+    0017_agent_ownership_tts_channel_flags for PostgreSQL.
+    """
+    for channel in ("telegram", "slack", "whatsapp"):
+        col = f"tts_voice_{channel}_enabled"
+        _safe_add_column(
+            cursor,
+            "agent_ownership",
+            col,
+            f"ALTER TABLE agent_ownership ADD COLUMN {col} INTEGER DEFAULT 1",
+        )
+    conn.commit()
+
+
+def _migrate_schedule_executions_source_channel(cursor, conn):
+    """trinity-enterprise#117 — persist channel delivery target on the execution.
+
+    Adds ``source_channel`` / ``source_channel_chat_id`` / ``source_channel_thread``
+    (all nullable TEXT) to ``schedule_executions``. Populated by the channel message
+    router so the ``send_voice_reply`` MCP tool (#117) can reconstruct the exact
+    delivery destination from an ``execution_id`` alone — works for group chats and
+    unverified users, with thread fidelity. NULL for non-channel executions.
+    Mirrored by Alembic 0018_schedule_executions_source_channel for PostgreSQL.
+    """
+    for col in ("source_channel", "source_channel_chat_id", "source_channel_thread"):
+        _safe_add_column(
+            cursor,
+            "schedule_executions",
+            col,
+            f"ALTER TABLE schedule_executions ADD COLUMN {col} TEXT",
+        )
+
+
+def _migrate_enterprise_connectors_table(cursor, conn):
+    """Create enterprise_connectors table (per-agent MCP connector, ent#46 → OSS #118).
+
+    Config row per agent: enabled + exposed-playbook allow-list. Schema is also in
+    db/schema.py for fresh installs; this handles existing installs. Idempotent —
+    ``CREATE TABLE IF NOT EXISTS`` on the SAME name the enterprise module used, so an
+    existing enterprise install adopts its data unchanged (zero data migration, no
+    duplicate-table drift, #118). Mirrored by Alembic 0015_enterprise_connectors for PG.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS enterprise_connectors (
+            agent_name TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            exposed_playbooks TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
+def _migrate_agent_sync_state_git_dir_bytes(cursor, conn):
+    """Add git_dir_bytes to agent_sync_state (#1596).
+
+    Records the agent's `.git` on-disk size (measured by the auto-sync heartbeat)
+    so operators can watch workspace-repo bloat before the disk fills. Nullable —
+    populated on the next sync of a git-enabled agent.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_sync_state",
+        "git_dir_bytes",
+        "ALTER TABLE agent_sync_state ADD COLUMN git_dir_bytes INTEGER",
+    )
+
+def _migrate_agent_sync_state_gc_signals(cursor, conn):
+    """Add pack_count / loose_objects / maintenance_failures to agent_sync_state (#1595).
+
+    Git-maintenance health signals measured by the auto-sync heartbeat
+    (`git count-objects -v`): pack and loose-object counts drive the bloat
+    observability the killed-auto-gc incident lacked, and the consecutive
+    maintenance-failure counter lets SyncHealthService edge-trigger an
+    operator alert. All nullable/default-0 — populated on the next sync of a
+    git-enabled agent.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_sync_state",
+        "pack_count",
+        "ALTER TABLE agent_sync_state ADD COLUMN pack_count INTEGER",
+    )
+    _safe_add_column(
+        cursor,
+        "agent_sync_state",
+        "loose_objects",
+        "ALTER TABLE agent_sync_state ADD COLUMN loose_objects INTEGER",
+    )
+    _safe_add_column(
+        cursor,
+        "agent_sync_state",
+        "maintenance_failures",
+        "ALTER TABLE agent_sync_state ADD COLUMN maintenance_failures INTEGER DEFAULT 0",
+    )
+
+
+def _migrate_agent_ownership_volume_base_name(cursor, conn):
+    """#1664 — pin an agent's Docker data-volume identity to the ownership row.
+
+    Adds ``volume_base_name TEXT`` (NULL ⇒ the volume base is ``agent_name``,
+    the case for every agent that was never renamed). Rename keeps the agent's
+    existing volumes (Docker can rename neither a volume nor its immutable
+    ``trinity.agent-name`` label), so after a rename the volume's own identity
+    is stale and the #1581 orphan sweep read it as a dead agent's leftovers.
+    Freezing the volume base here makes ownership resolvable from the DB rather
+    than from the volume's self-description. Backfill is a no-op by
+    construction: NULL already means "same as agent_name", which is correct for
+    every pre-existing row EXCEPT agents renamed before this migration — those
+    are healed at boot by ``CleanupService._heal_renamed_volume_bases``
+    (services/cleanup_service.py), which reads Docker's container mounts (the
+    only surviving record of the old volume name). Mirrored by Alembic
+    0024_agent_ownership_volume_base_name.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "volume_base_name",
+        "ALTER TABLE agent_ownership ADD COLUMN volume_base_name TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_agent_ownership_display_label(cursor, conn):
+    """ent#181 — the human-facing agent label.
+
+    Adds ``display_label TEXT`` (nullable) to ``agent_ownership``. NULL means
+    "render the slug", which is exactly today's behaviour, so no backfill and
+    every existing agent looks unchanged until someone sets a label.
+
+    The column is presentation only — the slug (``agent_name``) stays the
+    identity every route, container, volume, MCP key and A2A card keys on.
+    Mirrored by Alembic 0025_agent_ownership_display_label.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "display_label",
+        "ALTER TABLE agent_ownership ADD COLUMN display_label TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_users_github_pat(cursor, conn):
+    """ent#162 — per-user GitHub PAT.
+
+    Adds ``github_pat_encrypted TEXT`` (NULL = no personal credential) to
+    ``users``. A user configures one GitHub token in their own settings; agent
+    creation then resolves per-agent → owner's per-user → global, so a non-admin
+    is no longer confined to the admin PAT's repo scope. Stored as an
+    AES-256-GCM envelope via ``CredentialEncryptionService`` (Invariant #12), the
+    same shape as the per-agent PAT (``agent_git_config.github_pat_encrypted``).
+    Backfill is a no-op: NULL means "no personal credential", correct for every
+    existing user. Mirrored by Alembic 0027_users_github_pat.
+    """
+    _safe_add_column(
+        cursor,
+        "users",
+        "github_pat_encrypted",
+        "ALTER TABLE users ADD COLUMN github_pat_encrypted TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_schedule_executions_pull_claim_lease(cursor, conn):
+    """#1081 Phase 0 — dark pull/work-stealing coordination columns.
+
+    Adds three nullable, currently-unread columns to ``schedule_executions``:
+    - ``claim_token`` (TEXT): opaque token a worker will stamp when it claims a
+      queued execution (pull mode).
+    - ``lease_expires_at`` (TEXT): ISO-8601 UTC lease deadline, matching the
+      ``utc_now_iso()`` convention used elsewhere in this schema.
+    - ``claimed_by_worker`` (TEXT): identity of the claiming worker.
+
+    "Dark" = the columns exist but nothing reads or writes them yet. This is
+    pure schema groundwork for the pull-coordination phases (umbrella #1081);
+    no endpoint, service, or runtime behavior changes here. Mirrored by the
+    Alembic revision 0020_schedule_executions_pull_claim_lease for PostgreSQL.
+    """
+    new_columns = [
+        ("claim_token", "TEXT"),
+        ("lease_expires_at", "TEXT"),
+        ("claimed_by_worker", "TEXT"),
+    ]
+    for col_name, col_type in new_columns:
+        _safe_add_column(
+            cursor,
+            "schedule_executions",
+            col_name,
+            f"ALTER TABLE schedule_executions ADD COLUMN {col_name} {col_type}",
+            log_msg=f"Adding {col_name} column to schedule_executions for pull coordination (#1081)...",
+        )
+    conn.commit()
+
+
+def _migrate_schedule_executions_redelivery_count(cursor, conn):
+    """#1081 Phase 3 (#429 / #1402) — lease-reaper re-delivery counter.
+
+    Adds ``redelivery_count`` (INTEGER, default 0) to ``schedule_executions``.
+    A pull-claimed task whose worker dies leaves a ``running`` row with a past
+    ``lease_expires_at``; the single lease-reaper re-queues the SAME row
+    (preserving ``execution_id``) and bumps this counter. At
+    ``MAX_REDELIVERY`` (default 3) the row is poison-parked to the operator
+    queue instead of re-queued.
+
+    DISTINCT from ``retry_count`` (#678 reader-race in-line retry) — that column
+    is untouched. Mirrored by the Alembic revision
+    ``0021_schedule_executions_redelivery_count`` for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "redelivery_count",
+        "ALTER TABLE schedule_executions ADD COLUMN redelivery_count INTEGER DEFAULT 0",
+        log_msg="Adding redelivery_count column to schedule_executions for the lease reaper (#429/#1402)...",
+    )
+    conn.commit()
+
+
+def _migrate_product_events_table(cursor, conn):
+    """Create product_events table (ent#184).
+
+    Local product-event capture — activation funnel, Tier-1. Local-only,
+    default-on, zero egress. Records onboarding-wizard step transitions; the
+    first-value events are derived on read from audit_log/agent_activities.
+    Schema is also in db/schema.py for fresh installs; this handles existing
+    installs. Idempotent. Mirrored by the Alembic revision 0029_product_events
+    for PostgreSQL.
+    """
+    cursor.execute("PRAGMA table_info(product_events)")
+    if cursor.fetchall():
+        return  # already created (fresh-install path via init_schema)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS product_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            installation_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            event_context TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_product_events_type_created "
+        "ON product_events(event_type, created_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_product_events_created "
+        "ON product_events(created_at)"
+    )
+    conn.commit()
+    print("Created product_events table (ent#184)")
+
+
+def _migrate_slack_channel_allow_proactive(cursor, conn):
+    """ent#223 — per-channel proactive consent for Slack.
+
+    Adds ``allow_proactive INTEGER DEFAULT 0`` to ``slack_channel_agents``. In an
+    open Slack workspace users never authenticate, so the per-recipient consent
+    model (``agent_sharing.allow_proactive``, keyed by verified email) has nobody
+    to key on; for Slack the consent unit is the CHANNEL BINDING.
+
+    Default posture, and why it differs for existing vs new rows:
+      * NEW bindings default to 0 (deny) — binding an agent to a channel is not
+        by itself consent to unprompted posts; consent is explicit, matching the
+        DM path.
+      * EXISTING bindings are backfilled to 1 (allow) — channel posts had no
+        consent gate at all before this migration, so leaving them at 0 would
+        silently break every working integration. The AC is explicit that
+        existing behavior must not silently flip.
+
+    Mirrored by Alembic 0030_slack_channel_allow_proactive.
+    """
+    added = _safe_add_column(
+        cursor,
+        "slack_channel_agents",
+        "allow_proactive",
+        "ALTER TABLE slack_channel_agents ADD COLUMN allow_proactive INTEGER DEFAULT 0",
+    )
+    if added:
+        # Preserve today's behavior for bindings that already exist.
+        cursor.execute(
+            "UPDATE slack_channel_agents SET allow_proactive = 1 "
+            "WHERE allow_proactive IS NULL OR allow_proactive = 0"
+        )
 
 
 MIGRATIONS = [
@@ -2809,4 +3237,20 @@ MIGRATIONS = [
     ("agent_ownership_tts_voice", _migrate_agent_ownership_tts_voice),
     ("agent_ownership_public_channel_prompt", _migrate_agent_ownership_public_channel_prompt),
     ("public_chat_messages_sender", _migrate_public_chat_messages_sender),
+    ("enterprise_connectors_table", _migrate_enterprise_connectors_table),
+    ("agent_ownership_ephemeral", _migrate_agent_ownership_ephemeral),
+    ("agent_ownership_tts_channel_flags", _migrate_agent_ownership_tts_channel_flags),
+    ("schedule_executions_source_channel", _migrate_schedule_executions_source_channel),
+    ("agent_sync_state_git_dir_bytes", _migrate_agent_sync_state_git_dir_bytes),
+    ("schedule_executions_pull_claim_lease", _migrate_schedule_executions_pull_claim_lease),
+    ("schedule_executions_redelivery_count", _migrate_schedule_executions_redelivery_count),
+    ("agent_loops_failure_policy", _migrate_agent_loops_failure_policy),
+    ("agent_sync_state_gc_signals", _migrate_agent_sync_state_gc_signals),
+    ("agent_ownership_volume_base_name", _migrate_agent_ownership_volume_base_name),
+    ("agent_ownership_display_label", _migrate_agent_ownership_display_label),
+    ("operator_queue_request_id", _migrate_operator_queue_request_id),
+    ("users_github_pat", _migrate_users_github_pat),
+    ("agent_reminders_table", _migrate_agent_reminders_table),
+    ("slack_channel_allow_proactive", _migrate_slack_channel_allow_proactive),
+    ("product_events_table", _migrate_product_events_table),
 ]

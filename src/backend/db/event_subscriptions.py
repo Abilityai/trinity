@@ -200,6 +200,26 @@ class EventSubscriptionOperations:
 
         return [self._row_to_subscription(row) for row in rows]
 
+    def has_enabled_subscriptions_for_types(self, event_types: List[str]) -> bool:
+        """Cheap existence check: is ANY enabled subscription listening for one of
+        ``event_types`` (across all source agents)?
+
+        #1714: lets a bulk watchdog sweep skip all per-row completion-event work
+        when nobody subscribes to ``agent.task.*`` at all — so a large sweep with
+        no subscribers costs one bounded query, not one per swept row. The precise
+        per-source-agent gating still happens in ``emit_task_terminal_event``.
+        """
+        if not event_types:
+            return False
+        t = agent_event_subscriptions
+        stmt = (
+            select(t.c.id)
+            .where(and_(t.c.event_type.in_(event_types), t.c.enabled == 1))
+            .limit(1)
+        )
+        with get_engine().connect() as conn:
+            return conn.execute(stmt).first() is not None
+
     # =========================================================================
     # Event Persistence
     # =========================================================================

@@ -22,8 +22,13 @@
   Purge runs the #816 `purge_agent_ownership` → `cascade_delete`
   primitive so all per-agent child rows are removed in one transaction;
   `KEEP`-policy tables (`schedule_executions`, `nevermined_payment_log`)
-  survive per their own retention discipline. Bounded by the shared
-  5000-row/cycle cap so a backlog drains gradually.
+  survive per their own retention discipline. Each purge additionally
+  removes the agent's Docker data volumes (#1581) and is therefore
+  **unrecoverable** — so the #1644 blast-radius guard floors this sweep
+  at **0**: any purge at all requires an explicit admin acknowledgement
+  before it runs. (`RETENTION_CHUNK_SIZE_PER_CYCLE` bounds each
+  *transaction*, not the call — there is no per-cycle row cap; see #1644.)
+
 - **Name reservation**: `is_agent_name_reserved()` is intentionally
   unfiltered — it sees soft-deleted rows so a soft-deleted name cannot
   be reused (and silently clobbered) before purge.
@@ -42,6 +47,49 @@
   `idx_agent_ownership_deleted_at ON agent_ownership(deleted_at) WHERE
   deleted_at IS NOT NULL`. Migration
   `agent_ownership_soft_delete`.
+
+### RETENTION-GUARD-001: Retention prunes are blast-radius guarded
+- **Implements**: Issue #1644 (follow-up to #1638)
+- **Description**: before any window-driven destructive prune,
+  `services/retention_guard.py` counts the candidate set (bounded, so the
+  cost is O(threshold) not O(candidates)) and **refuses** the prune if it
+  exceeds the threshold, logging at ERROR and raising an `operator_queue`
+  alarm naming the setting, the window, the window's source
+  (`db-row`/`code-default`), and the counts. The prune proceeds only after
+  an admin acknowledges it. Covers all **7** window-driven prunes.
+- **Why**: #1638 fixed one *mechanism* (a retroactive default change).
+  It left every other route to a destructive window open — an unvalidated
+  `PUT /api/settings/ops/config`, a future default regression, a direct DB
+  write. The guard does not care how the bad window arrived.
+- **Acknowledgement**: `POST /api/settings/retention/acknowledge`
+  (admin **and** human-only) is **the gate**; the operator-queue item is an
+  alarm and authorizes nothing. An ack is **bound to the window in force**
+  (409 on mismatch — approving a prune at 30 days does not approve one at
+  1 day) and **single-use** (consumed once the prune runs, so the guard
+  re-arms and one approval can never authorize an unboundedly larger
+  future delete at the same window).
+- **Threshold**: a **fixed constant** (`retention_guard.MAX_ROWS_PER_SWEEP`,
+  1000) — deliberately NOT an operator setting. It was briefly configurable via
+  Settings; that was wrong twice over: nobody can reason about the right value
+  (it depends on per-cycle churn they cannot see — the panel needed a caption
+  explaining that *bigger is worse*, and a control that must explain which way is
+  safe is the wrong control), and a mutable constant read at action time gating a
+  destructive operation is #1638 one level up — raising it would silently disarm
+  the guard fleet-wide. Deleting the knob deleted its clamp, its endpoint, its
+  blocklist entry, and a whole fail-closed branch. Chosen against **steady state,
+  not table size**: only rows crossing the cutoff within one 5-min cycle are
+  candidates, so four digits means something changed. Lowering is always safe;
+  raising is a code change with a reviewer, not a text box. Surfaced read-only at
+  `GET /api/settings/retention` → `guard.max_rows`. Per-sweep floors: rows →
+  the constant, schedules → 100, agents → **0**.
+- **Fail-closed**: any error — the count throws, the ack lookup throws —
+  **refuses** the prune. A guard that fails open is worse than no guard
+  because it manufactures confidence. (There is no 'threshold unreadable'
+  path: the threshold is a constant, so that failure mode does not exist.)
+- **Expected behaviour**: a legitimate first-enable of retention on a
+  mature install *will* trip the guard once, and that is intended — the
+  guard cannot distinguish a large legitimate backlog from a mistyped
+  window, so it asks once and the operator acknowledges once.
 
 ### 33.2 Schedule Soft-Delete (#834 — Phase 1b)
 - **Implements**: Issue #834 Phase 1b (PR #839)
@@ -274,3 +322,185 @@ endpoint — reports flow agent → MCP → backend.
 (#1084/Epic #1045); audit-log entry on write; per-report sharing distinct from agent access.
 
 ---
+
+## 45. Local Product-Event Capture — Activation Funnel, Tier-1 (ent#184)
+
+**Description**: A **local-only** product-event capture layer — the **Tier-1**
+half of the two-tier telemetry model (Tier-2 = opt-in anonymized fleet sharing,
+#758 / trinity-enterprise#12, which builds on this). Tier-1 records
+activation/usage events **on the operator's own instance, default-ON, with zero
+network egress**, so the operator can see where their own first-run users drop
+off. It is *not* a sovereignty concern — nothing leaves the box — and is distinct
+from the identifiable opt-in operator intake (§43.1): this is anonymous,
+instance-local instrumentation keyed by the same `installation_id`.
+
+**Open-core split** (product decision, gating confirmed ent#184): the **capture**
+is OSS-core (the edition-agnostic instrumentation primitive, default-on); the
+operator-facing **activation-funnel view** is an entitlement-gated enterprise
+surface (`telemetry` feature-id). The generic seam is documented here; the funnel
+module's design lives in the private submodule.
+
+- **FR-1 — Event set v1 (OSS capture)**: the genuinely-new client beacons are the
+  onboarding-wizard step transitions — `setup_started`, `setup_step_intro`,
+  `setup_step_create`, `setup_step_credential`, `setup_completed`,
+  `setup_dismissed` — emitted by `components/OnboardingWizard.vue` through
+  `stores/productTelemetry.js` → `POST /api/product-events`. **First-value
+  events** (`first_agent_created`, `first_chat`, `first_schedule_created`,
+  `first_channel_connected`) are **derived on read** from the rows Trinity
+  already writes (`audit_log`, `agent_activities`, `schedule_executions`), never
+  re-emitted — so they survive restart by construction and add no write path.
+- **FR-2 — Storage (OSS)**: a local SQLite/Postgres table `product_events`
+  (`installation_id`, `event_type`, `event_context` optional small JSON,
+  `created_at`; dual-track migration + `db/tables.py` MetaData). The emit
+  endpoint accepts only a **fixed allow-list** of `event_type` values (unknown →
+  422) so the table can't be spammed with arbitrary strings. Rows carry the
+  stable `installation_id` (§43.1) and a UTC timestamp so Tier-2's opt-in
+  **retroactive backfill at consent** can serialize history — the mechanism that
+  rescues early-funnel data despite consent arriving late.
+- **FR-3 — Zero egress**: the capture layer NEVER phones home; the emit endpoint
+  writes one local row and returns. All sharing/consent lives in Tier-2 (#12).
+  Verifiable and documented as local-only in user docs.
+- **FR-4 — Operator funnel view (enterprise-gated)**: an operator-facing
+  activation/funnel panel on an existing admin surface (Settings, admin-only)
+  shows step-by-step activation counts + drop-off with an honest empty state when
+  there's no data yet. It reads a gated enterprise endpoint
+  (`requires_entitlement("telemetry")`) that aggregates `product_events` +
+  derives the first-value events from the OSS tables above. The **panel Vue**
+  ships in the OSS bundle but is hidden unless `telemetry` is in
+  `enterprise_features` (the standard feature-flag gating). Explicitly **NOT** a
+  new standalone analytics dashboard in v1.
+
+**Deferred**: auto-retention sweep for `product_events` (volume is negligible —
+a handful of rows per install); per-user (vs per-install) funnel cohorts.
+
+### 45.1 Tier-2 — Opt-in Fleet Sharing (ent#12)
+
+**Description**: the **opt-in egress** layer on top of Tier-1 (§45). On
+**explicit, default-off, reversible** operator consent, Trinity periodically
+shares **anonymized aggregates** with the Ability-operated hosted intake in
+exchange for reciprocal value (fleet benchmarks). The hosted aggregation/benchmark
+service is a **separate issue**; this covers the client consent + egress +
+backfill + the gated benchmark status surface.
+
+**Open-core split** (gating confirmed ent#12): the **consent + egress + backfill**
+are OSS-core (the sovereignty primitive — the operator's choice to share is
+edition-agnostic, and it mirrors the OSS operator-intake #38 credential-free
+transport); only the **reciprocity benchmark view** is entitlement-gated
+(`telemetry`).
+
+- **FR-1 — Two-gate egress, never without consent**: egress fires only when BOTH
+  the stored `telemetry_sharing_enabled` consent (system_settings, default-off)
+  AND the config switch `TELEMETRY_SHARING_ENABLED` (honors `DO_NOT_TRACK`) are
+  on. Either off ⇒ nothing leaves the box. Both re-checked in `share_now`.
+- **FR-2 — Anonymized aggregates only**: `services/telemetry_sharing_service.py`
+  `build_aggregate_payload` — `installation_id` (anonymous), version/edition/
+  platform/python, coarse `enterprise_features`, agent + execution **counts**, and
+  the Tier-1 activation-funnel counts. **No PII, no content, no prompts, no
+  emails, no agent names.** The exact payload is **inspectable before send** via
+  `GET /api/settings/telemetry-sharing` → `payload_preview` (the Settings panel).
+- **FR-3 — Periodic heartbeat + reversibility**: `TelemetrySharingService` is a
+  sleeps-first background loop (default 24h, jittered) that shares when consent is
+  on; opt-out stops egress at the next heartbeat. Fail-open (a blocked/failed/
+  air-gapped POST never affects the platform). Reuses the operator-intake httpx
+  fire-and-forget transport.
+- **FR-4 — Retroactive backfill at consent**: on the off→on transition the router
+  schedules an immediate fire-and-forget backfill share over a disclosed window
+  (`backfill_days`, default 30) sourced from Tier-1 `product_events`, so late
+  consent still yields accurate benchmarks. Disclosed at the moment of consent.
+- **FR-5 — Consent surfaces**: a value-framed, optional, non-blocking ask in the
+  onboarding wizard (`OnboardingWizard.vue`, hidden when hard-disabled) + a
+  reversible default-off toggle in Settings → General
+  (`components/settings/TelemetrySharingPanel.vue`), each stating exactly what is
+  shared. `PUT /api/settings/telemetry-sharing` is admin + human-only, audit-logged.
+- **FR-6 — Reciprocity carrot (gated, v1 status surface)**: `GET
+  /api/enterprise/telemetry/benchmark` (entitlement-gated) reports whether the
+  operator is sharing and that benchmarks are `pending_hosted_service` until the
+  hosted service lands; the OSS `ActivationFunnelPanel` renders it. Percentiles
+  are computable only for participants, so sharing is structurally the price of
+  the comparison.
+
+**Deferred**: the hosted aggregation/benchmark service (separate issue); v2/v3
+carrots (targeted alerts, live in-app benchmark panel, roadmap influence);
+warm-ask-after-value prompt.
+
+---
+
+## Ephemeral "Ghost" Agents (trinity-enterprise#69)
+
+**Description**: A disposable-agent lifecycle — an agent is created with a hard
+**budget** (`max_executions` and/or `ttl_seconds`) and is **hard-discarded** when
+the budget is exhausted: container removed, DB rows purged via the cascade
+primitive, Redis runtime state cleared. Ghosts never enter soft-delete/retention
+(no 180-day name reservation) and are volume-less (container writable layer only —
+they never recreate, so nothing needs to survive a recreate). Every requirement
+below is OSS code; creating an agent *with a budget* additionally requires the
+`ephemeral_agents` entitlement (registry read — the registering module is
+private). Scoped to **heterogeneous-workspace jobs**
+(different repo/config per ghost); same-agent burst parallelism stays with
+`fan_out` and, post-pull, replica groups.
+
+- **FR-1 — Budgeted creation**: `POST /api/agents` accepts an optional
+  `ephemeral {max_executions?, ttl_seconds?}` block (≥1 required;
+  `ephemeral_expires_at` is ALWAYS stamped, defaulting to the TTL ceiling, so no
+  ghost is immortal). Ghost names are server-suffixed (`{name}-{rand}`) —
+  unique-by-construction. Defaults: `max_parallel_tasks=1`, no credential
+  injection (opt-in), git auto-sync off, no avatar seed, no workspace volume.
+  Gates, in order: entitlement (403) → ephemeral-caller refusal (an ephemeral
+  agent cannot spawn ephemeral agents, 403) → atomic per-owner ephemeral quota
+  (Redis INCR-with-cap, 429) → per-parent spawn rate limit (429, agent-scoped
+  callers). Labels: `trinity.ephemeral=true`, `trinity.ephemeral-expires-at`,
+  `trinity.spawned-by`.
+- **FR-2 — Budget enforcement**: admission gate at the TOP of
+  `CapacityManager.acquire` (beside the dispatch-breaker gate — nothing is
+  enqueued for an exhausted/expired ghost; predicate counts terminal + running +
+  queued rows). Terminal-side: an `apply_result` post-CAS-win hook counts ALL
+  terminal statuses and background-triggers discard at budget (fail-open, after
+  slot release). `/chat` finalizes outside `apply_result` — its exhaustion is
+  admission-gated immediately and discard lags to the GC sweep (≤5 min),
+  documented. Pull-mode note: the #1081 claim endpoint must re-check the same
+  predicate.
+- **FR-3 — Hard discard**: `discard_ephemeral_agent(name)` under a per-name Redis
+  SETNX lock, crash-convergent ordering: (0) durable intent marker
+  (`ephemeral_expires_at = now`) → (1) cancel queued + CAS-fail all non-terminal
+  rows (`ghost_discarded`) + close activities → (2) remove container
+  (force, NotFound-tolerated) → (3) `clear_agent_runtime_state` (BEFORE purge —
+  the name must never free while slots/heartbeat keys survive) → (4) purge via
+  `cascade_delete` (executions KEEP; age out via the 90d retention sweep) →
+  (5) audit `ephemeral_discard`. `DELETE /api/agents/{name}` routes ephemeral
+  agents here (branch BEFORE the container lookup; a half-discarded ghost is
+  force-discardable, never 404).
+- **FR-4 — GC**: `cleanup_service._sweep_ephemeral_agents` (5-min): DB pass
+  (expired/exhausted rows → discard) + Docker-as-truth orphan pass
+  (`trinity.ephemeral` containers with no live ownership row, older than a
+  ~15-min newborn grace window → removed). Capped per cycle; folds into the
+  consolidated lease reaper later (#429).
+- **FR-5 — Ghost key containment**: a ghost's key stays `scope="agent"` (a new
+  scope value would break heartbeat/report/callback auth, which key off
+  `User.agent_name` = scope-"agent"-only); containment is a `(method, path)`
+  allowlist enforced at the single auth entry point (the connector-fence
+  pattern), keyed off the agent row's `is_ephemeral` — the flag dies with the
+  ghost. Allowed: heartbeat, execution result callback, reports, notifications,
+  own info; everything else 403. v1 has NO trusted opt-out (a parent needing a
+  fully-capable worker creates a durable agent); fail-open on DB read error.
+- **FR-6 — Spawn provenance + parent control (Part 2)**: any agent-spawned
+  creation (durable or ephemeral) auto-writes the `agent_permissions`
+  parent→child edge (`created_by="spawn:{parent}"`) and persists
+  `spawned_by_agent` + `spawned_by_key_id` on `agent_ownership` — the parent can
+  immediately chat/list/info the child. Agent-scoped callers may
+  start/stop/delete ONLY agents whose `spawned_by_agent` AND `spawned_by_key_id`
+  match the calling key (interim until #948 capability tokens); sharing,
+  permission grants, rename, and credential ops stay human-only (403 for
+  agent-scoped callers). Fleet-wide narrowing of agent-key breadth on other
+  mutating routes is an accepted-risk follow-up.
+- **FR-7 — Fleet hygiene**: ghosts are excluded from the heartbeat watch loop and
+  fleet health polling (no stale-alerts for discarded ghosts); operator-queue
+  polling keeps them (a ghost may escalate). Execution/cost stats stay inclusive
+  (billing truth). Schedule creation on a ghost → 400
+  `schedule_on_ephemeral_agent`. `is_ephemeral` surfaced on `GET /api/agents` +
+  MCP `list_agents`. Post-discard, KEEP execution rows are admin-only visible
+  (owner visibility derives from the purged ownership row) — documented.
+
+**Deferred**: non-LLM command-runner runtime; gVisor/microVM isolation lane;
+per-ghost egress control; creation UI (MCP-first); `is_ephemeral` filter on
+`/api/executions` if stats skew materializes; durable-agent volume-leak fix
+(separate public bug — `volume_remove` has no callers).

@@ -56,6 +56,24 @@
       </div>
     </div>
 
+    <!--
+      #1743: these totals include executions whose agent has since been deleted.
+      The rows are kept on purpose — cost is billing truth and a soft-deleted
+      agent is recoverable — but no per-agent surface renders a deleted agent, so
+      without this line the fleet totals exceed the sum of the Dashboard tiles by
+      an amount nothing explains. Shown only when there is something to explain.
+    -->
+    <p
+      v-if="store.stats?.deleted_agent_count > 0"
+      class="-mt-2 mb-4 text-xs text-gray-500 dark:text-gray-400"
+    >
+      Includes
+      <span class="font-medium text-gray-700 dark:text-gray-300">{{ store.stats.deleted_agent_count }}</span>
+      execution<span v-if="store.stats.deleted_agent_count !== 1">s</span>
+      ({{ formatCostCompact(store.stats.deleted_agent_cost) }})
+      from deleted agents, which have no tile on the dashboard.
+    </p>
+
     <!-- Filter bar -->
     <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg mb-4">
       <div class="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
@@ -70,7 +88,7 @@
               : 'border border-gray-200 dark:border-gray-600 hover:border-gray-300 dark:hover:border-gray-500'"
           >
             <option value="">All agents</option>
-            <option v-for="name in agentNames" :key="name" :value="name">{{ name }}</option>
+            <option v-for="name in agentNames" :key="name" :value="name">{{ agentOptionLabel(agentsStore.agentRefForSlug(name)) }}</option>
           </select>
           <svg class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/></svg>
         </div>
@@ -228,6 +246,7 @@
                 <router-link
                   :to="'/agents/' + row.agent_name"
                   @click.stop
+                  :title="agentNameTooltip(agentsStore.agentRefForSlug(row.agent_name))"
                   class="text-sm font-medium text-gray-900 dark:text-white hover:text-action-primary-600 dark:hover:text-action-primary-400"
                 >
                   {{ row.agent_name }}
@@ -287,9 +306,11 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { formatCost, formatCostCompact } from '../composables/useFormatters'
 import axios from 'axios'
+import { parseUTC } from '@/utils/timestamps'
 import { useExecutionsStore } from '../stores/executions'
 import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
+import { agentNameTooltip, agentOptionLabel } from '../utils/agentName'
 import { useWebSocket } from '../utils/websocket'
 
 const router = useRouter()
@@ -368,7 +389,7 @@ function triggerLabelClass(trigger) {
 
 function timeAgo(iso) {
   if (!iso) return ''
-  const diff = Math.floor((Date.now() - new Date(iso)) / 1000)
+  const diff = Math.floor((Date.now() - parseUTC(iso)) / 1000)
   if (diff < 60) return 'just now'
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`

@@ -61,6 +61,10 @@ def _drive_terminate(agent_status: str):
     """Drive terminate_agent_execution with the agent returning `agent_status`.
     Returns the mock_db so the caller can inspect update_execution_status."""
     import routers.chat as chat
+    # #1483: the terminate orchestration moved to chat_execution_service; the
+    # endpoint (chat.terminate_agent_execution) stays a thin mapper. httpx.AsyncClient
+    # is patched globally (agent_httpx_client uses the module-level class).
+    import services.chat_execution_service as ce
 
     mock_db = MagicMock()
     mock_db.get_execution.return_value = SimpleNamespace(status="running")  # not QUEUED
@@ -77,10 +81,10 @@ def _drive_terminate(agent_status: str):
     agent_resp = _FakeAgentResponse(200, {"status": agent_status, "returncode": 0})
 
     with (
-        patch.object(chat, "db", mock_db),
-        patch.object(chat, "get_agent_container", return_value=container),
-        patch.object(chat, "get_capacity_manager", return_value=capacity),
-        patch.object(chat, "activity_service", activity),
+        patch.object(ce, "db", mock_db),
+        patch.object(ce, "get_agent_container", return_value=container),
+        patch.object(ce, "get_capacity_manager", return_value=capacity),
+        patch.object(ce, "activity_service", activity),
         patch.object(chat.httpx, "AsyncClient", lambda *a, **kw: _FakeClient(agent_resp)),
     ):
         result = _await(

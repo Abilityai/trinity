@@ -755,6 +755,32 @@ On startup, `_recover_pending_retries()` queries executions with `status='pendin
 
 **Location**: `src/scheduler/database.py`
 
+### Timestamp serialization contract (#1474)
+
+The scheduler is a separate package that can't import `src/backend/utils/helpers.py`,
+so it vendors a byte-parity mirror at **`src/scheduler/utils.py`** (regenerate from the
+backend copy, like `failure_classifier.py`):
+
+- **Writes** go through `utc_now_iso()` ("now") / `to_utc_iso(dt)` (caller datetimes) →
+  always UTC with an explicit **`Z`** suffix. Every write site (`started_at`,
+  `completed_at`, `last_run_at`, `next_run_at`, `retry_scheduled_at`, `validated_at` in
+  `service.py`, + all process-schedule variants) emits `Z`. Previously they used
+  `datetime.utcnow().isoformat()` (no `Z`), which JS `new Date(...)` mis-parsed as *local*
+  time — schedule-triggered rows rendered shifted by the viewer's UTC offset.
+- **Reads** go through `parse_scheduler_ts(s)` → **naive UTC**. It tolerates `…Z`, `…+03:00`,
+  and legacy naive strings; an offset-bearing value is *converted then stripped* (instant
+  preserved, model type stays naive). This is a **co-requisite of the write change** and
+  lands in the same commit: once writes emit `Z`, `fromisoformat("…Z")` is tz-aware on 3.11+,
+  and `update_execution_status`'s `datetime.utcnow() − started_at` would raise `aware − naive`.
+- **Read-boundary siblings (backend):** historical naive rows are also normalized where the
+  API leaked them raw — `db/schedules.py` `get_agent_executions_summary` /
+  `get_fleet_executions` / `get_agent_schedules_summary` `last_run_at`, and `db/activities.py`
+  `_row_to_activity` / `_mapping_to_activity` — via `parse_iso_timestamp`+`to_utc_iso`. The 5
+  execution panels also parse via `parseUTC` (render-layer defense; covers WS-pushed values).
+- **Caveat:** `agent_schedules.next_run_at` stays mixed-format across the scheduler (`Z`) and
+  the backend's own `next_run_at.isoformat()` writers (aware offset) — safe because it is only
+  parse-compared in Python, never lexicographically in SQL. See Architectural Invariant #16.
+
 ### Agent Schedule Read Operations
 
 | Method | Line | SQL | Purpose |
@@ -1085,6 +1111,7 @@ The embedded scheduler (`src/backend/services/scheduler_service.py`) has been co
 
 | Date | Change |
 |------|--------|
+| 2026-07-06 | **UTC `Z`-suffix serialization (#1474)**: scheduler-written execution/schedule timestamps were naive (no `Z`), so JS `new Date(...)` parsed them as local time and schedule-triggered rows rendered shifted by the viewer's UTC offset. New vendored `src/scheduler/utils.py` (byte-parity mirror of backend `utils/helpers.py`): `utc_now_iso`/`to_utc_iso` writes emit `Z`; `parse_scheduler_ts` reads tolerantly and returns naive-UTC (write+read atomic — a `Z` write + a tz-aware read would break `update_execution_status`'s `aware − naive` duration math). Backend read boundaries (`get_agent_executions_summary`/`get_fleet_executions`/`get_agent_schedules_summary`; `db/activities.py` mappers) normalize historical naive rows; the 5 execution panels parse via `parseUTC`. `next_run_at` stays mixed-format across writers by design (Python-compared only). See the Timestamp serialization contract section + Architectural Invariant #16. |
 | 2026-07-06 | **Stale `next_run_at` repair (#1472)**: fixed the "Next: Nd ago" bug across the projection-advance paths. Autonomy-off skip now advances `next_run_at` only (no row/last_run_at). Every fire outcome (success/dispatched/failure/exception) advances **once at fire time** (`_execute_schedule_with_lock`), replacing the per-branch advances — closes the failure/exception leak and a latent phantom-catch-up. `_add_job` returns a bool and classifies permanent (bad cron/tz — snapshot + log-once, bounded) vs transient (retried next sync) instead of orphaning silently; snapshot-on-success at all sync sites. `_get_missed_schedules` compares in UTC (was stripping tzinfo → non-UTC schedules mis-compared). New API validation `services/schedule_validation.py` matches the scheduler's 5-field/`CronTrigger`/`pytz` parser (was bare `croniter()` — accepted `@daily`/seconds-crons/quartz/bad-tz that then failed registration). UI `SchedulesPanel.vue` renders "Overdue by …"; canary **E-06** detects any residual. |
 | 2026-06-14 | **Descriptive error on dispatch timeout (#1022)**: a dispatch `httpx.TimeoutException` is re-raised with a named, non-blank message (`"dispatch ... timed out after {N}s — outcome unknown"`) so the silent blank `error` (bare httpx timeouts `str()` to `''`) no longer lands. New `_describe_exception()` helper normalizes blank exceptions across all execution / retry / process-schedule error paths. Dispatch + pre-check HTTP deadlines lifted from literals to config: `DISPATCH_TIMEOUT` (default 30s) and `PRE_CHECK_TIMEOUT` (default 70s). Outcome of a dispatch timeout is UNKNOWN (backend may have already started the bg task → orphan recovered by cleanup). |
 | 2026-05-09 | **MCP update_agent_schedule fixes (aaad4f6, #741/#742)**: (1) `src/mcp-server/src/tools/schedules.ts` — added explicit warning to `enabled` field description in `update_agent_schedule` so AI models do not inadvertently re-enable a disabled schedule when updating unrelated fields (e.g. cron expression). (2) `src/backend/routers/schedules.py` — added `max_retries` and `retry_delay_seconds` to `ScheduleUpdateRequest`; both were missing, so `exclude_unset=True` silently dropped them before they reached `db.update_schedule()`, making retry config uneditable via MCP. |

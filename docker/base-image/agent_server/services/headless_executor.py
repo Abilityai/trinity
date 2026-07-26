@@ -1011,6 +1011,27 @@ def _finalize_headless_result(
             detail=f"Task execution failed (exit code {ctx.return_code}): {error_preview[:300]}"
         )
 
+    # #1673: Claude Code reported an error result (is_error=true) despite a
+    # clean exit — e.g. `--resume` against a session whose JSONL no longer
+    # exists ("No conversation found with session ID"). The parent exits 0
+    # with a populated result line, so without this check the empty-response
+    # handling below reads it as a legitimate `context: fork` clean exit and
+    # returns a 200 success placeholder (#160). An is_error result must never
+    # reach that branch. 502 (not 503) keeps it clear of SUB-003's auth
+    # auto-switch; the detail carries the verbatim Claude message so the
+    # backend's resume-not-found fallback can match it and retry cold.
+    #
+    # Placed after the return_code != 0 block: a non-zero exit is already
+    # classified there (signal/auth/rate-limit), and preempting that would
+    # misread a #516 signal termination as a generic execution error.
+    if ctx.metadata.error_type == "execution_error":
+        err = sanitize_text(ctx.metadata.error_message or "Execution error")
+        logger.error(f"[Headless Task] Claude Code execution error: {err[:300]}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Execution error: {err[:300]}",
+        )
+
     # Issue #520 + Session-tab pipe race recovery: clean exit
     # (return_code == 0) but the final `result` JSON line never reached
     # the reader thread — typically because a child subprocess inherited

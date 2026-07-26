@@ -1,7 +1,9 @@
 """
 Pydantic models for the Trinity backend API.
 """
+import os
 import re
+import unicodedata
 
 from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator
 from typing import Dict, List, Literal, Optional
@@ -58,9 +60,38 @@ class ForkToOwnRequest(BaseModel):
         return v
 
 
+class EphemeralConfig(BaseModel):
+    """Ephemeral "ghost" agent budget (trinity-enterprise#69).
+
+    At least one of ``max_executions`` / ``ttl_seconds`` is required. A TTL is
+    ALWAYS stamped at creation (defaulting to the platform ceiling when only
+    ``max_executions`` is given) so no ghost is immortal.
+    """
+    max_executions: Optional[int] = Field(
+        None, ge=1, le=100,
+        description="Discard after this many terminal executions (1-100)",
+    )
+    ttl_seconds: Optional[int] = Field(
+        None, ge=60,
+        description="Discard after this many seconds (60..platform ceiling, default ceiling 24h)",
+    )
+
+    @model_validator(mode="after")
+    def _at_least_one_budget(self):
+        if self.max_executions is None and self.ttl_seconds is None:
+            raise ValueError(
+                "ephemeral requires max_executions and/or ttl_seconds"
+            )
+        return self
+
+
 class AgentConfig(BaseModel):
     """Configuration for creating a new agent."""
-    name: str
+    name: str  # the immutable slug — every route/container/volume/key keys on it
+    # ent#1640: optional human-facing display label set AT creation. Presentation
+    # only; None → the agent renders under its slug (exactly today's behavior).
+    # Same normalization + named validation as the post-creation PUT /label.
+    display_label: Optional[str] = None
     type: Optional[str] = "business-assistant"
     base_image: str = "trinity-agent-base:latest"
     resources: Optional[dict] = {"cpu": "2", "memory": "4g"}
@@ -83,6 +114,60 @@ class AgentConfig(BaseModel):
     # Fork-to-own creation (trinity-enterprise#93): copy the github: template
     # into a user-owned repo first; the agent is created from that copy.
     fork_to_own: Optional[ForkToOwnRequest] = None
+    # Ephemeral "ghost" agent (trinity-enterprise#69): budgeted, volume-less,
+    # hard-discarded at budget. Entitlement-gated at the creation path.
+    ephemeral: Optional[EphemeralConfig] = None
+
+    @field_validator("display_label")
+    @classmethod
+    def _normalize_display_label(cls, v: Optional[str]) -> Optional[str]:
+        return normalize_display_label(v)
+
+
+# ent#181/#1640 — the human-facing display label. Shared normalization + a
+# NAMED validation error (not a generic 422 blob), used everywhere a label is
+# accepted (set-after-creation AND at creation), so the policy lives in one place.
+DISPLAY_LABEL_MAX_LEN = 120
+
+
+def normalize_display_label(value: Optional[str]) -> Optional[str]:
+    """Trim, empty→None (clear), reject control chars / line breaks, cap length.
+
+    Uniqueness is deliberately NOT enforced — the slug (`agent_name`) already
+    guarantees uniqueness; a display label is a presentation string that may
+    legitimately repeat across agents (#1640). Raises ``ValueError`` with a
+    specific message on bad input so callers surface a named error.
+    """
+    if value is None:
+        return None
+    # Normalize to NFC so visually-identical labels compare/store consistently.
+    value = unicodedata.normalize("NFC", value).strip()
+    if not value:
+        return None  # blank clears the label → render under the slug again
+    if len(value) > DISPLAY_LABEL_MAX_LEN:
+        raise ValueError(
+            f"display label must be at most {DISPLAY_LABEL_MAX_LEN} characters"
+        )
+    # A display name is a single line: reject control chars (category Cc, incl.
+    # \n\t\r) and the Unicode line/paragraph separators.
+    if any(unicodedata.category(ch) == "Cc" or ch in (" ", " ") for ch in value):
+        raise ValueError("display label must not contain control characters or line breaks")
+    return value
+
+
+class AgentLabelUpdate(BaseModel):
+    """PUT body — set or clear an agent's human-facing label (ent#181).
+
+    `label=None` (or blank) clears it, and the agent renders under its slug
+    again. Presentation only: the slug never moves, which is the entire point —
+    a slug rename re-keys ~20 tables and strands the agent's volumes (#1664).
+    """
+    label: Optional[str] = None
+
+    @field_validator("label")
+    @classmethod
+    def _normalize_label(cls, v: Optional[str]) -> Optional[str]:
+        return normalize_display_label(v)
 
 
 class AgentStatus(BaseModel):
@@ -97,6 +182,8 @@ class AgentStatus(BaseModel):
     template: Optional[str] = None
     runtime: Optional[str] = "claude-code"  # "claude-code" or "gemini-cli"
     base_image_version: Optional[str] = None  # Version of trinity-agent-base image
+    ephemeral: Optional[bool] = False  # trinity-enterprise#69: ghost agent (budgeted, hard-discarded)
+    display_label: Optional[str] = None  # ent#181: human-facing name; None = render `name` (the slug)
 
     class Config:
         json_encoders = {
@@ -166,6 +253,11 @@ class ParallelTaskRequest(BaseModel):
     resume_session_id: Optional[str] = None  # Claude Code session ID to resume (EXEC-023)
     inject_result: Optional[bool] = False  # If true and self-task, inject result as message in originating chat session (SELF-EXEC-001)
     files: Optional[List[WebFileUpload]] = None  # File attachments (#364)
+    # ent#224: the CALLER's current execution id. When agent A delegates to B,
+    # B inherits A's originating channel/thread from this row, so B's completion
+    # can be reported back to the Slack thread the work actually came from.
+    # Optional and fail-open — absent means "no channel context to inherit".
+    parent_execution_id: Optional[str] = None
 
 
 # ============================================================================
@@ -303,6 +395,28 @@ class ReportCreate(BaseModel):
         if self.period_start and self.period_end and self.period_start > self.period_end:
             raise ValueError("period_start must be <= period_end")
         return self
+
+
+class TelemetrySharingUpdate(BaseModel):
+    """PUT body for Tier-2 opt-in fleet sharing consent (ent#12).
+
+    ``enabled`` is the reversible, default-off consent. ``backfill_days`` (only
+    meaningful on enable) is the disclosed history window included in the
+    consent-time backfill share. Anonymized aggregates only — no PII.
+    """
+    enabled: bool
+    backfill_days: Optional[int] = Field(None, ge=0, le=3650)
+
+
+class ProductEventCreate(BaseModel):
+    """Request body for a local product-event beacon (ent#184).
+
+    ``event_type`` is validated against a fixed allow-list at the router (unknown
+    → 422) so the local table can't be spammed with arbitrary strings. Local-only,
+    zero egress — one local row per accepted event.
+    """
+    event_type: str = Field(..., min_length=1, max_length=64)
+    context: Optional[Dict] = None  # small optional metadata (byte-capped at the router)
 
 
 class ReportSummary(BaseModel):
@@ -491,11 +605,25 @@ class SystemDeployRequest(BaseModel):
     """Request to deploy a system from YAML manifest."""
     manifest: str  # Raw YAML string
     dry_run: bool = False
+    # trinity-enterprise#125: abort on the first agent-create failure (legacy
+    # behavior) instead of the default best-effort continue-and-report.
+    strict: bool = False
+
+
+class SystemDeployFailure(BaseModel):
+    """One agent that failed to create during a system deploy (trinity-enterprise#125)."""
+    name: str  # Final (resolved) agent name
+    short_name: str  # Short name from the manifest
+    template: str
+    reason: str  # Sanitized, truncated failure reason
+    status_code: Optional[int] = None  # Original HTTP status when the failure was an HTTPException
 
 
 class SystemDeployResponse(BaseModel):
     """Response from system deployment."""
-    status: str  # "deployed" or "valid" (for dry_run)
+    # "deployed" (all created) | "partial" (some failed) | "failed" (none created)
+    # | "valid" (dry_run) — trinity-enterprise#125
+    status: str
     system_name: str
     agents_created: List[str]  # Final agent names created
     agents_to_create: Optional[List[dict]] = None  # For dry_run: [{name, template}]
@@ -505,6 +633,7 @@ class SystemDeployResponse(BaseModel):
     tags_configured: int = 0  # ORG-001 Phase 4: Number of tags applied
     system_view_created: Optional[str] = None  # ORG-001 Phase 4: View ID if created
     warnings: List[str] = []
+    failed: List[SystemDeployFailure] = []  # trinity-enterprise#125: per-agent create failures
 
 
 # ============================================================================
@@ -714,6 +843,19 @@ class MaxParallelTasksCeilingUpdate(BaseModel):
     value: int
 
 
+class ProactiveRateLimitsUpdate(BaseModel):
+    """Body for PUT /api/settings/proactive-rate-limits (#1609).
+
+    All optional — only provided caps change. Each is an int per hour; ``0`` =
+    unlimited. Range ([0, MAX]) is enforced in the router with a named 422.
+    """
+    slack_proactive_per_channel: Optional[int] = None
+    slack_proactive_per_agent: Optional[int] = None
+    telegram_proactive_per_group: Optional[int] = None
+    telegram_proactive_per_agent: Optional[int] = None
+    proactive_dm_per_recipient: Optional[int] = None
+
+
 class AgentCapacityUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/capacity (CAPACITY-001, #506)."""
     max_parallel_tasks: int
@@ -731,6 +873,20 @@ class BrainOrbSettingsUpdate(BaseModel):
     enabled: Optional[bool] = None
     voice_enabled: Optional[bool] = None
     write_enabled: Optional[bool] = None
+    clear: Optional[List[str]] = None
+
+
+class ElevenLabsSettingsUpdate(BaseModel):
+    """Body for PUT /api/settings/elevenlabs (trinity-enterprise#117).
+
+    Partial update. ``api_key`` sets the ElevenLabs key (stored AES-256-GCM
+    encrypted; never echoed back). ``default_voice_id`` sets the platform default
+    voice the agent-level config falls back to. ``clear`` lists which to remove:
+    "api_key" (revert to env/unavailable) and/or "default_voice_id". A field may
+    not be both set and cleared (400).
+    """
+    api_key: Optional[str] = None
+    default_voice_id: Optional[str] = None
     clear: Optional[List[str]] = None
 
 
@@ -803,6 +959,14 @@ class FleetExecutionStats(BaseModel):
     total_cost: float
     success_rate: float
     hours: int  # 0 = all-time
+    # #1743: the slice of the above that belongs to a DELETED agent (soft-deleted
+    # or purged). Execution rows outlive their agent deliberately — cost is
+    # billing truth and a soft-deleted agent is recoverable — but the per-agent
+    # surfaces render only live agents, so these totals would otherwise exceed
+    # the sum of the tiles by an amount nothing on screen explains. Defaults keep
+    # the field additive for any client that predates it.
+    deleted_agent_count: int = 0
+    deleted_agent_cost: float = 0.0
 
 
 class CircuitBreakerConfigUpdate(BaseModel):
@@ -824,15 +988,73 @@ class McpExposedUpdate(BaseModel):
     enabled: bool
 
 
-class VoiceRepliesUpdate(BaseModel):
-    """Body for PUT /api/agents/{name}/voice-replies (epic #24 / #25).
+# ---------------------------------------------------------------------------
+# Per-agent MCP connector (ent#46; OSS-core since #118)
+# ---------------------------------------------------------------------------
 
-    Shared agent-level outbound-voice config: when ``enabled``, channel adapters
-    speak the agent's reply via the shared TTS service using ``voice_id``
-    (an ElevenLabs voice id). ``voice_id`` is required when enabling.
+class ConnectorConfigUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/connector.
+
+    ``exposed_playbooks=None`` leaves the allow-list unchanged; an explicit list
+    sets it; ``expose_all_playbooks=True`` resets it to "all user_invocable".
     """
-    enabled: bool
+    enabled: Optional[bool] = None
+    exposed_playbooks: Optional[List[str]] = None
+    expose_all_playbooks: Optional[bool] = None
+
+
+class ConnectorClientSnippet(BaseModel):
+    """A copy-paste-ready connector config for one AI client."""
+    client: str
+    label: str
+    format: str            # 'shell' | 'json'
+    content: str           # the literal block to copy (key pre-embedded)
+    note: Optional[str] = None
+
+
+class ConnectorPlaybook(BaseModel):
+    """A playbook exposed by the connector as an MCP tool."""
+    name: str
+    description: Optional[str] = None
+    argument_hint: Optional[str] = None
+    automation: Optional[str] = None
+
+
+class ConnectorStatus(BaseModel):
+    """Response for GET .../connector (owner view)."""
+    agent_name: str
+    enabled: bool = False
+    exposed_playbooks: Optional[List[str]] = None
+    has_key: bool = False
+    key_prefix: Optional[str] = None
+    mcp_url: Optional[str] = None
+    snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class ConnectorKeySecret(BaseModel):
+    """Response when minting/regenerating the key — secret returned once."""
+    agent_name: str
+    api_key: str
+    key_prefix: str
+    mcp_url: Optional[str] = None
+    snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
+
+
+class VoiceRepliesUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/voice-replies (epic #24 / #25; v2 ent#117).
+
+    Partial update. Agent-level fields (from the Settings surface): ``enabled`` +
+    ``voice_id`` — when both are present they set the agent-level capability
+    (voice id is an ElevenLabs voice id; may be omitted to fall back to the platform
+    default). ``channels`` (from the channel panels) is a partial map of
+    ``{telegram|slack|whatsapp: bool}`` per-channel voice-allowed flags. At least
+    one of ``enabled`` / ``channels`` should be provided.
+    """
+    enabled: Optional[bool] = None
     voice_id: Optional[str] = None
+    channels: Optional[Dict[str, bool]] = None
 
     @field_validator("voice_id")
     @classmethod
@@ -841,6 +1063,28 @@ class VoiceRepliesUpdate(BaseModel):
             return None
         v = v.strip()
         return v or None
+
+    @field_validator("channels")
+    @classmethod
+    def _validate_channels(cls, v: Optional[Dict[str, bool]]) -> Optional[Dict[str, bool]]:
+        if v is None:
+            return None
+        allowed = {"telegram", "slack", "whatsapp"}
+        unknown = set(v) - allowed
+        if unknown:
+            raise ValueError(f"unknown channel(s): {', '.join(sorted(unknown))}")
+        return v
+
+
+class VoiceReplyRequest(BaseModel):
+    """Body for POST /api/agents/{name}/voice-reply (send_voice_reply MCP tool, ent#117).
+
+    ``text`` is spoken as a voice note on the channel the ``execution_id`` came from.
+    ``dedup_label`` lets an agent intentionally send two voice notes in one turn.
+    """
+    text: str = Field(min_length=1, max_length=4096)
+    execution_id: str = Field(min_length=1)
+    dedup_label: str = ""
 
 
 class PublicChannelModelUpdate(BaseModel):
@@ -880,6 +1124,67 @@ class ExecutionResultEnvelope(BaseModel):
     execution_log: Optional[List] = None
     session_id: Optional[str] = None
     execution_time_ms: Optional[int] = None
+
+
+# =============================================================================
+# Pull / work-stealing coordination (#1081 Phase 1 — DARK)
+# =============================================================================
+
+# The pinned typed terminal-reason taxonomy (MESSAGE_ENVELOPE_SCHEMA.md §4):
+# the TaskExecutionErrorCode code-enum values plus the two contract additions
+# (OOM, MAX_TURNS). Lower-case, matching the code enum's string values.
+_PULL_ERROR_CODES = frozenset({
+    "timeout", "capacity", "auth", "billing", "agent_error", "network",
+    "circuit_open", "reconciled", "lease_expired", "oom", "max_turns",
+})
+# reply.status value set (MESSAGE_ENVELOPE_SCHEMA §2.4/§4; `cancelled` per the
+# live #1083 3-way map — OPEN-1).
+_PULL_RESULT_STATUSES = frozenset({"success", "failed", "cancelled"})
+
+
+class PullTaskResultRequest(BaseModel):
+    """Body for ``POST /api/internal/tasks/{id}/result`` (#1081 Phase 1, DARK).
+
+    The ``reply`` payload per ``MESSAGE_ENVELOPE_SCHEMA.md`` §3.3 (which cites
+    §2.4) plus the ``claim_token`` the worker received from the §3.1 claim
+    response. The token is validated INSIDE the atomic CAS terminal write
+    (``db/schedules.py`` ``update_execution_status(claim_token=…)``) — a
+    stale / duplicate / wrong-token POST can never clobber a terminal row
+    (#1082 status-as-projection). ``status`` + ``error_code`` are the pinned
+    typed taxonomy (§4); unknown values are rejected at the boundary (422).
+    """
+    claim_token: str = Field(..., min_length=1, description="Token from the §3.1 claim response")
+    status: str = Field(..., description="'success' | 'failed' | 'cancelled' (§2.4/§4)")
+    content: Optional[str] = Field(None, description="Result text (§2.4 reply.content)")
+    error_code: Optional[str] = Field(None, description="Typed failure class (§4); required on failed")
+    cost: Optional[float] = None
+    tokens: Optional[int] = None
+    session_id: Optional[str] = None
+    execution_log: Optional[List] = None
+    metadata: Optional[Dict] = None
+
+    @field_validator("status")
+    @classmethod
+    def _check_status(cls, v: str) -> str:
+        if v not in _PULL_RESULT_STATUSES:
+            raise ValueError(
+                f"status must be one of {sorted(_PULL_RESULT_STATUSES)} "
+                "(MESSAGE_ENVELOPE_SCHEMA §2.4/§4)"
+            )
+        return v
+
+    @field_validator("error_code")
+    @classmethod
+    def _check_error_code(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        norm = v.strip().lower()
+        if norm not in _PULL_ERROR_CODES:
+            raise ValueError(
+                f"error_code must be one of {sorted(_PULL_ERROR_CODES)} "
+                "(MESSAGE_ENVELOPE_SCHEMA §4)"
+            )
+        return norm
 
 
 # =============================================================================
@@ -1197,10 +1502,10 @@ class RenameAgentRequest(BaseModel):
 
 
 class SshAccessRequest(BaseModel):
-    """Request body for SSH access."""
+    """Request body for SSH access (key-based only; #1615 removed password auth)."""
     ttl_hours: float = 4.0
-    auth_method: str = "key"  # "key" for SSH key, "password" for ephemeral password
-    public_key: Optional[str] = None  # Required for key auth — client-supplied OpenSSH public key
+    auth_method: str = "key"  # only "key" is supported (password auth removed, #1615)
+    public_key: Optional[str] = None  # Required — client-supplied OpenSSH public key
 
 
 # =============================================================================
@@ -1672,6 +1977,9 @@ MAX_STOP_SIGNAL_LEN = 200
 MAX_DURATION_SECONDS = 604_800  # 7 days — hard ceiling on the wall-clock deadline
 
 
+MAX_CONSECUTIVE_FAILURES_LIMIT = 100  # #1167 — cap on the continue-mode circuit breaker
+
+
 class StartLoopRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=MAX_MESSAGE_LEN)
     max_runs: int = Field(..., ge=1, le=MAX_RUNS_LIMIT)
@@ -1692,6 +2000,12 @@ class StartLoopRequest(BaseModel):
     # response fingerprint (SHA-256 of normalized text) is identical. 0 disables;
     # default 3. 1 is nonsensical ("repeated identical" needs ≥2) → rejected.
     no_progress_threshold: Optional[int] = Field(default=3, ge=0)
+    # #1167: failure policy. 'abort' (default) = fail-fast, backward compatible;
+    # 'continue' tolerates failed iterations up to max_consecutive_failures.
+    on_failure: Literal["abort", "continue"] = "abort"
+    max_consecutive_failures: int = Field(
+        default=3, ge=1, le=MAX_CONSECUTIVE_FAILURES_LIMIT
+    )
     model: Optional[str] = None
     allowed_tools: Optional[List[str]] = None
 
@@ -1719,6 +2033,7 @@ class StartLoopResponse(BaseModel):
     status: str
     agent_name: str
     max_runs: int
+    on_failure: str = "abort"  # #1167
 
 
 class LoopRunResponse(BaseModel):
@@ -1739,6 +2054,9 @@ class LoopStatusResponse(BaseModel):
     status: str
     max_runs: int
     runs_completed: int
+    failed_runs: int = 0  # #1167
+    on_failure: str = "abort"  # #1167
+    max_consecutive_failures: int = 3  # #1167
     stop_reason: Optional[str] = None
     last_response: Optional[str] = None
     error: Optional[str] = None
@@ -1762,6 +2080,104 @@ class LoopStatusResponse(BaseModel):
 class StopLoopResponse(BaseModel):
     loop_id: str
     status: str  # "stopping" | "already_done"
+
+
+# =============================================================================
+# Agent Self-Reminders (#1296) — routers/reminders.py
+# =============================================================================
+
+# Env-tunable abuse bounds. Read once at import; the router enforces the stateful
+# ones (pending cap, daily cap, resolved-window) with real DB counts, while the
+# field caps below are the hard Pydantic ceilings (422 before any DB work).
+REMINDER_MESSAGE_MAX_CHARS = int(os.getenv("REMINDER_MESSAGE_MAX_CHARS", "4000"))
+# Min delay ≥ the 60s scheduler reload interval so a reminder can be armed before
+# it is due (a near-min reminder fires ~one interval late, never dropped).
+REMINDER_MIN_DELAY_SECONDS = int(os.getenv("REMINDER_MIN_DELAY_SECONDS", "60"))
+# Max delay 30 days — deliberately < the 180-day soft-delete name reservation, so
+# a pending reminder can never outlive the reuse of its agent's name.
+REMINDER_MAX_DELAY_SECONDS = int(os.getenv("REMINDER_MAX_DELAY_SECONDS", "2592000"))
+# Concurrency cap on pending reminders per agent (429 on a real pending count).
+MAX_PENDING_REMINDERS_PER_AGENT = int(os.getenv("MAX_PENDING_REMINDERS_PER_AGENT", "25"))
+# Durable rolling-24h create cap — the non-fail-open backstop against
+# self-perpetuation (a reminder can itself call set_reminder). 429.
+MAX_REMINDERS_PER_AGENT_PER_DAY = int(os.getenv("MAX_REMINDERS_PER_AGENT_PER_DAY", "100"))
+
+
+class ReminderCreate(BaseModel):
+    """Request body for an agent scheduling a one-shot self-reminder (#1296).
+
+    Exactly one of ``fire_at`` (absolute ISO-8601) or ``delay_seconds``
+    (relative) must be supplied — the XOR is validated below. The resolved
+    fire instant's min/max window and the timeout clamp are enforced at the
+    router against the agent's config (they need the live agent cap).
+    """
+    message: str = Field(..., min_length=1, max_length=REMINDER_MESSAGE_MAX_CHARS)
+    fire_at: Optional[str] = Field(
+        default=None,
+        description="Absolute ISO-8601 time to fire (UTC recommended). XOR delay_seconds.",
+    )
+    delay_seconds: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="Relative delay in seconds from now. XOR fire_at.",
+    )
+    model: Optional[str] = None
+    timeout_seconds: Optional[int] = Field(default=None, ge=10)
+    allowed_tools: Optional[List[str]] = None
+
+    @field_validator("fire_at")
+    @classmethod
+    def _check_fire_at_iso(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        try:
+            datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            raise ValueError("fire_at must be an ISO-8601 timestamp")
+        return v
+
+    @model_validator(mode="after")
+    def _check_fire_spec_xor(self) -> "ReminderCreate":
+        has_fire_at = self.fire_at is not None
+        has_delay = self.delay_seconds is not None
+        if has_fire_at == has_delay:
+            raise ValueError(
+                "Provide exactly one of fire_at (absolute) or delay_seconds (relative)."
+            )
+        return self
+
+    def raw_fire_spec(self) -> str:
+        """The literal fire spec as supplied — the create-idempotency key hashes
+        this (NOT the resolved instant), so a ``delay_seconds`` client-retry
+        dedupes instead of resolving ``now+delay`` to a fresh key each call."""
+        if self.delay_seconds is not None:
+            return f"delay_seconds={self.delay_seconds}"
+        return f"fire_at={self.fire_at}"
+
+
+class ReminderSummary(BaseModel):
+    """List-response model for a reminder (#1296)."""
+    id: str
+    agent_name: str
+    message: str
+    fire_at: str
+    status: str  # pending | firing | fired | cancelled | failed
+    created_at: str
+    fired_at: Optional[str] = None
+    cancelled_at: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class Reminder(ReminderSummary):
+    """Detail-response model — full reminder row (#1296)."""
+    model: Optional[str] = None
+    timeout_seconds: Optional[int] = None
+    allowed_tools: Optional[List[str]] = None
+    execution_id: Optional[str] = None
+    fire_attempts: int = 0
+    error: Optional[str] = None
 
 
 # =============================================================================
@@ -2109,6 +2525,17 @@ class OpsSettingsUpdate(BaseModel):
     settings: Dict[str, str]
 
 
+class RetentionAcknowledge(BaseModel):
+    """Approve one over-threshold retention prune (#1644).
+
+    `window_days` is not advisory — the endpoint rejects (409) unless it matches
+    the window actually in force, so an ack always names the deletion it authorizes.
+    """
+    key: str = Field(..., min_length=1, max_length=100)
+    window_days: int = Field(..., ge=0, le=3650)
+
+
+
 class SlackSettingsUpdate(BaseModel):
     """Request body for updating Slack settings."""
     client_id: str = None
@@ -2265,6 +2692,11 @@ class TelegramGroupConfigUpdateRequest(BaseModel):
 class TelegramGroupMessageRequest(BaseModel):
     """Request model for proactive group messaging (Issue #349)."""
     message: str
+
+
+class SlackChannelProactiveRequest(BaseModel):
+    """ent#223 — toggle per-channel proactive consent on a Slack channel binding."""
+    allow_proactive: bool
 
 
 class SlackChannelMessageRequest(BaseModel):

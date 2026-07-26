@@ -14,6 +14,14 @@ Socket Mode is the default transport: Trinity opens an outbound WebSocket connec
 
 Yes. Each agent gets its own dedicated Slack channel via **Create Channel** in the agent's Sharing tab, and @mentions in that channel route to the bound agent. Direct messages to the bot go to a single workspace-wide DM-default agent instead. Replies post with each agent's own name and avatar, so multiple agents in one workspace stay visually distinct. See [Slack Integration](../integrations/slack-integration.md).
 
+## Can each agent have its own Slack bot identity instead of sharing one?
+
+By default all agents share one workspace bot and are told apart by their per-message name and avatar. Giving an agent its **own dedicated Slack bot** — one people can DM directly and `@mention` by name, alongside other agents in the same channel — is an enterprise-tier capability, configured from the agent's Sharing tab. See [Slack Integration](../integrations/slack-integration.md#per-agent-dedicated-bots-enterprise).
+
+## Can I control whether an agent posts to a Slack channel on its own?
+
+Yes. Proactively posting to a Slack channel requires a per-channel consent toggle, separate from the per-recipient consent for DMs — a newly bound channel denies proactive posts until you enable it in the Slack channel panel. Replying inline to someone's message never needs consent. See [Slack Integration](../integrations/slack-integration.md#per-channel-proactive-consent).
+
 ## Which agent answers when someone DMs the Slack bot?
 
 DMs are routed to the workspace's DM-default agent. The first agent bound to the workspace becomes the DM default automatically, but you can reassign it anytime: open the target agent's **Sharing** tab → Slack section and click **Set as DM Default** — the change takes effect immediately, no restart needed. Only one agent per workspace can be the DM default, and you cannot unbind the current DM-default agent while other agents are still bound; reassign the default first. See [Slack Integration](../integrations/slack-integration.md).
@@ -89,3 +97,9 @@ Calls are rate-limited to 5 per owner and destination number per 60 seconds, cap
 ## How does Trinity know who is messaging my agent from a channel?
 
 The verified email is the identity across every channel: a user verified on Telegram, WhatsApp, or a public link, or identified via Slack workspace OAuth, is the same person to Trinity everywhere. That email is checked against the agent's access policy — open access lets anyone chat, while restricted agents admit only the owner, admins, and emails on the shared-access list, with everyone else generating a pending access request. Approving a user once admits them on all channels. The Sharing tab also shows a client roster of external channel users who have messaged the agent. For the approval flow and policy details, see [Access Control](../sharing-and-access/access-control.md).
+
+## Can I change how many proactive messages my agent can send?
+
+Yes. An admin can tune the anti-spam caps on **agent-initiated** ("proactive") sends under **Settings → General → Proactive message limits**: Slack per-channel and per-agent, Telegram per-group and per-agent, and proactive direct messages per recipient — each a per-hour limit. The shipped defaults are 10/hour per channel/group/recipient and 100/hour per agent, so nothing changes until you raise them. Set a value to **0** to make that cap unlimited (the guardrail is disabled and the save warns you). Changes take effect immediately, with no restart. This is the setting to raise for a legitimate high-volume agent — for example, one that posts a Slack message for each inbound support request.
+
+Note: these caps apply only to messages the agent *starts*. **Replies to inbound messages** (a DM, an @mention, or a thread reply through a channel) are never limited by them.

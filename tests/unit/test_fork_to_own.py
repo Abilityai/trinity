@@ -413,7 +413,12 @@ def _load_crud(docker_available=True):
     docker_service.get_agent_status_from_container = MagicMock(return_value=MagicMock())
 
     docker_utils = MagicMock()
-    docker_utils.volume_get = AsyncMock()
+    # #1667: a bare AsyncMock answers "yes, that volume exists" to every probe,
+    # which is the opposite of reality for the fresh agent names these tests
+    # create — and now means "another agent's leftover data is sitting there",
+    # so create refuses with a 409. NotFound is the truthful default; a test
+    # that wants the volume to pre-exist overrides it.
+    docker_utils.volume_get = AsyncMock(side_effect=_NotFound("no such volume"))
     docker_utils.volume_create = AsyncMock()
     docker_utils.containers_run = AsyncMock(return_value=MagicMock())
 
@@ -431,6 +436,14 @@ def _load_crud(docker_available=True):
     settings_service = MagicMock()
     settings_service.get_anthropic_api_key = MagicMock(return_value="sk-ant-key")
     settings_service.get_github_pat = MagicMock(return_value="platform-pat")
+    # #162 (17d0c8ef): crud swapped get_github_pat → resolve_github_pat(owner_id=…),
+    # which returns a (pat, tier) 2-tuple unpacked at crud.py. The retired
+    # get_github_pat stub above left resolve_github_pat an auto-child MagicMock,
+    # so every github-path test raised `ValueError: not enough values to unpack`.
+    # Default = global tier (non-fork agents keep github_pat_encrypted NULL, so
+    # set_agent_github_pat stays uncalled — the behavior these tests assert).
+    settings_service.resolve_github_pat = MagicMock(
+        return_value=("platform-pat", "global"))
     settings_service.get_agent_full_capabilities = MagicMock(return_value=False)
     settings_service.get_agent_quota_for_role = MagicMock(return_value=0)
     settings_service.get_agent_default_resources = MagicMock(
@@ -459,6 +472,12 @@ def _load_crud(docker_available=True):
     db = database_mod.db
     db.get_agent_owner.return_value = None
     db.is_agent_name_reserved.return_value = False
+    # #1664: the name-free check has a volume-identity sibling — a rename frees
+    # the NAME while the agent keeps its volumes, so create also refuses a base
+    # another agent still owns. Fork destinations are fresh names, so: free.
+    # (Stub it explicitly: an unstubbed MagicMock attribute is truthy, which
+    # reads as "base taken" and 409s every create in this module.)
+    db.is_volume_base_reserved.return_value = False
     db.get_agents_by_owner.return_value = []
     db.get_guardrails_config.return_value = None
     db.create_agent_mcp_api_key.return_value = MagicMock(

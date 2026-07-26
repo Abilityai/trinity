@@ -14,7 +14,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Header
 
 from database import db
-from dependencies import get_authorized_agent, get_current_user
+from dependencies import get_authorized_agent, get_current_user, assert_agent_access
 from models import (
     LoopRunResponse,
     LoopStatusResponse,
@@ -96,6 +96,9 @@ def _build_status_response(loop: dict) -> LoopStatusResponse:
         status=loop["status"],
         max_runs=loop["max_runs"],
         runs_completed=loop["runs_completed"],
+        failed_runs=loop.get("failed_runs", 0) or 0,
+        on_failure=loop.get("on_failure") or "abort",
+        max_consecutive_failures=loop.get("max_consecutive_failures") or 3,
         stop_reason=loop["stop_reason"],
         last_response=loop["last_response"],
         error=loop["error"],
@@ -118,9 +121,7 @@ def _check_loop_access(loop: dict, user: User) -> None:
     if loop["started_by_user_id"] == user.id:
         return
     # Fall back to agent ownership/sharing check.
-    if db.can_user_access_agent(user.username, loop["agent_name"]):
-        return
-    raise HTTPException(status_code=403, detail="Access denied")
+    assert_agent_access(user, loop["agent_name"])
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +169,8 @@ async def start_loop(
         max_duration_seconds=payload.max_duration_seconds,
         max_cost_usd=payload.max_cost_usd,
         no_progress_threshold=payload.no_progress_threshold,
+        on_failure=payload.on_failure,
+        max_consecutive_failures=payload.max_consecutive_failures,
         model=payload.model,
         allowed_tools=payload.allowed_tools,
         started_by_user_id=current_user.id,
@@ -181,6 +184,7 @@ async def start_loop(
         status=loop_row["status"],
         agent_name=name,
         max_runs=payload.max_runs,
+        on_failure=payload.on_failure,
     )
 
 

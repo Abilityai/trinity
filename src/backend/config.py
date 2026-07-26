@@ -32,12 +32,34 @@ PUBLIC_ACCESS_REQUESTS_ENABLED = os.getenv("PUBLIC_ACCESS_REQUESTS_ENABLED", "fa
 # deployments — the consent box still appears but nothing ever leaves the box.
 OPERATOR_INTAKE_ENABLED = (
     os.getenv("OPERATOR_INTAKE_ENABLED", "true").lower() == "true"
-    and os.getenv("DO_NOT_TRACK", "0") not in ("1", "true", "True")
+    and os.getenv("DO_NOT_TRACK", "0").strip().lower() in ("0", "", "false")
 )
 # Stable Cloudflare-fronted vanity domain (same app as #1116's /v1/report-bug);
 # /v1/ versions the contract so the backing Worker can be replaced forever.
 OPERATOR_INTAKE_URL = os.getenv(
     "OPERATOR_INTAKE_URL", "https://intake.abilityai.dev/v1/operator-intake"
+)
+
+# --- Tier-2 telemetry sharing (ent#12) -----------------------------------
+# The opt-IN fleet-sharing channel (Tier-2) on top of the Tier-1 local capture
+# (ent#184). Egress NEVER fires unless the operator explicitly opted in (the
+# `telemetry_sharing_enabled` system-setting, default-off) AND this hard
+# off-switch is on. `TELEMETRY_SHARING_ENABLED=false` (or the cross-tool
+# `DO_NOT_TRACK=1`) is an operator/air-gapped kill switch that disables egress
+# regardless of any stored consent — the toggle still appears, nothing leaves.
+TELEMETRY_SHARING_ENABLED = (
+    os.getenv("TELEMETRY_SHARING_ENABLED", "true").lower() == "true"
+    and os.getenv("DO_NOT_TRACK", "0").strip().lower() in ("0", "", "false")
+)
+# Same Cloudflare-fronted hosted-intake app as operator intake; a sibling
+# versioned path. The hosted aggregation/benchmark service is a separate issue.
+TELEMETRY_SHARING_URL = os.getenv(
+    "TELEMETRY_SHARING_URL", "https://intake.abilityai.dev/v1/telemetry-share"
+)
+# Periodic share cadence (hours) + default backfill window offered at consent.
+TELEMETRY_SHARING_INTERVAL_HOURS = int(os.getenv("TELEMETRY_SHARING_INTERVAL_HOURS", "24"))
+TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS = int(
+    os.getenv("TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS", "30")
 )
 
 # JWT Settings
@@ -172,6 +194,29 @@ ASYNC_DISPATCH_ELIGIBLE_TRIGGERS = frozenset({"schedule", "webhook"})
 # can't drift.
 MCP_AGENT_CHAT_PULL_ENABLED = os.getenv("MCP_AGENT_CHAT_PULL_ENABLED", "false").lower() == "true"
 
+# Pull-pilot CONSUMER opt-in for the agent-side worker pool (#946 Phase 2, Epic
+# #1045 / umbrella #1081). ORTHOGONAL to MCP_AGENT_CHAT_PULL_ENABLED above: that
+# flag is the global PRODUCER switch (how agent→agent chat is enqueued, decided
+# in the MCP server); this is a per-agent CONSUMER allowlist (which agents PULL
+# their queued work via GET /api/internal/next-task instead of being pushed to).
+# Comma-separated agent names; empty ⇒ no agent pulls (default). An allowlisted
+# agent gets TRINITY_PULL_MODE / TRINITY_MAX_PARALLEL_TASKS injected at
+# create/recreate (services/agent_service/pull_mode.py) — NOT the master internal
+# secret: the worker authenticates with the agent's own scoped TRINITY_MCP_API_KEY
+# (#307/#1159). Every other
+# agent's push path is unchanged. Default OFF — clearing the list is the rollback.
+PULL_MODE_PILOT_AGENTS = os.getenv("PULL_MODE_PILOT_AGENTS", "")
+
+# Lease-reaper poison-task cap (#1081 Phase 3 — #429 / #1402). MAX_REDELIVERY is
+# how many times a pull-claimed task whose worker died/hung (a `running` row with
+# a past `lease_expires_at`) is re-delivered — the reaper re-queues the SAME
+# execution_id and bumps `schedule_executions.redelivery_count` — before it is
+# poison-parked to the operator queue (FAILED + a human-facing park item). The
+# fleet-wide default; a per-agent override is a deferred follow-up (see
+# services/lease_reaper_service.py). Inert until a PULL_MODE_PILOT_AGENTS agent is
+# opted in (no non-pull row ever carries a lease).
+MAX_REDELIVERY = int(os.getenv("MAX_REDELIVERY", "3"))
+
 # Correlated-Failure / Thundering-Herd Controls (#1085) — re-delivery governor.
 # These guard the live #1083 fire-and-forget callback path (and, unchanged, the
 # future pull-mode re-delivery path) against a fleet-wide retry storm: a backend
@@ -289,3 +334,41 @@ DEFAULT_GITHUB_TEMPLATE_REPOS = [
     "abilityai/ruby-content",
     "abilityai/ruby-engagement",
 ]
+
+
+# ============================================================================
+# Retention (#1039 community floor / #1638 upgrade safety)
+# ============================================================================
+# These live in config.py — a leaf module — rather than services/settings_service.py
+# because database.py seeds them during init_database(), which runs at import
+# time. settings_service imports `from database import db`, so reaching into it
+# from the seed path is a circular import (#1638). settings_service re-exports
+# both names, so `from services.settings_service import ...` keeps working.
+
+# Community retention floor (days). The audit log is EXEMPT — it keeps a
+# 365-day integrity floor (see audit_retention_service). This is also the value
+# the enterprise `retention` module clamps unentitled writes to.
+COMMUNITY_RETENTION_FLOOR_DAYS = 5
+
+# #1638: the windows a FRESH install is seeded with, applying the community
+# floor to new installs only. Seeded once, against an empty database, by
+# database._seed_fresh_install_retention() — never written to an install that
+# already has data.
+#
+# This is the ONLY mechanism that may apply the floor. Do NOT apply it by
+# lowering OPS_SETTINGS_DEFAULTS: those are read at prune time as the fallback
+# for an install with no row, so lowering one retroactively hard-DELETEs the
+# existing data of every install that never opted in — silently, on its next
+# boot. That is #1638, and it cost a production instance ~3 months of history.
+#
+# `agent_soft_delete_retention_days` is deliberately ABSENT: it is a *recovery*
+# window, not a log window. Its expiry chains purge_agent_ownership ->
+# clear_agent_runtime_state -> remove_agent_volumes (#1581), destroying the
+# agent's workspace/public/shared volumes and any declared `data_paths` runtime
+# data (#1169). The floor does not apply to it in ANY edition.
+COMMUNITY_FRESH_INSTALL_SEED = {
+    "execution_log_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
+    "execution_row_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
+    "health_check_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
+    "schedule_soft_delete_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
+}

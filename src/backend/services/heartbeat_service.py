@@ -260,7 +260,14 @@ def _list_agent_names() -> List[str]:
     """
     try:
         from services.docker_service import list_all_agents_fast
-        return [a.name for a in list_all_agents_fast()]
+        # trinity-enterprise#69: ephemeral ghosts are excluded from the watch
+        # loop — a discarded ghost would otherwise fire a spurious alive→stale
+        # operator alert per discard (churn-scale noise); a short-lived
+        # worker's liveness is owned by its budget/GC lifecycle, not alerting.
+        return [
+            a.name for a in list_all_agents_fast()
+            if getattr(a, "ephemeral", False) is not True
+        ]
     except Exception:  # noqa: BLE001 — a Docker blip must not kill the loop
         logger.debug("heartbeat watch: agent listing failed", exc_info=True)
         return []

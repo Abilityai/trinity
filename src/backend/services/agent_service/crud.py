@@ -6,9 +6,11 @@ Contains the core logic for creating and deleting agents.
 import os
 import re
 import json
+import secrets
 import docker
 import logging
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -26,15 +28,19 @@ from services.docker_service import (
 from services.docker_utils import (
     volume_get, volume_create, containers_run
 )
+from services.agent_runtime_state import clear_agent_breakers
 from services.template_service import (
     get_github_template,
     generate_credential_files,
 )
 from services import git_service
-from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email
+from services.settings_service import get_anthropic_api_key, resolve_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
+from services.entitlement_service import entitlement_service
+from services import rate_limiter
+from . import ephemeral as ephemeral_service
 from services.github_service import GitHubService, GitHubError
 from services.agent_auth import derive_agent_token
-from utils.helpers import sanitize_agent_name, utc_now_iso
+from utils.helpers import sanitize_agent_name, to_utc_iso, utc_now_iso
 from .fork_to_own import fork_template_to_own_repo
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
@@ -135,91 +141,592 @@ def get_platform_version() -> str:
     return "unknown"
 
 
-async def create_agent_internal(
-    config: AgentConfig,
-    current_user: User,
-    request: Optional[Request] = None,
-    skip_name_sanitization: bool = False,
-    ws_manager=None
-) -> AgentStatus:
+# ===========================================================================
+# create_agent_internal phase-helpers (#1484)
+#
+# `create_agent_internal` was decomposed into the named phase-helpers below.
+# The orchestrator keeps the `if docker_client: try/except/else` INLINE (so
+# *what* is caught is byte-identical) and threads shared builders (`env_vars`,
+# `volumes`) and the mutated `config` explicitly; each producing phase RETURNS
+# its handles into the orchestrator's local variables. The except/else read the
+# single `_RollbackHandles` object, populated ONLY by the orchestrator.
+#
+# These helpers deliberately stay in this file for now; splitting them into
+# `agent_service/creation_phases.py` is the mechanical #1028 follow-up.
+# ===========================================================================
+
+
+@dataclass
+class _TemplateResolution:
+    """Set-once outputs of the template-resolution phase (github | local).
+
+    Mirrors the upfront `x = None` init block the monolith carried, so a raise
+    before a field is produced leaves a benign default (no new NameError
+    surface).
     """
-    Internal function to create an agent.
+    template_data: dict = field(default_factory=dict)
+    github_template_path: Optional[str] = None
+    github_repo_for_agent: Optional[str] = None
+    github_pat_for_agent: Optional[str] = None
+    github_pat_tier: str = "none"  # ent#162: per_user/fork → persist per-agent PAT
+    git_instance_id: Optional[str] = None
+    git_working_branch: Optional[str] = None
+    fork_upstream_repo: Optional[str] = None
+    template_shared_folders: Optional[dict] = None
 
-    Used by both the API endpoint and system deployment.
 
-    `request` is optional: the HTTP request object is not dereferenced anywhere
-    in this function, so boot-time / background callers with no live request
-    (e.g. the Cornelius first-run seeder, ent#107) pass `request=None`.
+@dataclass
+class _RollbackHandles:
+    """The exact handles the except/else roll back (AC #3). Every field is
+    defaulted and the ORCHESTRATOR is the sole populator — the phase-helpers
+    never touch it, so the caught behavior is byte-identical to the monolith."""
+    agent_name: str = ""
+    agent_mcp_key: object = None
+    git_instance_id: Optional[str] = None
+    github_repo_for_agent: Optional[str] = None
+    ephemeral_slot_reserved: bool = False
+    ephemeral_owner_id: Optional[int] = None
 
-    CRED-002: Credentials are no longer auto-injected during creation.
-    They are added after creation via inject_credentials endpoint or
-    imported from .credentials.enc on startup.
 
-    Args:
-        config: Agent configuration
-        current_user: Authenticated user
-        request: FastAPI request object
-        skip_name_sanitization: If True, don't sanitize the name (used when name is pre-validated)
-        ws_manager: Optional WebSocket manager for broadcasts
+def _apply_ephemeral_pregates(config: AgentConfig, current_user: User) -> Optional[str]:
+    """trinity-enterprise#69 ghost pre-gates — ALL before any side effect.
 
-    Returns:
-        AgentStatus of the created agent
-
-    Raises:
-        HTTPException: On validation or creation errors
+    Returns the stamped `ephemeral_expires_at` (None for a non-ghost) and, for a
+    ghost, mutates `config.name` to the unique `{base}-{hex8}` suffix. Raises the
+    gate HTTPExceptions in priority order (entitlement → fork-conflict →
+    spawn-recursion → spawn-rate-limit → ttl-ceiling → name-allocation).
     """
-    original_name = config.name
-    if not skip_name_sanitization:
-        config.name = sanitize_agent_name(config.name)
-
-    if not config.name:
-        raise HTTPException(status_code=400, detail="Invalid agent name - must contain at least one alphanumeric character")
-
-    # #834: the name-reservation check must also catch soft-deleted agents.
-    # `get_agent_owner` filters them out (user-facing 404 transparency), so
-    # we use the unfiltered `is_agent_name_reserved` here. Without this the
-    # create flow walks past the existence guard, the container ends up
-    # created, and the agent_ownership INSERT hits a UNIQUE constraint
-    # IntegrityError leaving the system half-built.
-    if (
-        get_agent_by_name(config.name)
-        or db.get_agent_owner(config.name)
-        or db.is_agent_name_reserved(config.name)
-    ):
-        raise HTTPException(status_code=409, detail="Agent already exists")
-
-    # Agent quota enforcement: per-role limits (QUOTA-001)
-    max_agents = get_agent_quota_for_role(current_user.role)
-    if max_agents > 0:
-        owned = db.get_agents_by_owner(current_user.username)
-        # System agents don't count toward user quota
-        non_system = [a for a in owned if not (db.get_agent_owner(a) or {}).get("is_system")]
-        if len(non_system) >= max_agents:
+    ephemeral_expires_at = None
+    if config.ephemeral:
+        # Entitlement-gated creation surface (the lifecycle mechanics below
+        # are edition-agnostic; only creating WITH a budget is gated).
+        if not entitlement_service.is_entitled("ephemeral_agents"):
             raise HTTPException(
-                status_code=429,
+                status_code=403,
                 detail={
-                    "error": f"Agent quota exceeded. You have {len(non_system)}/{max_agents} agents. "
-                             f"Delete an agent to create a new one.",
-                    "code": "QUOTA_EXCEEDED",
-                    "current": len(non_system),
-                    "limit": max_agents
-                }
+                    "error": "Ephemeral agents are not available in this edition.",
+                    "code": "ephemeral_not_entitled",
+                },
+            )
+        # fork_to_own makes a durable user-owned repo — pointless for a ghost.
+        if config.fork_to_own:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "fork_to_own cannot be combined with ephemeral.",
+                    "code": "ephemeral_fork_to_own_conflict",
+                },
+            )
+        # An ephemeral agent must not spawn ephemeral agents (chain-spawn
+        # depth-1 kill; belt to the key-fence braces in dependencies.py).
+        if current_user.agent_name:
+            parent_info = db.get_agent_ephemeral_info(current_user.agent_name)
+            if isinstance(parent_info, dict) and parent_info.get("is_ephemeral"):
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "error": "Ephemeral agents cannot spawn ephemeral agents.",
+                        "code": "ephemeral_spawn_recursion",
+                    },
+                )
+            # Per-parent spawn rate limit (agent-scoped callers only) —
+            # resets never compound across generations because of the
+            # recursion refusal above.
+            rate_limiter.enforce(
+                f"agent_spawn:{current_user.agent_name}",
+                int(os.getenv("EPHEMERAL_SPAWN_RATE_LIMIT", "10")),
+                int(os.getenv("EPHEMERAL_SPAWN_RATE_WINDOW_S", "3600")),
+                detail="Ephemeral spawn rate limit exceeded for this agent.",
+            )
+        # TTL is ALWAYS stamped (no immortal ghost): default to the platform
+        # ceiling when only max_executions was given.
+        ttl_ceiling = get_ephemeral_ttl_ceiling_seconds()
+        ttl = config.ephemeral.ttl_seconds or ttl_ceiling
+        if ttl > ttl_ceiling:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": f"ttl_seconds exceeds the platform ceiling ({ttl_ceiling}s).",
+                    "code": "ephemeral_ttl_exceeds_ceiling",
+                },
+            )
+        ephemeral_expires_at = to_utc_iso(
+            datetime.now(timezone.utc) + timedelta(seconds=ttl)
+        )
+        # Server-suffixed name: unique-by-construction, so a discarded ghost's
+        # KEEP-policy execution rows are never inherited by a successor and
+        # concurrent fan-out spawns can share a base name. 8 hex chars (review
+        # M3): 4 would collide at fan-out scale (~300 spawns of one base name
+        # within the 90d execution-row retention ≈ 50% birthday odds), and a
+        # collision inherits the dead ghost's terminal rows → stillborn ghost.
+        base_name = config.name[:48]
+        for _ in range(5):
+            candidate = f"{base_name}-{secrets.token_hex(4)}"
+            if not (
+                get_agent_by_name(candidate)
+                or db.is_agent_name_reserved(candidate)
+            ):
+                config.name = candidate
+                break
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail="Could not allocate a unique ephemeral agent name",
+            )
+    return ephemeral_expires_at
+
+
+async def _guard_leftover_workspace_volume(
+    config: AgentConfig, adopt_existing_workspace: bool
+) -> None:
+    """#1667: refuse a leftover workspace volume that NOTHING claims unless the
+    caller explicitly declares an adopt. Raised BEFORE the docker try-block so
+    the 409 isn't flattened to a generic 500 (nothing is built yet to roll
+    back). Ghosts are volume-less, so they never reach here."""
+    if (
+        not config.ephemeral
+        and not adopt_existing_workspace
+        and docker_client
+    ):
+        _workspace_vol = f"agent-{config.name}-workspace"
+        try:
+            await volume_get(_workspace_vol)
+        except docker.errors.NotFound:
+            pass  # the normal path: no leftover, create it below
+        except Exception as e:  # noqa: BLE001 — a probe failure must not block creation
+            logger.warning(
+                "[#1667] could not probe workspace volume %s (%s); proceeding",
+                _workspace_vol,
+                e,
+            )
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Data volume '{_workspace_vol}' already exists and no agent "
+                    f"claims it, so its contents would silently become this "
+                    f"agent's home directory. Refusing to adopt another agent's "
+                    f"leftover data. Remove it (docker volume rm "
+                    f"{_workspace_vol}) or choose a different name — unclaimed "
+                    f"agent volumes are also reclaimed automatically."
+                ),
             )
 
-    # SEC-172: Validate base image against allowlist before any Docker operations
-    validate_base_image(config.base_image)
 
-    template_data = {}
-    github_template_path = None
-    github_repo_for_agent = None
-    github_pat_for_agent = None
-    git_instance_id = None
-    git_working_branch = None
-    # trinity-enterprise#93: template repo the fork-to-own copy came from —
-    # baked as GIT_UPSTREAM_REPO so `git pull upstream <branch>` works.
-    fork_upstream_repo = None
-    # Phase 9.11: Track shared folder config from template
+# ent#123: owner/repo charset guard. The repo path is interpolated into
+# startup.sh's `eval`-built clone command; the PAT-ful REST validation only
+# blocked garbage incidentally, and the tokenless path replaces REST with a
+# git-transport probe — so the barrier must be explicit, not incidental.
+# GitHub's own owner/repo charset is a subset of this.
+_GITHUB_REPO_PATH_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def _parse_github_ref(config: AgentConfig) -> tuple[str, str, Optional[str]]:
+    """GIT-002: parse `github:owner/repo[@branch]` into `(template_lookup,
+    repo_path, url_branch)`. Mutates `config.source_branch` when a valid branch
+    is present in the URL."""
+    template_str = config.template[7:]  # Remove "github:" prefix
+    url_branch = None
+    if "@" in template_str:
+        template_str, url_branch = template_str.rsplit("@", 1)
+        # Validate branch name (alphanumeric plus - _ /)
+        if url_branch and url_branch.replace("-", "").replace("_", "").replace("/", "").isalnum():
+            config.source_branch = url_branch
+            logger.info(f"GIT-002: Parsed branch from URL: {url_branch}")
+        else:
+            url_branch = None  # Invalid branch, ignore
+
+    if "/" in template_str and not _GITHUB_REPO_PATH_RE.match(template_str):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid GitHub repository reference. Use github:owner/repo "
+                "with letters, digits, '.', '_' or '-' only."
+            ),
+        )
+
+    # Reconstruct template ID without branch for lookup
+    template_lookup = f"github:{template_str}" if url_branch else config.template
+    return template_lookup, template_str, url_branch
+
+
+def _gate_tokenless_request(
+    config: AgentConfig, github_pat: str
+) -> Optional[str]:
+    """ent#123: admit or reject a github-template create with no PAT.
+
+    ``resolve_github_pat`` returns an EMPTY STRING (not None) when no tier
+    has a token — normalize to None so every downstream consumer can rely
+    on truthiness. A tokenless request is allowed only in source mode
+    (pull-only): working-branch mode pushes a new branch at container boot,
+    which is impossible anonymously. ``source_mode`` is Optional[bool], so
+    the falsy check deliberately catches an explicit None too. Fork-to-own
+    passes through — the user's own PAT becomes the write identity later.
+    The public-vs-private decision is NOT made here (this helper is sync);
+    it happens in ``_validate_github_access`` via the anonymous ls-remote
+    probe.
+    """
+    if github_pat:
+        return github_pat
+    if not config.fork_to_own and not config.source_mode:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Bidirectional git sync requires write credentials — add "
+                "your GitHub token in Settings (or ask an admin to configure "
+                "the platform token), or create the agent in source mode "
+                "(pull-only)."
+            ),
+        )
+    return None
+
+
+def _resolve_github_repo_and_pat(
+    config: AgentConfig, current_user: User, template_lookup: str, repo_path: str
+) -> tuple[Optional[dict], str, Optional[str], str]:
+    """Resolve `(gh_template, github_repo, github_pat, github_pat_tier)` for a
+    github template. Prefers the predefined catalog entry; otherwise treats the
+    ref as a dynamic `owner/repo`. Mutates `config.resources`/`config.mcp_servers`
+    for a predefined template."""
+    gh_template = get_github_template(template_lookup)
+
+    # ent#162: the PAT resolver prefers THIS creator's personal token
+    # over the shared admin PAT. `current_user.id` is the owner user id
+    # (agent-scoped keys resolve to their owner), so resolution keys on
+    # ownership only — never a calling/sharing principal. `github_pat_tier`
+    # records which tier supplied the token, so the persist site below
+    # writes a per-agent PAT only for a deliberate identity (per-user /
+    # fork), never the global fallback (see Decision 2 in the resolver
+    # docstring). NOTE: agent creation requires role creator+ (ROLE-001);
+    # an invited user seeded as `user` (#314) cannot reach this path until
+    # promoted — a per-user PAT does not itself grant creation rights.
+    creator_user_id = current_user.id
+
+    if gh_template:
+        # Pre-defined GitHub template from config.py
+        github_repo = gh_template["github_repo"]
+
+        # Resolve the GitHub PAT: per-agent → this owner's per-user
+        # (live) → global (ent#162). Prefers the creator's own token so a
+        # non-admin is not confined to the admin PAT's repo scope.
+        # Fork-to-own (#93) doesn't need it — the user's PAT is the
+        # write identity and public templates clone unauthenticated.
+        github_pat, github_pat_tier = resolve_github_pat(owner_id=creator_user_id)
+        github_pat = _gate_tokenless_request(config, github_pat)
+
+        config.resources = gh_template.get("resources", config.resources)
+        config.mcp_servers = gh_template.get("mcp_servers", config.mcp_servers)
+        return gh_template, github_repo, github_pat, github_pat_tier
+
+    # Dynamic GitHub template - use any github:owner/repo[@branch] format
+    # Note: Branch was already parsed above; repo_path already has branch removed
+    if "/" not in repo_path:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid GitHub template format. Use: github:owner/repo or github:owner/repo@branch"
+        )
+
+    # Resolve the GitHub PAT: per-agent → this owner's per-user
+    # (live) → global (ent#162). Prefers the creator's own token so a
+    # non-admin can clone a private repo the admin PAT can't see.
+    github_pat, github_pat_tier = resolve_github_pat(owner_id=creator_user_id)
+    github_pat = _gate_tokenless_request(config, github_pat)
+
+    logger.info(f"Using dynamic GitHub template: {repo_path} (branch: {config.source_branch})")
+    return None, repo_path, github_pat, github_pat_tier
+
+
+async def _apply_fork_to_own(
+    config: AgentConfig,
+    current_user: User,
+    gh_template: Optional[dict],
+    github_repo_for_agent: str,
+    github_pat_for_agent: Optional[str],
+    github_pat_tier: str,
+    url_branch: Optional[str],
+) -> tuple[str, Optional[str], str, Optional[str]]:
+    """trinity-enterprise#93: enforce a `fork_to_own: required` template and, when
+    the caller forks, copy the template into a user-owned repo and return the
+    updated `(repo, pat, tier, fork_upstream_repo)`. Runs BEFORE the docker
+    try-block so the structured FORK_* errors reach the UI. When the caller is
+    NOT forking the inputs pass through unchanged (tier untouched)."""
+    fork_meta = (gh_template or {}).get("fork_to_own")
+    if fork_meta == "required" and not config.fork_to_own:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"Template '{config.template}' requires fork-to-own "
+                    f"creation: provide fork_to_own.destination_repo and "
+                    f"fork_to_own.github_pat so the agent's repo is your "
+                    f"own, not the shared template."
+                ),
+                "code": "FORK_TO_OWN_REQUIRED",
+            },
+        )
+    if not config.fork_to_own:
+        return github_repo_for_agent, github_pat_for_agent, github_pat_tier, None
+    if url_branch:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    "fork_to_own copies the template's default branch; "
+                    "the github:owner/repo@branch form is not supported "
+                    "with it."
+                ),
+                "code": "FORK_BRANCH_UNSUPPORTED",
+            },
+        )
+    destination = config.fork_to_own.destination_repo
+    # Source-mode rows bypass the UNIQUE(repo, branch) index, so
+    # this is the guard against two agents auto-pushing the same
+    # destination main. (Re-checked after reservation below — this
+    # pre-check is check-then-act with the whole copy in between.)
+    bound_agents = db.get_git_config_agent_names_for_repo(destination)
+    if bound_agents:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": _fork_destination_in_use_message(
+                    destination, bound_agents[0], current_user.username
+                ),
+                "code": "FORK_DESTINATION_IN_USE",
+            },
+        )
+    # Unwrap the SecretStr exactly once; plain str flows inward
+    # (docker env, GitHubService header, push auth).
+    user_pat = config.fork_to_own.github_pat.get_secret_value()
+    fork_result = await fork_template_to_own_repo(
+        template_repo=github_repo_for_agent,
+        destination_repo=destination,
+        user_pat=user_pat,
+        read_pat=github_pat_for_agent or "",
+        private=config.fork_to_own.private,
+    )
+    fork_upstream_repo = github_repo_for_agent
+    github_repo_for_agent = fork_result.destination_repo
+    github_pat_for_agent = user_pat
+    github_pat_tier = "fork"  # ent#162: a deliberate per-agent identity → persist
+    # Pinned semantics: the user's default branch IS the brain —
+    # origin main holds captures; auto-sync pushes there.
+    config.source_branch = fork_result.default_branch
+    config.source_mode = True
+    return github_repo_for_agent, github_pat_for_agent, github_pat_tier, fork_upstream_repo
+
+
+async def _validate_github_access(
+    config: AgentConfig, github_repo_for_agent: str, github_pat_for_agent: Optional[str]
+) -> None:
+    """#218: validate PAT access to the repo (and branch) before container create,
+    so a bad token fails loud here instead of silently in startup.sh. Transient
+    network errors are logged and NOT fatal (matches the monolith).
+
+    ent#123 tokenless path: no PAT ⇒ probe over the git transport instead of
+    REST (`probe_anonymous_repo_access` — same transport as the container's
+    anonymous clone, immune to the anonymous REST rate cap). Unlike the
+    PAT-ful path this is FAIL-CLOSED on transient errors: if the probe can't
+    reach GitHub the clone would fail too, and with monitoring default-off
+    (#1121) a fail-open would produce a silently empty agent.
+    """
+    if not github_pat_for_agent:
+        outcome = await git_service.probe_anonymous_repo_access(
+            github_repo_for_agent
+        )
+        if outcome == "unavailable":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Repository '{github_repo_for_agent}' was not found or is "
+                    f"private. If it is private, add your GitHub token in "
+                    f"Settings or ask an admin to configure the platform token."
+                ),
+            )
+        if outcome != "ok":
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "GitHub is unreachable — could not verify anonymous access "
+                    f"to '{github_repo_for_agent}'. Retry shortly, or add a "
+                    f"GitHub token."
+                ),
+            )
+        # Repo reachable anonymously. Also verify the source branch exists —
+        # source-mode clones `-b <branch>`, and a missing branch would fail
+        # the clone with the same silent-empty-agent risk (the credential-less
+        # ls-remote helper answers for public repos).
+        if config.source_branch:
+            branch_ok = await git_service.check_remote_branch_exists(
+                github_repo_for_agent, config.source_branch
+            )
+            if not branch_ok:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Branch '{config.source_branch}' not found in public "
+                        f"repository '{github_repo_for_agent}'. Pass the "
+                        f"branch explicitly (github:owner/repo@branch) if the "
+                        f"repository's default branch is not 'main'."
+                    ),
+                )
+        logger.info(
+            f"Validated anonymous access to public repo: {github_repo_for_agent}"
+        )
+        return
+
+    try:
+        gh_service = GitHubService(github_pat_for_agent)
+        repo_parts = github_repo_for_agent.split("/", 1)
+        if len(repo_parts) == 2:
+            repo_info = await gh_service.check_repo_exists(repo_parts[0], repo_parts[1])
+            if not repo_info.exists:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"GitHub repository '{github_repo_for_agent}' not found or PAT does not have access. "
+                           f"Verify the repository exists and the configured GitHub PAT has read access."
+                )
+            logger.info(f"Validated GitHub repo access: {github_repo_for_agent} (private={repo_info.private})")
+
+            # If source_branch specified, validate branch exists
+            if config.source_branch and config.source_branch != repo_info.default_branch:
+                try:
+                    branch_resp = await gh_service._request(
+                        "GET", f"/repos/{github_repo_for_agent}/branches/{config.source_branch}"
+                    )
+                    if branch_resp.status_code == 404:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Branch '{config.source_branch}' not found in repository '{github_repo_for_agent}'. "
+                                   f"Available default branch: '{repo_info.default_branch}'."
+                        )
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    logger.warning(f"Could not validate branch '{config.source_branch}': {e}")
+    except HTTPException:
+        raise
+    except GitHubError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to validate GitHub repository access: {e}"
+        )
+    except Exception as e:
+        # Log but don't block creation for transient network errors
+        logger.warning(f"GitHub repo validation failed (non-blocking): {e}")
+
+
+async def _reserve_git_instance(
+    config: AgentConfig, current_user: User, github_repo_for_agent: str
+) -> tuple[Optional[str], Optional[str]]:
+    """S7 Layer 0 (#382): reserve the working branch atomically (writes the
+    `agent_git_config` row that the except-block rolls back), then re-check the
+    fork destination race and deterministically roll back the losing agent."""
+    # Generate git sync instance ID and branch for Phase 7.
+    # S7 Layer 0 (#382): reserve the working branch atomically —
+    # probes the remote with `git ls-remote` and inserts the DB
+    # row under the partial UNIQUE index so no two agents can end
+    # up bound to the same (repo, branch). The row is written
+    # here, before the container is created, so it must be rolled
+    # back if anything in the rest of the flow fails (see the
+    # `try: ... except: db.delete_git_config(...)` block below).
+    git_instance_id, git_working_branch = (
+        await git_service.reserve_and_generate_instance_id(
+            agent_name=config.name,
+            github_repo=github_repo_for_agent,
+            source_branch=config.source_branch or "main",
+            source_mode=config.source_mode,
+        )
+    )
+
+    # trinity-enterprise#93: the destination-binding pre-check above is
+    # check-then-act with the entire fork copy (minutes) in between,
+    # and source-mode rows bypass the partial UNIQUE index — so two
+    # concurrent creates to the same destination can both reach here.
+    # Re-check now that our own row is inserted; losers (everyone but
+    # the lexicographically-first agent name) roll back deterministically,
+    # leaving exactly one winner.
+    if config.fork_to_own:
+        bound_now = db.get_git_config_agent_names_for_repo(github_repo_for_agent)
+        if len(bound_now) > 1 and min(bound_now) != config.name:
+            try:
+                db.delete_git_config(config.name)
+            except Exception as cleanup_exc:
+                logger.warning(
+                    "fork-to-own: failed to roll back git config for %s "
+                    "after destination race: %s", config.name, cleanup_exc,
+                )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": _fork_destination_in_use_message(
+                        github_repo_for_agent,
+                        min(bound_now),
+                        current_user.username,
+                    ),
+                    "code": "FORK_DESTINATION_IN_USE",
+                },
+            )
+    return git_instance_id, git_working_branch
+
+
+def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
+    """Load a `local:`-prefixed template's `template.yaml` (curated catalog then
+    deploy-local store, #950). Mutates `config` runtime/type/resources/tools/
+    mcp_servers fields. Returns `(template_data, template_shared_folders)`."""
+    template_data: dict = {}
     template_shared_folders = None
+    # Local template - strip "local:" prefix. Look in curated catalog
+    # first (/agent-configs/templates), then in deploy-local writable
+    # store (/data/deployed-templates) per #950. Each candidate path
+    # is validated + resolved to prove it stays under the root before
+    # any filesystem access (regex barrier + is_relative_to barrier).
+    raw_name = config.template[6:]
+    template_path = _safe_local_template_path(
+        raw_name, _LOCAL_TEMPLATE_ROOTS[0]
+    )
+    if not (template_path / "template.yaml").exists():
+        template_path = _safe_local_template_path(
+            raw_name, _LOCAL_TEMPLATE_ROOTS[1]
+        )
+
+    template_yaml = template_path / "template.yaml"
+
+    if template_yaml.exists():
+        try:
+            with open(template_yaml) as f:
+                template_data = yaml.safe_load(f)
+                config.type = template_data.get("type", config.type)
+                config.resources = template_data.get("resources", config.resources)
+                config.tools = template_data.get("tools", config.tools)
+                creds = template_data.get("credentials", {})
+                mcp_servers = list(creds.get("mcp_servers", {}).keys())
+                if mcp_servers:
+                    config.mcp_servers = mcp_servers
+                # Multi-runtime support - extract runtime config from template
+                runtime_config = template_data.get("runtime", {})
+                if isinstance(runtime_config, dict):
+                    config.runtime = runtime_config.get("type", config.runtime)
+                    config.runtime_model = runtime_config.get("model", config.runtime_model)
+                elif isinstance(runtime_config, str):
+                    config.runtime = runtime_config
+                # Phase 9.11: Extract shared folder config from template
+                shared_folders_config = template_data.get("shared_folders", {})
+                if shared_folders_config:
+                    template_shared_folders = {
+                        "expose": shared_folders_config.get("expose", False),
+                        "consume": shared_folders_config.get("consume", False)
+                    }
+        except Exception as e:
+            logger.warning(f"Error loading template config: {e}")
+    return template_data, template_shared_folders
+
+
+async def _resolve_template(config: AgentConfig, current_user: User) -> _TemplateResolution:
+    """Dispatch template resolution (github incl. fork | local | none) and return
+    the set-once `_TemplateResolution`. The whole github phase — including the
+    real fork-to-own GitHub write — stays here, BEFORE the caller's docker
+    try-block, so its structured 4xx errors are not flattened to a 500."""
+    tr = _TemplateResolution()
 
     # trinity-enterprise#93: fork-to-own only makes sense for a github:
     # template (there must be a source repo to copy). Reject early and loud.
@@ -255,287 +762,50 @@ async def create_agent_internal(
                 ),
             )
         if config.template.startswith("github:"):
-            # GIT-002: First, check if template URL contains @branch syntax
-            # This applies to both pre-defined and dynamic templates
-            template_str = config.template[7:]  # Remove "github:" prefix
-            url_branch = None
-            if "@" in template_str:
-                template_str, url_branch = template_str.rsplit("@", 1)
-                # Validate branch name (alphanumeric plus - _ /)
-                if url_branch and url_branch.replace("-", "").replace("_", "").replace("/", "").isalnum():
-                    config.source_branch = url_branch
-                    logger.info(f"GIT-002: Parsed branch from URL: {url_branch}")
-                else:
-                    url_branch = None  # Invalid branch, ignore
-
-            # Reconstruct template ID without branch for lookup
-            template_lookup = f"github:{template_str}" if url_branch else config.template
-            gh_template = get_github_template(template_lookup)
-
-            if gh_template:
-                # Pre-defined GitHub template from config.py
-                github_repo = gh_template["github_repo"]
-
-                # Get system GitHub PAT from settings (SQLite) or env var.
-                # Fork-to-own (#93) doesn't need it — the user's PAT is the
-                # write identity and public templates clone unauthenticated.
-                github_pat = get_github_pat()
-                if not github_pat and not config.fork_to_own:
-                    raise HTTPException(
-                        status_code=500,
-                        detail="GitHub PAT not configured. Set GITHUB_PAT in .env or add via Settings."
-                    )
-
-                github_repo_for_agent = github_repo
-                github_pat_for_agent = github_pat
-                config.resources = gh_template.get("resources", config.resources)
-                config.mcp_servers = gh_template.get("mcp_servers", config.mcp_servers)
-            else:
-                # Dynamic GitHub template - use any github:owner/repo[@branch] format
-                # Requires system GitHub PAT to be configured
-                # Note: Branch was already parsed above; template_str already has branch removed
-                repo_path = template_str
-
-                if "/" not in repo_path:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Invalid GitHub template format. Use: github:owner/repo or github:owner/repo@branch"
-                    )
-
-                # Get system GitHub PAT from settings (SQLite) or env var
-                github_pat = get_github_pat()
-                if not github_pat and not config.fork_to_own:
-                    raise HTTPException(
-                        status_code=500,
-                        detail="GitHub PAT not configured. Set GITHUB_PAT in .env or add via Settings."
-                    )
-
-                github_repo_for_agent = repo_path
-                github_pat_for_agent = github_pat
-                logger.info(f"Using dynamic GitHub template: {repo_path} (branch: {config.source_branch})")
-
-            # trinity-enterprise#93: fork-to-own — copy the template into a
-            # repo the USER owns, then create the agent FROM the copy. Runs
-            # here, BEFORE the docker try-block, so the structured FORK_*
-            # errors reach the UI (the catch-all below flattens everything
-            # inside it to a generic 500).
-            fork_meta = (gh_template or {}).get("fork_to_own")
-            if fork_meta == "required" and not config.fork_to_own:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": (
-                            f"Template '{config.template}' requires fork-to-own "
-                            f"creation: provide fork_to_own.destination_repo and "
-                            f"fork_to_own.github_pat so the agent's repo is your "
-                            f"own, not the shared template."
-                        ),
-                        "code": "FORK_TO_OWN_REQUIRED",
-                    },
-                )
-            if config.fork_to_own:
-                if url_branch:
-                    raise HTTPException(
-                        status_code=400,
-                        detail={
-                            "error": (
-                                "fork_to_own copies the template's default branch; "
-                                "the github:owner/repo@branch form is not supported "
-                                "with it."
-                            ),
-                            "code": "FORK_BRANCH_UNSUPPORTED",
-                        },
-                    )
-                destination = config.fork_to_own.destination_repo
-                # Source-mode rows bypass the UNIQUE(repo, branch) index, so
-                # this is the guard against two agents auto-pushing the same
-                # destination main. (Re-checked after reservation below — this
-                # pre-check is check-then-act with the whole copy in between.)
-                bound_agents = db.get_git_config_agent_names_for_repo(destination)
-                if bound_agents:
-                    raise HTTPException(
-                        status_code=409,
-                        detail={
-                            "error": _fork_destination_in_use_message(
-                                destination, bound_agents[0], current_user.username
-                            ),
-                            "code": "FORK_DESTINATION_IN_USE",
-                        },
-                    )
-                # Unwrap the SecretStr exactly once; plain str flows inward
-                # (docker env, GitHubService header, push auth).
-                user_pat = config.fork_to_own.github_pat.get_secret_value()
-                fork_result = await fork_template_to_own_repo(
-                    template_repo=github_repo_for_agent,
-                    destination_repo=destination,
-                    user_pat=user_pat,
-                    read_pat=github_pat_for_agent or "",
-                    private=config.fork_to_own.private,
-                )
-                fork_upstream_repo = github_repo_for_agent
-                github_repo_for_agent = fork_result.destination_repo
-                github_pat_for_agent = user_pat
-                # Pinned semantics: the user's default branch IS the brain —
-                # origin main holds captures; auto-sync pushes there.
-                config.source_branch = fork_result.default_branch
-                config.source_mode = True
-
+            template_lookup, repo_path, url_branch = _parse_github_ref(config)
+            (
+                gh_template,
+                tr.github_repo_for_agent,
+                tr.github_pat_for_agent,
+                tr.github_pat_tier,
+            ) = _resolve_github_repo_and_pat(
+                config, current_user, template_lookup, repo_path
+            )
+            (
+                tr.github_repo_for_agent,
+                tr.github_pat_for_agent,
+                tr.github_pat_tier,
+                tr.fork_upstream_repo,
+            ) = await _apply_fork_to_own(
+                config,
+                current_user,
+                gh_template,
+                tr.github_repo_for_agent,
+                tr.github_pat_for_agent,
+                tr.github_pat_tier,
+                url_branch,
+            )
             # Validate PAT has access to the repository before creating container
             # This prevents silent clone failures in startup.sh (#218)
-            try:
-                gh_service = GitHubService(github_pat_for_agent)
-                repo_parts = github_repo_for_agent.split("/", 1)
-                if len(repo_parts) == 2:
-                    repo_info = await gh_service.check_repo_exists(repo_parts[0], repo_parts[1])
-                    if not repo_info.exists:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"GitHub repository '{github_repo_for_agent}' not found or PAT does not have access. "
-                                   f"Verify the repository exists and the configured GitHub PAT has read access."
-                        )
-                    logger.info(f"Validated GitHub repo access: {github_repo_for_agent} (private={repo_info.private})")
-
-                    # If source_branch specified, validate branch exists
-                    if config.source_branch and config.source_branch != repo_info.default_branch:
-                        try:
-                            branch_resp = await gh_service._request(
-                                "GET", f"/repos/{github_repo_for_agent}/branches/{config.source_branch}"
-                            )
-                            if branch_resp.status_code == 404:
-                                raise HTTPException(
-                                    status_code=400,
-                                    detail=f"Branch '{config.source_branch}' not found in repository '{github_repo_for_agent}'. "
-                                           f"Available default branch: '{repo_info.default_branch}'."
-                                )
-                        except HTTPException:
-                            raise
-                        except Exception as e:
-                            logger.warning(f"Could not validate branch '{config.source_branch}': {e}")
-            except HTTPException:
-                raise
-            except GitHubError as e:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Failed to validate GitHub repository access: {e}"
-                )
-            except Exception as e:
-                # Log but don't block creation for transient network errors
-                logger.warning(f"GitHub repo validation failed (non-blocking): {e}")
-
-            # Generate git sync instance ID and branch for Phase 7.
-            # S7 Layer 0 (#382): reserve the working branch atomically —
-            # probes the remote with `git ls-remote` and inserts the DB
-            # row under the partial UNIQUE index so no two agents can end
-            # up bound to the same (repo, branch). The row is written
-            # here, before the container is created, so it must be rolled
-            # back if anything in the rest of the flow fails (see the
-            # `try: ... except: db.delete_git_config(...)` block below).
-            git_instance_id, git_working_branch = (
-                await git_service.reserve_and_generate_instance_id(
-                    agent_name=config.name,
-                    github_repo=github_repo_for_agent,
-                    source_branch=config.source_branch or "main",
-                    source_mode=config.source_mode,
-                )
+            await _validate_github_access(
+                config, tr.github_repo_for_agent, tr.github_pat_for_agent
             )
-
-            # trinity-enterprise#93: the destination-binding pre-check above is
-            # check-then-act with the entire fork copy (minutes) in between,
-            # and source-mode rows bypass the partial UNIQUE index — so two
-            # concurrent creates to the same destination can both reach here.
-            # Re-check now that our own row is inserted; losers (everyone but
-            # the lexicographically-first agent name) roll back deterministically,
-            # leaving exactly one winner.
-            if config.fork_to_own:
-                bound_now = db.get_git_config_agent_names_for_repo(github_repo_for_agent)
-                if len(bound_now) > 1 and min(bound_now) != config.name:
-                    try:
-                        db.delete_git_config(config.name)
-                    except Exception as cleanup_exc:
-                        logger.warning(
-                            "fork-to-own: failed to roll back git config for %s "
-                            "after destination race: %s", config.name, cleanup_exc,
-                        )
-                    raise HTTPException(
-                        status_code=409,
-                        detail={
-                            "error": _fork_destination_in_use_message(
-                                github_repo_for_agent,
-                                min(bound_now),
-                                current_user.username,
-                            ),
-                            "code": "FORK_DESTINATION_IN_USE",
-                        },
-                    )
+            tr.git_instance_id, tr.git_working_branch = await _reserve_git_instance(
+                config, current_user, tr.github_repo_for_agent
+            )
         elif config.template.startswith("local:"):
-            # Local template - strip "local:" prefix. Look in curated catalog
-            # first (/agent-configs/templates), then in deploy-local writable
-            # store (/data/deployed-templates) per #950. Each candidate path
-            # is validated + resolved to prove it stays under the root before
-            # any filesystem access (regex barrier + is_relative_to barrier).
-            raw_name = config.template[6:]
-            template_path = _safe_local_template_path(
-                raw_name, _LOCAL_TEMPLATE_ROOTS[0]
-            )
-            if not (template_path / "template.yaml").exists():
-                template_path = _safe_local_template_path(
-                    raw_name, _LOCAL_TEMPLATE_ROOTS[1]
-                )
+            tr.template_data, tr.template_shared_folders = _resolve_local_template(config)
+    return tr
 
-            template_yaml = template_path / "template.yaml"
 
-            if template_yaml.exists():
-                try:
-                    with open(template_yaml) as f:
-                        template_data = yaml.safe_load(f)
-                        config.type = template_data.get("type", config.type)
-                        config.resources = template_data.get("resources", config.resources)
-                        config.tools = template_data.get("tools", config.tools)
-                        creds = template_data.get("credentials", {})
-                        mcp_servers = list(creds.get("mcp_servers", {}).keys())
-                        if mcp_servers:
-                            config.mcp_servers = mcp_servers
-                        # Multi-runtime support - extract runtime config from template
-                        runtime_config = template_data.get("runtime", {})
-                        if isinstance(runtime_config, dict):
-                            config.runtime = runtime_config.get("type", config.runtime)
-                            config.runtime_model = runtime_config.get("model", config.runtime_model)
-                        elif isinstance(runtime_config, str):
-                            config.runtime = runtime_config
-                        # Phase 9.11: Extract shared folder config from template
-                        shared_folders_config = template_data.get("shared_folders", {})
-                        if shared_folders_config:
-                            template_shared_folders = {
-                                "expose": shared_folders_config.get("expose", False),
-                                "consume": shared_folders_config.get("consume", False)
-                            }
-                except Exception as e:
-                    logger.warning(f"Error loading template config: {e}")
-
-    # #1187: runtime is final here (request value, possibly overridden by the
-    # template). Reject an unknown one now (clear 400) instead of letting the
-    # agent container crash-loop on boot when get_runtime() can't resolve it.
-    validate_runtime(config.runtime)
-
-    # #1187: normalize the stored runtime to lowercase so the AGENT_RUNTIME env
-    # var and the `trinity.agent-runtime` label agree with the exact-case checks
-    # downstream — startup.sh's `[ "${AGENT_RUNTIME}" = "codex" ]` Codex setup
-    # block and the Gemini key-injection branch below (`config.runtime ==
-    # 'gemini-cli'`). validate_runtime() accepts mixed case (it lowercases only
-    # for the membership test) but does not normalize the stored value, so a
-    # template `runtime: Codex` would pass validation yet silently skip Codex's
-    # startup setup (AGENTS.md mirror / CODEX_HOME) or Gemini's credential inject.
-    if config.runtime:
-        config.runtime = config.runtime.lower()
-
-    if config.port is None:
-        config.port = get_next_available_port()
-
-    # CRED-002: Credentials are now injected directly into agents after creation
-    # via the inject_credentials endpoint, not auto-injected during creation.
-    # The agent starts without credentials and they are added via Quick Inject
-    # or imported from .credentials.enc files.
-
+def _stage_config_files(
+    config: AgentConfig, template_data: dict, github_template_path: Optional[str]
+) -> tuple[Path, Path, Optional[dict], Optional[dict]]:
+    """CRED-002: write the agent-config.yaml + empty credentials.json + template
+    cred files under /tmp and compute the template/cred bind specs. Also
+    normalizes + writes back the resource fields (#1197) so container labels +
+    limits use canonical values. Returns
+    `(config_path, credentials_path, template_volume, cred_files_volume)`."""
     generated_files = {}
     if template_data:
         # Generate empty credential files structure from template
@@ -624,21 +894,12 @@ async def create_agent_internal(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Phase: Agent-to-Agent Collaboration
-    # Generate agent-scoped MCP API key for Trinity MCP access
-    agent_mcp_key = None
-    trinity_mcp_url = os.getenv('TRINITY_MCP_URL', 'http://mcp-server:8080/mcp')
-    try:
-        agent_mcp_key = db.create_agent_mcp_api_key(
-            agent_name=config.name,
-            owner_username=current_user.username,
-            description=f"Auto-generated Trinity MCP key for agent {config.name}"
-        )
-        if agent_mcp_key:
-            logger.info(f"Created MCP API key for agent {config.name}: {agent_mcp_key.key_prefix}...")
-    except Exception as e:
-        logger.warning(f"Failed to create MCP API key for agent {config.name}: {e}")
+    return config_path, credentials_path, template_volume, cred_files_volume
 
+
+def _build_base_env(config: AgentConfig) -> dict:
+    """Base container env (name/type/creds/runtime/#1098 TMPDIR) plus the #1369
+    stall-watchdog ceiling and GUARD-001 guardrails overrides."""
     env_vars = {
         'AGENT_NAME': config.name,
         'AGENT_TYPE': config.type,
@@ -672,6 +933,13 @@ async def create_agent_internal(
         import json as _json
         env_vars['AGENT_GUARDRAILS'] = _json.dumps(_guardrails)
 
+    return env_vars
+
+
+def _apply_subscription_env(config: AgentConfig, env_vars: dict) -> Optional[str]:
+    """#74: auto-assign a round-robin Claude subscription (Claude runtimes only).
+    Sets `CLAUDE_CODE_OAUTH_TOKEN` and pops `ANTHROPIC_API_KEY` on success.
+    Returns the assigned subscription id (None when skipped)."""
     # Auto-assign subscription (round-robin) — #74.
     # Subscriptions are Claude-OAuth tokens (CLAUDE_CODE_OAUTH_TOKEN) and apply
     # ONLY to the Claude Code runtime. Non-Claude runtimes (Gemini, Codex) bring
@@ -699,7 +967,12 @@ async def create_agent_internal(
             f"Skipping subscription auto-assign for agent {config.name} "
             f"(runtime={(config.runtime or 'claude-code')!r} is non-Claude — uses its own .env credentials)"
         )
+    return auto_assigned_subscription_id
 
+
+def _apply_gemini_and_otel_env(config: AgentConfig, env_vars: dict) -> None:
+    """Inject GEMINI_API_KEY for Gemini runtimes and the (default-on) Claude Code
+    OpenTelemetry export vars."""
     # Add Google API key if using Gemini runtime
     # Gemini CLI expects GEMINI_API_KEY environment variable
     if config.runtime == 'gemini-cli' or config.runtime == 'gemini':
@@ -719,6 +992,12 @@ async def create_agent_internal(
         env_vars['OTEL_EXPORTER_OTLP_ENDPOINT'] = os.getenv('OTEL_COLLECTOR_ENDPOINT', 'http://trinity-otel-collector:4317')
         env_vars['OTEL_METRIC_EXPORT_INTERVAL'] = os.getenv('OTEL_METRIC_EXPORT_INTERVAL', '60000')
 
+
+def _apply_mcp_and_auth_env(
+    config: AgentConfig, env_vars: dict, agent_mcp_key, trinity_mcp_url: str
+) -> None:
+    """Inject the Trinity MCP creds + heartbeat backend URL (#307, gated on the
+    MCP key) and the unconditional per-agent in-container auth token (#1159)."""
     # Phase: Agent-to-Agent Collaboration - Inject Trinity MCP credentials
     if agent_mcp_key:
         env_vars['TRINITY_MCP_URL'] = trinity_mcp_url
@@ -737,10 +1016,31 @@ async def create_agent_internal(
     # name. Raises if AGENT_AUTH_SECRET is unset — fail-closed, never tokenless.
     env_vars['TRINITY_AGENT_AUTH_TOKEN'] = derive_agent_token(config.name)
 
-    if github_repo_for_agent and github_pat_for_agent:
+
+def _apply_github_env(
+    config: AgentConfig,
+    env_vars: dict,
+    github_repo_for_agent: Optional[str],
+    github_pat_for_agent: Optional[str],
+    fork_upstream_repo: Optional[str],
+    git_working_branch: Optional[str],
+) -> None:
+    """Bake the GitHub sync env (#1574/#93/#389) for a GitHub-native agent —
+    repo/PAT/gh-CLI tokens, upstream remote, auto-sync heartbeat flag, and
+    source-vs-working-branch mode. ent#123: a tokenless agent (anonymous
+    public-template clone) gets repo + sync flags but NO token vars."""
+    if github_repo_for_agent:
         env_vars['GITHUB_REPO'] = github_repo_for_agent
-        env_vars['GITHUB_PAT'] = github_pat_for_agent
-        # Phase 7: Enable git sync for GitHub-native agents
+        if github_pat_for_agent:
+            env_vars['GITHUB_PAT'] = github_pat_for_agent
+            # #1574: the SAME managed token also authenticates the `gh` CLI
+            # and the REST API (which read GH_TOKEN/GITHUB_TOKEN), not just
+            # git. Gated identically to GITHUB_PAT — never set for a
+            # tokenless agent.
+            env_vars['GH_TOKEN'] = github_pat_for_agent
+            env_vars['GITHUB_TOKEN'] = github_pat_for_agent
+        # Phase 7: Enable git sync for GitHub-native agents (tokenless
+        # included — the .git dir is what makes pull-only updates work)
         env_vars['GIT_SYNC_ENABLED'] = 'true'
         # Dev/self-host: propagate optional git base-URL override to agent container
         _git_base = os.getenv('TRINITY_GIT_BASE_URL')
@@ -758,7 +1058,10 @@ async def create_agent_internal(
         # can toggle per-agent via PUT /api/agents/{name}/git/auto-sync.
         # Exception (#93): fork-to-own agents own their repo — auto-pushing
         # captures to their own main is the point.
-        if not config.source_mode or fork_upstream_repo:
+        # ent#123: `and github_pat_for_agent` is a belt — tokenless is
+        # provably source-mode+non-fork today, but auto-push must never
+        # engage without credentials if that restriction is ever relaxed.
+        if (not config.source_mode or fork_upstream_repo) and github_pat_for_agent:
             env_vars['GIT_SYNC_AUTO'] = 'true'
 
         # Source mode (default): Track source branch directly for pull-only sync
@@ -779,324 +1082,840 @@ async def create_agent_internal(
                 f"source_mode=false, sync=true"
             )
 
-    # CRED-002: Legacy credential injection loop removed.
-    # Credentials are now injected after agent creation via:
-    # - inject_credentials endpoint (Quick Inject)
-    # - .credentials.enc import on agent startup
+
+def _build_env_vars(
+    config: AgentConfig,
+    agent_mcp_key,
+    trinity_mcp_url: str,
+    tr: _TemplateResolution,
+) -> tuple[dict, Optional[str]]:
+    """Assemble the full container env in the monolith's exact sequence and
+    return `(env_vars, auto_assigned_subscription_id)`."""
+    env_vars = _build_base_env(config)
+    auto_assigned_subscription_id = _apply_subscription_env(config, env_vars)
+    _apply_gemini_and_otel_env(config, env_vars)
+    _apply_mcp_and_auth_env(config, env_vars, agent_mcp_key, trinity_mcp_url)
+    _apply_github_env(
+        config,
+        env_vars,
+        tr.github_repo_for_agent,
+        tr.github_pat_for_agent,
+        tr.fork_upstream_repo,
+        tr.git_working_branch,
+    )
+
+    # #946 / #1081 Phase 2: opt an allowlisted pilot agent into the pull worker
+    # pool. Returns {} (a no-op) for every non-pilot agent, so the default push
+    # behavior is unchanged. See services/agent_service/pull_mode.py.
+    from services.agent_service.pull_mode import pull_mode_env_vars
+    env_vars.update(pull_mode_env_vars(config.name))
+    return env_vars, auto_assigned_subscription_id
+
+
+async def _workspace_volume_mount(config: AgentConfig, volumes: dict) -> None:
+    """Get-or-create the durable per-agent workspace volume and mount it at
+    /home/developer. A pre-existing volume is a DECLARED adopt (#1667 — the
+    refusal gate already ran before the try-block)."""
+    agent_volume_name = f"agent-{config.name}-workspace"
+    # #1667: adopting a pre-existing volume is a DECISION, not a
+    # fallthrough. This used to be get-then-create with no branch —
+    # an existing volume was silently mounted as the new agent's
+    # `/home/developer`, so whatever the previous holder of this
+    # name left behind (its `.env`, its `.credentials.enc`, its
+    # workspace) resurfaced inside a different agent, possibly a
+    # different owner's. #1664's gate covers the case where a row
+    # still claims the base (rename); this covers the case where
+    # NOTHING claims it — a purge whose removal hit an in-use 409,
+    # a crash between `volume_create` and the ownership INSERT
+    # (creation writes the volume first — the reason the orphan
+    # sweep carries a 1h creation grace), or a restored backup.
+    #
+    # Emptiness cannot be the discriminator: the one legitimate
+    # adopter — deploy-local (#950) — PRE-POPULATES this volume with
+    # the template before calling create, so a valid adopt is
+    # non-empty. (And Docker auto-populates a named volume from the
+    # image on first mount, so "empty" wouldn't even identify a
+    # crashed create.) So the adopter declares itself, and everyone
+    # else is refused.
+    try:
+        await volume_get(agent_volume_name)
+        # Reaching here means the volume pre-exists. The refusal
+        # gate above already ran, so this is a declared adopt —
+        # deploy-local's pre-populated workspace (#950). Logged:
+        # an adopt is never silent again (#1667).
+        logger.info(
+            "[#1667] adopting pre-existing workspace volume %s for %s",
+            agent_volume_name,
+            config.name,
+        )
+    except docker.errors.NotFound:
+        await volume_create(
+            name=agent_volume_name,
+            labels={
+                'trinity.platform': 'agent-workspace',
+                'trinity.agent-name': config.name
+            }
+        )
+    volumes[agent_volume_name] = {'bind': '/home/developer', 'mode': 'rw'}  # Persistent workspace
+
+
+async def _shared_folder_mounts(
+    config: AgentConfig, volumes: dict, template_shared_folders: Optional[dict]
+) -> None:
+    """Phase 9.11: apply the template-defined shared-folder config, then create/
+    mount the expose volume and mount any consumable peer shared volumes."""
+    # First, write template-defined shared folder config to DB (if defined)
+    if template_shared_folders:
+        try:
+            db.upsert_shared_folder_config(
+                agent_name=config.name,
+                expose_enabled=template_shared_folders.get("expose", False),
+                consume_enabled=template_shared_folders.get("consume", False)
+            )
+            logger.info(f"Applied template shared folder config for {config.name}: expose={template_shared_folders.get('expose')}, consume={template_shared_folders.get('consume')}")
+        except Exception as e:
+            logger.warning(f"Failed to apply template shared folder config for {config.name}: {e}")
+
+    shared_folder_config = db.get_shared_folder_config(config.name)
+    if shared_folder_config:
+        # If agent exposes a shared folder, create and mount the shared volume
+        if shared_folder_config.expose_enabled:
+            shared_volume_name = db.get_shared_volume_name(config.name)
+            volume_created = False
+            try:
+                await volume_get(shared_volume_name)
+            except docker.errors.NotFound:
+                await volume_create(
+                    name=shared_volume_name,
+                    labels={
+                        'trinity.platform': 'agent-shared',
+                        'trinity.agent-name': config.name
+                    }
+                )
+                volume_created = True
+
+            # Fix ownership of new volumes (Docker creates them as root)
+            if volume_created:
+                try:
+                    await containers_run(
+                        'alpine',
+                        command='chown 1000:1000 /shared',
+                        volumes={shared_volume_name: {'bind': '/shared', 'mode': 'rw'}},
+                        remove=True
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not fix shared volume ownership: {e}")
+
+            volumes[shared_volume_name] = {'bind': '/home/developer/shared-out', 'mode': 'rw'}
+
+        # If agent consumes shared folders, mount available shared volumes
+        if shared_folder_config.consume_enabled:
+            available_folders = db.get_available_shared_folders(config.name)
+            for source_agent in available_folders:
+                source_volume = db.get_shared_volume_name(source_agent)
+                mount_path = db.get_shared_mount_path(source_agent)
+                # Only mount if the source volume exists
+                try:
+                    await volume_get(source_volume)
+                    volumes[source_volume] = {'bind': mount_path, 'mode': 'rw'}
+                except docker.errors.NotFound:
+                    # Source agent hasn't started yet or doesn't have shared volume
+                    pass
+
+
+async def _public_volume_mount(config: AgentConfig, volumes: dict) -> None:
+    """FILES-001 Step 2: create + mount the per-agent public volume when file
+    sharing is enabled (symmetric to the shared-folders expose flow)."""
+    if db.get_file_sharing_enabled(config.name):
+        public_volume_name = db.get_public_volume_name(config.name)
+        public_volume_created = False
+        try:
+            await volume_get(public_volume_name)
+        except docker.errors.NotFound:
+            await volume_create(
+                name=public_volume_name,
+                labels={
+                    'trinity.platform': 'agent-public',
+                    'trinity.agent-name': config.name,
+                },
+            )
+            public_volume_created = True
+
+        if public_volume_created:
+            try:
+                await containers_run(
+                    'alpine',
+                    command='chown 1000:1000 /public',
+                    volumes={public_volume_name: {'bind': '/public', 'mode': 'rw'}},
+                    remove=True,
+                )
+            except Exception as e:
+                logger.warning(f"Could not fix public volume ownership: {e}")
+
+        volumes[public_volume_name] = {'bind': db.get_public_mount_path(), 'mode': 'rw'}
+
+
+async def _build_volume_mounts(
+    config: AgentConfig,
+    config_path: Path,
+    credentials_path: Path,
+    template_volume: Optional[dict],
+    cred_files_volume: Optional[dict],
+    template_shared_folders: Optional[dict],
+) -> dict:
+    """Assemble the container volume-mount spec: config/creds/encrypted-data
+    binds, the durable workspace (skipped for volume-less ghosts, ent#69), the
+    template/cred bind mounts, and the shared-folder + FILES-001 public volumes."""
+    # Create per-agent persistent volume for /home/developer (Pillar III: Persistent Memory)
+    # This ensures files created by the agent survive container restarts.
+    # trinity-enterprise#69: ephemeral ghosts are VOLUME-LESS — their
+    # /home/developer lives on the container writable layer (overlayfs),
+    # auto-reclaimed by container removal. Volumes exist to survive
+    # recreate, and ghosts never recreate.
+    volumes = {
+        str(config_path): {'bind': '/config/agent-config.yaml', 'mode': 'ro'},
+        str(credentials_path): {'bind': '/config/credentials.json', 'mode': 'ro'},
+        'encrypted-data': {'bind': '/data', 'mode': 'rw'},
+    }
+    if not config.ephemeral:
+        await _workspace_volume_mount(config, volumes)
+
+    if template_volume:
+        volumes.update(template_volume)
+    if cred_files_volume:
+        volumes.update(cred_files_volume)
+
+    await _shared_folder_mounts(config, volumes, template_shared_folders)
+    await _public_volume_mount(config, volumes)
+    return volumes
+
+
+async def _create_agent_container(
+    config: AgentConfig,
+    volumes: dict,
+    env_vars: dict,
+    current_user: User,
+    ephemeral_expires_at: Optional[str],
+):
+    """`docker run` the agent container with the baseline security posture
+    (cap_drop ALL + mode caps, AppArmor, tmpfs #1098, mem/cpu limits). AC #5:
+    the agent network is HARD-CODED here — agents never join the platform net."""
+    # Get system-wide full_capabilities setting (not per-agent)
+    full_capabilities = get_agent_full_capabilities()
+
+    # Create container with security settings
+    # Security principle: ALWAYS apply baseline security, even in full_capabilities mode
+    # - Always drop ALL caps, then add back only what's needed
+    # - Always apply AppArmor profile
+    # - Always apply noexec,nosuid to /tmp
+    container_labels = {
+        'trinity.platform': 'agent',
+        'trinity.agent-name': config.name,
+        'trinity.agent-type': config.type,
+        'trinity.ssh-port': str(config.port),
+        'trinity.cpu': config.resources['cpu'],
+        'trinity.memory': config.resources['memory'],
+        'trinity.created': utc_now_iso(),
+        'trinity.template': config.template or '',
+        'trinity.agent-runtime': config.runtime or 'claude-code',
+        'trinity.full-capabilities': str(full_capabilities).lower(),
+        'trinity.base-image-version': get_platform_version()
+    }
+    if config.ephemeral:
+        # trinity-enterprise#69: Docker-as-truth ghost markers — the GC
+        # orphan pass reclaims labeled containers whose ownership row
+        # is gone (backend restarted mid-create/mid-discard).
+        container_labels['trinity.ephemeral'] = 'true'
+        container_labels['trinity.ephemeral-expires-at'] = ephemeral_expires_at or ''
+    if current_user.agent_name:
+        # Part 2 spawn provenance rides on ANY agent-spawned creation
+        # (durable or ephemeral), pairing with the DB columns.
+        container_labels['trinity.spawned-by'] = current_user.agent_name
+
+    return await containers_run(
+        config.base_image,
+        detach=True,
+        name=f"agent-{config.name}",
+        ports={'22/tcp': config.port},
+        volumes=volumes,
+        environment=env_vars,
+        labels=container_labels,
+        # Always apply AppArmor for additional sandboxing
+        security_opt=['apparmor:docker-default'],
+        # Always drop ALL capabilities first (defense in depth)
+        cap_drop=['ALL'],
+        # Add back only the capabilities needed for the mode
+        cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
+        read_only=False,
+        # Always apply noexec,nosuid to /tmp for security (#1098: scratch
+        # is redirected off this tiny tmpfs via the TMPDIR env var).
+        tmpfs=AGENT_TMPFS_MOUNT,
+        network='trinity-agent-network',
+        # #1197: cpu/memory normalized + validated above (raises 400 on
+        # a bad template value), so these are guaranteed Docker-valid.
+        mem_limit=config.resources['memory'],
+        # #1126: nano_cpus (Linux CFS quota), NOT cpu_count — the latter
+        # is Windows-only in docker-py and left NanoCpus=0, so newly
+        # created agents never got a CPU limit on Linux.
+        nano_cpus=int(config.resources['cpu']) * 1_000_000_000,
+    )
+
+
+async def _broadcast_agent_created(agent_status: AgentStatus, ws_manager) -> None:
+    """Broadcast the `agent_created` WS event (best-effort, no-op without a
+    ws_manager)."""
+    if ws_manager:
+        await ws_manager.broadcast(json.dumps({
+            "event": "agent_created",
+            "data": {
+                "name": agent_status.name,
+                "type": agent_status.type,
+                "status": agent_status.status,
+                "port": agent_status.port,
+                "created": agent_status.created.isoformat(),
+                "resources": agent_status.resources,
+                "container_id": agent_status.container_id
+            }
+        }))
+
+
+def _register_agent(
+    config: AgentConfig,
+    current_user: User,
+    template_data: dict,
+    ephemeral_expires_at: Optional[str],
+    auto_assigned_subscription_id: Optional[str],
+) -> None:
+    """DB registration: ownership row (require_email #1129 + ephemeral fields +
+    provenance), the ent#69 parent→child spawn edge, the auto-assigned
+    subscription (#74), the AVATAR-003 avatar seed, and default permissions.
+    Each post-registration grant is log-and-continue (non-fatal)."""
+    # #1129: seed require_email from the fleet-wide default
+    # (secure-by-default ON) at creation; owners can override per agent.
+    # trinity-enterprise#69 Part 2: spawn provenance is written for ANY
+    # agent-spawned creation; the parent's key id (not just its name)
+    # backs the control gate — a recycled name alone must never inherit
+    # control of surviving children.
+    spawned_by_key_id = None
+    if current_user.agent_name:
+        try:
+            parent_key = db.get_agent_mcp_api_key(current_user.agent_name)
+            spawned_by_key_id = parent_key.id if parent_key else None
+        except Exception as e:
+            logger.warning(f"Could not resolve parent key id for {current_user.agent_name}: {e}")
+    db.register_agent_owner(
+        config.name,
+        current_user.username,
+        require_email=get_agent_default_require_email(),
+        is_ephemeral=bool(config.ephemeral),
+        ephemeral_max_executions=(config.ephemeral.max_executions if config.ephemeral else None),
+        ephemeral_expires_at=ephemeral_expires_at,
+        spawned_by_agent=current_user.agent_name,
+        spawned_by_key_id=spawned_by_key_id,
+        # Ghosts default to 1 concurrent turn: bounds check-then-act
+        # budget overshoot to a single in-flight execution and shrinks
+        # the blast radius of an untrusted workspace.
+        max_parallel_tasks=(1 if config.ephemeral else None),
+    )
+
+    # ent#1640: persist the optional display label set at creation. Reuses the
+    # same setter as PUT /label (trim + blank→NULL), on the row just created.
+    # Best-effort: a label write must never fail a successful agent creation —
+    # the agent is fully functional under its slug without it.
+    if config.display_label:
+        try:
+            db.set_display_label(config.name, config.display_label)
+        except Exception as e:
+            logger.warning(f"Could not set display label for {config.name}: {e}")
+
+    # trinity-enterprise#69 Part 2: auto-grant the parent→child
+    # permission edge so the spawning agent can immediately
+    # chat/list/info its child (the MCP layer gates on
+    # agent_permissions; grant_default_permissions is deliberately
+    # empty). created_by carries the spawn sentinel so a human grant
+    # and an auto-grant stay distinguishable.
+    if current_user.agent_name:
+        try:
+            db.add_agent_permission(
+                current_user.agent_name,
+                config.name,
+                created_by=f"spawn:{current_user.agent_name}",
+            )
+            logger.info(
+                f"Auto-granted spawn permission edge {current_user.agent_name} -> {config.name}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to auto-grant spawn permission edge for {config.name}: {e}"
+            )
+
+    # Persist auto-assigned subscription (#74)
+    if auto_assigned_subscription_id:
+        try:
+            db.assign_subscription_to_agent(config.name, auto_assigned_subscription_id)
+        except Exception as e:
+            logger.warning(f"Failed to persist subscription assignment for {config.name}: {e}")
+
+    # AVATAR-003: Seed avatar prompt from template
+    # (skipped for ephemeral ghosts — avatar generation is a paid,
+    # durable-identity nicety a disposable agent never benefits from)
+    _avatar_prompt = (template_data.get("avatar_prompt") if template_data else None) if not config.ephemeral else None
+    if _avatar_prompt:
+        try:
+            db.set_default_avatar(config.name, _avatar_prompt, datetime.now(timezone.utc).isoformat())
+            logger.info(f"[AVATAR-003] Seeded avatar prompt from template for {config.name}")
+        except Exception as e:
+            logger.warning(f"[AVATAR-003] Failed to seed avatar prompt for {config.name}: {e}")
+
+    # Phase 9.10: Grant default permissions (Option B - same-owner agents)
+    try:
+        permissions_count = db.grant_default_permissions(config.name, current_user.username)
+        if permissions_count > 0:
+            logger.info(f"Granted {permissions_count} default permissions for agent {config.name}")
+    except Exception as e:
+        logger.warning(f"Failed to grant default permissions for {config.name}: {e}")
+
+    # Phase 7: git config was already reserved and persisted via
+    # `reserve_and_generate_instance_id` earlier in this function
+    # (S7 Layer 0). No second db.create_git_config call here — that
+    # would either be a no-op (agent_name UNIQUE) or, worse, mask
+    # a Layer 2 conflict.
+
+
+async def _materialize_agent_files(
+    config: AgentConfig,
+    template_data: dict,
+    github_repo_for_agent: Optional[str],
+    fork_upstream_repo: Optional[str],
+    github_pat_for_agent: Optional[str] = None,
+) -> None:
+    """Materialize the S4 persistent-state allowlist (#383) and the declared
+    data_paths (#1169) into the agent, then opt non-source-mode GitHub agents
+    into the auto-sync heartbeat (#389). All three are non-fatal."""
+    # S4 (#383): Materialize persistent-state allowlist into the agent.
+    # Runtime sync/reset paths read `.trinity/persistent-state.yaml`;
+    # template.yaml is only read at creation (10-min cache), so this
+    # is the source of truth going forward. Non-fatal on failure —
+    # reset operations fall back to the default list at read time.
+    persistent_state = (
+        (template_data or {}).get(
+            "persistent_state", git_service.DEFAULT_PERSISTENT_STATE
+        )
+    )
+    try:
+        await git_service.materialize_persistent_state(
+            config.name, persistent_state
+        )
+    except Exception as e:
+        logger.warning(
+            f"[S4] Failed to materialize persistent-state.yaml for "
+            f"{config.name}: {e}"
+        )
+
+    # #1169: Materialize the declared `data_paths` into the agent.
+    # Opt-in (empty list = no-op), so undeclared agents are
+    # untouched. Writes `.trinity/data-paths.yaml` and gitignores the
+    # `data/` root in the agent's own .gitignore. Non-fatal — the
+    # home volume is already durable; the declaration just enables
+    # selective snapshot/export and keeps runtime data out of git.
+    data_paths = (template_data or {}).get(
+        "data_paths", git_service.DEFAULT_DATA_PATHS
+    )
+    try:
+        await git_service.materialize_data_paths(
+            config.name, data_paths
+        )
+    except Exception as e:
+        logger.warning(
+            f"[#1169] Failed to materialize data-paths.yaml for "
+            f"{config.name}: {e}"
+        )
+
+    # #389 S1a: opt non-source-mode GitHub-template agents into the
+    # auto-sync heartbeat by default. Source-mode agents stay opt-in
+    # (auto-pushing to main would clobber protected branches) —
+    # except fork-to-own agents (#93), which own their repo.
+    # trinity-enterprise#69: ghosts never auto-push — their workspace
+    # is throwaway by definition, so the 15-min sync heartbeat stays off.
+    # ent#123: tokenless agents never auto-push (belt — see _apply_github_env).
+    if github_repo_for_agent and github_pat_for_agent and not config.ephemeral and (not config.source_mode or fork_upstream_repo):
+        try:
+            db.set_git_auto_sync_enabled(config.name, True)
+        except Exception as e:
+            logger.warning(
+                f"Failed to enable auto-sync for {config.name}: {e}"
+            )
+
+
+def _rollback_failed_creation(handles: _RollbackHandles) -> None:
+    """The except-path rollback (AC #3, PRESERVED exactly): roll back the
+    agent_git_config reservation, the ephemeral quota slot, and the agent MCP
+    key — each guarded, each best-effort. Deliberately does NOT stop/remove the
+    container or its volumes (left for the cleanup watchdog)."""
+    # S7 Layer 0 (#382): if anything after the reservation fails,
+    # roll back the agent_git_config row so the working branch is
+    # released and a retry can claim it fresh.
+    if handles.github_repo_for_agent and handles.git_instance_id:
+        try:
+            db.delete_git_config(handles.agent_name)
+        except Exception as cleanup_exc:
+            logger.warning(
+                "Failed to roll back agent_git_config for %s after "
+                "creation failure: %s",
+                handles.agent_name,
+                cleanup_exc,
+            )
+    # trinity-enterprise#69: release the reserved ephemeral quota slot
+    # so a failed creation doesn't permanently consume owner capacity.
+    if handles.ephemeral_slot_reserved and handles.ephemeral_owner_id is not None:
+        try:
+            ephemeral_service.release_ephemeral_slot(handles.ephemeral_owner_id)
+        except Exception as cleanup_exc:
+            logger.warning(
+                "Failed to release ephemeral quota slot for %s after "
+                "creation failure: %s",
+                handles.agent_name,
+                cleanup_exc,
+            )
+    # #1197: the agent-scoped MCP key is minted before container
+    # creation, so a failure here would otherwise leave an orphaned
+    # mcp_api_keys row (one per failed attempt). Roll it back too.
+    if handles.agent_mcp_key:
+        try:
+            db.delete_agent_mcp_api_key(handles.agent_name)
+        except Exception as cleanup_exc:
+            logger.warning(
+                "Failed to roll back MCP key for %s after creation "
+                "failure: %s",
+                handles.agent_name,
+                cleanup_exc,
+            )
+
+
+def _release_ephemeral_on_no_docker(handles: _RollbackHandles) -> None:
+    """The docker-unavailable else-branch cleanup (PRESERVED exactly): release
+    ONLY the ephemeral quota slot. The MCP key and git-config reservation are
+    deliberately NOT rolled back here (a pre-existing, preserved leak)."""
+    # trinity-enterprise#69 (review M2): release the quota reservation on
+    # the Docker-unavailable path too — otherwise repeated attempts during
+    # an outage consume the owner's ghost quota for the counter TTL.
+    if handles.ephemeral_slot_reserved and handles.ephemeral_owner_id is not None:
+        try:
+            ephemeral_service.release_ephemeral_slot(handles.ephemeral_owner_id)
+        except Exception as cleanup_exc:
+            logger.warning(
+                "Failed to release ephemeral quota slot for %s (no docker): %s",
+                handles.agent_name,
+                cleanup_exc,
+            )
+
+
+def _check_name_availability(config: AgentConfig) -> None:
+    """Refuse a name already taken (#834 existence guard, incl. soft-deleted) or
+    whose data volumes another agent still owns after a rename (#1664). Both
+    raise 409 before any side effect."""
+    # #834: the name-reservation check must also catch soft-deleted agents.
+    # `get_agent_owner` filters them out (user-facing 404 transparency), so
+    # we use the unfiltered `is_agent_name_reserved` here. Without this the
+    # create flow walks past the existence guard, the container ends up
+    # created, and the agent_ownership INSERT hits a UNIQUE constraint
+    # IntegrityError leaving the system half-built.
+    if (
+        get_agent_by_name(config.name)
+        or db.get_agent_owner(config.name)
+        or db.is_agent_name_reserved(config.name)
+    ):
+        raise HTTPException(status_code=409, detail="Agent already exists")
+
+    # #1664: the name being free does NOT mean its volumes are. Rename frees the
+    # NAME while the agent keeps its volumes under the old base (Docker can
+    # rename neither a volume nor its label), so `agent-{name}-workspace` can
+    # still be a live agent's `/home/developer`. The volume block below is
+    # get-then-create — an existing volume is REUSED, not rejected — so without
+    # this gate a new agent created under a freed name silently boots on the
+    # renamed agent's home volume: its `.env`, its `.credentials.enc`, its
+    # workspace, with both containers writing the same disk. The owners need not
+    # be the same person, which makes it a cross-tenant credential disclosure,
+    # not just corruption. Refuse instead: the volumes are somebody's live data
+    # until their owning row is purged.
+    # Ghosts are exempt: they are volume-less by construction (the volume block
+    # below is `if not config.ephemeral`), so there is nothing to collide with —
+    # and this would put a DB read on the burst-spawn path for no reason.
+    if not config.ephemeral and db.is_volume_base_reserved(config.name):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Agent name unavailable: its data volumes still belong to "
+                "another agent (it was renamed). Pick a different name."
+            ),
+        )
+
+
+def _enforce_role_quota(config: AgentConfig, current_user: User) -> None:
+    """QUOTA-001 per-role agent quota (429). Ephemeral agents have their OWN
+    quota (reserved atomically just before the docker block), so they bypass
+    this durable-agent limit."""
+    # Agent quota enforcement: per-role limits (QUOTA-001).
+    # Ephemeral agents have their OWN quota (atomic reservation just before
+    # the docker block) — counting ghosts against the durable quota would
+    # starve the burst-parallelism use case (trinity-enterprise#69).
+    max_agents = get_agent_quota_for_role(current_user.role) if not config.ephemeral else 0
+    if max_agents > 0:
+        owned = db.get_agents_by_owner(current_user.username)
+        # System agents don't count toward user quota
+        non_system = [a for a in owned if not (db.get_agent_owner(a) or {}).get("is_system")]
+        if len(non_system) >= max_agents:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": f"Agent quota exceeded. You have {len(non_system)}/{max_agents} agents. "
+                             f"Delete an agent to create a new one.",
+                    "code": "QUOTA_EXCEEDED",
+                    "current": len(non_system),
+                    "limit": max_agents
+                }
+            )
+
+
+def _mint_agent_mcp_key(config: AgentConfig, current_user: User) -> tuple[object, str]:
+    """Mint the agent-scoped Trinity MCP API key (best-effort; None on failure).
+    Returns `(agent_mcp_key, trinity_mcp_url)`. The key is a rollback handle —
+    minted here (before the container) and rolled back in the except."""
+    # Phase: Agent-to-Agent Collaboration
+    # Generate agent-scoped MCP API key for Trinity MCP access
+    agent_mcp_key = None
+    trinity_mcp_url = os.getenv('TRINITY_MCP_URL', 'http://mcp-server:8080/mcp')
+    try:
+        agent_mcp_key = db.create_agent_mcp_api_key(
+            agent_name=config.name,
+            owner_username=current_user.username,
+            description=f"Auto-generated Trinity MCP key for agent {config.name}"
+        )
+        if agent_mcp_key:
+            logger.info(f"Created MCP API key for agent {config.name}: {agent_mcp_key.key_prefix}...")
+    except Exception as e:
+        logger.warning(f"Failed to create MCP API key for agent {config.name}: {e}")
+    return agent_mcp_key, trinity_mcp_url
+
+
+def _reserve_ephemeral_slot(
+    config: AgentConfig, current_user: User
+) -> tuple[bool, Optional[int]]:
+    """trinity-enterprise#69: atomic ephemeral quota reservation (Redis
+    INCR-with-cap; DB-count fallback when Redis is down). Returns
+    `(ephemeral_slot_reserved, ephemeral_owner_id)` — the two rollback handles
+    the except/else paths release."""
+    ephemeral_slot_reserved = False
+    ephemeral_owner_id = None
+    if config.ephemeral:
+        owner_row = db.get_user_by_username(current_user.username)
+        ephemeral_owner_id = (owner_row or {}).get("id") if isinstance(owner_row, dict) else getattr(owner_row, "id", None)
+        if ephemeral_owner_id is None:
+            raise HTTPException(status_code=500, detail="Could not resolve owner for ephemeral quota")
+        eph_cap = get_ephemeral_agent_quota()
+        if not ephemeral_service.try_reserve_ephemeral_slot(ephemeral_owner_id, eph_cap):
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": f"Ephemeral agent quota exceeded ({eph_cap} live ghosts per owner).",
+                    "code": "ephemeral_quota_exceeded",
+                    "limit": eph_cap,
+                },
+            )
+        ephemeral_slot_reserved = True
+    return ephemeral_slot_reserved, ephemeral_owner_id
+
+
+async def create_agent_internal(
+    config: AgentConfig,
+    current_user: User,
+    request: Optional[Request] = None,
+    skip_name_sanitization: bool = False,
+    ws_manager=None,
+    adopt_existing_workspace: bool = False,
+) -> AgentStatus:
+    """
+    Internal function to create an agent.
+
+    Used by both the API endpoint and system deployment.
+
+    `request` is optional: the HTTP request object is not dereferenced anywhere
+    in this function, so boot-time / background callers with no live request
+    (e.g. the Cornelius first-run seeder, ent#107) pass `request=None`.
+
+    CRED-002: Credentials are no longer auto-injected during creation.
+    They are added after creation via inject_credentials endpoint or
+    imported from .credentials.enc on startup.
+
+    Args:
+        config: Agent configuration
+        current_user: Authenticated user
+        request: FastAPI request object
+        skip_name_sanitization: If True, don't sanitize the name (used when name is pre-validated)
+        ws_manager: Optional WebSocket manager for broadcasts
+        adopt_existing_workspace: #1667 — allow mounting a workspace volume that
+            ALREADY exists instead of refusing it (409). Only deploy-local
+            (#950) may pass True: it pre-populates the volume with the template
+            before calling here, so for it a pre-existing volume is expected
+            rather than a stranger's leftover. Deliberately a function kwarg and
+            NOT a field on `AgentConfig` — as an API field, a caller could set
+            it and re-open the silent-adopt disclosure this closes.
+
+    Returns:
+        AgentStatus of the created agent
+
+    Raises:
+        HTTPException: On validation or creation errors
+    """
+    original_name = config.name
+    if not skip_name_sanitization:
+        config.name = sanitize_agent_name(config.name)
+
+    if not config.name:
+        raise HTTPException(status_code=400, detail="Invalid agent name - must contain at least one alphanumeric character")
+
+    # trinity-enterprise#69: ephemeral "ghost" pre-gates. All BEFORE any side
+    # effect (no partial state on refusal). Mutates config.name to the suffixed
+    # ghost name; returns the stamped expiry (None for a durable agent).
+    ephemeral_expires_at = _apply_ephemeral_pregates(config, current_user)
+
+    # #834 existence guard + #1664 volume-base guard (both 409, pre-side-effect).
+    _check_name_availability(config)
+
+    # #1667: the gate above covers a volume some ROW still claims (the rename
+    # case). This covers the volume NOTHING claims — refuse a leftover workspace
+    # volume unless the caller (deploy-local #950) explicitly declares an adopt.
+    # Raised HERE, before the docker try-block, so the 409 isn't flattened to a
+    # generic 500 (nothing is built yet, so nothing to roll back).
+    await _guard_leftover_workspace_volume(config, adopt_existing_workspace)
+
+    # #1560: reaching here means the name is free — but `is_agent_name_reserved`
+    # only stops matching once the retention purge hard-deletes the row, and the
+    # breakers are keyed by name with no TTL. Clear any predecessor's verdict
+    # BEFORE the container exists, so nothing races the agent's first heartbeat.
+    # Breakers only: no slots exist for a name nothing is running under yet, and
+    # the full sweep is reserved for teardown paths.
+    clear_agent_breakers(config.name)
+
+    # QUOTA-001: per-role durable-agent quota (429; ephemeral agents bypass it).
+    _enforce_role_quota(config, current_user)
+
+    # SEC-172: Validate base image against allowlist before any Docker operations
+    validate_base_image(config.base_image)
+
+    # Resolve template (github incl. fork-to-own, or local). The whole github
+    # phase — including the real fork-to-own GitHub write and its structured
+    # FORK_* 4xx errors — stays OUTSIDE the docker try-block below, so those
+    # errors are not flattened to a generic 500.
+    tr = await _resolve_template(config, current_user)
+
+    # #1187: runtime is final here (request value, possibly overridden by the
+    # template). Reject an unknown one now (clear 400) instead of letting the
+    # agent container crash-loop on boot when get_runtime() can't resolve it.
+    validate_runtime(config.runtime)
+
+    # #1187: normalize the stored runtime to lowercase so the AGENT_RUNTIME env
+    # var and the `trinity.agent-runtime` label agree with the exact-case checks
+    # downstream — startup.sh's `[ "${AGENT_RUNTIME}" = "codex" ]` Codex setup
+    # block and the Gemini key-injection branch below (`config.runtime ==
+    # 'gemini-cli'`). validate_runtime() accepts mixed case (it lowercases only
+    # for the membership test) but does not normalize the stored value, so a
+    # template `runtime: Codex` would pass validation yet silently skip Codex's
+    # startup setup (AGENTS.md mirror / CODEX_HOME) or Gemini's credential inject.
+    if config.runtime:
+        config.runtime = config.runtime.lower()
+
+    if config.port is None:
+        config.port = get_next_available_port()
+
+    # CRED-002: Credentials are now injected directly into agents after creation
+    # via the inject_credentials endpoint, not auto-injected during creation.
+    # The agent starts without credentials and they are added via Quick Inject
+    # or imported from .credentials.enc files.
+
+    (
+        config_path,
+        credentials_path,
+        template_volume,
+        cred_files_volume,
+    ) = _stage_config_files(config, tr.template_data, tr.github_template_path)
+
+    # Phase: Agent-to-Agent Collaboration — mint the agent-scoped MCP key
+    # (a rollback handle, rolled back in the except below).
+    agent_mcp_key, trinity_mcp_url = _mint_agent_mcp_key(config, current_user)
+
+    env_vars, auto_assigned_subscription_id = _build_env_vars(
+        config, agent_mcp_key, trinity_mcp_url, tr
+    )
+
+    # trinity-enterprise#69: atomic ephemeral quota reservation, placed
+    # immediately before the docker block so every later failure path releases
+    # it via the except/else rollback below.
+    ephemeral_slot_reserved, ephemeral_owner_id = _reserve_ephemeral_slot(
+        config, current_user
+    )
+
+    # AC #3: assemble the rollback handles the except/else read. Only the
+    # orchestrator populates them; each field mirrors a value fixed BEFORE the
+    # docker block, so this is byte-identical to reading the locals in place.
+    handles = _RollbackHandles(
+        agent_name=config.name,
+        agent_mcp_key=agent_mcp_key,
+        git_instance_id=tr.git_instance_id,
+        github_repo_for_agent=tr.github_repo_for_agent,
+        ephemeral_slot_reserved=ephemeral_slot_reserved,
+        ephemeral_owner_id=ephemeral_owner_id,
+    )
 
     if docker_client:
         try:
-            # trinity-enterprise#93: persist the user's PAT as the per-agent
-            # PAT (#347) onto the agent_git_config row the reservation above
-            # just created. Inside this try so a failure hits the except
-            # below and rolls back the reserved row + MCP key. Fail-closed:
-            # a fork-to-own agent must never fall back to the platform PAT
-            # on recreate (get_github_pat_for_agent resolves per-agent first).
-            if config.fork_to_own and github_repo_for_agent:
-                if not db.set_agent_github_pat(config.name, github_pat_for_agent):
+            # Persist the resolved PAT as the per-agent PAT (#347) onto the
+            # agent_git_config row the reservation above just created. Inside
+            # this try so a failure hits the except below and rolls back the
+            # reserved row + MCP key. ent#162 — persist ONLY for a deliberate
+            # identity (fork-to-own #93 or the creator's per-user PAT), NEVER
+            # the `global` tier (Decision 2: keep github_pat_encrypted NULL so
+            # propagation keeps reaching it on admin rotation).
+            if tr.github_pat_tier in ("fork", "per_user") and tr.github_repo_for_agent:
+                if not db.set_agent_github_pat(config.name, tr.github_pat_for_agent):
                     raise RuntimeError(
                         f"failed to persist per-agent GitHub PAT for {config.name}"
                     )
 
-            # Create per-agent persistent volume for /home/developer (Pillar III: Persistent Memory)
-            # This ensures files created by the agent survive container restarts
-            agent_volume_name = f"agent-{config.name}-workspace"
-            try:
-                await volume_get(agent_volume_name)
-            except docker.errors.NotFound:
-                await volume_create(
-                    name=agent_volume_name,
-                    labels={
-                        'trinity.platform': 'agent-workspace',
-                        'trinity.agent-name': config.name
-                    }
-                )
-
-            volumes = {
-                str(config_path): {'bind': '/config/agent-config.yaml', 'mode': 'ro'},
-                str(credentials_path): {'bind': '/config/credentials.json', 'mode': 'ro'},
-                'encrypted-data': {'bind': '/data', 'mode': 'rw'},
-                agent_volume_name: {'bind': '/home/developer', 'mode': 'rw'}  # Persistent workspace
-            }
-
-            if template_volume:
-                volumes.update(template_volume)
-            if cred_files_volume:
-                volumes.update(cred_files_volume)
-
-            # Phase 9.11: Agent Shared Folders - mount shared volumes based on config
-            # First, write template-defined shared folder config to DB (if defined)
-            if template_shared_folders:
-                try:
-                    db.upsert_shared_folder_config(
-                        agent_name=config.name,
-                        expose_enabled=template_shared_folders.get("expose", False),
-                        consume_enabled=template_shared_folders.get("consume", False)
-                    )
-                    logger.info(f"Applied template shared folder config for {config.name}: expose={template_shared_folders.get('expose')}, consume={template_shared_folders.get('consume')}")
-                except Exception as e:
-                    logger.warning(f"Failed to apply template shared folder config for {config.name}: {e}")
-
-            shared_folder_config = db.get_shared_folder_config(config.name)
-            if shared_folder_config:
-                # If agent exposes a shared folder, create and mount the shared volume
-                if shared_folder_config.expose_enabled:
-                    shared_volume_name = db.get_shared_volume_name(config.name)
-                    volume_created = False
-                    try:
-                        await volume_get(shared_volume_name)
-                    except docker.errors.NotFound:
-                        await volume_create(
-                            name=shared_volume_name,
-                            labels={
-                                'trinity.platform': 'agent-shared',
-                                'trinity.agent-name': config.name
-                            }
-                        )
-                        volume_created = True
-
-                    # Fix ownership of new volumes (Docker creates them as root)
-                    if volume_created:
-                        try:
-                            await containers_run(
-                                'alpine',
-                                command='chown 1000:1000 /shared',
-                                volumes={shared_volume_name: {'bind': '/shared', 'mode': 'rw'}},
-                                remove=True
-                            )
-                        except Exception as e:
-                            logger.warning(f"Could not fix shared volume ownership: {e}")
-
-                    volumes[shared_volume_name] = {'bind': '/home/developer/shared-out', 'mode': 'rw'}
-
-                # If agent consumes shared folders, mount available shared volumes
-                if shared_folder_config.consume_enabled:
-                    available_folders = db.get_available_shared_folders(config.name)
-                    for source_agent in available_folders:
-                        source_volume = db.get_shared_volume_name(source_agent)
-                        mount_path = db.get_shared_mount_path(source_agent)
-                        # Only mount if the source volume exists
-                        try:
-                            await volume_get(source_volume)
-                            volumes[source_volume] = {'bind': mount_path, 'mode': 'rw'}
-                        except docker.errors.NotFound:
-                            # Source agent hasn't started yet or doesn't have shared volume
-                            pass
-
-            # FILES-001 Step 2: if file sharing is enabled, create and mount the
-            # per-agent public volume (symmetric to the shared-folders expose flow).
-            if db.get_file_sharing_enabled(config.name):
-                public_volume_name = db.get_public_volume_name(config.name)
-                public_volume_created = False
-                try:
-                    await volume_get(public_volume_name)
-                except docker.errors.NotFound:
-                    await volume_create(
-                        name=public_volume_name,
-                        labels={
-                            'trinity.platform': 'agent-public',
-                            'trinity.agent-name': config.name,
-                        },
-                    )
-                    public_volume_created = True
-
-                if public_volume_created:
-                    try:
-                        await containers_run(
-                            'alpine',
-                            command='chown 1000:1000 /public',
-                            volumes={public_volume_name: {'bind': '/public', 'mode': 'rw'}},
-                            remove=True,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Could not fix public volume ownership: {e}")
-
-                volumes[public_volume_name] = {'bind': db.get_public_mount_path(), 'mode': 'rw'}
-
-            # Get system-wide full_capabilities setting (not per-agent)
-            full_capabilities = get_agent_full_capabilities()
-
-            # Create container with security settings
-            # Security principle: ALWAYS apply baseline security, even in full_capabilities mode
-            # - Always drop ALL caps, then add back only what's needed
-            # - Always apply AppArmor profile
-            # - Always apply noexec,nosuid to /tmp
-            container = await containers_run(
-                config.base_image,
-                detach=True,
-                name=f"agent-{config.name}",
-                ports={'22/tcp': config.port},
-                volumes=volumes,
-                environment=env_vars,
-                labels={
-                    'trinity.platform': 'agent',
-                    'trinity.agent-name': config.name,
-                    'trinity.agent-type': config.type,
-                    'trinity.ssh-port': str(config.port),
-                    'trinity.cpu': config.resources['cpu'],
-                    'trinity.memory': config.resources['memory'],
-                    'trinity.created': utc_now_iso(),
-                    'trinity.template': config.template or '',
-                    'trinity.agent-runtime': config.runtime or 'claude-code',
-                    'trinity.full-capabilities': str(full_capabilities).lower(),
-                    'trinity.base-image-version': get_platform_version()
-                },
-                # Always apply AppArmor for additional sandboxing
-                security_opt=['apparmor:docker-default'],
-                # Always drop ALL capabilities first (defense in depth)
-                cap_drop=['ALL'],
-                # Add back only the capabilities needed for the mode
-                cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
-                read_only=False,
-                # Always apply noexec,nosuid to /tmp for security (#1098: scratch
-                # is redirected off this tiny tmpfs via the TMPDIR env var).
-                tmpfs=AGENT_TMPFS_MOUNT,
-                network='trinity-agent-network',
-                # #1197: cpu/memory normalized + validated above (raises 400 on
-                # a bad template value), so these are guaranteed Docker-valid.
-                mem_limit=config.resources['memory'],
-                # #1126: nano_cpus (Linux CFS quota), NOT cpu_count — the latter
-                # is Windows-only in docker-py and left NanoCpus=0, so newly
-                # created agents never got a CPU limit on Linux.
-                nano_cpus=int(config.resources['cpu']) * 1_000_000_000,
+            volumes = await _build_volume_mounts(
+                config,
+                config_path,
+                credentials_path,
+                template_volume,
+                cred_files_volume,
+                tr.template_shared_folders,
             )
-
+            container = await _create_agent_container(
+                config, volumes, env_vars, current_user, ephemeral_expires_at
+            )
             agent_status = get_agent_status_from_container(container)
-
-            if ws_manager:
-                await ws_manager.broadcast(json.dumps({
-                    "event": "agent_created",
-                    "data": {
-                        "name": agent_status.name,
-                        "type": agent_status.type,
-                        "status": agent_status.status,
-                        "port": agent_status.port,
-                        "created": agent_status.created.isoformat(),
-                        "resources": agent_status.resources,
-                        "container_id": agent_status.container_id
-                    }
-                }))
-
-            # #1129: seed require_email from the fleet-wide default
-            # (secure-by-default ON) at creation; owners can override per agent.
-            db.register_agent_owner(
-                config.name,
-                current_user.username,
-                require_email=get_agent_default_require_email(),
+            await _broadcast_agent_created(agent_status, ws_manager)
+            _register_agent(
+                config,
+                current_user,
+                tr.template_data,
+                ephemeral_expires_at,
+                auto_assigned_subscription_id,
             )
-
-            # Persist auto-assigned subscription (#74)
-            if auto_assigned_subscription_id:
-                try:
-                    db.assign_subscription_to_agent(config.name, auto_assigned_subscription_id)
-                except Exception as e:
-                    logger.warning(f"Failed to persist subscription assignment for {config.name}: {e}")
-
-            # AVATAR-003: Seed avatar prompt from template
-            _avatar_prompt = template_data.get("avatar_prompt") if template_data else None
-            if _avatar_prompt:
-                try:
-                    db.set_default_avatar(config.name, _avatar_prompt, datetime.now(timezone.utc).isoformat())
-                    logger.info(f"[AVATAR-003] Seeded avatar prompt from template for {config.name}")
-                except Exception as e:
-                    logger.warning(f"[AVATAR-003] Failed to seed avatar prompt for {config.name}: {e}")
-
-            # Phase 9.10: Grant default permissions (Option B - same-owner agents)
-            try:
-                permissions_count = db.grant_default_permissions(config.name, current_user.username)
-                if permissions_count > 0:
-                    logger.info(f"Granted {permissions_count} default permissions for agent {config.name}")
-            except Exception as e:
-                logger.warning(f"Failed to grant default permissions for {config.name}: {e}")
-
-            # Phase 7: git config was already reserved and persisted via
-            # `reserve_and_generate_instance_id` earlier in this function
-            # (S7 Layer 0). No second db.create_git_config call here — that
-            # would either be a no-op (agent_name UNIQUE) or, worse, mask
-            # a Layer 2 conflict.
-
-            # S4 (#383): Materialize persistent-state allowlist into the agent.
-            # Runtime sync/reset paths read `.trinity/persistent-state.yaml`;
-            # template.yaml is only read at creation (10-min cache), so this
-            # is the source of truth going forward. Non-fatal on failure —
-            # reset operations fall back to the default list at read time.
-            persistent_state = (
-                (template_data or {}).get(
-                    "persistent_state", git_service.DEFAULT_PERSISTENT_STATE
-                )
+            await _materialize_agent_files(
+                config,
+                tr.template_data,
+                tr.github_repo_for_agent,
+                tr.fork_upstream_repo,
+                tr.github_pat_for_agent,
             )
-            try:
-                await git_service.materialize_persistent_state(
-                    config.name, persistent_state
-                )
-            except Exception as e:
-                logger.warning(
-                    f"[S4] Failed to materialize persistent-state.yaml for "
-                    f"{config.name}: {e}"
-                )
-
-            # #1169: Materialize the declared `data_paths` into the agent.
-            # Opt-in (empty list = no-op), so undeclared agents are
-            # untouched. Writes `.trinity/data-paths.yaml` and gitignores the
-            # `data/` root in the agent's own .gitignore. Non-fatal — the
-            # home volume is already durable; the declaration just enables
-            # selective snapshot/export and keeps runtime data out of git.
-            data_paths = (template_data or {}).get(
-                "data_paths", git_service.DEFAULT_DATA_PATHS
-            )
-            try:
-                await git_service.materialize_data_paths(
-                    config.name, data_paths
-                )
-            except Exception as e:
-                logger.warning(
-                    f"[#1169] Failed to materialize data-paths.yaml for "
-                    f"{config.name}: {e}"
-                )
-
-            # #389 S1a: opt non-source-mode GitHub-template agents into the
-            # auto-sync heartbeat by default. Source-mode agents stay opt-in
-            # (auto-pushing to main would clobber protected branches) —
-            # except fork-to-own agents (#93), which own their repo.
-            if github_repo_for_agent and (not config.source_mode or fork_upstream_repo):
-                try:
-                    db.set_git_auto_sync_enabled(config.name, True)
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to enable auto-sync for {config.name}: {e}"
-                    )
-
             return agent_status
         except Exception as e:
-            # S7 Layer 0 (#382): if anything after the reservation fails,
-            # roll back the agent_git_config row so the working branch is
-            # released and a retry can claim it fresh.
-            if github_repo_for_agent and git_instance_id:
-                try:
-                    db.delete_git_config(config.name)
-                except Exception as cleanup_exc:
-                    logger.warning(
-                        "Failed to roll back agent_git_config for %s after "
-                        "creation failure: %s",
-                        config.name,
-                        cleanup_exc,
-                    )
-            # #1197: the agent-scoped MCP key is minted before container
-            # creation, so a failure here would otherwise leave an orphaned
-            # mcp_api_keys row (one per failed attempt). Roll it back too.
-            if agent_mcp_key:
-                try:
-                    db.delete_agent_mcp_api_key(config.name)
-                except Exception as cleanup_exc:
-                    logger.warning(
-                        "Failed to roll back MCP key for %s after creation "
-                        "failure: %s",
-                        config.name,
-                        cleanup_exc,
-                    )
+            _rollback_failed_creation(handles)
             logger.error(f"Failed to create agent {config.name}: {e}")
             raise HTTPException(status_code=500, detail="Failed to create agent. Please try again.")
     else:
+        _release_ephemeral_on_no_docker(handles)
         raise HTTPException(
             status_code=503,
             detail="Docker not available - cannot create agents in demo mode"

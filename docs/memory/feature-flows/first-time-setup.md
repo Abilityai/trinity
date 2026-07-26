@@ -877,6 +877,14 @@ that rather than blocking on it:
   once** via the `operator_intake_submitted` marker claimed *before* the POST;
   no-op without an email. Owns the stable `installation_id` (random UUID in
   `system_settings`, the #758 telemetry seed). Never raises; never logs the email.
+  **Delivery-failure observability (#1593):** success is gated on a *true* 2xx —
+  a non-2xx **response** (3xx redirect or 4xx/5xx) logs at **WARNING** (status +
+  the Worker's coded `error`, echoed only when it matches a lowercase
+  snake_case whitelist so an echoed email/free-text can't leak), and a
+  connect/timeout/TLS/DNS failure that **raises** logs at **INFO** (visible under
+  prod root=INFO without WARNING's false alarm on a deliberately-offline
+  install). At-most-once marker semantics are unchanged — this makes a *future*
+  outage visible; it does not add retry.
 - **`dependencies.authenticate_user`** — resolves the identifier by username, then
   by email when it looks like one and no username matched. The password check
   still runs, so only an account *with* a password hash (the admin) authenticates
@@ -936,3 +944,4 @@ POST https://intake.abilityai.dev/v1/operator-intake
 | 2026-03-26 | Security Fix SEC #177 | Added single-use setup token to prevent installation hijack. Token generated via `secrets.token_urlsafe(24)` at startup, printed to server logs, required in `POST /api/setup/admin-password`. Frontend adds setup token field with instructions to check `docker compose logs backend`. Constant-time comparison guards against timing attacks. |
 | 2026-06-22 | Operator profile — intake + admin email login (trinity-enterprise#38, #82) | Added Flow 3. Optional email/company + unchecked-by-default consent at setup; email binds as admin sign-in identity (login with email + password — **no verification email**, fresh installs have no Resend key); opt-in once-per-install fire-and-forget POST to a new `/v1/operator-intake` endpoint on #1116's Cloudflare intake app. New `services/operator_intake_service.py` (+ `installation_id`), `authenticate_user` email resolution, `PUT /api/users/me/email` + Settings card for existing-admin transition, `OPERATOR_INTAKE_ENABLED`/`OPERATOR_INTAKE_URL`. |
 | 2026-06-23 | Streamlined setup wizard (trinity-enterprise#49) | **Removed the setup token** (and all `ensure_setup_token`/`clear_setup_token`/Redis machinery + the `main.py` startup emission — setup no longer depends on Redis), **made admin email required** (sign-in identity; missing → 422, blank/invalid → 400 before any write), reordered to email → password (+confirm) → company → updates opt-in, and rebuilt `SetupPassword.vue` as a welcoming single-screen first-run page with an animated **orbiting fleet constellation** (dark hero, `prefers-reduced-motion` aware). Security tradeoff of token removal accepted + documented as operator responsibility (deploy behind a tunnel/VPN until setup completes) in `docs/DEPLOYMENT.md` → Security Recommendations. Removed `tests/unit/test_1165_setup_token_shared.py`; updated `tests/test_setup.py` + `tests/unit/test_setup_operator_profile.py`. |
+| 2026-07-17 | Operator-intake delivery-failure observability (#1593) | The non-2xx branch was logged at `debug` (invisible under prod root=INFO), so the hosted `/v1/operator-intake` outage of 2026-06-22→07-13 dropped every fresh-install opt-in as a silent 404 for ~3 weeks. Success is now gated on a **true 2xx**: a 3xx/4xx/5xx **response** logs at **WARNING** (status + the Worker's coded `error`, whitelisted to lowercase snake_case so no PII leaks) and a connect/timeout failure that **raises** logs at **INFO**. `_safe_error_detail` is hardened (broad `except` + `isinstance(dict)`) so a non-JSON/non-dict body can never re-hide the WARNING. Marker/retry semantics **unchanged** — observability only. `services/operator_intake_service.py` + `tests/unit/test_operator_intake.py`. |

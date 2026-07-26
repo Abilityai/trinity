@@ -113,6 +113,9 @@ from db.chat import ChatOperations
 from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.reports import ReportOperations
+from db.product_events import ProductEventOperations
+from db.reminders import RemindersOperations
+from db.connector import ConnectorOperations
 from db.permissions import PermissionOperations
 from db.shared_folders import SharedFolderOperations
 from db.agent_shared_files import AgentSharedFilesOperations
@@ -162,6 +165,8 @@ def init_database():
     if not is_sqlite():
         from db.alembic_runner import upgrade_to_head
         upgrade_to_head()
+        # #1638: seed BEFORE _ensure_admin_user_engine — see the sqlite path.
+        _seed_fresh_install_retention_engine()
         _ensure_admin_user_engine()
         return
 
@@ -189,8 +194,104 @@ def init_database():
             # them, keeping the health check accurate.
             run_all_migrations(cursor, conn)
 
+            # #1638: apply the #1039 community retention floor to a fresh DB.
+            # MUST run after init_schema (system_settings/users must exist) and
+            # BEFORE _ensure_admin_user (which makes `users` non-empty and so
+            # would make this install look pre-existing).
+            _seed_fresh_install_retention(cursor, conn)
+
             # Create default admin user if not exists
             _ensure_admin_user(cursor, conn)
+
+
+_FRESH_INSTALL_SEED_NOTE = (
+    "[#1638] Fresh install: seeded community retention floor "
+    "(%s). Existing installs keep the wider code defaults."
+)
+
+
+def _is_fresh_install_sqlite(cursor) -> bool:
+    """True when this DB has never been set up (#1638).
+
+    `users` is empty for exactly one moment in a database's life: after
+    `init_schema` creates the table and before `_ensure_admin_user` populates
+    it. Any row means the install predates this boot and owns data whose
+    retention we must not narrow. Deliberately NOT a timestamp comparison — a
+    row count is dialect-portable and needs no release-date constant.
+    """
+    cursor.execute("SELECT 1 FROM users LIMIT 1")
+    return cursor.fetchone() is None
+
+
+def _seed_fresh_install_retention(cursor, conn):
+    """Apply the #1039 community retention floor to a fresh install (#1638).
+
+    The floor reaches new installs by writing explicit `system_settings` rows
+    here — NOT by lowering `OPS_SETTINGS_DEFAULTS`, which is read at prune time
+    and would retroactively destroy existing installs' data (#1638).
+
+    Fails SAFE and never raises: if this is skipped or errors, the install
+    simply has no rows and falls back to the wide code defaults, keeping more
+    data than intended. A failed *seed* must never brick boot — `init_database`
+    runs at import, so raising here would crash-loop the backend permanently.
+    """
+    # config, not services.settings_service: that module imports `db` from this
+    # one, and this runs at import time (#1638 circular-import trap).
+    from config import COMMUNITY_FRESH_INSTALL_SEED
+
+    try:
+        if not _is_fresh_install_sqlite(cursor):
+            return
+        now = utc_now_iso()
+        for key, value in COMMUNITY_FRESH_INSTALL_SEED.items():
+            # OR IGNORE: idempotent under a re-run (both migration locks fail
+            # open, so two workers can race this) and never clobbers a value an
+            # operator set.
+            cursor.execute(
+                "INSERT OR IGNORE INTO system_settings (key, value, updated_at) "
+                "VALUES (?, ?, ?)",
+                (key, value, now),
+            )
+        conn.commit()
+        print(_FRESH_INSTALL_SEED_NOTE % ", ".join(
+            f"{k}={v}d" for k, v in sorted(COMMUNITY_FRESH_INSTALL_SEED.items())
+        ))
+    except Exception as e:
+        print(f"WARNING: [#1638] retention seed skipped ({e}); "
+              f"install keeps the default (wider) retention windows")
+
+
+def _seed_fresh_install_retention_engine():
+    """Fresh-install retention seed — engine-based path for PostgreSQL (#300).
+
+    Mirrors `_seed_fresh_install_retention`; see it for the rationale. Same
+    fail-safe contract: never raises, and a skip leaves the wide code defaults
+    in place.
+    """
+    from sqlalchemy import func, select
+
+    from config import COMMUNITY_FRESH_INSTALL_SEED
+    from db.engine import get_engine, make_insert
+    from db.tables import system_settings, users
+
+    try:
+        with get_engine().begin() as conn:
+            count = conn.execute(select(func.count()).select_from(users)).scalar()
+            if count:
+                return
+            now = utc_now_iso()
+            for key, value in COMMUNITY_FRESH_INSTALL_SEED.items():
+                conn.execute(
+                    make_insert(system_settings)
+                    .values(key=key, value=value, updated_at=now)
+                    .on_conflict_do_nothing(index_elements=["key"])
+                )
+        print(_FRESH_INSTALL_SEED_NOTE % ", ".join(
+            f"{k}={v}d" for k, v in sorted(COMMUNITY_FRESH_INSTALL_SEED.items())
+        ))
+    except Exception as e:
+        print(f"WARNING: [#1638] retention seed skipped ({e}); "
+              f"install keeps the default (wider) retention windows")
 
 
 def _ensure_admin_user_engine():
@@ -332,6 +433,9 @@ class DatabaseManager:
         self._session_ops = SessionOperations()
         self._activity_ops = ActivityOperations()
         self._report_ops = ReportOperations()
+        self._product_event_ops = ProductEventOperations()
+        self._reminder_ops = RemindersOperations()
+        self._connector_ops = ConnectorOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
         self._shared_folder_ops = SharedFolderOperations(self._permission_ops)
         self._agent_shared_files_ops = AgentSharedFilesOperations()
@@ -399,12 +503,51 @@ class DatabaseManager:
     def update_user_role(self, username: str, role: str):
         return self._user_ops.update_user_role(username, role)
 
+    # --- Per-user GitHub PAT (ent#162) ---
+
+    def get_user_github_pat(self, user_id: int):
+        return self._user_ops.get_user_github_pat(user_id)
+
+    def set_user_github_pat(self, user_id: int, pat: str) -> bool:
+        return self._user_ops.set_user_github_pat(user_id, pat)
+
+    def clear_user_github_pat(self, user_id: int) -> bool:
+        return self._user_ops.clear_user_github_pat(user_id)
+
+    def has_user_github_pat(self, user_id: int) -> bool:
+        return self._user_ops.has_user_github_pat(user_id)
+
     # =========================================================================
     # Agent Ownership Management (delegated to db/agents.py)
     # =========================================================================
 
-    def register_agent_owner(self, agent_name: str, owner_username: str, is_system: bool = False, require_email: bool = False):
-        return self._agent_ops.register_agent_owner(agent_name, owner_username, is_system, require_email)
+    def register_agent_owner(self, agent_name: str, owner_username: str, is_system: bool = False, require_email: bool = False, **kwargs):
+        # **kwargs carries the trinity-enterprise#69 ephemeral/provenance
+        # fields (is_ephemeral, ephemeral_max_executions, ephemeral_expires_at,
+        # spawned_by_agent, spawned_by_key_id, max_parallel_tasks).
+        return self._agent_ops.register_agent_owner(agent_name, owner_username, is_system, require_email, **kwargs)
+
+    # --- Ephemeral "ghost" agents (trinity-enterprise#69) ---
+
+    def get_agent_ephemeral_info(self, agent_name: str):
+        return self._agent_ops.get_agent_ephemeral_info(agent_name)
+
+    def mark_ephemeral_discard_intent(self, agent_name: str):
+        return self._agent_ops.mark_ephemeral_discard_intent(agent_name)
+
+    def count_ephemeral_budget_usage(self, agent_name: str, exclude_execution_id=None):
+        return self._agent_ops.count_ephemeral_budget_usage(
+            agent_name, exclude_execution_id=exclude_execution_id
+        )
+
+    def find_discardable_ephemeral_agents(self, limit: int = 50):
+        return self._agent_ops.find_discardable_ephemeral_agents(limit)
+
+    def count_live_ephemeral_agents_for_owner(self, owner_id: int):
+        return self._agent_ops.count_live_ephemeral_agents_for_owner(owner_id)
+
+    def purge_ephemeral_agent_ownership(self, agent_name: str):
+        return self._agent_ops.purge_ephemeral_agent_ownership(agent_name)
 
     def get_agent_owner(self, agent_name: str):
         return self._agent_ops.get_agent_owner(agent_name)
@@ -429,6 +572,37 @@ class DatabaseManager:
 
     def is_agent_live(self, agent_name: str):
         return self._agent_ops.is_agent_live(agent_name)
+
+    # #1664: Docker data-volume identity. `is_volume_base_reserved` is the
+    # volume-ownership predicate the #1581 orphan sweep must use instead of
+    # `is_agent_name_reserved` — a renamed agent's volumes keep the pre-rename
+    # base, so asking "is this a live agent NAME?" marks live data an orphan.
+    # ent#181: the human-facing label. `display_label` is presentation only —
+    # `agent_name` (the slug) remains the identity everything else keys on.
+    def get_display_label(self, agent_name: str):
+        return self._agent_ops.get_display_label(agent_name)
+
+    def get_display_name(self, agent_name: str):
+        return self._agent_ops.get_display_name(agent_name)
+
+    def get_display_labels_for_agents(self, agent_names):
+        return self._agent_ops.get_display_labels_for_agents(agent_names)
+
+    def set_display_label(self, agent_name: str, label):
+        return self._agent_ops.set_display_label(agent_name, label)
+
+    def is_volume_base_reserved(self, volume_base: str, exclude_agent=None):
+        # #1671: `exclude_agent` = "does anyone ELSE claim this base?" — the
+        # rename gate passes the renaming agent so a rename-back isn't refused.
+        return self._agent_ops.is_volume_base_reserved(
+            volume_base, exclude_agent=exclude_agent
+        )
+
+    def get_volume_base_name(self, agent_name: str):
+        return self._agent_ops.get_volume_base_name(agent_name)
+
+    def set_volume_base_name(self, agent_name: str, volume_base: str):
+        return self._agent_ops.set_volume_base_name(agent_name, volume_base)
 
     def recover_agent_ownership(self, agent_name: str):
         return self._agent_ops.recover_agent_ownership(agent_name)
@@ -667,11 +841,40 @@ class DatabaseManager:
     def get_mcp_exposed_agents(self):
         return self._agent_ops.get_mcp_exposed_agents()
 
+    # =========================================================================
+    # Per-agent MCP connector (ent#46; OSS-core since #118)
+    # =========================================================================
+    def get_connector_config(self, agent_name: str):
+        return self._connector_ops.get_config(agent_name)
+
+    def upsert_connector_config(self, agent_name, enabled=None, exposed_playbooks=None, *, clear_playbooks=False):
+        return self._connector_ops.upsert_config(
+            agent_name, enabled=enabled, exposed_playbooks=exposed_playbooks, clear_playbooks=clear_playbooks
+        )
+
+    def delete_connector_config(self, agent_name: str):
+        return self._connector_ops.delete_config(agent_name)
+
+    def mint_connector_key(self, agent_name, user_id):
+        return self._connector_ops.mint_key(agent_name, user_id)
+
+    def get_connector_key_prefix(self, agent_name):
+        return self._connector_ops.get_key_prefix(agent_name)
+
+    def revoke_connector_key(self, agent_name):
+        return self._connector_ops.revoke_key(agent_name)
+
+    def regenerate_connector_key(self, agent_name, user_id):
+        return self._connector_ops.regenerate_key(agent_name, user_id)
+
     def get_tts_config(self, agent_name: str):
         return self._agent_ops.get_tts_config(agent_name)
 
     def set_tts_config(self, agent_name: str, enabled: bool, voice_id):
         return self._agent_ops.set_tts_config(agent_name, enabled, voice_id)
+
+    def set_tts_channel_flags(self, agent_name: str, channels: dict):
+        return self._agent_ops.set_tts_channel_flags(agent_name, channels)
 
     # =========================================================================
     # Execution Timeout (delegated to db/agents.py) - TIMEOUT-001
@@ -703,11 +906,29 @@ class DatabaseManager:
     def update_execution_to_queued(self, execution_id: str, backlog_metadata: str, queued_at: str) -> bool:
         return self._schedule_ops.update_execution_to_queued(execution_id, backlog_metadata, queued_at)
 
-    def claim_next_queued(self, agent_name: str):
-        return self._schedule_ops.claim_next_queued(agent_name)
+    def claim_next_queued(self, agent_name: str, worker_id: str = None, lease_seconds: int = None):
+        return self._schedule_ops.claim_next_queued(agent_name, worker_id, lease_seconds)
 
     def release_claim_to_queued(self, execution_id: str) -> bool:
         return self._schedule_ops.release_claim_to_queued(execution_id)
+
+    # Lease reaper (#1081 Phase 3 — #429 / #1402)
+    def find_expired_leases(self, now_iso: str = None, limit: int = 500):
+        return self._schedule_ops.find_expired_leases(now_iso, limit)
+
+    def requeue_expired_lease(self, execution_id: str, now_iso: str = None) -> bool:
+        return self._schedule_ops.requeue_expired_lease(execution_id, now_iso)
+
+    def park_expired_lease(self, execution_id: str, error: str, now_iso: str = None) -> bool:
+        return self._schedule_ops.park_expired_lease(execution_id, error, now_iso)
+
+    # Physical-occupancy meter (#1081 Phase 3): read-only leased-row counters
+    # consumed by CapacityManager's two meter methods. Metering only.
+    def count_active_leased_by_agent(self, agent_names):
+        return self._schedule_ops.count_active_leased_by_agent(agent_names)
+
+    def count_active_leased(self, agent_name: str) -> int:
+        return self._schedule_ops.count_active_leased(agent_name)
 
     def get_queued_count(self, agent_name: str) -> int:
         return self._schedule_ops.get_queued_count(agent_name)
@@ -720,6 +941,9 @@ class DatabaseManager:
 
     def fail_queued_for_agent(self, agent_name: str, reason: str = "circuit_open") -> int:
         return self._schedule_ops.fail_queued_for_agent(agent_name, reason)
+
+    def fail_all_nonterminal_for_agent(self, agent_name: str, reason: str = "ghost_discarded") -> int:
+        return self._schedule_ops.fail_all_nonterminal_for_agent(agent_name, reason)
 
     def expire_stale_queued(self, max_age_hours: float = 24) -> int:
         return self._schedule_ops.expire_stale_queued(max_age_hours)
@@ -801,6 +1025,14 @@ class DatabaseManager:
 
     def get_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.get_agent_mcp_api_key(agent_name)
+
+    def set_agent_keys_active(self, agent_name: str, active: bool) -> int:
+        """#1745: activate/deactivate an agent's per-agent MCP keys."""
+        return self._mcp_key_ops.set_agent_keys_active(agent_name, active)
+
+    def deactivate_orphaned_agent_keys(self) -> int:
+        """#1745: deactivate per-agent keys whose agent is no longer live."""
+        return self._mcp_key_ops.deactivate_orphaned_agent_keys()
 
     def delete_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.delete_agent_mcp_api_key(agent_name)
@@ -917,6 +1149,9 @@ class DatabaseManager:
         fan_out_id: str = None,
         loop_id: str = None,
         subscription_id: str = None,
+        source_channel: str = None,
+        source_channel_chat_id: str = None,
+        source_channel_thread: str = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule)."""
         return self._schedule_ops.create_task_execution(
@@ -930,6 +1165,9 @@ class DatabaseManager:
             fan_out_id=fan_out_id,
             loop_id=loop_id,
             subscription_id=subscription_id,
+            source_channel=source_channel,
+            source_channel_chat_id=source_channel_chat_id,
+            source_channel_thread=source_channel_thread,
         )
 
     def create_schedule_execution(
@@ -957,13 +1195,21 @@ class DatabaseManager:
 
     def update_execution_status(self, execution_id: str, status: str, response: str = None, error: str = None,
                                 context_used: int = None, context_max: int = None, cost: float = None, tool_calls: str = None, execution_log: str = None,
-                                claude_session_id: str = None, compact_metadata: str = None, retry_count: int = None):
+                                claude_session_id: str = None, compact_metadata: str = None, retry_count: int = None,
+                                claim_token: str = None):
         return self._schedule_ops.update_execution_status(execution_id, status, response, error,
                                                           context_used, context_max, cost, tool_calls, execution_log, claude_session_id,
-                                                          compact_metadata, retry_count)
+                                                          compact_metadata, retry_count, claim_token)
 
     def mark_execution_dispatched(self, execution_id: str, async_dispatch: bool = False) -> bool:
         return self._schedule_ops.mark_execution_dispatched(execution_id, async_dispatch)
+
+    def resume_session_belongs_to_user(
+        self, agent_name: str, claude_session_id: str, user_id: int
+    ) -> bool:
+        return self._schedule_ops.resume_session_belongs_to_user(
+            agent_name, claude_session_id, user_id
+        )
 
     def get_schedule_executions(self, schedule_id: str, limit: int = 50):
         return self._schedule_ops.get_schedule_executions(schedule_id, limit)
@@ -1220,6 +1466,61 @@ class DatabaseManager:
         return self._report_ops.prune_agent_reports(retention_days, chunk_size)
 
     # =========================================================================
+    # Local Product-Event Capture Methods (ent#184 — delegated to db/product_events.py)
+    # =========================================================================
+
+    def record_product_event(self, installation_id, event_type, event_context=None):
+        return self._product_event_ops.record_product_event(
+            installation_id, event_type, event_context
+        )
+
+    def count_product_events_by_type(self, since=None):
+        return self._product_event_ops.count_product_events_by_type(since)
+
+    def list_product_events(self, event_type=None, since=None, limit=1000, offset=0):
+        return self._product_event_ops.list_product_events(event_type, since, limit, offset)
+
+    def prune_product_events(self, retention_days, chunk_size=1000):
+        return self._product_event_ops.prune_product_events(retention_days, chunk_size)
+
+    # =========================================================================
+    # Agent Self-Reminder Methods (#1296 — delegated to db/reminders.py)
+    # =========================================================================
+
+    def insert_reminder(self, agent_name, message, fire_at, *, model=None,
+                        timeout_seconds=None, allowed_tools=None, owner_id=None,
+                        created_by_email=None, source_agent_name=None,
+                        source_mcp_key_id=None):
+        return self._reminder_ops.insert_reminder(
+            agent_name, message, fire_at, model=model,
+            timeout_seconds=timeout_seconds, allowed_tools=allowed_tools,
+            owner_id=owner_id, created_by_email=created_by_email,
+            source_agent_name=source_agent_name, source_mcp_key_id=source_mcp_key_id,
+        )
+
+    def list_reminders(self, agent_name, status=None, limit=100):
+        return self._reminder_ops.list_reminders(agent_name, status, limit)
+
+    def get_reminder(self, agent_name, reminder_id):
+        return self._reminder_ops.get_reminder(agent_name, reminder_id)
+
+    def count_pending_reminders(self, agent_name):
+        return self._reminder_ops.count_pending_reminders(agent_name)
+
+    def count_reminders_created_since(self, agent_name, since_iso):
+        return self._reminder_ops.count_reminders_created_since(agent_name, since_iso)
+
+    def cancel_reminder(self, agent_name, reminder_id):
+        return self._reminder_ops.cancel_reminder(agent_name, reminder_id)
+
+    def prune_agent_reminders(self, retention_days: int = 90, chunk_size: int = 1000):
+        return self._reminder_ops.prune_agent_reminders(retention_days, chunk_size)
+
+    def count_agent_reminders_candidates(self, retention_days: int, limit: int) -> int:
+        """Bounded count of what prune_agent_reminders would delete (#1644)."""
+        return self._reminder_ops.count_agent_reminders_candidates(retention_days, limit)
+
+    # =========================================================================
     # Cleanup Operations (for CleanupService)
     # =========================================================================
 
@@ -1227,15 +1528,34 @@ class DatabaseManager:
         """Get all schedule executions currently in 'running' status."""
         return self._schedule_ops.get_running_executions()
 
-    def mark_stale_executions_failed(self, timeout_minutes: int = 30, agent_timeouts=None, buffer_seconds: int = 0):
-        """Mark executions stuck in 'running' past threshold as failed."""
+    def mark_stale_executions_failed(self, timeout_minutes: int = 30, agent_timeouts=None, buffer_seconds: int = 0, collect_failed=None):
+        """Mark executions stuck in 'running' past threshold as failed.
+
+        #1714: pass a list as ``collect_failed`` to also receive CAS-won
+        ``(execution_id, agent_name)`` tuples for completion-event emission.
+        """
         return self._schedule_ops.mark_stale_executions_failed(
-            timeout_minutes, agent_timeouts=agent_timeouts, buffer_seconds=buffer_seconds
+            timeout_minutes, agent_timeouts=agent_timeouts, buffer_seconds=buffer_seconds,
+            collect_failed=collect_failed,
         )
 
-    def mark_no_session_executions_failed(self, timeout_seconds: int = 60):
-        """Mark running executions with no claude_session_id as failed (Issue #106)."""
-        return self._schedule_ops.mark_no_session_executions_failed(timeout_seconds)
+    def mark_no_session_executions_failed(self, timeout_seconds: int = 60, collect_failed=None):
+        """Mark running executions with no claude_session_id as failed (Issue #106).
+
+        #1714: ``collect_failed`` list receives CAS-won ``(execution_id,
+        agent_name)`` tuples for completion-event emission.
+        """
+        return self._schedule_ops.mark_no_session_executions_failed(
+            timeout_seconds, collect_failed=collect_failed
+        )
+
+    def has_task_terminal_subscribers(self) -> bool:
+        """#1714: is any enabled subscription listening for agent.task.completed/
+        failed? Cheap gate so a bulk sweep with no subscribers costs nothing."""
+        from services.event_dispatch_service import TASK_COMPLETED_EVENT, TASK_FAILED_EVENT
+        return self._event_subscription_ops.has_enabled_subscriptions_for_types(
+            [TASK_COMPLETED_EVENT, TASK_FAILED_EVENT]
+        )
 
     def fail_stale_slot_execution(self, execution_id: str, error: str) -> bool:
         """Mark a running execution as failed when its slot is reclaimed (#219)."""
@@ -1252,6 +1572,55 @@ class DatabaseManager:
     def prune_execution_rows(self, retention_days: int, chunk_size: int = 500) -> int:
         """Delete terminal schedule_executions rows older than retention_days (#772)."""
         return self._schedule_ops.prune_execution_rows(retention_days, chunk_size)
+
+    def scrub_terminal_backlog_metadata(self, chunk_size: int = 500) -> int:
+        """NULL backlog_metadata on authoritative-terminal executions (#1449 PII scrub)."""
+        return self._schedule_ops.scrub_terminal_backlog_metadata(chunk_size)
+
+    # --- #1644 blast-radius counts (bounded; share each prune's predicate) ---
+
+    def count_execution_log_candidates(self, retention_days: int, limit: int) -> int:
+        """Bounded count of what prune_execution_logs would null (#1644)."""
+        return self._schedule_ops.count_execution_log_candidates(retention_days, limit)
+
+    def count_execution_row_candidates(self, retention_days: int, limit: int) -> int:
+        """Bounded count of what prune_execution_rows would delete (#1644)."""
+        return self._schedule_ops.count_execution_row_candidates(retention_days, limit)
+
+    def count_soft_deleted_schedules_past_retention(
+        self, retention_days: int, limit: int
+    ) -> int:
+        """Bounded count of schedules the #834 sweep would purge (#1644)."""
+        return self._schedule_ops.count_soft_deleted_schedules_past_retention(
+            retention_days, limit
+        )
+
+    def count_health_check_candidates(self, days: int, limit: int) -> int:
+        """Bounded count of what cleanup_old_health_records would delete (#1644)."""
+        return self._monitoring_ops.count_health_check_candidates(days, limit)
+
+    def count_agent_reports_candidates(self, retention_days: int, limit: int) -> int:
+        """Bounded count of what prune_agent_reports would delete (#1644)."""
+        return self._report_ops.count_agent_reports_candidates(retention_days, limit)
+
+    def count_operator_queue_terminal_candidates(
+        self, retention_days: int, responded_retention_days: int, limit: int
+    ) -> int:
+        """Bounded count of what prune_terminal_items would delete (#1644)."""
+        return self._operator_queue_ops.count_terminal_candidates(
+            retention_days, responded_retention_days, limit
+        )
+
+    def count_soft_deleted_agents_past_retention(
+        self, retention_days: int, limit: int
+    ) -> int:
+        """Bounded count of agents the #834 sweep would hard-purge (#1644).
+
+        Each candidate is one agent whose data volumes are destroyed (#1581).
+        """
+        return self._agent_ops.count_soft_deleted_agents_past_retention(
+            retention_days, limit
+        )
 
     def get_running_executions_with_agent_info(self):
         """Get all running executions with schedule timeout info (Issue #129)."""
@@ -1867,6 +2236,9 @@ class DatabaseManager:
     def get_slack_workspace_bot_token(self, team_id):
         return self._slack_channel_ops.get_workspace_bot_token(team_id)
 
+    def get_slack_bot_token_for_channel(self, slack_channel_id):
+        return self._slack_channel_ops.get_bot_token_for_channel(slack_channel_id)
+
     def get_all_slack_workspaces(self):
         return self._slack_channel_ops.get_all_workspaces()
 
@@ -1899,6 +2271,11 @@ class DatabaseManager:
 
     def get_slack_channels_for_agent(self, agent_name):
         return self._slack_channel_ops.get_channels_for_agent(agent_name)
+
+    def set_slack_channel_allow_proactive(self, team_id, slack_channel_id, enabled):
+        """ent#223 — toggle per-channel proactive consent on a channel binding."""
+        return self._slack_channel_ops.set_channel_allow_proactive(
+            team_id, slack_channel_id, enabled)
 
     def unbind_slack_agent(self, team_id, agent_name):
         return self._slack_channel_ops.unbind_agent(team_id, agent_name)
@@ -1940,11 +2317,8 @@ class DatabaseManager:
     def delete_telegram_binding(self, agent_name):
         return self._telegram_channel_ops.delete_binding(agent_name)
 
-    def get_or_create_telegram_chat_link(self, binding_id, telegram_user_id, telegram_username=None):
-        return self._telegram_channel_ops.get_or_create_chat_link(binding_id, telegram_user_id, telegram_username)
-
-    def increment_telegram_message_count(self, chat_link_id):
-        return self._telegram_channel_ops.increment_message_count(chat_link_id)
+    def record_telegram_inbound(self, binding_id, telegram_user_id, telegram_username=None):
+        return self._telegram_channel_ops.record_inbound(binding_id, telegram_user_id, telegram_username)
 
     def list_telegram_clients_for_agent(self, agent_name):
         return self._telegram_channel_ops.list_clients_for_agent(agent_name)
@@ -2022,8 +2396,8 @@ class DatabaseManager:
     def delete_whatsapp_binding(self, agent_name):
         return self._whatsapp_channel_ops.delete_binding(agent_name)
 
-    def get_or_create_whatsapp_chat_link(self, binding_id, wa_user_phone, wa_user_name=None):
-        return self._whatsapp_channel_ops.get_or_create_chat_link(
+    def record_whatsapp_inbound(self, binding_id, wa_user_phone, wa_user_name=None):
+        return self._whatsapp_channel_ops.record_inbound(
             binding_id, wa_user_phone, wa_user_name
         )
 
@@ -2038,9 +2412,6 @@ class DatabaseManager:
 
     def get_whatsapp_chat_link_by_verified_email(self, binding_id, email):
         return self._whatsapp_channel_ops.get_chat_link_by_verified_email(binding_id, email)
-
-    def increment_whatsapp_message_count(self, chat_link_id):
-        return self._whatsapp_channel_ops.increment_message_count(chat_link_id)
 
     def list_whatsapp_clients_for_agent(self, agent_name):
         return self._whatsapp_channel_ops.list_clients_for_agent(agent_name)
@@ -2142,6 +2513,12 @@ class DatabaseManager:
     def create_operator_queue_item(self, agent_name, item):
         return self._operator_queue_ops.create_item(agent_name, item)
 
+    def prune_operator_queue_terminal_items(self, retention_days, responded_retention_days, limit=5000):
+        # #1142: retention sweep for terminal operator-queue rows.
+        return self._operator_queue_ops.prune_terminal_items(
+            retention_days, responded_retention_days, limit
+        )
+
     def get_operator_queue_item(self, item_id):
         return self._operator_queue_ops.get_item(item_id)
 
@@ -2171,8 +2548,9 @@ class DatabaseManager:
             agent_name, since_hours
         )
 
-    def mark_operator_queue_acknowledged(self, item_id):
-        return self._operator_queue_ops.mark_acknowledged(item_id)
+    def mark_operator_queue_acknowledged(self, agent_name, item_id):
+        # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.
+        return self._operator_queue_ops.mark_acknowledged(agent_name, item_id)
 
     def mark_operator_queue_expired(self):
         return self._operator_queue_ops.mark_expired()
@@ -2183,8 +2561,13 @@ class DatabaseManager:
     def get_operator_queue_responded_for_agent(self, agent_name):
         return self._operator_queue_ops.get_responded_items_for_agent(agent_name)
 
-    def operator_queue_item_exists(self, item_id):
-        return self._operator_queue_ops.item_exists(item_id)
+    def operator_queue_item_exists(self, agent_name, item_id):
+        # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.
+        return self._operator_queue_ops.item_exists(agent_name, item_id)
+
+    def count_operator_queue_pending_for_agent(self, agent_name):
+        # #1632: DB-measured per-agent pending depth — the primary ingestion cap.
+        return self._operator_queue_ops.count_pending_for_agent(agent_name)
 
     # =========================================================================
     # Agent Event Subscriptions (delegated to db/event_subscriptions.py) - EVT-001
@@ -2402,14 +2785,16 @@ class DatabaseManager:
     def mark_loop_running(self, loop_id: str):
         return self._loop_ops.mark_loop_running(loop_id)
 
-    def update_loop_progress(self, loop_id: str, *, runs_completed: int, last_response):
+    def update_loop_progress(self, loop_id: str, *, runs_completed: int, last_response, failed_runs=None):
         return self._loop_ops.update_loop_progress(
             loop_id, runs_completed=runs_completed, last_response=last_response,
+            failed_runs=failed_runs,
         )
 
-    def finalize_loop(self, loop_id: str, *, status: str, stop_reason: str, error=None):
+    def finalize_loop(self, loop_id: str, *, status: str, stop_reason: str, error=None, failed_runs=None):
         return self._loop_ops.finalize_loop(
             loop_id, status=status, stop_reason=stop_reason, error=error,
+            failed_runs=failed_runs,
         )
 
     def list_loops_for_agent(self, agent_name: str, *, status=None, limit: int = 50):

@@ -15,7 +15,7 @@ to focused mixin classes in db/agent_settings/:
 from datetime import datetime
 from typing import Optional, List, Dict
 
-from sqlalchemy import select, insert, update, delete, func
+from sqlalchemy import select, insert, update, delete, func, and_, or_
 from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine
@@ -30,13 +30,30 @@ from .agent_settings import (
     AccessPolicyMixin,
     GitPATMixin,
     FileSharingMixin,
+    DisplayLabelMixin,
     McpExposureMixin,
     TtsMixin,
+    EphemeralMixin,
 )
 from utils.helpers import utc_now_iso
 
 # System agent name constant
 SYSTEM_AGENT_NAME = "trinity-system"
+
+
+def _soft_deleted_agents_predicate(cutoff: str):
+    """WHERE clause for the #834 Phase 1a soft-deleted agent hard-purge.
+
+    #1644: shared between `find_soft_deleted_agents_past_retention` (what the
+    sweep purges) and `count_soft_deleted_agents_past_retention` (what the guard
+    counts) so the two can never diverge. This purge chains into
+    `remove_agent_volumes` (#1581) — the count MUST describe exactly the set that
+    is about to become unrecoverable.
+    """
+    return and_(
+        agent_ownership.c.deleted_at.is_not(None),
+        agent_ownership.c.deleted_at < cutoff,
+    )
 
 
 class AgentOperations(
@@ -49,8 +66,10 @@ class AgentOperations(
     AccessPolicyMixin,
     GitPATMixin,
     FileSharingMixin,
+    DisplayLabelMixin,
     McpExposureMixin,
     TtsMixin,
+    EphemeralMixin,
 ):
     """Agent ownership, access control, and settings database operations.
 
@@ -72,6 +91,12 @@ class AgentOperations(
         owner_username: str,
         is_system: bool = False,
         require_email: bool = False,
+        is_ephemeral: bool = False,
+        ephemeral_max_executions: Optional[int] = None,
+        ephemeral_expires_at: Optional[str] = None,
+        spawned_by_agent: Optional[str] = None,
+        spawned_by_key_id: Optional[str] = None,
+        max_parallel_tasks: Optional[int] = None,
     ) -> bool:
         """Register the owner of an agent.
 
@@ -84,6 +109,14 @@ class AgentOperations(
                 fleet-wide default at creation. Defaults False so internal
                 callers (e.g. the system agent) are unaffected; user agent
                 creation passes the platform default.
+            is_ephemeral / ephemeral_max_executions / ephemeral_expires_at:
+                trinity-enterprise#69 ghost-agent budget. ``ephemeral_expires_at``
+                must be non-NULL whenever ``is_ephemeral`` is set (no immortal
+                ghost — the creation path always stamps it).
+            spawned_by_agent / spawned_by_key_id: Part 2 spawn provenance,
+                written for ANY agent-spawned creation (durable or ephemeral).
+            max_parallel_tasks: optional explicit concurrency cap; ghosts pass 1
+                (overshoot bound). None keeps the column default.
         """
         user = self._user_ops.get_user_by_username(owner_username)
         if not user:
@@ -101,17 +134,29 @@ class AgentOperations(
             # #1129: same reasoning for require_email — pass it
             # explicitly so the secure-by-default seed lands on existing
             # DBs whose baked-in column default is 0.
-            with get_engine().begin() as conn:
-                conn.execute(
-                    insert(agent_ownership).values(
-                        agent_name=agent_name,
-                        owner_id=user["id"],
-                        created_at=utc_now_iso(),
-                        is_system=1 if is_system else 0,
-                        execution_timeout_seconds=3600,
-                        require_email=1 if require_email else 0,
-                    )
+            values = dict(
+                agent_name=agent_name,
+                owner_id=user["id"],
+                created_at=utc_now_iso(),
+                is_system=1 if is_system else 0,
+                execution_timeout_seconds=3600,
+                require_email=1 if require_email else 0,
+            )
+            if is_ephemeral:
+                values.update(
+                    is_ephemeral=1,
+                    ephemeral_max_executions=ephemeral_max_executions,
+                    ephemeral_expires_at=ephemeral_expires_at,
                 )
+            if spawned_by_agent:
+                values.update(
+                    spawned_by_agent=spawned_by_agent,
+                    spawned_by_key_id=spawned_by_key_id,
+                )
+            if max_parallel_tasks is not None:
+                values["max_parallel_tasks"] = max_parallel_tasks
+            with get_engine().begin() as conn:
+                conn.execute(insert(agent_ownership).values(**values))
             return True
         except IntegrityError:
             # Agent already registered - update is_system flag if needed
@@ -142,6 +187,107 @@ class AgentOperations(
                 )
             ).first()
             return row is not None
+
+    def is_volume_base_reserved(
+        self, volume_base: str, exclude_agent: Optional[str] = None
+    ) -> bool:
+        """True if any ownership row (live OR soft-deleted) owns the Docker
+        data volumes named ``agent-{volume_base}-{workspace|public|shared}``
+        (#1664).
+
+        The volume-identity counterpart of :meth:`is_agent_name_reserved`, and
+        the ONLY safe orphan predicate for the #1581 volume sweep. A volume
+        describes itself by name and by its immutable ``trinity.agent-name``
+        label, but Docker can rename neither — so after an agent rename BOTH
+        carry the pre-rename name while the volume is still the live agent's
+        home. Asking "is this *name* an agent?" therefore answers the wrong
+        question and marks live data an orphan; asking "does any agent own
+        volumes under this base?" answers the right one.
+
+        A row owns volumes under BOTH of its identities — the check is a
+        UNION, not a switch:
+
+        - ``agent_name``: NULL ``volume_base_name`` means "same as agent_name"
+          (every agent that was never renamed, so no backfill is needed), AND
+          a renamed agent still creates *new* volumes under its CURRENT name —
+          `get_public_volume_name` / `get_shared_volume_name` are called with
+          the live name, so enabling file-sharing after a rename produces
+          `agent-{new}-public`. A renamed agent therefore legitimately owns
+          volumes under two bases, and the public volume is unmounted whenever
+          file-sharing is off — matching only the pin would mark that live
+          agent's shared files an orphan and delete them.
+        - ``volume_base_name``: the pre-rename base its workspace kept.
+
+        Union-of-both is also strictly safer than the pre-#1664 predicate it
+        replaces (`is_agent_name_reserved` ≡ the first branch alone), so this
+        can only protect more than before, never less. A purged row matches
+        neither, so a genuine orphan is still reclaimable.
+
+        ``exclude_agent`` ignores one row — pass the agent that is ASKING, so
+        the question becomes "does anyone ELSE claim this base?" (#1671). The
+        rename gate needs it: an agent renamed ``B``→``A`` keeps pin ``B``, so
+        renaming it back to ``B`` must be allowed (it already owns that base,
+        and the result has exactly one claimant). Without the exclusion that
+        legitimate rename-back is refused, and told its own volumes belong to
+        someone else.
+        """
+        if not volume_base:
+            return False
+        where = [
+            or_(
+                agent_ownership.c.agent_name == volume_base,
+                agent_ownership.c.volume_base_name == volume_base,
+            )
+        ]
+        if exclude_agent:
+            where.append(agent_ownership.c.agent_name != exclude_agent)
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(agent_ownership.c.agent_name).where(*where)
+            ).first()
+            return row is not None
+
+    def get_volume_base_name(self, agent_name: str) -> Optional[str]:
+        """The base name of ``agent_name``'s Docker data volumes (#1664).
+
+        Returns the pinned ``volume_base_name`` when set (the agent was
+        renamed and kept its volumes), else ``agent_name``. Returns None only
+        when the agent has no ownership row at all.
+        """
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(
+                    agent_ownership.c.agent_name,
+                    agent_ownership.c.volume_base_name,
+                ).where(agent_ownership.c.agent_name == agent_name)
+            ).first()
+            if row is None:
+                return None
+            return row.volume_base_name or row.agent_name
+
+    def set_volume_base_name(self, agent_name: str, volume_base: str) -> bool:
+        """Pin ``agent_name``'s volume identity, but only if not already pinned
+        (#1664). Returns True when a row was written.
+
+        Guarded on ``volume_base_name IS NULL`` so it can never overwrite an
+        earlier rename's pin with a later one — the volume base is frozen at
+        the FIRST rename and every subsequent rename must keep pointing at the
+        same volumes. Used by the boot-time heal for agents renamed before this
+        column existed; the rename path pins inline (see
+        ``MetadataMixin.rename_agent``).
+        """
+        if not agent_name or not volume_base:
+            return False
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_ownership)
+                .where(
+                    agent_ownership.c.agent_name == agent_name,
+                    agent_ownership.c.volume_base_name.is_(None),
+                )
+                .values(volume_base_name=volume_base)
+            )
+            return (result.rowcount or 0) > 0
 
     def is_agent_live(self, agent_name: str) -> bool:
         """True if `agent_name` has a live (non-soft-deleted) ownership row.
@@ -229,6 +375,26 @@ class AgentOperations(
         with get_engine().connect() as conn:
             return int(conn.execute(stmt).scalar() or 0)
 
+    @staticmethod
+    def _deactivate_agent_keys_in_txn(conn, agent_name: str, *, active: bool) -> int:
+        """Flip per-agent key activity on an EXISTING connection (#1745).
+
+        Runs inside the caller's transaction so the credential state can never
+        diverge from the ownership state — a key left active after a committed
+        delete is the whole bug.
+        """
+        from .tables import mcp_api_keys
+
+        return conn.execute(
+            update(mcp_api_keys)
+            .where(
+                mcp_api_keys.c.agent_name == agent_name,
+                mcp_api_keys.c.scope.in_(("agent", "connector")),
+                mcp_api_keys.c.is_active == (0 if active else 1),
+            )
+            .values(is_active=1 if active else 0)
+        ).rowcount or 0
+
     def delete_agent_ownership(self, agent_name: str) -> bool:
         """Soft-delete the agent ownership row (Issue #834 Phase 1a).
 
@@ -254,6 +420,16 @@ class AgentOperations(
                 .values(deleted_at=utc_now_iso())
             )
             if result.rowcount > 0:
+                # #1745: revoke the agent's credentials in the SAME transaction.
+                # `mcp_api_keys` is CASCADE in AGENT_REFS precisely because "an
+                # orphaned key must not survive its agent", but that cascade only
+                # runs at the hard purge — i.e. after the whole soft-delete
+                # window (default 180 days), during which the key kept
+                # authenticating, enumerating the fleet, and able to mint a fresh
+                # key of its own. Deactivate (not delete) so recovery can restore
+                # them; `validate_mcp_api_key` requires is_active=1, so this
+                # closes both the REST and MCP paths.
+                self._deactivate_agent_keys_in_txn(conn, agent_name, active=False)
                 return True
             # rowcount==0 — either already soft-deleted or doesn't exist
             row = conn.execute(
@@ -280,14 +456,36 @@ class AgentOperations(
         cutoff = iso_cutoff(hours=retention_days * 24)
         stmt = (
             select(agent_ownership.c.agent_name)
-            .where(
-                agent_ownership.c.deleted_at.is_not(None),
-                agent_ownership.c.deleted_at < cutoff,
-            )
+            .where(_soft_deleted_agents_predicate(cutoff))
             .limit(limit)
         )
         with get_engine().connect() as conn:
             return [row["agent_name"] for row in conn.execute(stmt).mappings()]
+
+    def count_soft_deleted_agents_past_retention(
+        self, retention_days: int, limit: int
+    ) -> int:
+        """#1644: how many agents `_sweep_soft_deleted_agents` would hard-purge.
+
+        Every candidate here is one agent whose Docker data volumes are destroyed
+        (#1581) — this count is not "rows", it is "unrecoverable losses". The guard
+        floors this sweep at 0 for that reason: any purge at all is worth one ack.
+        """
+        if retention_days <= 0 or limit <= 0:
+            return 0
+        from utils.helpers import iso_cutoff
+
+        cutoff = iso_cutoff(hours=retention_days * 24)
+        inner = (
+            select(agent_ownership.c.agent_name)
+            .where(_soft_deleted_agents_predicate(cutoff))
+            .limit(limit)
+            .subquery()
+        )
+        with get_engine().connect() as conn:
+            return int(
+                conn.execute(select(func.count()).select_from(inner)).scalar() or 0
+            )
 
     def recover_agent_ownership(self, agent_name: str) -> bool:
         """Recover a soft-deleted agent by clearing `deleted_at` (#834).
@@ -312,6 +510,11 @@ class AgentOperations(
                 )
                 .values(deleted_at=None)
             )
+            if result.rowcount > 0:
+                # #1745: recovery is the inverse of delete — restore the same
+                # credentials so a recovered agent keeps working without
+                # re-issuing keys into a running container.
+                self._deactivate_agent_keys_in_txn(conn, agent_name, active=True)
             return result.rowcount > 0
 
     def list_soft_deleted_agents(self, limit: int = 200) -> List[Dict]:

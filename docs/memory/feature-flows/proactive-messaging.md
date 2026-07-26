@@ -11,10 +11,23 @@ Enables agents to send proactive messages to specific users by verified email ac
 ## Key Features
 
 - **Explicit opt-in consent**: Users must enable `allow_proactive` flag on their sharing record
+- **Two consent units, by channel shape (ent#223)**: a **DM** to a person is consented
+  **per recipient** (`agent_sharing.allow_proactive`, keyed by verified email). A post to a
+  **Slack channel** is consented **per channel binding**
+  (`slack_channel_agents.allow_proactive`) — in an open Slack workspace users never
+  authenticate, so there is no verified-email recipient record to opt in, and the channel
+  is the only meaningful consent unit. Default posture: a **new** binding denies (binding
+  an agent is not itself consent); **existing** bindings were backfilled to allow, because
+  channel posts had no consent gate before ent#223 and must not silently break. Toggled in
+  the Slack channel panel, or via
+  `PUT /api/agents/{name}/slack/channels/{channel_id}/proactive`. Refusal is a named
+  `proactive_not_allowed` (403), kept distinct from *not bound* (404) and *rate capped*
+  (429) so the agent can relay **why**. Replying to a user's own message never needs it.
 - **Redis-based rate limiting**: 10 messages per recipient per hour (survives restarts)
 - **Mandatory audit logging**: All proactive sends logged via platform_audit_service
 - **Multi-channel delivery**: Auto-selection tries telegram → slack → web. WhatsApp is an explicit-only channel (`channel="whatsapp"`) and not part of `auto` — Twilio's 24-hour session window makes it unreliable for inactive recipients.
 - **MCP tool access**: Agents use `send_message` MCP tool for outreach
+- **History-aware (#1600)**: a delivered message is appended to the recipient's channel session, so the agent's next turn knows what it sent
 
 ## Architecture
 
@@ -58,38 +71,55 @@ Enables agents to send proactive messages to specific users by verified email ac
 
 ## Frontend Layer
 
-### SharingPanel Toggle (#376)
+### Access-tab Toggle (#376, relocated #1317 → restored #1577)
 
-The `allow_proactive` flag is managed via a toggle switch in the Team Sharing section of the Sharing tab.
+The `allow_proactive` flag is managed via a per-operator toggle in the **Access tab**
+(`AccessPanel.vue`). *(History: the toggle originally lived in the Sharing tab's Team
+Sharing section (`SharingPanel.vue`, #377); the #1317 Access-tab redesign replaced that
+markup and silently dropped the toggle — a UI-only regression restored in #1577.)*
 
-**Location**: `src/frontend/src/components/SharingPanel.vue`
+**Location**: `src/frontend/src/components/AccessPanel.vue` (operator roster rows).
 
-**UI Structure** (lines 124-149):
+**State source**: `GET /api/agents/{name}/access` already returns `allow_proactive`
+per row (`AgentOperatorAccess`, `db/agent_settings/sharing.py:get_agent_operator_access`),
+so the panel reads the persisted flag from the roster it already loads — no extra fetch.
+Pending (unresolved-email) invites are toggleable too: the flag rides on the
+`agent_sharing` row, which exists before the email resolves to an account. The owner is
+not in the operator roster and is always allowed (a static note states this).
+
+**UI Structure**:
 ```vue
-<li v-for="share in shares" :key="share.id">
+<li v-for="op in operators" :key="op.email">
+  <!-- … name / status / role … -->
   <div class="flex items-center gap-4">
-    <!-- Proactive messaging toggle -->
-    <label title="Agent can/cannot send proactive messages">
+    <label :title="proactiveTitle(op)">
       <span>Proactive</span>
-      <switch :checked="share.allow_proactive" @click="toggleProactive(share)" />
+      <input type="checkbox" :checked="op.allow_proactive"
+             :disabled="savingProactive === op.email"
+             @change="onToggleProactive(op, $event.target.checked)" />
     </label>
-    <button @click="removeShare(...)">Remove</button>
+    <button @click="removeOperator(op.email)">Remove</button>
   </div>
 </li>
 ```
 
-**Toggle Handler** (lines 224-240):
+**Toggle Handler** (honest status — reflects the server's confirmed value, reverts on
+failure; no optimistic-only flip):
 ```javascript
-const toggleProactive = async (share) => {
-  await axios.put(
-    `/api/agents/${props.agentName}/shares/proactive`,
-    { email: share.shared_with_email, allow_proactive: !share.allow_proactive },
-    { headers: authStore.authHeader }
-  )
-  share.allow_proactive = !share.allow_proactive
-  showNotification(share.allow_proactive ? 'Proactive messaging enabled' : 'Proactive messaging disabled', 'success')
+async function onToggleProactive(op, next) {
+  const prev = op.allow_proactive
+  try {
+    const res = await agentsStore.setProactive(agentName, op.email, next)   // PUT .../shares/proactive
+    op.allow_proactive = !!res.allow_proactive
+  } catch (e) {
+    op.allow_proactive = prev
+    message.value = { type: 'error', text: '…' }
+  }
 }
 ```
+
+The `setProactive` store action (`stores/agents.js`) issues
+`PUT /api/agents/{name}/shares/proactive { email, allow_proactive }`.
 
 **Model** (`src/backend/db_models.py:53-60`):
 ```python
@@ -143,6 +173,56 @@ actor_id=agent_name
 target_type="user"
 target_id=recipient_email
 ```
+
+### 5. Session-History Persistence (#1600)
+
+A delivered message is appended to the recipient's channel session, so the next
+inbound turn's `build_public_chat_context` includes it. Without this the agent had
+no record of its own outreach — it would repeat itself, contradict the message, or
+fail to parse the reply ("yes, sounds good" — to what?).
+
+```python
+# _send_message_inner, on confirmed delivery only (never on failure — no phantom turn)
+self._persist_outbound(agent_name, recipient_email, text, result)
+  -> db.get_or_create_public_chat_session(agent_name, result.session_identifier, channel)
+  -> db.add_public_chat_message(session_id, "assistant", text,
+                                sender_email=recipient_email,   # DM => single participant (#903)
+                                sender_label=agent_name)
+```
+
+**The session key must equal the inbound one.** Persisting into *a* session is
+useless; it has to be the one the recipient's next message resolves to, or the
+write succeeds and the bug survives invisibly. So each `_deliver_*` sets
+`DeliveryResult.session_identifier` by driving **its own adapter's**
+`get_session_identifier()` with a synthetic DM — never by re-deriving the format
+in the service, which would drift from the adapter:
+
+| Channel | Key | Derived from |
+|---------|-----|--------------|
+| Telegram | `{bot_id}:{user}:{chat}` | binding `bot_id` + chat link's `telegram_user_id` (a DM's chat_id IS the user id) |
+| WhatsApp | `{binding_id}:{phone}` | binding id + chat link's `wa_user_phone` |
+| Slack | `{team}:{user}:{dm_channel}` | workspace `team_id` + looked-up user + opened DM channel (`is_dm=True` selects the DM branch, not the thread branch) |
+
+**The session is created if absent.** `telegram_chat_links.session_id` and
+`whatsapp_chat_links.session_id` look like the natural key but are **never written
+by any code path** — vestigial columns, read in three SELECTs and nowhere else. So
+"reuse the link's session" isn't available; `get_or_create_public_chat_session` with
+the adapter's identifier lands in the same session regardless.
+
+**Attribution (#903)**: role `assistant`, `sender_label` = agent name,
+`sender_email` = the recipient. A proactive send targets ONE verified email — a DM,
+i.e. a single-participant session — so `_assistant_sender_email`'s rule resolves to
+the recipient, keeping sender-filtered MEM-001 summarization in the right user's
+memory.
+
+**Fail-soft**: the message is already delivered when this runs, so a persistence
+error is logged (loudly) and never surfaces as a delivery failure.
+
+**Scope**: `send_access_grant_notification` shares the `_deliver_*` helpers but does
+NOT persist — its history semantics are out of scope (#951). The call sits on the
+`send_message` path, which draws that line structurally rather than with a flag.
+Proactive **group** sends (`send_group_message`, #349/#350) have the same gap and a
+different session model — tracked in #1649.
 
 ## File Locations
 

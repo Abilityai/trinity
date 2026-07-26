@@ -55,7 +55,13 @@ def tmp_db(db_backend):
     """Active backend with a fresh full schema (db_harness, #300). Pops any
     sibling-stubbed modules so this file's imports re-resolve fresh. Returns
     the backend marker (the leading positional arg the helpers accept)."""
-    for mod in ("db.connection", "db.schedules"):
+    # #1481: db.schedules is now a package — evict its children too, else a
+    # stale db.schedules.<slice> survives a pop("db.schedules") and shadows the
+    # fresh import (prefix match, so a future sub-split needs no further edit).
+    for mod in [
+        "db.connection",
+        *[m for m in sys.modules if m == "db.schedules" or m.startswith("db.schedules.")],
+    ]:
         sys.modules.pop(mod, None)
     return db_backend
 
@@ -249,9 +255,9 @@ class TestResidualRaceObservabilityLog:
 # human to classify any NEW update(schedule_executions) site, which is the
 # backstop for these shape gaps within this file.
 
-_SCHEDULES_PY = _BACKEND / "db" / "schedules.py"
+_SCHEDULES_PKG = _BACKEND / "db" / "schedules"
 
-# Every db/schedules.py method that issues an `update(schedule_executions)`.
+# Every db/schedules/ package method that issues an `update(schedule_executions)`.
 # A new update site that is not in this inventory fails
 # `test_update_site_inventory_is_complete`, forcing the author to classify it
 # and (if it writes `status`) add a behavioural no-op proof below. Keep this in
@@ -260,9 +266,12 @@ _EXPECTED_UPDATE_SITES = {
     # --- status writers: MUST carry a status precondition (CAS projection) ---
     "update_execution_to_queued",          # #1082: AND status == RUNNING
     "release_claim_to_queued",
+    "requeue_expired_lease",               # #1081 Phase 3: AND status == RUNNING + lease-past
+    "park_expired_lease",                  # #1081 Phase 3: AND status == RUNNING + lease-past
     "cancel_queued_execution",
     "cancel_queued_for_agent",
     "fail_queued_for_agent",
+    "fail_all_nonterminal_for_agent",      # trinity-enterprise#69: ghost discard; AND status IN (queued, running, pending_retry) — terminal rows untouched (no-op proof: test_69_ephemeral_agents.py::test_fail_all_nonterminal_for_agent)
     "expire_stale_queued",
     "update_execution_status",             # RELIABILITY-005 CAS (#524)
     "mark_stale_executions_failed",
@@ -276,6 +285,7 @@ _EXPECTED_UPDATE_SITES = {
     "mark_execution_dispatched",           # sets claude_session_id
     "update_business_status",              # sets business_status
     "prune_execution_logs",                # nulls execution_log
+    "scrub_terminal_backlog_metadata",     # #1449: nulls backlog_metadata (reads status in a WHERE filter only)
 }
 
 
@@ -350,14 +360,22 @@ def _has_status_precondition(fn: ast.FunctionDef) -> bool:
 
 
 def _update_site_functions() -> dict[str, ast.FunctionDef]:
-    """Map function name -> FunctionDef for every update(schedule_executions)."""
-    tree = ast.parse(_SCHEDULES_PY.read_text())
+    """Map function name -> FunctionDef for every update(schedule_executions)
+    across the whole `db/schedules/` package (#1481 split — the writers no
+    longer live in one file). `rglob` (not `glob`) so a future nested
+    sub-split is still discovered rather than silently skipped."""
     sites: dict[str, ast.FunctionDef] = {}
-    for fn in ast.walk(tree):
-        if isinstance(fn, ast.FunctionDef) and any(
-            _is_update_schedule_executions(n) for n in ast.walk(fn)
-        ):
-            sites[fn.name] = fn
+    for path in sorted(_SCHEDULES_PKG.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for fn in ast.walk(tree):
+            if isinstance(fn, ast.FunctionDef) and any(
+                _is_update_schedule_executions(n) for n in ast.walk(fn)
+            ):
+                sites[fn.name] = fn
+    assert sites, (
+        f"no update(schedule_executions) sites found under {_SCHEDULES_PKG} — "
+        "package glob is broken; the CAS-precondition guard would pass vacuously"
+    )
     return sites
 
 

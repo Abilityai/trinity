@@ -19,12 +19,12 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import RedirectResponse
 
 from database import db
-from dependencies import get_current_user
-from models import SlackChannelMessageRequest, SlackEventResponse, User
-from services import rate_limiter
+from dependencies import get_current_user, reject_agent_principal
+from models import SlackChannelMessageRequest, SlackChannelProactiveRequest, SlackEventResponse, User
+from services import channel_history, rate_limiter
 from services.slack_service import slack_service
 from db_models import SlackConnectionStatus, SlackOAuthInitResponse
-from services.settings_service import get_slack_signing_secret
+from services.settings_service import get_slack_signing_secret, get_proactive_rate_limit
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
@@ -211,7 +211,7 @@ async def get_slack_connection_status(
     current_user: User = Depends(get_current_user)
 ):
     """Get Slack connection status for a public link."""
-    if not db.can_user_access_agent(current_user.username, name):
+    if not db.can_user_access_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Access denied")
 
     link = db.get_public_link(link_id)
@@ -247,7 +247,7 @@ async def connect_slack(
     If workspace not yet connected: returns OAuth URL (frontend opens it).
     If workspace already connected: creates a Slack channel for the agent and binds it.
     """
-    if not db.can_user_share_agent(current_user.username, name):
+    if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Only owners can connect Slack")
 
     link = db.get_public_link(link_id)
@@ -337,7 +337,7 @@ async def disconnect_slack(
     current_user: User = Depends(get_current_user)
 ):
     """Disconnect Slack workspace from public link."""
-    if not db.can_user_share_agent(current_user.username, name):
+    if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Only owners can disconnect Slack")
 
     link = db.get_public_link(link_id)
@@ -360,7 +360,7 @@ async def update_slack_connection(
     current_user: User = Depends(get_current_user)
 ):
     """Update Slack connection settings (enable/disable)."""
-    if not db.can_user_share_agent(current_user.username, name):
+    if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Only owners can modify Slack settings")
 
     link = db.get_public_link(link_id)
@@ -391,7 +391,7 @@ async def get_agent_slack_channel(
     Returns binding info if the agent is bound to a channel,
     or {bound: false} if not.
     """
-    if not db.can_user_access_agent(current_user.username, name):
+    if not db.can_user_access_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Access denied")
 
     workspaces = db.get_all_slack_workspaces()
@@ -409,6 +409,9 @@ async def get_agent_slack_channel(
                 "workspace_team_id": ws["team_id"],
                 "workspace_name": ws["team_name"],
                 "is_dm_default": binding.get("is_dm_default", False),
+                # ent#223: per-channel proactive consent, so the UI can render
+                # (and toggle) the switch instead of it being API-only.
+                "allow_proactive": binding.get("allow_proactive", False),
                 "workspace_agent_count": len(workspace_agents),
                 "created_at": binding.get("created_at"),
             }
@@ -427,7 +430,7 @@ async def create_agent_slack_channel(
     Requires at least one connected workspace. Creates a channel
     named after the agent and binds it for message routing.
     """
-    if not db.can_user_share_agent(current_user.username, name):
+    if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Only owners can manage Slack channels")
 
     # Check if already bound
@@ -496,7 +499,7 @@ async def delete_agent_slack_channel(
     When the agent is the only one bound, unbind is allowed — the workspace
     ends up with no Slack agents, which is a clean cascade.
     """
-    if not db.can_user_share_agent(current_user.username, name):
+    if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Only owners can manage Slack channels")
 
     workspaces = db.get_all_slack_workspaces()
@@ -540,7 +543,7 @@ async def set_agent_as_slack_dm_default(
     flips it; ``unbind`` auto-promotes the oldest remaining agent so the
     workspace is never left with zero defaults.
     """
-    if not db.can_user_share_agent(current_user.username, name):
+    if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Only owners can manage Slack channels")
 
     # Find the workspace where this agent is bound. There should be at
@@ -612,10 +615,9 @@ async def set_agent_as_slack_dm_default(
 # Proactive channel messaging (#350 Phase 3) — parallels Telegram #349
 # =============================================================================
 
-# Mirror the Telegram proactive caps (10/hr/channel, 100/hr/agent) via the
-# shared sliding-window limiter (#1023) rather than a bespoke bucket.
-_SLACK_PROACTIVE_PER_CHANNEL = 10
-_SLACK_PROACTIVE_PER_AGENT = 100
+# Proactive caps via the shared sliding-window limiter (#1023). The per-channel /
+# per-agent limits are admin-configurable (#1609) — sourced from settings at
+# request time (0 = unlimited). Window is fixed at 1 hour.
 _SLACK_PROACTIVE_WINDOW = 3600
 _SLACK_MESSAGE_MAX = 4000
 
@@ -630,7 +632,7 @@ async def list_agent_slack_channels(
     Backs the MCP ``list_channel_groups`` discovery tool. Any user with access
     to the agent may list; proactive send is owner-gated separately.
     """
-    if not db.can_user_access_agent(current_user.username, name):
+    if not db.can_user_access_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Access denied")
 
     # team_id → workspace name, resolved once for labelling.
@@ -649,6 +651,45 @@ async def list_agent_slack_channels(
     return {"channels": channels, "count": len(channels)}
 
 
+@auth_router.put("/api/agents/{name}/slack/channels/{channel_id}/proactive")
+async def set_slack_channel_proactive(
+    name: str,
+    channel_id: str,
+    request: SlackChannelProactiveRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """ent#223 — toggle proactive-messaging consent for one channel binding.
+
+    Owner-gated, mirroring the channel-message endpoint. This is what makes the
+    flag toggleable from the UI rather than API-only.
+    """
+    # Human-only: an agent-scoped key resolves to the OWNER on REST
+    # (dependencies.py:423), so can_user_share_agent alone would let an agent flip
+    # its own consent on — self-granting the very control ent#223 adds. Granting
+    # consent is a human decision; SENDING under it stays agent-callable.
+    reject_agent_principal(current_user)
+    if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310)
+        raise HTTPException(status_code=403, detail="Only owners can change channel settings")
+
+    target = next(
+        (c for c in db.get_slack_channels_for_agent(name) if c["slack_channel_id"] == channel_id),
+        None,
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Channel not found or not bound to this agent")
+
+    updated = db.set_slack_channel_allow_proactive(
+        target["team_id"], channel_id, request.allow_proactive)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Channel binding not found")
+
+    return {
+        "agent_name": name,
+        "slack_channel_id": channel_id,
+        "allow_proactive": request.allow_proactive,
+    }
+
+
 @auth_router.post("/api/agents/{name}/slack/channels/{channel_id}/messages")
 async def send_agent_slack_channel_message(
     name: str,
@@ -662,7 +703,7 @@ async def send_agent_slack_channel_message(
     Posts via ``chat.postMessage`` with the agent's identity, optionally in a
     thread.
     """
-    if not db.can_user_share_agent(current_user.username, name):
+    if not db.can_user_share_agent(current_user.username, name):  # noqa: inv8 — slack deferred (#1310), coordinate w/ channel-adapter owner
         raise HTTPException(status_code=403, detail="Only owners can send channel messages")
 
     text = (request.message or "").strip()
@@ -682,23 +723,47 @@ async def send_agent_slack_channel_message(
     if not target:
         raise HTTPException(status_code=404, detail="Channel not found or not bound to this agent")
 
-    # Rate limit: per-channel then per-agent (fail-open inside the limiter).
-    rate_limiter.enforce(
-        f"slack_proactive:{name}:{channel_id}",
-        _SLACK_PROACTIVE_PER_CHANNEL, _SLACK_PROACTIVE_WINDOW,
-        detail="Too many messages to this channel.",
-    )
-    rate_limiter.enforce(
-        f"slack_proactive:{name}",
-        _SLACK_PROACTIVE_PER_AGENT, _SLACK_PROACTIVE_WINDOW,
-        detail="Too many proactive messages from this agent.",
-    )
+    # ent#223: per-channel proactive consent. Open Slack workspaces have no
+    # verified-email recipient to key the DM-style consent on, so the consent unit
+    # is this channel binding. Refuse with a NAMED, actionable reason so the agent
+    # can relay *why* (consent) rather than a generic failure — and so it is
+    # distinguishable from "not bound" (404 above) and "rate capped" (429 below).
+    if not target.get("allow_proactive"):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "proactive_not_allowed",
+                "message": (
+                    f"Proactive messages are not enabled for channel {channel_id}. "
+                    "Enable 'Allow proactive messages' on this channel binding "
+                    "(agent → Channels → Slack) to let this agent post unprompted."
+                ),
+            },
+        )
+
+    # Rate limit: per-channel then per-agent, caps sourced from settings (#1609;
+    # 0 = unlimited → skip). Fail-open inside the limiter.
+    per_channel = get_proactive_rate_limit("slack_proactive_per_channel")
+    per_agent = get_proactive_rate_limit("slack_proactive_per_agent")
+    if per_channel > 0:
+        rate_limiter.enforce(
+            f"slack_proactive:{name}:{channel_id}",
+            per_channel, _SLACK_PROACTIVE_WINDOW,
+            detail=f"Too many messages to this channel (cap {per_channel}/hour).",
+        )
+    if per_agent > 0:
+        rate_limiter.enforce(
+            f"slack_proactive:{name}",
+            per_agent, _SLACK_PROACTIVE_WINDOW,
+            detail=f"Too many proactive messages from this agent (cap {per_agent}/hour).",
+        )
 
     bot_token = db.get_slack_workspace_bot_token(target["team_id"])
     if not bot_token:
         raise HTTPException(status_code=500, detail="Failed to retrieve Slack bot token")
 
-    ok, error = await slack_service.send_message(
+    # #1649: `_detailed` to capture the posted message's ts — see below.
+    ok, error, posted_ts = await slack_service.send_message_detailed(
         bot_token=bot_token,
         channel=channel_id,
         text=text,
@@ -707,6 +772,33 @@ async def send_agent_slack_channel_message(
     )
     if not ok:
         raise HTTPException(status_code=502, detail=f"Slack send failed: {error}")
+
+    # #1649: record the broadcast in the channel session an inbound reply will
+    # resolve to. Slack channel sessions are thread-scoped (`team:channel:thread`,
+    # #903), and a reply carries thread_ts = the PARENT's ts. So:
+    #   - replying into an existing thread -> that thread's ts
+    #   - a new top-level post            -> the post's OWN ts, which is exactly
+    #     the key an in-thread reply to it will carry
+    # Either way this lands in the session the conversation continues in, so the
+    # agent DOES recall its broadcast — unlike the Telegram group case, whose
+    # per-(sender, chat) sessions have no shared key to write to.
+    #
+    # Caveat: a reply posted top-level in the channel (not in the thread) starts
+    # its own session and won't see this message. That is inherent to Slack's
+    # thread-scoped session model (#903), not something this fix can change.
+    thread_key = request.thread_ts or posted_ts
+    channel_history.persist_outbound_group_message(
+        agent_name=name,
+        channel="slack",
+        session_identifier=(
+            channel_history.session_key_for_slack_channel(
+                team_id=target["team_id"], channel_id=channel_id, thread_ts=thread_key
+            )
+            if thread_key
+            else None  # no ts (older/odd Slack response) -> log + skip, never crash
+        ),
+        text=text,
+    )
 
     return {
         "sent": True,
