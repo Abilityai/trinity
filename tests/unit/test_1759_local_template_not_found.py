@@ -29,6 +29,7 @@ Issue:  abilityai/trinity#1759
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -287,6 +288,18 @@ def _write_template(root: Path, name: str, body: str = "type: business-assistant
     return d
 
 
+#: An absolute path is a `/`-rooted token at a token boundary. `/api/...` is an
+#: HTTP route, not a filesystem path — it is the message's whole remedy, so it
+#: is the one allowed form.
+_ABS_PATH_RE = re.compile(r"(?:^|\s)(/[A-Za-z0-9_.\-/]+)")
+
+
+def _leaked_paths(msg: str) -> list[str]:
+    """Absolute filesystem paths disclosed by an error message (API routes
+    excluded). MUST always be empty — see `test_t1b`."""
+    return [p for p in _ABS_PATH_RE.findall(msg) if not p.startswith("/api/")]
+
+
 def _agent_run_kwargs(ctx):
     """kwargs of the containers_run call that created the AGENT container."""
     for call in ctx["docker_utils"].containers_run.call_args_list:
@@ -358,7 +371,7 @@ async def test_t1b_error_message_leaks_no_filesystem_path(
     assert "/agent-configs/templates" not in msg
     assert "/data/deployed-templates" not in msg
     # No absolute path of any shape, and no leading-slash root hint.
-    assert " /" not in msg
+    assert _leaked_paths(msg) == []
     assert len(msg) < 500
     # Actionable remedy, abstract only.
     assert "GET /api/templates" in msg
@@ -556,7 +569,7 @@ async def test_t6b_invalid_message_leaks_no_filesystem_path(
 
     msg = exc.value.detail["error"]
     assert str(tmp_path) not in msg
-    assert " /" not in msg
+    assert _leaked_paths(msg) == []
     assert len(msg) < 500
 
 

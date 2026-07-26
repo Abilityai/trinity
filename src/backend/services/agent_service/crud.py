@@ -54,9 +54,62 @@ logger = logging.getLogger(__name__)
 # filesystem reads (CodeQL py/path-injection on #950 PR).
 _LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 
-# Roots that a resolved local-template path must stay within (#950).
+_CONTAINER_CURATED_TEMPLATES = Path("/agent-configs/templates")
+
+
+def _repo_local_templates_dir() -> Path:
+    """Repo-relative curated-template directory, for source-run backends.
+
+    Mirrors the fallback in `template_service._local_templates_dir()` (#843).
+    It is **hand-rolled, never imported**: `services.template_service` is
+    MagicMocked by the #1484 characterization harness, so a gate that called
+    into it would be satisfied by a truthy mock and those tests would stay
+    green on the pre-#1759 behaviour — a silent, uncatchable regression.
+
+    `parents[4]`, NOT `.parent * 4`: this module lives one directory deeper
+    than `template_service.py` (`services/agent_service/` vs `services/`), so
+    the copy-pasted four-`.parent` form yields
+    `<repo>/src/config/agent-templates`, which does not exist. Pinned by
+    `tests/unit/test_1759_template_root_parity.py`.
+    """
+    return Path(__file__).resolve().parents[4] / "config" / "agent-templates"
+
+
+def _curated_templates_root() -> Path:
+    """Curated-catalog root: the read-only bind mount inside a Trinity
+    container, the in-repo catalog otherwise (#1759).
+
+    Without the fallback neither root exists outside a container, so the
+    `LOCAL_TEMPLATE_NOT_FOUND` gate below would 400 *every* `local:` create in
+    dev shells, source-run CI and unit tests — i.e. it would be inert exactly
+    where the test suite runs (the #1638 accidental-green pattern).
+    """
+    if _CONTAINER_CURATED_TEMPLATES.exists():
+        return _CONTAINER_CURATED_TEMPLATES.resolve()
+    return _repo_local_templates_dir()
+
+
+def _default_host_templates_base() -> str:
+    """Fallback bind-source base for the `/template` mount (#1759).
+
+    Inside a Trinity container the catalog is the read-only bind at
+    `/agent-configs/templates` and compose always sets `HOST_TEMPLATES_PATH`,
+    so this returns today's literal relative default verbatim — the container
+    path is byte-identical. Outside a container the repo path *is* a host path
+    and a valid bind source, so return it resolved rather than a relative path
+    Docker would refuse.
+    """
+    if _CONTAINER_CURATED_TEMPLATES.exists():
+        return "./config/agent-templates"
+    return str(_repo_local_templates_dir())
+
+
+# Roots that a resolved local-template path must stay within (#950). Read at
+# TWO seams — `_resolve_local_template` and the `/template` bind decision in
+# `_stage_config_files` — which must always agree (#1759). Kept a module-level
+# tuple: it is the single monkeypatch point the create tests use.
 _LOCAL_TEMPLATE_ROOTS = (
-    Path("/agent-configs/templates").resolve(),
+    _curated_templates_root(),
     Path("/data/deployed-templates").resolve(),
 )
 
@@ -691,33 +744,100 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
 
     template_yaml = template_path / "template.yaml"
 
-    if template_yaml.exists():
-        try:
-            with open(template_yaml) as f:
-                template_data = yaml.safe_load(f)
-                config.type = template_data.get("type", config.type)
-                config.resources = template_data.get("resources", config.resources)
-                config.tools = template_data.get("tools", config.tools)
-                creds = template_data.get("credentials", {})
-                mcp_servers = list(creds.get("mcp_servers", {}).keys())
-                if mcp_servers:
-                    config.mcp_servers = mcp_servers
-                # Multi-runtime support - extract runtime config from template
-                runtime_config = template_data.get("runtime", {})
-                if isinstance(runtime_config, dict):
-                    config.runtime = runtime_config.get("type", config.runtime)
-                    config.runtime_model = runtime_config.get("model", config.runtime_model)
-                elif isinstance(runtime_config, str):
-                    config.runtime = runtime_config
-                # Phase 9.11: Extract shared folder config from template
-                shared_folders_config = template_data.get("shared_folders", {})
-                if shared_folders_config:
-                    template_shared_folders = {
-                        "expose": shared_folders_config.get("expose", False),
-                        "consume": shared_folders_config.get("consume", False)
-                    }
-        except Exception as e:
-            logger.warning(f"Error loading template config: {e}")
+    # #1759: a well-formed but ABSENT template used to fall through here with
+    # `template_data == {}` — the same HTTP 200 as success, but a blank
+    # container with no CLAUDE.md and no instructions. It is the sibling of the
+    # unprefixed case #843 made loud. Reject in the same pre-side-effect band
+    # as FORK_REQUIRES_GITHUB_TEMPLATE and the #843 reject: nothing between
+    # this point and the caller's docker try-block allocates a resource, so
+    # there is nothing to roll back, and the 4xx is not flattened to a 500.
+    #
+    # ONE message regardless of which root missed: deploy-local templates
+    # (#950) are named after AGENT names, so a root-distinguishing or
+    # path-echoing error would let a creator-role caller probe whether another
+    # user's deploy-local agent exists (#186 enumeration discipline).
+    if not template_yaml.exists():
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"Local template {config.template!r} not found — no "
+                    f"template.yaml for this template. List available "
+                    f"templates with GET /api/templates, or add it under "
+                    f"config/agent-templates/."
+                ),
+                "code": "LOCAL_TEMPLATE_NOT_FOUND",
+            },
+        )
+
+    try:
+        with open(template_yaml) as f:
+            template_data = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError) as e:
+        # #1759: previously swallowed by the bare `except Exception:
+        # logger.warning(...)` below, which produced the *identical* observable
+        # outcome as an absent template — blank agent, HTTP 200 — via a
+        # different line. The parser error itself is deliberately NOT echoed to
+        # the caller: it quotes the resolved file path and the file's bytes.
+        logger.warning("Unparseable template.yaml for %s: %s", config.template, e)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"Local template {config.template!r} has an unreadable or "
+                    f"malformed template.yaml. Fix the template, or list "
+                    f"working templates with GET /api/templates."
+                ),
+                "code": "LOCAL_TEMPLATE_INVALID",
+            },
+        ) from e
+
+    # `yaml.safe_load("")` returns None, and a scalar/list document returns a
+    # non-dict. The LISTING path already rejects both
+    # (`template_service._build_local_template`), so before #1759 the create
+    # path was strictly *less* strict than the surface advertising the template.
+    if not isinstance(template_data, dict):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"Local template {config.template!r} has an empty or "
+                    f"malformed template.yaml (expected a YAML mapping). Fix "
+                    f"the template, or list working templates with "
+                    f"GET /api/templates."
+                ),
+                "code": "LOCAL_TEMPLATE_INVALID",
+            },
+        )
+
+    # A malformed *field* (as opposed to a malformed file) still degrades
+    # gracefully: `template_data` is a real dict here, so the agent does get
+    # its template files and only some config mutations are skipped. Unchanged
+    # pre-#1759 behaviour, deliberately left out of this issue's scope.
+    try:
+        config.type = template_data.get("type", config.type)
+        config.resources = template_data.get("resources", config.resources)
+        config.tools = template_data.get("tools", config.tools)
+        creds = template_data.get("credentials", {})
+        mcp_servers = list(creds.get("mcp_servers", {}).keys())
+        if mcp_servers:
+            config.mcp_servers = mcp_servers
+        # Multi-runtime support - extract runtime config from template
+        runtime_config = template_data.get("runtime", {})
+        if isinstance(runtime_config, dict):
+            config.runtime = runtime_config.get("type", config.runtime)
+            config.runtime_model = runtime_config.get("model", config.runtime_model)
+        elif isinstance(runtime_config, str):
+            config.runtime = runtime_config
+        # Phase 9.11: Extract shared folder config from template
+        shared_folders_config = template_data.get("shared_folders", {})
+        if shared_folders_config:
+            template_shared_folders = {
+                "expose": shared_folders_config.get("expose", False),
+                "consume": shared_folders_config.get("consume", False)
+            }
+    except Exception as e:
+        logger.warning(f"Error loading template config: {e}")
     return template_data, template_shared_folders
 
 
@@ -865,7 +985,14 @@ def _stage_config_files(
                 raw_name, _LOCAL_TEMPLATE_ROOTS[0]
             )
             if curated_path.exists():
-                host_templates_base = os.getenv("HOST_TEMPLATES_PATH", "./config/agent-templates")
+                # `or`, NOT `os.getenv(key, default)` (#1759): an EMPTY
+                # HOST_TEMPLATES_PATH made `Path("") / name` collapse to the
+                # bare name, which Docker reads as a NAMED VOLUME — an empty
+                # one mounted at /template, i.e. a silently blank template.
+                # That is this issue's bug class, one seam over.
+                host_templates_base = (
+                    os.getenv("HOST_TEMPLATES_PATH") or _default_host_templates_base()
+                )
                 # raw_name already validated by _safe_local_template_path; the
                 # join here is on a value that survived the regex + resolve
                 # barriers above, so the bind source can't traverse out.
