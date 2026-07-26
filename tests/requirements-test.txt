@@ -57,6 +57,15 @@ payments-py>=1.0.0
 # a head-only failure in the base-vs-head unit regression diff — the one thing
 # the derandomized profile exists to prevent.
 hypothesis==6.161.5
+# tzdata: the IANA database as a pure-Python fallback for `zoneinfo`. The #1771
+# timestamp properties draw real IANA zones (`st.timezones()`) deliberately —
+# DST transitions, quarter-hour offsets and historical LMT offsets are what stop
+# the ordering property from degenerating into "a zero-padded format sorts
+# correctly". `zoneinfo` reads the SYSTEM database first and falls back to this
+# package; without either, `available_timezones()` is empty and those tests
+# would either error or silently degrade to a vacuous green. Pinning it makes
+# the properties independent of whatever the runner image ships.
+tzdata>=2024.1
 # NOTE: trinity-cli (needed by test_cli_*.py) is intentionally NOT listed here.
 # An editable local path (`-e ./src/cli`) breaks GitHub's dependency-graph
 # updater — it resolves `-e` targets relative to THIS file's dir (tests/src/cli,

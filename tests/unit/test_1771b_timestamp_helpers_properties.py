@@ -166,17 +166,19 @@ def _instant(dt: datetime) -> datetime:
 
 
 # Fold pins reused across properties (Europe/London, 2026-10-25 01:30 repeats).
-try:  # zoneinfo needs a system tz database; guard so a bare image degrades loudly
-    from zoneinfo import ZoneInfo
+#
+# NO try/except FALLBACK, deliberately: `zoneinfo` needs a tz database (system,
+# or the `tzdata` package now declared in tests/requirements-test.txt). If it is
+# missing, this raises `ZoneInfoNotFoundError` at import and names the zone.
+# A graceful fallback to fixed offsets would be worse than an error — the fold
+# pins and `st.timezones()` are precisely what keep the ordering property from
+# being vacuous, so degrading them silently would turn a real guard into a
+# permanent green that proves nothing.
+from zoneinfo import ZoneInfo  # noqa: E402
 
-    _LONDON = ZoneInfo("Europe/London")
-    _FOLD_0 = datetime(2026, 10, 25, 1, 30, tzinfo=_LONDON, fold=0)
-    _FOLD_1 = datetime(2026, 10, 25, 1, 30, tzinfo=_LONDON, fold=1)
-    _HAVE_TZDATA = True
-except Exception:  # pragma: no cover - only on an image with no tz database
-    _FOLD_0 = datetime(2026, 10, 25, 0, 30, tzinfo=timezone(timedelta(hours=1)))
-    _FOLD_1 = datetime(2026, 10, 25, 1, 30, tzinfo=UTC)
-    _HAVE_TZDATA = False
+_LONDON = ZoneInfo("Europe/London")
+_FOLD_0 = datetime(2026, 10, 25, 1, 30, tzinfo=_LONDON, fold=0)
+_FOLD_1 = datetime(2026, 10, 25, 1, 30, tzinfo=_LONDON, fold=1)
 
 
 # ==========================================================================
