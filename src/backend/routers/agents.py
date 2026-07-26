@@ -104,7 +104,8 @@ async def create_agent_internal(
     config: AgentConfig,
     current_user: User,
     request: Request,
-    skip_name_sanitization: bool = False
+    skip_name_sanitization: bool = False,
+    adopt_existing_workspace: bool = False
 ) -> AgentStatus:
     """
     Internal function to create an agent.
@@ -116,7 +117,8 @@ async def create_agent_internal(
         current_user=current_user,
         request=request,
         skip_name_sanitization=skip_name_sanitization,
-        ws_manager=manager
+        ws_manager=manager,
+        adopt_existing_workspace=adopt_existing_workspace
     )
 
 
