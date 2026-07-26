@@ -150,11 +150,16 @@
           </button>
 
           <!-- Compact navigation trigger: the full route strip cannot fit safely
-               alongside connection and account utilities below xl. -->
+               alongside connection and account utilities below xl.
+               @click.stop is required: the icon-swap (v-if/v-else) detaches the
+               clicked <path> from the DOM before the document click-outside
+               handler runs, so navRef.contains(target) is false and the panel
+               would close the instant it opened. Stopping propagation keeps the
+               open click from ever reaching handleClickOutside. -->
           <button
             ref="compactNavButtonRef"
             data-testid="compact-navigation-trigger"
-            @click="toggleCompactNav"
+            @click.stop="toggleCompactNav"
             class="inline-flex h-11 w-11 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-gray-400 dark:hover:bg-gray-700 xl:hidden"
             type="button"
             :aria-label="showCompactNav ? 'Close navigation' : 'Open navigation'"
