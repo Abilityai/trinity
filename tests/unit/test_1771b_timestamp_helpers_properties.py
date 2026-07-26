@@ -339,6 +339,12 @@ def iso_zoo(draw):
     code. The shapes that matter are enumerated: canonical Z, Z without
     fraction, bare naive, the SQLite space-separated shape, date-only, and an
     offset-bearing value (what the backend writes into ``next_run_at``).
+
+    The ``offset`` shape draws a sub-minute-resolution offset, so it renders
+    ``+HH:MM:SS[.ffffff]`` — parseable on 3.11+ only, the same assumption the
+    edges file's D14 row carries an explicit ``skipif`` for. That is deliberate
+    (``pytz`` historical LMT offsets carry seconds and reach ``next_run_at``);
+    see the "Python < 3.11" note in the edges file's module docstring.
     """
     dt = draw(
         st.datetimes(min_value=datetime(1001, 1, 1), max_value=datetime(9997, 12, 31))

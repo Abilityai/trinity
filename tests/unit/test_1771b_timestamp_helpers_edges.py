@@ -24,6 +24,14 @@ WHAT THIS FILE DELIBERATELY DOES NOT ASSERT
 - Hour-24 parsing (``'…T24:00:00Z'``): parses on 3.14, raises on 3.12/3.13.
   CI is 3.11, prod images are 3.13, dev machines vary — any assertion is
   version-flaky (dossier G7).
+- Behaviour on Python < 3.11. ``datetime.fromisoformat`` was substantially
+  extended in 3.11 (offsets carrying seconds; fractional parts other than
+  exactly 3 or 6 digits). The D8 fractional rows here, and the ``iso_zoo``
+  offset shape in the properties file, therefore assume 3.11+ — which D14's
+  explicit ``skipif`` already documents for one row. Nothing in the repo runs
+  ``tests/unit`` below 3.11 (CI 3.11, prod images 3.13, verify-local 3.12), so
+  the remaining rows STATE the assumption here rather than each carrying its own
+  guard. Not verified against a 3.10 interpreter — none was available.
 - Uniform formatting of ``agent_schedules.next_run_at``: it is DELIBERATELY
   mixed-format (scheduler writes ``Z``, backend writes an offset), which
   Invariant #16 calls out as an honest caveat and explains is safe because that
@@ -234,19 +242,32 @@ def test_A13_normalization_makes_naive_and_aware_mutually_comparable(backend):
 # =============================================================================
 
 
-def test_B3_successive_calls_are_non_decreasing_not_strictly_increasing(backend):
+def test_B3_successive_calls_are_non_decreasing_not_strictly_increasing(
+    backend, scheduler
+):
     """B3 — ordering from `utc_now_iso()` is NON-strict.
 
     On a coarse clock two successive calls can return the IDENTICAL string.
     Pinned so no future test asserts `a < b` on consecutive calls and flakes.
     (This is also why the monotonicity properties use windows >= 1 minute apart:
     the gap must dominate the microseconds of elapsed test time.)
+
+    Asserted on BOTH copies. The scheduler's `utc_now_iso` is a slice target but
+    was otherwise reached only by `test_1713`'s digit-blanked template compare —
+    covering it here takes `src/scheduler/utils.py` to full line+branch coverage.
     """
-    samples = [backend.utc_now_iso() for _ in range(200)]
-    assert samples == sorted(samples), "utc_now_iso went backwards"
-    # Non-strictness is the *allowed* case — assert only `<=`, never `<`.
-    for earlier, later in zip(samples, samples[1:]):
-        assert earlier <= later
+    for label, now_iso in (
+        ("backend", backend.utc_now_iso),
+        ("scheduler", scheduler.utc_now_iso),
+    ):
+        samples = [now_iso() for _ in range(200)]
+        assert samples == sorted(samples), f"{label}.utc_now_iso went backwards"
+        assert all(
+            _Z_ISO.match(s) for s in samples
+        ), f"{label}.utc_now_iso emitted a non-canonical shape"
+        # Non-strictness is the *allowed* case — assert only `<=`, never `<`.
+        for earlier, later in zip(samples, samples[1:]):
+            assert earlier <= later
 
 
 # =============================================================================
