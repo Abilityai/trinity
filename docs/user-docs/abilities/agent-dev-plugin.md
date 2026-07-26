@@ -1,6 +1,6 @@
 # agent-dev Plugin
 
-Development tools for extending existing agents — skills, memory systems, git-backed state, a GitHub Issues development cycle, and long-running pipelines.
+Development tools for extending existing agents — skills, memory systems, git-backed state, a GitHub Issues development cycle, long-running pipelines, and multi-agent orchestration.
 
 > 📺 **Watch:** [Why Every AI Agent Needs a GitHub Repo](https://youtu.be/R4nNHf6ywEs) *(Apr 2026)* · [3 AI Agents Run My Software Development Pipeline](https://youtu.be/zCDFDhewFkk) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -33,6 +33,7 @@ Development tools for extending existing agents — skills, memory systems, git-
 | `/agent-dev:add-pipeline-instance` | Add an instance (tenant / zone / case) to an existing pipeline |
 | `/agent-dev:add-pipeline-stage` | Append a stage to an existing pipeline definition |
 | `/agent-dev:validate-pipeline` | Lint a pipeline.yaml — schema, DAG acyclicity, referenced skills |
+| `/agent-dev:add-orchestrator` | Make the agent a system-aware orchestrator — discover the fleet, compose systems, route and fan out work |
 
 ## Memory Systems
 
@@ -129,6 +130,20 @@ Scaffolds an agent-owned pipeline for work that spans days or weeks (e.g. percep
 - `/agent-dev:validate-pipeline` — lint the definition (schema, acyclicity, skill references)
 
 Pipelines are owned by the agent, not by Trinity — the platform only reads the published state. This matches Trinity's agent-defined-pipelines design: no central DAG engine.
+
+## Orchestration (multi-agent)
+
+```bash
+/agent-dev:add-orchestrator
+```
+
+Makes any agent a system-aware orchestrator of other agents. It installs three skills into the agent:
+
+- `/discover-agents` — discover the fleet (from the live Trinity instance and/or a repo list) into a descriptive `fleet/system-map.yaml`
+- `/compose-system` — turn the map into a Trinity system manifest and deploy it
+- `/orchestrate` — route work to the right agent, fan the same task out across several, and spin up ephemeral agents for one-off jobs via Trinity MCP
+
+The orchestrator builds on Trinity's existing multi-agent primitives rather than inventing a parallel standard — see [System Manifest](../collaboration/system-manifest.md) and [Fan-Out](../automation/fan-out.md). Pipelines are the intra-agent sibling: `/orchestrate` routes pipeline-shaped work to the agent that owns the pipeline instead of re-sequencing its stages as a chain.
 
 ## Multi-Session Planning
 
