@@ -999,6 +999,30 @@ class TestWindowArithmetic:
             "hours": days * 24
         }, f"{name} must convert its window with exactly 24 hours/day; got {seen}"
 
+    @pytest.mark.parametrize("days", [1, 7, 90, 365])
+    def test_soft_delete_finder_also_converts_by_exactly_24(
+        self, days, sched, monkeypatch
+    ):
+        """`find_soft_deleted_schedules_past_retention` re-imports `iso_cutoff`
+        INSIDE the function body (retention.py:99), so it binds
+        `utils.helpers.iso_cutoff` rather than the module-level `_RET.iso_cutoff`
+        every other accessor uses. The module-level spy above cannot see it — the
+        mutation gate caught that this one call site was still unasserted."""
+        import utils.helpers as _H
+
+        seen = []
+
+        def spy(**kwargs):
+            seen.append(kwargs)
+            return _days_ago_iso(3650)
+
+        monkeypatch.setattr(_H, "iso_cutoff", spy)
+        sched.find_soft_deleted_schedules_past_retention(days, limit=10)
+
+        assert seen and seen[0] == {
+            "hours": days * 24
+        }, f"the soft-delete finder must convert by 24 hours/day; got {seen}"
+
 
 # ---------------------------------------------------------------------------
 # G — structural invariants
