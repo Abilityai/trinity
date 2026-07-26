@@ -846,6 +846,160 @@ class TestPredicateEdges:
         assert _hscalar("SELECT COUNT(*) FROM schedule_executions") == 1
 
 
+class TestDisabledSweepGuards:
+    """`retention_days <= 0 or limit <= 0` on every accessor.
+
+    `0` means DISABLED. If that guard weakens, `iso_cutoff(hours=0)` is *now* and
+    the predicate `completed_at < now` matches the entire terminal table — the
+    #1638 blast radius reached directly, bypassing the window entirely. The
+    mutation gate showed these guards almost completely unasserted: only
+    `count_execution_row_candidates(0, ...)` had a test, and nothing covered
+    `limit == 0`, `chunk_size == 0`, or the `or`.
+
+    `limit == 0` is genuinely reachable, not theoretical: the guard calls
+    `count_fn(threshold + 1)`, so a floor of −1 (matrix row A17) makes the bound
+    exactly 0.
+    """
+
+    @pytest.mark.parametrize(
+        "days,limit", [(0, 10), (10, 0), (0, 0), (-1, 10), (10, -1)]
+    )
+    @pytest.mark.parametrize(
+        "accessor",
+        [
+            "count_execution_log_candidates",
+            "count_execution_row_candidates",
+            "count_soft_deleted_schedules_past_retention",
+        ],
+    )
+    def test_non_positive_window_or_limit_counts_nothing(
+        self, accessor, days, limit, sched
+    ):
+        _seed("old", _days_ago_iso(100))
+        assert getattr(sched, accessor)(days, limit=limit) == 0
+
+    @pytest.mark.parametrize(
+        "days,limit", [(0, 10), (10, 0), (0, 0), (-1, 10), (10, -1)]
+    )
+    def test_non_positive_window_or_limit_finds_no_schedules(self, days, limit, sched):
+        assert sched.find_soft_deleted_schedules_past_retention(days, limit=limit) == []
+
+    @pytest.mark.parametrize(
+        "days,chunk", [(0, 10), (10, 0), (0, 0), (-1, 10), (10, -1)]
+    )
+    @pytest.mark.parametrize("pruner", ["prune_execution_logs", "prune_execution_rows"])
+    def test_non_positive_window_or_chunk_prunes_nothing(
+        self, pruner, days, chunk, sched
+    ):
+        _seed("old", _days_ago_iso(100))
+        assert getattr(sched, pruner)(days, chunk_size=chunk) == 0
+        assert _hscalar("SELECT COUNT(*) FROM schedule_executions") == 1
+
+    @pytest.mark.parametrize("chunk", [0, -1])
+    def test_non_positive_chunk_scrubs_nothing(self, chunk, sched):
+        """`scrub_terminal_backlog_metadata` is not age-gated (it is a security
+        invariant, not a retention window), so `chunk_size` is its only guard."""
+        assert sched.scrub_terminal_backlog_metadata(chunk_size=chunk) == 0
+
+
+class TestCutoffStrictness:
+    """`completed_at < cutoff` is STRICT on all three predicates.
+
+    F6 covers the row predicate. The mutation gate showed the sibling log
+    predicate (`retention.py:36`) and the soft-deleted-schedules predicate
+    (`:58`) had no exactly-at-cutoff test, so `<` -> `<=` survived on both. An
+    inclusive comparison prunes one window-boundary cohort early on every cycle.
+    """
+
+    def test_log_predicate_keeps_a_row_exactly_at_the_cutoff(self, sched, monkeypatch):
+        import db.schedules.retention as _RET
+
+        frozen = _days_ago_iso(90)
+        monkeypatch.setattr(_RET, "iso_cutoff", lambda **kw: frozen)
+
+        _seed("at-cutoff", frozen, log="transcript")
+        counted = sched.count_execution_log_candidates(90, limit=100)
+        pruned = sched.prune_execution_logs(90, chunk_size=100)
+
+        assert counted == pruned == 0, "a row exactly at the cutoff is not past it"
+        assert (
+            _hscalar(
+                "SELECT COUNT(*) FROM schedule_executions WHERE execution_log IS NOT NULL"
+            )
+            == 1
+        )
+
+    def test_soft_deleted_schedule_exactly_at_the_cutoff_survives(
+        self, sched, monkeypatch
+    ):
+        """Also the only coverage of `find_soft_deleted_schedules_past_retention`'s
+        row extraction — it binds its own `iso_cutoff` via a function-local import,
+        so both bindings are patched."""
+        import db.schedules.retention as _RET
+        import utils.helpers as _H
+
+        frozen = _days_ago_iso(30)
+        monkeypatch.setattr(_RET, "iso_cutoff", lambda **kw: frozen)
+        monkeypatch.setattr(_H, "iso_cutoff", lambda **kw: frozen)
+
+        for sid, deleted in (("at-cutoff", frozen), ("older", _days_ago_iso(60))):
+            _hrun(
+                "INSERT INTO agent_schedules "
+                "(id, agent_name, name, cron_expression, message, owner_id, "
+                " created_at, updated_at, deleted_at) "
+                "VALUES (:id, 'a1', 'n', '* * * * *', 'm', 1, :t, :t, :d)",
+                id=sid,
+                t=_days_ago_iso(100),
+                d=deleted,
+            )
+
+        found = sched.find_soft_deleted_schedules_past_retention(30, limit=100)
+        counted = sched.count_soft_deleted_schedules_past_retention(30, limit=100)
+
+        assert found == ["older"], "only the strictly-older schedule is past retention"
+        assert counted == 1
+
+
+class TestWindowArithmetic:
+    """`iso_cutoff(hours=retention_days * 24)` — the days->hours conversion.
+
+    A wrong multiplier silently rescales EVERY retention window (24->25 makes a
+    90-day window prune at ~86 days). Row-seeded tests cannot see a 4% shift, so
+    the mutation gate found all six call sites unasserted. Asserting the call
+    itself is the only way to pin arithmetic that no realistic fixture reveals.
+    """
+
+    @pytest.mark.parametrize("days", [1, 7, 90, 365])
+    @pytest.mark.parametrize(
+        "call",
+        [
+            ("count_execution_log_candidates", {"limit": 10}),
+            ("count_execution_row_candidates", {"limit": 10}),
+            ("count_soft_deleted_schedules_past_retention", {"limit": 10}),
+            ("prune_execution_logs", {"chunk_size": 10}),
+            ("prune_execution_rows", {"chunk_size": 10}),
+        ],
+    )
+    def test_window_is_converted_to_hours_by_exactly_24(
+        self, call, days, sched, monkeypatch
+    ):
+        import db.schedules.retention as _RET
+
+        seen = []
+
+        def spy(**kwargs):
+            seen.append(kwargs)
+            return _days_ago_iso(3650)
+
+        monkeypatch.setattr(_RET, "iso_cutoff", spy)
+        name, kwargs = call
+        getattr(sched, name)(days, **kwargs)
+
+        assert seen and seen[0] == {
+            "hours": days * 24
+        }, f"{name} must convert its window with exactly 24 hours/day; got {seen}"
+
+
 # ---------------------------------------------------------------------------
 # G — structural invariants
 # ---------------------------------------------------------------------------
