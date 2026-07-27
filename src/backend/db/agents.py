@@ -395,6 +395,18 @@ class AgentOperations(
             .values(is_active=1 if active else 0)
         ).rowcount or 0
 
+    def deactivate_agent_mcp_keys(self, agent_name: str) -> int:
+        """Deactivate this agent's agent- and connector-scoped MCP keys (#1811).
+
+        Standalone-transaction wrapper over `_deactivate_agent_keys_in_txn`, for
+        callers outside a delete/recover transaction — specifically the recovery
+        recreate, which mints a fresh key on every invocation (the old key's
+        plaintext is unrecoverable) and previously left every superseded row
+        active. Returns the number of rows flipped.
+        """
+        with get_engine().begin() as conn:
+            return self._deactivate_agent_keys_in_txn(conn, agent_name, active=False)
+
     def delete_agent_ownership(self, agent_name: str) -> bool:
         """Soft-delete the agent ownership row (Issue #834 Phase 1a).
 

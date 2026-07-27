@@ -1272,10 +1272,19 @@ async def _build_volume_mounts(
     # /home/developer lives on the container writable layer (overlayfs),
     # auto-reclaimed by container removal. Volumes exist to survive
     # recreate, and ghosts never recreate.
+    # #1811: the `encrypted-data:/data` mount was removed rather than copied
+    # into the recovery path. It was dead AND unsafe:
+    #   * nothing in the agent image ever touched /data — the Dockerfile only
+    #     `mkdir`s it, and no code in docker/base-image references it;
+    #   * the volume name was a LITERAL, so a single volume was mounted rw into
+    #     every agent at once — a cross-agent read/write surface in a product
+    #     whose premise is per-agent isolation. Unused today is not a guarantee.
+    # Removing it here (instead of adding it to recreate_missing_container)
+    # makes both paths agree and closes the surface. The volume itself is not
+    # deleted, so anything historically written to it remains on the host.
     volumes = {
         str(config_path): {'bind': '/config/agent-config.yaml', 'mode': 'ro'},
         str(credentials_path): {'bind': '/config/credentials.json', 'mode': 'ro'},
-        'encrypted-data': {'bind': '/data', 'mode': 'rw'},
     }
     if not config.ephemeral:
         await _workspace_volume_mount(config, volumes)

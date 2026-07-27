@@ -775,6 +775,28 @@ def _workspace_volume_name(agent_name: str) -> str:
         return f"agent-{agent_name}-workspace"
 
 
+def _reconstruct_template_id(agent_name: str, tmpl: dict) -> str:
+    """Best-effort rebuild of an agent's template id after its container is gone (#1811).
+
+    Returns "" when nothing identifying survives — the honest answer, and the
+    same value the caller had before, so this can only improve the result.
+    """
+    try:
+        git_cfg = db.get_git_config(agent_name)
+    except Exception:  # noqa: BLE001 — never block recovery on this
+        git_cfg = None
+
+    repo = getattr(git_cfg, "github_repo", None) if git_cfg else None
+    if repo:
+        branch = getattr(git_cfg, "working_branch", None) or getattr(
+            git_cfg, "source_branch", None
+        )
+        return f"github:{repo}@{branch}" if branch else f"github:{repo}"
+
+    name = (tmpl.get("name") or "").strip()
+    return f"local:{name}" if name else ""
+
+
 async def _read_template_yaml_from_volume(agent_name: str) -> dict:
     """Read the agent's `template.yaml` off its persisted workspace volume
     without a running container (#1559).
@@ -843,7 +865,18 @@ async def recreate_missing_container(agent_name: str):
     else:
         runtime = "claude-code"
         runtime_model = ""
-    template_name = tmpl.get("_template") or ""  # display-only; label field
+    # #1811: the original template id (`local:scout`, `github:Org/repo@main`)
+    # lived ONLY in the destroyed container's TEMPLATE_NAME env and
+    # `trinity.template` label — the workspace `template.yaml` carries `name:`
+    # and `type:`, never `_template`, so this was always empty in practice and
+    # both the label and (once restored) the env var came back blank.
+    # Reconstruct from what actually survives:
+    #   * a GitHub-native agent → its persisted git config (repo + branch);
+    #   * otherwise → `local:{name}` from the volume's template.yaml.
+    # This is a reconstruction, not the original string: an agent created from
+    # a github: URL with no branch suffix gets one back. Persisting the id at
+    # creation is the authoritative fix and needs a schema change.
+    template_name = tmpl.get("_template") or _reconstruct_template_id(agent_name, tmpl)
 
     # --- Resource limits: per-agent DB override → system defaults ---
     system_defaults = get_agent_default_resources()
@@ -864,6 +897,13 @@ async def recreate_missing_container(agent_name: str):
         "AGENT_RUNTIME": runtime,
         "AGENT_RUNTIME_MODEL": runtime_model,
         "TMPDIR": AGENT_DEFAULT_TMPDIR,
+        # #1811: creation sets this (crud.py) and two consumers read it —
+        # startup.sh gates local-template init on it, and the agent-server
+        # /info route reports it. Recovery read the value off template.yaml but
+        # used it only for the `trinity.template` LABEL, so a recovered agent
+        # reported an empty template_name and skipped the local-template
+        # branch. Same empty-string-when-absent shape as creation.
+        "TEMPLATE_NAME": template_name,
     }
 
     # OpenTelemetry (default on) — same wiring as create.
@@ -882,6 +922,21 @@ async def recreate_missing_container(agent_name: str):
     owner_username = owner.get("owner_username") or owner.get("username")
     try:
         if owner_username:
+            # #1811: recovery is not idempotent — every call mints a key, and a
+            # repeatedly-recovered agent accumulated active rows (50 observed on
+            # one instance). Deactivate the superseded ones FIRST, so the key we
+            # are about to mint stays active; the same hygiene #1745 gave delete.
+            # Best-effort: never block recovery on credential bookkeeping.
+            try:
+                superseded = db.deactivate_agent_mcp_keys(agent_name)
+                if superseded:
+                    logger.info(
+                        "Deactivated %d superseded MCP key(s) for %s before recovery mint (#1811)",
+                        superseded, agent_name,
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Could not deactivate prior MCP keys for %s: %s", agent_name, e)
+
             agent_mcp_key = db.create_agent_mcp_api_key(
                 agent_name, owner_username, description="recovery-recreate"
             )
