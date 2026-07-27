@@ -131,6 +131,9 @@ services:
       # merge), so an operator-set LOG_RETENTION_DAYS never reached the
       # container and retention silently fell back to the code default. Default
       # is the 5-day community floor; enterprise `retention` unlocks longer.
+      # LOG_ARCHIVE_PATH is intentionally omitted: the code default
+      # (/data/archives) already lands in the TRINITY_DATA_PATH bind mount
+      # (/data), so no new volume is needed.
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-5}
       - LOG_ARCHIVE_ENABLED=${LOG_ARCHIVE_ENABLED:-true}
       - LOG_CLEANUP_HOUR=${LOG_CLEANUP_HOUR:-3}
@@ -248,14 +251,19 @@ services:
       # docker-compose.yml; without this line the .env value is inert in prod (the
       # #1039 packaging-gap class) and SSH host detection falls back to localhost.
       - SSH_HOST=${SSH_HOST:-}
-      # Log retention & archival (services/log_archive_service.py). Mirrors
-      # docker-compose.yml; without these lines the .env knobs are inert in prod
-      # (the #1039 packaging-gap class). LOG_ARCHIVE_PATH is intentionally omitted:
-      # the code default (/data/archives) already lands in the TRINITY_DATA_PATH
-      # bind mount (/data), so no new volume is needed.
-      - LOG_ARCHIVE_ENABLED=${LOG_ARCHIVE_ENABLED:-true}
-      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-90}
-      - LOG_CLEANUP_HOUR=${LOG_CLEANUP_HOUR:-3}
+      # NOTE (#1799): a duplicate LOG_ARCHIVE_ENABLED / LOG_RETENTION_DAYS /
+      # LOG_CLEANUP_HOUR trio lived here. Two separate #1039-class "mirror
+      # docker-compose.yml" fixes each appended the same three vars, which broke
+      # this file two different ways:
+      #   * LOG_ARCHIVE_ENABLED and LOG_CLEANUP_HOUR were byte-identical in both
+      #     blocks, and Compose requires array items to be unique — so
+      #     `docker compose -f docker-compose.prod.yml config` failed outright.
+      #   * LOG_RETENTION_DAYS was duplicated with a DIFFERENT value (5 vs 90).
+      #     Differing strings are not caught by the uniqueness check, and Docker
+      #     resolves a repeated env key by last-wins — so prod would silently run
+      #     90 while this file's own block above, docker-compose.yml, and
+      #     config.py (COMMUNITY_RETENTION_FLOOR_DAYS = 5) all say 5.
+      # Resolved in favour of the block above; keep the LOG_* trio defined ONCE.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./config/agent-templates:/agent-configs/templates:ro
@@ -517,6 +525,21 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # #1799: #1478 chowns /data/logs to 1000:1000 (chmod 775) so the UID-1000
+    # backend's retention sweep can delete archived originals. Vector runs as
+    # root, but cap_drop: ALL strips CAP_DAC_OVERRIDE — the capability that lets
+    # root ignore file permissions — so root is neither owner nor group and
+    # falls through to "other" (r-x) on that 775 dir. EVERY sink write then
+    # fails with "Permission denied", silently: a file-sink error does not fail
+    # the :8686 healthcheck, so Vector reports healthy while writing nothing.
+    #
+    # Joining GID 1000 uses the dir's existing group-write bit instead of
+    # restoring a capability, so the cap_drop posture is preserved. Vector must
+    # stay ROOT for the uid: raw container logs under /var/lib/docker/containers
+    # are 0640 root:root, so user: "1000:1000" would swap a write failure for a
+    # read failure.
+    group_add:
+      - "1000"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8686/health"]
       interval: 30s
