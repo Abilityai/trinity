@@ -14,6 +14,15 @@ source .venv/bin/activate
 # Pull TRINITY_TEST_PASSWORD / REDIS_BACKEND_PASSWORD from project .env.
 source "$(dirname "$0")/setup-env.sh"
 
+# #1775: declare the Redis target explicitly, the same way verify-local does.
+# tests/integration/conftest.py treats a caller-supplied REDIS_URL as "the
+# harness knows where Redis is", so an unreachable Redis FAILS the run instead
+# of silently skipping ~57 tests while pytest still exits 0. Without this line
+# the two harnesses would disagree about what a Redis outage means.
+if [ -z "${REDIS_URL:-}" ] && [ -n "${REDIS_BACKEND_PASSWORD:-}" ]; then
+    export REDIS_URL="redis://backend:${REDIS_BACKEND_PASSWORD}@localhost:${REDIS_HOST_PORT:-6379}"
+fi
+
 echo "========================================="
 echo "  TRINITY INTEGRATION TESTS"
 echo "  Requires: live Docker stack"
