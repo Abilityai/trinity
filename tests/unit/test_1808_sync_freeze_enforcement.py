@@ -20,11 +20,21 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
+
+# The `src.scheduler` namespace-package import below resolves only when the
+# repo root is on sys.path. That is true for a repo-root `pytest` run but NOT
+# in CI, which runs with rootdir `tests/` (the conftests put `src/backend` on
+# the path, never the repo root) — the 9-failure `ModuleNotFoundError: src`
+# regression-diff on this PR's first push. Appending (not inserting at 0) so
+# the repo root can never shadow the conftest-managed `src/backend` entries.
+if str(_REPO) not in sys.path:
+    sys.path.append(str(_REPO))
 
 # `src/scheduler/config.py` reads these at import time (#589 makes the Redis
 # credentials mandatory), so they must exist before the package is imported.
@@ -39,9 +49,8 @@ def _scheduler_database_module():
     It uses relative imports (`from .config import config`), so it cannot be
     loaded standalone by path — and a bare `import database` would resolve to
     `src/backend/database.py`, which is on the pytest path ahead of it.
-    Imported through the repo root (which conftest puts on sys.path) so the
-    name is unambiguous with no sys.path or sys.modules mutation
-    (tests/lint_sys_modules.py).
+    Imported through the repo root (appended to sys.path above) so the name is
+    unambiguous with no sys.modules mutation (tests/lint_sys_modules.py).
     """
     import src.scheduler.database as scheduler_database
 
