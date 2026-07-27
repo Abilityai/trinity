@@ -695,12 +695,39 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
 
     template_yaml = template_path / "template.yaml"
 
-    # #1793: an unresolvable `local:` template must fail here, before any side
-    # effect. Falling through with an empty `template_data` used to provision a
-    # running container with no CLAUDE.md, no template.yaml and no skills — an
-    # empty shell reported to the caller as a normal 200 creation. The `github:`
-    # path already fails fast on an unknown repo; this makes `local:` match.
-    if not template_yaml.exists():
+    if template_yaml.exists():
+        try:
+            with open(template_yaml) as f:
+                template_data = yaml.safe_load(f)
+                config.type = template_data.get("type", config.type)
+                config.resources = template_data.get("resources", config.resources)
+                config.tools = template_data.get("tools", config.tools)
+                creds = template_data.get("credentials", {})
+                mcp_servers = list(creds.get("mcp_servers", {}).keys())
+                if mcp_servers:
+                    config.mcp_servers = mcp_servers
+                # Multi-runtime support - extract runtime config from template
+                runtime_config = template_data.get("runtime", {})
+                if isinstance(runtime_config, dict):
+                    config.runtime = runtime_config.get("type", config.runtime)
+                    config.runtime_model = runtime_config.get("model", config.runtime_model)
+                elif isinstance(runtime_config, str):
+                    config.runtime = runtime_config
+                # Phase 9.11: Extract shared folder config from template
+                shared_folders_config = template_data.get("shared_folders", {})
+                if shared_folders_config:
+                    template_shared_folders = {
+                        "expose": shared_folders_config.get("expose", False),
+                        "consume": shared_folders_config.get("consume", False)
+                    }
+        except Exception as e:
+            logger.warning(f"Error loading template config: {e}")
+    else:
+        # #1793: an unresolvable `local:` template must fail before any side
+        # effect. Falling through with an empty `template_data` provisioned a
+        # running container with no CLAUDE.md, no template.yaml and no skills —
+        # an empty shell reported to the caller as a normal 200 creation. The
+        # `github:` path already fails fast on an unknown repo; this matches it.
         raise HTTPException(
             status_code=404,
             detail={
@@ -713,33 +740,6 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
                 "code": "UNKNOWN_LOCAL_TEMPLATE",
             },
         )
-
-    try:
-        with open(template_yaml) as f:
-            template_data = yaml.safe_load(f)
-            config.type = template_data.get("type", config.type)
-            config.resources = template_data.get("resources", config.resources)
-            config.tools = template_data.get("tools", config.tools)
-            creds = template_data.get("credentials", {})
-            mcp_servers = list(creds.get("mcp_servers", {}).keys())
-            if mcp_servers:
-                config.mcp_servers = mcp_servers
-            # Multi-runtime support - extract runtime config from template
-            runtime_config = template_data.get("runtime", {})
-            if isinstance(runtime_config, dict):
-                config.runtime = runtime_config.get("type", config.runtime)
-                config.runtime_model = runtime_config.get("model", config.runtime_model)
-            elif isinstance(runtime_config, str):
-                config.runtime = runtime_config
-            # Phase 9.11: Extract shared folder config from template
-            shared_folders_config = template_data.get("shared_folders", {})
-            if shared_folders_config:
-                template_shared_folders = {
-                    "expose": shared_folders_config.get("expose", False),
-                    "consume": shared_folders_config.get("consume", False)
-                }
-    except Exception as e:
-        logger.warning(f"Error loading template config: {e}")
     return template_data, template_shared_folders
 
 
