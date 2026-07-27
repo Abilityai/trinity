@@ -92,19 +92,27 @@ def test_version_payload_falls_back_to_unknown_when_env_missing(monkeypatch):
     assert payload["build_date"] == "unknown"
 
 
-def test_version_payload_prefers_version_env(monkeypatch):
-    """#993 — the build-stamped VERSION env var (e.g. `0.9.0+g4c640b6e`)
-    takes precedence over the VERSION file so dev (bind-mount) and prod
-    (build-arg) agree for the same commit."""
-    monkeypatch.setenv("VERSION", "0.9.0+gdeadbeef")
+def test_version_payload_file_wins_when_env_disagrees(monkeypatch):
+    """#1810/#1814 — when the build-stamped env and the live VERSION file
+    disagree, the FILE (describing the code that is running) wins and the
+    baked value surfaces as `image_version` so the drift stays visible.
+    Supersedes the pre-#1814 env-first contract (#993) this test used to
+    pin: env-first reported a stale image's version after an in-place
+    upgrade."""
+    # The repo VERSION file is read via the injected __file__ path; derive a
+    # guaranteed-disagreeing env stamp from whatever it currently holds.
+    repo_version = (_BACKEND.parent.parent / "VERSION").read_text().strip()
+    stale_env = f"{repo_version}-stale+gdeadbeef"
+    monkeypatch.setenv("VERSION", stale_env)
 
     build = _load_builder()
     payload = build(voice_enabled=False, edition="oss", enterprise_features=[])
 
-    assert payload["version"] == "0.9.0+gdeadbeef"
+    assert payload["version"] == repo_version
+    assert payload["image_version"] == stale_env
     # Version flows into the component descriptors too.
-    assert payload["components"]["backend"] == "0.9.0+gdeadbeef"
-    assert payload["components"]["base_image"] == "trinity-agent-base:0.9.0+gdeadbeef"
+    assert payload["components"]["backend"] == repo_version
+    assert payload["components"]["base_image"] == f"trinity-agent-base:{repo_version}"
 
 
 def test_version_payload_empty_version_env_falls_back_to_file(monkeypatch):
