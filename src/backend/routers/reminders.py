@@ -59,9 +59,36 @@ def _self_gate(current_user: User, name: str) -> None:
         )
 
 
+# #1806: statuses the autonomy gate can still act on. A terminal reminder is
+# never "held" — it already fired, was cancelled, or gave up.
+_LIVE_STATUSES = ("pending", "firing")
+
+
+def _autonomy_hold(name: str, row_status: str, autonomy_enabled: Optional[bool] = None) -> bool:
+    """Is this reminder live but un-armable because the agent's autonomy is off?
+
+    #1806: the scheduler's ``get_active_reminders`` filters on
+    ``ao.autonomy_enabled = 1``, so a reminder on a paused agent is never armed
+    — no job, therefore no skip to log. Derived at read time (one cheap lookup,
+    no column, no migration). Fail-open to "not held": a settings-read failure
+    must never invent a warning on a healthy reminder.
+    """
+    if row_status not in _LIVE_STATUSES:
+        return False
+    try:
+        if autonomy_enabled is None:
+            autonomy_enabled = db.get_autonomy_enabled(name)
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("Could not resolve autonomy for %s; reporting no hold", name)
+        return False
+    return not autonomy_enabled
+
+
 def _reminder_response(row: dict) -> dict:
     """Reminder-model-shaped JSON dict (drops the non-response provenance cols)."""
-    return Reminder(**row).model_dump()
+    return Reminder(
+        **row, autonomy_hold=_autonomy_hold(row["agent_name"], row["status"])
+    ).model_dump()
 
 
 @router.post("/agents/{name}/reminders", response_model=Reminder, status_code=201)
@@ -143,7 +170,10 @@ async def create_reminder_endpoint(
     else:
         idempotency_service.complete(idem, reminder["id"], snapshot)
 
-    return Reminder(**reminder)
+    return Reminder(
+        **reminder,
+        autonomy_hold=_autonomy_hold(name, reminder["status"]),
+    )
 
 
 @router.get("/agents/{name}/reminders", response_model=List[ReminderSummary])
@@ -160,7 +190,15 @@ async def list_reminders_endpoint(
     _self_gate(current_user, name)
     effective = None if status_filter in (None, "", "all") else status_filter
     rows = db.list_reminders(name, status=effective)
-    return [ReminderSummary(**r) for r in rows]
+    # #1806: one autonomy lookup for the whole page — every row belongs to the
+    # same agent, so a per-row resolve would be a pointless N+1.
+    autonomy = db.get_autonomy_enabled(name) if rows else True
+    return [
+        ReminderSummary(
+            **r, autonomy_hold=_autonomy_hold(name, r["status"], autonomy)
+        )
+        for r in rows
+    ]
 
 
 @router.post("/agents/{name}/reminders/{reminder_id}/cancel", response_model=Reminder)
@@ -190,4 +228,6 @@ async def cancel_reminder_endpoint(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Reminder not found"
         )
-    return Reminder(**row)
+    return Reminder(
+        **row, autonomy_hold=_autonomy_hold(name, row["status"])
+    )
