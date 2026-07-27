@@ -672,7 +672,11 @@ async def _reserve_git_instance(
 def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
     """Load a `local:`-prefixed template's `template.yaml` (curated catalog then
     deploy-local store, #950). Mutates `config` runtime/type/resources/tools/
-    mcp_servers fields. Returns `(template_data, template_shared_folders)`."""
+    mcp_servers fields. Returns `(template_data, template_shared_folders)`.
+
+    Raises `HTTPException(404, UNKNOWN_LOCAL_TEMPLATE)` when the name resolves
+    to no `template.yaml` under either root (#1793) — this previously returned
+    an empty dict and the caller provisioned a templateless container."""
     template_data: dict = {}
     template_shared_folders = None
     # Local template - strip "local:" prefix. Look in curated catalog
@@ -691,33 +695,51 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
 
     template_yaml = template_path / "template.yaml"
 
-    if template_yaml.exists():
-        try:
-            with open(template_yaml) as f:
-                template_data = yaml.safe_load(f)
-                config.type = template_data.get("type", config.type)
-                config.resources = template_data.get("resources", config.resources)
-                config.tools = template_data.get("tools", config.tools)
-                creds = template_data.get("credentials", {})
-                mcp_servers = list(creds.get("mcp_servers", {}).keys())
-                if mcp_servers:
-                    config.mcp_servers = mcp_servers
-                # Multi-runtime support - extract runtime config from template
-                runtime_config = template_data.get("runtime", {})
-                if isinstance(runtime_config, dict):
-                    config.runtime = runtime_config.get("type", config.runtime)
-                    config.runtime_model = runtime_config.get("model", config.runtime_model)
-                elif isinstance(runtime_config, str):
-                    config.runtime = runtime_config
-                # Phase 9.11: Extract shared folder config from template
-                shared_folders_config = template_data.get("shared_folders", {})
-                if shared_folders_config:
-                    template_shared_folders = {
-                        "expose": shared_folders_config.get("expose", False),
-                        "consume": shared_folders_config.get("consume", False)
-                    }
-        except Exception as e:
-            logger.warning(f"Error loading template config: {e}")
+    # #1793: an unresolvable `local:` template must fail here, before any side
+    # effect. Falling through with an empty `template_data` used to provision a
+    # running container with no CLAUDE.md, no template.yaml and no skills — an
+    # empty shell reported to the caller as a normal 200 creation. The `github:`
+    # path already fails fast on an unknown repo; this makes `local:` match.
+    if not template_yaml.exists():
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": (
+                    f"Local template {raw_name!r} was not found. Check the id "
+                    f"against GET /api/templates — templates marked hidden are "
+                    f"not deployable. To create an agent with no template at "
+                    f"all, omit the 'template' field."
+                ),
+                "code": "UNKNOWN_LOCAL_TEMPLATE",
+            },
+        )
+
+    try:
+        with open(template_yaml) as f:
+            template_data = yaml.safe_load(f)
+            config.type = template_data.get("type", config.type)
+            config.resources = template_data.get("resources", config.resources)
+            config.tools = template_data.get("tools", config.tools)
+            creds = template_data.get("credentials", {})
+            mcp_servers = list(creds.get("mcp_servers", {}).keys())
+            if mcp_servers:
+                config.mcp_servers = mcp_servers
+            # Multi-runtime support - extract runtime config from template
+            runtime_config = template_data.get("runtime", {})
+            if isinstance(runtime_config, dict):
+                config.runtime = runtime_config.get("type", config.runtime)
+                config.runtime_model = runtime_config.get("model", config.runtime_model)
+            elif isinstance(runtime_config, str):
+                config.runtime = runtime_config
+            # Phase 9.11: Extract shared folder config from template
+            shared_folders_config = template_data.get("shared_folders", {})
+            if shared_folders_config:
+                template_shared_folders = {
+                    "expose": shared_folders_config.get("expose", False),
+                    "consume": shared_folders_config.get("consume", False)
+                }
+    except Exception as e:
+        logger.warning(f"Error loading template config: {e}")
     return template_data, template_shared_folders
 
 
