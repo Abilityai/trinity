@@ -9,6 +9,7 @@ import logging
 import asyncio
 from typing import Optional, List, Callable, Any
 
+import docker
 import httpx
 from fastapi import HTTPException
 
@@ -20,7 +21,7 @@ from services.docker_service import (
     list_all_agents_fast,
     get_agent_container,
 )
-from services.docker_utils import volume_get
+from services.docker_utils import volume_get, image_get
 from services.agent_auth import derive_agent_token, merge_auth_headers
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, settings_service
 from utils.helpers import sanitize_agent_name
@@ -634,4 +635,58 @@ def check_full_capabilities_match(container, agent_name: str) -> bool:
         logger.info(f"Capabilities mismatch for {agent_name}: container={current_full_caps} -> system={system_full_caps}")
         return False
 
+    return True
+
+
+async def check_base_image_matches(container, agent_name: str) -> bool:
+    """#1809: does the container still run the image its own tag resolves to?
+
+    Returns True (match — no recreate needed) or False (the base image was
+    rebuilt underneath the container). FAIL-OPEN: any unreadable state returns
+    True, because a false mismatch would recreate the whole fleet — and on
+    ``ImageNotFound`` a recreate would fail on the same missing reference
+    anyway. Never silent: every fail-open exit logs a WARNING (a permanently
+    unreadable check would otherwise be indistinguishable from "no drift" —
+    the #1809 symptom itself), and a detected drift logs the old→new ids.
+
+    The comparison is against the container's OWN ``Config.Image`` reference,
+    so a version-pinned container (``trinity-agent-base:0.8.0``) recreates only
+    when that specific tag is re-pointed, and an ID/digest-pinned container
+    compares its ID to itself — a deliberate, documented no-op.
+
+    Unlike the sibling predicates this one does a live Docker round-trip, so it
+    is async via ``docker_utils.image_get`` (event-loop safety) and callers
+    evaluate it lazily — only when no other predicate already forced a
+    recreate.
+    """
+    attrs = getattr(container, "attrs", None) or {}
+    running_image_id = attrs.get("Image")
+    image_ref = (attrs.get("Config") or {}).get("Image")
+    if not running_image_id or not image_ref:
+        logger.warning(
+            f"Base-image check for {agent_name}: container attrs carry no image "
+            f"id/reference — skipping image-drift evaluation (fail-open)"
+        )
+        return True
+    try:
+        current_id = (await image_get(image_ref)).id
+    except docker.errors.ImageNotFound:
+        logger.warning(
+            f"Base-image check for {agent_name}: image reference '{image_ref}' "
+            f"no longer resolves — skipping image-drift evaluation (fail-open; "
+            f"a recreate would fail on the same missing reference)"
+        )
+        return True
+    except Exception as e:
+        logger.warning(
+            f"Base-image check for {agent_name} failed ({type(e).__name__}: {e}) "
+            f"— skipping image-drift evaluation (fail-open)"
+        )
+        return True
+    if current_id != running_image_id:
+        logger.info(
+            f"Base image drift for {agent_name}: {running_image_id} -> "
+            f"{current_id} (reference '{image_ref}')"
+        )
+        return False
     return True

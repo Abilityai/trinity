@@ -21,13 +21,13 @@ from services.docker_service import (
 )
 from services.docker_utils import (
     container_stop, container_remove, container_start, container_reload,
-    volume_get, volume_create, containers_run
+    volume_get, volume_create, containers_run, image_get
 )
 from services.agent_service.helpers import validate_base_image
 from services.agent_runtime_state import clear_agent_breakers
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
 from services.skill_service import skill_service
-from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, is_claude_runtime
+from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, check_base_image_matches, is_claude_runtime
 from services.agent_auth import derive_agent_token
 from utils.helpers import utc_now_iso
 from .file_sharing import check_public_folder_mount_matches
@@ -295,6 +295,28 @@ async def start_agent_internal(agent_name: str) -> dict:
         not check_agent_auth_token_env_matches(container, agent_name)
     )
 
+    # #1809: a rebuilt base image is picked up on COLD start only. Evaluated
+    # lazily — the Docker round-trip runs only when no other predicate already
+    # forced a recreate. Gated on `not was_already_running` because
+    # start-on-running is a load-bearing idempotent no-op (MCP ensure-running
+    # calls, the SUB-003 auto-switch restart, restart_system): config drift is
+    # an owner-intentional per-agent change, while image drift is armed
+    # fleet-wide by any `build-base-image.sh` run — it must never turn a start
+    # of a running agent into a container kill. Ephemeral ghosts are excluded:
+    # they are volume-less by design ("ghosts never recreate"), so an
+    # image-drift recreate would silently destroy their workspace mid-budget
+    # (trinity-enterprise#69).
+    recreate_reason = "config_drift" if needs_recreation else None
+    if not needs_recreation and not was_already_running:
+        try:
+            _eph_gate = db.get_agent_ephemeral_info(agent_name)
+        except Exception:
+            _eph_gate = None
+        if not (isinstance(_eph_gate, dict) and _eph_gate.get("is_ephemeral")):
+            if not await check_base_image_matches(container, agent_name):
+                needs_recreation = True
+                recreate_reason = "image_drift"
+
     # #1560: the heartbeat markers and both circuit breakers are keyed by agent
     # NAME, not by container identity, so a recreated container inherits the
     # verdict recorded against its predecessor — a fresh, healthy agent is
@@ -395,7 +417,12 @@ async def start_agent_internal(agent_name: str) -> dict:
         "skills_injection": skills_status,
         "skills_result": skills_result,
         "read_only_injection": read_only_result.get("status", "unknown"),
-        "read_only_result": read_only_result
+        "read_only_result": read_only_result,
+        # #1809: surface whether (and why) this start replaced the container,
+        # so "why did my container id change / uptime reset" is answerable from
+        # the start response and the audit trail.
+        "recreated": needs_recreation,
+        "recreate_reason": recreate_reason if needs_recreation else None,
     }
 
 
@@ -563,12 +590,35 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
     # Update label to reflect current setting
     labels["trinity.full-capabilities"] = str(full_capabilities).lower()
 
+    # #1809: refresh the base-image version label from the image this recreate
+    # will actually run. Labels are carried forward verbatim from the old
+    # container, and every AgentStatus reader prefers the container label over
+    # an image lookup — so without this an image-drift recreate runs the NEW
+    # image while the UI keeps reporting the OLD version. Best-effort: an
+    # unreadable image keeps the carried-forward label, never blocks recreate.
+    try:
+        _new_image_ver = ((await image_get(image)).labels or {}).get("trinity.base-image-version")
+        if _new_image_ver:
+            labels["trinity.base-image-version"] = _new_image_ver
+    except Exception as e:
+        logger.warning(
+            f"Could not refresh trinity.base-image-version label for {agent_name} "
+            f"({type(e).__name__}: {e}) — keeping the carried-forward value"
+        )
+
     # Stop and remove old container
     try:
         await container_stop(old_container)
     except Exception:
         pass
-    await container_remove(old_container)
+    try:
+        await container_remove(old_container)
+    except docker.errors.NotFound:
+        # #1809: a concurrent start already removed it. Post-rebuild, EVERY
+        # cold start is a recreate, so two racing starts (UI double-click,
+        # --workers 2, restart_system loop + manual start) is routine — fall
+        # through; the 409 adoption below covers the run-side of the race.
+        pass
 
     # Build new volume configuration.
     #
@@ -600,17 +650,31 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
             if vol_name:
                 volumes[vol_name] = {"bind": dest, "mode": "rw" if m.get("RW", True) else "ro"}
 
-    return await _provision_folders_and_run_agent_container(
-        agent_name,
-        image=image,
-        env_vars=env_vars,
-        labels=labels,
-        base_volumes=volumes,
-        ssh_port=ssh_port,
-        cpu=cpu,
-        memory=memory,
-        full_capabilities=full_capabilities,
-    )
+    try:
+        return await _provision_folders_and_run_agent_container(
+            agent_name,
+            image=image,
+            env_vars=env_vars,
+            labels=labels,
+            base_volumes=volumes,
+            ssh_port=ssh_port,
+            cpu=cpu,
+            memory=memory,
+            full_capabilities=full_capabilities,
+        )
+    except docker.errors.APIError as e:
+        # #1809: 409 name-conflict — a concurrent start won the recreate race
+        # and already ran the replacement. Adopt the winner's container instead
+        # of failing this caller with a 500 ("start this agent" is idempotent).
+        if getattr(e, "status_code", None) == 409:
+            existing = get_agent_container(agent_name)
+            if existing is not None:
+                logger.info(
+                    f"Recreate race for {agent_name}: adopting the concurrently "
+                    f"created container"
+                )
+                return existing
+        raise
 
 
 async def _provision_folders_and_run_agent_container(

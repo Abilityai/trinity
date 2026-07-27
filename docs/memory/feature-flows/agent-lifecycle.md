@@ -398,20 +398,38 @@ async def start_agent_internal(agent_name: str) -> dict:
     #   - Platform key enabled: must have ANTHROPIC_API_KEY, must NOT have CLAUDE_CODE_OAUTH_TOKEN
     #   - Neither: both must be absent
     await container_reload(container)
+    was_already_running = getattr(container, "status", None) == "running"
     needs_recreation = (
         not await check_shared_folder_mounts_match(container, agent_name) or
+        not check_public_folder_mount_matches(container, agent_name) or
         not check_api_key_env_matches(container, agent_name) or
+        not check_github_pat_env_matches(container, agent_name) or
         not check_resource_limits_match(container, agent_name) or
-        not check_full_capabilities_match(container, agent_name)
+        not check_full_capabilities_match(container, agent_name) or
+        not check_guardrails_env_matches(container, agent_name) or
+        not check_agent_auth_token_env_matches(container, agent_name)
     )
+
+    # #1809: ninth predicate — a rebuilt trinity-agent-base is adopted on the
+    # next COLD start. Lazy (the Docker round-trip runs only when no other
+    # predicate already fired), gated on `not was_already_running` (a start of
+    # a RUNNING agent stays an idempotent no-op — never an image-driven kill),
+    # skipped for ephemeral ghosts (volume-less; a recreate would destroy their
+    # workspace), and fail-open on every unreadable state (WARNING-logged).
+    if not needs_recreation and not was_already_running:  # + not is_ephemeral
+        if not await check_base_image_matches(container, agent_name):
+            needs_recreation = True  # recreate_reason = "image_drift"
 
     if needs_recreation:
         # Recreate container with updated config
-        # (sets CLAUDE_CODE_OAUTH_TOKEN if subscription, removes ANTHROPIC_API_KEY, or vice versa)
+        # (sets CLAUDE_CODE_OAUTH_TOKEN if subscription, removes ANTHROPIC_API_KEY, or vice versa).
+        # Resolves the container's OWN image tag fresh — this is what adopts a
+        # rebuilt base image — refreshes the trinity.base-image-version label,
+        # and tolerates the concurrent-start race (remove NotFound → proceed;
+        # run 409 name-conflict → adopt the winner's container) (#1809).
         await recreate_container_with_updated_config(agent_name, container, "system")
         container = get_agent_container(agent_name)
 
-    was_already_running = getattr(container, "status", None) == "running"
     await container_start(container)
 
     # NOTE: Trinity platform instructions are now injected at runtime via

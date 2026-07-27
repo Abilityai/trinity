@@ -628,7 +628,16 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
             target_type="agent",
             target_id=agent_name,
             endpoint=str(request.url.path),
-            details={"credentials_injection": credentials_status},
+            details={
+                "credentials_injection": credentials_status,
+                # #1809: record container replacement + cause (config_drift |
+                # image_drift) so a changed container id is traceable.
+                **(
+                    {"recreated": True, "recreate_reason": result.get("recreate_reason")}
+                    if result.get("recreated")
+                    else {}
+                ),
+            },
         )
 
         event = {
@@ -646,7 +655,11 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
         return {
             "message": f"Agent {agent_name} started",
             "credentials_injection": credentials_status,
-            "credentials_result": credentials_result
+            "credentials_result": credentials_result,
+            # #1809: whether (and why) this start replaced the container —
+            # answers "why did my container id change / uptime reset".
+            "recreated": bool(result.get("recreated")),
+            "recreate_reason": result.get("recreate_reason"),
         }
     except HTTPException:
         raise
