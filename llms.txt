@@ -1,0 +1,25 @@
+# Trinity
+
+> Self-hosted runtime for autonomous AI agents (Claude Code, OpenAI Codex, Gemini CLI). Apache 2.0. Each agent runs in an isolated Docker container with persistent memory, cron scheduling, agent-to-agent messaging, human approval gates, and a tamper-evident audit trail - on infrastructure you own.
+
+Key facts: one-line install (`curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/main/install.sh | bash`), Docker required, SQLite default with PostgreSQL recommended for production, independently pentested (UnderDefense Grade A). AI agents working inside this repository should start at [AGENTS.md](AGENTS.md).
+
+## Docs
+
+- [Overview](docs/user-docs/getting-started/overview.md): what Trinity is, key concepts, architecture
+- [Quick Start](docs/user-docs/getting-started/quick-start.md): create your first agent in 5 minutes
+- [Setup](docs/user-docs/getting-started/setup.md): installation, first-time setup, login
+- [Building Agents](docs/user-docs/guides/building-agents.md): create, develop, and deploy agents with Claude Code
+- [Deploying Trinity](docs/user-docs/guides/deploying-trinity.md): Cloud vs self-hosted setup, step-by-step
+- [Agent Runtimes](docs/user-docs/agents/agent-runtimes.md): Claude Code, OpenAI Codex, Gemini CLI
+- [Agent Guardrails](docs/user-docs/agents/agent-guardrails.md): deterministic safety enforcement, bash deny-lists, credential protection
+- [Agent Network](docs/user-docs/collaboration/agent-network.md): multi-agent communication and async collaboration
+- [System Manifest](docs/user-docs/collaboration/system-manifest.md): recipe-based multi-agent deployment
+- [FAQ](docs/user-docs/faq/README.md): 260+ grounded answers organized by topic
+
+## Optional
+
+- [Full docs index](docs/user-docs/README.md): complete documentation map
+- [Release highlights](docs/user-docs/whats-new/README.md): user-facing changes per release, newest first
+- [Video library](docs/user-docs/videos.md): workshops, demos, and deep-dives
+- [Website](https://www.ability.ai/trinity): product page

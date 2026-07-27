@@ -691,7 +691,7 @@ async def reset_to_main_preserve_state(
     if err:
         # #905: this is a destructive, force-with-lease recovery op — every
         # exit path (success and each guardrail/failure) must be auditable.
-        status_code = 409 if err in ("agent_busy", "no_git_config", "no_remote_main") else 500
+        status_code = 409 if err in ("agent_busy", "no_git_config", "no_remote_main", "no_write_credentials") else 500
         await _audit_git(
             action="reset_to_main_preserve_state",
             request=request,

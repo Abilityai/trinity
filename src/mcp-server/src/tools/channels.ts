@@ -254,7 +254,36 @@ export function createChannelTools(
             return JSON.stringify({
               success: false,
               error: "Rate limited. Please wait before sending more messages.",
+              reason: "rate_limited",
               rate_limited: true,
+            }, null, 2);
+          }
+
+          // ent#223: per-channel proactive consent refusal. Kept distinct from a
+          // rate cap (429) and from "not bound" (404) so the agent can relay WHY
+          // it could not post, instead of a generic failure the user can't act on.
+          if (
+            errorMessage.includes("proactive_not_allowed") ||
+            errorMessage.includes("Proactive messages are not enabled")
+          ) {
+            return JSON.stringify({
+              success: false,
+              error: errorMessage,
+              reason: "consent_required",
+              consent_required: true,
+              hint:
+                "Proactive posting is off for this channel. The agent owner can enable " +
+                "'Allow proactive messages' on the channel binding (agent → Channels → Slack). " +
+                "Replying to a user's message does not require this.",
+            }, null, 2);
+          }
+
+          if (errorMessage.includes("not bound") || errorMessage.includes("Channel not found")) {
+            return JSON.stringify({
+              success: false,
+              error: errorMessage,
+              reason: "not_bound",
+              hint: "This agent has no binding for that channel — bind it first.",
             }, null, 2);
           }
 

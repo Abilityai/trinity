@@ -134,8 +134,16 @@ class TestSuccessGolden:
         assert kw["context_max"] == 200000
         # claude_session_id prefers raw response session id, falls back to meta.
         assert kw["claude_session_id"] == "resp-sess"
-        assert kw["tool_calls"] is not None and "Bash" in kw["tool_calls"]
-        assert kw["execution_log"] == kw["tool_calls"]
+        # #1741: tool_calls is a derived SUMMARY of the transcript, no longer a
+        # verbatim copy of execution_log (the pre-#1741 behavior this golden
+        # test used to pin).
+        import json as _json
+
+        assert _json.loads(kw["tool_calls"]) == [
+            {"type": "tool_use", "tool": "Bash", "input": None}
+        ]
+        assert kw["execution_log"] != kw["tool_calls"]
+        assert _json.loads(kw["execution_log"]) == [{"type": "tool_use", "name": "Bash"}]
         # Side effects on a won CAS.
         assert mact.complete_activity.await_args.kwargs["status"] == ActivityState.COMPLETED
         mrec.assert_awaited_once_with("test-agent", False, None)

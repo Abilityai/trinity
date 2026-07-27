@@ -15,7 +15,13 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 
 from models import User
-from dependencies import get_current_user, require_admin, get_authorized_agent_by_name, get_owned_agent_by_name
+from dependencies import (
+    get_current_user,
+    require_admin,
+    reject_agent_principal,
+    get_authorized_agent_by_name,
+    get_owned_agent_by_name,
+)
 from database import db
 from db_models import AgentSkill, SkillInfo, AgentSkillsUpdate
 from services.skill_service import skill_service, SkillInjectionBusy
@@ -72,7 +78,20 @@ async def get_skill(
 ):
     """
     Get details for a specific skill including full content.
+
+    **Human/operator surface only** (ent#139). This returns the skill's full
+    content — SKILL.md plus any bundled `scripts/` — so it is executable
+    material, not metadata. An agent-scoped key resolves to its owner user, so
+    before this gate any agent could pull arbitrary executable content out of
+    the library and run it locally: self-acquisition, which is exactly the
+    supply-chain risk the skill runner exists to avoid.
+
+    Agents get skills two supported ways instead: assigned/injected by an
+    operator, or executed on the dedicated runner under a per-skill allow-list.
+    Neither needs raw content over REST. Listing (name + description) stays open
+    so an agent can still *discover* what exists.
     """
+    reject_agent_principal(current_user)
     skill = skill_service.get_skill(skill_name)
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")

@@ -6,6 +6,7 @@ import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useExecutionsStore } from '../stores/executions'
 import { useLoopsStore } from '../stores/loops'
 import { useReportsStore, useFleetReportsStore } from '../stores/reports'
+import { useRoomsStore } from '../stores/rooms'
 
 const ws = ref(null)
 const isConnected = ref(false)
@@ -25,6 +26,7 @@ export function useWebSocket() {
   const notificationsStore = useNotificationsStore()
   const operatorQueueStore = useOperatorQueueStore()
   const executionsStore = useExecutionsStore()
+  const roomsStore = useRoomsStore()
   const loopsStore = useLoopsStore()
   const reportsStore = useReportsStore()
   const fleetReportsStore = useFleetReportsStore()
@@ -176,6 +178,12 @@ export function useWebSocket() {
         if (data.type === 'agent_report') {
           reportsStore.handleWebSocketEvent(data)
           fleetReportsStore.handleWebSocketEvent(data)
+        }
+        // ent#170: shared-session (room) events. Thin payloads (room_id + seq /
+        // state / stop_reason); the store filters to the room on screen and
+        // refetches over REST (#918 pattern). No-op when Sessions isn't mounted.
+        if (data.type === 'room_message' || data.type === 'room_participant_state' || data.type === 'room_closed') {
+          roomsStore.handleWebSocketEvent(data)
         }
         break
     }

@@ -188,7 +188,11 @@ class TestRoutersPersist:
         monkeypatch.setattr(slack_router.db, "can_user_share_agent", lambda *a: True)
         monkeypatch.setattr(slack_router.db, "get_slack_channels_for_agent",
                             lambda *a: [{"slack_channel_id": "C1", "team_id": "T1",
-                                         "slack_channel_name": "general"}])
+                                         "slack_channel_name": "general",
+                                         # ent#223: a CONSENTED channel. Proactive posts now
+                                         # require allow_proactive; these tests exercise the
+                                         # SEND path, not the consent gate.
+                                         "allow_proactive": True}])
         monkeypatch.setattr(slack_router.db, "get_slack_workspace_bot_token", lambda *a: "xoxb-x")
         monkeypatch.setattr(slack_router, "get_proactive_rate_limit", lambda *a: 0)
 
@@ -219,7 +223,8 @@ class TestRoutersPersist:
                             lambda **kw: captured.update(kw))
         monkeypatch.setattr(slack_router.db, "can_user_share_agent", lambda *a: True)
         monkeypatch.setattr(slack_router.db, "get_slack_channels_for_agent",
-                            lambda *a: [{"slack_channel_id": "C1", "team_id": "T1"}])
+                            lambda *a: [{"slack_channel_id": "C1", "team_id": "T1",
+                                         "allow_proactive": True}])  # ent#223: consented
         monkeypatch.setattr(slack_router.db, "get_slack_workspace_bot_token", lambda *a: "xoxb-x")
         monkeypatch.setattr(slack_router, "get_proactive_rate_limit", lambda *a: 0)
 
@@ -289,7 +294,8 @@ class TestRoutersPersist:
                             lambda **kw: called.append(kw))
         monkeypatch.setattr(slack_router.db, "can_user_share_agent", lambda *a: True)
         monkeypatch.setattr(slack_router.db, "get_slack_channels_for_agent",
-                            lambda *a: [{"slack_channel_id": "C1", "team_id": "T1"}])
+                            lambda *a: [{"slack_channel_id": "C1", "team_id": "T1",
+                                         "allow_proactive": True}])  # ent#223: consented
         monkeypatch.setattr(slack_router.db, "get_slack_workspace_bot_token", lambda *a: "xoxb-x")
         monkeypatch.setattr(slack_router, "get_proactive_rate_limit", lambda *a: 0)
 

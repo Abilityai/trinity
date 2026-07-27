@@ -866,7 +866,7 @@
         "infrastructure",
         "brain-orb"
       ],
-      "description": "Cornelius first-run seeder (ent#107): ensure_seeded first-run gating via durable cornelius_seeded flag (deleted agent not resurrected); fresh-install scoping (existing non-system agents -> skip + converge flag, orb flag untouched); owner-must-exist deferral (pre-setup skip without burning the flag); Docker-unavailable skip; Brain Orb flag defaulted ON existence-guarded (admin OFF preserved); 409-on-exists convergence vs generic-failure retry (flag not burned, never raises); --workers 2 Redis SETNX provision lock (held -> skip, winner provisions+releases with TTL, Redis-down fail-open); _provision builds local:cornelius create with request=None; real-DB smoke of db.count_non_system_agents() facade delegation. create_agent_internal/db/redis/docker seams patched; no Docker/backend."
+      "description": "Cornelius first-run seeder (ent#107): ensure_seeded first-run gating via durable cornelius_seeded flag (deleted agent not resurrected); fresh-install scoping (existing non-system agents -> skip + converge flag, orb flag untouched); owner-must-exist deferral (pre-setup skip without burning the flag); Docker-unavailable skip; Brain Orb flag defaulted ON existence-guarded (admin OFF preserved); 409-on-exists convergence vs generic-failure retry (flag not burned, never raises); --workers 2 Redis SETNX provision lock (held -> skip, winner provisions+releases with TTL, Redis-down fail-open); _provision builds local:cornelius create with request=None; real-DB smoke of db.count_non_system_agents() facade delegation. create_agent_internal/db/redis/docker seams patched; no Docker/backend. ent#124 addition: precomputed freshness verdict \u2014 ensure_seeded(fresh=True) skips the internal count, fresh=False converges the flag without provisioning, fresh=None preserves the legacy count path."
     },
     {
       "file": "unit/test_1557_autonomy_breaker_decoupled.py",
@@ -1084,6 +1084,41 @@
         "unit"
       ],
       "description": "Full-directory skill packages (ent#183): pure packaging primitives (hardened frontmatter contract parse \u2014 alias-bomb refused, garbage requires typed-guarded, malicious dep names regex-gated; git-archive member vetting \u2014 REGTYPE only, symlinks/litter/protected basenames dropped with named warnings; injection tar with generated .trinity-skill.json meta appended LAST; manifest-based prune diff capped 200/skill); round-trip against the REAL agent-server restore_from_tar incl. allowlist confinement; real-git end-to-end (repo -> archive -> filter -> restore, tree-SHA determinism across clones, exec bits from git modes); injection orchestration (skip-if-unchanged vs force, old-image 404 fallback with multi_file_dropped_old_image only for multi-file skills, restore-failure repair path = delete-dir + one re-restore, prune deletes ONLY previous-manifest files, unmanaged same-named dir overwritten but never pruned, per-skill + total caps named errors, dep-probe warnings missing_binary/missing_env fail-open and run for unchanged skills too, SkillInjectionBusy on lock contention, CLAUDE.md section rebuilt from ALL present skills with line-anchored replacement that spares ### lookalikes)."
+    },
+    {
+      "file": "unit/test_ent123_tokenless_clone.py",
+      "feature": "trinity-enterprise#123",
+      "added": "2026-07-23",
+      "categories": [
+        "backend",
+        "agents",
+        "git",
+        "unit"
+      ],
+      "description": "PAT-free clone of public github: templates (ent#123). 50 tests over the 1484-shape purge-and-mock harness: _gate_tokenless_request (\"\"->None normalization, source-mode-only 400 incl. explicit None, fork passthrough), _parse_github_ref charset guard (eval-interpolation hardening), _validate_github_access tokenless ls-remote probe (ok/unavailable->400/transient->502 fail-closed, anonymous branch check, PAT-ful REST regression), _apply_github_env token-var gating (+GIT_SYNC_AUTO belt), lifecycle._apply_persisted_auth_env rebuild seam (repo-only gate, source-mode re-derivation), git_service.probe_anonymous_repo_access stderr classification, the no_write_credentials sync/reset guard (baked env OR per-agent PAT row \u2014 #1264 live-injection window, fail-open), and startup.sh static guards (repo-only clone gate, credential-less CLONE_URL, GIT_TERMINAL_PROMPT=0, push blackhole, .env PAT fallback, private-repo failure cause)."
+    },
+    {
+      "file": "unit/test_ent125_resilient_system_deploy.py",
+      "feature": "trinity-enterprise#125",
+      "added": "2026-07-23",
+      "categories": [
+        "backend",
+        "systems",
+        "unit"
+      ],
+      "description": "Resilient system-manifest deploy (ent#125): best-effort default \u2014 partial deploy continues past a failed agent-create and reports failed[] with {name, short_name, template, reason, status_code}; post-create config (folders/permissions/schedules/tags) scoped to the survivor map; config-phase failures degrade to warnings; total failure returns HTTP 500 with the full report body, skips config/start, and never writes trinity_prompt; partial still writes it; strict=True aborts preserving the original status code (dict-detail 429 not flattened to 500); reason normalization (dict detail \u2192 error field), PAT-bearing git-URL userinfo redaction (learnings 2026-07-14), and 500-char truncation; orchestrator-workers preset with failed orchestrator warns 'non-functional' and configures permissions over survivors only; dry_run and all-success responses unchanged (failed == []). Router mounted alone; since the ent#124 extraction the deploy orchestration lives in services.system_service.deploy_manifest, so config fns/db are patched on services.system_service and agent creation via the _default_create_agent_fn seam."
+    },
+    {
+      "file": "unit/test_ent124_default_system_seed.py",
+      "feature": "trinity-enterprise#124",
+      "added": "2026-07-24",
+      "categories": [
+        "backend",
+        "systems",
+        "unit",
+        "infrastructure"
+      ],
+      "description": "First-run default-system seeder (ent#124): the REAL bundled config/manifests/default-system.yaml validates through the executor's own parse_manifest/validate_manifest (acme trio, full-mesh, no schedules, no prompt) and every local: template it references exists in-tree (learnings 2026-07-23 blank-agent trap); durable default_system_seeded flag gating (deleted fleet never resurrected); persisted first_run_fresh verdict \u2014 computed once BEFORE Cornelius runs, persisted, reused on later passes (cross-pass count-poisoning bug), cornelius_seeded=true forces not-fresh (ent#107-era installs get no fleet), count failure defers without persisting; TRINITY_DEFAULT_SYSTEM_MANIFEST disable sentinels skip without burning the flag; override path used when set, unreadable override fails loudly (operator-queue alert, no bundled fallback, no flag); flag policy per deploy outcome: deployed/partial set flag (+partial alert), failed (0 created)/exception do NOT (retry-safe); existence backstop converges the flag without deploying when any {system}-{short} name is reserved (suffix double-seed guard for the fail-open lock); SETNX lock held->skip / winner deploys+releases; orchestrator never raises when Cornelius explodes. db/docker/redis/deploy_manifest seams patched; no Docker/backend."
     }
   ]
 }

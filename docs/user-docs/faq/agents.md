@@ -10,6 +10,10 @@ Three ways, all equivalent: in the UI, click **Create Agent** on the Dashboard o
 
 Yes. Use the `github:Org/repo` template format, and append `@branch` to build from a specific branch: `github:Org/repo@branch`. Private repositories require a GitHub personal access token configured before you use them as a template source. See [Creating Agents](../agents/creating-agents.md) and [GitHub PAT Setup](../integrations/github-pat-setup.md).
 
+## Can I create an agent from a public GitHub repository without a token?
+
+Yes. A `github:owner/repo` template that points at a **public** repository clones anonymously — no personal access token required. This is source-mode only, though: without a token the agent can read and run the template but cannot push its changes back, and features that write to GitHub (the working-branch auto-sync heartbeat, fork-to-own) stay unavailable until you add a token. Add a per-agent or personal PAT later to unlock write access. See [Creating Agents](../agents/creating-agents.md) and [GitHub PAT Setup](../integrations/github-pat-setup.md).
+
 ## Do I need to write my own template to create an agent?
 
 No. The Templates page ships a curated **Starter Templates** section (recommended starters: `scout`, `sage`, `scribe`) auto-discovered from the platform's `config/agent-templates/` directory, plus any GitHub templates an admin has configured as cards. If you want a blank slate, choose **From Scratch** — it creates a minimal agent with a default `CLAUDE.md` you can build on. See [Creating Agents](../agents/creating-agents.md).
@@ -38,13 +42,23 @@ A plain stop/start keeps the same container, so everything in it survives — ex
 
 No. Deleting stops and removes the container immediately, but it is a soft delete: the workspace volumes, schedules, chat history, sharing records, permissions, and credentials are all preserved until a retention sweep purges them (default: 180 days). Schedules stop firing right away. During the retention window an admin can recover the agent — recovery restores the record but does not recreate the container, so start the agent afterwards. See [Managing Agents](../agents/managing-agents.md).
 
-## Why can't I create a new agent with the same name as one I just deleted?
+## Can I create a short-lived, disposable agent that cleans itself up?
+
+Yes, with an enterprise-tier feature: a disposable ("ghost") agent is created with a hard budget — a maximum number of runs and/or a time limit. When the budget is spent it is discarded immediately and completely: the container and its data are removed with no soft-delete window and no reserved name. This is aimed at one-off jobs, often spawned on demand by another agent, rather than long-lived agents you manage by hand. In a community build agents are always long-lived (no budget). See [Managing Agents](../agents/managing-agents.md).
 
 Because deletion is a soft delete, the old agent's record still exists and reserves the name until the retention sweep purges it (default: 180 days). Pick a different name, or ask an admin to recover the soft-deleted agent if you actually want it back. See [Managing Agents](../agents/managing-agents.md).
 
 ## What happens when I rename an agent?
 
 Renaming is atomic: Trinity updates the agent's name across every database record that references it (schedules, executions, chat history, sharing, permissions, tags, skills, shared files, and more), renames the Docker container, and broadcasts the change live over WebSocket. Click the pencil icon next to the agent name on the Agent Detail page, or use `PUT /api/agents/{name}/rename` / the MCP tool `rename_agent`. Only owners and admins can rename, and system agents cannot be renamed. See [Managing Agents](../agents/managing-agents.md).
+
+## How do I change an agent's friendly display name without renaming it?
+
+Set a **display label**. The label is the human-facing name shown across the UI — the header, agent pickers, search, sort, and the activity timeline — and editing it never moves the immutable slug, so URLs, MCP tool names, schedules, and webhooks all keep working. It's owner-only, and clearing it back to blank falls back to showing the slug. This is the change you want for everyday relabeling. See [Managing Agents](../agents/managing-agents.md).
+
+## What's the difference between renaming an agent and giving it a display label?
+
+Renaming moves the immutable slug — the agent's canonical name that URLs, MCP tool names, schedules, and webhooks all resolve to — so it's the heavier operation and rewrites records across the platform. A display label is a presentation-only friendly name layered on top of the unchanged slug. Prefer the label for day-to-day relabeling and reserve a rename for when you genuinely need the canonical name to change. See [Managing Agents](../agents/managing-agents.md).
 
 ## How do I limit how much CPU and memory an agent can use?
 
@@ -68,7 +82,7 @@ Export the agent's runtime data with `POST /api/agents/{name}/data/export` (or t
 
 ## Can I get shell access to my agent's container?
 
-Yes, via SSH — but it is admin-only and disabled by default. An admin first enables `ssh_access_enabled` under Settings → Ops Settings, then generates ephemeral credentials with `POST /api/agents/{name}/ssh-access` or the MCP tool `get_agent_ssh_access`; both key-based and password-based access are supported and expire automatically after their TTL. Agents listen on incrementing SSH ports starting at 2222. See [Agent Terminal](../agents/agent-terminal.md).
+Yes, via SSH — but it is admin-only and disabled by default. An admin first enables `ssh_access_enabled` under Settings → Ops Settings, then generates ephemeral credentials with `POST /api/agents/{name}/ssh-access` or the MCP tool `get_agent_ssh_access`. Access is **key-based only** — you supply your own public key and the server never handles a private key (the old password option was removed; the agent's SSH daemon rejects password auth). Credentials expire automatically after their TTL, which is now enforced on the container itself, not just in metadata. Agents listen on incrementing SSH ports starting at 2222. See [Agent Terminal](../agents/agent-terminal.md).
 
 ## How do I browse and edit the files inside my agent's workspace?
 

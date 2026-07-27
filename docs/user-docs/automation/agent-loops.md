@@ -40,14 +40,17 @@ The panel updates in real time via WebSocket events as each run completes, with 
 | Status | Meaning |
 |--------|---------|
 | `queued` / `running` | Loop active; iterations dispatching |
-| `completed` | Reached max runs, or the stop signal matched |
+| `completed` | Reached max runs, or the stop signal matched — with no failed iterations |
+| `completed_with_errors` | A `continue`-mode loop reached its run limit (or matched its stop signal) with at least one tolerated failure along the way |
 | `stopped` | Stopped by a user, or the cost budget (`max_cost_usd`) was met/exceeded at a run boundary; the in-flight iteration finished first |
-| `failed` | An iteration failed (task error or exception) — the loop aborts at that iteration |
+| `failed` | The loop aborted on a failed iteration — in `abort` mode at the first failure, or in `continue` mode after `max_consecutive_failures` consecutive failures |
 | `interrupted` | The backend restarted mid-loop; loops do **not** auto-resume |
 
 ### Observability
 
 Every iteration is a normal execution: it creates its own row with `triggered_by: "loop"` and the parent `loop_id`, visible on the Executions page and per-execution detail view. In analytics timeline views (the agent's Overview tab and execution charts), loop executions appear as their own **Loops** category with a distinct color — they are not folded into Scheduled.
+
+The loop record also reports `failed_runs` — the count of tolerated failures. It is always `0` in `abort` mode (the first failure ends the loop); in `continue` mode it counts every iteration that failed but was tolerated, and it is what distinguishes a clean `completed` from a `completed_with_errors` finish.
 
 ## Common Patterns
 
@@ -120,6 +123,17 @@ Until mode is only as reliable as the stop condition you write. Three rules:
 
 And once a loop is running, **watch for stalls**: if consecutive responses are near-identical (same failure, same output, no state change), the loop is burning budget without progress. Stop it rather than letting it run to the cap.
 
+## Handling Failures
+
+The `on_failure` policy decides what happens when an iteration fails (a task error or an exception):
+
+- **`abort`** (default) — fail fast. The first failed iteration ends the loop with status `failed`; remaining runs are skipped. Use this when each iteration depends on the last succeeding, or when a failure means the whole batch is invalid.
+- **`continue`** — tolerate failures and keep going. A failed iteration does not stop the loop; the next run starts as usual. This is bounded by `max_consecutive_failures` (default 3): once that many iterations fail *in a row*, the loop aborts with status `failed`. Any success resets the streak to zero. Use this for independent work items — draining a backlog where one bad item shouldn't kill the run.
+
+A `continue`-mode loop that reaches its run limit (or matches its stop signal) with at least one tolerated failure finishes as `completed_with_errors`, and reports how many iterations it tolerated via `failed_runs`.
+
+`{{previous_response}}` always carries the last **successful** response — a failed iteration never overwrites it, so chaining survives a tolerated failure.
+
 ## For Agents
 
 Agents (and scripts) start loops via MCP tools or REST. The permission model matches `chat_with_agent`: owner, admin, or shared access on the target agent; agent-scoped MCP keys need an explicit permission grant.
@@ -180,6 +194,8 @@ curl -X POST http://localhost:8000/api/agents/my-agent/loops \
 | `delay_seconds` | 0 | 0–3600 | Pause between iterations |
 | `timeout_per_run` | agent's execution timeout | 10–7200 | Per-iteration timeout in seconds |
 | `max_cost_usd` | none (no budget) | > 0 | Total USD spend budget; checked **between runs** (the current run always finishes). Stops with reason `budget exhausted` once spend meets/exceeds it. Runs reporting no cost count as `$0`. |
+| `on_failure` | `abort` | `abort` \| `continue` | Failure policy. `abort` stops at the first failed iteration; `continue` tolerates a failed iteration and proceeds |
+| `max_consecutive_failures` | 3 | 1–100 | `continue` mode only: abort the loop (`failed`) after this many failed iterations in a row. The streak resets on any success |
 | `model` | agent default | — | Model override applied to every iteration |
 | `allowed_tools` | unrestricted | — | Tool restrictions applied to every iteration |
 
@@ -187,7 +203,7 @@ curl -X POST http://localhost:8000/api/agents/my-agent/loops \
 
 - **One agent, sequential** — A loop targets a single agent and never runs iterations in parallel. For parallel batches, use [Fan-Out](fan-out.md).
 - **Shared capacity** — Each iteration goes through the agent's normal capacity admission and counts against its `max_parallel_tasks` budget alongside chat, schedules, and other traffic.
-- **Fail-fast** — Any failed iteration ends the loop with status `failed`; remaining runs are skipped.
+- **Failure policy** — `abort` (default) stops the loop with status `failed` at the first failed iteration. `continue` tolerates failed iterations and proceeds, but still aborts (`failed`) after `max_consecutive_failures` consecutive failures — the streak resets on any success. See [Handling Failures](#handling-failures).
 - **No resume after restart** — A backend restart marks in-flight loops `interrupted`. They do not auto-resume; start a new loop.
 - **Stop is not instant** — The in-flight iteration always finishes; only subsequent iterations are skipped.
 - **Bounded inputs** — `max_runs` is capped at 100, delay at 1 hour, and per-run timeout at 2 hours.
@@ -196,6 +212,7 @@ curl -X POST http://localhost:8000/api/agents/my-agent/loops \
 
 - [trinity Plugin](../abilities/trinity-plugin.md) — `/trinity:loop`, the conversational entry point from Claude Code
 - [Fan-Out](fan-out.md) — Parallel batch counterpart
+- [Agent Self-Reminders](agent-reminders.md) — The time-deferred sibling: a one-shot, durable, agent-scheduled follow-up
 - [Scheduling](scheduling.md) — Cron-based recurring tasks; the right tool for cadences slower than 1 hour
 - [Executions](../operations/executions.md) — Where each loop iteration appears
 - [Agent Configuration](../agents/agent-configuration.md) — Execution timeout and parallel task limits

@@ -1,6 +1,6 @@
 # Dashboard
 
-The main Dashboard at `/` monitors all agents and their activities in real time. Switch between three view modes with the toggle in the top-right — **Grid**, **Graph**, and **Timeline**. Timeline is the default; your choice persists per browser in `localStorage['trinity-dashboard-view']`.
+The main Dashboard at `/` monitors all agents and their activities in real time. Switch between two view modes with the toggle in the top-right — **Grid** and **Timeline**. Timeline is the default; your choice persists per browser in `localStorage['trinity-dashboard-view']`. (A previously saved `graph` preference now falls back to the default.)
 
 > 📺 **Watch:** [The Multi-Agent Platform I Run My Company On](https://youtu.be/8j6q-kABRqc) *(May 2026)* · [all videos](../videos.md)
 
@@ -18,19 +18,6 @@ A magnetic tile canvas — the fleet as a grid of agent cards rather than a grap
 4. Pan by dragging the background; zoom with the scroll wheel or pinch. Tiles are keyboard-navigable.
 5. Tile metrics hydrate lazily as they scroll into view, so large fleets stay responsive.
 
-### Graph View
-
-![Trinity Dashboard — Graph view showing 13 agents as a live network](../images/dashboard-graph-view.png)
-
-1. Shows all agents as draggable nodes in a network graph (Vue Flow).
-2. Node colors indicate status: running (green), stopped (gray).
-3. Animated edges appear when agents communicate (3-second animation).
-4. Each node displays the agent name, avatar, success rate bar, and status indicator.
-5. Drag nodes to rearrange -- positions persist in localStorage.
-6. Host telemetry (CPU/memory/disk) is displayed in the header.
-7. Capacity meter shows parallel execution slot usage.
-8. Tag clouds group agents visually — click a cloud to filter to that group.
-
 ### Timeline View (default)
 
 ![Trinity Dashboard — Timeline view showing live executions across oracle and market agents](../images/dashboard-timeline-live.png)
@@ -42,6 +29,8 @@ A magnetic tile canvas — the fleet as a grid of agent cards rather than a grap
 6. Time range filter: 1h, 6h, 24h, 7d, or custom.
 7. **Active only** toggle hides agents with no recent activity.
 8. **Jump to Now** snaps the view to the current time.
+
+Agent-to-agent collaboration is surfaced here — in the Timeline replay via the Agent-Triggered trigger type — rather than as a live node graph.
 
 ### Tag Clouds
 

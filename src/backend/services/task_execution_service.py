@@ -46,6 +46,7 @@ from services.capacity_manager import (
 )
 from services.dispatch_breaker import DispatchBreaker
 from services import event_dispatch_service
+from services import channel_completion_report
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from services.settings_service import settings_service
 from utils.credential_sanitizer import sanitize_dict, sanitize_execution_log, sanitize_response, sanitize_text
@@ -841,6 +842,16 @@ async def _write_terminal_and_gate(
             terminal_status=status,
             summary_or_error=error,
             cost=cost,
+        )
+        # ent#224: tell the originating Slack channel/thread the job ended.
+        # Failure terminals report too — a silent failure is the bug this closes.
+        # No-ops unless the execution INHERITED channel context (never for an
+        # inline channel turn, which the adapter already answered).
+        channel_completion_report.spawn_completion_report(
+            execution_id=execution_id,
+            agent_name=agent_name,
+            status=str(getattr(status, "value", status)),
+            summary_or_error=error,
         )
     return won
 
@@ -1898,6 +1909,14 @@ class TaskExecutionService:
                 summary_or_error=sanitized_resp,
                 duration_ms=envelope.execution_time_ms,
                 cost=total_cost,
+            )
+            # ent#224: report the finished job back to its originating Slack
+            # channel/thread (no-op unless the context was inherited).
+            channel_completion_report.spawn_completion_report(
+                execution_id=eid,
+                agent_name=agent_name,
+                status="success",
+                summary_or_error=sanitized_resp,
             )
 
             return TaskExecutionResult(

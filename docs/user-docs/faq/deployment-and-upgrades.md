@@ -30,6 +30,10 @@ Add `FRONTEND_PORT=8090` (or any free port) to `.env` and restart. Only the host
 
 You must set `ADMIN_PASSWORD` yourself — `start.sh` refuses to boot without it, because a generated password would lock you out of your own instance. If left blank, the script auto-generates `SECRET_KEY`, `INTERNAL_API_SECRET`, `CREDENTIAL_ENCRYPTION_KEY`, and `AGENT_AUTH_SECRET`, generates the two Redis passwords on a fresh install (it refuses if a populated Redis volume already exists), auto-detects `DOCKER_GID`, and even copies `.env.example` to `.env` if the file is missing. For production, the single-server guide recommends generating all secrets explicitly with `openssl rand` before first boot, and you'll also want `ANTHROPIC_API_KEY`, an email provider, and `FRONTEND_URL`/`PUBLIC_CHAT_URL`. See [Single-Server Deployment](../guides/deploying/single-server.md).
 
+## Can I have an AI agent install Trinity for me, or run a no-prompt install?
+
+Yes. Run `./scripts/deploy/start.sh --unattended` (or set `TRINITY_UNATTENDED=1`) for a no-prompt local install: the happy path never stops to ask for input, and the script auto-generates the `admin` password (and any missing secrets), then prints the admin password in the final summary. Save it — it is stored in `.env` and shown only once. You can also have Claude Code drive the entire local install for you: point it at the versioned runbook at `docs/AGENT_INSTALL_GUIDE.md`, a deterministic step-by-step guide that stays in sync with the installer. See [Local Development](../guides/deploying/local-development.md).
+
 ## What happens if I lose or change my credential encryption key?
 
 All encrypted credentials — OAuth tokens, channel bot tokens (Slack, Telegram, WhatsApp), and subscription credentials — become permanently unrecoverable. Once `CREDENTIAL_ENCRYPTION_KEY` is set, never edit or delete it casually; a deliberate key rotation is possible via a decrypt-only secondary key and the `scripts/deploy/rotate-credential-key.py` runbook, but that's a planned procedure, not a config tweak. This is also why backing up `.env` alongside the database matters — the file is gitignored, so losing the host means losing the key. See [Backup and Restore](../guides/deploying/backup-and-restore.md).
@@ -65,6 +69,10 @@ Stop the writers first — `docker compose stop backend scheduler` — to releas
 ## Where does Trinity actually store my data?
 
 Platform state lives in `trinity.db`: in the named Docker volume `trinity_trinity-data` on a dev install, or in the bind-mount directory set by `TRINITY_DATA_PATH` (default `./trinity-data`; an absolute path like `/srv/trinity-data` is recommended) in production. It holds agents, schedules, chat history, user accounts, the audit log, and encrypted channel tokens. Each agent additionally gets its own Docker volumes — a durable home/workspace volume that survives container recreation — while Redis holds only ephemeral runtime state and agent source code lives in git. All of it survives `docker compose down`/`up` cycles. See [Backup and Restore](../guides/deploying/backup-and-restore.md).
+
+## How long does Trinity keep my data, and is there a minimum I can't accidentally drop below?
+
+Retention windows are configurable per data type — execution logs and rows, health checks, agent reports, terminal operator-queue items, and soft-deleted agents and schedules — and any window can be set to `0` to disable that sweep. Fresh community installs are seeded with a 5-day minimum on the log windows so you don't lose data by default; that floor reaches new installs only (it is never a retroactive change, and the agent soft-delete window is exempt in every edition because its purge destroys data volumes). A blast-radius guard is the backstop against a misconfiguration: any sweep that would delete more than a fixed threshold of a table's rows is blocked and raises an alarm until an admin approves it in Settings → the retention panel. See [Monitoring](../operations/monitoring.md).
 
 ## Should I use SQLite or PostgreSQL?
 

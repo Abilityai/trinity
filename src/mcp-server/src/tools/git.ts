@@ -114,6 +114,15 @@ export function createGitTools(client: TrinityClient, requireApiKey: boolean) {
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         console.log(`[${toolName}] conflict (${error.conflictType ?? "unknown"}) on '${agentName}'`);
+        // ent#123: `no_write_credentials` is a credentials gap, not a git
+        // conflict — an LLM turn cannot fix it, so don't send the caller to
+        // chat_with_agent. Surface the backend's actionable detail verbatim.
+        const hint =
+          error.conflictType === "no_write_credentials"
+            ? "This agent has no push credentials. A chat turn cannot fix this — " +
+              "fork-to-own a new agent (importing this agent's data) or add a GitHub token."
+            : "This git operation hit a conflict that can't be resolved deterministically. " +
+              `Resolve it via chat_with_agent(agent_name="${agentName}", ...).`;
         return JSON.stringify(
           {
             error: "conflict",
@@ -121,9 +130,7 @@ export function createGitTools(client: TrinityClient, requireApiKey: boolean) {
             conflict_type: error.conflictType,
             conflict_class: error.conflictClass,
             detail: error.message,
-            hint:
-              "This git operation hit a conflict that can't be resolved deterministically. " +
-              `Resolve it via chat_with_agent(agent_name="${agentName}", ...).`,
+            hint,
           },
           null,
           2,

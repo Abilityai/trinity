@@ -9,6 +9,48 @@ echo "Trinity Agent Platform - Starting"
 echo "====================================="
 echo ""
 
+# --- Mode + pre-flight (#39: agent-driven one-shot install) -------------------
+# Unattended/agent mode removes interactive hard-stops — required inputs are
+# auto-generated-and-surfaced instead of prompting. An agent installing Trinity
+# passes TRINITY_UNATTENDED=1 or --unattended so the happy path never blocks on
+# a TTY. Whatever gets generated is echoed back in the final summary.
+UNATTENDED="${TRINITY_UNATTENDED:-0}"
+for _arg in "$@"; do [ "$_arg" = "--unattended" ] && UNATTENDED=1; done
+
+# Fail fast with ONE consolidated, actionable message rather than crashing
+# mid-run. Docker daemon + Compose v2 are hard requirements. `docker info` also
+# doubles as the "daemon actually reachable" check the DOCKER_GID probe and
+# `compose up` below both assume.
+_preflight_problems=()
+if ! docker info >/dev/null 2>&1; then
+    _preflight_problems+=("Docker daemon not reachable — start Docker Desktop (macOS) or 'sudo systemctl start docker' (Linux), then re-run.")
+fi
+if ! docker compose version >/dev/null 2>&1; then
+    _preflight_problems+=("Docker Compose v2 missing — upgrade Docker so the 'docker compose' plugin is present ('docker-compose' v1 is not supported).")
+fi
+if [ ${#_preflight_problems[@]} -gt 0 ]; then
+    echo "❌ Pre-flight checks failed:" >&2
+    for _p in "${_preflight_problems[@]}"; do echo "   • ${_p}" >&2; done
+    echo "" >&2
+    exit 1
+fi
+
+# Port conflicts are a WARNING, not a hard stop: on a re-run Trinity itself
+# holds these ports (idempotent bring-up), so failing would break the common
+# "start.sh again" case. `bash /dev/tcp` is portable (no lsof/ss/nc dependency);
+# the redirect is guarded so `set -e` never trips on a free port.
+_port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1 && exec 3>&- 3<&- ; }
+_busy_ports=()
+for _pp in 80 8000 8080 6379; do _port_busy "$_pp" && _busy_ports+=("$_pp"); done
+if [ ${#_busy_ports[@]} -gt 0 ]; then
+    echo "ℹ️  Ports already in use: ${_busy_ports[*]}."
+    echo "    If this is a re-run, that's expected — they're Trinity's own containers."
+    echo "    If it's a fresh install and something else owns them, stop that service"
+    echo "    (or set FRONTEND_PORT= in .env for the Web UI) before continuing."
+    echo ""
+fi
+# -----------------------------------------------------------------------------
+
 if [ ! -f .env ]; then
     echo "⚠️  No .env file found. Creating from template..."
     cp .env.example .env
@@ -46,17 +88,40 @@ ensure_hex32_secret INTERNAL_API_SECRET
 # shift and the running fleet would 401 until recreated.
 ensure_hex32_secret AGENT_AUTH_SECRET
 
-# ADMIN_PASSWORD has no sensible default — operator must choose. Fail fast
-# rather than booting into a state the operator can't log into. (#443)
+# ADMIN_PASSWORD has no sensible default. Interactively we fail fast rather than
+# boot into a state the operator can't log into (#443). Unattended (#39), we
+# generate a strong one and surface it in the final summary so an agent-run
+# install never hard-stops on a TTY.
+GENERATED_ADMIN_PASSWORD=""
 if ! grep -qE '^ADMIN_PASSWORD=.+' .env 2>/dev/null; then
-    cat >&2 <<EOF
+    if [ "$UNATTENDED" = "1" ]; then
+        GENERATED_ADMIN_PASSWORD=$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 24)
+        if grep -qE '^ADMIN_PASSWORD=$' .env 2>/dev/null; then
+            sed -i.bak "s|^ADMIN_PASSWORD=$|ADMIN_PASSWORD=${GENERATED_ADMIN_PASSWORD}|" .env && rm -f .env.bak
+        else
+            echo "ADMIN_PASSWORD=${GENERATED_ADMIN_PASSWORD}" >> .env
+        fi
+        echo "Auto-generated ADMIN_PASSWORD (unattended) — shown in the summary below."
+    else
+        cat >&2 <<EOF
 
 ERROR: ADMIN_PASSWORD is blank in .env.
        Choose a strong password (12+ chars; the backend will reject
        weak defaults like "password" or "admin"), then re-run start.sh.
+       For an unattended/agent-run install, pass --unattended (or set
+       TRINITY_UNATTENDED=1) and one will be generated and printed for you.
 
 EOF
-    exit 1
+        exit 1
+    fi
+fi
+
+# A model API key isn't required to BOOT (the stack starts fine), but agents
+# can't run without one. Warn now and surface it in the summary rather than let
+# the user discover it only when their first agent fails. (#39)
+MODEL_KEY_MISSING=0
+if ! grep -qE '^(ANTHROPIC_API_KEY|GOOGLE_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)=.+' .env 2>/dev/null; then
+    MODEL_KEY_MISSING=1
 fi
 
 # Issue #589 — Redis passwords are mandatory.
@@ -255,35 +320,90 @@ fi
 echo "Starting services..."
 docker compose up -d
 
-echo ""
-echo "Waiting for services to be ready..."
-sleep 5
-
-echo ""
-echo "====================================="
-echo "Trinity Agent Platform - Ready!"
-echo "====================================="
-echo ""
-# Read FRONTEND_PORT from .env or use default
+# Read FRONTEND_PORT from .env or use default (needed for the serving check + URL).
 FRONTEND_PORT=${FRONTEND_PORT:-$(grep -E '^FRONTEND_PORT=' .env 2>/dev/null | cut -d'=' -f2 || echo "80")}
 FRONTEND_PORT=${FRONTEND_PORT:-80}
 
-echo "Access points:"
-if [ "$FRONTEND_PORT" = "80" ]; then
-    echo "  - Web UI:       http://localhost (login: admin / ADMIN_PASSWORD from .env)"
+# Verify the stack is actually SERVING, not just "containers started" (#39).
+# Poll the backend health endpoint (authoritative — it's up only after DB
+# migrations + lifespan init) and the Web UI. Bounded so a wedged boot doesn't
+# hang an agent-run install forever; a timeout downgrades to a warning, not a
+# hard failure, because the containers may still be finishing (image pulls, etc).
+echo ""
+echo "Waiting for the stack to come up (migrations + health)..."
+SERVING_OK=0
+_deadline=$(( $(date +%s) + 180 ))
+while [ "$(date +%s)" -lt "$_deadline" ]; do
+    if curl -fsS -m 3 "http://localhost:8000/health" >/dev/null 2>&1; then
+        SERVING_OK=1
+        break
+    fi
+    sleep 3
+    printf '.'
+done
+echo ""
+
+echo ""
+echo "====================================="
+if [ "$SERVING_OK" = "1" ]; then
+    echo "Trinity Agent Platform - Ready! ✅"
 else
-    echo "  - Web UI:       http://localhost:$FRONTEND_PORT (login: admin / ADMIN_PASSWORD from .env)"
+    echo "Trinity Agent Platform - Started (not yet serving) ⚠️"
 fi
+echo "====================================="
+echo ""
+if [ "$SERVING_OK" != "1" ]; then
+    echo "⚠️  The backend health check at http://localhost:8000/health did not"
+    echo "    respond within 180s. Containers are up but may still be initializing"
+    echo "    (first-run image build / migrations). Check:  docker compose logs -f backend"
+    echo "    Re-running start.sh is safe once it settles."
+    echo ""
+fi
+
+# Web UI URL (used in the summary below).
+if [ "$FRONTEND_PORT" = "80" ]; then
+    WEB_UI_URL="http://localhost"
+else
+    WEB_UI_URL="http://localhost:$FRONTEND_PORT"
+fi
+
+echo "Access points:"
+echo "  - Web UI:       ${WEB_UI_URL}"
 echo "  - Backend API:  http://localhost:8000/docs"
 echo "  - MCP Server:   http://localhost:8080/mcp"
 echo ""
-echo "To view logs:"
-echo "  docker compose logs -f"
+
+# --- Next steps card (#39) ----------------------------------------------------
+echo "── Your next steps ──────────────────────────────────────────────────────"
 echo ""
-echo "To stop services:"
-echo "  docker compose stop"
+echo "  1. Open the Web UI:  ${WEB_UI_URL}"
+if [ -n "$GENERATED_ADMIN_PASSWORD" ]; then
+    echo "     Log in as 'admin' with this AUTO-GENERATED password (save it now —"
+    echo "     it is stored in .env as ADMIN_PASSWORD and won't be shown again):"
+    echo ""
+    echo "         admin / ${GENERATED_ADMIN_PASSWORD}"
+    echo ""
+else
+    echo "     Log in as 'admin' with the ADMIN_PASSWORD from your .env, then"
+    echo "     complete the first-run setup wizard (admin email + whitelist)."
+fi
+echo "  2. Install the agent-dev plugins (in Claude Code):"
+echo "         /plugin marketplace add abilityai/abilities"
+echo "         /plugin install trinity@abilityai"
+echo "     then run  /trinity:onboard  to build & connect your first agent."
+echo "  3. Or create an agent straight from the UI: Create Agent → pick a template."
+if [ "$MODEL_KEY_MISSING" = "1" ]; then
+    echo ""
+    echo "  ⚠️  No model API key detected in .env — agents can't run until you set one."
+    echo "     Add ANTHROPIC_API_KEY=... (or GOOGLE_API_KEY / a Claude subscription"
+    echo "     token) to .env and re-run start.sh, or set it in Settings after login."
+fi
 echo ""
-echo "NOTE: Use 'stop' not 'down' — 'down' destroys agent containers."
+echo "─────────────────────────────────────────────────────────────────────────"
+echo ""
+echo "To view logs:      docker compose logs -f"
+echo "To stop services:  docker compose stop"
+echo "  (use 'stop', NOT 'down' — 'down' destroys agent containers)"
 echo ""
 echo "Just pulled new code? If services fail with ModuleNotFoundError or"
 echo "the UI shows 'Disconnected', the platform images may be stale —"

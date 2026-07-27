@@ -189,6 +189,17 @@ const routes = [
     meta: { requiresAuth: true, requiresEntitlement: 'audit', title: 'Audit Log' }
   },
   {
+    // Shared sessions / rooms (ent#170, backend ent#169). Top-level view — a
+    // room spans multiple agents, so it is NOT an Agent Detail tab. Gated Vue in
+    // the OSS bundle (portal precedent): the route + NavBar entry only appear
+    // when `shared_sessions` is in enterprise_features; the guard below catches a
+    // direct URL. `:roomId?` makes a session deep-linkable / refresh-safe.
+    path: '/sessions/:roomId?',
+    name: 'Sessions',
+    component: () => import('../views/enterprise/Sessions.vue'),
+    meta: { requiresAuth: true, requiresEntitlement: 'shared_sessions', title: 'Sessions' }
+  },
+  {
     // Public client-facing portal — a client signs in with a verified email
     // (no platform account) and sees the agents shared with them. Standalone
     // (no NavBar / platform chrome), no requiresAuth. Backend 404s in

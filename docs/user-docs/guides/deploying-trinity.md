@@ -42,6 +42,8 @@ Done. Your agent is now running on ability.ai.
 
 ## Option B: Self Hosted
 
+> **Tip:** the local install can run one-shot with `./scripts/deploy/start.sh --unattended` (auto-generates and prints the admin password), or be driven end to end by an AI coding agent via the runbook at [`docs/AGENT_INSTALL_GUIDE.md`](../../AGENT_INSTALL_GUIDE.md).
+
 ### Requirements
 
 - Docker Desktop (or Docker + Docker Compose)

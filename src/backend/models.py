@@ -3,6 +3,7 @@ Pydantic models for the Trinity backend API.
 """
 import os
 import re
+import unicodedata
 
 from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator
 from typing import Dict, List, Literal, Optional
@@ -86,7 +87,11 @@ class EphemeralConfig(BaseModel):
 
 class AgentConfig(BaseModel):
     """Configuration for creating a new agent."""
-    name: str
+    name: str  # the immutable slug — every route/container/volume/key keys on it
+    # ent#1640: optional human-facing display label set AT creation. Presentation
+    # only; None → the agent renders under its slug (exactly today's behavior).
+    # Same normalization + named validation as the post-creation PUT /label.
+    display_label: Optional[str] = None
     type: Optional[str] = "business-assistant"
     base_image: str = "trinity-agent-base:latest"
     resources: Optional[dict] = {"cpu": "2", "memory": "4g"}
@@ -113,6 +118,42 @@ class AgentConfig(BaseModel):
     # hard-discarded at budget. Entitlement-gated at the creation path.
     ephemeral: Optional[EphemeralConfig] = None
 
+    @field_validator("display_label")
+    @classmethod
+    def _normalize_display_label(cls, v: Optional[str]) -> Optional[str]:
+        return normalize_display_label(v)
+
+
+# ent#181/#1640 — the human-facing display label. Shared normalization + a
+# NAMED validation error (not a generic 422 blob), used everywhere a label is
+# accepted (set-after-creation AND at creation), so the policy lives in one place.
+DISPLAY_LABEL_MAX_LEN = 120
+
+
+def normalize_display_label(value: Optional[str]) -> Optional[str]:
+    """Trim, empty→None (clear), reject control chars / line breaks, cap length.
+
+    Uniqueness is deliberately NOT enforced — the slug (`agent_name`) already
+    guarantees uniqueness; a display label is a presentation string that may
+    legitimately repeat across agents (#1640). Raises ``ValueError`` with a
+    specific message on bad input so callers surface a named error.
+    """
+    if value is None:
+        return None
+    # Normalize to NFC so visually-identical labels compare/store consistently.
+    value = unicodedata.normalize("NFC", value).strip()
+    if not value:
+        return None  # blank clears the label → render under the slug again
+    if len(value) > DISPLAY_LABEL_MAX_LEN:
+        raise ValueError(
+            f"display label must be at most {DISPLAY_LABEL_MAX_LEN} characters"
+        )
+    # A display name is a single line: reject control chars (category Cc, incl.
+    # \n\t\r) and the Unicode line/paragraph separators.
+    if any(unicodedata.category(ch) == "Cc" or ch in (" ", " ") for ch in value):
+        raise ValueError("display label must not contain control characters or line breaks")
+    return value
+
 
 class AgentLabelUpdate(BaseModel):
     """PUT body — set or clear an agent's human-facing label (ent#181).
@@ -121,7 +162,12 @@ class AgentLabelUpdate(BaseModel):
     again. Presentation only: the slug never moves, which is the entire point —
     a slug rename re-keys ~20 tables and strands the agent's volumes (#1664).
     """
-    label: Optional[str] = Field(default=None, max_length=120)
+    label: Optional[str] = None
+
+    @field_validator("label")
+    @classmethod
+    def _normalize_label(cls, v: Optional[str]) -> Optional[str]:
+        return normalize_display_label(v)
 
 
 class AgentStatus(BaseModel):
@@ -207,6 +253,11 @@ class ParallelTaskRequest(BaseModel):
     resume_session_id: Optional[str] = None  # Claude Code session ID to resume (EXEC-023)
     inject_result: Optional[bool] = False  # If true and self-task, inject result as message in originating chat session (SELF-EXEC-001)
     files: Optional[List[WebFileUpload]] = None  # File attachments (#364)
+    # ent#224: the CALLER's current execution id. When agent A delegates to B,
+    # B inherits A's originating channel/thread from this row, so B's completion
+    # can be reported back to the Slack thread the work actually came from.
+    # Optional and fail-open — absent means "no channel context to inherit".
+    parent_execution_id: Optional[str] = None
 
 
 # ============================================================================
@@ -344,6 +395,28 @@ class ReportCreate(BaseModel):
         if self.period_start and self.period_end and self.period_start > self.period_end:
             raise ValueError("period_start must be <= period_end")
         return self
+
+
+class TelemetrySharingUpdate(BaseModel):
+    """PUT body for Tier-2 opt-in fleet sharing consent (ent#12).
+
+    ``enabled`` is the reversible, default-off consent. ``backfill_days`` (only
+    meaningful on enable) is the disclosed history window included in the
+    consent-time backfill share. Anonymized aggregates only — no PII.
+    """
+    enabled: bool
+    backfill_days: Optional[int] = Field(None, ge=0, le=3650)
+
+
+class ProductEventCreate(BaseModel):
+    """Request body for a local product-event beacon (ent#184).
+
+    ``event_type`` is validated against a fixed allow-list at the router (unknown
+    → 422) so the local table can't be spammed with arbitrary strings. Local-only,
+    zero egress — one local row per accepted event.
+    """
+    event_type: str = Field(..., min_length=1, max_length=64)
+    context: Optional[Dict] = None  # small optional metadata (byte-capped at the router)
 
 
 class ReportSummary(BaseModel):
@@ -532,11 +605,25 @@ class SystemDeployRequest(BaseModel):
     """Request to deploy a system from YAML manifest."""
     manifest: str  # Raw YAML string
     dry_run: bool = False
+    # trinity-enterprise#125: abort on the first agent-create failure (legacy
+    # behavior) instead of the default best-effort continue-and-report.
+    strict: bool = False
+
+
+class SystemDeployFailure(BaseModel):
+    """One agent that failed to create during a system deploy (trinity-enterprise#125)."""
+    name: str  # Final (resolved) agent name
+    short_name: str  # Short name from the manifest
+    template: str
+    reason: str  # Sanitized, truncated failure reason
+    status_code: Optional[int] = None  # Original HTTP status when the failure was an HTTPException
 
 
 class SystemDeployResponse(BaseModel):
     """Response from system deployment."""
-    status: str  # "deployed" or "valid" (for dry_run)
+    # "deployed" (all created) | "partial" (some failed) | "failed" (none created)
+    # | "valid" (dry_run) — trinity-enterprise#125
+    status: str
     system_name: str
     agents_created: List[str]  # Final agent names created
     agents_to_create: Optional[List[dict]] = None  # For dry_run: [{name, template}]
@@ -546,6 +633,7 @@ class SystemDeployResponse(BaseModel):
     tags_configured: int = 0  # ORG-001 Phase 4: Number of tags applied
     system_view_created: Optional[str] = None  # ORG-001 Phase 4: View ID if created
     warnings: List[str] = []
+    failed: List[SystemDeployFailure] = []  # trinity-enterprise#125: per-agent create failures
 
 
 # ============================================================================
@@ -871,6 +959,14 @@ class FleetExecutionStats(BaseModel):
     total_cost: float
     success_rate: float
     hours: int  # 0 = all-time
+    # #1743: the slice of the above that belongs to a DELETED agent (soft-deleted
+    # or purged). Execution rows outlive their agent deliberately — cost is
+    # billing truth and a soft-deleted agent is recoverable — but the per-agent
+    # surfaces render only live agents, so these totals would otherwise exceed
+    # the sum of the tiles by an amount nothing on screen explains. Defaults keep
+    # the field additive for any client that predates it.
+    deleted_agent_count: int = 0
+    deleted_agent_cost: float = 0.0
 
 
 class CircuitBreakerConfigUpdate(BaseModel):
@@ -2069,6 +2165,11 @@ class ReminderSummary(BaseModel):
     created_at: str
     fired_at: Optional[str] = None
     cancelled_at: Optional[str] = None
+    # #1806: derived at read time (NOT a column) — true when this reminder is
+    # still live but its agent has autonomy off, so the scheduler will not arm
+    # it. Without this a held reminder is indistinguishable from a healthy one:
+    # `pending` with a fire_at that quietly slides into the past.
+    autonomy_hold: bool = False
 
     class Config:
         from_attributes = True
@@ -2596,6 +2697,11 @@ class TelegramGroupConfigUpdateRequest(BaseModel):
 class TelegramGroupMessageRequest(BaseModel):
     """Request model for proactive group messaging (Issue #349)."""
     message: str
+
+
+class SlackChannelProactiveRequest(BaseModel):
+    """ent#223 — toggle per-channel proactive consent on a Slack channel binding."""
+    allow_proactive: bool
 
 
 class SlackChannelMessageRequest(BaseModel):

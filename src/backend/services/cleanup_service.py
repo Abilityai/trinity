@@ -42,6 +42,17 @@ EXECUTION_STALE_TIMEOUT_MINUTES = 120  # SCHED-ASYNC-001: increased from 30 to s
 # the execution service into the cleanup background loop. The existing descriptive
 # text is preserved after the prefix (substring assertions stay green).
 _LEASE_EXPIRED_TAG = "lease_expired"
+
+# #1714: bulk watchdog sweeps (stale / no-session) fail many rows in one cycle
+# with no per-row context, so they emitted no agent.task.failed event and never
+# woke a subscribed orchestrator (the #1578 residual). We now emit per CAS-won
+# row. To avoid a thundering herd on a large sweep, the emits are paced: after
+# each BATCH the loop yields for PACE_S so N create_task spawns don't fire at
+# once. No row is dropped (unlike a hard cap) — pacing bounds the burst, matching
+# subscription gating in emit_task_terminal_event bounds who is woken, and the
+# cheap has_task_terminal_subscribers() gate makes a no-subscriber sweep free.
+_BULK_TERMINAL_EMIT_BATCH = 50
+_BULK_TERMINAL_EMIT_PACE_S = 0.1
 ACTIVITY_STALE_TIMEOUT_MINUTES = 120  # SCHED-ASYNC-001: increased from 30 to support long-running tasks
 NO_SESSION_TIMEOUT_SECONDS = 60  # Issue #106: fast-fail executions that never got a Claude session
 WATCHDOG_HTTP_TIMEOUT = 15.0  # Timeout for agent HTTP calls during reconciliation (#869: increased from 5s to handle agents under load)
@@ -315,6 +326,7 @@ class CleanupReport:
     # Issue #1449: backlog_metadata PII scrubbed on authoritative-terminal rows
     backlog_metadata_scrubbed: int = 0
     legacy_tool_calls_converted: int = 0  # #1741
+    orphaned_agent_keys_revoked: int = 0  # #1745
     # Issue #834 Phase 1a: soft-deleted agents purged past their retention window
     soft_deleted_agents_purged: int = 0
     # Issue #834 Phase 1b: soft-deleted schedules purged past their retention window
@@ -373,6 +385,7 @@ class CleanupReport:
             "execution_rows_pruned": self.execution_rows_pruned,
             "backlog_metadata_scrubbed": self.backlog_metadata_scrubbed,
             "legacy_tool_calls_converted": self.legacy_tool_calls_converted,
+            "orphaned_agent_keys_revoked": self.orphaned_agent_keys_revoked,
             "health_checks_pruned": self.health_checks_pruned,
             "soft_deleted_agents_purged": self.soft_deleted_agents_purged,
             "soft_deleted_schedules_purged": self.soft_deleted_schedules_purged,
@@ -454,8 +467,14 @@ class CleanupService:
         # blanket-FAILED by them; those sweeps then skip it (no longer `running`).
         # Inert until a PULL_MODE_PILOT_AGENTS agent is opted in.
         await self._sweep_expired_leases(report)
-        self._sweep_stale_executions(report)
-        self._sweep_no_session_executions(report)
+        stale_rows = self._sweep_stale_executions(report)
+        no_session_rows = self._sweep_no_session_executions(report)
+        # #1714: wake subscribers of bulk-swept executions (parity with the
+        # individually-reaped writers). One combined, gated, paced, fail-open emit.
+        await self._emit_bulk_terminal_events(
+            (stale_rows or []) + (no_session_rows or []),
+            "marked failed by cleanup watchdog sweep",
+        )
         self._sweep_orphaned_skipped(report)
         self._sweep_stale_activities(report)
         await self._sweep_stale_slots(report, confirmed_running_ids)
@@ -593,26 +612,85 @@ class CleanupService:
         """
         try:
             agent_timeouts = db.get_all_execution_timeouts()
+            failed_rows: list = []
             count = db.mark_stale_executions_failed(
                 EXECUTION_STALE_TIMEOUT_MINUTES,
                 agent_timeouts=agent_timeouts,
                 buffer_seconds=SLOT_TTL_BUFFER,
+                collect_failed=failed_rows,
             )
             report.stale_executions = count
             if count > 0:
                 logger.info(f"[Cleanup] Marked {count} stale executions as failed")
+            # #1714: emit agent.task.failed for each CAS-won bulk-swept row so a
+            # subscribed orchestrator is woken (parity with individually-reaped
+            # executions). Gated + paced + fail-open in the helper.
+            return failed_rows
         except Exception as e:
             logger.error(f"[Cleanup] Error marking stale executions: {e}")
+            return []
 
     def _sweep_no_session_executions(self, report: CleanupReport) -> None:
         """1b. Fast-fail running executions with no Claude session (Issue #106)."""
         try:
-            count = db.mark_no_session_executions_failed(NO_SESSION_TIMEOUT_SECONDS)
+            failed_rows: list = []
+            count = db.mark_no_session_executions_failed(
+                NO_SESSION_TIMEOUT_SECONDS, collect_failed=failed_rows
+            )
             report.no_session_executions = count
             if count > 0:
                 logger.info(f"[Cleanup] Marked {count} no-session executions as failed")
+            return failed_rows  # #1714: for the completion-event emit
         except Exception as e:
             logger.error(f"[Cleanup] Error marking no-session executions: {e}")
+            return []
+
+    async def _emit_bulk_terminal_events(self, rows: list, reason: str) -> None:
+        """#1714: emit ``agent.task.failed`` for each CAS-won bulk-swept row.
+
+        Closes the #1578 residual — a bulk watchdog sweep now wakes a subscribed
+        orchestrator exactly like an individually-reaped execution does. Properties:
+
+        * **Costs nothing with no subscribers** — one cheap
+          ``has_task_terminal_subscribers()`` gate short-circuits the whole loop
+          (no per-row ``get_execution``/``find_matching`` when nobody listens).
+        * **No thundering herd** — emits are paced in batches of
+          ``_BULK_TERMINAL_EMIT_BATCH`` with a short yield between them, so a large
+          sweep never fires N dispatch tasks at once. No row is dropped.
+        * **All #1578 invariants inherited** — the shared
+          ``spawn_task_terminal_event`` → ``emit_task_terminal_event`` helper does
+          per-agent matching-subscription gating (no row/dispatch when the specific
+          agent has no sub), the reserved ``agent.task.*`` namespace + recursion
+          break (suppresses a ``triggered_by="event"`` origin), and is fail-open.
+        * **Never affects the terminal write** — the FAILED rows are already
+          committed by the sweep; this whole method is best-effort and swallows.
+        """
+        if not rows:
+            return
+        try:
+            if not db.has_task_terminal_subscribers():
+                return  # nobody listening — skip all per-row work
+            emitted = 0
+            for execution_id, agent_name in rows:
+                if not (execution_id and agent_name):
+                    continue
+                event_dispatch_service.spawn_task_terminal_event(
+                    agent_name,
+                    execution_id,
+                    terminal_status=TaskExecutionStatus.FAILED,
+                    summary_or_error=reason,
+                )
+                emitted += 1
+                if emitted % _BULK_TERMINAL_EMIT_BATCH == 0:
+                    # Pace the herd: yield so the just-spawned dispatch tasks run
+                    # before the next batch is queued.
+                    await asyncio.sleep(_BULK_TERMINAL_EMIT_PACE_S)
+            if emitted:
+                logger.info(
+                    "[#1714] Emitted %d bulk-sweep agent.task.failed event(s)", emitted
+                )
+        except Exception as e:  # fail-open: never affect the sweep's terminal writes
+            logger.warning("[#1714] bulk terminal-event emit failed: %s", e)
 
     def _sweep_orphaned_skipped(self, report: CleanupReport) -> None:
         """1c. Finalize orphaned skipped executions (Issue #106)."""
@@ -862,6 +940,24 @@ class CleanupService:
                 )
         except Exception as e:
             logger.error(f"[Cleanup] Error converting legacy tool_calls: {e}")
+
+        # #1745: deactivate per-agent MCP keys whose agent is no longer live.
+        # The delete/recover paths keep this in sync going forward; this catches
+        # keys orphaned BEFORE the fix, and any that slip through a path that
+        # removes an agent without going through delete_agent_ownership. Not
+        # age-gated — an orphaned credential is a security invariant, not a
+        # retention window (the #1449 reasoning).
+        try:
+            revoked = db.deactivate_orphaned_agent_keys()
+            report.orphaned_agent_keys_revoked = revoked
+            if revoked > 0:
+                _log_prune(
+                    revoked,
+                    f"[Cleanup] Deactivated {revoked} MCP key(s) belonging to "
+                    f"agents that are no longer live (#1745)",
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error deactivating orphaned agent keys: {e}")
 
     def _sweep_operator_queue_retention(self, report: CleanupReport) -> None:
         """4c-quinquies. Issue #1142: delete terminal operator_queue rows past

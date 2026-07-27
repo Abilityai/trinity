@@ -4,11 +4,11 @@
 
 ## How do I see what all my agents are doing at once?
 
-The main Dashboard at `/` monitors all agents and their activities in real time, with a live activity feed of collaborations, task starts and completions, schedule executions, and errors. Use the toggle in the top-right to switch between three view modes — Grid, Graph, and Timeline. Timeline is the default, and your choice persists per browser. See [Dashboard](../operations/dashboard.md).
+The main Dashboard at `/` monitors all agents and their activities in real time, with a live activity feed of collaborations, task starts and completions, schedule executions, and errors. Use the toggle in the top-right to switch between two view modes — Grid and Timeline. Timeline is the default, and your choice persists per browser. See [Dashboard](../operations/dashboard.md).
 
-## What's the difference between the Grid, Graph, and Timeline dashboard views?
+## What's the difference between the Grid and Timeline dashboard views?
 
-Grid is a tile canvas: each agent is a card with its avatar, runtime badge, inline Running and Autonomy toggles, and live status chips (git sync health, pending operator-queue items) — drag tiles to rearrange, or use Tidy and Reset. Graph is a network view: agents as draggable nodes colored by status, animated edges when agents communicate, tag clouds for filtering, and host telemetry plus a capacity meter in the header. Timeline (the default) arranges execution boxes per agent chronologically, color-coded by trigger type, with per-row success rate, cost, and slot count, a time-range filter, and live progress for running executions. See [Dashboard](../operations/dashboard.md).
+Grid is a tile canvas: each agent is a card with its avatar, runtime badge, inline Running and Autonomy toggles, and live status chips (git sync health, pending operator-queue items) — drag tiles to rearrange, or use Tidy and Reset. Timeline (the default) arranges execution boxes per agent chronologically, color-coded by trigger type, with per-row success rate, cost, and slot count, a time-range filter, and live progress for running executions. Agent-to-agent collaboration is surfaced in the Timeline replay (via the Agent-Triggered trigger type) rather than as a live node graph — the former Graph view has been removed. See [Dashboard](../operations/dashboard.md).
 
 ## What is the Operations page and what do its tabs show?
 
@@ -68,7 +68,7 @@ Admins can set a daily cost limit (`ops_cost_limit_daily_usd`, default $50; 0 = 
 
 ## What does the "circuit open" badge on my agent mean?
 
-The dispatch circuit breaker has tripped: the agent's container answered several executions in a row with authentication failures (for example, an expired API key), so the platform stopped sending it new work instead of queueing tasks that are doomed to fail. New executions fast-fail with a 503 and a `Retry-After` header; after a cooldown, one probe execution is let through — success closes the breaker, failure extends the cooldown with exponential backoff. Timeouts and ordinary task errors do not trip the breaker, only auth-type failures. The badge appears in the agent header and the Dashboard graph, with a "Circuit open" chip on the Overview tab's health panel. See [Agent Configuration](../agents/agent-configuration.md).
+The dispatch circuit breaker has tripped: the agent's container answered several executions in a row with authentication failures (for example, an expired API key), so the platform stopped sending it new work instead of queueing tasks that are doomed to fail. New executions fast-fail with a 503 and a `Retry-After` header; after a cooldown, one probe execution is let through — success closes the breaker, failure extends the cooldown with exponential backoff. Timeouts and ordinary task errors do not trip the breaker, only auth-type failures. The badge appears in the agent header and on the agent's Grid tile on the Dashboard, with a "Circuit open" chip on the Overview tab's health panel. See [Agent Configuration](../agents/agent-configuration.md).
 
 ## How do I turn the circuit breaker on for an agent, or reset one that's open?
 
@@ -84,4 +84,12 @@ Overview is the default landing tab and owns the "trend over time" picture, whil
 
 ## Where can I see the CPU, memory, and disk usage of the host machine?
 
-Host telemetry is displayed in the header of the Dashboard's Graph view, alongside a capacity meter showing parallel execution slot usage. The same data is available from the API at `GET /api/telemetry/host`, with aggregate container stats served from a short-lived cache so the endpoint never blocks on Docker. See [Dashboard](../operations/dashboard.md).
+Host telemetry is displayed inline in the Dashboard's top header, regardless of which view mode is active — the old Graph-view header that used to carry it has been removed. The same data is available from the API at `GET /api/telemetry/host`, with aggregate container stats served from a short-lived cache so the endpoint never blocks on Docker. See [Dashboard](../operations/dashboard.md).
+
+## Will Trinity ever automatically delete my execution history, logs, or deleted agents?
+
+Yes. A background cleanup service runs retention sweeps that prune old execution logs and rows, health-check records, terminal operator-queue items, and agent reports, and purge agents and schedules that have been soft-deleted past their window — each on a configurable number of days, with `0` disabling that particular sweep. Defaults are generous (for example, execution rows at 90 days, reports and terminal operator-queue rows at 90, health checks at 7, soft-deleted agents at 180), and the audit log has a protected 365-day floor. The agent-purge sweep is special because it also removes the agent's data volumes, so treat its window as a recovery window, not a log window. See [Monitoring](../operations/monitoring.md).
+
+## Why was a data cleanup blocked until I approved it?
+
+Trinity has a blast-radius guard: any single retention sweep that would delete more than a fixed safety threshold (1,000 rows) of one table refuses to run, logs an error, and raises an operator-queue alarm instead of deleting. An admin then has to approve that specific prune in Settings → the retention panel (which shows a pending-acknowledgements banner) before it proceeds. The approval is admin- and human-only, bound to the exact retention window in force, and single-use — the guard re-arms after each prune, and agent-purge sweeps always require an acknowledgement because they destroy data volumes. See [Monitoring](../operations/monitoring.md).

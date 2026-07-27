@@ -342,5 +342,104 @@ export function createSkillsTools(
         }, null, 2);
       },
     },
+
+    // ========================================================================
+    // run_skill - Execute a library skill on the dedicated skill runner
+    // ========================================================================
+    runSkill: {
+      name: "run_skill",
+      description:
+        "Execute a library skill on the platform's skill runner and return its result. " +
+        "Use list_runnable_skills first to see which skills you are permitted to run. " +
+        "The runner is a separate agent with its own workspace — it cannot see your " +
+        "files, so this is for self-contained skills (call an API, generate an " +
+        "artifact, process the input you pass). Skills that must operate on YOUR " +
+        "workspace have to be assigned to you by an operator instead.",
+      parameters: z.object({
+        skill_name: z.string().describe("Skill to run, exactly as returned by list_runnable_skills"),
+        input: z.string().optional().describe("Input / arguments for the skill"),
+      }),
+      execute: async (
+        { skill_name, input }: { skill_name: string; input?: string },
+        context?: { session?: McpAuthContext }
+      ) => {
+        const apiClient = getClient(context?.session);
+
+        // Server-side enforcement is authoritative — the backend re-checks the
+        // per-skill allow-list at dispatch. This pre-check exists only to turn a
+        // predictable refusal into a helpful message listing what IS available
+        // (the run_playbook shape), never to decide access.
+        let available: string[] = [];
+        try {
+          const runnable = await apiClient.getRunnableSkills();
+          if (!runnable.enabled) {
+            return JSON.stringify({
+              error: "skill_runner_disabled",
+              message: "Skill execution is not enabled on this platform.",
+            }, null, 2);
+          }
+          available = runnable.skills.map((s) => s.name);
+          if (!available.includes(skill_name)) {
+            return JSON.stringify({
+              error: "skill_not_permitted",
+              message: `You are not permitted to run "${skill_name}".`,
+              available,
+            }, null, 2);
+          }
+        } catch {
+          // Availability lookup failed (feature absent in an OSS build, network
+          // hiccup). Fall through and let the backend be the single authority —
+          // never fail open into "assume permitted" locally, and never block a
+          // legitimate run on a flaky pre-check.
+        }
+
+        try {
+          const result = await apiClient.runSkill(skill_name, input);
+          return JSON.stringify(result, null, 2);
+        } catch (e) {
+          return JSON.stringify({
+            error: "skill_run_failed",
+            message: e instanceof Error ? e.message : String(e),
+            ...(available.length ? { available } : {}),
+          }, null, 2);
+        }
+      },
+    },
+
+    // ========================================================================
+    // list_runnable_skills - What THIS agent may execute on the runner
+    // ========================================================================
+    listRunnableSkills: {
+      name: "list_runnable_skills",
+      description:
+        "List the skills you are permitted to execute via run_skill. This is your " +
+        "own permitted set, not the whole library — an operator decides which " +
+        "skills each agent may run.",
+      parameters: z.object({}),
+      execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
+        const apiClient = getClient(context?.session);
+        try {
+          const runnable = await apiClient.getRunnableSkills();
+          return JSON.stringify({
+            enabled: runnable.enabled,
+            count: runnable.skills.length,
+            skills: runnable.skills,
+            ...(runnable.enabled
+              ? {}
+              : { message: "Skill execution is not enabled on this platform." }),
+          }, null, 2);
+        } catch (e) {
+          // Honest, distinct status — an OSS build has no runner at all, which
+          // is different from "you have no grants".
+          return JSON.stringify({
+            enabled: false,
+            count: 0,
+            skills: [],
+            message: "Skill execution is not available on this platform.",
+            detail: e instanceof Error ? e.message : String(e),
+          }, null, 2);
+        }
+      },
+    },
   };
 }

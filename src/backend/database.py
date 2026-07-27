@@ -113,6 +113,7 @@ from db.chat import ChatOperations
 from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.reports import ReportOperations
+from db.product_events import ProductEventOperations
 from db.reminders import RemindersOperations
 from db.connector import ConnectorOperations
 from db.permissions import PermissionOperations
@@ -432,6 +433,7 @@ class DatabaseManager:
         self._session_ops = SessionOperations()
         self._activity_ops = ActivityOperations()
         self._report_ops = ReportOperations()
+        self._product_event_ops = ProductEventOperations()
         self._reminder_ops = RemindersOperations()
         self._connector_ops = ConnectorOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
@@ -1024,6 +1026,14 @@ class DatabaseManager:
     def get_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.get_agent_mcp_api_key(agent_name)
 
+    def set_agent_keys_active(self, agent_name: str, active: bool) -> int:
+        """#1745: activate/deactivate an agent's per-agent MCP keys."""
+        return self._mcp_key_ops.set_agent_keys_active(agent_name, active)
+
+    def deactivate_orphaned_agent_keys(self) -> int:
+        """#1745: deactivate per-agent keys whose agent is no longer live."""
+        return self._mcp_key_ops.deactivate_orphaned_agent_keys()
+
     def delete_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.delete_agent_mcp_api_key(agent_name)
 
@@ -1456,6 +1466,24 @@ class DatabaseManager:
         return self._report_ops.prune_agent_reports(retention_days, chunk_size)
 
     # =========================================================================
+    # Local Product-Event Capture Methods (ent#184 — delegated to db/product_events.py)
+    # =========================================================================
+
+    def record_product_event(self, installation_id, event_type, event_context=None):
+        return self._product_event_ops.record_product_event(
+            installation_id, event_type, event_context
+        )
+
+    def count_product_events_by_type(self, since=None):
+        return self._product_event_ops.count_product_events_by_type(since)
+
+    def list_product_events(self, event_type=None, since=None, limit=1000, offset=0):
+        return self._product_event_ops.list_product_events(event_type, since, limit, offset)
+
+    def prune_product_events(self, retention_days, chunk_size=1000):
+        return self._product_event_ops.prune_product_events(retention_days, chunk_size)
+
+    # =========================================================================
     # Agent Self-Reminder Methods (#1296 — delegated to db/reminders.py)
     # =========================================================================
 
@@ -1500,15 +1528,34 @@ class DatabaseManager:
         """Get all schedule executions currently in 'running' status."""
         return self._schedule_ops.get_running_executions()
 
-    def mark_stale_executions_failed(self, timeout_minutes: int = 30, agent_timeouts=None, buffer_seconds: int = 0):
-        """Mark executions stuck in 'running' past threshold as failed."""
+    def mark_stale_executions_failed(self, timeout_minutes: int = 30, agent_timeouts=None, buffer_seconds: int = 0, collect_failed=None):
+        """Mark executions stuck in 'running' past threshold as failed.
+
+        #1714: pass a list as ``collect_failed`` to also receive CAS-won
+        ``(execution_id, agent_name)`` tuples for completion-event emission.
+        """
         return self._schedule_ops.mark_stale_executions_failed(
-            timeout_minutes, agent_timeouts=agent_timeouts, buffer_seconds=buffer_seconds
+            timeout_minutes, agent_timeouts=agent_timeouts, buffer_seconds=buffer_seconds,
+            collect_failed=collect_failed,
         )
 
-    def mark_no_session_executions_failed(self, timeout_seconds: int = 60):
-        """Mark running executions with no claude_session_id as failed (Issue #106)."""
-        return self._schedule_ops.mark_no_session_executions_failed(timeout_seconds)
+    def mark_no_session_executions_failed(self, timeout_seconds: int = 60, collect_failed=None):
+        """Mark running executions with no claude_session_id as failed (Issue #106).
+
+        #1714: ``collect_failed`` list receives CAS-won ``(execution_id,
+        agent_name)`` tuples for completion-event emission.
+        """
+        return self._schedule_ops.mark_no_session_executions_failed(
+            timeout_seconds, collect_failed=collect_failed
+        )
+
+    def has_task_terminal_subscribers(self) -> bool:
+        """#1714: is any enabled subscription listening for agent.task.completed/
+        failed? Cheap gate so a bulk sweep with no subscribers costs nothing."""
+        from services.event_dispatch_service import TASK_COMPLETED_EVENT, TASK_FAILED_EVENT
+        return self._event_subscription_ops.has_enabled_subscriptions_for_types(
+            [TASK_COMPLETED_EVENT, TASK_FAILED_EVENT]
+        )
 
     def fail_stale_slot_execution(self, execution_id: str, error: str) -> bool:
         """Mark a running execution as failed when its slot is reclaimed (#219)."""
@@ -2228,6 +2275,11 @@ class DatabaseManager:
 
     def get_slack_channels_for_agent(self, agent_name):
         return self._slack_channel_ops.get_channels_for_agent(agent_name)
+
+    def set_slack_channel_allow_proactive(self, team_id, slack_channel_id, enabled):
+        """ent#223 — toggle per-channel proactive consent on a channel binding."""
+        return self._slack_channel_ops.set_channel_allow_proactive(
+            team_id, slack_channel_id, enabled)
 
     def unbind_slack_agent(self, team_id, agent_name):
         return self._slack_channel_ops.unbind_agent(team_id, agent_name)
