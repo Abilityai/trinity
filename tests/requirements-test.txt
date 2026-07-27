@@ -4,6 +4,26 @@ pytest-asyncio>=0.24.0
 pytest-timeout>=2.3.0
 pytest-html>=4.1.0
 pytest-cov>=6.0.0
+# Property-based testing (#1771 / P-38 `/edge-cases`). Used by
+# tests/unit/test_1771*_properties.py.
+#
+# EXACT pin, deliberately breaking this file's `>=` convention: Hypothesis's
+# example generation and shrinking change between releases, and the #1771
+# property suites run under a `derandomize=True` profile whose frozen input set
+# is stable only per version. A floating floor would make a failure
+# irreproducible across machines and could surface as a head-only failure in
+# CI's base-vs-head regression diff — the one thing the derandomized profile
+# exists to prevent.
+#
+# Unlike pytest-randomly (deliberately kept OUT of this file — see
+# backend-unit-test.yml:93-99 — because pytest auto-discovers installed plugins
+# and it would silently randomize every local run), Hypothesis's auto-loaded
+# plugin changes neither collection order nor the behaviour of tests that don't
+# use @given; it only adds --hypothesis-* options and a statistics reporter.
+#
+# Every #1771 slice adds this block byte-identically at this exact position, so
+# the slices merge cleanly in any order and the file keeps ONE hypothesis line.
+hypothesis==6.161.5
 httpx>=0.28.0
 websockets>=13.0
 python-dotenv>=1.0.1
@@ -50,13 +70,6 @@ bcrypt>=4.2.0,<5
 pydantic-settings>=2.0.0
 google-genai>=1.0.0
 payments-py>=1.0.0
-# hypothesis: property-based edge-case tests (#1771, /edge-cases). Test-only.
-# EXACT pin, not a floor: those tests run under a `derandomize=True` CI profile
-# whose frozen input set is stable only per Hypothesis version. An open lower
-# bound would let a new release silently change the generated inputs and produce
-# a head-only failure in the base-vs-head unit regression diff — the one thing
-# the derandomized profile exists to prevent.
-hypothesis==6.161.5
 # tzdata: the IANA database as a pure-Python fallback for `zoneinfo`. The #1771
 # timestamp properties draw real IANA zones (`st.timezones()`) deliberately —
 # DST transitions, quarter-hour offsets and historical LMT offsets are what stop
