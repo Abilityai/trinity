@@ -124,7 +124,7 @@ servers (each replica polls + reconciles independently).
 ## Trinity Helper MCP Server (#1459)
 
 **Description**: A standalone, dependency-light MCP server (`src/helper-mcp/`, npm
-`@abilityai/trinity-docs-mcp`) that exposes the public Trinity Docs Q&A service
+`trinity-docs-mcp`) that exposes the public Trinity Docs Q&A service
 (DOCS-QA-001, `docs/memory/feature-flows/trinity-docs-qa.md`) as MCP tools, so anyone can
 add a grounded "ask Trinity anything" assistant to Claude Code / Claude Desktop / any MCP
 client **without running a Trinity instance**. Pure protocol adapter over the existing

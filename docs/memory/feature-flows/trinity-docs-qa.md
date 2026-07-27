@@ -68,7 +68,7 @@ in-app Help widget (#391), and the standalone `trinity-docs-mcp` MCP server
 | `docs/onboarding/*.md` | Source documentation (onboarding) |
 | `docs/user-docs/**/*.md` | Source documentation (user docs incl. the 264-Q&A FAQ) |
 | `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md` | Source documentation (agent guide, #1459) |
-| `src/helper-mcp/` | Standalone MCP server exposing the endpoint (`@abilityai/trinity-docs-mcp`, #1459) |
+| `src/helper-mcp/` | Standalone MCP server exposing the endpoint (`trinity-docs-mcp`, #1459) |
 
 ## Data Flow
 
@@ -238,7 +238,7 @@ User clicks help button → Panel opens → Types question → Enter to send
 - Conversation history shown in-panel during session
 - "New conversation" clears local messages and session ID
 
-## MCP Distribution — `@abilityai/trinity-docs-mcp` (#1459)
+## MCP Distribution — `trinity-docs-mcp` (#1459)
 
 A standalone, dependency-light MCP server (`src/helper-mcp/`) exposes this
 endpoint to any MCP client (Claude Code, Claude Desktop, Cursor) — **no Trinity
