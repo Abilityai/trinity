@@ -246,6 +246,24 @@ def _load_crud(monkeypatch, docker_available=True):
         if (key == "services" or key.startswith("services.")) and key not in mocks:
             monkeypatch.delitem(sys.modules, key, raising=False)
     import services.agent_service.crud as crud
+
+    # #1793: an unresolvable `local:` template is now a 404 instead of a
+    # silent templateless creation. These cases exercise the local-template
+    # HAPPY path with `local:scout`, and passed previously only because the
+    # unit env has no template roots on disk — the missing template.yaml was
+    # tolerated. Point the roots at a tmp dir carrying a minimal `scout` so
+    # the fixture supplies the template the cases always assumed. Deliberately
+    # minimal (no `resources`, no `avatar_prompt`) so the pinned container
+    # kwargs — mem_limit 4g / nano_cpus 2 — are unchanged, and so
+    # set_default_avatar stays unreached for every case but the one that
+    # builds its own root. Cases that monkeypatch `_LOCAL_TEMPLATE_ROOTS`
+    # themselves still win: their setattr runs after this.
+    _tpl_root = Path(tempfile.mkdtemp(prefix="trinity_1484_templates_"))
+    _scout = _tpl_root / "scout"
+    _scout.mkdir()
+    (_scout / "template.yaml").write_text("type: business-assistant\n")
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (_tpl_root, _tpl_root))
+
     return crud, {
         "patcher": patcher,
         "db": db,

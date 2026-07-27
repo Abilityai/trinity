@@ -672,7 +672,11 @@ async def _reserve_git_instance(
 def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
     """Load a `local:`-prefixed template's `template.yaml` (curated catalog then
     deploy-local store, #950). Mutates `config` runtime/type/resources/tools/
-    mcp_servers fields. Returns `(template_data, template_shared_folders)`."""
+    mcp_servers fields. Returns `(template_data, template_shared_folders)`.
+
+    Raises `HTTPException(404, UNKNOWN_LOCAL_TEMPLATE)` when the name resolves
+    to no `template.yaml` under either root (#1793) — this previously returned
+    an empty dict and the caller provisioned a templateless container."""
     template_data: dict = {}
     template_shared_folders = None
     # Local template - strip "local:" prefix. Look in curated catalog
@@ -718,6 +722,24 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
                     }
         except Exception as e:
             logger.warning(f"Error loading template config: {e}")
+    else:
+        # #1793: an unresolvable `local:` template must fail before any side
+        # effect. Falling through with an empty `template_data` provisioned a
+        # running container with no CLAUDE.md, no template.yaml and no skills —
+        # an empty shell reported to the caller as a normal 200 creation. The
+        # `github:` path already fails fast on an unknown repo; this matches it.
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": (
+                    f"Local template {raw_name!r} was not found. Check the id "
+                    f"against GET /api/templates — templates marked hidden are "
+                    f"not deployable. To create an agent with no template at "
+                    f"all, omit the 'template' field."
+                ),
+                "code": "UNKNOWN_LOCAL_TEMPLATE",
+            },
+        )
     return template_data, template_shared_folders
 
 
