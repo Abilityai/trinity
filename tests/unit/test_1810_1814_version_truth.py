@@ -27,10 +27,38 @@ from pathlib import Path
 
 import pytest
 
+_BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
+
+
+def _load_builder():
+    """Slice `_build_version_payload` out of main.py source and exec it —
+    the same loader as test_926_version_endpoint.py, for the same reason:
+    `import main` executes main.py's full import graph (opentelemetry,
+    slack_sdk, twilio, …), which the unit-test venv deliberately lacks.
+    The builder is stdlib-only by contract (its docstring), so the exec'd
+    snippet is self-sufficient.
+    """
+    src_path = _BACKEND / "main.py"
+    if not src_path.exists():
+        pytest.skip("backend source not present")
+    text = src_path.read_text()
+    marker = "def _build_version_payload"
+    start = text.find(marker)
+    if start == -1:
+        pytest.fail(f"_build_version_payload not found in {src_path}")
+    rest = text[start:]
+    end = rest.find("\n\n\n")  # function ends before the two blank lines
+    snippet = rest[: end if end != -1 else len(rest)]
+    ns: dict = {"__file__": str(src_path)}
+    exec(snippet, ns)
+    return ns["_build_version_payload"]
+
 
 def _payload(monkeypatch, tmp_path, *, env_version, file_version):
     """Build the version payload with a controlled env var and VERSION file."""
-    import main
+    # Load BEFORE the Path patches below — the loader reads main.py via
+    # Path.read_text, which is about to be monkeypatched.
+    build = _load_builder()
 
     if env_version is None:
         monkeypatch.delenv("VERSION", raising=False)
@@ -60,7 +88,7 @@ def _payload(monkeypatch, tmp_path, *, env_version, file_version):
     monkeypatch.setattr(Path, "exists", fake_exists)
     monkeypatch.setattr(Path, "read_text", fake_read_text)
 
-    return main._build_version_payload(edition="oss", enterprise_features=[], voice_enabled=False)
+    return build(edition="oss", enterprise_features=[], voice_enabled=False)
 
 
 def test_1810_unknown_sentinel_falls_through_to_the_file(monkeypatch, tmp_path):
