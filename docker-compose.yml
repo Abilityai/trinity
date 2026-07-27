@@ -537,6 +537,21 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # #1799: #1478 chowns /data/logs to 1000:1000 (chmod 775) so the UID-1000
+    # backend's retention sweep can delete archived originals. Vector runs as
+    # root, but cap_drop: ALL strips CAP_DAC_OVERRIDE — the capability that lets
+    # root ignore file permissions — so root is neither owner nor group and
+    # falls through to "other" (r-x) on that 775 dir. EVERY sink write then
+    # fails with "Permission denied", silently: a file-sink error does not fail
+    # the :8686 healthcheck, so Vector reports healthy while writing nothing.
+    #
+    # Joining GID 1000 uses the dir's existing group-write bit instead of
+    # restoring a capability, so the cap_drop posture is preserved. Vector must
+    # stay ROOT for the uid: raw container logs under /var/lib/docker/containers
+    # are 0640 root:root, so user: "1000:1000" would swap a write failure for a
+    # read failure.
+    group_add:
+      - "1000"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8686/health"]
       interval: 30s
