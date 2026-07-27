@@ -145,27 +145,34 @@ def test_partial_deploy_continues_and_reports(env):
 
 
 def test_absent_local_template_surfaces_per_agent(env):
-    """AC#3 of #1759: the new create-time 400 must reach the operator through
+    """AC#3 of #1759: the create-time reject must reach the operator through
     the ent#125 per-agent `failed[]` report, not abort the whole manifest.
 
     No new plumbing is needed — this asserts that by construction. Note
     `_failure_reason` keeps only `detail["error"]` and DROPS `detail["code"]`,
     which is why the error sentence has to stand alone and name its own
     remedy.
+
+    The fixture below MUST mirror the live contract verbatim: it constructs its
+    own `HTTPException`, so a drift between this literal and
+    `_resolve_local_template` passes green while asserting a contract that no
+    longer exists. It is a 404 `UNKNOWN_LOCAL_TEMPLATE` (#1793), and the message
+    interpolates the STRIPPED name (`raw_name`), not the `local:` id.
     """
-    real_400 = HTTPException(
-        status_code=400,
+    real_404 = HTTPException(
+        status_code=404,
         detail={
             "error": (
-                "Local template 'local:typo-template' not found — no "
-                "template.yaml for this template. List available templates "
-                "with GET /api/templates, or add it under "
-                "config/agent-templates/."
+                "Local template 'typo-template' was not found. Check the id "
+                "against GET /api/templates — note that hidden templates are "
+                "omitted from that listing but remain creatable by id. To "
+                "create an agent with no template at all, omit the 'template' "
+                "field."
             ),
-            "code": "LOCAL_TEMPLATE_NOT_FOUND",
+            "code": "UNKNOWN_LOCAL_TEMPLATE",
         },
     )
-    _fail_agent(env, "alpha", real_400)
+    _fail_agent(env, "alpha", real_404)
 
     resp = _deploy(env, TWO_AGENT_MANIFEST)
 
@@ -175,12 +182,12 @@ def test_absent_local_template_surfaces_per_agent(env):
     assert data["agents_created"] == ["test-sys-beta"]
     failure = data["failed"][0]
     assert failure["name"] == "test-sys-alpha"
-    assert failure["status_code"] == 400
+    assert failure["status_code"] == 404
     # The sentence survives intact and is self-contained: `code` is dropped by
     # `_failure_reason`, so the operator only ever sees this string.
-    assert failure["reason"].startswith("Local template 'local:typo-template' not found")
+    assert failure["reason"].startswith("Local template 'typo-template' was not found")
     assert "GET /api/templates" in failure["reason"]
-    assert "LOCAL_TEMPLATE_NOT_FOUND" not in failure["reason"]
+    assert "UNKNOWN_LOCAL_TEMPLATE" not in failure["reason"]
     # The sibling agent still deployed — one typo'd template does not sink the
     # manifest (the trinity-enterprise#124 first-run-seed failure mode).
     assert env.m.create_agent.await_count == 2

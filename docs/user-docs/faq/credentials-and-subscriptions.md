@@ -58,6 +58,14 @@ No. Re-registering a subscription with a fresh token pushes the new token to eve
 
 Trinity stores one platform-wide GitHub PAT that every agent inherits by default — its reach is whatever the token's owner can reach on GitHub. Set a per-agent PAT override when an agent needs to push to a repository the platform token can't see, or when you want to limit blast radius by giving each agent its own narrowly-scoped token. Per-agent PATs are validated when you set them and stored encrypted; clearing the override reverts the agent to the platform PAT. When the platform PAT changes, Trinity propagates the new token to every running agent within seconds — agents with their own override are skipped. See [GitHub PAT Setup](../integrations/github-pat-setup.md).
 
+## Can I use my own GitHub token instead of the platform-wide one?
+
+Yes. Store a personal access token in your own Settings, and Trinity uses it when you create agents — so you're not confined to the admin's platform-wide token and its repo scope. At creation the token resolves in tiers: a per-agent PAT override if one is set, otherwise your personal token, otherwise the platform-wide global PAT. Your personal token is validated when you save it, stored encrypted, and read live at creation time. See [GitHub PAT Setup](../integrations/github-pat-setup.md).
+
+## Do I need a GitHub token to build an agent from a public repo?
+
+No. A `github:owner/repo` template that points at a public repository clones anonymously, with no personal access token required. This is source-mode only — the agent can read and run the template but can't push its changes back or use write-dependent features (the working-branch sync heartbeat, fork-to-own) until you add a token. See [Creating Agents](../agents/creating-agents.md).
+
 ## Are my credentials ever stored in Trinity's database?
 
 Agent credentials are not — the model is file injection into the agent's container, never plaintext in the database. There is one deliberate exception: tokens that drive long-lived background processes outside any container, such as Slack, Telegram, and WhatsApp bot tokens, shared subscription tokens, payment credentials, and GitHub PATs. These must be persisted, so they are stored only as AES-256-GCM encrypted envelopes; plaintext persistence is forbidden. OAuth tokens acquired through the provider flows are held in Redis with persistence enabled. See [Credential Management](../credentials/credential-management.md).

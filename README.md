@@ -127,15 +127,7 @@ The runbook ([`docs/AGENT_INSTALL_GUIDE.md`](docs/AGENT_INSTALL_GUIDE.md)) is a
 deterministic verify → install → confirm → report-next-steps loop that any
 capable agent can execute and explain to you as it goes.
 
-**One-line install (run it yourself)**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/main/install.sh | bash
-```
-
-This clones the repository, configures the environment, builds the base image, and starts all services. For a fully non-interactive bring-up (no admin-password prompt — one is generated and printed), run `./scripts/deploy/start.sh --unattended`.
-
-**Manual installation**
+**Install it yourself**
 
 ```bash
 # 1. Clone the repository
@@ -144,8 +136,9 @@ cd trinity
 
 # 2. Configure environment
 cp .env.example .env
-# Edit .env - at minimum set:
-#   SECRET_KEY (generate with: openssl rand -hex 32)
+# Edit .env and set ADMIN_PASSWORD (12+ characters) — the only required edit.
+# start.sh generates SECRET_KEY, the encryption keys and the Redis
+# passwords for you on first run.
 
 # 3. Build the base agent image
 ./scripts/deploy/build-base-image.sh
@@ -154,16 +147,16 @@ cp .env.example .env
 ./scripts/deploy/start.sh
 ```
 
-> Prefer a guided setup? `./quickstart.sh` walks you through it interactively (or `./quickstart.sh --defaults` for non-interactive bring-up with auto-generated secrets).
+For a fully non-interactive bring-up, run `./scripts/deploy/start.sh --unattended` (or set `TRINITY_UNATTENDED=1`) and skip the `.env` edit entirely — an admin password is generated and printed in the final summary.
 
 > **Note**: the repo's git submodules are private and optional — cloning (even with `--recurse-submodules`) needs no credentials; they're skipped automatically. See [docs/ENTERPRISE.md](docs/ENTERPRISE.md).
 
 **First-time setup**
 
 1. Open http://localhost — you'll be redirected to the setup wizard
-2. Set your **admin password** (minimum 8 characters)
-3. Log in with username `admin` and your new password
-4. Go to **Settings** → **API Keys** to configure your Anthropic API key
+2. Enter your **admin email** — this becomes your sign-in identity — and an **admin password** (minimum 12 characters, with upper- and lowercase, a digit, and a special character)
+3. Log in with that email (or the username `admin`) and your password
+4. Go to **Settings** → **Integrations** → **API Keys** to configure your Anthropic API key
 
 **Access**
 
@@ -423,7 +416,7 @@ Trinity includes three reference agent implementations that demonstrate real-wor
 
 | Agent | Repository | Purpose |
 |-------|------------|---------|
-| **Cornelius** | [github.com/abilityai/agent-cornelius](https://github.com/abilityai/agent-cornelius) | Knowledge Base Manager — Obsidian vault management, insight synthesis, research coordination |
+| **Cornelius** | [github.com/Abilityai/cornelius](https://github.com/Abilityai/cornelius) | Knowledge Base Manager — Obsidian vault management, insight synthesis, research coordination |
 | **Corbin** | [github.com/abilityai/agent-corbin](https://github.com/abilityai/agent-corbin) | Business Assistant — Google Workspace integration, task coordination, team management |
 | **Ruby** | [github.com/abilityai/agent-ruby](https://github.com/abilityai/agent-ruby) | Content Creator — Multi-platform publishing, social media distribution, content strategy |
 
@@ -436,8 +429,8 @@ These agents demonstrate:
 
 **Usage**: Create agents from these templates via the Trinity UI:
 ```bash
-# Via UI: Create Agent → Select "github:abilityai/agent-cornelius"
-# Via MCP: trinity_create_agent(name="my-agent", template="github:abilityai/agent-cornelius")
+# Via UI: Create Agent → Select "github:abilityai/cornelius"
+# Via MCP: trinity_create_agent(name="my-agent", template="github:abilityai/cornelius")
 ```
 
 **Note**: You'll need to configure a `GITHUB_PAT` environment variable in `.env` to use GitHub templates.
@@ -628,7 +621,7 @@ Trinity Connect enables real-time coordination between local Claude Code instanc
 # Install listener dependencies
 brew install websocat jq
 
-# Set your MCP API key (from Settings → API Keys)
+# Set your MCP API key (from Settings → MCP Keys)
 export TRINITY_API_KEY="trinity_mcp_xxx"
 
 # Listen for events from a specific agent

@@ -54,7 +54,19 @@ Toggle an agent between Running and Stopped using the switch on the Dashboard, A
 - **API:** `POST /api/agents/{name}/start` and `POST /api/agents/{name}/stop`
 - **MCP:** `start_agent(name)` and `stop_agent(name)`
 
+### Display Label
+
+The **display label** is the friendly name shown across the UI — the header, agent pickers, search, sort, and the activity timeline. Editing it is the everyday "rename": it changes what people read without moving the immutable slug (`name`), so it never breaks URLs, MCP tool names, schedules, or webhooks. For most day-to-day relabeling, this is the change you want; the heavier [Rename](#rename) below moves the slug itself.
+
+- Owner-only. The label is non-unique (the slug guarantees uniqueness) and clears back to the slug when left blank.
+- Input is trimmed; control characters and line breaks are rejected with a named error.
+- There is no MCP tool for the display label — it is a UI/API-only, presentation-only change. (The MCP `rename_agent` tool moves the slug, not the label.)
+
+- **API:** `GET /api/agents/{name}/label` and `PUT /api/agents/{name}/label` with body `{"label": "My Agent"}` (send `{"label": null}` or an empty string to clear back to the slug)
+
 ### Rename
+
+Renaming moves the immutable slug itself — the heavier operation. Because the slug is what URLs, MCP tool names, schedules, and webhooks resolve to, prefer the [Display Label](#display-label) above when you only need to change the friendly name.
 
 Click the pencil icon next to the agent name on the Agent Detail page to edit inline. Renaming is atomic: it updates the database, renames the Docker container, and broadcasts the change via WebSocket.
 

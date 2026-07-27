@@ -20,6 +20,11 @@ from .utils import utc_now_iso, to_utc_iso, parse_scheduler_ts
 
 logger = logging.getLogger(__name__)
 
+# #389/#1808: consecutive failed syncs before a freeze-enabled agent stops
+# firing. Mirrors the threshold in the backend's
+# routers/internal.py::internal_agent_sync_health — keep the two in step.
+SYNC_FAILURE_FREEZE_THRESHOLD = 3
+
 
 def _scheduler_pg_url() -> Optional[str]:
     """Return the PostgreSQL ``DATABASE_URL`` if configured, else None (#300).
@@ -422,6 +427,55 @@ class SchedulerDatabase:
                 retry_of_execution_id=retry_of_execution_id
             )
 
+    def should_freeze_schedules(self, agent_name: str) -> bool:
+        """Is this agent's cron firing frozen by a failing git sync? (#389/#1808)
+
+        True only when the owner opted in (`freeze_schedules_if_sync_failing`)
+        AND sync is actually failing. Mirrors the predicate the backend already
+        exposes at `/api/internal/agents/{name}/sync-health-status`; read
+        directly here because the scheduler talks to the same database for
+        every other gate (autonomy, enabled, reminders) and an extra HTTP hop
+        would add a failure mode to the fire path for no benefit.
+
+        FAIL-OPEN: any error (missing table on an older DB, read failure)
+        returns False and the schedule fires. A freeze-on-error would silently
+        stop the whole fleet the moment this query broke — the opposite of the
+        bug this closes.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT gc.freeze_schedules_if_sync_failing,
+                           ss.last_sync_status,
+                           ss.consecutive_failures
+                    FROM agent_git_config gc
+                    LEFT JOIN agent_sync_state ss ON ss.agent_name = gc.agent_name
+                    WHERE gc.agent_name = ?
+                    """,
+                    (agent_name,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return False
+                # Named access only: the PG path (#300) yields RealDictCursor
+                # mapping rows with no positional indexing — row[0] would
+                # KeyError and silently fail-open on every PostgreSQL deploy.
+                freeze_enabled = bool(row["freeze_schedules_if_sync_failing"])
+                if not freeze_enabled:
+                    return False
+                failing = (
+                    row["last_sync_status"] == "failed"
+                    and (row["consecutive_failures"] or 0) >= SYNC_FAILURE_FREEZE_THRESHOLD
+                )
+                return bool(failing)
+        except Exception as e:
+            logger.warning(
+                f"Sync-freeze check failed for {agent_name} ({e}); firing anyway"
+            )
+            return False
+
     def create_skipped_execution(
         self,
         schedule_id: str,
@@ -707,6 +761,27 @@ class SchedulerDatabase:
                 ORDER BY r.fire_at ASC
             """)
             return [self._row_to_reminder(row) for row in cursor.fetchall()]
+
+    def count_held_reminders(self) -> int:
+        """Live reminders excluded from arming solely because autonomy is off (#1806).
+
+        The complement of ``get_active_reminders``'s autonomy predicate, with the
+        same live-status and not-deleted conditions. Exists purely for
+        observability: a held reminder is never armed, so there is no job and
+        therefore no skip for the scheduler to log. Without this count an
+        operator debugging "my reminder never fired" has nothing to go on.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) FROM agent_reminders r
+                JOIN agent_ownership ao ON ao.agent_name = r.agent_name
+                WHERE r.status IN ('pending', 'firing')
+                  AND ao.deleted_at IS NULL
+                  AND ao.autonomy_enabled = 0
+            """)
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
 
     def get_reminder_by_id(self, reminder_id: str) -> Optional[Reminder]:
         """Fetch a single reminder by id (to re-read fire_attempts after a CAS)."""

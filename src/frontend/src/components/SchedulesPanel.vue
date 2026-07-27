@@ -17,6 +17,35 @@
       </button>
     </div>
 
+    <!-- #1796: autonomy is the master gate for every schedule on this agent.
+         With it off the scheduler fires each job on time and discards it
+         without writing an execution row, so the tab would otherwise look
+         completely healthy while nothing ever runs. -->
+    <div
+      v-if="!autonomyEnabled && enabledScheduleCount > 0"
+      class="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 p-4"
+    >
+      <div class="flex items-start">
+        <svg class="w-5 h-5 mr-3 mt-0.5 flex-shrink-0 text-amber-600 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19H19a2 2 0 001.75-2.96l-6.93-12a2 2 0 00-3.5 0l-6.93 12A2 2 0 005.07 19z" />
+        </svg>
+        <div class="flex-1">
+          <p class="text-sm font-medium text-amber-800 dark:text-amber-200">
+            Autonomy is off — {{ enabledScheduleCount === 1 ? 'this schedule will not fire' : `these ${enabledScheduleCount} schedules will not fire` }}
+          </p>
+          <p class="mt-1 text-sm text-amber-700 dark:text-amber-300">
+            Autonomy mode is the master switch for scheduled work on this agent. While it is off, each run is skipped silently and no execution is recorded.
+          </p>
+          <button
+            @click="$emit('enable-autonomy')"
+            class="mt-3 inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-md text-white bg-amber-600 hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-500"
+          >
+            Enable autonomy
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Create/Edit Form Modal -->
     <div v-if="showCreateForm || editingSchedule" class="fixed inset-0 z-50 overflow-y-auto">
       <div class="flex items-center justify-center min-h-screen px-4">
@@ -314,7 +343,17 @@
                 </svg>
                 {{ schedule.max_retries }}x retry
               </span>
-              <span v-if="schedule.next_run_at && isOverdue(schedule)" class="flex items-center text-amber-600 dark:text-amber-400" :title="`Scheduled for ${formatDateTime(schedule.next_run_at)} but hasn't fired yet`">
+              <!-- #1796: autonomy is the master gate. When it is off the
+                   scheduler still fires the job and immediately discards it,
+                   so a "Next: in 4 minutes" countdown here would promise a run
+                   that cannot happen. Say why instead. -->
+              <span v-if="!autonomyEnabled && schedule.enabled" class="flex items-center text-amber-600 dark:text-amber-400" title="Autonomy is off for this agent, so this schedule will not fire">
+                <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                Will not fire — autonomy off
+              </span>
+              <span v-else-if="schedule.next_run_at && isOverdue(schedule)" class="flex items-center text-amber-600 dark:text-amber-400" :title="`Scheduled for ${formatDateTime(schedule.next_run_at)} but hasn't fired yet`">
                 <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19H19a2 2 0 001.75-2.96l-6.93-12a2 2 0 00-3.5 0l-6.93 12A2 2 0 005.07 19z" />
                 </svg>
@@ -778,8 +817,16 @@ const props = defineProps({
   initialMessage: {
     type: String,
     default: ''
+  },
+  // #1796: master gate. Defaults to true so a parent that doesn't pass it
+  // never shows a false "will not fire" warning.
+  autonomyEnabled: {
+    type: Boolean,
+    default: true
   }
 })
+
+defineEmits(['enable-autonomy'])
 
 const authStore = useAuthStore()
 const executionsStore = useExecutionsStore()
@@ -793,6 +840,12 @@ const perfBySchedule = ref({}) // schedule_id -> rollup row
 // State
 const schedules = ref([])
 const loading = ref(true)
+
+// #1796: only enabled schedules are affected by the autonomy gate — a disabled
+// schedule wouldn't fire either way, so warning about it would be noise.
+const enabledScheduleCount = computed(
+  () => schedules.value.filter(s => s.enabled).length
+)
 const showCreateForm = ref(false)
 const editingSchedule = ref(null)
 const formLoading = ref(false)

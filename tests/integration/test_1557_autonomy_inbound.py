@@ -27,7 +27,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import redis as _redis
 
 _REPO = Path(__file__).resolve().parent.parent.parent
 _BACKEND = _REPO / "src" / "backend"
@@ -45,18 +44,9 @@ def _env_value(key: str) -> str | None:
     return None
 
 
-# Point config.py at the local stack BEFORE importing agent_client (it fails fast
-# when REDIS_URL lacks credentials). Honor a pre-set REDIS_URL for sibling stacks.
-if "REDIS_URL" not in os.environ:
-    _PASSWORD = _env_value("REDIS_BACKEND_PASSWORD")
-    if not _PASSWORD:
-        pytest.skip(
-            "REDIS_BACKEND_PASSWORD not in .env — cannot derive Redis credentials",
-            allow_module_level=True,
-        )
-    os.environ["REDIS_URL"] = f"redis://backend:{_PASSWORD}@localhost:6379"
-os.environ.setdefault("REDIS_PASSWORD", "test")
-os.environ.setdefault("REDIS_BACKEND_PASSWORD", "test")
+# #1775: config.py is pointed at the resolved Redis target by
+# tests/integration/conftest.py, which runs before this module is imported.
+# No import-time os.environ mutation lives here any more.
 
 
 def _load(name: str, rel: str):
@@ -84,14 +74,8 @@ def cleanup_after_test():
     yield
 
 
-@pytest.fixture(scope="module")
-def redis_client():
-    client = _redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
-    try:
-        client.ping()
-    except Exception as e:  # noqa: BLE001
-        pytest.skip(f"Redis unreachable at {os.environ['REDIS_URL']}: {e}")
-    return client
+# `redis_client` comes from tests/integration/conftest.py (#1775) — including
+# the credential masking its unreachable-Redis message needs.
 
 
 _LIVE_AGENT = os.environ.get("TRINITY_AUTONOMY_TEST_AGENT") or os.environ.get(

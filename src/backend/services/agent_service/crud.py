@@ -72,17 +72,20 @@ def _repo_local_templates_dir() -> Path:
     `<repo>/src/config/agent-templates`, which does not exist. Pinned by
     `tests/unit/test_1759_template_root_parity.py`.
     """
-    # `parents[4]` would IndexError in the container layout — `/app/services/
-    # agent_service/crud.py` has only 4 parents (0-3) — but that is
-    # unreachable in every shipped config: this fallback is reached only when
-    # `/agent-configs/templates` is absent, and both `docker-compose.yml` and
-    # `docker-compose.prod.yml` always mount `config/agent-templates` →
-    # `/agent-configs/templates` on `backend` (Docker auto-creates a missing
-    # bind source), so `_LOCAL_TEMPLATE_ROOTS[0]` resolves and this branch is
-    # never taken. `scheduler` has no such bind but ships no `services/`
-    # package at all. A defensive `len(parents) <= 4` guard is a flagged
-    # follow-up.
-    return Path(__file__).resolve().parents[4] / "config" / "agent-templates"
+    # The guard is NOT decorative. In the container layout
+    # `/app/services/agent_service/crud.py` has only 4 parents (0-3), so a bare
+    # `parents[4]` raises IndexError — and `_LOCAL_TEMPLATE_ROOTS` is computed at
+    # IMPORT time, so that IndexError would stop the backend booting rather than
+    # degrade a single request. The branch is believed unreachable (taken only
+    # when `/agent-configs/templates` is absent, and both compose files always
+    # bind it on `backend`), but "believed unreachable" is not a reason to ship a
+    # crash-on-import path — especially one this file introduces.
+    parents = Path(__file__).resolve().parents
+    if len(parents) <= 4:
+        # No repo root above us: an installed/container layout, where the
+        # container catalog is the only meaningful answer.
+        return _CONTAINER_CURATED_TEMPLATES
+    return parents[4] / "config" / "agent-templates"
 
 
 def _curated_templates_root() -> Path:
@@ -90,9 +93,11 @@ def _curated_templates_root() -> Path:
     container, the in-repo catalog otherwise (#1759).
 
     Without the fallback neither root exists outside a container, so the
-    `LOCAL_TEMPLATE_NOT_FOUND` gate below would 400 *every* `local:` create in
-    dev shells, source-run CI and unit tests — i.e. it would be inert exactly
-    where the test suite runs (the #1638 accidental-green pattern).
+    `UNKNOWN_LOCAL_TEMPLATE` gate below (#1793) would 404 *every* `local:`
+    create in dev shells, source-run CI and unit tests — the gate would be
+    hostile exactly where the test suite runs, and #1793 could only paper over
+    that by pointing `_LOCAL_TEMPLATE_ROOTS` at a tmp fixture inside the #1484
+    harness (the #1638 accidental-green pattern).
     """
     if _CONTAINER_CURATED_TEMPLATES.exists():
         return _CONTAINER_CURATED_TEMPLATES.resolve()
@@ -735,7 +740,17 @@ async def _reserve_git_instance(
 def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
     """Load a `local:`-prefixed template's `template.yaml` (curated catalog then
     deploy-local store, #950). Mutates `config` runtime/type/resources/tools/
-    mcp_servers fields. Returns `(template_data, template_shared_folders)`."""
+    mcp_servers fields. Returns `(template_data, template_shared_folders)`.
+
+    Raises `HTTPException(404, UNKNOWN_LOCAL_TEMPLATE)` when the name resolves
+    to no `template.yaml` under either root (#1793) — this previously returned
+    an empty dict and the caller provisioned a templateless container.
+
+    Raises `HTTPException(400, LOCAL_TEMPLATE_INVALID)` when the `template.yaml`
+    exists but is unreadable, unparseable, or not a YAML mapping (#1759). That
+    case reached the same observable outcome as an absent template — blank
+    agent, HTTP 200 — through the broad `except Exception` below, so #1793 alone
+    did not close it."""
     template_data: dict = {}
     template_shared_folders = None
     # Local template - strip "local:" prefix. Look in curated catalog
@@ -754,114 +769,124 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
 
     template_yaml = template_path / "template.yaml"
 
-    # #1759: a well-formed but ABSENT template used to fall through here with
-    # `template_data == {}` — the same HTTP 200 as success, but a blank
-    # container with no CLAUDE.md and no instructions. It is the sibling of the
-    # unprefixed case #843 made loud. Reject in the same pre-side-effect band
-    # as FORK_REQUIRES_GITHUB_TEMPLATE and the #843 reject: nothing between
-    # this point and the caller's docker try-block allocates a resource, so
-    # there is nothing to roll back, and the 4xx is not flattened to a 500.
-    #
-    # ONE message regardless of which root missed: deploy-local templates
-    # (#950) are named after AGENT names, so a root-distinguishing or
-    # path-echoing error would let a creator-role caller probe whether another
-    # user's deploy-local agent exists (#186 enumeration discipline).
-    if not template_yaml.exists():
+    # The `if/else` shape (rather than an early-return guard) is deliberate and
+    # load-bearing: dedenting this block moves the `.exists()` and `open()`
+    # expressions onto new lines and re-fingerprints the `py/path-injection`
+    # alerts already dismissed as false positives on dev. #1793 hit exactly this
+    # and reverted its own guard-clause refactor for it. Add bands INSIDE the
+    # block; do not flatten it.
+    if template_yaml.exists():
+        try:
+            with open(template_yaml) as f:
+                template_data = yaml.safe_load(f)
+        except (OSError, yaml.YAMLError) as e:
+            # #1759: previously swallowed by the broad `except Exception:
+            # logger.warning(...)` below, which produced the *identical*
+            # observable outcome as an absent template — blank agent, HTTP 200 —
+            # via a different line. #1793 closed the ABSENT case; this closes the
+            # present-but-unreadable one. The parser error itself is deliberately
+            # NOT echoed to the caller: it quotes the resolved file path and the
+            # file's bytes.
+            logger.warning("Unparseable template.yaml for %s: %s", config.template, e)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        f"Local template {config.template!r} has an unreadable or "
+                        f"malformed template.yaml. Fix the template, or list "
+                        f"working templates with GET /api/templates."
+                    ),
+                    "code": "LOCAL_TEMPLATE_INVALID",
+                },
+            ) from e
+
+        # `yaml.safe_load("")` returns None, and a scalar/list document returns a
+        # non-dict. The LISTING path already rejects both
+        # (`template_service._build_local_template`), so before #1759 the create
+        # path was strictly *less* strict than the surface advertising the
+        # template.
+        if not isinstance(template_data, dict):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        f"Local template {config.template!r} has an empty or "
+                        f"malformed template.yaml (expected a YAML mapping). Fix "
+                        f"the template, or list working templates with "
+                        f"GET /api/templates."
+                    ),
+                    "code": "LOCAL_TEMPLATE_INVALID",
+                },
+            )
+
+        # A malformed *field* (as opposed to a malformed file) still degrades
+        # gracefully: `template_data` is a real dict here, so the agent does get
+        # its template files and only some config mutations are skipped.
+        # Unchanged pre-#1759 behaviour, deliberately left out of scope.
+        try:
+            config.type = template_data.get("type", config.type)
+            config.resources = template_data.get("resources", config.resources)
+            config.tools = template_data.get("tools", config.tools)
+            creds = template_data.get("credentials", {})
+            mcp_servers = list(creds.get("mcp_servers", {}).keys())
+            if mcp_servers:
+                config.mcp_servers = mcp_servers
+            # Multi-runtime support - extract runtime config from template
+            runtime_config = template_data.get("runtime", {})
+            if isinstance(runtime_config, dict):
+                config.runtime = runtime_config.get("type", config.runtime)
+                config.runtime_model = runtime_config.get("model", config.runtime_model)
+            elif isinstance(runtime_config, str):
+                config.runtime = runtime_config
+            # Phase 9.11: Extract shared folder config from template
+            shared_folders_config = template_data.get("shared_folders", {})
+            if shared_folders_config:
+                template_shared_folders = {
+                    "expose": shared_folders_config.get("expose", False),
+                    "consume": shared_folders_config.get("consume", False)
+                }
+        except Exception as e:
+            # Still broad and still non-fatal, deliberately: the file parsed, so
+            # the agent DOES get its template files and only some `config`
+            # mutations are skipped. Tightening this to a 400 would reject
+            # templates that deploy successfully today — beyond #1759's ACs. But
+            # the mutations above run in order, so a raise part-way through
+            # leaves a PARTIALLY applied template (e.g. `credentials: "a string"`
+            # applies type/resources/tools, then silently skips
+            # mcp_servers/runtime/shared_folders). Name the template and the
+            # agent: the old message carried neither, leaving an operator nothing
+            # to grep when the resulting agent is subtly wrong.
+            logger.warning(
+                "Template %r for agent %r: field-level config only partially "
+                "applied (agent still created): %s",
+                config.template,
+                config.name,
+                e,
+            )
+    else:
+        # #1793: an unresolvable `local:` template must fail before any side
+        # effect. Falling through with an empty `template_data` provisioned a
+        # running container with no CLAUDE.md, no template.yaml and no skills —
+        # an empty shell reported to the caller as a normal 200 creation. The
+        # `github:` path already fails fast on an unknown repo; this matches it.
+        #
+        # ONE message regardless of which root missed, and no resolved path in
+        # it: deploy-local templates (#950) are named after AGENT names, so a
+        # root-distinguishing or path-echoing error would let a creator-role
+        # caller probe whether another user's deploy-local agent exists (#186
+        # enumeration discipline).
         raise HTTPException(
-            status_code=400,
+            status_code=404,
             detail={
                 "error": (
-                    f"Local template {config.template!r} not found — no "
-                    f"template.yaml for this template. List available "
-                    f"templates with GET /api/templates, or add it under "
-                    f"config/agent-templates/."
+                    f"Local template {raw_name!r} was not found. Check the id "
+                    f"against GET /api/templates — note that hidden templates "
+                    f"are omitted from that listing but remain creatable by id. "
+                    f"To create an agent with no template at all, omit the "
+                    f"'template' field."
                 ),
-                "code": "LOCAL_TEMPLATE_NOT_FOUND",
+                "code": "UNKNOWN_LOCAL_TEMPLATE",
             },
-        )
-
-    try:
-        with open(template_yaml) as f:
-            template_data = yaml.safe_load(f)
-    except (OSError, yaml.YAMLError) as e:
-        # #1759: previously swallowed by the bare `except Exception:
-        # logger.warning(...)` below, which produced the *identical* observable
-        # outcome as an absent template — blank agent, HTTP 200 — via a
-        # different line. The parser error itself is deliberately NOT echoed to
-        # the caller: it quotes the resolved file path and the file's bytes.
-        logger.warning("Unparseable template.yaml for %s: %s", config.template, e)
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": (
-                    f"Local template {config.template!r} has an unreadable or "
-                    f"malformed template.yaml. Fix the template, or list "
-                    f"working templates with GET /api/templates."
-                ),
-                "code": "LOCAL_TEMPLATE_INVALID",
-            },
-        ) from e
-
-    # `yaml.safe_load("")` returns None, and a scalar/list document returns a
-    # non-dict. The LISTING path already rejects both
-    # (`template_service._build_local_template`), so before #1759 the create
-    # path was strictly *less* strict than the surface advertising the template.
-    if not isinstance(template_data, dict):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": (
-                    f"Local template {config.template!r} has an empty or "
-                    f"malformed template.yaml (expected a YAML mapping). Fix "
-                    f"the template, or list working templates with "
-                    f"GET /api/templates."
-                ),
-                "code": "LOCAL_TEMPLATE_INVALID",
-            },
-        )
-
-    # A malformed *field* (as opposed to a malformed file) still degrades
-    # gracefully: `template_data` is a real dict here, so the agent does get
-    # its template files and only some config mutations are skipped. Unchanged
-    # pre-#1759 behaviour, deliberately left out of this issue's scope.
-    try:
-        config.type = template_data.get("type", config.type)
-        config.resources = template_data.get("resources", config.resources)
-        config.tools = template_data.get("tools", config.tools)
-        creds = template_data.get("credentials", {})
-        mcp_servers = list(creds.get("mcp_servers", {}).keys())
-        if mcp_servers:
-            config.mcp_servers = mcp_servers
-        # Multi-runtime support - extract runtime config from template
-        runtime_config = template_data.get("runtime", {})
-        if isinstance(runtime_config, dict):
-            config.runtime = runtime_config.get("type", config.runtime)
-            config.runtime_model = runtime_config.get("model", config.runtime_model)
-        elif isinstance(runtime_config, str):
-            config.runtime = runtime_config
-        # Phase 9.11: Extract shared folder config from template
-        shared_folders_config = template_data.get("shared_folders", {})
-        if shared_folders_config:
-            template_shared_folders = {
-                "expose": shared_folders_config.get("expose", False),
-                "consume": shared_folders_config.get("consume", False)
-            }
-    except Exception as e:
-        # Still broad and still non-fatal, deliberately: the file parsed, so the
-        # agent DOES get its template files and only some `config` mutations are
-        # skipped. Tightening this to a 400 would reject templates that deploy
-        # successfully today — beyond #1759's ACs. But the mutations above run in
-        # order, so a raise part-way through leaves a PARTIALLY applied template
-        # (e.g. `credentials: "a string"` applies type/resources/tools, then
-        # silently skips mcp_servers/runtime/shared_folders). Name the template
-        # and the agent: the old message carried neither, leaving an operator
-        # nothing to grep when the resulting agent is subtly wrong.
-        logger.warning(
-            "Template %r for agent %r: field-level config only partially "
-            "applied (agent still created): %s",
-            config.template,
-            config.name,
-            e,
         )
     return template_data, template_shared_folders
 
@@ -1424,10 +1449,19 @@ async def _build_volume_mounts(
     # /home/developer lives on the container writable layer (overlayfs),
     # auto-reclaimed by container removal. Volumes exist to survive
     # recreate, and ghosts never recreate.
+    # #1811: the `encrypted-data:/data` mount was removed rather than copied
+    # into the recovery path. It was dead AND unsafe:
+    #   * nothing in the agent image ever touched /data — the Dockerfile only
+    #     `mkdir`s it, and no code in docker/base-image references it;
+    #   * the volume name was a LITERAL, so a single volume was mounted rw into
+    #     every agent at once — a cross-agent read/write surface in a product
+    #     whose premise is per-agent isolation. Unused today is not a guarantee.
+    # Removing it here (instead of adding it to recreate_missing_container)
+    # makes both paths agree and closes the surface. The volume itself is not
+    # deleted, so anything historically written to it remains on the host.
     volumes = {
         str(config_path): {'bind': '/config/agent-config.yaml', 'mode': 'ro'},
         str(credentials_path): {'bind': '/config/credentials.json', 'mode': 'ro'},
-        'encrypted-data': {'bind': '/data', 'mode': 'rw'},
     }
     if not config.ephemeral:
         await _workspace_volume_mount(config, volumes)

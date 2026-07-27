@@ -561,6 +561,10 @@ class DatabaseManager:
     def delete_agent_ownership(self, agent_name: str):
         return self._agent_ops.delete_agent_ownership(agent_name)
 
+    def deactivate_agent_mcp_keys(self, agent_name: str) -> int:
+        """Deactivate an agent's agent/connector-scoped MCP keys (#1811)."""
+        return self._agent_ops.deactivate_agent_mcp_keys(agent_name)
+
     def purge_agent_ownership(self, agent_name: str):
         return self._agent_ops.purge_agent_ownership(agent_name)
 
@@ -1572,6 +1576,10 @@ class DatabaseManager:
     def prune_execution_rows(self, retention_days: int, chunk_size: int = 500) -> int:
         """Delete terminal schedule_executions rows older than retention_days (#772)."""
         return self._schedule_ops.prune_execution_rows(retention_days, chunk_size)
+
+    def resummarize_legacy_tool_calls(self, chunk_size: int = 200, max_rows: int = 2000) -> int:
+        """#1741: rewrite legacy raw-transcript `tool_calls` blobs to the summary shape."""
+        return self._schedule_ops.resummarize_legacy_tool_calls(chunk_size, max_rows)
 
     def scrub_terminal_backlog_metadata(self, chunk_size: int = 500) -> int:
         """NULL backlog_metadata on authoritative-terminal executions (#1449 PII scrub)."""

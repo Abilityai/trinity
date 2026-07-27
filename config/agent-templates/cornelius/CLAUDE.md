@@ -267,8 +267,10 @@ resources/
 
 **Option 2: Self-host Trinity**
 ```bash
-# One-line install
-curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/main/install.sh | bash
+# Install Trinity
+git clone https://github.com/abilityai/trinity.git
+cd trinity
+./scripts/deploy/start.sh --unattended
 
 # Access at localhost (UI) and localhost:8000/docs (API)
 ```

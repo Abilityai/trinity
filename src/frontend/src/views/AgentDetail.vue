@@ -192,7 +192,12 @@
 
             <!-- Schedules Tab Content -->
             <div v-if="activeTab === 'schedules'" class="p-6">
-              <SchedulesPanel :agent-name="agent.name" :initial-message="schedulePrefillMessage" />
+              <SchedulesPanel
+                :agent-name="agent.name"
+                :initial-message="schedulePrefillMessage"
+                :autonomy-enabled="!!agent.autonomy_enabled"
+                @enable-autonomy="toggleAutonomy"
+              />
             </div>
 
             <!-- Reports Tab Content (#918) -->

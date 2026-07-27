@@ -221,37 +221,46 @@ if not (template_path / "template.yaml").exists():
     template_path = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[1])
 template_yaml = template_path / "template.yaml"
 
-if not template_yaml.exists():
-    raise HTTPException(400, {"error": ..., "code": "LOCAL_TEMPLATE_NOT_FOUND"})   # #1759
+# The if/else shape is load-bearing — see "CodeQL" below. Do not flatten it.
+if template_yaml.exists():
+    try:
+        with open(template_yaml) as f:
+            template_data = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError):
+        raise HTTPException(400, {"error": ..., "code": "LOCAL_TEMPLATE_INVALID"})   # #1759
+    if not isinstance(template_data, dict):                                          # yaml.safe_load("") -> None
+        raise HTTPException(400, {"error": ..., "code": "LOCAL_TEMPLATE_INVALID"})   # #1759
 
-try:
-    with open(template_yaml) as f:
-        template_data = yaml.safe_load(f)
-except (OSError, yaml.YAMLError):
-    raise HTTPException(400, {"error": ..., "code": "LOCAL_TEMPLATE_INVALID"})     # #1759
-if not isinstance(template_data, dict):                                            # yaml.safe_load("") -> None
-    raise HTTPException(400, {"error": ..., "code": "LOCAL_TEMPLATE_INVALID"})     # #1759
-
-# then mutate config from the template: type / resources / tools /
-# credentials.mcp_servers / runtime / shared_folders
+    # then mutate config from the template: type / resources / tools /
+    # credentials.mcp_servers / runtime / shared_folders
+else:
+    raise HTTPException(404, {"error": ..., "code": "UNKNOWN_LOCAL_TEMPLATE"})       # #1793
 ```
 
-**Failure contract (#1759).** Before this, an unresolvable `local:` id returned
-empty `template_data` and the agent was created anyway — HTTP 200, blank
-container, no warning; only *malformed* names failed. Now:
+**Failure contract (#1793 + #1759).** Before this, an unresolvable `local:` id
+returned empty `template_data` and the agent was created anyway — HTTP 200,
+blank container, no warning; only *malformed* names failed. The two halves were
+filed and fixed separately: #1793 (PR #1803) closed the **absent** case, #1759
+the **present-but-invalid** one. Now:
 
 | Condition | Status | Code |
 |---|---|---|
 | Name fails the regex / traversal barrier | 400 | `INVALID_LOCAL_TEMPLATE_NAME` (checked first) |
-| No `template.yaml` under either root | 400 | `LOCAL_TEMPLATE_NOT_FOUND` |
-| `template.yaml` empty / not a mapping / unparseable | 400 | `LOCAL_TEMPLATE_INVALID` |
+| No `template.yaml` under either root | **404** | `UNKNOWN_LOCAL_TEMPLATE` (#1793) |
+| `template.yaml` empty / not a mapping / unparseable | 400 | `LOCAL_TEMPLATE_INVALID` (#1759) |
 | `template` is `null` or `""` (Blank Agent) | 200 | — never enters this branch |
 
-The raise sits in the same pre-side-effect band as `FORK_REQUIRES_GITHUB_TEMPLATE`
+Both raises sit in the same pre-side-effect band as `FORK_REQUIRES_GITHUB_TEMPLATE`
 and the #843 reject: no container, MCP key, volume or slot has been allocated
 yet, so there is nothing to roll back, and it is outside the caller's docker
 try-block so the 4xx is not flattened to a 500. `create_agent_internal` gains
 zero lines (#1484).
+
+**CodeQL — do not flatten the `if/else` into a guard clause.** Dedenting the
+load block moves the `.exists()` and `open()` expressions onto new lines and
+re-fingerprints `py/path-injection` alerts already dismissed as false positives
+on `dev`. #1793 hit this and reverted its own guard-clause refactor for it;
+#1759 re-hit it at merge. New bands go **inside** the existing block.
 
 **Disclosure rule:** one identical message whichever root missed, carrying no
 filesystem path and no root name. Deploy-local templates are named after *agent*

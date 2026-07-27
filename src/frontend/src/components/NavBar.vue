@@ -1,31 +1,45 @@
 <template>
   <nav class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-      <div class="flex justify-between h-16">
-        <div class="flex">
+      <!-- #1789 — `gap-4` guarantees breathing room between the two clusters at
+           the width where they finally meet, so a link clipped by the scroll
+           boundary never butts up against the connection dot. -->
+      <div class="flex justify-between h-16 gap-4">
+        <!-- #1789 — `min-w-0` is load-bearing. A flex item defaults to
+             `min-width: auto`, so without it this cluster cannot shrink below
+             its min-content width: once logo + links + the right-hand controls
+             exceed the `max-w-7xl` cap the two clusters stop compressing and
+             overflow INTO each other, which `justify-between` parks in the
+             middle of the bar (Connected landing on top of Enterprise PRO). -->
+        <div class="flex min-w-0">
           <router-link to="/" class="flex-shrink-0 flex items-center hover:opacity-80 transition-opacity">
             <img src="../assets/trinity-logo.svg" alt="Trinity Logo" class="h-8 w-8 mr-2 dark:hidden" />
             <img src="../assets/trinity-logo-white.svg" alt="Trinity Logo" class="h-8 w-8 mr-2 hidden dark:block" />
             <h1 class="text-xl font-bold text-gray-900 dark:text-white">Trinity</h1>
           </router-link>
-          <div class="hidden sm:ml-6 sm:flex sm:space-x-8">
+          <!-- #1789 — the link row is the elastic side: it scrolls when the
+               full set can't fit, so every link stays reachable instead of
+               being clipped or overlapping the controls. Gaps tighten below
+               `xl` to buy the ~150px that keeps a 7-link entitled build
+               scroll-free at the capped container width. -->
+          <div class="hidden sm:ml-6 sm:flex sm:space-x-3 xl:space-x-6 min-w-0 overflow-x-auto nav-links-scroll">
             <router-link
               to="/"
-              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
+              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium"
               :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path === '/' }"
             >
               Dashboard
             </router-link>
             <router-link
               to="/agents"
-              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
+              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium"
               :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': isAgentSection }"
             >
               Agents
             </router-link>
             <router-link
               to="/templates"
-              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
+              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium"
               :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path === '/templates' }"
             >
               Templates
@@ -36,7 +50,7 @@
                  running-execution count lives inside the Executions tab. -->
             <router-link
               to="/operations"
-              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium relative"
+              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium relative"
               :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path === '/operations' }"
             >
               Operations
@@ -57,7 +71,7 @@
             -->
             <router-link
               to="/settings"
-              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
+              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium"
               :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path === '/settings' }"
             >
               Settings
@@ -77,7 +91,7 @@
             <router-link
               v-if="enterpriseStore.isEntitled('shared_sessions')"
               to="/sessions"
-              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
+              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium"
               :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path.startsWith('/sessions') }"
             >
               Sessions
@@ -85,7 +99,7 @@
             <router-link
               v-if="enterpriseStore.hasAnyEnterprise"
               to="/enterprise"
-              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
+              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium"
               :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path.startsWith('/enterprise') }"
             >
               Enterprise
@@ -93,18 +107,34 @@
             </router-link>
           </div>
         </div>
-        <div class="flex items-center space-x-4">
-          <!-- WebSocket Status -->
-          <span class="text-sm text-gray-500 dark:text-gray-400">
-            <span class="inline-block h-2 w-2 rounded-full mr-1" :class="isConnected ? 'bg-status-success-400' : 'bg-gray-400 dark:bg-gray-600'"></span>
-            {{ isConnected ? 'Connected' : 'Disconnected' }}
+        <!-- #1789 — `flex-shrink-0`: these are the bar's controls (docs, theme,
+             and the user menu that owns Sign out). They must never be
+             compressed or pushed past the viewport edge, so the link row above
+             absorbs all the width pressure instead. -->
+        <div class="flex flex-shrink-0 items-center space-x-4">
+          <!-- WebSocket Status — dot only (#1789). The word cost ~80px of a
+               budget the bar does not have at the `max-w-7xl` cap; the state is
+               conveyed by colour, a tooltip, and the sr-only label, and a lost
+               connection additionally pulses. -->
+          <span
+            class="flex items-center text-sm text-gray-500 dark:text-gray-400"
+            :title="isConnected ? 'Connected' : 'Disconnected'"
+          >
+            <span
+              class="inline-block h-2 w-2 rounded-full"
+              :class="isConnected ? 'bg-status-success-400' : 'bg-status-warning-500 animate-pulse'"
+            ></span>
+            <span class="sr-only">{{ isConnected ? 'Connected' : 'Disconnected' }}</span>
           </span>
 
-          <!-- Build Info Chip (#926) — small muted version label; click opens detail modal -->
+          <!-- Build Info Chip (#926) — small muted version label; click opens detail modal.
+               Hidden below `xl` (#1789) — it is the widest non-interactive item in
+               the bar and the same data is one click away in the Build Info modal
+               and on Settings. -->
           <button
             v-if="buildInfo.info.value"
             @click="showBuildInfoModal = true"
-            class="text-xs text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 font-mono"
+            class="hidden xl:block text-xs text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 font-mono whitespace-nowrap"
             :title="`Click for build info — commit ${buildInfo.info.value.git_commit_short}`"
           >
             v{{ buildInfo.displayVersion.value }}<span
@@ -432,3 +462,23 @@ const handleLogout = () => {
   router.push('/login')
 }
 </script>
+
+<style scoped>
+/*
+ * #1789 — the nav link row is an `overflow-x-auto` container so an
+ * over-wide link set scrolls instead of overlapping the controls. A
+ * classic scrollbar inside a 64px bar would eat vertical space and sit
+ * under the active-link underline, so the gutter is suppressed. The row
+ * remains scrollable by wheel, trackpad, touch, and keyboard focus
+ * (focusing an off-screen link scrolls it into view) — the affordance is
+ * hidden, not the capability.
+ */
+.nav-links-scroll {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* legacy Edge */
+}
+
+.nav-links-scroll::-webkit-scrollbar {
+  display: none; /* Chromium, WebKit */
+}
+</style>

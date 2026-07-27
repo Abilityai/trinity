@@ -85,6 +85,10 @@ The script does the following, in order:
 5. Runs `docker compose up -d` to start all platform services.
 6. Waits 5 seconds, then prints access URLs.
 
+> **One-shot / unattended install:** pass `--unattended` (or set `TRINITY_UNATTENDED=1`) — `./scripts/deploy/start.sh --unattended` — and the happy path never blocks on a prompt. It auto-generates `ADMIN_PASSWORD` (and any missing secrets) and prints the admin password in the final summary. Save it — it is stored in `.env` and shown only once.
+
+> **Let an AI agent install it for you:** an AI coding agent (Claude Code) can run the whole local install by following the deterministic runbook at [`docs/AGENT_INSTALL_GUIDE.md`](../../../AGENT_INSTALL_GUIDE.md). Point your agent at it and it drives the steps above end to end.
+
 Once complete, all six platform services are running:
 
 | Service | Container | Port |

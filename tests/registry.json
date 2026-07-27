@@ -1119,6 +1119,53 @@
         "infrastructure"
       ],
       "description": "First-run default-system seeder (ent#124): the REAL bundled config/manifests/default-system.yaml validates through the executor's own parse_manifest/validate_manifest (acme trio, full-mesh, no schedules, no prompt) and every local: template it references exists in-tree (learnings 2026-07-23 blank-agent trap); durable default_system_seeded flag gating (deleted fleet never resurrected); persisted first_run_fresh verdict \u2014 computed once BEFORE Cornelius runs, persisted, reused on later passes (cross-pass count-poisoning bug), cornelius_seeded=true forces not-fresh (ent#107-era installs get no fleet), count failure defers without persisting; TRINITY_DEFAULT_SYSTEM_MANIFEST disable sentinels skip without burning the flag; override path used when set, unreadable override fails loudly (operator-queue alert, no bundled fallback, no flag); flag policy per deploy outcome: deployed/partial set flag (+partial alert), failed (0 created)/exception do NOT (retry-safe); existence backstop converges the flag without deploying when any {system}-{short} name is reserved (suffix double-seed guard for the fail-open lock); SETNX lock held->skip / winner deploys+releases; orchestrator never raises when Cornelius explodes. db/docker/redis/deploy_manifest seams patched; no Docker/backend."
+    },
+    {
+      "file": "unit/test_1809_image_drift_recreate.py",
+      "feature": "#1809",
+      "added": "2026-07-27",
+      "categories": [
+        "backend",
+        "agents",
+        "unit",
+        "reliability"
+      ],
+      "description": "Image-drift recreate predicate (#1809): check_base_image_matches compares the container's resolved image id against what its OWN Config.Image reference currently resolves to \u2014 drift\u2192False (recreate on next cold start), match\u2192True; fail-open True on falsy attrs (Config.Image can be \"\"), ImageNotFound (recreate would fail on the same missing tag), and generic daemon errors (2am case: start proceeds on the old image, never a fleet recreate); ID-pinned Config.Image is a documented tautological no-op; version-pinned tags compare their own tag only (a :latest-only rebuild leaves 0.8.0-pinned agents untouched). Source-pins the lifecycle wiring: lazy evaluation gated on `not needs_recreation and not was_already_running` (cold start only \u2014 start-on-running stays an idempotent no-op), ephemeral-ghost exclusion, image-check assignment ABOVE the #1560 clear_agent_breakers gate, recreate delivering the upgrade via the container's own tag, trinity.base-image-version label refresh, recreate-race hardening (remove NotFound tolerated, run 409 adopts the winner), start-response recreated/recreate_reason surfacing, and the skip-inject _reset fixture stubbing the new predicate (Mock-auto-child trap)."
+    },
+    {
+      "file": "unit/test_1759_local_template_not_found.py",
+      "feature": "#1759",
+      "added": "2026-07-27",
+      "categories": [
+        "backend",
+        "agents",
+        "unit",
+        "reliability"
+      ],
+      "description": "Local-template create gate (#1759, companion to #1793). Drives the FULL create_agent_internal, so unlike test_1793_unknown_local_template.py it also proves the reject is pre-side-effect (no container, volume, MCP key, ownership row or ephemeral slot). Covers the absent case at #1793's 404 UNKNOWN_LOCAL_TEMPLATE (both roots missing, dir without template.yaml, name resolving to a regular file), the #1759 400 LOCAL_TEMPLATE_INVALID band (empty / whitespace / comment-only / scalar / list / unparseable template.yaml), INVALID_LOCAL_TEMPLATE_NAME precedence, Blank Agent passthrough, the /template bind source under set/unset/EMPTY HOST_TEMPLATES_PATH, and the disclosure rule \u2014 one identical message whichever root missed, echoing no filesystem path (deploy-local template dirs are named after AGENT names, so 'which root' is a #186 enumeration oracle)."
+    },
+    {
+      "file": "unit/test_1759_template_root_parity.py",
+      "feature": "#1759",
+      "added": "2026-07-27",
+      "categories": [
+        "backend",
+        "agents",
+        "unit",
+        "reliability"
+      ],
+      "description": "Curated-template root parity (#1759). The create resolver's repo-relative fallback is hand-rolled rather than imported from template_service (which the #1484 harness MagicMocks, so an imported gate would be satisfied by a truthy mock), which makes drift between the two surfaces invisible \u2014 these tests pin them equal against both REAL modules. Also pins that the fallback resolves to <repo>/config/agent-templates and not <repo>/src/config/agent-templates (crud.py sits one directory deeper than template_service.py), that the deploy-local root is unchanged, that the container branch returns the pre-#1759 literal byte-identically, that the host branch is absolute so Docker accepts it as a bind source, and \u2014 the guard that would have caught the missing local:default \u2014 that EVERY shipped in-tree template resolves through the create gate."
+    },
+    {
+      "file": "unit/test_1759_export_manifest_template.py",
+      "feature": "#1759",
+      "added": "2026-07-27",
+      "categories": [
+        "backend",
+        "systems",
+        "unit"
+      ],
+      "description": "export_manifest template round-trip (#1759). Blank Agents carry template: None (key PRESENT), and dict.get(key, default) returns the default only when the key is ABSENT \u2014 so the old local:business-assistant fallback was unreachable dead code and every template-less agent exported template: null, which SystemAgentConfig.template (non-Optional str) rejects on redeploy. Pins the `or` fix emitting local:default, pass-through of a real template, that the exported manifest both validates and names a template that exists in-tree, and that inferred agents are logged."
     }
   ]
 }

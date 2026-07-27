@@ -153,7 +153,7 @@ def test_bundled_manifest_parses_and_validates():
 def test_bundled_manifest_local_templates_exist_in_tree():
     """learnings 2026-07-23: an absent local: template used to create a BLANK
     agent — deploy reported success and the seed flag latched. #1759 closed
-    that (create now 400s `LOCAL_TEMPLATE_NOT_FOUND`), so this check is now
+    that (create now 404s `UNKNOWN_LOCAL_TEMPLATE`), so this check is now
     belt-and-braces rather than the only line of defence. KEPT deliberately: it
     fails at collection time with a precise message naming the offending
     manifest entry, whereas the runtime gate would surface as a first-run seed

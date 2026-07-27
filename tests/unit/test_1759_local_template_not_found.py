@@ -1,10 +1,24 @@
-"""A well-formed but ABSENT `local:` template must fail loudly (#1759).
+"""An unresolvable or INVALID `local:` template must fail loudly (#1759).
 
-Before this fix `_resolve_local_template` had no `else`: a `local:<name>` whose
-directory (or `template.yaml`) did not exist under either root returned
-`template_data == {}` and the agent was created — HTTP 200, blank container,
-no warning. Only *malformed* names failed (`INVALID_LOCAL_TEMPLATE_NAME`).
-This is the sibling hole #843 explicitly left open for unprefixed names.
+`_resolve_local_template` had no `else`: a `local:<name>` whose directory (or
+`template.yaml`) did not exist under either root returned `template_data == {}`
+and the agent was created — HTTP 200, blank container, no warning. Only
+*malformed* names failed (`INVALID_LOCAL_TEMPLATE_NAME`). This is the sibling
+hole #843 explicitly left open for unprefixed names.
+
+The ABSENT half was closed on `dev` by #1793 (PR #1803) with **404
+`UNKNOWN_LOCAL_TEMPLATE`**; #1759 was built in parallel against the same line
+and conceded that contract at merge. What #1793 did NOT close, and what this
+file now primarily covers, is the **present-but-invalid** half — an empty,
+non-mapping or unparseable `template.yaml` still reached the identical blank
+agent at HTTP 200 through the broad `except Exception`. That is **400
+`LOCAL_TEMPLATE_INVALID`**.
+
+The absent-template cases are kept here rather than deleted: unlike
+`test_1793_unknown_local_template.py` (which calls `_resolve_local_template`
+directly) they drive the full `create_agent_internal` and assert
+`_assert_no_side_effects` — no container, volume, MCP key, ownership row or
+ephemeral slot. That pre-side-effect proof exists nowhere else.
 
 Every test here monkeypatches `crud._LOCAL_TEMPLATE_ROOTS` to REAL `tmp_path`
 directories (the `test_1484:853` precedent). That is the anti-trap: the gate is
@@ -348,14 +362,17 @@ def _assert_no_side_effects(ctx):
 
 
 # ===========================================================================
-# T1 — absent in BOTH roots → 400 LOCAL_TEMPLATE_NOT_FOUND, no side effects
+# T1 — absent in BOTH roots → 404 UNKNOWN_LOCAL_TEMPLATE (#1793), no side effects
 # ===========================================================================
 
 
 @pytest.mark.asyncio
-async def test_t1_absent_in_both_roots_400_and_no_side_effects(
+async def test_t1_absent_in_both_roots_404_and_no_side_effects(
     crud_env, monkeypatch, tmp_path
 ):
+    """The absent-template contract is #1793's 404. What this adds over
+    `test_1793_unknown_local_template.py` is the pre-side-effect proof: the
+    raise happens before any container, volume, MCP key or ownership row."""
     crud, ctx = crud_env
     _roots(monkeypatch, crud, tmp_path)
 
@@ -364,9 +381,10 @@ async def test_t1_absent_in_both_roots_400_and_no_side_effects(
             AgentConfig(name="nf-1759", template="local:nope-1759"), _user(), None
         )
 
-    assert exc.value.status_code == 400
-    assert exc.value.detail["code"] == "LOCAL_TEMPLATE_NOT_FOUND"
-    assert "local:nope-1759" in exc.value.detail["error"]
+    assert exc.value.status_code == 404
+    assert exc.value.detail["code"] == "UNKNOWN_LOCAL_TEMPLATE"
+    # #1793 interpolates the STRIPPED name (`raw_name`), not the `local:` id.
+    assert "nope-1759" in exc.value.detail["error"]
     _assert_no_side_effects(ctx)
 
 
@@ -484,7 +502,7 @@ async def test_t3_present_only_in_deployed_root_still_creates(
 
 
 @pytest.mark.asyncio
-async def test_t4_directory_without_template_yaml_400(crud_env, monkeypatch, tmp_path):
+async def test_t4_directory_without_template_yaml_404(crud_env, monkeypatch, tmp_path):
     crud, ctx = crud_env
     curated, _ = _roots(monkeypatch, crud, tmp_path)
     (curated / "bare-1759").mkdir()  # dir exists, no template.yaml
@@ -494,13 +512,13 @@ async def test_t4_directory_without_template_yaml_400(crud_env, monkeypatch, tmp
             AgentConfig(name="nf-bare", template="local:bare-1759"), _user(), None
         )
 
-    assert exc.value.status_code == 400
-    assert exc.value.detail["code"] == "LOCAL_TEMPLATE_NOT_FOUND"
+    assert exc.value.status_code == 404
+    assert exc.value.detail["code"] == "UNKNOWN_LOCAL_TEMPLATE"
     _assert_no_side_effects(ctx)
 
 
 @pytest.mark.asyncio
-async def test_t4b_name_resolving_to_a_regular_file_400(
+async def test_t4b_name_resolving_to_a_regular_file_404(
     crud_env, monkeypatch, tmp_path
 ):
     crud, ctx = crud_env
@@ -512,8 +530,8 @@ async def test_t4b_name_resolving_to_a_regular_file_400(
             AgentConfig(name="nf-file", template="local:afile-1759"), _user(), None
         )
 
-    assert exc.value.status_code == 400
-    assert exc.value.detail["code"] == "LOCAL_TEMPLATE_NOT_FOUND"
+    assert exc.value.status_code == 404
+    assert exc.value.detail["code"] == "UNKNOWN_LOCAL_TEMPLATE"
     _assert_no_side_effects(ctx)
 
 

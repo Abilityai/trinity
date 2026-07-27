@@ -36,9 +36,19 @@ collect_ignore = ["test_archive_security.py"]
 # their own conftest from .env.
 # ---------------------------------------------------------------------------
 import os as _os_589
-_os_589.environ.setdefault("REDIS_URL", "redis://test:test@redis:6379")
-_os_589.environ.setdefault("REDIS_PASSWORD", "test")
-_os_589.environ.setdefault("REDIS_BACKEND_PASSWORD", "test")
+# #1775: whether the CALLER supplied a Redis target, captured BEFORE the
+# sentinels below are installed. This is the only place that can know: once the
+# setdefault runs, `"REDIS_URL" in os.environ` is unconditionally true, so a
+# child conftest cannot tell "the harness told us where Redis is" from "this
+# file defaulted it to a dummy". tests/integration/conftest.py reads this to
+# decide whether an unreachable Redis is a FAILURE (harness declared a target)
+# or a legitimate SKIP (we had to derive the target ourselves).
+CALLER_SUPPLIED_REDIS_URL = "REDIS_URL" in _os_589.environ
+ROOT_REDIS_URL_SENTINEL = "redis://test:test@redis:6379"
+ROOT_REDIS_PASSWORD_SENTINEL = "test"
+_os_589.environ.setdefault("REDIS_URL", ROOT_REDIS_URL_SENTINEL)
+_os_589.environ.setdefault("REDIS_PASSWORD", ROOT_REDIS_PASSWORD_SENTINEL)
+_os_589.environ.setdefault("REDIS_BACKEND_PASSWORD", ROOT_REDIS_PASSWORD_SENTINEL)
 
 # ---------------------------------------------------------------------------
 # Issue #754 (C-003): Load SECRET_KEY and INTERNAL_API_SECRET from the

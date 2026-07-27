@@ -51,6 +51,8 @@ Each operator tab has a **Clear All** button (with a confirmation dialog) when t
 
 All clear operations are scoped to agents you can access, affect all operators of those agents, and are recorded in the audit log.
 
+**Clear All only hides — it does not delete.** Terminal operator-queue rows are removed automatically by the operator-queue retention sweep: acknowledged, cancelled, and expired rows are deleted past `operator_queue_retention_days` (default 90, `0` disables); `responded` rows are kept at least 30 days so their answer can still be delivered; and `pending` items are never deleted. See [Retention Sweeps](monitoring.md#retention-sweeps).
+
 ### Sync Service
 
 - Restart-resilient sync between agent containers and the backend database.
