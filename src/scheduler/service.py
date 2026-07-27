@@ -1826,6 +1826,22 @@ class SchedulerService:
             )
             return
 
+        # #1806: reminders on autonomy-disabled agents are filtered out of
+        # get_active_reminders, so they are never armed and produce no job and
+        # no skip line — the reconcile is the only place that can say they
+        # exist. Log a COUNT (not a row per reminder) once per pass, and only
+        # when non-zero, so a paused fleet doesn't spam the log. Best-effort:
+        # observability must never break the reconcile.
+        try:
+            held = self.db.count_held_reminders()
+            if held:
+                logger.info(
+                    f"{held} reminder(s) held: their agent's autonomy is disabled. "
+                    f"They will fire past-due when autonomy is re-enabled."
+                )
+        except Exception as e:
+            logger.debug(f"Held-reminder count unavailable: {e}")
+
         now = datetime.utcnow()
         # A firing row older than this (with no live job) is a crash-mid-fire
         # orphan: the dispatch window + poll buffer + a margin.

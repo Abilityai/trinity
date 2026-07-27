@@ -759,6 +759,27 @@ class SchedulerDatabase:
             """)
             return [self._row_to_reminder(row) for row in cursor.fetchall()]
 
+    def count_held_reminders(self) -> int:
+        """Live reminders excluded from arming solely because autonomy is off (#1806).
+
+        The complement of ``get_active_reminders``'s autonomy predicate, with the
+        same live-status and not-deleted conditions. Exists purely for
+        observability: a held reminder is never armed, so there is no job and
+        therefore no skip for the scheduler to log. Without this count an
+        operator debugging "my reminder never fired" has nothing to go on.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) FROM agent_reminders r
+                JOIN agent_ownership ao ON ao.agent_name = r.agent_name
+                WHERE r.status IN ('pending', 'firing')
+                  AND ao.deleted_at IS NULL
+                  AND ao.autonomy_enabled = 0
+            """)
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
+
     def get_reminder_by_id(self, reminder_id: str) -> Optional[Reminder]:
         """Fetch a single reminder by id (to re-read fire_attempts after a CAS)."""
         with self.get_connection() as conn:
