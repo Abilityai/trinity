@@ -72,6 +72,16 @@ def _repo_local_templates_dir() -> Path:
     `<repo>/src/config/agent-templates`, which does not exist. Pinned by
     `tests/unit/test_1759_template_root_parity.py`.
     """
+    # `parents[4]` would IndexError in the container layout — `/app/services/
+    # agent_service/crud.py` has only 4 parents (0-3) — but that is
+    # unreachable in every shipped config: this fallback is reached only when
+    # `/agent-configs/templates` is absent, and both `docker-compose.yml` and
+    # `docker-compose.prod.yml` always mount `config/agent-templates` →
+    # `/agent-configs/templates` on `backend` (Docker auto-creates a missing
+    # bind source), so `_LOCAL_TEMPLATE_ROOTS[0]` resolves and this branch is
+    # never taken. `scheduler` has no such bind but ships no `services/`
+    # package at all. A defensive `len(parents) <= 4` guard is a flagged
+    # follow-up.
     return Path(__file__).resolve().parents[4] / "config" / "agent-templates"
 
 
