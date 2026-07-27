@@ -29,15 +29,17 @@ Before you begin, make sure you have:
 
 ### Option 1: Quick Install (Recommended)
 
-Run the one-line installer:
+Clone the repo and run the start script:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/main/install.sh | bash
+git clone https://github.com/abilityai/trinity.git
+cd trinity
+./scripts/deploy/start.sh --unattended
 ```
 
-This will:
-1. Clone the Trinity repository
-2. Create `.env` file from template
+`start.sh` will:
+1. Create the `.env` file from the template
+2. Generate the required secrets (secret key, encryption keys, Redis passwords) and an admin password
 3. Build the base agent image
 4. Start all services
 
