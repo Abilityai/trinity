@@ -40,7 +40,9 @@ Trinity is an autonomous agent orchestration platform: every agent runs in its o
 Prerequisites: Docker + Docker Compose v2; an Anthropic API key (Claude agents) or Google API key (Gemini agents).
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/main/install.sh | bash
+git clone https://github.com/abilityai/trinity.git
+cd trinity
+./scripts/deploy/start.sh --unattended
 ```
 
 Then open `http://localhost` → setup wizard → set the admin email + password (12+ chars, mixed case + digit + symbol) → **Settings → Integrations → API Keys** to add the model API key.
