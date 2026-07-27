@@ -4,12 +4,13 @@ File browser endpoints.
 import logging
 import mimetypes
 import shutil
-from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse, FileResponse
 from pydantic import BaseModel
+
+from ..utils.helpers import iso_z_from_mtime
 
 
 class FileUpdateRequest(BaseModel):
@@ -70,7 +71,7 @@ async def list_files(path: str = "/home/developer", show_hidden: bool = False):
                             "type": "directory",
                             "children": subtree["children"],
                             "file_count": subtree["file_count"],
-                            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+                            "modified": iso_z_from_mtime(stat.st_mtime)
                         })
                         total_files += subtree["file_count"]
                     else:
@@ -80,7 +81,7 @@ async def list_files(path: str = "/home/developer", show_hidden: bool = False):
                             "path": str(relative_path),
                             "type": "file",
                             "size": stat.st_size,
-                            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+                            "modified": iso_z_from_mtime(stat.st_mtime)
                         })
                         total_files += 1
 
@@ -421,7 +422,7 @@ async def update_file(path: str, request: FileUpdateRequest, platform: bool = Fa
             "success": True,
             "path": path,
             "size": stat.st_size,
-            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            "modified": iso_z_from_mtime(stat.st_mtime)
         }
 
     except Exception as e:
@@ -489,7 +490,7 @@ async def create_folder(path: str):
             "success": True,
             "path": path,
             "type": "directory",
-            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            "modified": iso_z_from_mtime(stat.st_mtime)
         }
 
     except HTTPException:

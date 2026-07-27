@@ -9,7 +9,12 @@ ARG VERSION=latest
 LABEL trinity.base-image-version="${VERSION}"
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=America/New_York
+# Default to UTC so container-local time == UTC and matches /etc/localtime
+# (Etc/UTC). Agents, the backend, and the scheduler all reason in UTC
+# (Invariant #16); a non-UTC default made agents run hours off and file
+# timestamps surface as naive local time (#1795). Override at deploy time
+# with `docker run -e TZ=...` if a specific zone is required.
+ENV TZ=Etc/UTC
 ENV TRINITY_BASE_VERSION="${VERSION}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
