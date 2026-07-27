@@ -711,12 +711,22 @@ class SchedulerService:
         else:
             logger.warning(f"Unknown job_id format for skipped job: {job_id}")
 
-    def _record_skipped_agent_schedule(self, schedule_id: str):
+    def _record_skipped_agent_schedule(
+        self,
+        schedule_id: str,
+        skip_reason: str = "Previous execution still running (max_instances reached)",
+        event_reason: str = "Previous execution still running",
+    ):
         """
         Record a skipped agent schedule execution in the database.
 
         Creates an execution record with status='skipped' so it appears in
         the execution history and provides an audit trail.
+
+        `skip_reason` / `event_reason` are parameterised (#1808) so the
+        sync-freeze gate can reuse this exact audit path; the defaults preserve
+        the original max_instances wording for the EVENT_JOB_MAX_INSTANCES
+        caller.
         """
         try:
             schedule = self.db.get_schedule(schedule_id)
@@ -730,7 +740,7 @@ class SchedulerService:
                 agent_name=schedule.agent_name,
                 message=schedule.message,
                 triggered_by="schedule",
-                skip_reason="Previous execution still running (max_instances reached)"
+                skip_reason=skip_reason
             )
 
             if execution:
@@ -743,7 +753,7 @@ class SchedulerService:
                     "schedule_id": schedule.id,
                     "execution_id": execution.id,
                     "schedule_name": schedule.name,
-                    "reason": "Previous execution still running"
+                    "reason": event_reason
                 }))
             else:
                 logger.error(f"Failed to create skipped execution record for schedule {schedule_id}")
@@ -839,6 +849,39 @@ class SchedulerService:
             # event — a skipped row per tick would flood schedule_executions for
             # the default-OFF fleet) and no last_run_at (nothing ran; setting it
             # would suppress the _get_missed_schedules catch-up).
+            self._advance_next_run_only(schedule)
+            return
+
+        # #1808: git-sync freeze gate. The owner opted in via
+        # `freeze_schedules_if_sync_failing` (#389) so the agent stops doing
+        # autonomous work while its repo is broken — until now the flag was
+        # stored, reported back as enabled, and never enforced, and
+        # docs/user-docs/faq/troubleshooting.md told users it worked.
+        #
+        # Cron only: a manual trigger is an operator explicitly asking, exactly
+        # like the autonomy gate above.
+        #
+        # Unlike the autonomy branch this DOES record a skipped execution row.
+        # Autonomy-off is a static config gate on a default-OFF fleet, so a row
+        # per tick would flood the table; a sync freeze needs BOTH an opt-in
+        # toggle AND 3+ consecutive real sync failures, so the row count is
+        # bounded and it is exactly the signal an operator needs to see. Uses
+        # the same audit path as the max_instances skip.
+        if triggered_by == "schedule" and self.db.should_freeze_schedules(schedule.agent_name):
+            logger.warning(
+                f"Schedule {schedule_id} skipped: agent {schedule.agent_name} git sync is "
+                f"failing and freeze_schedules_if_sync_failing is enabled"
+            )
+            self._record_skipped_agent_schedule(
+                schedule_id,
+                skip_reason=(
+                    "Git sync is failing and freeze_schedules_if_sync_failing is "
+                    "enabled for this agent"
+                ),
+                event_reason="Git sync failing (schedules frozen)",
+            )
+            # Same projection advance as the autonomy branch (#1472) so the
+            # schedule never renders a receding "Next: Nd ago" while frozen.
             self._advance_next_run_only(schedule)
             return
 

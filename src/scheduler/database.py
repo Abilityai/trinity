@@ -20,6 +20,11 @@ from .utils import utc_now_iso, to_utc_iso, parse_scheduler_ts
 
 logger = logging.getLogger(__name__)
 
+# #389/#1808: consecutive failed syncs before a freeze-enabled agent stops
+# firing. Mirrors the threshold in the backend's
+# routers/internal.py::internal_agent_sync_health — keep the two in step.
+SYNC_FAILURE_FREEZE_THRESHOLD = 3
+
 
 def _scheduler_pg_url() -> Optional[str]:
     """Return the PostgreSQL ``DATABASE_URL`` if configured, else None (#300).
@@ -421,6 +426,52 @@ class SchedulerDatabase:
                 attempt_number=attempt_number,
                 retry_of_execution_id=retry_of_execution_id
             )
+
+    def should_freeze_schedules(self, agent_name: str) -> bool:
+        """Is this agent's cron firing frozen by a failing git sync? (#389/#1808)
+
+        True only when the owner opted in (`freeze_schedules_if_sync_failing`)
+        AND sync is actually failing. Mirrors the predicate the backend already
+        exposes at `/api/internal/agents/{name}/sync-health-status`; read
+        directly here because the scheduler talks to the same database for
+        every other gate (autonomy, enabled, reminders) and an extra HTTP hop
+        would add a failure mode to the fire path for no benefit.
+
+        FAIL-OPEN: any error (missing table on an older DB, read failure)
+        returns False and the schedule fires. A freeze-on-error would silently
+        stop the whole fleet the moment this query broke — the opposite of the
+        bug this closes.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT gc.freeze_schedules_if_sync_failing,
+                           ss.last_sync_status,
+                           ss.consecutive_failures
+                    FROM agent_git_config gc
+                    LEFT JOIN agent_sync_state ss ON ss.agent_name = gc.agent_name
+                    WHERE gc.agent_name = ?
+                    """,
+                    (agent_name,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return False
+                freeze_enabled = bool(row[0])
+                if not freeze_enabled:
+                    return False
+                failing = (
+                    row[1] == "failed"
+                    and (row[2] or 0) >= SYNC_FAILURE_FREEZE_THRESHOLD
+                )
+                return bool(failing)
+        except Exception as e:
+            logger.warning(
+                f"Sync-freeze check failed for {agent_name} ({e}); firing anyway"
+            )
+            return False
 
     def create_skipped_execution(
         self,
