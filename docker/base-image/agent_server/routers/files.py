@@ -4,13 +4,12 @@ File browser endpoints.
 import logging
 import mimetypes
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse, FileResponse
 from pydantic import BaseModel
-
-from ..utils.helpers import iso_z_from_mtime
 
 
 class FileUpdateRequest(BaseModel):
@@ -19,6 +18,17 @@ class FileUpdateRequest(BaseModel):
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _iso_z_from_mtime(mtime: float) -> str:
+    """Format an mtime (epoch seconds) as canonical ISO-Z UTC.
+
+    Defined locally rather than imported from ``..utils.helpers`` so this router
+    stays standalone-importable: tests/unit/test_ent183_skill_packages.py loads
+    this file by path (no package context) to verify its protected-path logic,
+    and a relative import would break that load (#1795).
+    """
+    return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 @router.get("/api/files")
@@ -71,7 +81,7 @@ async def list_files(path: str = "/home/developer", show_hidden: bool = False):
                             "type": "directory",
                             "children": subtree["children"],
                             "file_count": subtree["file_count"],
-                            "modified": iso_z_from_mtime(stat.st_mtime)
+                            "modified": _iso_z_from_mtime(stat.st_mtime)
                         })
                         total_files += subtree["file_count"]
                     else:
@@ -81,7 +91,7 @@ async def list_files(path: str = "/home/developer", show_hidden: bool = False):
                             "path": str(relative_path),
                             "type": "file",
                             "size": stat.st_size,
-                            "modified": iso_z_from_mtime(stat.st_mtime)
+                            "modified": _iso_z_from_mtime(stat.st_mtime)
                         })
                         total_files += 1
 
@@ -422,7 +432,7 @@ async def update_file(path: str, request: FileUpdateRequest, platform: bool = Fa
             "success": True,
             "path": path,
             "size": stat.st_size,
-            "modified": iso_z_from_mtime(stat.st_mtime)
+            "modified": _iso_z_from_mtime(stat.st_mtime)
         }
 
     except Exception as e:
@@ -490,7 +500,7 @@ async def create_folder(path: str):
             "success": True,
             "path": path,
             "type": "directory",
-            "modified": iso_z_from_mtime(stat.st_mtime)
+            "modified": _iso_z_from_mtime(stat.st_mtime)
         }
 
     except HTTPException:

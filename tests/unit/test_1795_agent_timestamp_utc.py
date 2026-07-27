@@ -14,6 +14,7 @@ package, so ``from agent_server.utils.helpers import ...`` resolves directly.
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import time
 from datetime import datetime, timezone
@@ -80,3 +81,22 @@ def test_base_image_defaults_to_utc():
     content = _DOCKERFILE.read_text(encoding="utf-8")
     assert "ENV TZ=Etc/UTC" in content
     assert "America/New_York" not in content
+
+
+def test_files_router_stays_standalone_importable():
+    """#1795 regression: files.py must load by path with no package context.
+
+    tests/unit/test_ent183_skill_packages.py loads files.py via
+    spec_from_file_location to check its protected-path logic; a relative import
+    (``from ..utils.helpers``) breaks that standalone load. Guard both the load
+    and that the router's local ``_iso_z_from_mtime`` matches the shared helper.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_test1795_agent_files",
+        str(_REPO_ROOT / "docker/base-image/agent_server/routers/files.py"),
+    )
+    files_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(files_mod)  # must not raise (a relative import would)
+
+    for mtime in (0.0, 1753603618.549706):
+        assert files_mod._iso_z_from_mtime(mtime) == iso_z_from_mtime(mtime)
