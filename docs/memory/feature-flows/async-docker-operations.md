@@ -67,6 +67,7 @@ async def container_stop(container, timeout: int = 10) -> None:
 | `container_reload(container)` | Refresh container attrs | 100-500ms | 0s event loop block |
 | `container_stats(container, stream=False)` | Get container stats | 1-2s | 0s event loop block |
 | `container_get(container_id)` | Get container by ID/name | 50-200ms | 0s event loop block |
+| `image_get(name)` | Get image by tag/ID (#1809 drift check) | 50-200ms | 0s event loop block |
 | `volume_get(name)` | Get volume by name | 100-300ms | 0s event loop block |
 | `volume_create(name, labels=None)` | Create volume | 200-500ms | 0s event loop block |
 | `volume_remove(volume)` | Remove volume | 100-300ms | 0s event loop block |

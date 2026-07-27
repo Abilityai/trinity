@@ -1119,6 +1119,18 @@
         "infrastructure"
       ],
       "description": "First-run default-system seeder (ent#124): the REAL bundled config/manifests/default-system.yaml validates through the executor's own parse_manifest/validate_manifest (acme trio, full-mesh, no schedules, no prompt) and every local: template it references exists in-tree (learnings 2026-07-23 blank-agent trap); durable default_system_seeded flag gating (deleted fleet never resurrected); persisted first_run_fresh verdict \u2014 computed once BEFORE Cornelius runs, persisted, reused on later passes (cross-pass count-poisoning bug), cornelius_seeded=true forces not-fresh (ent#107-era installs get no fleet), count failure defers without persisting; TRINITY_DEFAULT_SYSTEM_MANIFEST disable sentinels skip without burning the flag; override path used when set, unreadable override fails loudly (operator-queue alert, no bundled fallback, no flag); flag policy per deploy outcome: deployed/partial set flag (+partial alert), failed (0 created)/exception do NOT (retry-safe); existence backstop converges the flag without deploying when any {system}-{short} name is reserved (suffix double-seed guard for the fail-open lock); SETNX lock held->skip / winner deploys+releases; orchestrator never raises when Cornelius explodes. db/docker/redis/deploy_manifest seams patched; no Docker/backend."
+    },
+    {
+      "file": "unit/test_1809_image_drift_recreate.py",
+      "feature": "#1809",
+      "added": "2026-07-27",
+      "categories": [
+        "backend",
+        "agents",
+        "unit",
+        "reliability"
+      ],
+      "description": "Image-drift recreate predicate (#1809): check_base_image_matches compares the container's resolved image id against what its OWN Config.Image reference currently resolves to \u2014 drift\u2192False (recreate on next cold start), match\u2192True; fail-open True on falsy attrs (Config.Image can be \"\"), ImageNotFound (recreate would fail on the same missing tag), and generic daemon errors (2am case: start proceeds on the old image, never a fleet recreate); ID-pinned Config.Image is a documented tautological no-op; version-pinned tags compare their own tag only (a :latest-only rebuild leaves 0.8.0-pinned agents untouched). Source-pins the lifecycle wiring: lazy evaluation gated on `not needs_recreation and not was_already_running` (cold start only \u2014 start-on-running stays an idempotent no-op), ephemeral-ghost exclusion, image-check assignment ABOVE the #1560 clear_agent_breakers gate, recreate delivering the upgrade via the container's own tag, trinity.base-image-version label refresh, recreate-race hardening (remove NotFound tolerated, run 409 adopts the winner), start-response recreated/recreate_reason surfacing, and the skip-inject _reset fixture stubbing the new predicate (Mock-auto-child trap)."
     }
   ]
 }
