@@ -178,9 +178,11 @@ def test_claude_md_does_not_reference_unshipped_slash_commands(claude_md):
     `/namespace:command` form. `_EXTERNAL` covers the rest: `plugin` is a Claude
     Code builtin, and the others are POSIX path segments that suppress false
     positives from prose paths like `open /path/to/folder` (CLAUDE.md:30) — not
-    builtins. Extend it when CLAUDE.md gains a new prose path.
+    builtins. Extend it when CLAUDE.md gains a new prose path (`scripts`
+    entered with the `./scripts/deploy/start.sh` install command, #1788).
     """
-    _EXTERNAL = {"plugin", "home", "api", "data", "path", "opt", "usr", "var", "tmp", "mcp", "docs"}
+    _EXTERNAL = {"plugin", "home", "api", "data", "path", "opt", "usr", "var", "tmp", "mcp", "docs",
+                     "scripts"}
     # (?!:) skips plugin-namespaced commands like /trinity:onboard
     referenced = set(re.findall(r"(?<![\w/])/([a-z][a-z0-9-]{2,})\b(?!:)", claude_md))
     referenced -= _EXTERNAL
