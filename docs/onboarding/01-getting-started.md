@@ -95,20 +95,23 @@ You should see:
 Open your browser and navigate to:
 
 ```
-http://localhost:3000
+http://localhost
 ```
+
+(or `http://localhost:<FRONTEND_PORT>` if you changed it in `.env`)
 
 You'll be redirected to the **Setup Wizard** on first launch.
 
 ### Step 2: Create Admin Account
 
-1. **Set Admin Password**
-   - Enter a strong password (minimum 8 characters)
+1. **Create the Admin Account**
+   - Enter your **admin email** — this becomes your sign-in identity
+   - Enter a strong password (minimum 12 characters, including upper- and lowercase, a digit, and a special character)
    - Confirm the password
    - Click **Create Account**
 
 2. **Login**
-   - Username: `admin`
+   - Email: the admin email you just entered (the username `admin` also works)
    - Password: (the password you just created)
    - Click **Sign In**
 

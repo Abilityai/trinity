@@ -161,9 +161,9 @@ cp .env.example .env
 **First-time setup**
 
 1. Open http://localhost — you'll be redirected to the setup wizard
-2. Set your **admin password** (minimum 8 characters)
-3. Log in with username `admin` and your new password
-4. Go to **Settings** → **API Keys** to configure your Anthropic API key
+2. Enter your **admin email** — this becomes your sign-in identity — and an **admin password** (minimum 12 characters, with upper- and lowercase, a digit, and a special character)
+3. Log in with that email (or the username `admin`) and your password
+4. Go to **Settings** → **Integrations** → **API Keys** to configure your Anthropic API key
 
 **Access**
 
@@ -628,7 +628,7 @@ Trinity Connect enables real-time coordination between local Claude Code instanc
 # Install listener dependencies
 brew install websocat jq
 
-# Set your MCP API key (from Settings → API Keys)
+# Set your MCP API key (from Settings → MCP Keys)
 export TRINITY_API_KEY="trinity_mcp_xxx"
 
 # Listen for events from a specific agent
