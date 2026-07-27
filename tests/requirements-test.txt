@@ -4,18 +4,25 @@ pytest-asyncio>=0.24.0
 pytest-timeout>=2.3.0
 pytest-html>=4.1.0
 pytest-cov>=6.0.0
-# Property-based testing (#1771 / P-38 /edge-cases). EXACT pin, not a `>=` floor,
-# deliberately breaking this file's convention: Hypothesis's example generation and
-# shrinking change between releases, so a floating floor makes a derandomized-seed
-# failure non-reproducible across machines and CI runs. Three concurrent #1771
-# slices add this identical line — keeping it byte-identical keeps the merge
-# trivial in any order.
+# Property-based testing (#1771 / P-38 `/edge-cases`). Used by
+# tests/unit/test_1771*_properties.py.
 #
-# Unlike pytest-randomly (deliberately kept OUT of this file, backend-unit-test.yml:93-99,
-# because pytest auto-discovers installed plugins and it would silently randomize
-# every local run), Hypothesis's auto-loaded plugin does not alter collection order
-# or the behaviour of tests that don't use @given — it only adds --hypothesis-*
-# options and a statistics reporter.
+# EXACT pin, deliberately breaking this file's `>=` convention: Hypothesis's
+# example generation and shrinking change between releases, and the #1771
+# property suites run under a `derandomize=True` profile whose frozen input set
+# is stable only per version. A floating floor would make a failure
+# irreproducible across machines and could surface as a head-only failure in
+# CI's base-vs-head regression diff — the one thing the derandomized profile
+# exists to prevent.
+#
+# Unlike pytest-randomly (deliberately kept OUT of this file — see
+# backend-unit-test.yml:93-99 — because pytest auto-discovers installed plugins
+# and it would silently randomize every local run), Hypothesis's auto-loaded
+# plugin changes neither collection order nor the behaviour of tests that don't
+# use @given; it only adds --hypothesis-* options and a statistics reporter.
+#
+# Every #1771 slice adds this block byte-identically at this exact position, so
+# the slices merge cleanly in any order and the file keeps ONE hypothesis line.
 hypothesis==6.161.5
 httpx>=0.28.0
 websockets>=13.0
