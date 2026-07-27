@@ -1573,6 +1573,10 @@ class DatabaseManager:
         """Delete terminal schedule_executions rows older than retention_days (#772)."""
         return self._schedule_ops.prune_execution_rows(retention_days, chunk_size)
 
+    def resummarize_legacy_tool_calls(self, chunk_size: int = 200, max_rows: int = 2000) -> int:
+        """#1741: rewrite legacy raw-transcript `tool_calls` blobs to the summary shape."""
+        return self._schedule_ops.resummarize_legacy_tool_calls(chunk_size, max_rows)
+
     def scrub_terminal_backlog_metadata(self, chunk_size: int = 500) -> int:
         """NULL backlog_metadata on authoritative-terminal executions (#1449 PII scrub)."""
         return self._schedule_ops.scrub_terminal_backlog_metadata(chunk_size)

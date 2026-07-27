@@ -7,7 +7,9 @@ bare-name module-global does NOT resolve via MRO, so splitting them would
 NameError on the #834 purge path."""
 
 
-from sqlalchemy import select, update, delete, and_, func
+import json
+
+from sqlalchemy import select, update, delete, and_, func, or_
 
 from ..engine import get_engine
 from ..tables import (
@@ -34,7 +36,15 @@ def _execution_log_prune_predicate(cutoff: str):
         schedule_executions.c.status.in_(_RETENTION_TERMINAL),
         schedule_executions.c.completed_at.isnot(None),
         schedule_executions.c.completed_at < cutoff,
-        schedule_executions.c.execution_log.isnot(None),
+        # #1741: either column may still hold transcript-derived content. Gating
+        # on `execution_log IS NOT NULL` alone would permanently strand the
+        # `tool_calls` copies on rows a PREVIOUS sweep already nulled the log
+        # for — the exact rows where the copy most obviously outlived what it
+        # duplicates.
+        or_(
+            schedule_executions.c.execution_log.isnot(None),
+            schedule_executions.c.tool_calls.isnot(None),
+        ),
     )
 
 
@@ -201,7 +211,14 @@ class ScheduleRetentionMixin:
                 result = conn.execute(
                     update(schedule_executions)
                     .where(schedule_executions.c.id.in_(ids))
-                    .values(execution_log=None)
+                    # #1741: `tool_calls` holds tool inputs derived from the same
+                    # transcript, so it is pruned on the SAME schedule. Before
+                    # this it held a verbatim copy of `execution_log` that this
+                    # sweep never touched — an operator saw the log retired while
+                    # an identical copy lived on until the row itself was deleted
+                    # ~60 days later. A copy of the transcript must not outlive
+                    # the transcript.
+                    .values(execution_log=None, tool_calls=None)
                 )
                 total += result.rowcount
             if len(ids) < chunk_size:
@@ -246,6 +263,68 @@ class ScheduleRetentionMixin:
                 )
                 total += result.rowcount
             if len(ids) < chunk_size:
+                break
+        return total
+
+    def resummarize_legacy_tool_calls(self, chunk_size: int = 200, max_rows: int = 2000) -> int:
+        """Rewrite legacy raw-transcript ``tool_calls`` blobs into the summary
+        shape (#1741).
+
+        Before #1741 the task path stored the whole transcript in ``tool_calls``.
+        Every consumer looks for ``{"tool": …}`` entries, so those rows report
+        **0 tool calls** and render an empty "Tool Calls" panel — history stays
+        wrong even after the writer is fixed. This converts them in place.
+
+        Non-destructive: the original transcript remains in ``execution_log``
+        (pruned on its own schedule), so a bad conversion loses nothing
+        recoverable. Idempotent: ``summarize_tool_calls_json`` returns an
+        already-summarised value unchanged, and rows are re-selected only while
+        they still look raw.
+
+        Bounded per call (``max_rows``) because this is a whole-table rewrite on
+        the largest table; the sweep runs every 5 minutes, so a big backlog
+        drains over a few cycles instead of holding a long write lock.
+
+        Returns: number of rows rewritten.
+        """
+        from services.tool_call_summary import looks_like_raw_transcript, summarize_tool_calls_json
+
+        engine = get_engine()
+        total = 0
+        scanned = 0
+        last_id = None
+        while scanned < max_rows:
+            with engine.begin() as conn:
+                q = (
+                    select(schedule_executions.c.id, schedule_executions.c.tool_calls)
+                    .where(schedule_executions.c.tool_calls.isnot(None))
+                    .order_by(schedule_executions.c.id)
+                    .limit(chunk_size)
+                )
+                if last_id is not None:
+                    q = q.where(schedule_executions.c.id > last_id)
+                rows = conn.execute(q).mappings().all()
+                if not rows:
+                    break
+                last_id = rows[-1]["id"]
+                scanned += len(rows)
+
+                for row in rows:
+                    raw = row["tool_calls"]
+                    try:
+                        parsed = json.loads(raw)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if not looks_like_raw_transcript(parsed):
+                        continue
+                    summary = summarize_tool_calls_json(raw)
+                    conn.execute(
+                        update(schedule_executions)
+                        .where(schedule_executions.c.id == row["id"])
+                        .values(tool_calls=summary)
+                    )
+                    total += 1
+            if len(rows) < chunk_size:
                 break
         return total
 
