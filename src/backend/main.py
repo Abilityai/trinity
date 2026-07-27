@@ -1279,24 +1279,56 @@ def _build_version_payload(
     import os
     from pathlib import Path
 
-    # Version resolution order (#993):
-    #   1. VERSION env var — build-stamped from git (e.g. "0.9.0+g4c640b6e"),
-    #      wired through docker-compose backend.build.args + start.sh.
-    #   2. VERSION file — curated semver, mounted in dev / copied in image.
-    #   3. "unknown" — neither present.
-    # Env-first means dev (bind-mount) and prod (build-arg) agree for the
-    # same commit instead of diverging on the file-mount being absent.
-    version = os.getenv("VERSION") or None
-    if not version:
-        version_paths = [
-            Path("/app/VERSION"),  # In container (mounted)
-            Path(__file__).parent.parent.parent / "VERSION",  # Development
-        ]
-        for version_file in version_paths:
+    # Version resolution (#993, corrected by #1810 + #1814).
+    #
+    #   env VERSION  — build-stamped from git ("0.9.0+g4c640b6e"), wired through
+    #                  docker-compose backend.build.args + start.sh. Describes
+    #                  the IMAGE.
+    #   VERSION file — curated semver. Bind-mounted live in dev
+    #                  (docker-compose.yml `./VERSION:/app/VERSION:ro`), COPY'd
+    #                  into the image in prod. In dev it describes the CODE.
+    #
+    # #1810: `ARG VERSION=unknown` + an unconditional `ENV` means the env var is
+    # always set — to the literal string "unknown" when no build arg was passed.
+    # That sentinel is truthy, so the old `or None` never fired and the file tier
+    # was unreachable for exactly the operator it was written for. Treat the
+    # sentinel as absence.
+    #
+    # #1814: `start.sh` never rebuilds platform images, so after an in-place
+    # upgrade the baked env still names the PREVIOUS build while the
+    # bind-mounted source runs the new code. The two then disagree, and the
+    # file — being live in dev — is the one describing what is actually
+    # executing. Prefer it, and keep the baked value as `image_version` so the
+    # drift is visible rather than silently smoothed over. In prod both are
+    # baked from the same build, so they agree and this branch never fires.
+    _SENTINEL = "unknown"
+
+    env_version = (os.getenv("VERSION") or "").strip()
+    if env_version == _SENTINEL:
+        env_version = ""
+
+    file_version = ""
+    version_paths = [
+        Path("/app/VERSION"),  # In container (mounted in dev, COPY'd in prod)
+        Path(__file__).parent.parent.parent / "VERSION",  # Development
+    ]
+    for version_file in version_paths:
+        try:
             if version_file.exists():
-                version = version_file.read_text().strip()
+                file_version = version_file.read_text().strip()
                 break
-    version = version or "unknown"
+        except OSError:
+            # An unreadable VERSION file must never 500 this endpoint — it is
+            # the endpoint operators reach for when something is already wrong.
+            continue
+
+    # Compare on the semver base: the env value carries a `+g<sha>` suffix the
+    # curated file does not.
+    image_version = env_version or None
+    if env_version and file_version and file_version != env_version.split("+")[0]:
+        version = file_version
+    else:
+        version = env_version or file_version or _SENTINEL
 
     git_commit = os.getenv("GIT_COMMIT", "unknown")
     git_commit_short = git_commit[:8] if git_commit != "unknown" else "unknown"
@@ -1317,6 +1349,12 @@ def _build_version_payload(
             "base_image": f"trinity-agent-base:{version}"
         },
         "runtimes": ["claude-code", "gemini-cli", "codex"],
+        # #1814: the version baked into the running image. Equal to `version`
+        # on a normally-built stack; DIFFERENT means the image is stale
+        # relative to the code being executed (an in-place upgrade without
+        # `docker compose build`), and the git_* fields below describe that
+        # older image, not `version`. None when the image carries no stamp.
+        "image_version": image_version,
         "build_date": os.getenv("BUILD_DATE", "unknown"),
         "git_commit": git_commit,
         "git_commit_short": git_commit_short,

@@ -11,6 +11,7 @@ There is no web UI for reminders. They are a backend and MCP primitive that agen
 - **Reminder** — A one-shot, durable, self-scheduled task. An agent sets a reminder on **itself** with a message and a fire time. At that time, Trinity runs a normal execution of the agent with that message.
 - **Self-only** — An agent can set, list, and cancel only *its own* reminders. A reminder against a sibling agent is rejected (`403`).
 - **Durable** — Reminders survive a restart. The fire time is stored, not held in memory, and re-armed on boot. A reminder due during a restart fires when the service comes back rather than being lost.
+- **Autonomy-gated** — Reminders only fire while the agent's **autonomy mode** is on, the same master switch that governs [schedules](scheduling.md). Autonomy is **off by default on a newly created agent**.
 
 ### Reminder vs. Loop vs. Schedule
 
@@ -36,6 +37,19 @@ Optional per-reminder overrides — `model`, `timeout_seconds`, and `allowed_too
 **Listing** returns pending reminders by default (soonest fire first); pass a status filter of `all` to see fired, cancelled, and failed reminders too.
 
 **Cancelling** a still-pending reminder stops it from firing. Cancelling an already-cancelled reminder is a no-op success; a reminder that has already fired, is mid-fire, or has failed cannot be cancelled (`409`). An unknown reminder id returns `404`.
+
+### Autonomy must be on
+
+A reminder set on an agent whose autonomy mode is **off** is accepted and **held**: it stays `pending`, is never armed, and does not fire — even once its fire time passes. Turn autonomy on and it fires past-due within about a minute. Nothing is lost, but nothing happens either.
+
+Because autonomy defaults to off on a new agent, this is the usual reason a first reminder "never fires".
+
+How to tell:
+
+- The create response and `list_reminders` set **`autonomy_hold: true`** on any reminder in this state, and the `set_reminder` tool result adds an explicit `warning`. An agent should relay that to the user rather than reporting the reminder as scheduled.
+- The scheduler logs a count each reconcile pass, e.g. `2 reminder(s) held: their agent's autonomy is disabled.`
+
+Chat is *not* autonomy-gated, so an agent can be mid-conversation, accept "remind me in an hour", and still be unable to fire it. Check autonomy when a user asks for a reminder.
 
 **Where fired reminders appear** — a fired reminder is a normal execution row (with `triggered_by: "reminder"`), so it appears on the Executions page, in per-execution detail, and as its own **Reminders** category in the agent's analytics timeline — never folded into Scheduled.
 

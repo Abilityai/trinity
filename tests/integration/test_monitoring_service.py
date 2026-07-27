@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.util
-import os
 import sys
 import types
 import uuid
@@ -28,7 +27,6 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
-import redis as _redis
 
 
 # Modules this test stubs into sys.modules at import time so that
@@ -70,21 +68,11 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 
-def _load_env_password() -> str:
-    """Pull REDIS_BACKEND_PASSWORD out of the repo .env."""
-    env_path = _REPO / ".env"
-    if not env_path.exists():
-        pytest.skip(".env missing — cannot derive Redis credentials")
-    for line in env_path.read_text().splitlines():
-        if line.startswith("REDIS_BACKEND_PASSWORD="):
-            return line.split("=", 1)[1].strip()
-    pytest.skip("REDIS_BACKEND_PASSWORD not found in .env")
-
-
-_PASSWORD = _load_env_password()
-os.environ["REDIS_URL"] = f"redis://backend:{_PASSWORD}@localhost:6379"
-os.environ.setdefault("REDIS_PASSWORD", "test")
-os.environ.setdefault("REDIS_BACKEND_PASSWORD", _PASSWORD)
+# #1775: the Redis target is resolved once, in tests/integration/conftest.py,
+# at a scope that runs before this module is imported. This file used to write
+# os.environ["REDIS_URL"] UNCONDITIONALLY here — during collection — which
+# overwrote the harness's target for the entire pytest session and silently
+# turned every other Redis-backed integration module into a skip.
 
 
 # Pre-load src/backend/utils/helpers.py as the `utils.helpers` submodule so
@@ -116,14 +104,20 @@ def _preload_backend_helpers():
 _preload_backend_helpers()
 
 
-# Load the real agent_client and register it as `services.agent_client` so
-# monitoring_service.check_network_health's lazy import resolves it.
+# Load the real agent_client standalone (bypassing services/__init__.py, which
+# drags in Docker/FastAPI). #1775: this deliberately does NOT register the module
+# in sys.modules. It used to — at module scope, i.e. during *collection* — which
+# left the session holding two generations of agent_client: the real one the root
+# conftest imported (tests/conftest.py) and this copy, for every module collected
+# after this one. `check_network_health` resolves `CircuitState` through a
+# call-time `from services.agent_client import ...`, so the binding is needed only
+# while these tests run; `_bind_agent_client` below does it with
+# monkeypatch.setitem, which is scoped and auto-restored.
 _AC_SPEC = importlib.util.spec_from_file_location(
     "services.agent_client",
     str(_BACKEND / "services" / "agent_client.py"),
 )
 agent_client = importlib.util.module_from_spec(_AC_SPEC)
-sys.modules["services.agent_client"] = agent_client
 _AC_SPEC.loader.exec_module(agent_client)
 
 
@@ -135,8 +129,8 @@ _AC_SPEC.loader.exec_module(agent_client)
 # `services.docker_utils` (no `container_get_archive`) into later test files
 # such as test_whatsapp_adapter, breaking their imports with
 # "cannot import name 'container_get_archive' ... (unknown location)" (#211).
-# `services.agent_client` (loaded above) is the REAL module and IS used at test
-# runtime by check_network_health's lazy import, so it deliberately stays.
+# `services.agent_client` is not in this confinement list because #1775 stopped
+# installing it here at all — see `_bind_agent_client` below.
 _CONFINED_KEYS = ("database", "services.docker_service", "services.docker_utils")
 _saved_mods = {k: sys.modules.get(k) for k in _CONFINED_KEYS}
 
@@ -177,20 +171,7 @@ pytestmark = pytest.mark.integration
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
-@pytest.fixture(scope="module")
-def redis_client():
-    client = _redis.from_url(
-        os.environ["REDIS_URL"],
-        decode_responses=True,
-        socket_connect_timeout=2,
-        socket_timeout=2,
-    )
-    try:
-        client.ping()
-    except Exception as e:
-        pytest.skip(f"Redis unavailable: {e}")
-    yield client
-    client.close()
+# `redis_client` comes from tests/integration/conftest.py (#1775).
 
 
 @pytest.fixture
@@ -232,6 +213,19 @@ class TestCheckNetworkHealthClassification:
     AgentClient._request: only ConnectError/ConnectTimeout trip the circuit;
     any HTTP response records success (5xx is handled downstream by
     aggregate_health)."""
+
+    @pytest.fixture(autouse=True)
+    def _bind_agent_client(self, monkeypatch):
+        """Make the test and the code under test share ONE agent_client (#1775).
+
+        `check_network_health` reaches `CircuitState` through a call-time
+        `from services.agent_client import CircuitState`, so the binding only has
+        to hold while these tests run. Scoped to this class — the tests in
+        `TestAggregateHealthFiveHundred` never touch the circuit — and applied
+        with monkeypatch.setitem so it is unwound automatically instead of
+        leaking a second generation into every module collected after this one.
+        """
+        monkeypatch.setitem(sys.modules, "services.agent_client", agent_client)
 
     def _read_failures(self, name: str) -> int:
         return agent_client.CircuitState(name).failure_count

@@ -2165,6 +2165,11 @@ class ReminderSummary(BaseModel):
     created_at: str
     fired_at: Optional[str] = None
     cancelled_at: Optional[str] = None
+    # #1806: derived at read time (NOT a column) — true when this reminder is
+    # still live but its agent has autonomy off, so the scheduler will not arm
+    # it. Without this a held reminder is indistinguishable from a healthy one:
+    # `pending` with a fire_at that quietly slides into the past.
+    autonomy_hold: bool = False
 
     class Config:
         from_attributes = True
