@@ -459,12 +459,15 @@ class SchedulerDatabase:
                 row = cursor.fetchone()
                 if not row:
                     return False
-                freeze_enabled = bool(row[0])
+                # Named access only: the PG path (#300) yields RealDictCursor
+                # mapping rows with no positional indexing — row[0] would
+                # KeyError and silently fail-open on every PostgreSQL deploy.
+                freeze_enabled = bool(row["freeze_schedules_if_sync_failing"])
                 if not freeze_enabled:
                     return False
                 failing = (
-                    row[1] == "failed"
-                    and (row[2] or 0) >= SYNC_FAILURE_FREEZE_THRESHOLD
+                    row["last_sync_status"] == "failed"
+                    and (row["consecutive_failures"] or 0) >= SYNC_FAILURE_FREEZE_THRESHOLD
                 )
                 return bool(failing)
         except Exception as e:

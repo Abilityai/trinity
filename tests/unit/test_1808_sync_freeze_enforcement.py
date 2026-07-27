@@ -129,3 +129,43 @@ def test_threshold_matches_the_backend(tmp_path):
     backend = (_REPO / "src" / "backend" / "routers" / "internal.py").read_text()
     # internal.py expresses the same rule inline.
     assert f">= {threshold}" in backend
+
+
+def test_mapping_only_rows_still_freeze(tmp_path, monkeypatch):
+    """PostgreSQL rows (#300) are RealDictCursor mappings with NO positional
+    access — `row[0]` raises KeyError there, which the fail-open except would
+    swallow, leaving the freeze silently inert on every PG deploy. Pin that the
+    predicate reads columns by name (`row["col"]`, the module convention)."""
+    from contextlib import contextmanager
+
+    db_path = tmp_path / "t.db"
+    _seed(db_path, freeze=1, status="failed", failures=5)
+    db = _db(db_path)
+
+    class _DictRowCursor:
+        """sqlite3 cursor whose rows are plain dicts (mapping-only access)."""
+
+        def __init__(self, cur):
+            self._cur = cur
+
+        def execute(self, sql, params=()):
+            self._cur.execute(sql, params)
+            return self
+
+        def fetchone(self):
+            row = self._cur.fetchone()
+            return None if row is None else dict(row)
+
+    @contextmanager
+    def dict_row_connection():
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield type(
+                "Conn", (), {"cursor": lambda self: _DictRowCursor(conn.cursor())}
+            )()
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(db, "get_connection", dict_row_connection)
+    assert db.should_freeze_schedules("a1") is True
