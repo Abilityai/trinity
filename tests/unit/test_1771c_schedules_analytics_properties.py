@@ -50,6 +50,47 @@ from db_harness import db_backend, run as _hrun  # noqa: E402,F401
 
 _DB_MODULES = ("db.connection", "db.schedules", "db.activities", "database")
 
+# ---------------------------------------------------------------------------
+# sys.modules hygiene (#762 lint). Both evictions in this file are outside
+# monkeypatch's reach, or actively wrong for it:
+#   * the `utils*` shadow clear above runs at IMPORT time, before any fixture
+#     exists, so monkeypatch structurally cannot reach it;
+#   * the `ops` fixture must evict `db.*` so `from db.schedules import ...`
+#     re-imports against the harness-bound engine. `monkeypatch.delitem`
+#     records NO undo for a key that was absent on entry, so the freshly
+#     imported, harness-bound module would stay resident for later files —
+#     strictly worse isolation than the explicit pop it would replace.
+# Snapshot/restore covers both the present-on-entry and absent-on-entry cases,
+# which is the leak the lint actually guards against.
+# Precedent: tests/unit/test_telegram_webhook_backfill.py.
+# ---------------------------------------------------------------------------
+_STUBBED_MODULE_NAMES = [
+    "utils",
+    "utils.api_client",
+    "utils.assertions",
+    "utils.cleanup",
+    *_DB_MODULES,
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Snapshot the evicted modules before each test and restore after.
+
+    Purely a teardown-time guarantee: the snapshot is taken before the test
+    body, so no in-test behaviour (and no assertion) changes.
+    """
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
 _counter = itertools.count()
 
 STATUSES = [
