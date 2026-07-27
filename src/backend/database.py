@@ -561,6 +561,10 @@ class DatabaseManager:
     def delete_agent_ownership(self, agent_name: str):
         return self._agent_ops.delete_agent_ownership(agent_name)
 
+    def deactivate_agent_mcp_keys(self, agent_name: str) -> int:
+        """Deactivate an agent's agent/connector-scoped MCP keys (#1811)."""
+        return self._agent_ops.deactivate_agent_mcp_keys(agent_name)
+
     def purge_agent_ownership(self, agent_name: str):
         return self._agent_ops.purge_agent_ownership(agent_name)
 
