@@ -92,26 +92,16 @@ class MetadataMixin:
         """
         Rename an agent by updating all database references.
 
-        This updates agent_name in all tables that reference it:
-        - agent_ownership (primary)
-        - agent_sharing
-        - agent_schedules
-        - schedule_executions
-        - chat_sessions
-        - chat_messages
-        - agent_activities
-        - agent_permissions (source and target)
-        - agent_shared_folder_config
-        - agent_git_config
-        - agent_skills
-        - agent_tags
-        - agent_public_links
-        - mcp_api_keys
-        - agent_health_checks
-        - agent_dashboard_values
-        - monitoring_alert_cooldowns
-        - agent_shared_files
-        - agent_reports
+        Re-keys `agent_name` in `agent_ownership` (here) and in EVERY table
+        registered in `db.agent_cleanup.AGENT_REFS` (via `cascade_rename`),
+        plus any entitled-module table registered at runtime through
+        `register_agent_owned_table`.
+
+        Deliberately NOT a hand-maintained list of tables (#1819): the previous
+        docstring enumerated 19 and the code matched it, while the registry had
+        grown to 41 — so a rename silently stranded 23 tables' worth of the
+        agent's data, including its Session-tab history. The list is derived
+        now; adding a table to `AGENT_REFS` is all a new feature has to do.
 
         Args:
             old_name: Current agent name
@@ -210,136 +200,39 @@ class MetadataMixin:
                     )
                 )
 
-                # Sharing
-                conn.execute(
-                    update(agent_sharing)
-                    .where(agent_sharing.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
+                # Every other agent-keyed table, from the ONE registry
+                # (#1819). This used to be ~19 hand-written `update()` blocks,
+                # and the list had silently fallen 23 tables behind
+                # `AGENT_REFS`: a rename stranded the agent's Session-tab
+                # history (the reported symptom), and also its reminders,
+                # loops, notifications, operator-queue items, sync state,
+                # compatibility results, per-user memory, and its Telegram /
+                # WhatsApp / VoIP / Slack channel bindings.
+                #
+                # `cascade_rename` was written for exactly this and had ZERO
+                # callers — the delete path consumed the registry while rename
+                # kept its own copy, so every table added since only ever
+                # joined one of them. Two hand-maintained lists for one
+                # question is the defect; deriving both from `AGENT_REFS` is
+                # the fix, and `test_1819_rename_cascade_parity.py` fails CI if
+                # they diverge again.
+                #
+                # Safe by construction: every table the old sequence touched is
+                # already in the registry (verified — the hand list was a strict
+                # subset), `cascade_rename` skips absent tables, and it handles
+                # the multi-column refs (`agent_permissions.source_agent` /
+                # `.target_agent`, the event-subscription pair) the hand list
+                # spelled out twice.
+                from db.agent_cleanup import cascade_rename
 
-                # Schedules
-                conn.execute(
-                    update(agent_schedules)
-                    .where(agent_schedules.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
-
-                # Executions
-                conn.execute(
-                    update(schedule_executions)
-                    .where(schedule_executions.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
-
-                # Chat sessions
-                conn.execute(
-                    update(chat_sessions)
-                    .where(chat_sessions.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
-
-                # Chat messages
-                conn.execute(
-                    update(chat_messages)
-                    .where(chat_messages.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
-
-                # Activities
-                conn.execute(
-                    update(agent_activities)
-                    .where(agent_activities.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
-
-                # Permissions (both source and target)
-                conn.execute(
-                    update(agent_permissions)
-                    .where(agent_permissions.c.source_agent == old_name)
-                    .values(source_agent=new_name)
-                )
-                conn.execute(
-                    update(agent_permissions)
-                    .where(agent_permissions.c.target_agent == old_name)
-                    .values(target_agent=new_name)
-                )
-
-                # Shared folder config
-                conn.execute(
-                    update(agent_shared_folder_config)
-                    .where(agent_shared_folder_config.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
-
-                # Git config
-                conn.execute(
-                    update(agent_git_config)
-                    .where(agent_git_config.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
-
-                # Skills
-                conn.execute(
-                    update(agent_skills)
-                    .where(agent_skills.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
-
-                # Tags
-                conn.execute(
-                    update(agent_tags)
-                    .where(agent_tags.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
-
-                # Public links
-                conn.execute(
-                    update(agent_public_links)
-                    .where(agent_public_links.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
-
-                # MCP API keys
-                conn.execute(
-                    update(mcp_api_keys)
-                    .where(mcp_api_keys.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
-
-                # Health checks
-                conn.execute(
-                    update(agent_health_checks)
-                    .where(agent_health_checks.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
-
-                # Dashboard values
-                conn.execute(
-                    update(agent_dashboard_values)
-                    .where(agent_dashboard_values.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
-
-                # Monitoring cooldowns
-                conn.execute(
-                    update(monitoring_alert_cooldowns)
-                    .where(monitoring_alert_cooldowns.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
-
-                # Shared files (outbound — amazing-file-outbound).
-                # FK has ON UPDATE CASCADE as belt-and-suspenders; this keeps
-                # the explicit cascade list complete for visibility.
-                conn.execute(
-                    update(agent_shared_files)
-                    .where(agent_shared_files.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
+                cascade_rename(conn, old_name, new_name)
 
                 # Entitled-module agent-scoped tables (ent#46) registered via
-                # db.agent_cleanup.register_agent_owned_table — e.g.
-                # enterprise_connectors. Table/column come from code (not user
-                # input); values are bound. Absent tables are skipped.
+                # db.agent_cleanup.register_agent_owned_table. Kept separate
+                # from the registry pass: these are runtime-registered by the
+                # private submodule, so they are not in `AGENT_REFS` at import
+                # time. Table/column come from code (not user input); values
+                # are bound. Absent tables are skipped.
                 from db.agent_cleanup import EXTRA_AGENT_REFS, _table_exists
                 for table, column in EXTRA_AGENT_REFS:
                     if not _table_exists(conn, table):
@@ -348,14 +241,6 @@ class MetadataMixin:
                         text(f"UPDATE {table} SET {column} = :new WHERE {column} = :old"),
                         {"new": new_name, "old": old_name},
                     )
-                # Reports (#918) — re-key so the renamed agent keeps its report
-                # history and the old name doesn't leave orphaned rows a reused
-                # name could inherit (cross-tenant disclosure).
-                conn.execute(
-                    update(agent_reports)
-                    .where(agent_reports.c.agent_name == old_name)
-                    .values(agent_name=new_name)
-                )
 
                 return True
 
