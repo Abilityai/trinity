@@ -196,7 +196,7 @@ class SystemAgentService:
             # the boot path. Bounded by AGENT_READINESS_TIMEOUT_S, on the
             # STOPPED branch only, and inside main.py's existing broad lifespan
             # try/except.
-            if not await self._preflight_ok_for_delegated_start():
+            if not await self._preflight_ok_for_delegated_start(container):
                 # R1: a recreate REMOVES the old container before running the
                 # replacement, so a run that cannot succeed leaves the platform
                 # with NO system agent. When a precondition for the run is
@@ -466,7 +466,7 @@ class SystemAgentService:
             "mcp_key_created": agent_mcp_key is not None
         }
 
-    async def _preflight_ok_for_delegated_start(self) -> bool:
+    async def _preflight_ok_for_delegated_start(self, container) -> bool:
         """#1816 R1: is it safe to hand the stopped container to a path that may
         REMOVE it before running a replacement?
 
@@ -512,8 +512,10 @@ class SystemAgentService:
 
         # The ssh port the recreate will re-request. The container is stopped,
         # so it holds nothing; anything bound here belongs to another container
-        # or process and WILL collide after the removal.
-        container = get_agent_container(SYSTEM_AGENT_NAME)
+        # or process and WILL collide after the removal. Read from the handle
+        # the caller already has — re-fetching would be a wasted round-trip and
+        # a needless TOCTOU window. Null-safe throughout so a test double or a
+        # partially-populated handle degrades to "no port to check".
         labels = (getattr(container, "attrs", None) or {}).get("Config", {}).get("Labels") or {}
         try:
             ssh_port = int(labels.get("trinity.ssh-port", 0))
