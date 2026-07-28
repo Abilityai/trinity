@@ -174,3 +174,59 @@ describe("get_report", () => {
     assert.equal(out.agent_name, undefined);
   });
 });
+
+describe("list_reports — filters that the backend narrows (#1838 review)", () => {
+  it("rejects a window the backend would silently coerce", () => {
+    // _VALID_HOURS = {0,1,6,24,168,720}; anything else becomes 168 server-side,
+    // so `hours: 48` would answer with 7 days and no signal the window was
+    // ignored. The schema refuses it instead.
+    const tools = makeTools();
+    const schema = tools.listReports.parameters;
+    assert.equal(schema.safeParse({ hours: 48 }).success, false);
+    assert.equal(schema.safeParse({ hours: 24 }).success, true);
+    assert.equal(schema.safeParse({ hours: 0 }).success, true);
+  });
+
+  it("does not send hours/search down the per-agent route", async () => {
+    // The per-agent endpoint takes report_type + paging only. Passing the window
+    // through would be a lie; asserting it here pins the documented behaviour
+    // until #1539 gives that route the same filters.
+    let seen: Record<string, unknown> | undefined;
+    const tools = makeTools({
+      listAgentReports: async (_n: string, p: Record<string, unknown>) => {
+        seen = p;
+        return [] as never;
+      },
+    });
+    await tools.listReports.execute(
+      { agent_name: "worker", hours: 24, search: "x", limit: 10, offset: 0 },
+      { session: AGENT_CTX },
+    );
+    assert.deepEqual(Object.keys(seen ?? {}).sort(), ["limit", "offset", "report_type"]);
+  });
+});
+
+describe("get_report — fail closed (#1838 review)", () => {
+  it("refuses a response with no agent_name for an agent key", async () => {
+    // Without an owner the access re-check cannot run; handing over the payload
+    // would mean an agent key receiving a body nobody gated for it.
+    const tools = makeTools({
+      getReport: async () => ({ id: "r1", payload: { secret: true } }),
+    });
+    const out = JSON.parse(
+      await tools.getReport.execute({ report_id: "r1" }, { session: AGENT_CTX }),
+    );
+    assert.equal(out.error, "Report not found");
+    assert.equal(out.payload, undefined);
+  });
+
+  it("still serves a user-scoped key, which the backend already gated", async () => {
+    const tools = makeTools({
+      getReport: async () => ({ id: "r1", payload: { ok: true } }),
+    });
+    const out = JSON.parse(
+      await tools.getReport.execute({ report_id: "r1" }, { session: USER_CTX }),
+    );
+    assert.deepEqual(out.payload, { ok: true });
+  });
+});

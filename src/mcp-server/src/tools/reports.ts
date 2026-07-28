@@ -208,12 +208,25 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           .string()
           .optional()
           .describe("Exact report_type to filter by, e.g. 'recon.weekly_summary'."),
+        // The backend does NOT accept an arbitrary window: `_VALID_HOURS` is a
+        // whitelist and anything outside it is silently coerced to 168. Accepting
+        // a free integer here would let `hours: 48` answer with 7 days of reports
+        // and no indication the window was ignored, so the enum is mirrored.
         hours: z
-          .number()
-          .int()
-          .min(0)
+          .union([
+            z.literal(0),
+            z.literal(1),
+            z.literal(6),
+            z.literal(24),
+            z.literal(168),
+            z.literal(720),
+          ])
           .optional()
-          .describe("Time window in hours (default 168 = 7 days; 0 = all-time)."),
+          .describe(
+            "Time window: one of 0 (all-time), 1, 6, 24, 168 (default, 7d), 720 (30d). " +
+              "Other values are rejected — the backend only honours these. " +
+              "Ignored when agent_name is set (the per-agent route has no window filter).",
+          ),
         search: z
           .string()
           .max(200)
@@ -318,8 +331,17 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           // agent-scoped key is narrower than its owner, so re-check the owning
           // agent here and return the SAME not-found shape — widening the
           // disclosure for agent keys would defeat the backend's own choice.
+          // Fail CLOSED: if the response carries no owning agent, the re-check
+          // below cannot run, so an agent-scoped key would receive a payload
+          // nobody gated for it. A missing agent_name means the contract changed
+          // or the response is malformed — neither is a reason to hand over the
+          // body. Non-agent scopes are already gated by the backend.
           const owner = (report as { agent_name?: string }).agent_name;
-          if (owner) {
+          if (authContext?.scope === "agent") {
+            if (!owner) {
+              console.error("[get_report] response carried no agent_name — refusing");
+              return JSON.stringify({ error: "Report not found" }, null, 2);
+            }
             const access = await checkAgentAccess(apiClient, authContext, owner);
             if (!access.allowed) {
               console.log(`[get_report] Access denied: ${access.reason}`);
