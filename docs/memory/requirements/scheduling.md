@@ -367,6 +367,53 @@
 - **Retention**: `agent_reminders_retention_days` (default 90, `0` = off) — the cleanup sweep DELETEs terminal (`fired`/`cancelled`/`failed`) rows past the window (`pending`/`firing` never deleted), chunked, gated through the #1644 blast-radius guard; registered in `RETENTION_OPS_KEYS`, surfaced read-only at `GET /api/settings/retention`. #1638 floor discipline: the default is the wide/safe value.
 - **Flow**: `docs/memory/feature-flows/agent-self-reminders.md`
 
+### 10.15 CAS-Won Terminal Owns the Activity Close (#1804)
+- **Status**: ✅ Implemented (2026-07-28, Issue #1804)
+- **GitHub Issue**: #1804 (sub of Epic #1259); prior single-producer patches #45, #767, #1332
+- **Description**: Closing an execution's paired `agent_activities` dispatch row is part of the
+  **terminal-write contract**, not a property of whoever happens to hold the `activity_id` local.
+  Before this, only the dispatching coroutine closed the activity, and only when it won the CAS —
+  so every recovery writer (watchdog, startup recovery, both bulk sweeps, both backend-shutdown
+  `CancelledError` handlers, the lease reaper, the pull sink) wrote the execution terminal and
+  walked away. The row stayed `activity_state='started'` (Timeline rendered the agent as still
+  working) until the generic 120-minute backstop closed it with a fabricated
+  `duration_ms = now − started_at` — a 15-minute run permanently recorded as a ~120-minute failure.
+- **The contract**: *every writer that wins a terminal CAS on `schedule_executions` closes the
+  paired dispatch activity.* The 120-minute `mark_stale_activities_failed` sweep is a **backstop
+  for the unclaimed**, not the primary closer (and #429 deletes it — a per-site patch would leave
+  no owner).
+- **One owner**: `activity_service.close_execution_activity(execution_id, terminal_status, …)`
+  (+ the sync `spawn_close_execution_activity` wrapper for the synchronous pull sink), mirroring
+  `event_dispatch_service.spawn_task_terminal_event` (#1578). It maps the terminal via the shared
+  `models.activity_state_for_terminal` (#1332 — never a second mapping), delegates to
+  `activity_service.complete_activity` so the `agent_activity` WebSocket broadcast survives, and is
+  **fail-open**: it can never affect an already-committed terminal write.
+- **The close is itself a CAS** (`db.complete_activity` → `ActivityCloseOutcome`
+  `UPDATED | ALREADY_CLOSED | NOT_FOUND`). Making a second closer *safe* is what makes "the CAS
+  winner owns it" true — you cannot guarantee only one writer tries. The activity predicate
+  **mirrors** the execution predicate (`db/schedules/executions.py`) rather than inventing a
+  stricter one:
+  - incoming COMPLETED (from SUCCESS) → `activity_state != 'cancelled'` — an authoritative close
+    MAY upgrade a provisional FAILED (the #1083 late-SUCCESS-after-lease-expiry path);
+  - incoming CANCELLED / FAILED → `activity_state = 'started'` — nothing overwrites an
+    authoritative close, so a double close never clobbers `completed_at`/`duration_ms`/`error`.
+  The **lookup** is widened to agree with the write: an authoritative terminal searches
+  `started|failed`, a provisional terminal searches `started` only. A lookup narrower than the CAS
+  makes the whole fix inert.
+- **Split by cardinality**: single-row recovery paths use the per-row helper (WS broadcast
+  preserved); the two bulk sweeps use `db.close_open_activities_for_executions` — one transaction,
+  no per-row WebSocket, driven by the `collect_failed` rows #1714 already collects (no new query).
+  A WS herd during post-outage recovery is exactly what #1085 exists to prevent.
+- **Observability**: `CleanupReport.activities_closed_on_recovery`. Post-merge signal —
+  `stale_activities` trends to ~0 while `activities_closed_on_recovery` picks up the volume;
+  a non-zero `stale_activities` means a producer is still unowned.
+- **Guard**: `tests/unit/test_1804_terminal_activity_parity.py` is anchored on **terminal writes**
+  (`update_execution_status` / `mark_execution_failed_by_watchdog` / `fail_stale_slot_execution`),
+  not on completion-event emission — the emit set is a strict subset (both shutdown handlers write
+  a terminal and emit nothing), which is how those two writers hid from review.
+- **Flow**: `docs/memory/feature-flows/activity-stream.md`,
+  `docs/memory/feature-flows/task-execution-service.md`
+
 ---
 
 ## 34. Agent-Defined Pipelines (#919)
