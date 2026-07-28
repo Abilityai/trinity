@@ -37,8 +37,9 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # changes — PR-only: does this PR touch the frontend? Dependency-free (gh diff),
-  # so a frontend PR runs e2e automatically without the `ui` label.
+  # changes — PR-only: does this PR touch the frontend? Checkout-free (the PR
+  # files API, not a clone), so a frontend PR runs e2e automatically without the
+  # `ui` label.
   # ---------------------------------------------------------------------------
   changes:
     if: github.event_name == 'pull_request'
@@ -103,17 +104,23 @@ jobs:
     # Run when: nightly / manual dispatch, OR the PR touched the frontend, OR the
     # PR carries the `ui` label (manual opt-in, e.g. a non-frontend PR). `always()`
     # so a skipped `changes` job (schedule/dispatch) doesn't gate this out.
-    # Defence in depth (#1782): a `changes` job that failed or was cancelled left
-    # no verdict, and "unable to determine" must mean RUN, never silently skip.
-    # The step itself already fails open, so these clauses guard a future cause
-    # (runner crash, a later edit reintroducing a hard exit), not today's bug.
+    # Defence in depth (#1782): a `changes` job that FAILED left no verdict, and
+    # "unable to determine" must mean RUN, never silently skip. The step itself
+    # already fails open, so this clause guards a future cause (runner crash, a
+    # later edit reintroducing a hard exit), not today's bug.
+    #
+    # `cancelled` is deliberately NOT covered. On cancellation GitHub re-evaluates
+    # this `if` and keeps the job whenever it returns true (that is what `always()`
+    # means), so a `cancelled` clause would defeat the `cancel-in-progress` above:
+    # every superseded push would still boot the 25-minute stack, and a failure
+    # there would post the very red X this issue exists to remove. A cancelled run
+    # has been superseded — the replacement run evaluates from scratch. Don't re-add.
     if: >-
       always() &&
       ( github.event_name == 'schedule'
         || github.event_name == 'workflow_dispatch'
         || needs.changes.outputs.frontend == 'true'
         || needs.changes.result == 'failure'
-        || needs.changes.result == 'cancelled'
         || contains(github.event.pull_request.labels.*.name, 'ui') )
     runs-on: ubuntu-latest
     timeout-minutes: 25
