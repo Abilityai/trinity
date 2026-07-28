@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://www.ability.ai/trinity">
-    <img src="docs/assets/trinity-hero.webp" alt="Trinity — Run agents like infrastructure" width="720" />
+    <img src="docs/assets/trinity-hero.webp" alt="Trinity — The Sovereign AI Agents Platform" width="720" />
   </a>
 </p>
 
@@ -23,19 +23,22 @@
   <img src="https://img.shields.io/badge/docker-required-blue.svg" alt="Docker">
 </p>
 
+> [!NOTE]
+> **📦 Just released — [v0.8.5](docs/releases/0.8.5.md)** (July 26, 2026): skills as a first-class platform capability, shared multi-agent rooms (sessions), agent display names, ephemeral "ghost" agents, voice replies v2, and a smoother first-run experience. [Read the full release notes →](docs/releases/0.8.5.md)
+
 <p align="center">
-  <a href="https://youtu.be/wxCC6QGtLMA">
-    <img src="https://img.youtube.com/vi/wxCC6QGtLMA/maxresdefault.jpg" alt="Trinity v0.8.0 release tour — video" width="640" />
+  <a href="https://youtu.be/XDLOq1crF9w">
+    <img src="https://img.youtube.com/vi/XDLOq1crF9w/maxresdefault.jpg" alt="Trinity Architecture Explained — animated explainer video" width="640" />
   </a>
   <br/>
-  <em>🎬 New — <a href="https://youtu.be/wxCC6QGtLMA">watch the v0.8.0 release tour</a>: agents that speak, the Brain Orb, and the Grid dashboard.</em>
+  <em>🎬 <a href="https://youtu.be/XDLOq1crF9w">Trinity Architecture Explained</a> — a 4:44 animated explainer: one scheduled task followed end to end through the container, gate, delegation, approval, audit, and breaker machinery.</em>
 </p>
 
 ---
 
-## Run agents like infrastructure
+## The Sovereign AI Agents Platform
 
-Trinity is the production runtime for your AI agents — governed, auditable, on your own infrastructure.
+Trinity is a sovereign AI agents platform — build and run proprietary systems, from fully (or semi-) autonomous businesses to self-improving cognitive systems, all governed, auditable, and on infrastructure you control.
 
 > **Claude Code writes the agent. Trinity runs it in production.**
 
@@ -84,6 +87,7 @@ A short teaser of the live interface — the full, zoomable detail is in [the sc
 
 - [Trinity Demo](https://youtu.be/ivljtZqsxeo) — full platform walkthrough
 - [Trinity Architecture Explained](https://youtu.be/XDLOq1crF9w) — animated explainer (4:44): one scheduled task followed end to end through the container, gate, delegation, approval, audit, and breaker machinery
+- [Trinity v0.8.0 Release Tour](https://youtu.be/wxCC6QGtLMA) — agents that speak, the Brain Orb, and the Grid dashboard
 - [From Zero to Deployed AI Agent](https://youtu.be/-TSZyekDS6o) — your first Trinity agent in 30 minutes
 - [Plugins + Trinity: Build and Deploy Agents in Cursor](https://youtu.be/amqiysdlEWY) — the plugin workflow end-to-end
 - [Loops Engineering with Trinity](https://youtu.be/q3YvFYtuhec) — bounded autonomous work loops in practice
