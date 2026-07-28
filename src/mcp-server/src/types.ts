@@ -372,3 +372,20 @@ export interface AgentFileTreeResponse {
   total_files: number;
   show_hidden: boolean;
 }
+
+/**
+ * Agent report metadata — the list-response shape (#918/#1538). Deliberately
+ * carries NO `payload`: list is metadata, detail fetches the body, mirroring the
+ * REST split so a broad listing can't dump every report's contents.
+ */
+export interface ReportSummary {
+  id: string;
+  agent_name: string;
+  report_type: string;
+  title: string;
+  display_hint?: string | null;
+  schema_version?: number;
+  period_start?: string | null;
+  period_end?: string | null;
+  created_at: string;
+}

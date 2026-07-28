@@ -14,6 +14,20 @@ import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 
+
+/**
+ * Pure helper: keep only summaries whose agent is in the allowed set. Gates a
+ * broad (agent_name-omitted) listing under an agent-scoped key down to
+ * {self} ∪ permitted. Exported so a unit test can pin the rule without standing
+ * up a backend — mirrors `filterQueueItemsForAgentScope` (#1104).
+ */
+export function filterReportsForAgentScope<T extends { agent_name: string }>(
+  reports: T[],
+  allowedNames: Set<string>,
+): T[] {
+  return reports.filter((r) => allowedNames.has(r.agent_name));
+}
+
 export function createReportTools(client: TrinityClient, requireApiKey: boolean) {
   const getClient = (authContext?: McpAuthContext): TrinityClient => {
     if (requireApiKey) {
@@ -39,6 +53,36 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
     throw new Error(
       "The report tool requires an agent-scoped API key (it publishes a report as the calling agent)."
     );
+  };
+
+  /**
+   * Agent-to-agent READ gate (mirrors operator_queue.ts / executions.ts).
+   * system → allow; user → allow (the backend already scoped to the user's
+   * accessible agents); agent → self, or a target it has been permitted.
+   *
+   * Note this is the READ path: the write tool above requires an agent-scoped
+   * key and the backend self-gates it to the calling agent, so reading another
+   * agent's reports never widens what you can WRITE.
+   */
+  const checkAgentAccess = async (
+    apiClient: TrinityClient,
+    authContext: McpAuthContext | undefined,
+    targetAgent: string,
+  ): Promise<{ allowed: boolean; reason?: string }> => {
+    if (authContext?.scope === "system") return { allowed: true };
+    if (authContext?.scope !== "agent" || !authContext?.agentName) {
+      return { allowed: true };
+    }
+    const caller = authContext.agentName;
+    if (targetAgent === caller) return { allowed: true };
+    const permitted = await apiClient.getPermittedAgents(caller);
+    if (!permitted.includes(targetAgent)) {
+      return {
+        allowed: false,
+        reason: `Agent '${caller}' does not have permission to access '${targetAgent}'`,
+      };
+    }
+    return { allowed: true };
   };
 
   return {
@@ -135,6 +179,159 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           if (/\b422\b/.test(message)) flags.invalid = true;
           if (/\b429\b/.test(message)) flags.rate_limited = true;
           return JSON.stringify({ success: false, error: message, ...flags }, null, 2);
+        }
+      },
+    },
+
+    // ========================================================================
+    // list_reports — read back what has been reported (#1538)
+    // ========================================================================
+    listReports: {
+      name: "list_reports",
+      description:
+        "Read back reports that were previously published — yours by default. " +
+        "Use it before writing a new report to avoid duplicating or contradicting " +
+        "one you already filed, to resume a series (e.g. last week's summary), or " +
+        "to diff this period against the last. Returns METADATA only (id, type, " +
+        "title, period, created_at) — call get_report with an id for the payload. " +
+        "Omit agent_name for your own reports plus any agent you have permission " +
+        "for. Filters: report_type (exact), hours (time window, 0 = all-time), " +
+        "search (title/type substring). Read-only.",
+      parameters: z.object({
+        agent_name: z
+          .string()
+          .optional()
+          .describe(
+            "Scope to a single agent (your own, or one you are permitted). Omit for every agent you can access.",
+          ),
+        report_type: z
+          .string()
+          .optional()
+          .describe("Exact report_type to filter by, e.g. 'recon.weekly_summary'."),
+        hours: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe("Time window in hours (default 168 = 7 days; 0 = all-time)."),
+        search: z
+          .string()
+          .max(200)
+          .optional()
+          .describe("Substring match on title/report_type. Ignored when agent_name is set."),
+        limit: z.number().int().min(1).max(200).optional().default(50)
+          .describe("Maximum reports to return (1–200, default 50)."),
+        offset: z.number().int().min(0).optional().default(0)
+          .describe("Pagination offset (default 0)."),
+      }),
+      execute: async (
+        params: {
+          agent_name?: string;
+          report_type?: string;
+          hours?: number;
+          search?: string;
+          limit?: number;
+          offset?: number;
+        },
+        context?: { session?: McpAuthContext },
+      ) => {
+        const authContext = context?.session;
+        const apiClient = getClient(authContext);
+
+        if (params.agent_name) {
+          const access = await checkAgentAccess(apiClient, authContext, params.agent_name);
+          if (!access.allowed) {
+            console.log(`[list_reports] Access denied: ${access.reason}`);
+            return JSON.stringify({ error: "Access denied", reason: access.reason }, null, 2);
+          }
+        }
+
+        try {
+          // Scoped listing uses the per-agent route (it takes report_type but no
+          // time window); a broad listing uses the fleet route.
+          let reports = params.agent_name
+            ? await apiClient.listAgentReports(params.agent_name, {
+                report_type: params.report_type,
+                limit: params.limit,
+                offset: params.offset,
+              })
+            : await apiClient.listReports({
+                report_type: params.report_type,
+                hours: params.hours,
+                search: params.search,
+                limit: params.limit,
+                offset: params.offset,
+              });
+
+          // Broad listing under an agent-scoped key: the backend filtered to the
+          // KEY OWNER's accessible agents — broader than this agent's permits.
+          // Narrow to {self} ∪ permitted (same rule as list_operator_queue).
+          if (
+            !params.agent_name &&
+            authContext?.scope === "agent" &&
+            authContext?.agentName
+          ) {
+            const caller = authContext.agentName;
+            const permitted = await apiClient.getPermittedAgents(caller);
+            const allowed = new Set([caller, ...permitted]);
+            const before = reports.length;
+            reports = filterReportsForAgentScope(reports, allowed);
+            console.log(
+              `[list_reports] Agent '${caller}' filtered: ${reports.length}/${before} visible`,
+            );
+          }
+
+          return JSON.stringify({ count: reports.length, reports }, null, 2);
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          console.error(`[list_reports] error: ${msg}`);
+          return JSON.stringify({ error: msg }, null, 2);
+        }
+      },
+    },
+
+    // ========================================================================
+    // get_report — one report including its payload (#1538)
+    // ========================================================================
+    getReport: {
+      name: "get_report",
+      description:
+        "Fetch one report INCLUDING its payload, by id (ids come from " +
+        "list_reports). Use it to read back what you actually wrote — the numbers " +
+        "in last period's summary, the rows of a table you filed — rather than " +
+        "re-deriving them. Read-only.",
+      parameters: z.object({
+        report_id: z.string().describe("Report id, as returned by list_reports."),
+      }),
+      execute: async (
+        params: { report_id: string },
+        context?: { session?: McpAuthContext },
+      ) => {
+        const authContext = context?.session;
+        const apiClient = getClient(authContext);
+
+        try {
+          const report = await apiClient.getReport(params.report_id);
+
+          // The backend gates on the KEY OWNER's access and answers 404 (not
+          // 403) when it fails, so an id can't be probed for existence. An
+          // agent-scoped key is narrower than its owner, so re-check the owning
+          // agent here and return the SAME not-found shape — widening the
+          // disclosure for agent keys would defeat the backend's own choice.
+          const owner = (report as { agent_name?: string }).agent_name;
+          if (owner) {
+            const access = await checkAgentAccess(apiClient, authContext, owner);
+            if (!access.allowed) {
+              console.log(`[get_report] Access denied: ${access.reason}`);
+              return JSON.stringify({ error: "Report not found" }, null, 2);
+            }
+          }
+
+          return JSON.stringify(report, null, 2);
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          console.error(`[get_report] error: ${msg}`);
+          return JSON.stringify({ error: msg }, null, 2);
         }
       },
     },

@@ -317,6 +317,17 @@ endpoint — reports flow agent → MCP → backend.
   the JSON viewer on mismatch. List shows metadata; full payload lazy-loads on expand.
 - **FR-6 — Retention**: cleanup sweep deletes `agent_reports` older than
   `agent_reports_retention_days` (default 90; `0` disables), chunked like the #772 sweeps.
+- **FR-8 — Agent read-back** (#1538, epic #1534): MCP `list_reports` (metadata; filters
+  `agent_name`/`report_type`/`hours`/`search`, paged) and `get_report` (full payload by id)
+  over the **existing** FR-3 endpoints — no new endpoint, no new tenant-boundary logic. The
+  MCP layer adds the one gate the backend structurally cannot: an agent-scoped key resolves to
+  its **owner**, so the backend scopes reads to everything the owner sees; the tool narrows a
+  broad listing to `{self} ∪ permitted` (the #1104 operator-queue rule) and re-checks the
+  owning agent on `get_report`. A denied `get_report` returns the backend's own
+  `Report not found` shape, so the deliberate 404-not-403 id-privacy choice (FR-3) is not
+  widened for agent keys. Closes the write-only loop: an agent can see what it already filed
+  and continue a series rather than duplicate or contradict it. The FR-7 prompt block points
+  at it, so read-back is discoverable in the same breath as publishing.
 - **FR-7 — Discoverability via the platform prompt** (#1535, epic #1534): `PLATFORM_INSTRUCTIONS`
   carries a "Publishing Reports" block, so reporting is a default fleet behaviour instead of
   something only agents whose own CLAUDE.md mentions it ever do. Documents the call, when to

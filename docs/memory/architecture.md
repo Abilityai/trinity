@@ -291,7 +291,7 @@ FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: 
 | `loops.ts` (3) | `run_agent_loop`, `get_loop_status`, `stop_loop` | Sequential bounded task execution (#740) |
 | `reminders.ts` (3) | `set_reminder`, `list_reminders`, `cancel_reminder` | Durable one-shot deferred self-trigger; self-scoped; fires a normal execution of the same agent (`triggered_by="reminder"`) via the scheduler (#1296) |
 | `memory.ts` (1) | `write_user_memory` | Per-user memory blob; user email resolved server-side from execution_id (MEM-001, #888) |
-| `reports.ts` (1) | `report` | Publish a structured report; agent resolved from auth context (self-only), backend self-gates the path agent (#918) |
+| `reports.ts` (3) | `report`, `list_reports`, `get_report` | Publish a structured report (self-only, backend self-gates the path agent, #918); read back what was reported (#1538) — `list_reports` returns metadata, `get_report` the payload, mirroring the REST split. Read is gated at the MCP layer to `{self} ∪ permitted` (an agent key resolves to its OWNER, so the backend's scoping is wider than the calling agent); a non-permitted `get_report` returns the backend's own not-found shape rather than a distinguishable 403 |
 | `voip.ts` (1) | `call_user` | Outbound phone call via Twilio Media Streams; server-gated + rate-limited (VOIP-001, #1056) |
 | `operator_queue.ts` (3) | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue` | Read the Operating Room queue (broad or `agent_name`-scoped) and **resolve** a pending item — answer / approve / deny via `POST /{id}/respond`. The respond tool resolves the item's `agent_name`, then applies the same MCP-layer gate before writing (non-`pending` → structured error). Agent-scoped keys gated to `{self} ∪ permitted`. `cancel` deferred. (OPS-001, #1101 read / #1104 respond) |
 | `git.ts` (6) | `get_git_status`, `git_sync`, `get_git_log`, `git_pull`, `get_git_sync_state`, `reset_to_main_preserve_state` | Direct, deterministic (non-LLM) git operations — bypass `chat_with_agent` for status/sync/log/pull/sync-state and the destructive `reset_to_main_preserve_state` recovery. Conflicts stay LLM-mediated: a 409 surfaces `X-Conflict-Type`/`X-Conflict-Class` verbatim + a `chat_with_agent` hint (except `no_write_credentials` — a credentials gap chat can't fix; the hint says fork-to-own/add-a-token instead, ent#123). Mutating ops (`git_sync`/`reset`) are `OwnedAgentByName` (owner-only; a shared key gets read+pull only); agent-scoped keys gated to `{self} ∪ permitted` at the MCP layer. Each call mints a `requestId` it stamps on its `mcp_operation` audit row AND forwards as `X-Request-ID`, so the paired backend `git_operation` row joins via `GET /api/audit-log?request_id=` (#905) |
@@ -577,6 +577,12 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
 - **Fleet access**: `GET /api/reports` + `GET /api/reports/stats` filter via
   `accessible_agent_names` + `_narrow_to_agent` (admin = all). Renderers (`components/reports/`)
   pick by `display_hint` → `report_type` prefix → JSON, with shape-validation fallback to JSON.
+- **Agent read-back** (#1538): `list_reports` / `get_report` MCP tools over the existing
+  access-controlled REST endpoints — no new endpoint, no new tenant-boundary logic. The
+  MCP layer adds the narrowing the backend cannot do (agent key → owner scope → `{self} ∪
+  permitted`, the #1104 rule), and a denied `get_report` returns "Report not found" so the
+  backend's deliberate 404-not-403 id-privacy choice isn't widened for agent keys. Closes
+  the write-only loop: an agent can continue a series instead of duplicating it.
 - **Retention**: `cleanup_service` `_sweep_retention_772` prunes rows past
   `agent_reports_retention_days` (default 90, `0` disables) via `db.prune_agent_reports`
   (chunked, `idx_agent_reports_created`). Table `agent_reports`; dual migration (SQLite

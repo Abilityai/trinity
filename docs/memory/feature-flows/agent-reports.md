@@ -121,3 +121,32 @@ calling agent.
 - Effect-guard dedup on `report()` for at-least-once pull-mode re-delivery (#1084 / Epic #1045).
 - Audit-log entry on report write (issue: low priority — "reports are the audit").
 - Per-report sharing distinct from the agent's access model.
+
+
+## Agent read-back (#1538)
+
+The write path was one-way: an agent could publish a report and never see it again, so a
+recurring report had no way to continue a series — it could only re-derive, duplicate, or
+contradict what it filed last period.
+
+Two MCP tools close the loop over the **existing** access-controlled REST endpoints
+(`GET /api/reports`, `GET /api/agents/{name}/reports`, `GET /api/reports/{id}`) — no new
+endpoint, no new tenant-boundary logic:
+
+- `list_reports` — metadata only (id, type, title, period, created_at), filters on
+  `agent_name` / `report_type` / `hours` / `search`, paged. Same list-vs-detail split as REST,
+  so a broad listing cannot dump every payload.
+- `get_report(report_id)` — one report including its payload.
+
+**The gate the backend cannot apply.** An agent-scoped key resolves to its *owner*, so the
+backend scopes a read to everything the owner can see — wider than the calling agent's
+permits. The tool narrows a broad listing to `{self} ∪ permitted` (the #1104 rule that
+`list_operator_queue` established) and re-checks the owning agent on `get_report`.
+
+**A denial looks like a miss, not a refusal.** `GET /api/reports/{id}` deliberately answers
+404 rather than 403 so an id cannot be probed for existence. The MCP re-check returns the same
+`Report not found` shape — returning "exists but forbidden" for agent keys would undo that
+choice at the tool layer.
+
+Write is unchanged and stays self-gated: reading another agent's reports never widens what you
+can write.

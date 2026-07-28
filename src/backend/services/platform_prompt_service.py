@@ -75,6 +75,8 @@ Match the payload to the `display_hint` or it renders as raw JSON:
 
 Aggregate before publishing: the 20 rows that matter, not 5,000 raw ones. Oversized payloads are rejected and reports are rate-limited.
 
+Before filing a recurring report, read back what you already filed — `mcp__trinity__list_reports` (metadata; filter by `report_type`) then `mcp__trinity__get_report(report_id)` for a payload. That is how you continue a series instead of duplicating or contradicting last period's numbers.
+
 ### Operator Communication
 
 You can ask your human operator for input — approvals, answers to questions, or alerts — through a file-based queue protocol.
@@ -202,7 +204,8 @@ _CODEX_MCP_ORIENTATION = (
     "## MCP Tools (Codex runtime)\n\n"
     "A Trinity MCP server named `trinity` is configured for you. Call its tools "
     "by the bare names documented below — `list_agents`, `chat_with_agent`, "
-    "`share_file`, `report`, `write_user_memory` — exactly as your client "
+    "`share_file`, `report`, `list_reports`, `get_report`, `write_user_memory` — "
+    "exactly as your client "
     "auto-discovers them. Do not add any vendor-specific tool-name prefix."
     "\n\n---\n\n"
 )
