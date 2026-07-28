@@ -241,6 +241,7 @@ the close.
 | lease reaper (park / **re-queue**) | FAILED / **CANCELLED** (a superseded attempt is not a failure) |
 | pull sink `apply_task_result` | its own terminal, via the sync spawn wrapper |
 | `terminate_execution` | CANCELLED, or the row's real terminal on a lost CAS |
+| #1083 result callback (`routers/agents.py`) | passes `include_failed=True` — it *is* the late-SUCCESS path, so a `started`-only lookup would hand `apply_result` a `None` id and strand the pair at `execution=success, activity=failed` |
 
 Guarded by `tests/unit/test_1804_terminal_activity_parity.py`, anchored on
 **terminal writes** rather than completion-event emission — the #1578 emit set is
