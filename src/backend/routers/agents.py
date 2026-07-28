@@ -1414,7 +1414,14 @@ async def agent_execution_result(
     result = await svc.apply_result(
         agent_name,
         envelope,
-        activity_id=db.get_open_activity_id_for_execution(execution_id),
+        # #1804: `include_failed=True` — this endpoint IS the late-SUCCESS path.
+        # A lease reaper that beat the callback already FAILED the row and closed
+        # the activity FAILED; the CAS lets a genuine late SUCCESS correct the
+        # row, and the activity must follow. A `started`-only lookup returns None
+        # here, so the pair would settle at execution=success, activity=failed —
+        # permanently. Harmless for a FAILED callback: the close CAS refuses to
+        # overwrite an already-closed activity.
+        activity_id=db.get_open_activity_id_for_execution(execution_id, include_failed=True),
         breaker_enabled=dispatch_breaker_active(agent_name),
         release_slot=True,
     )

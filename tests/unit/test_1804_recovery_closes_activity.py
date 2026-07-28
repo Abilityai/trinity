@@ -912,3 +912,26 @@ class TestPullSinkAndLeaseReaper:
         assert report.requeued == 1
         assert report.requeued_execution_ids == ["exec-rq"]
         assert report.parked_execution_ids == []
+
+
+@pytest.mark.unit
+class TestCallbackLateSuccessLookup:
+    """[R1, the #1083 path it was written for] The result-callback endpoint IS
+    the late-SUCCESS path: a lease reaper that beat the callback already FAILED
+    the row and closed the activity FAILED, and the execution CAS deliberately
+    lets a genuine late SUCCESS correct it. A `started`-only lookup returns None
+    there, so the pair would settle at execution=success, activity=failed —
+    #1804 inverted, on the exact path the lattice exists for."""
+
+    def test_callback_lookup_includes_failed_activities(self):
+        import inspect
+
+        import routers.agents as agents_router
+
+        src = inspect.getsource(agents_router)
+        assert (
+            "get_open_activity_id_for_execution(execution_id, include_failed=True)" in src
+        ), (
+            "#1804: the #1083 result-callback must look up with include_failed=True, "
+            "or a late SUCCESS can never upgrade the reaper-FAILED activity."
+        )
