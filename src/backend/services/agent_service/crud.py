@@ -30,6 +30,7 @@ from services.docker_utils import (
 )
 from services.agent_runtime_state import clear_agent_breakers
 from services.template_service import (
+    CredentialDeclarationError,
     get_github_template,
     generate_credential_files,
 )
@@ -174,6 +175,38 @@ def _safe_local_template_path(template_name: str, root: Path) -> Path:
                     f"Resolved template path {candidate} escaped expected root {root}."
                 ),
                 "code": "INVALID_LOCAL_TEMPLATE_NAME",
+            },
+        )
+    return candidate
+
+
+def _safe_cred_file_path(relative_path: str, root: Path) -> Path:
+    """Join a template-declared credential-file path onto `root`, proving it stays inside.
+
+    `credentials.config_files[].path` is an author-controlled string that ends
+    up as `open(root / path, "w")`, and a template is untrusted input — any
+    authenticated user can upload one through `deploy_local_agent_logic`. An
+    absolute path silently wins the join (`Path("/a") / "/etc/x"` is `/etc/x`)
+    and `..` walks out of it, so without this the declaration is an
+    arbitrary-file-write primitive. (trinity-enterprise#128)
+
+    `template_service.credential_shape_errors` already rejects both shapes at
+    the parse boundary; this is the barrier at the sink — the same
+    resolve + `is_relative_to` pattern as `_safe_local_template_path`, which is
+    also what CodeQL recognises as a `py/path-injection` barrier.
+
+    Raises `HTTPException(400)` with code `INVALID_CREDENTIAL_FILE_PATH`.
+    """
+    candidate = (root / relative_path).resolve()
+    if not candidate.is_relative_to(root.resolve()):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"Template credential file path {relative_path!r} escapes "
+                    f"the agent's credential directory."
+                ),
+                "code": "INVALID_CREDENTIAL_FILE_PATH",
             },
         )
     return candidate
@@ -985,17 +1018,30 @@ def _stage_config_files(
     generated_files = {}
     if template_data:
         # Generate empty credential files structure from template
-        generated_files = generate_credential_files(
-            template_data, {}, config.name,
-            template_base_path=github_template_path
-        )
+        try:
+            generated_files = generate_credential_files(
+                template_data, {}, config.name,
+                template_base_path=github_template_path
+            )
+        except CredentialDeclarationError as e:
+            # Invariant #1: the service raises an HTTP-free domain error and
+            # this, its only caller, maps it 1:1. A named 400 beats both of the
+            # alternatives it replaces — an uncaught TypeError (500) and a
+            # silently corrupt `.env`. (trinity-enterprise#128)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": str(e),
+                    "code": "INVALID_CREDENTIAL_DECLARATION",
+                },
+            )
 
     cred_files_dir = Path(f"/tmp/agent-{config.name}-creds")
     cred_files_dir.mkdir(exist_ok=True)
 
     # Write template-generated files (.env, .mcp.json, etc.)
     for filepath, content in generated_files.items():
-        file_path = cred_files_dir / filepath
+        file_path = _safe_cred_file_path(filepath, cred_files_dir)
         file_path.parent.mkdir(parents=True, exist_ok=True)
         with open(file_path, "w") as f:
             f.write(content)
