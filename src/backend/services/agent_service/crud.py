@@ -61,6 +61,12 @@ logger = logging.getLogger(__name__)
 # filesystem reads (CodeQL py/path-injection on #950 PR).
 _LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 
+# Allowed chars in a template-declared credential-file path. Unlike
+# `_LOCAL_TEMPLATE_NAME_RE` this is a *relative path*, so `/` is permitted —
+# but nothing that could start an absolute path or a traversal.
+# (trinity-enterprise#128)
+_CRED_FILE_PATH_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")
+
 _CONTAINER_CURATED_TEMPLATES = Path("/agent-configs/templates")
 
 
@@ -191,14 +197,41 @@ def _safe_cred_file_path(relative_path: str, root: Path) -> Path:
     arbitrary-file-write primitive. (trinity-enterprise#128)
 
     `template_service.credential_shape_errors` already rejects both shapes at
-    the parse boundary; this is the barrier at the sink — the same
-    resolve + `is_relative_to` pattern as `_safe_local_template_path`, which is
-    also what CodeQL recognises as a `py/path-injection` barrier.
+    the parse boundary; this is the barrier at the sink. Two steps, mirroring
+    `_safe_local_template_path`:
+
+    1. Allowlist the raw string — reject empty, absolute, `..`-bearing and
+       anything outside `[A-Za-z0-9._/-]`, BEFORE it reaches the join.
+    2. Resolve the joined path and assert `is_relative_to(root)`.
+
+    Step 1 is not redundant: it is what makes the guard legible to a reader
+    *and* to CodeQL, which does not treat resolve + `is_relative_to` alone as a
+    `py/path-injection` barrier (this helper was flagged high-severity twice
+    when it had only step 2).
 
     Raises `HTTPException(400)` with code `INVALID_CREDENTIAL_FILE_PATH`.
     """
+    if (
+        not relative_path
+        or relative_path.startswith("/")
+        or ".." in relative_path
+        or not _CRED_FILE_PATH_RE.match(relative_path)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"Template credential file path {relative_path!r} is not a "
+                    f"plain relative path inside the agent's credential "
+                    f"directory."
+                ),
+                "code": "INVALID_CREDENTIAL_FILE_PATH",
+            },
+        )
+
+    root = root.resolve()
     candidate = (root / relative_path).resolve()
-    if not candidate.is_relative_to(root.resolve()):
+    if not candidate.is_relative_to(root):
         raise HTTPException(
             status_code=400,
             detail={

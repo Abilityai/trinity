@@ -365,11 +365,27 @@ def test_crud_sink_rejects_an_escaping_credential_file_path(tmp_path):
 
     assert crud._safe_cred_file_path(".env", root) == (root / ".env").resolve()
 
-    for hostile in ("/tmp/pwned.txt", "../../pwned.txt"):
+    assert crud._safe_cred_file_path(".config/app.conf", root) == (
+        root / ".config/app.conf"
+    ).resolve()
+
+    # Step 1 (allowlist on the raw string) and step 2 (resolve + containment).
+    # Step 1 is what CodeQL recognises as a py/path-injection barrier — without
+    # it this helper was flagged high-severity twice.
+    hostile = (
+        "/tmp/pwned.txt",          # absolute — silently wins the join
+        "../../pwned.txt",         # traversal
+        "nested/../../escape.txt",  # traversal mid-path
+        "",                        # empty
+        "-leading-dash",           # outside the allowlist's first-char class
+        "has space.txt",           # outside the allowlist
+        "semi;colon.txt",          # shell-ish punctuation
+    )
+    for path in hostile:
         with pytest.raises(HTTPException) as exc:
-            crud._safe_cred_file_path(hostile, root)
-        assert exc.value.status_code == 400
-        assert exc.value.detail["code"] == "INVALID_CREDENTIAL_FILE_PATH"
+            crud._safe_cred_file_path(path, root)
+        assert exc.value.status_code == 400, path
+        assert exc.value.detail["code"] == "INVALID_CREDENTIAL_FILE_PATH", path
 
 
 # ---------------------------------------------------------------------------
