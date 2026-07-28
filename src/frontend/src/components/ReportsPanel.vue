@@ -12,11 +12,46 @@
       >Refresh</button>
     </div>
 
+    <!-- Filters (#1539) — same controls as the fleet view minus the agent
+         picker, which this tab is already scoped by. -->
+    <div class="flex flex-wrap items-center gap-2 mb-4">
+      <select
+        :value="store.filters.report_type"
+        class="text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-1"
+        @change="store.setFilter('report_type', $event.target.value)"
+      >
+        <option value="">All types</option>
+        <option v-for="t in typeOptions" :key="t" :value="t">{{ t }}</option>
+      </select>
+      <select
+        :value="store.filters.hours"
+        class="text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-1"
+        @change="store.setFilter('hours', Number($event.target.value))"
+      >
+        <option :value="24">24h</option>
+        <option :value="168">7d</option>
+        <option :value="720">30d</option>
+        <option :value="0">All time</option>
+      </select>
+      <input
+        :value="store.filters.search"
+        type="search"
+        placeholder="Search title / type"
+        class="text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-1 flex-1 min-w-[12rem]"
+        @input="onSearch($event.target.value)"
+      />
+    </div>
+
     <p v-if="store.error" class="text-sm text-red-600 mb-3">{{ store.error }}</p>
 
     <div v-if="store.loading && store.reports.length === 0" class="text-sm text-gray-400">Loading…</div>
     <div v-else-if="store.reports.length === 0" class="text-sm text-gray-400">
-      No reports yet. Agents publish reports via the <code>report</code> MCP tool.
+      <template v-if="hasActiveFilter">
+        No reports match these filters.
+      </template>
+      <template v-else>
+        No reports yet. Agents publish reports via the <code>report</code> MCP tool.
+      </template>
     </div>
 
     <ul v-else class="space-y-2">
@@ -63,7 +98,7 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useReportsStore } from '../stores/reports'
 import ReportRenderer from './reports/ReportRenderer.vue'
 
@@ -73,6 +108,38 @@ const props = defineProps({
 })
 
 const store = useReportsStore()
+
+// Type options come from what this agent has actually published — there is no
+// per-agent stats endpoint, and inventing one for a dropdown would be a new
+// surface for a filter the list already answers. Derived from the loaded page,
+// so it reflects the current window rather than all time (#1539).
+const seenTypes = ref(new Set())
+watch(
+  () => store.reports,
+  (rows) => {
+    for (const r of rows || []) seenTypes.value.add(r.report_type)
+    seenTypes.value = new Set(seenTypes.value)
+  },
+  { immediate: true, deep: false },
+)
+const typeOptions = computed(() => [...seenTypes.value].sort())
+
+const hasActiveFilter = computed(
+  () =>
+    !!store.filters.report_type ||
+    !!store.filters.search ||
+    store.filters.hours !== 168,
+)
+
+// Debounced so a typed query is one request, not one per keystroke.
+let _searchTimer = null
+function onSearch(value) {
+  if (_searchTimer) clearTimeout(_searchTimer)
+  _searchTimer = setTimeout(() => store.setFilter('search', value), 300)
+}
+onUnmounted(() => {
+  if (_searchTimer) clearTimeout(_searchTimer)
+})
 
 function load() {
   store.setAgent(props.agentName)

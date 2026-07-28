@@ -20,7 +20,7 @@ import type { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 
 const AGENT_CTX: McpAuthContext = {
-  userId: 1,
+  userId: "admin",   // McpAuthContext.userId is the OWNER USERNAME, not a numeric id
   userEmail: "a@example.com",
   keyName: "k",
   scope: "agent",
@@ -29,7 +29,7 @@ const AGENT_CTX: McpAuthContext = {
 } as McpAuthContext;
 
 const USER_CTX: McpAuthContext = {
-  userId: 1,
+  userId: "admin",   // McpAuthContext.userId is the OWNER USERNAME, not a numeric id
   userEmail: "a@example.com",
   keyName: "k",
   scope: "user",
@@ -187,10 +187,12 @@ describe("list_reports — filters that the backend narrows (#1838 review)", () 
     assert.equal(schema.safeParse({ hours: 0 }).success, true);
   });
 
-  it("does not send hours/search down the per-agent route", async () => {
-    // The per-agent endpoint takes report_type + paging only. Passing the window
-    // through would be a lie; asserting it here pins the documented behaviour
-    // until #1539 gives that route the same filters.
+  it("sends hours/search down the per-agent route too (#1539)", async () => {
+    // This assertion is inverted from what it pinned before #1539: the
+    // per-agent endpoint took report_type + paging only, so the tool dropped
+    // the window and the search term whenever a caller scoped to one agent.
+    // Now both routes carry the same filters and the caveat is gone from the
+    // tool description.
     let seen: Record<string, unknown> | undefined;
     const tools = makeTools({
       listAgentReports: async (_n: string, p: Record<string, unknown>) => {
@@ -202,7 +204,8 @@ describe("list_reports — filters that the backend narrows (#1838 review)", () 
       { agent_name: "worker", hours: 24, search: "x", limit: 10, offset: 0 },
       { session: AGENT_CTX },
     );
-    assert.deepEqual(Object.keys(seen ?? {}).sort(), ["limit", "offset", "report_type"]);
+    assert.equal(seen?.hours, 24);
+    assert.equal(seen?.search, "x");
   });
 });
 

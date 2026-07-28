@@ -103,11 +103,29 @@ async def create_report(
 async def list_agent_reports(
     name: AuthorizedAgent,
     report_type: Optional[str] = Query(None),
+    hours: int = Query(168, description="Time window in hours; 0 = all-time"),
+    search: Optional[str] = Query(None, max_length=200),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    """List one agent's reports (metadata only, newest first)."""
-    rows = db.get_reports_for_agent(name, report_type=report_type, limit=limit, offset=offset)
+    """List one agent's reports (metadata only, newest first).
+
+    `hours`/`search` (#1539) bring this route to parity with the fleet list.
+    They were absent, which made the per-agent Reports tab a flat unfilterable
+    list and silently dropped both filters for any caller that scoped to one
+    agent. `hours` is whitelist-validated exactly like the fleet route — an
+    unlisted value falls back to the 7-day default rather than erroring, so an
+    old client keeps working.
+    """
+    effective_hours = hours if hours in _VALID_HOURS else 168
+    rows = db.get_reports_for_agent(
+        name,
+        report_type=report_type,
+        hours=effective_hours or None,
+        search=search,
+        limit=limit,
+        offset=offset,
+    )
     return [ReportSummary(**r) for r in rows]
 
 

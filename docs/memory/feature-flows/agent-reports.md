@@ -150,3 +150,30 @@ choice at the tool layer.
 
 Write is unchanged and stays self-gated: reading another agent's reports never widens what you
 can write.
+
+
+## Search & filter (#1539)
+
+The fleet view shipped with `report_type` / `hours` / `search`; the per-agent route never
+got them, so the Agent Detail Reports tab was a flat list and the #1538 `list_reports` tool
+silently dropped both filters whenever a caller scoped to one agent.
+
+Both routes now build their WHERE clause from the same `_fleet_conditions`, with a single
+parameterized difference:
+
+| | fleet list | per-agent list |
+|---|---|---|
+| `search` matches | title, report_type, **agent_name** | title, report_type |
+
+Including `agent_name` on a single-agent list would be actively misleading: every row
+carries that name, so searching `recon` inside agent `recon-bot` would return the agent's
+entire history — indistinguishable from search being ignored.
+
+**Payload is not searched.** `LIKE` over a 256 KB TEXT column with no index gets slower
+exactly as reporting succeeds. An FTS/extracted-column answer belongs with the #1537
+storage rework rather than being smuggled in behind a filter box.
+
+**Facade note.** `database.py` forwards these by keyword. It previously delegated
+positionally, so adding two parameters to the ops signature rebound `limit`→`hours` and
+every request 500'd — the pitfall a wholesale-mocked test cannot see
+(`test_1539_report_filters.py::test_facade_forwards_the_new_filters` pins it).

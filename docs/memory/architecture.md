@@ -572,6 +572,12 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   (which can be sensitive). The frontend store refetches via the access-controlled REST
   endpoints (the `notifications` pattern). Regression-guarded by
   `tests/unit/test_918_report_broadcast.py`.
+- **Search & filter parity** (#1539): the per-agent list takes `report_type`/`hours`/
+  `search` like the fleet list, both built from the same `_fleet_conditions`. One
+  parameterized difference: `search` matches `agent_name` on the fleet list but not on a
+  single-agent list, where every row carries that name and a matching term would return
+  the agent's whole history. Payload contents are not searched — that needs the #1537
+  storage rework, not an unindexed `LIKE` over a 256 KB blob.
 - **List = metadata, detail = payload**: list endpoints return `ReportSummary` (no payload);
   `GET /api/reports/{id}` returns the full payload, lazy-loaded when a card expands.
 - **Fleet access**: `GET /api/reports` + `GET /api/reports/stats` filter via

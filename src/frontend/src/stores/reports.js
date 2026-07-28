@@ -25,6 +25,11 @@ export const useReportsStore = defineStore('reports', () => {
   const expandedId = ref(null)       // survives tab remount (globally-unique id)
   const payloads = ref({})           // report_id -> full report (lazy cache)
 
+  // #1539: same filter shape as the fleet slice, minus `agent` (the panel is
+  // already scoped to one). Reset on agent switch so a filter typed on one
+  // agent's tab doesn't silently hide another's reports.
+  const filters = ref({ report_type: '', hours: 168, search: '' })
+
   const _loadInFlight = new Set()
 
   function setAgent(name) {
@@ -32,7 +37,20 @@ export const useReportsStore = defineStore('reports', () => {
       agentName.value = name
       reports.value = []
       error.value = null
+      filters.value = { report_type: '', hours: 168, search: '' }
     }
+  }
+
+  function setFilter(key, value) {
+    filters.value = { ...filters.value, [key]: value }
+    fetchReports()
+  }
+
+  function _params() {
+    const p = { hours: filters.value.hours, limit: 100 }
+    if (filters.value.report_type) p.report_type = filters.value.report_type
+    if (filters.value.search) p.search = filters.value.search
+    return p
   }
 
   async function fetchReports() {
@@ -41,7 +59,7 @@ export const useReportsStore = defineStore('reports', () => {
     error.value = null
     try {
       const res = await api.get(`/api/agents/${agentName.value}/reports`, {
-        params: { limit: 100 },
+        params: _params(),
       })
       reports.value = res.data
     } catch (err) {
@@ -100,8 +118,8 @@ export const useReportsStore = defineStore('reports', () => {
   }
 
   return {
-    reports, agentName, loading, error, expandedId, payloads,
-    setAgent, fetchReports, loadPayload, deleteReport, toggleExpanded,
+    reports, agentName, loading, error, expandedId, payloads, filters,
+    setAgent, setFilter, fetchReports, loadPayload, deleteReport, toggleExpanded,
     handleWebSocketEvent, clearAgent,
   }
 })

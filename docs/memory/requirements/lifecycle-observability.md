@@ -328,6 +328,20 @@ endpoint — reports flow agent → MCP → backend.
   widened for agent keys. Closes the write-only loop: an agent can see what it already filed
   and continue a series rather than duplicate or contradict it. The FR-7 prompt block points
   at it, so read-back is discoverable in the same breath as publishing.
+- **FR-9 — Search & filter, per-agent parity** (#1539, epic #1534): the per-agent list
+  (`GET /api/agents/{name}/reports`) gains `hours` + `search`, matching the fleet list it
+  had drifted from — the Agent Detail Reports tab was a flat unfilterable list, and any
+  caller scoping to one agent (including FR-8's `list_reports`) had both filters silently
+  dropped. Both routes build their WHERE through the SAME `_fleet_conditions`, with one
+  parameterized difference: `search` matches `agent_name` on the fleet list (that is how
+  you find "everything scout published") but NOT on a single-agent list, where every row
+  carries that name and a matching term would return the whole history looking like search
+  was ignored. `hours` is whitelist-validated (`_VALID_HOURS`) on both, falling back to the
+  7-day default rather than erroring so an old client keeps working. UI: the same filter
+  bar as the fleet view minus the agent picker, with the empty state distinguishing "no
+  reports yet" from "no reports match these filters". **Payload contents are deliberately
+  NOT searched** — a `LIKE` over a 256 KB TEXT blob with no index degrades exactly as the
+  feature succeeds; an FTS answer belongs with #1537's storage rework.
 - **FR-7 — Discoverability via the platform prompt** (#1535, epic #1534): `PLATFORM_INSTRUCTIONS`
   carries a "Publishing Reports" block, so reporting is a default fleet behaviour instead of
   something only agents whose own CLAUDE.md mentions it ever do. Documents the call, when to

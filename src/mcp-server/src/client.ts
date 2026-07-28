@@ -1421,7 +1421,13 @@ export class TrinityClient {
    */
   async listAgentReports(
     agentName: string,
-    params: { report_type?: string; limit?: number; offset?: number }
+    params: {
+      report_type?: string;
+      hours?: number;
+      search?: string;
+      limit?: number;
+      offset?: number;
+    }
   ): Promise<ReportSummary[]> {
     const qs = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) {

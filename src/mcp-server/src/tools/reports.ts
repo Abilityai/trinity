@@ -224,14 +224,16 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           .optional()
           .describe(
             "Time window: one of 0 (all-time), 1, 6, 24, 168 (default, 7d), 720 (30d). " +
-              "Other values are rejected — the backend only honours these. " +
-              "Ignored when agent_name is set (the per-agent route has no window filter).",
+              "Other values are rejected — the backend only honours these.",
           ),
         search: z
           .string()
           .max(200)
           .optional()
-          .describe("Substring match on title/report_type. Ignored when agent_name is set."),
+          .describe(
+            "Substring match on title and report_type (and agent name on a broad listing). " +
+              "Payload contents are NOT searched — see #1537.",
+          ),
         limit: z.number().int().min(1).max(200).optional().default(50)
           .describe("Maximum reports to return (1–200, default 50)."),
         offset: z.number().int().min(0).optional().default(0)
@@ -265,6 +267,8 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
           let reports = params.agent_name
             ? await apiClient.listAgentReports(params.agent_name, {
                 report_type: params.report_type,
+                hours: params.hours,
+                search: params.search,
                 limit: params.limit,
                 offset: params.offset,
               })
