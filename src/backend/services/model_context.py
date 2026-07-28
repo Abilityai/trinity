@@ -24,7 +24,10 @@ imminent 200K compaction wall) is dangerous. The explicit ``[1m]`` suffix is the
 operator's opt-in signal that a 1M window was requested → it resolves to 1M.
 Sonnet 5 / Fable 5 are unconditionally 1M (no 200K variant exists), but we still
 keep the uniform safe floor here and rely on the runtime value to show 1M for
-them — a future edit must not promote the bare-Claude floor to 1M.
+them — a future edit must not promote the bare-Claude floor to 1M. Reading that
+runtime value correctly is ``pick_context_window``'s job (#1840): the runtime
+reports a window PER MODEL the turn touched, so the entry has to be matched to
+the model that answered, not taken arbitrarily.
 
 VENDORING (Invariant #5)
 ------------------------
@@ -78,6 +81,58 @@ _FAMILY_PREFIX_WINDOWS: tuple[tuple[str, int], ...] = (
     ("haiku", DEFAULT_CONTEXT_WINDOW),
     ("fable", DEFAULT_CONTEXT_WINDOW),
 )
+
+
+def pick_context_window(model_usage: object, model_name: str | None) -> int | None:
+    """Select the TURN's context window from a Claude Code ``modelUsage`` map.
+
+    ``modelUsage`` maps EVERY model the turn touched, not just the one that
+    answered: Claude Code bills side work (tool-permission classification, title
+    generation) to a cheap Haiku, so a Sonnet-5 turn routinely reports
+
+        {"claude-haiku-4-5-20251001": {"contextWindow":   200000, ...},
+         "claude-sonnet-5":           {"contextWindow": 1000000, ...}}
+
+    Taking an arbitrary entry — dict order, i.e. whichever model was recorded
+    first, which is the side model whenever one ran — reports the wrong window
+    for the turn and makes the same agent flip between 1M and 200K run to run
+    (#1840). Match the entry to ``model_name`` (the id from the latest assistant
+    message, which is the model that actually answered).
+
+    Returns ``None`` when the turn's model can't be identified in the map, so the
+    caller keeps its already-seeded fallback rather than guessing. Guessing here
+    would mean picking the largest window, which is the DANGEROUS direction — a
+    1M side model alongside a 200K main model would hide an imminent compaction
+    wall (see the DESIGN INVARIANT above).
+    """
+    if not isinstance(model_usage, dict) or not model_usage:
+        return None
+
+    def _window(entry: object) -> int | None:
+        if isinstance(entry, dict):
+            value = entry.get("contextWindow")
+            if isinstance(value, int) and value > 0:
+                return value
+        return None
+
+    if isinstance(model_name, str) and model_name:
+        # Exact key, then the entry's own canonicalModel (the key is not always
+        # the canonical id — an alias like "sonnet" can key a canonical entry).
+        window = _window(model_usage.get(model_name))
+        if window is not None:
+            return window
+        for entry in model_usage.values():
+            if isinstance(entry, dict) and entry.get("canonicalModel") == model_name:
+                window = _window(entry)
+                if window is not None:
+                    return window
+
+    # Unambiguous single-model turn: no side model ran, so the only entry IS the
+    # turn's model — the common case, and the one that was already correct.
+    windows = [w for w in (_window(e) for e in model_usage.values()) if w is not None]
+    if len(windows) == 1:
+        return windows[0]
+    return None
 
 
 def resolve_context_window(model: str | None) -> int:

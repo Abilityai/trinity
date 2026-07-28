@@ -34,6 +34,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, List
 
+from ..model_context import pick_context_window
 from ..models import CompactEvent, ExecutionLogEntry, ExecutionMetadata
 from .activity_tracking import complete_tool_execution, start_tool_execution
 from .error_classifier import _is_rate_limit_message
@@ -109,11 +110,14 @@ def parse_stream_json_output(output: str) -> tuple[str, List[ExecutionLogEntry],
             if not metadata.session_id:
                 metadata.session_id = msg.get("session_id")
 
-            model_usage = msg.get("modelUsage", {})
-            for _, model_data in model_usage.items():
-                if "contextWindow" in model_data:
-                    metadata.context_window = model_data["contextWindow"]
-                break  # Use first model found
+            # #1840: modelUsage maps EVERY model the turn touched (Claude Code
+            # bills side work like tool-permission checks to a cheap Haiku), so
+            # the entry must be matched to the model that ANSWERED —
+            # `metadata.model_name`, captured from the assistant messages that
+            # precede this result event. No match ⇒ keep the seeded fallback.
+            window = pick_context_window(msg.get("modelUsage"), metadata.model_name)
+            if window is not None:
+                metadata.context_window = window
 
         elif msg_type == "assistant":
             message = msg.get("message", {})
@@ -324,11 +328,11 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
         # usage; the LATEST assistant message's values represent the FINAL
         # API call's prompt — which is what determines whether the next
         # turn will fit.
-        model_usage = msg.get("modelUsage", {})
-        for _, model_data in model_usage.items():
-            if "contextWindow" in model_data:
-                metadata.context_window = model_data["contextWindow"]
-            break  # Use first model found
+        # #1840: match the modelUsage entry to the model that ANSWERED — see the
+        # batch parser's result branch and pick_context_window's docstring.
+        window = pick_context_window(msg.get("modelUsage"), metadata.model_name)
+        if window is not None:
+            metadata.context_window = window
 
         logger.debug(
             f"Result message parsed: cost=${metadata.cost_usd}, "
