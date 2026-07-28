@@ -688,6 +688,12 @@ for rel in pruned_paths:
     parts = rel.split("/")
     if len(parts) < 4 or parts[0] != ".claude" or parts[1] != "skills":
         continue  # prefix confinement, mirroring compute_prune's own guard
+    if ".." in parts:
+        # compute_prune already drops these, but the startswith() confinement
+        # below is satisfied by `.claude/skills/x/../../..` — so without this the
+        # LAST line of defense would be a prefix check that a traversal segment
+        # walks straight through. Reject rather than rely on the caller.
+        continue
     root = "/".join(parts[:3])
     d = os.path.dirname(rel)
     while d.startswith(root + "/"):

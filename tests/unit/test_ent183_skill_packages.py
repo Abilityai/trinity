@@ -1105,3 +1105,20 @@ class TestPrunedEmptyDirReap:
         assert out["rmdir"] == 0
         assert target.is_dir()
         assert (skill / "reference").is_symlink()
+
+    def test_traversal_segment_is_rejected_by_the_reap(self, service, tmp_path, monkeypatch):
+        """#1842 review: the script's own prefix check is satisfied by
+        `.claude/skills/pkg/../../..`, so a `..` segment would climb out of the
+        skill root. compute_prune filters these upstream — this pins the reap's
+        last line of defense rather than trusting the caller."""
+        skill = self._skill(tmp_path)
+        (skill / "reference").mkdir()
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        out = self._run_finalize(
+            service, tmp_path, monkeypatch,
+            [".claude/skills/pkg/../../victim/x.txt", ".claude/skills/pkg/reference/notes.md"],
+        )
+        assert victim.is_dir()          # never touched
+        assert out["rmdir"] == 1        # only the legitimate one was reaped
+        assert not (skill / "reference").exists()
