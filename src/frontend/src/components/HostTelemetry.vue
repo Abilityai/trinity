@@ -96,40 +96,52 @@ onUnmounted(() => {
 <template>
   <div class="host-telemetry">
     <template v-if="!loading">
+      <!-- Leading separator lives here (not in Dashboard.vue) so it disappears
+           together with the meters when the ladder hides them (#1830). -->
+      <span class="text-gray-300 dark:text-gray-600">·</span>
+
       <!-- CPU -->
-      <span class="stat-item">
+      <span class="stat-item" data-metric="cpu" :title="`CPU ${formatPercent(hostStats?.cpu?.percent)}%`">
         <span class="dot bg-blue-500"></span>
         <span class="stat-label">CPU</span>
-        <SparklineChart
-          :data="cpuHistory"
-          color="#3b82f6"
-          :y-max="100"
-          :width="60"
-          :height="20"
-        />
+        <span class="spark">
+          <SparklineChart
+            :data="cpuHistory"
+            color="#3b82f6"
+            :y-max="100"
+            :width="60"
+            :height="20"
+          />
+        </span>
         <span class="stat-value" :class="getColorClass(hostStats?.cpu?.percent)">{{ formatPercent(hostStats?.cpu?.percent) }}%</span>
       </span>
 
-      <span class="text-gray-300 dark:text-gray-600">·</span>
+      <span class="text-gray-300 dark:text-gray-600" data-sep="mem">·</span>
 
       <!-- Memory -->
-      <span class="stat-item">
+      <span
+        class="stat-item"
+        data-metric="mem"
+        :title="`Memory ${formatMemory(hostStats?.memory?.used_gb, hostStats?.memory?.total_gb)}`"
+      >
         <span class="dot bg-accent-purple-500"></span>
         <span class="stat-label">Mem</span>
-        <SparklineChart
-          :data="memHistory"
-          color="#a855f7"
-          :y-max="100"
-          :width="60"
-          :height="20"
-        />
+        <span class="spark">
+          <SparklineChart
+            :data="memHistory"
+            color="#a855f7"
+            :y-max="100"
+            :width="60"
+            :height="20"
+          />
+        </span>
         <span class="stat-value" :class="getColorClass(hostStats?.memory?.percent)">{{ formatMemory(hostStats?.memory?.used_gb, hostStats?.memory?.total_gb) }}</span>
       </span>
 
-      <span class="text-gray-300 dark:text-gray-600">·</span>
+      <span class="text-gray-300 dark:text-gray-600" data-sep="disk">·</span>
 
       <!-- Disk -->
-      <span class="stat-item">
+      <span class="stat-item" data-metric="disk" :title="`Disk ${formatPercent(hostStats?.disk?.percent)}%`">
         <span class="dot bg-status-success-500"></span>
         <span class="stat-label">Disk</span>
         <span class="disk-bar">
@@ -199,5 +211,42 @@ onUnmounted(() => {
 /* Dark mode adjustments */
 .dark .disk-bar {
   background: rgba(55, 65, 81, 0.5);
+}
+
+/*
+ * Progressive degrade (#1830) — the meters shed detail, then whole metrics,
+ * as the stats cluster loses width, instead of being clipped mid-element by
+ * the cluster's `overflow-hidden`. Queried against the `statsbar` size
+ * container declared on `.stats-cluster` in Dashboard.vue (the only mount
+ * point); without that ancestor these rules simply never match, so the
+ * component stays safe to reuse elsewhere.
+ *
+ * Order: sparklines → Disk → Mem → everything (see the ladder comment in
+ * Dashboard.vue, which owns the two count groups below this).
+ */
+@container statsbar (max-width: 820px) {
+  .spark {
+    display: none;
+  }
+}
+
+@container statsbar (max-width: 700px) {
+  [data-metric='disk'],
+  [data-sep='disk'] {
+    display: none;
+  }
+}
+
+@container statsbar (max-width: 560px) {
+  [data-metric='mem'],
+  [data-sep='mem'] {
+    display: none;
+  }
+}
+
+@container statsbar (max-width: 420px) {
+  .host-telemetry {
+    display: none;
+  }
 }
 </style>
