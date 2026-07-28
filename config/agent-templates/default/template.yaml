@@ -1,0 +1,22 @@
+name: default
+# Excluded from the user-facing template catalog (GET /api/templates). See
+# README "Not starting points". The UI already offers "Blank Agent" for this
+# job; `local:default` exists as the documented minimal manifest/API example.
+# (#1759)
+hidden: true
+display_name: Default
+description: Minimal agent — no tools, no schedules, no shared folders. The smallest template that still resolves; used by manifest and API examples and by the integration suites.
+version: "1.0.0"
+author: Trinity Platform
+
+# DELIBERATELY DECLARES NO `resources:` BLOCK.
+#
+# `_resolve_local_template` applies a template's `resources` OVER the caller's
+# requested values (crud.py, before normalize_cpu runs), so a `resources:` block
+# here would silently overwrite what a manifest asked for. The ent#125
+# resilient-deploy test uses `resources: {cpu: "3"}` on a `local:default` agent
+# as its deliberate pre-side-effect failure vector — a `resources:` block would
+# neutralise it and flip that test from `partial` to `deployed`. Same reasoning
+# for `type`, `tools`, `credentials.mcp_servers`, `runtime` and
+# `shared_folders`: every field the resolver mutates `config` from is omitted.
+credentials: {}

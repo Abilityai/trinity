@@ -592,14 +592,35 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
     """
     # Extract short names (remove system prefix)
     agent_configs = {}
+    # Agents with no template label, whose manifest entry is inferred (#1759).
+    templateless: List[str] = []
     for agent in agents:
         full_name = agent['name']
         # Remove system prefix and hyphen
         short_name = full_name[len(system_name) + 1:]
 
+        # #1759: `or`, NOT a `.get` default. Every Blank Agent's dict carries
+        # `"template": None` (routers/agents.py builds the label as
+        # `config.template or ''` then `or None`), and `dict.get(key, default)`
+        # returns the default only when the key is ABSENT — so the old
+        # `local:business-assistant` fallback was unreachable dead code, and
+        # blank agents have always exported `template: null`. Since
+        # `SystemAgentConfig.template` is a non-Optional `str`, redeploying
+        # such a manifest already failed Pydantic validation; and
+        # `config/agent-templates/business-assistant` has never existed. This
+        # is a pre-existing broken round-trip on the platform's most common
+        # agent type, not a regression introduced by the create-time gate.
+        # `local:default` is the truthful representation of a template-less
+        # agent (a real, minimal template) — a product template like
+        # `local:scout` would fabricate provenance.
+        template = agent.get('template') or None
+        if template is None:
+            templateless.append(full_name)
+            template = 'local:default'
+
         # Get agent details
         config = {
-            "template": agent.get('template', 'local:business-assistant')
+            "template": template
         }
 
         # Get resources (if available from labels)
@@ -646,6 +667,16 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
             logger.warning(f"Failed to get tags for {full_name}: {e}")
 
         agent_configs[short_name] = config
+
+    if templateless:
+        # `export_manifest` returns a bare YAML string (routers/systems.py), so
+        # there is no structured field to carry this — a log line is the only
+        # non-contract-breaking channel (#1759).
+        logger.warning(
+            "Exported system '%s': %d agent(s) have no template label; their "
+            "manifest entry was inferred as 'local:default': %s",
+            system_name, len(templateless), ", ".join(sorted(templateless)),
+        )
 
     # Build manifest dict
     manifest_dict = {

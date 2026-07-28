@@ -568,7 +568,7 @@ class QueueStatus(BaseModel):
 
 class SystemAgentConfig(BaseModel):
     """Configuration for a single agent in a system manifest."""
-    template: str  # e.g., "github:Org/repo" or "local:business-assistant"
+    template: str  # e.g., "github:Org/repo" or "local:scout" (#1759: must resolve, or create 400s)
     resources: Optional[dict] = None  # {"cpu": "2", "memory": "4g"}
     folders: Optional[dict] = None  # {"expose": bool, "consume": bool}
     schedules: Optional[List[dict]] = None  # [{name, cron, message, ...}]
