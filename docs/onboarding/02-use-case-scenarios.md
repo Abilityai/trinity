@@ -34,9 +34,9 @@ A single agent that runs on a daily schedule to:
 #### Step 1: Create the Agent
 
 ```yaml
-# Create from default template
+# Start from the Scout starter template
 Name: research-assistant
-Template: local:default
+Template: local:scout
 ```
 
 #### Step 2: Customize Instructions
@@ -335,7 +335,7 @@ Single agent with Gmail access that:
 
 ```yaml
 Name: email-assistant
-Template: local:default
+Template: local:scribe
 ```
 
 #### Step 2: Set Up Gmail Access
