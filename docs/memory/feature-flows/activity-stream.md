@@ -126,6 +126,141 @@ class ActivityState(str, Enum):
 
 ---
 
+## The Close Contract (#1804)
+
+**Every writer that wins a terminal CAS on `schedule_executions` closes the
+paired dispatch activity.** Not "whoever holds the `activity_id` local", which is
+what it used to be — and every writer outside that one coroutine (the watchdog,
+startup recovery, both bulk sweeps, both backend-shutdown `CancelledError`
+handlers, the lease reaper, the pull sink) wrote its terminal and walked away.
+The row then sat at `activity_state='started'` — the Dashboard Timeline renders
+that as *still working* — until the generic 120-minute sweep closed it with a
+fabricated `duration_ms = now − started_at` that nothing recomputes. A 15-minute
+run, permanently recorded as a ~120-minute failure.
+
+Third appearance of the class: #45 (tool-call activities never completed) and
+#767 (CB probes inflating timeline duration) each patched **one producer** and
+left the ownership model alone. A fourth producer was guaranteed.
+
+### The owner
+
+`activity_service.close_execution_activity(execution_id, terminal_status, *,
+error=None, activity_id=None) -> bool` — plus `spawn_close_execution_activity`,
+a sync fire-and-forget wrapper for the synchronous pull sink. Structurally the
+twin of `event_dispatch_service.spawn_task_terminal_event` (#1578): same
+CAS-won gating, same fail-open discipline, same "never affects a committed
+terminal" rule.
+
+* Takes an **execution status**, not an activity state — it maps through the
+  shared `activity_state_for_terminal` (#1332). Callers never write a second
+  mapping.
+* Delegates to `complete_activity`, so the `agent_activity` WS broadcast and the
+  subscriber notify survive. (Closing inside the db-layer CAS transaction would
+  be airtight but silent — the Timeline would only self-correct on refetch.)
+* `activity_id` skips the lookup when the caller already holds it; otherwise the
+  lookup variant is chosen by the terminal (below).
+* Fail-open: returns `False` and logs on any exception.
+
+### The lattice — and why the lookup has to agree with it
+
+`db.complete_activity` is a **compare-and-set** returning
+`ActivityCloseOutcome` (`UPDATED` / `ALREADY_CLOSED` / `NOT_FOUND`). Once every
+CAS winner closes, two closers reaching the same row is ordinary; "the CAS winner
+owns it" is only true if a *second* attempt is safe. The old unconditional
+`UPDATE ... WHERE id = ?` let the later writer overwrite the earlier one's
+`completed_at`/`duration_ms`/`error` — the wrong-duration symptom, by a new route.
+
+The predicate **mirrors** the execution-row predicate in
+`db/schedules/executions.py`, deliberately, rather than inventing a stricter one:
+
+```
+                 EXECUTION ROW                             ACTIVITY ROW
+             (schedule_executions)                       (agent_activities)
+
+                    running                                    started
+                       │                                          │
+   non-success write   │ notin_(_TERMINAL)      FAILED close      │ = 'started'
+                       ▼                                          ▼
+          failed / cancelled / skipped                   failed / cancelled
+                       │                                          │
+   SUCCESS write       │ != CANCELLED        COMPLETED close      │ != 'cancelled'
+                       ▼                                          ▼
+                    success                                   completed
+
+  AUTHORITY:  started  <  failed  <  { completed, cancelled }
+```
+
+* An **authoritative** close (COMPLETED) may upgrade a **provisional** FAILED —
+  this is the #1083 late-SUCCESS-after-lease-expiry path, which
+  `pull_coordination_service` documents as "a FAILED row falls through so a late
+  SUCCESS can still correct it". Without the upgrade the pair would settle at
+  `execution=success, activity=failed` **permanently** — #1804 inverted.
+* Nothing overwrites an authoritative close.
+* Do **not** "simplify" this to a flat `WHERE activity_state='started'`. That is
+  the bug. The diagram is repeated inline over the predicate for that reason.
+
+`get_open_activity_id_for_execution(execution_id, include_failed=False)` widens
+to `started|failed` for authoritative terminals so the write can reach the row it
+is allowed to touch. **A lookup narrower than the CAS makes the whole fix
+inert** — the widened predicate would never see a FAILED row to upgrade. Ordering
+puts still-`started` rows first, then most recent; the `chat_start`/
+`schedule_start` type filter (Codex #8, #1083) is unchanged, so a shared-eid
+`tool_call` row is still never cross-closed.
+
+### Split by cardinality
+
+| Path | Rows | Mechanism | WS |
+|---|---|---|---|
+| Recovery / single writers | 1 | `close_execution_activity` | ✅ broadcast |
+| Bulk watchdog sweeps | N | `db.close_open_activities_for_executions` | ❌ none |
+
+The bulk close is **set-wise** (a re-queued execution can own more than one open
+dispatch activity, so an `eid → one activity_id` map would silently drop the
+rest), runs in one transaction, and chunks the `IN (…)` at
+`_SQLITE_MAX_IN_VARS`. It consumes the `(execution_id, agent_name)` rows the
+sweeps already collect for #1714 — no new query, no second collection pass.
+
+`cleanup_service._close_bulk_swept_activities` is a **sibling** of
+`_emit_bulk_terminal_events`, never folded into it: that method short-circuits on
+`has_task_terminal_subscribers() is False`, so folding would skip the close on
+every install with no event subscribers. The #1714 gate scopes the *event*, never
+the close.
+
+### The writers
+
+| Writer | Close |
+|---|---|
+| `_write_terminal_and_gate` (won) | its own terminal |
+| `_write_terminal_and_gate` (**lost**) | the persisted row's terminal (`superseded by …`) — this branch did not exist |
+| `apply_result` (success / failure) | its own terminal; lost SUCCESS reconciles (#1332) |
+| `execute_task` `except asyncio.CancelledError` | FAILED (backend shutdown) |
+| `routers/internal._execute_task_internal_background` same | FAILED (backend shutdown) |
+| watchdog `_recover_execution` | FAILED, before the WS watchdog event |
+| startup `_recover_execution` | FAILED — its CAS bool used to be **discarded** |
+| the two bulk sweeps | FAILED, batched |
+| lease reaper (park / **re-queue**) | FAILED / **CANCELLED** (a superseded attempt is not a failure) |
+| pull sink `apply_task_result` | its own terminal, via the sync spawn wrapper |
+| `terminate_execution` | CANCELLED, or the row's real terminal on a lost CAS |
+
+Guarded by `tests/unit/test_1804_terminal_activity_parity.py`, anchored on
+**terminal writes** rather than completion-event emission — the #1578 emit set is
+a strict subset (both shutdown writers emit nothing), which is precisely how they
+hid from review. Admission-path terminals (before `execute_task` step 3 opens the
+activity) are allowlisted with justifications.
+
+### The backstop, demoted
+
+`mark_stale_activities_failed` (120 min) is now *a backstop for the unclaimed*,
+and it runs **after** `_sweep_stale_slots` in the cleanup cycle — it used to run
+one line before the reaper that legitimately closes activities, so within a
+single cycle the duration fabricator could beat a real closer.
+`CleanupReport.activities_closed_on_recovery` is the counterpart signal:
+`stale_activities` should trend to ~0 while it picks up the volume. #429 deletes
+the backstop entirely — a contract survives that; per-site patches would have
+been deleted along with their hosts.
+
+---
+
 ## Service Layer
 
 ### ActivityService (`src/backend/services/activity_service.py`)
