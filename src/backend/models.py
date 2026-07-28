@@ -341,7 +341,26 @@ class Activity(BaseModel):
 
 # Max serialized-JSON byte length of a report payload. Enforced at the router
 # (oversize → HTTP 413) to bound SQLite growth and list-response weight.
-REPORT_PAYLOAD_MAX_BYTES = 256 * 1024  # 256 KiB
+# #1537: raised from 256 KiB. Measured on a live fleet before choosing: the
+# reports in existence were 201 bytes on average, 683 at the largest — four
+# orders of magnitude under the old cap. So the cap was never the thing agents
+# hit; it was the thing that would reject the FIRST real tabular report (a lead
+# list, a scan result) the moment one appeared. 5 MiB is a deliberate middle:
+# comfortably past "thousands of rows" of ordinary tabular JSON, and still small
+# enough that one row is a sane thing to hold in memory while rendering.
+#
+# The blob stays in one TEXT column. Off-row storage was considered and NOT
+# built: with no payload anywhere near the old cap, a migration + a rows table
+# would be a schema commitment made against a hypothetical. The paginated row
+# reader below is what keeps a large payload off the wire; if real payloads ever
+# approach this ceiling, THAT measurement is what should justify moving them
+# off-row.
+REPORT_PAYLOAD_MAX_BYTES = 5 * 1024 * 1024  # 5 MiB
+
+# Rows returned per page by the tabular row reader (#1537). Bounds the response
+# even when a payload carries tens of thousands of rows.
+REPORT_ROWS_PAGE_DEFAULT = 100
+REPORT_ROWS_PAGE_MAX = 1000
 
 # Renderer hints the frontend understands; an unknown/absent hint falls back to
 # the report_type prefix map, then the JSON viewer.

@@ -578,6 +578,13 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   single-agent list, where every row carries that name and a matching term would return
   the agent's whole history. Payload contents are not searched — that needs the #1537
   storage rework, not an unindexed `LIKE` over a 256 KB blob.
+- **Large payloads** (#1537): cap raised to 5 MiB (measured first — the fleet's reports
+  averaged 201 bytes, so the old 256 KiB cap was the wall the first real table would hit,
+  not one agents were meeting). `GET /api/reports/{id}/rows` windows a `table` payload
+  (`offset`/`limit`, true `total`); the UI fetches tabular reports through it, so expanding
+  a 1.2 MB report transfers ~8 KB. Storage stays a single TEXT blob — no migration — and
+  the slice is Python-side, so it bounds the response, not the read; off-row storage waits
+  on a payload distribution that justifies it.
 - **List = metadata, detail = payload**: list endpoints return `ReportSummary` (no payload);
   `GET /api/reports/{id}` returns the full payload, lazy-loaded when a card expands.
 - **Fleet access**: `GET /api/reports` + `GET /api/reports/stats` filter via

@@ -342,6 +342,24 @@ endpoint — reports flow agent → MCP → backend.
   reports yet" from "no reports match these filters". **Payload contents are deliberately
   NOT searched** — a `LIKE` over a 256 KB TEXT blob with no index degrades exactly as the
   feature succeeds; an FTS answer belongs with #1537's storage rework.
+- **FR-10 — Large payloads: raised ceiling + row windowing** (#1537, epic #1534):
+  `REPORT_PAYLOAD_MAX_BYTES` 256 KiB → **5 MiB**, and `GET /api/reports/{id}/rows`
+  (`offset`/`limit`, default 100, max 1000) returns a WINDOW of a `table` payload —
+  columns once, a slice of rows, and the true `total` — so expanding a card never ships
+  the whole blob. The frontend fetches `table` reports through it (branching on the
+  `display_hint` already in the summary, so no extra request decides) with a
+  "Showing N of M · Load more" footer; every other hint is a bounded document and still
+  fetches whole. Create gains a Content-Length pre-check that refuses an oversized body on
+  the header before the parsed payload is re-serialized; the exact byte check still
+  enforces. Non-tabular payloads answer **400** on the rows route (no row axis to slice)
+  and no-access answers **404**, matching `GET /reports/{id}` so an id stays unprobeable.
+  **Storage is unchanged — single TEXT blob, no migration.** That is a measured decision,
+  not a deferral by default: on a live fleet the existing reports averaged 201 bytes and
+  the largest was 683, so an off-row rows table would have been a schema commitment made
+  against a hypothetical. The honest residual: the row slice happens in Python after the
+  whole blob is read, so it bounds the RESPONSE, not the read — moving the slice into SQL
+  requires the off-row model, and the trigger for that should be a payload distribution
+  that actually approaches this ceiling.
 - **FR-7 — Discoverability via the platform prompt** (#1535, epic #1534): `PLATFORM_INSTRUCTIONS`
   carries a "Publishing Reports" block, so reporting is a default fleet behaviour instead of
   something only agents whose own CLAUDE.md mentions it ever do. Documents the call, when to

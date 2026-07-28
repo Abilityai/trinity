@@ -21,7 +21,7 @@ import json
 import os
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from database import db
 from dependencies import get_current_user, AuthorizedAgent, OwnedAgent
@@ -31,6 +31,8 @@ from models import (
     ReportCreate,
     ReportSummary,
     REPORT_PAYLOAD_MAX_BYTES,
+    REPORT_ROWS_PAGE_DEFAULT,
+    REPORT_ROWS_PAGE_MAX,
     User,
 )
 from services import rate_limiter, report_service
@@ -57,6 +59,10 @@ REPORT_RATE_WINDOW = 60  # seconds
 async def create_report(
     data: ReportCreate,
     name: AuthorizedAgent,
+    # Optional so a direct in-process call (tests, any future internal caller)
+    # keeps working; FastAPI injects it regardless of the default, and the
+    # header guard below already treats absence as "no hint available".
+    request: Request = None,
     current_user: User = Depends(get_current_user),
 ):
     """Publish a report for an agent (called by the agent via MCP).
@@ -77,6 +83,29 @@ async def create_report(
         REPORT_RATE_WINDOW,
         detail="Report rate limit exceeded for this agent.",
     )
+
+    # Two-stage size guard (#1537). The declared Content-Length is checked first
+    # so an oversized body is refused on the cheap header rather than after
+    # serializing the parsed payload back to JSON — at a 5 MiB ceiling that
+    # round-trip is the expensive part. It is a HINT, not the enforcement: a
+    # missing or lying header falls through to the exact check below, which is
+    # what actually bounds what reaches the DB and every later read.
+    #
+    # Honest limit: Starlette has already buffered the body by the time this
+    # handler runs, so this bounds STORAGE and response size, not peak memory.
+    # A true streaming guard needs the body off the typed-model path (the
+    # webhooks.py pattern) — worth doing only if reports ever move to the
+    # multi-megabyte norm this ceiling merely permits.
+    declared = request.headers.get("content-length") if request else None
+    if declared:
+        try:
+            if int(declared) > REPORT_PAYLOAD_MAX_BYTES:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"payload exceeds {REPORT_PAYLOAD_MAX_BYTES} bytes",
+                )
+        except ValueError:
+            pass  # unparseable header — the exact check below still applies
 
     # Bound the payload before it hits the DB / every list response (review A2).
     if len(json.dumps(data.payload).encode("utf-8")) > REPORT_PAYLOAD_MAX_BYTES:
@@ -180,6 +209,55 @@ async def list_fleet_reports(
         offset=offset,
     )
     return [ReportSummary(**r) for r in rows]
+
+
+@router.get("/reports/{report_id}/rows")
+async def get_report_rows(
+    report_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(REPORT_ROWS_PAGE_DEFAULT, ge=1, le=REPORT_ROWS_PAGE_MAX),
+    current_user: User = Depends(get_current_user),
+):
+    """A PAGE of a tabular report's rows, so a large table is never shipped whole
+    (#1537).
+
+    `GET /reports/{id}` returns the entire payload — fine at 201 bytes (the fleet
+    average when this was measured), wrong at the 5 MiB the cap now permits. This
+    gives the renderer a window instead: columns once, then `limit` rows from
+    `offset`, plus the true `total` so the UI can show "100 of 12,431".
+
+    Only `table`-shaped payloads (`{columns, rows}`) paginate — every other
+    display_hint is a bounded document (a KPI tile set, a markdown body) with no
+    row axis to slice, and answering 400 for those is clearer than inventing one.
+
+    Honest limit: the row slice happens in Python after the whole blob is read
+    from the column, so this bounds the RESPONSE, not the read. Slicing in the
+    database needs the rows off-row — deliberately not built until real payloads
+    justify the migration (see REPORT_PAYLOAD_MAX_BYTES).
+    """
+    report = db.get_report(report_id)
+    # 404 (not 403) on no-access, matching GET /reports/{id}: an id must not be
+    # probeable for existence through the sibling route either.
+    if not report or not db.can_user_access_agent(current_user.username, report["agent_name"]):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+
+    payload = report.get("payload")
+    columns = payload.get("columns") if isinstance(payload, dict) else None
+    rows = payload.get("rows") if isinstance(payload, dict) else None
+    if not isinstance(rows, list) or not isinstance(columns, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Report payload is not tabular ({columns, rows}); fetch it whole via GET /api/reports/{id}",
+        )
+
+    return {
+        "report_id": report_id,
+        "columns": columns,
+        "total": len(rows),
+        "offset": offset,
+        "limit": limit,
+        "rows": rows[offset : offset + limit],
+    }
 
 
 @router.get("/reports/{report_id}", response_model=Report)

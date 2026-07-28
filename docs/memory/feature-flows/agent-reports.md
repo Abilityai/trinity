@@ -177,3 +177,33 @@ storage rework rather than being smuggled in behind a filter box.
 positionally, so adding two parameters to the ops signature rebound `limit`→`hours` and
 every request 500'd — the pitfall a wholesale-mocked test cannot see
 (`test_1539_report_filters.py::test_facade_forwards_the_new_filters` pins it).
+
+
+## Large payloads (#1537)
+
+**Measured before designing.** On a live fleet: 4 reports, average 201 bytes, largest 683 —
+four orders of magnitude under the 256 KiB cap. So the cap was never a limit agents were
+hitting; it was the wall the *first* real tabular report would hit. That is why this raises
+the ceiling and windows the read rather than migrating to off-row row storage: with no
+payload anywhere near the cap, a rows table would be a schema commitment made against a
+hypothetical.
+
+| | before | after |
+|---|---|---|
+| ceiling | 256 KiB | 5 MiB |
+| detail fetch (table) | whole blob | `GET /reports/{id}/rows` — columns + a window + `total` |
+| storage | one TEXT blob | unchanged, no migration |
+
+Verified end to end: a 12,000-row / 1.16 MB report (4.5× the old cap) creates successfully,
+the row reader answers `total=12000` with 100 rows, and expanding the card in the UI
+transfers **8,699 bytes** instead of 1.16 MB.
+
+`display_hint` decides the fetch shape, and it is already on the summary — no extra request
+is needed to know whether to page. Non-tabular payloads answer 400 on the rows route rather
+than being given an invented row axis, and no-access answers 404 exactly like
+`GET /reports/{id}`, so the sibling route cannot be used to probe an id.
+
+**Honest residual.** The slice happens in Python after the whole blob is read from the
+column, so it bounds the RESPONSE, not the read. Moving the slice into SQL needs the rows
+off-row; the trigger for that work should be a measured payload distribution approaching the
+new ceiling, not this issue's premise.

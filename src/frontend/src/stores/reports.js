@@ -1,4 +1,7 @@
 import { defineStore } from 'pinia'
+
+// Mirrors REPORT_ROWS_PAGE_DEFAULT (#1537).
+const ROWS_PAGE = 100
 import { ref } from 'vue'
 import api from '../api'
 
@@ -24,6 +27,7 @@ export const useReportsStore = defineStore('reports', () => {
   const error = ref(null)
   const expandedId = ref(null)       // survives tab remount (globally-unique id)
   const payloads = ref({})           // report_id -> full report (lazy cache)
+  const rowMeta = ref({})            // report_id -> {total, loaded} for tabular reports (#1537)
 
   // #1539: same filter shape as the fleet slice, minus `agent` (the panel is
   // already scoped to one). Reset on agent switch so a filter typed on one
@@ -70,10 +74,26 @@ export const useReportsStore = defineStore('reports', () => {
   }
 
   // Lazy-load a single report's full payload (only when a card expands).
-  async function loadPayload(reportId) {
+  // #1537: a `table` report is fetched a PAGE at a time. The cap is now 5 MiB,
+  // so "expand the card" must not mean "ship the whole blob" — the row reader
+  // returns columns once plus a window, and `rowMeta` carries the true total so
+  // the card can offer more. Every other display_hint is a bounded document and
+  // still fetches whole.
+  async function loadPayload(reportId, displayHint) {
     if (payloads.value[reportId] || _loadInFlight.has(reportId)) return
     _loadInFlight.add(reportId)
     try {
+      if (displayHint === 'table') {
+        const res = await api.get(`/api/reports/${reportId}/rows`, {
+          params: { offset: 0, limit: ROWS_PAGE },
+        })
+        payloads.value = {
+          ...payloads.value,
+          [reportId]: { payload: { columns: res.data.columns, rows: res.data.rows } },
+        }
+        rowMeta.value = { ...rowMeta.value, [reportId]: { total: res.data.total, loaded: res.data.rows.length } }
+        return
+      }
       const res = await api.get(`/api/reports/${reportId}`)
       payloads.value = { ...payloads.value, [reportId]: res.data }
     } catch {
@@ -98,9 +118,32 @@ export const useReportsStore = defineStore('reports', () => {
     }
   }
 
+
+  // Append the next page of a tabular report's rows (#1537).
+  async function loadMoreRows(reportId) {
+    const meta = rowMeta.value[reportId]
+    const current = payloads.value[reportId]
+    if (!meta || !current || meta.loaded >= meta.total) return
+    const res = await api.get(`/api/reports/${reportId}/rows`, {
+      params: { offset: meta.loaded, limit: ROWS_PAGE },
+    })
+    const merged = [...current.payload.rows, ...res.data.rows]
+    payloads.value = {
+      ...payloads.value,
+      [reportId]: { payload: { columns: res.data.columns, rows: merged } },
+    }
+    rowMeta.value = { ...rowMeta.value, [reportId]: { total: res.data.total, loaded: merged.length } }
+  }
+
   function toggleExpanded(reportId) {
     expandedId.value = expandedId.value === reportId ? null : reportId
-    if (expandedId.value) loadPayload(reportId)
+    if (expandedId.value) {
+      // display_hint drives the fetch shape (#1537): `table` pages, everything
+      // else fetches whole. It comes from the summary already in hand, so no
+      // extra request is needed to decide.
+      const hint = (reports.value.find((r) => r.id === reportId) || {}).display_hint
+      loadPayload(reportId, hint)
+    }
   }
 
   // Thin trigger broadcast fleet-wide; only react for the agent on screen.
@@ -118,8 +161,8 @@ export const useReportsStore = defineStore('reports', () => {
   }
 
   return {
-    reports, agentName, loading, error, expandedId, payloads, filters,
-    setAgent, setFilter, fetchReports, loadPayload, deleteReport, toggleExpanded,
+    reports, agentName, loading, error, expandedId, payloads, rowMeta, filters,
+    setAgent, setFilter, fetchReports, loadPayload, loadMoreRows, deleteReport, toggleExpanded,
     handleWebSocketEvent, clearAgent,
   }
 })
@@ -135,6 +178,7 @@ export const useFleetReportsStore = defineStore('fleetReports', () => {
   const error = ref(null)
   const expandedId = ref(null)
   const payloads = ref({})
+  const rowMeta = ref({})            // #1537 tabular paging state
   const filters = ref({ agent: '', report_type: '', hours: 168, search: '' })
   const active = ref(false)          // true only while ReportsPanelFleet is mounted
 
@@ -189,10 +233,26 @@ export const useFleetReportsStore = defineStore('fleetReports', () => {
     refresh()
   }
 
-  async function loadPayload(reportId) {
+  // #1537: a `table` report is fetched a PAGE at a time. The cap is now 5 MiB,
+  // so "expand the card" must not mean "ship the whole blob" — the row reader
+  // returns columns once plus a window, and `rowMeta` carries the true total so
+  // the card can offer more. Every other display_hint is a bounded document and
+  // still fetches whole.
+  async function loadPayload(reportId, displayHint) {
     if (payloads.value[reportId] || _loadInFlight.has(reportId)) return
     _loadInFlight.add(reportId)
     try {
+      if (displayHint === 'table') {
+        const res = await api.get(`/api/reports/${reportId}/rows`, {
+          params: { offset: 0, limit: ROWS_PAGE },
+        })
+        payloads.value = {
+          ...payloads.value,
+          [reportId]: { payload: { columns: res.data.columns, rows: res.data.rows } },
+        }
+        rowMeta.value = { ...rowMeta.value, [reportId]: { total: res.data.total, loaded: res.data.rows.length } }
+        return
+      }
       const res = await api.get(`/api/reports/${reportId}`)
       payloads.value = { ...payloads.value, [reportId]: res.data }
     } catch {
@@ -202,9 +262,32 @@ export const useFleetReportsStore = defineStore('fleetReports', () => {
     }
   }
 
+
+  // Append the next page of a tabular report's rows (#1537).
+  async function loadMoreRows(reportId) {
+    const meta = rowMeta.value[reportId]
+    const current = payloads.value[reportId]
+    if (!meta || !current || meta.loaded >= meta.total) return
+    const res = await api.get(`/api/reports/${reportId}/rows`, {
+      params: { offset: meta.loaded, limit: ROWS_PAGE },
+    })
+    const merged = [...current.payload.rows, ...res.data.rows]
+    payloads.value = {
+      ...payloads.value,
+      [reportId]: { payload: { columns: res.data.columns, rows: merged } },
+    }
+    rowMeta.value = { ...rowMeta.value, [reportId]: { total: res.data.total, loaded: merged.length } }
+  }
+
   function toggleExpanded(reportId) {
     expandedId.value = expandedId.value === reportId ? null : reportId
-    if (expandedId.value) loadPayload(reportId)
+    if (expandedId.value) {
+      // display_hint drives the fetch shape (#1537): `table` pages, everything
+      // else fetches whole. It comes from the summary already in hand, so no
+      // extra request is needed to decide.
+      const hint = (reports.value.find((r) => r.id === reportId) || {}).display_hint
+      loadPayload(reportId, hint)
+    }
   }
 
   function handleWebSocketEvent(data) {
@@ -215,8 +298,8 @@ export const useFleetReportsStore = defineStore('fleetReports', () => {
   }
 
   return {
-    reports, stats, loading, statsLoading, error, expandedId, payloads, filters, active,
-    setActive, fetchReports, fetchStats, refresh, setFilter, loadPayload, toggleExpanded,
+    reports, stats, loading, statsLoading, error, expandedId, payloads, rowMeta, filters, active,
+    setActive, fetchReports, fetchStats, refresh, setFilter, loadPayload, loadMoreRows, toggleExpanded,
     handleWebSocketEvent,
   }
 })

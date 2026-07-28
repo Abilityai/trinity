@@ -87,6 +87,8 @@
           <ReportRenderer
             v-else
             :report-type="report.report_type"
+            :meta="store.rowMeta[report.id]"
+            :load-more="() => store.loadMoreRows(report.id)"
             :display-hint="report.display_hint"
             :payload="store.payloads[report.id].payload"
           />
