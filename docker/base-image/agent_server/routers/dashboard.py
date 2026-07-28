@@ -6,10 +6,11 @@ Reads and serves dashboard configuration from dashboard.yaml file.
 import logging
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from datetime import datetime
 
 from fastapi import APIRouter
 import yaml
+
+from ..utils.helpers import iso_z_from_mtime
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -227,7 +228,7 @@ async def get_dashboard():
 
         # Get file modification time
         stat = dashboard_path.stat()
-        last_modified = datetime.fromtimestamp(stat.st_mtime).isoformat()
+        last_modified = iso_z_from_mtime(stat.st_mtime)
 
         # Ensure defaults
         if 'refresh' not in config:
