@@ -40,6 +40,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _SYSTEM_AGENT_SERVICE = _BACKEND / "services" / "system_agent_service.py"
 
 
@@ -343,7 +344,16 @@ def test_creation_without_agent_auth_secret_fails_closed_without_blocking_boot(
 ):
     """Strictly more honest than creating a container the backend can never talk
     to: every backend→agent call already raises on an empty master, and
-    `check_agent_auth_token_env_matches` already raises for every agent."""
+    `check_agent_auth_token_env_matches` already raises for every agent.
+
+    `_create_system_agent` resolves its template through a CWD-RELATIVE fallback
+    (`./config/agent-templates`, used whenever `/agent-configs/templates` is
+    absent, i.e. off-container). Without pinning the CWD this test passes from
+    the repo root and fails from `tests/` — which is exactly where verify-local
+    runs pytest — because creation then dies on a missing template BEFORE it
+    reaches the token derive, and the test would be asserting the wrong failure.
+    """
+    monkeypatch.chdir(_REPO_ROOT)
     monkeypatch.setattr(sas, "get_agent_container", lambda name: None)
     monkeypatch.setattr(
         sas,

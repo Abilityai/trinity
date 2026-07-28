@@ -51,6 +51,7 @@ import pytest
 pytestmark = pytest.mark.unit
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _SYSTEM_AGENT_SERVICE = _BACKEND / "services" / "system_agent_service.py"
 
 
@@ -188,10 +189,12 @@ def created_spec(monkeypatch):
     monkeypatch.setattr(
         sas.SystemAgentService, "_set_system_scope", lambda self, key_id: None
     )
-    # The template lives at the repo-root path the service falls back to when
-    # /agent-configs/templates is absent (i.e. off-container), so no stubbing
-    # of the yaml load is needed — creation reads the REAL template.yaml.
-    monkeypatch.chdir(_BACKEND.parents[1])
+    # `_create_system_agent` reads the REAL template.yaml — no yaml stubbing —
+    # through a CWD-RELATIVE fallback (`./config/agent-templates`, used whenever
+    # /agent-configs/templates is absent, i.e. off-container). Pin the CWD to the
+    # repo root so this holds wherever pytest is invoked from; verify-local runs
+    # it from `tests/`, where the relative path does not resolve.
+    monkeypatch.chdir(_REPO_ROOT)
 
     asyncio.run(sas.SystemAgentService()._create_system_agent())
     assert "environment" in captured, "creation never reached containers_run"
