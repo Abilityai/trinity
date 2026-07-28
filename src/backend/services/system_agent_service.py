@@ -22,6 +22,7 @@ from services.docker_service import (
 )
 from services.docker_utils import container_reload, container_start, containers_run
 from services.agent_runtime_state import clear_agent_breakers
+from services.agent_auth import derive_agent_token
 from services.settings_service import get_anthropic_api_key
 from services.agent_service.lifecycle import FULL_CAPABILITIES, AGENT_TMPFS_MOUNT, AGENT_DEFAULT_TMPDIR
 from services.agent_service.capabilities import normalize_cpu, normalize_memory
@@ -188,7 +189,36 @@ class SystemAgentService:
             # #1098: redirect scratch off the 100 MB noexec /tmp tmpfs onto the
             # disk-backed home volume (dir created at start by startup.sh).
             'TMPDIR': AGENT_DEFAULT_TMPDIR,
+            # #1816 convergence: creation must satisfy every predicate the
+            # shared recreate path checks, or the system agent is born with a
+            # PERMANENT mismatch. This one (#1159's
+            # check_agent_auth_token_env_matches) was silently false since
+            # #1159 — the token's only three writers were crud.py and the two
+            # lifecycle recreates, never here. That matters far beyond a stray
+            # recreate: `recreate_container_with_updated_config` resolves the
+            # image from the container's own Config.Image *tag*, so a config
+            # recreate is ALSO an image adoption — a permanently-false predicate
+            # means the first `POST /api/agents/trinity-system/start` after any
+            # fresh provision replaces a RUNNING orchestrator and swaps its
+            # image mid-operation (AC2).
+            #
+            # Fail-closed, deliberately: derive_agent_token raises when
+            # AGENT_AUTH_SECRET is unset, so such an install now fails to CREATE
+            # the system agent instead of creating one the backend can never
+            # talk to (every backend→agent call already raises today, and
+            # check_agent_auth_token_env_matches already raises for every
+            # agent). ensure_deployed catches → `create_failed`, and
+            # main.py's lifespan catch keeps boot alive either way.
+            'TRINITY_AGENT_AUTH_TOKEN': derive_agent_token(SYSTEM_AGENT_NAME),
         }
+
+        # NB: deliberately NO `TRINITY_BACKEND_URL` here. That env var is the
+        # agent-side heartbeat loop's gate, and heartbeat_service.
+        # authorize_heartbeat accepts ONLY `scope == "agent"` keys — the system
+        # agent's key is `scope == "system"`, so arming it would produce a
+        # permanent 5-second 403 loop (swallowed agent-side, ~17k backend log
+        # lines/day). Whether the orchestrator SHOULD be visible to fleet health
+        # is a real design question, and a separate one (#1816 §10).
 
         # OpenTelemetry Configuration (enabled by default)
         if os.getenv('OTEL_ENABLED', '1') == '1':
@@ -231,6 +261,21 @@ class SystemAgentService:
             'trinity.created': utc_now_iso(),
             'trinity.template': SYSTEM_AGENT_TEMPLATE,
             'trinity.is-system': 'true',  # Mark as system agent
+            # #1816 convergence (second half): the container below really does
+            # run with `cap_add=FULL_CAPABILITIES`, but creation never said so
+            # in a label — and check_full_capabilities_match defaults a MISSING
+            # label to 'false' while the fleet setting defaults to true. Second
+            # permanently-false predicate, same AC2 consequence as the token
+            # above; every other reader of this label was also being lied to.
+            #
+            # Safe to pin ONLY because the predicate is system-aware (#1816,
+            # helpers.is_system_agent_name): on an
+            # `agent_full_capabilities=false` install, a pinned 'true' label
+            # compared against the fleet default would mismatch FOREVER —
+            # recreate on every start. The predicate exemption and the recreate
+            # path's `full_capabilities` override are the checker and writer
+            # halves of the same contract.
+            'trinity.full-capabilities': 'true',
         }
 
         # #1560: `SYSTEM_AGENT_NAME` is a fixed, permanently-recycled name — if the
