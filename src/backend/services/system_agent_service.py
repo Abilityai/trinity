@@ -67,10 +67,19 @@ BASE_IMAGE_STATE_LABELS = {
 # suppress — the alarm raised about it.
 BASE_IMAGE_STALE_ALERT_PREFIX = "base-image-stale-"
 
-# #1816: minimum gap between two staleness alarms. The alarm is already
-# edge-triggered on a state transition, but "running + stale" persists across
-# every backend restart until an operator acts, and a restart resets the
-# in-memory edge — so a restart loop would file one item per boot without this.
+# #1816: minimum gap between two staleness alarms. "running + stale" persists
+# until an operator acts, so without a bound a caller that re-runs
+# `ensure_deployed` would file an item per call.
+#
+# Honest about its reach: `ensure_deployed` is called ONCE per backend process
+# (main.py's lifespan), and this cursor is per-process, so with `--workers N`
+# a stale boot files N items — one per worker — and a restart loop files N per
+# restart. That is deliberate rather than overlooked: a cross-worker cursor
+# means Redis or a DB read on the boot path for an ADVISORY alarm, and the
+# established idiom (sync_failing / git_bloat) keeps the id un-guessable
+# (`{prefix}{agent}-{utc_now_iso()}`) precisely so it cannot be pre-created and
+# silenced — which a deterministic, dedupable id would give up. Operator-queue
+# retention and Clear All bound the rest.
 BASE_IMAGE_ALERT_COOLDOWN_SECONDS = 6 * 60 * 60
 
 
