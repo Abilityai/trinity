@@ -713,9 +713,12 @@ class TestInjectOrchestration:
         with patch.object(skill_service_module, "get_agent_client", return_value=client):
             _run(service.inject_skills("agent-x", ["multi"], force=True))
         service._finalize_injected_dirs.assert_awaited_once()
-        _agent, names, exec_paths = service._finalize_injected_dirs.await_args.args
+        # #1842 added a 4th arg: the paths the prune deleted, so finalize can
+        # reap the directories they emptied.
+        _agent, names, exec_paths, pruned = service._finalize_injected_dirs.await_args.args
         assert names == ["multi"]
         assert exec_paths == []
+        assert pruned == []   # fallback wrote only SKILL.md; nothing was pruned
 
     def test_total_cap_skips_overflow_skill(self, service, monkeypatch):
         monkeypatch.setenv("SKILLS_TOTAL_MAX_BYTES", "150")
@@ -999,3 +1002,123 @@ class TestListAndGetSurface:
         paths = {f["path"] for f in skill["files"]}
         assert paths == {"SKILL.md", "ref/a.txt"}
         assert skill["content"].startswith("# d")
+
+
+class TestPrunedEmptyDirReap:
+    """#1842: `compute_prune` diffs MANIFESTS and a manifest holds files, so a
+    package that drops a subdirectory had its files deleted and the directory
+    left standing. Reproduced live: after `reference/notes.md` was pruned,
+    `~/.claude/skills/pkg-probe/reference/` remained as an empty directory that
+    no later injection ever removed.
+
+    These execute the real finalize script against a tmp home — a mocked
+    assertion on the arg list would not catch a bad rmdir climb."""
+
+    def _run_finalize(self, service, tmp_path, monkeypatch, pruned):
+        captured = []
+
+        async def grab(agent_name, script):
+            captured.append(script)
+            return None
+
+        service._run_agent_python = grab
+        _run(service._finalize_injected_dirs("agent-x", ["pkg"], [], pruned))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        proc = subprocess.run(
+            [sys.executable, "-"], input=captured[0], text=True,
+            capture_output=True, timeout=15,
+        )
+        assert proc.returncode == 0, proc.stderr
+        return json.loads(proc.stdout)
+
+    def _skill(self, tmp_path):
+        d = tmp_path / ".claude" / "skills" / "pkg"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text("# pkg\n")
+        return d
+
+    def test_directory_emptied_by_the_prune_is_removed(self, service, tmp_path, monkeypatch):
+        skill = self._skill(tmp_path)
+        (skill / "reference").mkdir()          # its only file was just pruned
+        out = self._run_finalize(
+            service, tmp_path, monkeypatch,
+            [".claude/skills/pkg/reference/notes.md"],
+        )
+        assert out["rmdir"] == 1
+        assert not (skill / "reference").exists()
+        assert (skill / "SKILL.md").exists()   # the package itself is untouched
+
+    def test_directory_still_holding_files_is_kept(self, service, tmp_path, monkeypatch):
+        """`os.rmdir` IS the safety property: runtime artifacts a skill's own
+        scripts wrote (__pycache__, downloaded models) keep the dir alive."""
+        skill = self._skill(tmp_path)
+        (skill / "scripts").mkdir()
+        (skill / "scripts" / "run.sh").write_text("#!/bin/sh\n")
+        (skill / "scripts" / "__pycache__").mkdir()
+        (skill / "scripts" / "__pycache__" / "x.pyc").write_bytes(b"\x00")
+        out = self._run_finalize(
+            service, tmp_path, monkeypatch,
+            [".claude/skills/pkg/scripts/old.py"],
+        )
+        assert out["rmdir"] == 0
+        assert (skill / "scripts" / "run.sh").exists()
+        assert (skill / "scripts" / "__pycache__" / "x.pyc").exists()
+
+    def test_climb_stops_at_the_skill_root(self, service, tmp_path, monkeypatch):
+        """Even with every level empty, the skill root and `.claude/skills`
+        above it must survive — the package is still installed."""
+        skill = self._skill(tmp_path)
+        (skill / "a" / "b").mkdir(parents=True)
+        out = self._run_finalize(
+            service, tmp_path, monkeypatch, [".claude/skills/pkg/a/b/gone.txt"],
+        )
+        assert out["rmdir"] == 2                    # b/, then a/
+        assert not (skill / "a").exists()
+        assert skill.exists() and (skill / "SKILL.md").exists()
+        assert (tmp_path / ".claude" / "skills").is_dir()
+
+    def test_paths_outside_the_skills_prefix_are_ignored(self, service, tmp_path, monkeypatch):
+        """Prefix confinement mirrors compute_prune's own guard: a doctored
+        manifest must never steer an rmdir elsewhere in the agent home."""
+        self._skill(tmp_path)
+        (tmp_path / "workspace").mkdir()
+        (tmp_path / ".claude" / "loose").mkdir()
+        out = self._run_finalize(
+            service, tmp_path, monkeypatch,
+            ["workspace/data.csv", ".claude/loose/x.txt", "../../etc/passwd"],
+        )
+        assert out["rmdir"] == 0
+        assert (tmp_path / "workspace").is_dir()
+        assert (tmp_path / ".claude" / "loose").is_dir()
+
+    def test_symlinked_directory_is_not_followed(self, service, tmp_path, monkeypatch):
+        """A symlink where a package dir used to be must not be unlinked —
+        os.rmdir refuses it (NotADirectoryError), so the target is safe."""
+        skill = self._skill(tmp_path)
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        (skill / "reference").symlink_to(target, target_is_directory=True)
+        out = self._run_finalize(
+            service, tmp_path, monkeypatch,
+            [".claude/skills/pkg/reference/notes.md"],
+        )
+        assert out["rmdir"] == 0
+        assert target.is_dir()
+        assert (skill / "reference").is_symlink()
+
+    def test_traversal_segment_is_rejected_by_the_reap(self, service, tmp_path, monkeypatch):
+        """#1842 review: the script's own prefix check is satisfied by
+        `.claude/skills/pkg/../../..`, so a `..` segment would climb out of the
+        skill root. compute_prune filters these upstream — this pins the reap's
+        last line of defense rather than trusting the caller."""
+        skill = self._skill(tmp_path)
+        (skill / "reference").mkdir()
+        victim = tmp_path / "victim"
+        victim.mkdir()
+        out = self._run_finalize(
+            service, tmp_path, monkeypatch,
+            [".claude/skills/pkg/../../victim/x.txt", ".claude/skills/pkg/reference/notes.md"],
+        )
+        assert victim.is_dir()          # never touched
+        assert out["rmdir"] == 1        # only the legitimate one was reaped
+        assert not (skill / "reference").exists()
