@@ -10,11 +10,34 @@ This service provides centralized activity tracking with:
 
 import asyncio
 import json
-from typing import Dict, List, Optional, Callable, Any
+import logging
+from typing import Dict, List, Optional, Callable, Any, Set
 from datetime import datetime
-from models import ActivityType, ActivityState, ActivityCreate
+from models import (
+    ActivityType,
+    ActivityState,
+    ActivityCreate,
+    TaskExecutionStatus,
+    activity_state_for_terminal,
+)
 from database import db
+from db.activities import ActivityCloseOutcome
 from utils.helpers import utc_now_iso
+
+logger = logging.getLogger(__name__)
+
+# Terminals whose activity state is *authoritative* (#1804). Only these may
+# upgrade a provisionally-FAILED activity, and only these widen the lookup —
+# see db/activities.py::_close_predicate for the lattice.
+_AUTHORITATIVE_TERMINALS = (
+    TaskExecutionStatus.SUCCESS,
+    TaskExecutionStatus.CANCELLED,
+)
+
+# Strong refs for fire-and-forget closes spawned from sync call sites, so the
+# event loop cannot garbage-collect a pending task (same guard as
+# event_dispatch_service._inflight_emit_tasks).
+_inflight_close_tasks: Set["asyncio.Task"] = set()
 
 
 class ActivityService:
@@ -137,10 +160,12 @@ class ActivityService:
         if not activity:
             return False
 
-        # Update in database
-        success = db.complete_activity(activity_id, status, details, error)
+        # Update in database. #1804: the db layer is a lattice CAS returning a
+        # tri-state outcome — ALREADY_CLOSED is a DESIGNED no-op (a second
+        # closer refused, nothing clobbered), not a failure.
+        outcome = db.complete_activity(activity_id, status, details, error)
 
-        if success:
+        if outcome is ActivityCloseOutcome.UPDATED:
             # Broadcast via WebSocket
             await self._broadcast_activity_event(
                 agent_name=activity["agent_name"],
@@ -163,7 +188,108 @@ class ActivityService:
                 "details": details
             })
 
-        return success
+        # The bool answers "does this activity exist and is it closed" — the
+        # question `routers/internal.py` 404s on. An idempotent refusal is a
+        # satisfied caller, so only NOT_FOUND is False (a row deleted between
+        # the read above and the CAS).
+        return outcome is not ActivityCloseOutcome.NOT_FOUND
+
+    async def close_execution_activity(
+        self,
+        execution_id: str,
+        terminal_status,
+        *,
+        error: Optional[str] = None,
+        activity_id: Optional[str] = None,
+    ) -> bool:
+        """Close the dispatch activity paired with a just-written execution
+        terminal. **The single owner of the #1804 contract.**
+
+        Call this from EVERY writer that wins a terminal CAS on
+        ``schedule_executions``. Before #1804 the close was gated on holding the
+        ``activity_id`` local *and* winning the CAS in the same coroutine, so
+        every out-of-band terminal writer left the row ``started`` until a
+        120-minute backstop closed it with a fabricated duration::
+
+          CAS-WON TERMINAL WRITERS                          ONE OWNER
+          ------------------------                          ---------
+          _write_terminal_and_gate (won AND lost)   |
+          apply_result (success + failure)          |
+          watchdog  _recover_execution              |       activity_service
+          startup   _recover_execution              |--->   .close_execution_activity()
+          CancelledError x 2  (backend shutdown)    |              |
+          lease reaper (park + requeue)             |              | lattice-aware lookup
+          terminate_execution                       |              | activity_state_for_terminal()
+          pull sink apply_task_result --spawn wrap--|              v
+                                                          db.complete_activity()  <- CAS
+                                                          -> ActivityCloseOutcome
+
+          BULK (N rows) ------------------------------>  db.close_open_activities_for_executions()
+                                                          (1 transaction, no per-row WS)
+
+        ``terminal_status`` is an execution status (``TaskExecutionStatus`` or
+        its bare string); the activity state comes from the shared
+        ``models.activity_state_for_terminal`` (#1332) — never a second mapping.
+
+        ``activity_id`` skips the lookup when the caller already holds it.
+        Otherwise the lookup variant is chosen by the terminal: an
+        *authoritative* terminal (SUCCESS/CANCELLED) searches ``started|failed``
+        so it can upgrade a provisional FAILED; a *provisional* terminal
+        (FAILED) searches ``started`` only. Callers stay ignorant of the lattice.
+
+        Fail-open: returns False and swallows on any error. It runs AFTER a
+        committed terminal write and must never affect it.
+        """
+        try:
+            activity_state = activity_state_for_terminal(terminal_status)
+            if not activity_id:
+                if not execution_id:
+                    return False
+                activity_id = db.get_open_activity_id_for_execution(
+                    execution_id,
+                    include_failed=terminal_status in _AUTHORITATIVE_TERMINALS,
+                )
+                if not activity_id:
+                    return False
+            return await self.complete_activity(
+                activity_id=activity_id,
+                status=activity_state,
+                error=error,
+            )
+        except Exception as e:  # noqa: BLE001 — never affect a committed terminal
+            logger.warning(
+                "[#1804] close_execution_activity failed for execution %s: %s",
+                execution_id,
+                e,
+            )
+            return False
+
+    def spawn_close_execution_activity(
+        self,
+        execution_id: str,
+        terminal_status,
+        *,
+        error: Optional[str] = None,
+        activity_id: Optional[str] = None,
+    ) -> None:
+        """Fire ``close_execution_activity`` fire-and-forget from a SYNC site.
+
+        Mirrors ``event_dispatch_service.spawn_task_terminal_event``: the pull
+        sink (``pull_coordination_service.apply_task_result``) is synchronous but
+        runs inside an async router handler, so a running loop exists. Fail-open:
+        with no running loop the close is skipped (logged), never raised — the
+        120-minute backstop still covers it until #429.
+        """
+        coro = self.close_execution_activity(
+            execution_id, terminal_status, error=error, activity_id=activity_id
+        )
+        try:
+            task = asyncio.create_task(coro)
+            _inflight_close_tasks.add(task)
+            task.add_done_callback(_inflight_close_tasks.discard)
+        except RuntimeError as e:
+            coro.close()
+            logger.debug("[#1804] spawn_close_execution_activity skipped (no loop): %s", e)
 
     async def get_current_activities(self, agent_name: str) -> List[Dict]:
         """Get all in-progress activities for an agent."""

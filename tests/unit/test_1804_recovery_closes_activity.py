@@ -318,3 +318,187 @@ class TestBulkCloseOpenActivities:
         assert activity_ops.close_open_activities_for_executions(ids, "failed") == 5
         for i in range(5):
             assert _fetch_activity(f"bulk-act-{i}")["activity_state"] == "failed"
+
+
+# ===========================================================================
+# service layer — the single owner of the close contract
+# ===========================================================================
+def _svc_with_db(mock_db):
+    """A fresh ActivityService with its module-level ``db`` swapped whole.
+
+    Swapping the WHOLE object (never ``setattr(database.db, ...)``) avoids the
+    method-less ``database.db`` stub leak that makes attribute patches fail
+    under pytest-randomly (test_904).
+    """
+    import services.activity_service as act_mod
+
+    svc = act_mod.ActivityService()
+    return svc, act_mod
+
+
+@pytest.mark.unit
+class TestCloseExecutionActivityService:
+    def test_service_maps_terminal_via_shared_helper(self):
+        from db.activities import ActivityCloseOutcome
+        from models import ActivityState, TaskExecutionStatus
+
+        mock_db = MagicMock()
+        mock_db.get_open_activity_id_for_execution.return_value = "act-1"
+        mock_db.get_activity.return_value = {"agent_name": "a", "activity_type": "chat_start"}
+        mock_db.complete_activity.return_value = ActivityCloseOutcome.UPDATED
+        svc, mod = _svc_with_db(mock_db)
+
+        cases = {
+            TaskExecutionStatus.SUCCESS: ActivityState.COMPLETED,
+            TaskExecutionStatus.CANCELLED: ActivityState.CANCELLED,
+            TaskExecutionStatus.FAILED: ActivityState.FAILED,
+            TaskExecutionStatus.SKIPPED: ActivityState.FAILED,
+        }
+        for terminal, expected in cases.items():
+            with patch.object(mod, "db", mock_db):
+                assert _await(svc.close_execution_activity("exec-1", terminal)) is True
+            assert mock_db.complete_activity.call_args[0][1] == expected
+
+    def test_service_lookup_is_lattice_aware(self):
+        """[test 6] Authoritative terminals search started|failed; provisional
+        terminals search started only. The pairing that keeps the fix live."""
+        from db.activities import ActivityCloseOutcome
+        from models import TaskExecutionStatus
+
+        mock_db = MagicMock()
+        mock_db.get_open_activity_id_for_execution.return_value = "act-1"
+        mock_db.get_activity.return_value = {"agent_name": "a", "activity_type": "chat_start"}
+        mock_db.complete_activity.return_value = ActivityCloseOutcome.UPDATED
+        svc, mod = _svc_with_db(mock_db)
+
+        for terminal, expected in (
+            (TaskExecutionStatus.SUCCESS, True),
+            (TaskExecutionStatus.CANCELLED, True),
+            (TaskExecutionStatus.FAILED, False),
+        ):
+            with patch.object(mod, "db", mock_db):
+                _await(svc.close_execution_activity("exec-1", terminal))
+            assert (
+                mock_db.get_open_activity_id_for_execution.call_args.kwargs["include_failed"]
+                is expected
+            )
+
+    def test_service_caller_held_activity_id_skips_lookup(self):
+        from db.activities import ActivityCloseOutcome
+        from models import TaskExecutionStatus
+
+        mock_db = MagicMock()
+        mock_db.get_activity.return_value = {"agent_name": "a", "activity_type": "chat_start"}
+        mock_db.complete_activity.return_value = ActivityCloseOutcome.UPDATED
+        svc, mod = _svc_with_db(mock_db)
+
+        with patch.object(mod, "db", mock_db):
+            assert _await(
+                svc.close_execution_activity(
+                    "exec-1", TaskExecutionStatus.FAILED, activity_id="held"
+                )
+            ) is True
+        mock_db.get_open_activity_id_for_execution.assert_not_called()
+        assert mock_db.complete_activity.call_args[0][0] == "held"
+
+    def test_service_no_open_activity_is_a_noop(self):
+        from models import TaskExecutionStatus
+
+        mock_db = MagicMock()
+        mock_db.get_open_activity_id_for_execution.return_value = None
+        svc, mod = _svc_with_db(mock_db)
+
+        with patch.object(mod, "db", mock_db):
+            assert _await(
+                svc.close_execution_activity("exec-1", TaskExecutionStatus.FAILED)
+            ) is False
+        mock_db.complete_activity.assert_not_called()
+
+    def test_service_is_fail_open_when_db_raises(self):
+        """[test 9] The close runs AFTER a committed terminal write — it must
+        never raise into a caller that already billed the turn."""
+        from models import TaskExecutionStatus
+
+        mock_db = MagicMock()
+        mock_db.get_open_activity_id_for_execution.side_effect = RuntimeError("db down")
+        svc, mod = _svc_with_db(mock_db)
+
+        with patch.object(mod, "db", mock_db):
+            assert _await(
+                svc.close_execution_activity("exec-1", TaskExecutionStatus.FAILED)
+            ) is False
+
+    def test_service_broadcasts_only_on_updated(self):
+        """[test 10 / R3] An ALREADY_CLOSED refusal must not emit an
+        agent_activity event claiming the activity just closed."""
+        from db.activities import ActivityCloseOutcome
+        from models import TaskExecutionStatus
+
+        mock_db = MagicMock()
+        mock_db.get_open_activity_id_for_execution.return_value = "act-1"
+        mock_db.get_activity.return_value = {"agent_name": "a", "activity_type": "chat_start"}
+        svc, mod = _svc_with_db(mock_db)
+        ws = MagicMock(broadcast=AsyncMock())
+        svc.set_websocket_manager(ws)
+        seen = []
+        svc.subscribe(lambda e: seen.append(e))
+
+        mock_db.complete_activity.return_value = ActivityCloseOutcome.UPDATED
+        with patch.object(mod, "db", mock_db):
+            _await(svc.close_execution_activity("exec-1", TaskExecutionStatus.FAILED))
+        assert ws.broadcast.await_count == 1
+        assert len(seen) == 1
+
+        mock_db.complete_activity.return_value = ActivityCloseOutcome.ALREADY_CLOSED
+        with patch.object(mod, "db", mock_db):
+            _await(svc.close_execution_activity("exec-1", TaskExecutionStatus.FAILED))
+        assert ws.broadcast.await_count == 1  # unchanged — no second broadcast
+        assert len(seen) == 1
+
+    def test_service_already_closed_still_reports_handled(self):
+        """Only NOT_FOUND is False — routers/internal.py 404s on that, and only
+        that, so an idempotent re-close does not start 404ing the scheduler."""
+        from db.activities import ActivityCloseOutcome
+
+        mock_db = MagicMock()
+        mock_db.get_activity.return_value = {"agent_name": "a", "activity_type": "chat_start"}
+        svc, mod = _svc_with_db(mock_db)
+
+        mock_db.complete_activity.return_value = ActivityCloseOutcome.ALREADY_CLOSED
+        with patch.object(mod, "db", mock_db):
+            assert _await(svc.complete_activity("act-1", "failed")) is True
+
+        mock_db.complete_activity.return_value = ActivityCloseOutcome.NOT_FOUND
+        with patch.object(mod, "db", mock_db):
+            assert _await(svc.complete_activity("act-1", "failed")) is False
+
+    def test_service_spawn_wrapper_schedules_the_close(self):
+        """[test 16 part 1] The sync sink (pull_coordination_service) needs a
+        no-await entry point; a strong ref keeps the task from being GC'd."""
+        import asyncio
+        from db.activities import ActivityCloseOutcome
+        from models import TaskExecutionStatus
+
+        mock_db = MagicMock()
+        mock_db.get_open_activity_id_for_execution.return_value = "act-1"
+        mock_db.get_activity.return_value = {"agent_name": "a", "activity_type": "chat_start"}
+        mock_db.complete_activity.return_value = ActivityCloseOutcome.UPDATED
+        svc, mod = _svc_with_db(mock_db)
+
+        async def _drive():
+            with patch.object(mod, "db", mock_db):
+                svc.spawn_close_execution_activity("exec-1", TaskExecutionStatus.SUCCESS)
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+
+        asyncio.run(_drive())
+        mock_db.complete_activity.assert_called_once()
+
+    def test_service_spawn_wrapper_without_a_loop_is_fail_open(self):
+        """No running loop → skipped, never raised (the backstop still covers)."""
+        from models import TaskExecutionStatus
+
+        mock_db = MagicMock()
+        svc, mod = _svc_with_db(mock_db)
+        with patch.object(mod, "db", mock_db):
+            svc.spawn_close_execution_activity("exec-1", TaskExecutionStatus.SUCCESS)
