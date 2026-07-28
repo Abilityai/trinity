@@ -55,7 +55,7 @@ SYSTEM_AGENT_NETWORK = "trinity-agent-network"
 # operator wants to know whether the container is CURRENT. An ENUM only —
 # never image ids or digests, mirroring the `/health clone_status` contract
 # (#1439) — because this reaches an API response and a persisted alarm.
-_BASE_IMAGE_STATE_LABELS = {
+BASE_IMAGE_STATE_LABELS = {
     "match": "current",
     "drift": "stale",
     "unknown": "unknown",
@@ -147,7 +147,7 @@ class SystemAgentService:
                 state = await check_base_image_state(container, SYSTEM_AGENT_NAME)
                 result["action"] = "none"
                 result["status"] = "running"
-                result["base_image_state"] = _BASE_IMAGE_STATE_LABELS[state]
+                result["base_image_state"] = BASE_IMAGE_STATE_LABELS[state]
 
                 if state == "drift":
                     result["message"] = (

@@ -27,7 +27,7 @@ from services.docker_utils import (
 )
 from services.agent_service.helpers import check_base_image_state
 from services.agent_service.lifecycle import start_agent_internal
-from services.system_agent_service import _BASE_IMAGE_STATE_LABELS
+from services.system_agent_service import BASE_IMAGE_STATE_LABELS
 from db.agents import SYSTEM_AGENT_NAME
 
 router = APIRouter(prefix="/api/system-agent", tags=["system-agent"])
@@ -81,12 +81,11 @@ async def get_system_agent_status(
     # start, so reporting staleness for it would be advice about a state that
     # is about to be fixed.
     if status == "running":
-        result["base_image_state"] = _BASE_IMAGE_STATE_LABELS[
+        result["base_image_state"] = BASE_IMAGE_STATE_LABELS[
             await check_base_image_state(container, SYSTEM_AGENT_NAME)
         ]
 
-    # If running, try to get health info from agent
-    if status == "running":
+        # Try to get health info from the agent.
         try:
             agent_url = f"http://agent-{SYSTEM_AGENT_NAME}:8000/api/health"
             async with agent_httpx_client(SYSTEM_AGENT_NAME, timeout=5.0) as client:
