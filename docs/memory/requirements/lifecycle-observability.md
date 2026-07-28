@@ -360,6 +360,25 @@ endpoint — reports flow agent → MCP → backend.
   whole blob is read, so it bounds the RESPONSE, not the read — moving the slice into SQL
   requires the off-row model, and the trigger for that should be a payload distribution
   that actually approaches this ceiling.
+- **FR-11 — Export to .xlsx / .pdf** (#1536, epic #1534):
+  `GET /api/reports/{id}/export?format=xlsx|pdf` renders a stored report as a real
+  spreadsheet (cells, typed values, `{columns, rows}` honouring both positional and
+  column-keyed rows) or a formatted PDF (table stays a table, markdown stays prose).
+  Builders live in `services/report_export.py` as pure `(payload, hint, title) -> bytes`
+  functions; the router owns access, format validation and headers.
+  **Shape mismatch degrades, never 500s**: `kpi` → label/value/unit sheet, `timeline` →
+  event columns, anything unrecognized → pretty-printed JSON in one cell. Access reuses the
+  detail route's **404-not-403**, so an export URL cannot become the existence oracle that
+  route refuses to be; `Content-Disposition` is built from a sanitized title (quotes,
+  newlines and separators stripped, not escaped) and carries `X-Content-Type-Options:
+  nosniff` like the FILES-001 download. PDF caps at `PDF_MAX_ROWS` (2000) **with a visible
+  note** pointing at the spreadsheet — a 12,000-row PDF is not a document anyone reads.
+  Agent-authored text is escaped before reportlab parses its mini-HTML dialect.
+  **Dependencies** (`openpyxl`, `reportlab`) are pure-Python wheels — no system libraries,
+  so the image build is otherwise unchanged (WeasyPrint was rejected for exactly that
+  reason). They are imported **lazily**, so an instance that upgrades code without
+  rebuilding the image (#1814) gets **503 with a rebuild hint** on that one endpoint
+  instead of an import error taking the whole reports router down.
 - **FR-7 — Discoverability via the platform prompt** (#1535, epic #1534): `PLATFORM_INSTRUCTIONS`
   carries a "Publishing Reports" block, so reporting is a default fleet behaviour instead of
   something only agents whose own CLAUDE.md mentions it ever do. Documents the call, when to

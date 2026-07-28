@@ -21,7 +21,7 @@ import json
 import os
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from database import db
 from dependencies import get_current_user, AuthorizedAgent, OwnedAgent
@@ -35,7 +35,7 @@ from models import (
     REPORT_ROWS_PAGE_MAX,
     User,
 )
-from services import rate_limiter, report_service
+from services import rate_limiter, report_export, report_service
 from services.agent_service.helpers import accessible_agent_names, narrow_to_agent
 
 router = APIRouter(prefix="/api", tags=["reports"])
@@ -209,6 +209,69 @@ async def list_fleet_reports(
         offset=offset,
     )
     return [ReportSummary(**r) for r in rows]
+
+
+@router.get("/reports/{report_id}/export")
+async def export_report(
+    report_id: str,
+    format: str = Query("xlsx", pattern="^(xlsx|pdf)$"),
+    current_user: User = Depends(get_current_user),
+):
+    """Download a report as a spreadsheet or a PDF (#1536).
+
+    Access is the same gate as the detail route, including its 404-not-403 for a
+    report the caller cannot reach — an export URL must not become the oracle the
+    detail route refuses to be.
+
+    Shape mismatches degrade rather than fail: a `kpi` payload exports as a
+    two-column sheet, an unrecognized one as pretty-printed JSON. The only 4xx
+    here is an unknown `format`.
+
+    Missing libraries answer **503, not 500**: they are pinned in the backend
+    image, but an instance that upgrades code without rebuilding (#1814) would
+    otherwise see an opaque crash instead of "rebuild the image".
+    """
+    report = db.get_report(report_id)
+    if not report or not db.can_user_access_agent(current_user.username, report["agent_name"]):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+
+    title = report.get("title") or "report"
+    try:
+        if format == "xlsx":
+            content = report_export.build_xlsx(report.get("payload"), report.get("display_hint"), title)
+            media = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        else:
+            content = report_export.build_pdf(report.get("payload"), report.get("display_hint"), title)
+            media = "application/pdf"
+    except report_export.ExportUnavailable as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                f"Report export is unavailable on this instance ({e}). "
+                "Rebuild the backend image so the export dependencies are installed."
+            ),
+        )
+
+    filename = _export_filename(title, report_id, format)
+    return Response(
+        content=content,
+        media_type=media,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            # The report body is agent-authored; keep browsers from sniffing it
+            # into something executable, matching the FILES-001 download route.
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+def _export_filename(title: str, report_id: str, fmt: str) -> str:
+    """A safe, recognizable filename. The title is agent-authored, so anything
+    that could break out of the quoted Content-Disposition value — quotes,
+    newlines, separators — is stripped rather than escaped."""
+    safe = "".join(ch if (ch.isalnum() or ch in " -_") else "-" for ch in (title or ""))
+    safe = "-".join(safe.split()).strip("-")[:60] or "report"
+    return f"{safe}-{report_id[:8]}.{fmt}"
 
 
 @router.get("/reports/{report_id}/rows")

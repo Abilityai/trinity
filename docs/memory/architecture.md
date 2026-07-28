@@ -585,6 +585,12 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   a 1.2 MB report transfers ~8 KB. Storage stays a single TEXT blob — no migration — and
   the slice is Python-side, so it bounds the response, not the read; off-row storage waits
   on a payload distribution that justifies it.
+- **Export** (#1536): `GET /api/reports/{id}/export?format=xlsx|pdf` →
+  `services/report_export.py` (pure builders, lazily-imported `openpyxl`/`reportlab`, both
+  pure-Python wheels). Shape mismatch degrades to a sensible sheet or JSON rather than
+  erroring; access reuses the detail route's 404-not-403; missing libraries answer **503**
+  with a rebuild hint so an un-rebuilt image (#1814) fails legibly on one endpoint instead
+  of at router import.
 - **List = metadata, detail = payload**: list endpoints return `ReportSummary` (no payload);
   `GET /api/reports/{id}` returns the full payload, lazy-loaded when a card expands.
 - **Fleet access**: `GET /api/reports` + `GET /api/reports/stats` filter via

@@ -87,8 +87,24 @@
             :display-hint="report.display_hint"
             :payload="store.payloads[report.id].payload"
           />
-          <div v-if="canDelete" class="mt-3 text-right">
+          <div class="mt-3 flex items-center justify-between gap-2">
+            <div class="flex items-center gap-2">
+              <!-- #1536: plain links, not fetch+blob. The browser handles the
+                   download, Content-Disposition names the file, and the session
+                   cookie/JWT interceptor is not involved in a binary body. -->
+              <a
+                :href="`/api/reports/${report.id}/export?format=xlsx`"
+                class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+                download
+              >Export .xlsx</a>
+              <a
+                :href="`/api/reports/${report.id}/export?format=pdf`"
+                class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
+                download
+              >Export PDF</a>
+            </div>
             <button
+              v-if="canDelete"
               class="text-xs px-2 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
               @click="store.deleteReport(report.id)"
             >Delete</button>

@@ -207,3 +207,39 @@ than being given an invented row axis, and no-access answers 404 exactly like
 column, so it bounds the RESPONSE, not the read. Moving the slice into SQL needs the rows
 off-row; the trigger for that work should be a measured payload distribution approaching the
 new ceiling, not this issue's premise.
+
+
+## Export (#1536)
+
+`GET /api/reports/{id}/export?format=xlsx|pdf`. Builders are pure
+`(payload, display_hint, title) -> bytes` in `services/report_export.py`; the router owns
+access, format validation and headers.
+
+| payload | .xlsx | .pdf |
+|---|---|---|
+| `table` | header row + typed cells | table, header repeated per page |
+| `kpi` | `label / value / unit` | same, as a table |
+| `timeline` | `ts / label / detail` | same |
+| `markdown` | one line per row | flowed paragraphs |
+| anything else | pretty JSON in one cell | preformatted block |
+
+Nothing in that table is an error path. A `kpi` report asked for as a spreadsheet is a
+two-column sheet, not a 400 — a stakeholder holding a slightly plain file is better served
+than one holding a stack trace.
+
+**Verified against real data**, not just unit-tested: the 12,000-row / 1.16 MB report from
+#1537 exports to a 362 KB .xlsx whose sheet reads back with all 12,000 rows and typed
+values, and to a 153 KB PDF; a markdown report exports to a 1.7 KB PDF.
+
+Three decisions worth knowing:
+
+- **Lazy imports.** `openpyxl`/`reportlab` are pinned in the backend image, but `start.sh`
+  does not rebuild on an in-place upgrade (#1814). A module-level import would take the
+  whole reports router down on such an instance; lazily importing turns it into one
+  endpoint answering **503 — "rebuild the backend image"**. Confirmed live: on an
+  un-rebuilt container the endpoint returns exactly that.
+- **404, not 403**, matching `GET /reports/{id}` — an export URL must not become the
+  existence oracle the detail route deliberately refuses to be.
+- **The PDF is capped at 2000 rows with a visible note** pointing at the spreadsheet.
+  Silent truncation of an export is a data-integrity trap; a 12,000-row PDF is not a
+  document anyone reads.
