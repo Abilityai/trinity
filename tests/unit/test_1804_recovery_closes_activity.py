@@ -502,3 +502,413 @@ class TestCloseExecutionActivityService:
         svc, mod = _svc_with_db(mock_db)
         with patch.object(mod, "db", mock_db):
             svc.spawn_close_execution_activity("exec-1", TaskExecutionStatus.SUCCESS)
+
+
+# ===========================================================================
+# the wired terminal writers (mocked)
+# ===========================================================================
+@pytest.mark.unit
+class TestWriteTerminalAndGate:
+    """[R2] The CAS-loss branch — the asymmetry the issue is built on: the
+    SUCCESS applier has reconciled a lost CAS since #1332, this one never did."""
+
+    def _run(self, *, won, persisted_status=None):
+        import services.task_execution_service as tes
+        from models import TaskExecutionStatus
+
+        mock_db = MagicMock()
+        mock_db.update_execution_status.return_value = won
+        if persisted_status is not None:
+            row = MagicMock()
+            row.status = persisted_status
+            mock_db.get_execution.return_value = row
+        else:
+            mock_db.get_execution.return_value = None
+        mock_activity = MagicMock(close_execution_activity=AsyncMock(return_value=True))
+        with (
+            patch.object(tes, "db", mock_db),
+            patch.object(tes, "activity_service", mock_activity),
+            patch.object(tes, "event_dispatch_service", MagicMock()),
+            patch.object(tes, "channel_completion_report", MagicMock()),
+        ):
+            _await(
+                tes._write_terminal_and_gate(
+                    "exec-1804",
+                    "act-1",
+                    status=TaskExecutionStatus.FAILED,
+                    error="Task execution timed out",
+                    agent_name="worker-a",
+                )
+            )
+        return mock_activity
+
+    def test_cas_loss_closes_with_the_persisted_state(self):
+        from models import TaskExecutionStatus
+
+        mact = self._run(won=False, persisted_status=TaskExecutionStatus.CANCELLED)
+
+        mact.close_execution_activity.assert_awaited_once()
+        args, kwargs = mact.close_execution_activity.await_args
+        assert args[1] == TaskExecutionStatus.CANCELLED
+        # Same phrasing as the SUCCESS applier's own lost-CAS reconcile.
+        assert kwargs["error"].startswith("superseded by")
+        assert "CANCELLED" in kwargs["error"].upper()
+        assert kwargs["activity_id"] == "act-1"
+
+    def test_cas_loss_with_no_row_falls_back_to_failed(self):
+        from models import TaskExecutionStatus
+
+        mact = self._run(won=False, persisted_status=None)
+        assert mact.close_execution_activity.await_args[0][1] == TaskExecutionStatus.FAILED
+
+    def test_cas_win_closes_with_its_own_terminal(self):
+        from models import TaskExecutionStatus
+
+        mact = self._run(won=True)
+        args, kwargs = mact.close_execution_activity.await_args
+        assert args[1] == TaskExecutionStatus.FAILED
+        assert kwargs["error"] == "Task execution timed out"
+
+
+@pytest.mark.unit
+class TestShutdownHandlersCloseActivity:
+    """[R5] The two backend-shutdown CancelledError writers — the issue's own
+    reproduction step. Both write FAILED, which makes the row invisible to
+    startup recovery (it scans `running`), so nothing but the 120-minute
+    backstop ever closed their activity."""
+
+    def test_task_execution_service_shutdown_closes(self):
+        import asyncio
+
+        import services.task_execution_service as tes
+        from models import TaskExecutionStatus
+
+        mock_db = MagicMock()
+        row = MagicMock()
+        row.status = TaskExecutionStatus.RUNNING
+        mock_db.get_execution.return_value = row
+        mock_db.update_execution_status.return_value = True
+        mock_db.get_max_parallel_tasks.return_value = 3
+
+        admitted = MagicMock()
+        admitted.state = "admitted"
+        mock_capacity = MagicMock(acquire=AsyncMock(return_value=admitted), release=AsyncMock())
+        mock_activity = MagicMock(
+            track_activity=AsyncMock(return_value="act-shutdown"),
+            close_execution_activity=AsyncMock(return_value=True),
+        )
+        circuit = MagicMock()
+        circuit.allow_request.return_value = True
+
+        with (
+            patch.object(tes, "db", mock_db),
+            patch.object(tes, "get_capacity_manager", return_value=mock_capacity),
+            patch.object(tes, "activity_service", mock_activity),
+            patch.object(tes, "CircuitState", return_value=circuit),
+            patch.object(tes, "dispatch_breaker_active", return_value=False),
+            # Raise INSIDE the try, after the activity is tracked — the shape a
+            # shutdown cancellation takes mid-turn.
+            patch.object(tes, "_resolve_agent_runtime", side_effect=asyncio.CancelledError()),
+        ):
+            svc = tes.TaskExecutionService()
+            with pytest.raises(asyncio.CancelledError):
+                _await(
+                    svc.execute_task(
+                        agent_name="test-agent",
+                        message="hello",
+                        triggered_by="schedule",
+                        execution_id="exec-shutdown",
+                        timeout_seconds=300,
+                    )
+                )
+
+        mock_activity.close_execution_activity.assert_awaited_once()
+        args, kwargs = mock_activity.close_execution_activity.await_args
+        assert args[0] == "exec-shutdown"
+        assert args[1] == TaskExecutionStatus.FAILED
+        assert "backend shutdown" in kwargs["error"]
+        assert kwargs["activity_id"] == "act-shutdown"
+
+    def test_internal_router_shutdown_closes(self):
+        import asyncio
+
+        import routers.internal as internal
+        from models import TaskExecutionStatus
+
+        mock_db = MagicMock()
+        row = MagicMock()
+        row.status = TaskExecutionStatus.RUNNING
+        mock_db.get_execution.return_value = row
+        mock_db.update_execution_status.return_value = True
+        mock_activity = MagicMock(close_execution_activity=AsyncMock(return_value=True))
+        task_service = MagicMock(execute_task=AsyncMock(side_effect=asyncio.CancelledError()))
+        request = MagicMock(execution_id="exec-shutdown-2", agent_name="test-agent")
+
+        with (
+            patch.object(internal, "db", mock_db),
+            patch.object(internal, "activity_service", mock_activity),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                _await(internal._execute_task_internal_background(task_service, request))
+
+        mock_activity.close_execution_activity.assert_awaited_once()
+        args, _kwargs = mock_activity.close_execution_activity.await_args
+        assert args[0] == "exec-shutdown-2"
+        assert args[1] == TaskExecutionStatus.FAILED
+
+    def test_internal_router_shutdown_skips_close_on_lost_cas(self):
+        import asyncio
+
+        import routers.internal as internal
+        from models import TaskExecutionStatus
+
+        mock_db = MagicMock()
+        row = MagicMock()
+        row.status = TaskExecutionStatus.RUNNING
+        mock_db.get_execution.return_value = row
+        mock_db.update_execution_status.return_value = False  # lost to a real terminal
+        mock_activity = MagicMock(close_execution_activity=AsyncMock())
+        task_service = MagicMock(execute_task=AsyncMock(side_effect=asyncio.CancelledError()))
+        request = MagicMock(execution_id="exec-shutdown-3", agent_name="test-agent")
+
+        with (
+            patch.object(internal, "db", mock_db),
+            patch.object(internal, "activity_service", mock_activity),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                _await(internal._execute_task_internal_background(task_service, request))
+
+        mock_activity.close_execution_activity.assert_not_awaited()
+
+
+@pytest.mark.unit
+class TestCleanupRecoverySites:
+    def _service(self):
+        from services.cleanup_service import CleanupService
+
+        return CleanupService(poll_interval=300)
+
+    def _run_watchdog_recover(self, *, updated):
+        import services.cleanup_service as cs
+        from services.cleanup_service import CleanupReport
+
+        svc = self._service()
+        svc._broadcast_watchdog_event = AsyncMock()
+        mock_db = MagicMock()
+        mock_db.mark_execution_failed_by_watchdog.return_value = updated
+        mock_activity = MagicMock(close_execution_activity=AsyncMock(return_value=True))
+        report = CleanupReport()
+        with (
+            patch.object(cs, "db", mock_db),
+            patch.object(cs, "get_capacity_manager", return_value=MagicMock(
+                release_if_matches=AsyncMock()
+            )),
+            patch("services.activity_service.activity_service", mock_activity),
+        ):
+            recovered = _await(
+                svc._recover_execution(
+                    "exec-w", "agent-w", "orphaned", "orphan_recovered", None, report
+                )
+            )
+        return recovered, mock_activity, report
+
+    def test_watchdog_recovery_closes_on_won_cas(self):
+        from models import TaskExecutionStatus
+
+        recovered, mact, report = self._run_watchdog_recover(updated=True)
+
+        assert recovered is True
+        mact.close_execution_activity.assert_awaited_once()
+        args, _kwargs = mact.close_execution_activity.await_args
+        assert args[0] == "exec-w"
+        assert args[1] == TaskExecutionStatus.FAILED
+        assert report.activities_closed_on_recovery == 1
+
+    def test_watchdog_recovery_does_not_close_on_lost_cas(self):
+        """A real completion landed between check and update — the activity
+        belongs to that writer, not to us."""
+        recovered, mact, report = self._run_watchdog_recover(updated=False)
+
+        assert recovered is False
+        mact.close_execution_activity.assert_not_awaited()
+        assert report.activities_closed_on_recovery == 0
+
+    def _run_startup_recover(self, *, won):
+        import services.cleanup_service as cs
+
+        mock_db = MagicMock()
+        mock_db.mark_execution_failed_by_watchdog.return_value = won
+        mock_activity = MagicMock(close_execution_activity=AsyncMock(return_value=True))
+        capacity = MagicMock(release=AsyncMock())
+        stats = {"activities_closed": 0}
+        with (
+            patch.object(cs, "db", mock_db),
+            patch("services.activity_service.activity_service", mock_activity),
+        ):
+            result = _await(
+                cs._recover_execution({"id": "exec-s"}, "agent-s", capacity, stats)
+            )
+        return result, mock_activity, stats
+
+    def test_startup_recovery_closes_and_returns_the_cas_bool(self):
+        result, mact, stats = self._run_startup_recover(won=True)
+
+        assert result is True
+        mact.close_execution_activity.assert_awaited_once()
+        assert stats["activities_closed"] == 1
+
+    def test_startup_recovery_lost_cas_returns_false_and_skips_close(self):
+        """The CAS bool used to be DISCARDED here — the function returned True
+        unconditionally, so a lost recovery was counted as a recovery."""
+        result, mact, stats = self._run_startup_recover(won=False)
+
+        assert result is False
+        mact.close_execution_activity.assert_not_awaited()
+        assert stats["activities_closed"] == 0
+
+
+@pytest.mark.unit
+class TestBulkSweepClose:
+    def _service(self):
+        from services.cleanup_service import CleanupService
+
+        return CleanupService(poll_interval=300)
+
+    def test_bulk_close_runs_with_no_event_subscribers(self):
+        """[test 15] The #1714 subscriber gate scopes the EVENT, never the close.
+        Folding the close into _emit_bulk_terminal_events would skip it on every
+        install with no subscribers — which is most of them."""
+        import services.cleanup_service as cs
+
+        svc = self._service()
+        mock_db = MagicMock()
+        mock_db.has_task_terminal_subscribers.return_value = False
+        mock_db.close_open_activities_for_executions.return_value = 2
+        with patch.object(cs, "db", mock_db):
+            closed = _await(
+                svc._close_bulk_swept_activities([("e1", "a1"), ("e2", "a2")])
+            )
+        assert closed == 2
+        assert mock_db.close_open_activities_for_executions.call_args[0][0] == ["e1", "e2"]
+
+    def test_bulk_close_empty_rows_is_zero(self):
+        import services.cleanup_service as cs
+
+        svc = self._service()
+        mock_db = MagicMock()
+        with patch.object(cs, "db", mock_db):
+            assert _await(svc._close_bulk_swept_activities([])) == 0
+        mock_db.close_open_activities_for_executions.assert_not_called()
+
+    def test_bulk_close_is_fail_open(self):
+        import services.cleanup_service as cs
+
+        svc = self._service()
+        mock_db = MagicMock()
+        mock_db.close_open_activities_for_executions.side_effect = RuntimeError("boom")
+        with patch.object(cs, "db", mock_db):
+            assert _await(svc._close_bulk_swept_activities([("e1", "a1")])) == 0
+
+    def test_stale_activity_backstop_runs_after_the_slot_reaper(self):
+        """Ordering regression: the 120-minute duration fabricator must not beat
+        a legitimate closer within a single cycle."""
+        import inspect
+
+        import services.cleanup_service as cs
+
+        src = inspect.getsource(cs.CleanupService._run_cleanup_inner)
+        assert src.index("_sweep_stale_slots(") < src.index("_sweep_stale_activities(")
+
+
+@pytest.mark.unit
+class TestPullSinkAndLeaseReaper:
+    def test_pull_sink_closes_on_applied(self):
+        """[test 16] The sink is sync but runs inside an async router handler —
+        it uses the spawn wrapper, exactly as it does for the #1578 emit."""
+        import services.pull_coordination_service as pcs
+        from models import TaskExecutionStatus
+
+        execution = MagicMock()
+        execution.status = TaskExecutionStatus.RUNNING
+        execution.agent_name = "worker-a"
+        mock_db = MagicMock()
+        mock_db.get_execution.return_value = execution
+        mock_db.update_execution_status.return_value = True
+        mock_activity = MagicMock()
+
+        with (
+            patch.object(pcs, "db", mock_db),
+            patch.object(pcs, "event_dispatch_service", MagicMock()),
+            patch.object(pcs, "activity_service", mock_activity),
+        ):
+            outcome = pcs.apply_task_result(
+                "exec-pull", "tok", status="success", content="done"
+            )
+
+        assert outcome.kind == "applied"
+        mock_activity.spawn_close_execution_activity.assert_called_once()
+        args, _kwargs = mock_activity.spawn_close_execution_activity.call_args
+        assert args[0] == "exec-pull"
+        assert args[1] == TaskExecutionStatus.SUCCESS
+
+    def test_pull_sink_does_not_close_on_replay(self):
+        import services.pull_coordination_service as pcs
+        from models import TaskExecutionStatus
+
+        execution = MagicMock()
+        execution.status = TaskExecutionStatus.SUCCESS  # authoritative terminal
+        mock_db = MagicMock()
+        mock_db.get_execution.return_value = execution
+        mock_activity = MagicMock()
+
+        with (
+            patch.object(pcs, "db", mock_db),
+            patch.object(pcs, "activity_service", mock_activity),
+        ):
+            outcome = pcs.apply_task_result(
+                "exec-pull", "tok", status="success", content="done"
+            )
+
+        assert outcome.kind == "replayed"
+        mock_activity.spawn_close_execution_activity.assert_not_called()
+
+    def test_pull_sink_does_not_close_on_conflict(self):
+        import services.pull_coordination_service as pcs
+        from models import TaskExecutionStatus
+
+        execution = MagicMock()
+        execution.status = TaskExecutionStatus.RUNNING
+        execution.agent_name = "worker-a"
+        mock_db = MagicMock()
+        mock_db.get_execution.return_value = execution
+        mock_db.update_execution_status.return_value = False  # stale/wrong token
+        mock_activity = MagicMock()
+
+        with (
+            patch.object(pcs, "db", mock_db),
+            patch.object(pcs, "event_dispatch_service", MagicMock()),
+            patch.object(pcs, "activity_service", mock_activity),
+        ):
+            outcome = pcs.apply_task_result(
+                "exec-pull", "tok", status="failed", content="nope"
+            )
+
+        assert outcome.kind == "conflict"
+        mock_activity.spawn_close_execution_activity.assert_not_called()
+
+    def test_lease_reaper_reports_requeued_execution_ids(self):
+        """[test 17] The re-queue preserves execution_id, so the superseded
+        attempt's activity must be closable by the caller."""
+        from services import lease_reaper_service
+
+        mock_db = MagicMock()
+        mock_db.find_expired_leases.return_value = [
+            {"id": "exec-rq", "agent_name": "worker-a", "redelivery_count": 0}
+        ]
+        mock_db.requeue_expired_lease.return_value = True
+
+        report = lease_reaper_service.reap_expired_leases(mock_db, max_redelivery=3)
+
+        assert report.requeued == 1
+        assert report.requeued_execution_ids == ["exec-rq"]
+        assert report.parked_execution_ids == []
