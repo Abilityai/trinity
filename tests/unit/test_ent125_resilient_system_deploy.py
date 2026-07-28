@@ -27,6 +27,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import routers.systems as systems
+import services.agent_service.crud as crud
 import services.system_service as system_service
 from dependencies import get_current_user
 
@@ -89,6 +90,12 @@ def env(monkeypatch):
     monkeypatch.setattr(system_service, "create_system_view", mocks.create_system_view)
     monkeypatch.setattr(system_service, "start_all_agents", mocks.start_all_agents)
     monkeypatch.setattr(system_service, "db", mocks.db)
+    # #1841: the dry-run preflight resolves `local:` templates through the
+    # create path's own resolver. The catalog root (/agent-configs/templates)
+    # does not exist under pytest, so stub the seam to "resolves fine" here
+    # and let the preflight tests below override it. Patched on the crud
+    # MODULE because the preflight lazy-imports it at call time (cycle).
+    monkeypatch.setattr(crud, "_resolve_local_template", lambda config: ({}, None))
     # Hermetic name resolution — no shared-SQLite reads.
     monkeypatch.setattr(
         system_service,
@@ -374,3 +381,114 @@ def test_orchestrator_failure_warns_headless_fleet(env):
     assert env.m.configure_permissions.call_args.kwargs["agent_names"] == {
         "worker": "test-orch-worker"
     }
+
+
+# --- dry-run template preflight (#1841) ---------------------------------------
+
+MIXED_MANIFEST = """
+name: mixed
+agents:
+  good:
+    template: local:default
+  bad:
+    template: local:this-template-does-not-exist
+"""
+
+GITHUB_MANIFEST = """
+name: gh
+agents:
+  remote:
+    template: github:Abilityai/some-template
+"""
+
+
+def _unresolvable(*bad_ids):
+    """Resolver stub: raises the create path's real 404 for the named ids."""
+    def _resolve(config):
+        raw = config.template[len("local:"):]
+        if raw in bad_ids:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": f"Local template {raw!r} was not found.",
+                    "code": "UNKNOWN_LOCAL_TEMPLATE",
+                },
+            )
+        return ({}, None)
+    return _resolve
+
+
+def test_dry_run_flags_an_unresolvable_template(env, monkeypatch):
+    """#1841: the preview must not clear a manifest the deploy would 404 on.
+
+    Recovery from a partial deploy is manual (re-running the manifest creates
+    suffixed duplicates of whatever already succeeded), so a preview that says
+    'valid' here costs real cleanup later.
+    """
+    monkeypatch.setattr(
+        crud, "_resolve_local_template", _unresolvable("this-template-does-not-exist")
+    )
+
+    resp = _deploy(env, MIXED_MANIFEST, dry_run=True)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "invalid"
+    assert [f["short_name"] for f in data["failed"]] == ["bad"]
+    failure = data["failed"][0]
+    assert failure["name"] == "mixed-bad"
+    assert failure["status_code"] == 404
+    assert "was not found" in failure["reason"]
+    # Still a preview: the full plan is reported and nothing is created.
+    assert len(data["agents_to_create"]) == 2
+    env.m.create_agent.assert_not_awaited()
+
+
+def test_dry_run_stays_valid_when_every_template_resolves(env):
+    resp = _deploy(env, TWO_AGENT_MANIFEST, dry_run=True)
+
+    data = resp.json()
+    assert data["status"] == "valid"
+    assert data["failed"] == []
+    env.m.create_agent.assert_not_awaited()
+
+
+def test_dry_run_does_not_probe_github_templates(env, monkeypatch):
+    """Validating a `github:` id means a network call with the platform PAT on a
+    preview endpoint. Out of scope by decision — the preflight must skip it, not
+    fail it."""
+    calls = []
+    monkeypatch.setattr(
+        crud, "_resolve_local_template", lambda config: calls.append(config.template) or ({}, None)
+    )
+
+    resp = _deploy(env, GITHUB_MANIFEST, dry_run=True)
+
+    data = resp.json()
+    assert data["status"] == "valid"
+    assert data["failed"] == []
+    assert calls == [], "github: templates must not reach the local resolver"
+
+
+def test_preflight_reason_matches_what_the_real_deploy_reports(env, monkeypatch):
+    """The preview reuses the create path's resolver, so an operator comparing a
+    dry run against the deploy that follows sees the same reason and code."""
+    monkeypatch.setattr(
+        crud, "_resolve_local_template", _unresolvable("this-template-does-not-exist")
+    )
+    preview = _deploy(env, MIXED_MANIFEST, dry_run=True).json()["failed"][0]
+
+    # Same manifest, real deploy: the create seam raises the same error.
+    env.m.create_agent.side_effect = lambda **kw: (_ for _ in ()).throw(
+        HTTPException(
+            status_code=404,
+            detail={"error": "Local template 'this-template-does-not-exist' was not found.",
+                    "code": "UNKNOWN_LOCAL_TEMPLATE"},
+        )
+    ) if kw["config"].template.endswith("this-template-does-not-exist") else {"status": "created"}
+
+    real = _deploy(env, MIXED_MANIFEST).json()["failed"][0]
+
+    assert preview["reason"] == real["reason"]
+    assert preview["status_code"] == real["status_code"]
+    assert preview["template"] == real["template"]

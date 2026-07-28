@@ -46,7 +46,8 @@ export function createSystemTools(
       description:
         "Deploy a multi-agent system from a YAML manifest. " +
         "The manifest defines the system name, agents, permissions, schedules, and shared folders. " +
-        "Supports dry_run mode for validation without deployment. " +
+        "Supports dry_run mode for validation without deployment — a dry run resolves each `local:` template, "
+        + "so `status: 'invalid'` with a populated `failed[]` means the manifest would not deploy cleanly. " +
         "Agents are created with naming pattern '{system}-{agent}' (e.g., 'content-production-orchestrator'). " +
         "Supports permission presets: 'full-mesh', 'orchestrator-workers', 'none', or explicit rules. " +
         "Deploy is best-effort: check `status` ('deployed' | 'partial' | 'failed') and `failed[]` " +
@@ -93,7 +94,7 @@ export function createSystemTools(
 
         // Call backend deploy endpoint
         const response = await apiClient.request<{
-          status: string; // "deployed" | "partial" | "failed" | "valid" (dry_run)
+          status: string; // "deployed" | "partial" | "failed" | "valid" (dry_run) | "invalid" (dry_run, #1841)
           system_name: string;
           agents_created: string[];
           agents_to_create?: Array<{ name: string; short_name: string; template: string }>;

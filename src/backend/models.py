@@ -622,7 +622,8 @@ class SystemDeployFailure(BaseModel):
 class SystemDeployResponse(BaseModel):
     """Response from system deployment."""
     # "deployed" (all created) | "partial" (some failed) | "failed" (none created)
-    # | "valid" (dry_run) — trinity-enterprise#125
+    # | "valid" (dry_run, will deploy) | "invalid" (dry_run, blockers in `failed`,
+    # #1841) — trinity-enterprise#125
     status: str
     system_name: str
     agents_created: List[str]  # Final agent names created
