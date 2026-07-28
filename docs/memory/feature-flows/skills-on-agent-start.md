@@ -579,7 +579,7 @@ async def update_file(path: str, request: FileUpdateRequest):
             "success": True,
             "path": path,
             "size": stat.st_size,
-            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            "modified": _iso_z_from_mtime(stat.st_mtime)  # ISO-Z UTC, TZ-independent (#1795)
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update file: {str(e)}")
