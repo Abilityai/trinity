@@ -18,7 +18,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSo
 
 from models import User
 from database import db
-from dependencies import get_current_user, decode_token, assert_admin
+from dependencies import (
+    get_current_user,
+    decode_token,
+    assert_admin,
+    reject_agent_principal,
+)
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, docker_client
 from services.docker_utils import (
@@ -115,6 +120,14 @@ async def reinitialize_system_agent(
     Does NOT delete database records or MCP API key.
     This is a "reset to clean state" operation.
     """
+    # #1816: human-only. `assert_admin` alone is insufficient — an agent-scoped
+    # MCP key resolves to its OWNER carrying the owner's role, and the default
+    # install is admin-owned, so any non-ephemeral agent's TRINITY_MCP_API_KEY
+    # would pass (the trinity-ops-agent#232 pattern, already applied to the
+    # retention-acknowledge endpoint). Wiping the orchestrator's workspace is an
+    # operator decision. No-op for JWT / user-scoped / system-scoped principals,
+    # so the ops agent is unaffected.
+    reject_agent_principal(current_user)
     assert_admin(current_user)
 
     container = get_agent_container(SYSTEM_AGENT_NAME)
@@ -202,6 +215,12 @@ async def restart_system_agent(
     Admin-only endpoint that stops and starts the system agent.
     Does NOT clear workspace or re-initialize - just a simple restart.
     """
+    # #1816: human-only, same reasoning as /reinitialize above. Load-bearing
+    # here because this endpoint is no longer a stop+start: it now delegates to
+    # `start_agent_internal`, so a cold start REPLACES the container (base-image
+    # adoption), destroying anything outside /home/developer. A prompt-injected
+    # agent must not be able to reach that.
+    reject_agent_principal(current_user)
     assert_admin(current_user)
 
     container = get_agent_container(SYSTEM_AGENT_NAME)

@@ -32,6 +32,8 @@ from __future__ import annotations
 import ast
 import asyncio
 import re
+
+import docker
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -42,6 +44,15 @@ pytestmark = pytest.mark.unit
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SYSTEM_AGENT_SERVICE = _BACKEND / "services" / "system_agent_service.py"
+
+
+def _human_caller():
+    """A JWT/user-scoped principal. `User.agent_name` is set only for
+    scope="agent" keys, and `reject_agent_principal` keys off exactly that — so
+    a bare MagicMock (truthy `.agent_name`) would read as an agent key and 403."""
+    caller = MagicMock()
+    caller.agent_name = None
+    return caller
 
 
 def _run(coro):
@@ -775,6 +786,126 @@ def test_boolean_wrapper_is_state_is_not_drift(monkeypatch, state, expected):
 
 
 # ===========================================================================
+# T-C #12b — the 3-state itself: `unknown` must never be reported as `match`
+#
+# Everything above that asserts the alarm's core safety property ("never alarm
+# on a check that could not run") MOCKS `check_base_image_state` outright, and
+# every #1809 test asserts the BOOLEAN wrapper — where `match` and `unknown`
+# are indistinguishable by construction (both return True). So nothing else in
+# the suite pins what the real function returns.
+#
+# Without these, a refactor returning "match" on an unreadable probe keeps the
+# whole suite green while `ensure_deployed` logs "running on a current base
+# image" and `GET /api/system-agent/status` tells an admin `current` about a
+# comparison that never happened — the #1809 symptom (an unreadable check
+# indistinguishable from no-drift) rebuilt one layer up, which is the entire
+# reason the 3-state split exists.
+# ===========================================================================
+
+
+_RUNNING_ID = "sha256:" + "b" * 64
+_REBUILT_ID = "sha256:" + "a" * 64
+
+
+class _StateContainer:
+    """Minimal docker-SDK stand-in: the probe reads only ``.attrs``."""
+
+    def __init__(self, attrs):
+        self.attrs = attrs
+
+
+def _image_get(result):
+    async def _fake(_ref):
+        if isinstance(result, Exception):
+            raise result
+        return MagicMock(id=result)
+
+    return _fake
+
+
+def _patch_image_get(monkeypatch, fn, result):
+    """Patch the name in the globals of the function actually under test.
+
+    Not ``setattr(helpers, ...)``: another file re-importing the module leaves
+    ``helpers`` and ``fn.__globals__`` as different dicts, and the patch would
+    land on the one nobody calls (the module-identity gotcha). ``setitem``
+    restores itself.
+    """
+    monkeypatch.setitem(fn.__globals__, "image_get", _image_get(result))
+
+
+def test_state_match_when_the_reference_resolves_to_the_running_id(monkeypatch):
+    from services.agent_service import helpers
+
+    _patch_image_get(monkeypatch, helpers.check_base_image_state, _RUNNING_ID)
+    c = _StateContainer({"Image": _RUNNING_ID, "Config": {"Image": "b:latest"}})
+    assert _run(helpers.check_base_image_state(c, "a")) == "match"
+
+
+def test_state_drift_when_the_tag_resolves_elsewhere(monkeypatch):
+    from services.agent_service import helpers
+
+    _patch_image_get(monkeypatch, helpers.check_base_image_state, _REBUILT_ID)
+    c = _StateContainer({"Image": _RUNNING_ID, "Config": {"Image": "b:latest"}})
+    assert _run(helpers.check_base_image_state(c, "a")) == "drift"
+
+
+@pytest.mark.parametrize(
+    "attrs",
+    [
+        pytest.param({"Config": {"Image": "b:latest"}}, id="no_running_image_id"),
+        pytest.param({"Image": _RUNNING_ID, "Config": {"Image": ""}}, id="empty_ref"),
+        pytest.param({"Image": _RUNNING_ID, "Config": {}}, id="no_reference"),
+        pytest.param({"Image": _RUNNING_ID}, id="no_config_section"),
+        pytest.param({}, id="empty_attrs"),
+    ],
+)
+def test_state_unknown_when_the_container_attrs_are_unreadable(monkeypatch, attrs):
+    """Never ``match``: the comparison never happened."""
+    from services.agent_service import helpers
+
+    _patch_image_get(monkeypatch, helpers.check_base_image_state, _RUNNING_ID)
+    assert _run(helpers.check_base_image_state(_StateContainer(attrs), "a")) == "unknown"
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(docker.errors.ImageNotFound("gone"), id="image_not_found"),
+        pytest.param(docker.errors.APIError("boom"), id="docker_api_error"),
+        pytest.param(RuntimeError("boom"), id="unexpected_error"),
+    ],
+)
+def test_state_unknown_when_the_reference_cannot_be_resolved(monkeypatch, exc):
+    """Never ``match``: an unresolvable reference is an unrun check, not a clean
+    bill of health."""
+    from services.agent_service import helpers
+
+    _patch_image_get(monkeypatch, helpers.check_base_image_state, exc)
+    c = _StateContainer({"Image": _RUNNING_ID, "Config": {"Image": "b:latest"}})
+    assert _run(helpers.check_base_image_state(c, "a")) == "unknown"
+
+
+def test_unknown_never_reaches_the_operator_as_current(sas, monkeypatch):
+    """End-to-end with the predicate UNMOCKED — the property the mocked running
+    -branch tests above assume but cannot prove. A container whose image
+    reference no longer resolves must surface `unknown`, never `current`, and
+    must raise no alarm."""
+    _patch_image_get(
+        monkeypatch,
+        sas.check_base_image_state,
+        docker.errors.ImageNotFound("gone"),
+    )
+    monkeypatch.setattr(sas, "start_agent_internal", AsyncMock())
+
+    result = _run(sas.SystemAgentService().ensure_deployed())
+
+    assert result["base_image_state"] == "unknown"
+    assert result["action"] == "none"
+    sas.db.create_operator_queue_item.assert_not_called()
+
+
+# ===========================================================================
 # T-C #8/#9 — the admin router
 # ===========================================================================
 
@@ -785,6 +916,8 @@ def rsa(monkeypatch):
     import routers.system_agent as mod
 
     monkeypatch.setattr(mod, "assert_admin", lambda user: None)
+    # `reject_agent_principal` is deliberately NOT stubbed — the #1816 human-only
+    # gate should be exercised for real. Callers pass `_human_caller()`.
     monkeypatch.setattr(mod, "container_reload", AsyncMock())
     monkeypatch.setattr(mod, "container_stop", AsyncMock())
     monkeypatch.setattr(mod, "container_start", AsyncMock())
@@ -810,7 +943,7 @@ def test_restart_delegates_and_reads_a_FRESH_container_for_the_response(
 
     # The endpoint resolves its own container first; feed it the old handle.
     handles.pop()
-    result = _run(rsa.restart_system_agent(MagicMock(), MagicMock()))
+    result = _run(rsa.restart_system_agent(MagicMock(), _human_caller()))
     handles.append(replacement)
 
     rsa.start_agent_internal.assert_awaited_once_with("trinity-system")
@@ -837,7 +970,7 @@ def test_restart_reports_unknown_rather_than_crashing_if_the_container_vanished(
         rsa, "start_agent_internal", AsyncMock(return_value={"recreated": True})
     )
 
-    result = _run(rsa.restart_system_agent(MagicMock(), MagicMock()))
+    result = _run(rsa.restart_system_agent(MagicMock(), _human_caller()))
 
     assert result["status"] == "unknown"
 
@@ -968,3 +1101,117 @@ def test_the_router_surfaces_recreate_deferred():
     dies at the router."""
     src = (_BACKEND / "routers" / "agents.py").read_text()
     assert '"recreate_deferred": result.get("recreate_deferred")' in src
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups: the orchestrator must not be rebuilt by the generic
+# recovery path, and the start-failure alarm must not carry raw secrets.
+# ---------------------------------------------------------------------------
+
+
+def test_recovery_rebuild_refuses_the_system_agent(lifecycle):
+    """`recreate_missing_container` reconstructs a REGULAR agent: it deactivates
+    the existing **system-scoped** MCP key and mints an *agent-scoped* one in its
+    place (plaintext unrecoverable ⇒ irreversible), drops `trinity.is-system`,
+    the `/template` bind and `unless-stopped`, and arms the scope-403
+    `TRINITY_BACKEND_URL` heartbeat.
+
+    #1816 newly exposed it: both `ensure_deployed`'s stopped branch and
+    `POST /api/system-agent/restart` now delegate to `start_agent_internal`,
+    whose container lookup can come back None while a concurrent `--workers N`
+    boot is mid-recreate. Fail closed — `ensure_deployed`'s create branch is the
+    correct rebuild path.
+    """
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        _run(lifecycle.recreate_missing_container("trinity-system"))
+    assert exc.value.status_code == 409
+    assert "ensure_deployed" in exc.value.detail
+
+
+def test_start_of_a_container_less_system_agent_never_downgrades_it(lifecycle, monkeypatch):
+    """End-to-end shape of the guard: the refusal propagates out of
+    `start_agent_internal` instead of silently provisioning a degraded
+    orchestrator."""
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(lifecycle, "get_agent_container", lambda name: None)
+    monkeypatch.setattr(lifecycle.db, "get_agent_owner", lambda name: {"owner_username": "admin"})
+
+    with pytest.raises(HTTPException) as exc:
+        _run(lifecycle.start_agent_internal("trinity-system"))
+    assert exc.value.status_code == 409
+
+
+def test_start_failure_alarm_sanitizes_the_interpolated_reason(sas, monkeypatch):
+    """`reason` is an arbitrary exception string and lands in
+    `operator_queue.question` — durable, operator-visible state. Canary G-04's
+    rule: the emit chokepoint sanitizes."""
+    created = []
+    monkeypatch.setattr(sas.db, "create_operator_queue_item", lambda agent, item: created.append(item))
+
+    sas.SystemAgentService()._emit_start_failed_alert(
+        "docker refused: token=sk-ant-api03-DEADBEEFDEADBEEFDEADBEEFDEADBEEF"
+    )
+
+    assert len(created) == 1
+    blob = created[0]["question"] + str(created[0]["context"])
+    assert "sk-ant-api03-DEADBEEFDEADBEEFDEADBEEFDEADBEEF" not in blob
+    assert "docker refused" in created[0]["question"], "sanitizing must not eat the diagnosis"
+
+
+def test_the_alarm_cooldown_uses_a_monotonic_clock(sas):
+    """A wall-clock cursor (`datetime.utcnow()`) lets an NTP step skip or extend
+    the cooldown, and `utcnow()` is deprecated. `time.monotonic()` is the right
+    primitive for an elapsed-time gate."""
+    src = _SYSTEM_AGENT_SERVICE.read_text()
+    assert "time.monotonic()" in src
+    assert "datetime.utcnow(" not in src
+    assert "from datetime import" not in src
+
+
+def test_the_destructive_system_agent_endpoints_are_human_only():
+    """`assert_admin` rejects CONNECTOR principals, not AGENT ones, and
+    `get_current_user` hands an agent-scoped MCP key its owner's role — so on a
+    default admin-owned install any non-ephemeral agent's TRINITY_MCP_API_KEY
+    passes it. #1816 turns `/restart` into a container REPLACEMENT, so the gate
+    has to be human-only (trinity-ops-agent#232 precedent)."""
+    src = (_BACKEND / "routers" / "system_agent.py").read_text()
+    tree = ast.parse(src)
+    guarded = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+        and "reject_agent_principal" in ast.dump(node)
+    }
+    assert {"restart_system_agent", "reinitialize_system_agent"} <= guarded
+
+
+def test_start_failure_alarm_is_deduped_across_processes(sas, monkeypatch):
+    """A per-process cursor cannot bound this alarm: a crash-looping backend
+    re-emits from a FRESH process every time. The bucketed id collapses the
+    burst in the DB via create_item's (agent_name, request_id) conflict target.
+    """
+    created = []
+    monkeypatch.setattr(sas.db, "create_operator_queue_item", lambda agent, item: created.append(item))
+
+    # Two emissions from two distinct service instances — the cross-process case.
+    sas.SystemAgentService()._emit_start_failed_alert("network missing")
+    sas.SystemAgentService()._emit_start_failed_alert("network missing")
+
+    assert len(created) == 2, "both still attempt the write — the DB dedupes"
+    assert created[0]["id"] == created[1]["id"], (
+        "same bucket must yield the same request_id so on_conflict_do_nothing collapses them"
+    )
+    assert not created[0]["id"].endswith("Z"), "a raw timestamp would defeat the dedup"
+
+
+def test_start_failure_alarm_bucket_re_arms():
+    """Deliberately a bucket, not a fixed id: a fixed id wedges shut forever once
+    Clear All flips the row to `cancelled` (the conflict target ignores status,
+    #1644)."""
+    import services.system_agent_service as mod
+
+    assert mod.START_FAILED_ALERT_BUCKET_SECONDS > 0
+    assert mod.START_FAILED_ALERT_BUCKET_SECONDS <= 6 * 60 * 60

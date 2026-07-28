@@ -165,6 +165,24 @@ regular-agent semantics.
   but that env var is the agent-side heartbeat loop's gate and `heartbeat_service.authorize_heartbeat`
   accepts only `scope == "agent"` keys — the system agent's key is `scope == "system"`, so arming it would
   yield a permanent 5-second 403 loop. Test-pinned.
+- **The generic recovery rebuild refuses `trinity-system`** (409). `start_agent_internal` falls through to
+  `recreate_missing_container` when the container lookup returns `None`, and #1816 newly reaches that
+  from the boot path and from `/restart` — `ensure_deployed` runs in **every** uvicorn worker with no
+  leader lock, so a concurrent recreate can null the lookup mid-flight. That path reconstructs a *regular*
+  agent: it deactivates the existing **system-scoped** MCP key and mints an *agent-scoped* one (plaintext
+  unrecoverable ⇒ the orchestrator irreversibly loses its permission bypass), omits `trinity.is-system`
+  and the read-only `/template` bind, drops `unless-stopped`, arms `TRINITY_BACKEND_URL`, and follows the
+  fleet capabilities setting. Failing closed is self-healing — `ensure_deployed`'s create branch rebuilds
+  it correctly on the next boot. The per-agent start lock (#1817) is the fix for the race itself.
+- **The boot path blocks the lifespan.** The STOPPED branch runs recreate + `wait_for_agent_ready` (60s)
+  + credential retries (3 × 2s) + skill injection + read-only sync, so the backend serves nothing for
+  ~20–90s. Absorbed by the prod healthcheck (`start_period` 60s + 5 × 30s) and rare in practice, since
+  `unless-stopped` means the container is normally *running* and takes the read-only branch.
+- **`/restart` and `/reinitialize` are human-only.** `assert_admin` rejects *connector* principals but not
+  *agent* ones, and `get_current_user` hands an agent-scoped MCP key its owner's role — so on a default
+  admin-owned install any non-ephemeral agent's `TRINITY_MCP_API_KEY` passed it. Harmless when `/restart`
+  was a stop+start; not once it replaces the container. Both now call `reject_agent_principal` first
+  (trinity-ops-agent#232 precedent). No-op for JWT / user-scoped / system-scoped callers.
 
 ## Key Files
 
@@ -254,8 +272,8 @@ The dedicated `SystemAgent.vue` has been removed. The system agent now uses the 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/system-agent/status` | GET | Get system agent status. **#1816:** adds `base_image_state` ∈ `stale \| current \| unknown` when the container is running — an **enum only**, never image ids or digests (mirrors the `/health clone_status` contract, #1439); admin-gated |
-| `/api/system-agent/restart` | POST | Restart system agent (admin). **#1816:** stop, then `start_agent_internal` — adopts a rebuilt base image; the response reads a freshly fetched container |
-| `/api/system-agent/reinitialize` | POST | Reset to clean state (admin). Deliberately **not** an adoption path (#1816) |
+| `/api/system-agent/restart` | POST | Restart system agent (admin **+ human-only**, `reject_agent_principal`). **#1816:** stop, then `start_agent_internal` — adopts a rebuilt base image; the response reads a freshly fetched container |
+| `/api/system-agent/reinitialize` | POST | Reset to clean state (admin **+ human-only**). Deliberately **not** an adoption path (#1816) |
 
 ### Fleet Operations
 

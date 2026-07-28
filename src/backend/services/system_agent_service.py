@@ -8,9 +8,9 @@ The system agent is a privileged platform orchestrator that:
 - Can communicate with any agent regardless of permissions
 """
 import os
+import time
 import logging
 from pathlib import Path
-from datetime import datetime
 from typing import Optional
 
 import docker
@@ -40,6 +40,7 @@ from services.agent_service.lifecycle import (
     start_agent_internal,
 )
 from services.agent_service.capabilities import normalize_cpu, normalize_memory
+from utils.credential_sanitizer import sanitize_text
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -82,15 +83,41 @@ BASE_IMAGE_STALE_ALERT_PREFIX = "base-image-stale-"
 # retention and Clear All bound the rest.
 BASE_IMAGE_ALERT_COOLDOWN_SECONDS = 6 * 60 * 60
 
+# #1816: dedup window for the start-FAILURE alarm. A per-process cursor (what
+# the staleness alarm uses) would do nothing here: the failure this alarm
+# reports is one a crash-looping backend re-hits on a FRESH process every time,
+# so the cursor resets before it can suppress anything — and the standing case
+# (a missing `trinity-agent-network`, which the pre-flight detects) repeats on
+# every boot of every worker, while retention never deletes a `pending` row.
+#
+# Bounded in the DB instead, by bucketing the item id: `create_item`'s
+# `on_conflict_do_nothing(agent_name, request_id)` collapses every emission
+# inside a bucket to one row, across workers AND across restarts.
+#
+# Deliberately a BUCKET, not a fixed id. A fixed id would wedge the alarm shut
+# forever the first time the row reached a terminal state — Clear All sets
+# `cancelled`, and the conflict target does not care about status (#1644's
+# lesson: a load-bearing queue item is the wrong place to keep state). The
+# bucket re-arms on its own.
+#
+# Safe to make guessable ONLY because BASE_IMAGE_STALE_ALERT_PREFIX is
+# registered in operator_queue_service._RESERVED_ID_PREFIXES (#1632): an agent
+# that tried to pre-create the row — and so silence the alarm raised about it —
+# is rejected at the ingestion boundary. The reserved prefix is the defense; the
+# timestamp in the staleness alarm's id is not.
+START_FAILED_ALERT_BUCKET_SECONDS = 30 * 60
+
 
 class SystemAgentService:
     """Service for managing the Trinity system agent."""
 
-    # #1816: last staleness-alarm emission (monotonic-ish wall clock), for the
-    # cooldown. Per-process and deliberately NOT persisted: the alarm is
-    # advisory, an extra item after a redeploy is harmless, and a persisted
-    # cursor would be one more thing that can wedge the alarm shut forever.
-    _last_base_image_alert_at: Optional[datetime] = None
+    # #1816: last staleness-alarm emission, as a `time.monotonic()` reading.
+    # Monotonic, not wall clock: an NTP step or a DST-naive `utcnow()` jump
+    # could otherwise skip or extend the cooldown. Per-process and deliberately
+    # NOT persisted: the alarm is advisory, an extra item after a redeploy is
+    # harmless, and a persisted cursor would be one more thing that can wedge
+    # the alarm shut forever.
+    _last_base_image_alert_at: Optional[float] = None
 
     def is_deployed(self) -> bool:
         """Check if the system agent container exists."""
@@ -201,10 +228,22 @@ class SystemAgentService:
             # alternative — a second, permanently divergent lifecycle for one
             # agent — is the bug class that produced this issue.
             #
-            # Cost, accepted: credential/skill/read-only injection now runs on
-            # the boot path. Bounded by AGENT_READINESS_TIMEOUT_S, on the
-            # STOPPED branch only, and inside main.py's existing broad lifespan
-            # try/except.
+            # Cost, accepted: this blocks main.py's lifespan, so the backend
+            # serves nothing (not even /health) until it returns. The bound is
+            # NOT one timeout — it is the recreate, plus wait_for_agent_ready
+            # (AGENT_READINESS_TIMEOUT_S, 60s), plus the credential retries
+            # (3 x 2s), plus skill injection and the read-only sync: ~20-90s in
+            # practice. Tolerable because the prod healthcheck absorbs it
+            # (start_period 60s + 5 x 30s) and this branch is RARE — the
+            # container carries `unless-stopped`, so it is normally running and
+            # takes the read-only branch above. Wrapped by main.py's broad
+            # lifespan try/except either way.
+            #
+            # NB `ensure_deployed` runs in EVERY uvicorn worker with no leader
+            # lock, so #1816 makes a concurrent recreate a routine boot event
+            # where it previously could not happen at all. #1809's 409/NotFound
+            # hardening plus recreate_missing_container's system-agent refusal
+            # keep that safe; the per-agent start lock (#1817) is the real fix.
             if not await self._preflight_ok_for_delegated_start(container):
                 # R1: a recreate REMOVES the old container before running the
                 # replacement, so a run that cannot succeed leaves the platform
@@ -566,9 +605,9 @@ class SystemAgentService:
         or digests (canary G-04's lesson: this row is durable and
         operator-visible).
         """
-        now = datetime.utcnow()
+        now = time.monotonic()
         last = SystemAgentService._last_base_image_alert_at
-        if last is not None and (now - last).total_seconds() < BASE_IMAGE_ALERT_COOLDOWN_SECONDS:
+        if last is not None and (now - last) < BASE_IMAGE_ALERT_COOLDOWN_SECONDS:
             logger.debug("base-image staleness alarm suppressed by cooldown")
             return
         SystemAgentService._last_base_image_alert_at = now
@@ -601,11 +640,23 @@ class SystemAgentService:
     def _emit_start_failed_alert(self, reason: str) -> None:
         """#1816 R1: the platform may now have NO system agent, and nobody is
         watching a boot log. Same reserved prefix and emit-failure-safety as the
-        staleness alarm; no cooldown, because this is a hard failure rather than
-        a standing condition."""
+        staleness alarm.
+
+        Bounded by a **bucketed id** rather than the staleness alarm's
+        per-process cooldown — see START_FAILED_ALERT_BUCKET_SECONDS for why a
+        cursor cannot bound a failure whose whole symptom is a fresh process.
+
+        `reason` is an arbitrary exception string from the delegated start, so it
+        is credential-sanitized before interpolation: `operator_queue.question`
+        is durable, operator-visible state, and the emit chokepoint is the only
+        place that can guarantee nothing leaks into it (canary G-04's lesson,
+        and the same treatment `emit_task_terminal_event` gives
+        `summary_or_error`)."""
         ts = utc_now_iso()
+        reason = sanitize_text(reason)
+        bucket = int(time.time()) // START_FAILED_ALERT_BUCKET_SECONDS
         item = {
-            "id": f"{BASE_IMAGE_STALE_ALERT_PREFIX}start-{SYSTEM_AGENT_NAME}-{ts}",
+            "id": f"{BASE_IMAGE_STALE_ALERT_PREFIX}start-{SYSTEM_AGENT_NAME}-{bucket}",
             "agent_name": SYSTEM_AGENT_NAME,
             "type": "alert",
             "status": "pending",

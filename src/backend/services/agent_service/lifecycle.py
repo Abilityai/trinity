@@ -1021,7 +1021,33 @@ async def recreate_missing_container(agent_name: str):
 
     Caller must confirm a live `agent_ownership` row exists first — this does
     NOT create ownership/child rows, only the container.
+
+    Refuses `trinity-system` (#1816): this path reconstructs a REGULAR agent and
+    cannot reproduce the orchestrator's contract — it mints a fresh
+    *agent-scoped* MCP key after deactivating the existing **system-scoped** one
+    (whose plaintext is unrecoverable, so the downgrade is irreversible), omits
+    the `trinity.is-system` label and the read-only `/template` bind, drops
+    `restart_policy: unless-stopped`, arms `TRINITY_BACKEND_URL` (the scope-403
+    heartbeat loop #1816 exists to avoid), and follows the fleet capabilities
+    setting instead of the contractual one. #1816 made this reachable from the
+    boot path and from `POST /api/system-agent/restart` (both now delegate to
+    `start_agent_internal`), where a concurrent `--workers N` recreate can null
+    the container lookup mid-flight. Failing closed is safe and self-healing:
+    when the system agent genuinely has no container,
+    `SystemAgentService.ensure_deployed`'s create branch rebuilds it correctly
+    on the next boot.
     """
+    if is_system_agent_name(agent_name):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The system agent has no container. It is rebuilt by "
+                "SystemAgentService.ensure_deployed on backend boot, not by the "
+                "generic recovery path, which cannot reproduce its system-scoped "
+                "MCP key, labels and mounts."
+            ),
+        )
+
     image = "trinity-agent-base:latest"
     validate_base_image(image)
 
