@@ -781,6 +781,51 @@ def _default_create_agent_fn():
     return create_agent_internal
 
 
+def _preflight_template(
+    final_name: str, short_name: str, template: Optional[str]
+) -> Optional[SystemDeployFailure]:
+    """Can this agent's template resolve? Returns a failure, or None if it can.
+
+    Reuses the CREATE path's own resolver rather than re-deriving "does this
+    template exist", so the preview cannot drift from the deploy: the reason
+    string and status code a caller sees here are produced by the same code that
+    will produce them for real (#1841).
+
+    Scope, deliberately:
+      * ``local:`` — resolved (a filesystem read, no side effects). This is
+        where the cheap typo lives, and where #1793/#1759 made an unresolvable
+        id a hard 404 instead of a silent blank agent.
+      * ``github:`` — NOT probed. Validating it means a network call to GitHub
+        with the platform PAT on a preview endpoint; slow, rate-limited, and a
+        new outbound call on a path that had none. A dry run therefore still
+        cannot promise a github-template manifest deploys.
+      * no template — valid by construction (creates a bare agent by design).
+    """
+    if not template or not template.startswith("local:"):
+        return None
+
+    # Lazy import: crud imports service-layer modules, so a module-level import
+    # here would close a cycle (same reason `_default_create_agent_fn` is lazy).
+    from models import AgentConfig
+    from services.agent_service.crud import _resolve_local_template
+
+    try:
+        # A throwaway config: `_resolve_local_template` mutates the object it is
+        # given (type/resources/tools/runtime from template.yaml), which is why
+        # the manifest's own config is never handed to it.
+        _resolve_local_template(AgentConfig(name=final_name, template=template))
+    except Exception as e:  # noqa: BLE001 — mirrors the create loop's catch
+        reason, status_code = _failure_reason(e)
+        return SystemDeployFailure(
+            name=final_name,
+            short_name=short_name,
+            template=template,
+            reason=reason,
+            status_code=status_code,
+        )
+    return None
+
+
 def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
     """Normalize an agent-create exception into a (reason, status_code) pair.
 
@@ -863,13 +908,34 @@ async def deploy_manifest(
                 for short_name, final_name in agent_names.items()
             ]
 
+            # #1841: a preview that only checks manifest SHAPE clears manifests
+            # the real deploy then 404s on — a typo'd or renamed template id is
+            # the cheapest mistake to make and precisely what a preview is for.
+            # It matters more than it sounds: a partial deploy is expensive to
+            # undo, because re-running the same manifest creates suffixed
+            # duplicates of whatever already succeeded, so recovery is manual
+            # and per-agent.
+            preview_failed = [
+                failure for failure in (
+                    _preflight_template(
+                        final_name, short_name, manifest.agents[short_name].template
+                    )
+                    for short_name, final_name in agent_names.items()
+                ) if failure is not None
+            ]
+
             return SystemDeployResponse(
-                status="valid",
+                # "valid" keeps its meaning — a manifest that will deploy. A
+                # preview that found blockers reports `invalid`, matching the
+                # deploy path's own vocabulary (`partial` / `failed`) instead of
+                # claiming success next to a populated failure list.
+                status="invalid" if preview_failed else "valid",
                 system_name=manifest.name,
                 agents_created=[],
                 agents_to_create=agents_to_create,
                 prompt_updated=bool(manifest.prompt),
-                warnings=all_warnings
+                warnings=all_warnings,
+                failed=preview_failed,
             )
 
         # 5. Create all agents — best-effort by default (trinity-enterprise#125):
