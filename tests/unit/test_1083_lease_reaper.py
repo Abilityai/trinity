@@ -149,38 +149,51 @@ class TestCloseStaleSlotActivity:
         return CleanupService(poll_interval=300)
 
     def test_closes_open_activity_as_failed(self):
-        from models import ActivityState
+        """#1804: delegates to the shared owner, which does the filtered lookup
+        and the lattice close CAS. The FAILED terminal + lease_expired tag are
+        byte-identical to the pre-#1804 close."""
+        from models import TaskExecutionStatus
 
         svc = self._service()
         mock_db = MagicMock()
-        mock_db.get_open_activity_id_for_execution.return_value = "act-9"
-        mock_activity = MagicMock(complete_activity=AsyncMock())
+        mock_activity = MagicMock(close_execution_activity=AsyncMock(return_value=True))
         with (
             patch("services.cleanup_service.db", mock_db),
             patch("services.activity_service.activity_service", mock_activity),
         ):
             _await(svc._close_stale_slot_activity("exec-1"))
-        mock_activity.complete_activity.assert_awaited_once()
-        kw = mock_activity.complete_activity.await_args.kwargs
-        assert kw["status"] == ActivityState.FAILED
-        assert "lease_expired" in kw["error"]
+        mock_activity.close_execution_activity.assert_awaited_once()
+        args, kwargs = mock_activity.close_execution_activity.await_args
+        assert args[0] == "exec-1"
+        assert args[1] == TaskExecutionStatus.FAILED
+        assert "lease_expired" in kwargs["error"]
 
-    def test_noop_when_no_open_activity(self):
+    def test_requeued_activity_closes_cancelled_not_failed(self):
+        """#1804: a lease re-delivery SUPERSEDES the dead worker's attempt — the
+        superseded activity closes CANCELLED so activity-derived views don't
+        record a failure that never happened (#1332)."""
+        from models import TaskExecutionStatus
+
         svc = self._service()
         mock_db = MagicMock()
-        mock_db.get_open_activity_id_for_execution.return_value = None
-        mock_activity = MagicMock(complete_activity=AsyncMock())
+        mock_activity = MagicMock(close_execution_activity=AsyncMock(return_value=True))
         with (
             patch("services.cleanup_service.db", mock_db),
             patch("services.activity_service.activity_service", mock_activity),
         ):
-            _await(svc._close_stale_slot_activity("exec-1"))
-        mock_activity.complete_activity.assert_not_awaited()
+            _await(svc._close_requeued_activity("exec-1"))
+        args, kwargs = mock_activity.close_execution_activity.await_args
+        assert args[1] == TaskExecutionStatus.CANCELLED
+        assert "superseded" in kwargs["error"]
 
     def test_swallows_errors(self):
+        """The real (unmocked) helper is fail-open — a raising db never escapes."""
         svc = self._service()
         mock_db = MagicMock()
         mock_db.get_open_activity_id_for_execution.side_effect = RuntimeError("boom")
-        with patch("services.cleanup_service.db", mock_db):
+        with (
+            patch("services.cleanup_service.db", mock_db),
+            patch("services.activity_service.db", mock_db),
+        ):
             # Must not raise.
             _await(svc._close_stale_slot_activity("exec-1"))

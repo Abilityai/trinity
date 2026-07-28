@@ -220,6 +220,7 @@ class ScheduleCleanupMixin:
                 return 0
 
             completed_at = parse_iso_timestamp(now)
+            failed = 0
             for row in no_session_rows:
                 started_at = parse_iso_timestamp(row["started_at"])
                 duration_ms = int((completed_at - started_at).total_seconds() * 1000)
@@ -240,11 +241,19 @@ class ScheduleCleanupMixin:
                         error=error_msg,
                     )
                 )
-                # #1714: collect only CAS-won rows for the completion-event emit.
-                if result.rowcount and collect_failed is not None:
-                    collect_failed.append((row["id"], row["agent_name"]))
+                if result.rowcount:
+                    failed += 1
+                    # #1714: collect only CAS-won rows for the completion-event emit.
+                    if collect_failed is not None:
+                        collect_failed.append((row["id"], row["agent_name"]))
 
-            return len(no_session_rows)
+            # #1804: return the CAS-WON count, not the candidate count. This
+            # returned `len(no_session_rows)` — every row the SELECT saw,
+            # including ones whose guarded UPDATE lost to a real completion — so
+            # `report.no_session_executions` over-reported. Its sibling
+            # `mark_stale_executions_failed` already returns `failed`; this is
+            # now consistent with it (a visible, deliberate value change).
+            return failed
 
     def fail_stale_slot_execution(self, execution_id: str, error: str) -> bool:
         """Mark a single execution as failed if it is still running.

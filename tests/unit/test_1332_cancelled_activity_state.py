@@ -130,8 +130,15 @@ def _run_terminate(*, agent_status="terminated", open_activity_id="act-1",
     response.json.return_value = {"status": agent_status, "returncode": -15}
     client = MagicMock(post=AsyncMock(return_value=response))
 
-    complete = AsyncMock(side_effect=RuntimeError("boom")) if complete_raises else AsyncMock()
-    mock_activity = MagicMock(track_activity=AsyncMock(), complete_activity=complete)
+    # #1804: the terminate path folded onto the shared owner
+    # (activity_service.close_execution_activity), which does the lookup + the
+    # lattice close CAS itself. The behaviour asserted below is unchanged.
+    close = AsyncMock(side_effect=RuntimeError("boom")) if complete_raises else AsyncMock()
+    mock_activity = MagicMock(
+        track_activity=AsyncMock(),
+        complete_activity=AsyncMock(),
+        close_execution_activity=close,
+    )
 
     mock_capacity = MagicMock()
     mock_capacity.force_release = AsyncMock(return_value=MagicMock(was_running=True, slots_cleared=1))
@@ -160,67 +167,66 @@ class TestTerminateHandlerPathB:
     pytestmark = pytest.mark.unit
 
     def test_terminated_closes_dispatch_activity_cancelled(self):
-        from models import ActivityState
+        """[R4] Unchanged behaviour through the #1804 shared owner: a won CANCELLED
+        row-write closes the dispatch activity as CANCELLED. The lookup moved into
+        the helper, which maps the terminal via activity_state_for_terminal."""
+        from models import TaskExecutionStatus
 
         result, mdb, mact = _run_terminate(agent_status="terminated")
 
-        # The CANCELLED row write happened, then the open dispatch activity is
-        # looked up and closed as CANCELLED.
-        mdb.get_open_activity_id_for_execution.assert_called_once_with("texec-1332")
-        mact.complete_activity.assert_awaited_once()
-        assert mact.complete_activity.await_args.kwargs["activity_id"] == "act-1"
-        assert mact.complete_activity.await_args.kwargs["status"] == ActivityState.CANCELLED
+        mact.close_execution_activity.assert_awaited_once()
+        args, kwargs = mact.close_execution_activity.await_args
+        assert args[0] == "texec-1332"
+        assert args[1] == TaskExecutionStatus.CANCELLED
+        assert kwargs["error"] == "Execution terminated by user"
         assert result["status"] == "terminated"
 
     def test_already_finished_does_not_close_as_cancelled(self):
-        """On already_finished the agent's real terminal stands — no cancel close."""
+        """[R4] On already_finished the agent's real terminal stands — no cancel close."""
         result, mdb, mact = _run_terminate(agent_status="already_finished")
 
         mdb.update_execution_status.assert_not_called()
-        mdb.get_open_activity_id_for_execution.assert_not_called()
-        mact.complete_activity.assert_not_awaited()
+        mact.close_execution_activity.assert_not_awaited()
         assert result["status"] == "already_finished"
 
-    def test_no_open_activity_is_noop(self):
-        """Activity already closed → lookup returns None → no complete_activity call, no throw."""
-        result, mdb, mact = _run_terminate(open_activity_id=None)
-
-        mdb.get_open_activity_id_for_execution.assert_called_once_with("texec-1332")
-        mact.complete_activity.assert_not_awaited()
-        assert result["status"] == "terminated"
-
     def test_close_failure_does_not_fail_terminate(self):
-        """complete_activity raising is swallowed — the terminate request still succeeds."""
+        """[R4] A raising close is swallowed — the terminate request still succeeds.
+
+        (The "no open activity" no-op moved with the lookup into the helper —
+        covered by test_1804_recovery_closes_activity.py::
+        test_service_no_open_activity_is_a_noop.)"""
         result, _mdb, mact = _run_terminate(complete_raises=True)
 
-        mact.complete_activity.assert_awaited_once()
+        mact.close_execution_activity.assert_awaited_once()
         assert result["status"] == "terminated"
 
     def test_cas_lost_to_success_closes_activity_completed_not_cancelled(self):
-        """#1332 CAS-gating: if the CANCELLED row-write loses the CAS to a row that
-        already went terminal as SUCCESS, the activity is closed in the row's REAL
-        state (COMPLETED), never CANCELLED — the activity must not disagree with the
-        row. error is dropped for a COMPLETED close."""
-        from models import ActivityState, TaskExecutionStatus
+        """[R4] #1332 CAS-gating: if the CANCELLED row-write loses the CAS to a row
+        that already went terminal as SUCCESS, the activity is closed in the row's
+        REAL state (COMPLETED), never CANCELLED — the activity must not disagree
+        with the row. error is dropped for a COMPLETED close."""
+        from models import TaskExecutionStatus
 
         result, mdb, mact = _run_terminate(
             cancel_won=False, reconciled_status=TaskExecutionStatus.SUCCESS,
         )
 
-        mact.complete_activity.assert_awaited_once()
-        assert mact.complete_activity.await_args.kwargs["status"] == ActivityState.COMPLETED
-        assert mact.complete_activity.await_args.kwargs["error"] is None
+        mact.close_execution_activity.assert_awaited_once()
+        args, kwargs = mact.close_execution_activity.await_args
+        assert args[1] == TaskExecutionStatus.SUCCESS  # → COMPLETED via the mapping
+        assert kwargs["error"] is None
         assert result["status"] == "terminated"
 
     def test_cas_lost_to_failed_closes_activity_failed(self):
-        """#1332 CAS-gating: a lost CAS to a FAILED row closes the activity FAILED."""
-        from models import ActivityState, TaskExecutionStatus
+        """[R4] #1332 CAS-gating: a lost CAS to a FAILED row closes it FAILED."""
+        from models import TaskExecutionStatus
 
         result, mdb, mact = _run_terminate(
             cancel_won=False, reconciled_status=TaskExecutionStatus.FAILED,
         )
 
-        assert mact.complete_activity.await_args.kwargs["status"] == ActivityState.FAILED
+        args, _kwargs = mact.close_execution_activity.await_args
+        assert args[1] == TaskExecutionStatus.FAILED
         assert result["status"] == "terminated"
 
 

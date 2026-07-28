@@ -65,6 +65,14 @@ class LeaseReapReport:
     # execution_ids that were poison-parked this pass — the caller closes their
     # open dispatch activities (best-effort, async).
     parked_execution_ids: List[str] = field(default_factory=list)
+    # #1804: execution_ids re-queued this pass. The re-queue is a CAS-won status
+    # write (running → queued) that supersedes the dead worker's attempt, so its
+    # dispatch activity must be closed too — otherwise the *previous* attempt's
+    # row stays `started` while the re-delivery opens a second one, and the
+    # Timeline shows the agent working twice. The caller closes them CANCELLED,
+    # not FAILED: a superseded attempt is not a failure, and #1332 exists so
+    # activity-derived views don't collapse the two.
+    requeued_execution_ids: List[str] = field(default_factory=list)
 
 
 def get_max_redelivery(agent_name: str) -> int:
@@ -148,6 +156,7 @@ def reap_expired_leases(
             # Under the cap → re-queue the SAME row (execution_id preserved).
             if db.requeue_expired_lease(eid, now_iso=now):
                 report.requeued += 1
+                report.requeued_execution_ids.append(eid)
                 logger.info(
                     "[#1081 reaper] re-queued execution %s (agent=%s), "
                     "redelivery_count %d→%d (cap=%d)",
