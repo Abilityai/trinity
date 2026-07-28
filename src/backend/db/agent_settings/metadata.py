@@ -13,23 +13,8 @@ from ..engine import get_engine
 from ..tables import (
     agent_ownership,
     agent_sharing,
-    agent_schedules,
-    schedule_executions,
-    chat_sessions,
-    chat_messages,
-    agent_activities,
     agent_permissions,
-    agent_shared_folder_config,
     agent_git_config,
-    agent_skills,
-    agent_tags,
-    agent_public_links,
-    mcp_api_keys,
-    agent_health_checks,
-    agent_dashboard_values,
-    monitoring_alert_cooldowns,
-    agent_shared_files,
-    agent_reports,
 )
 
 
