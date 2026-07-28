@@ -57,8 +57,8 @@ def _close_predicate(status):
                            v                                          v
               failed / cancelled / skipped                   failed / cancelled
                            |                                          |
-       SUCCESS write       | != CANCELLED        COMPLETED close      | != 'cancelled'
-                           v                                          v
+       SUCCESS write       | != CANCELLED        COMPLETED close      | in (started,
+                           v                                          v      failed)
                         success                                   completed
 
       AUTHORITY:  started  <  failed  <  { completed, cancelled }
@@ -68,10 +68,23 @@ def _close_predicate(status):
         ``pull_coordination_service``: "a FAILED row falls through so a late
         SUCCESS can still correct it"). Without it, that path would leave
         ``execution=success, activity=failed`` permanently — #1804 inverted.
-      * Nothing may overwrite an authoritative close.
+      * Nothing may overwrite an authoritative close. This is where the mirror
+        is deliberately TIGHTER than the execution CAS rather than literal: the
+        execution row's SUCCESS predicate is ``!= CANCELLED``, which also admits
+        ``success -> success`` and re-dates ``completed_at``/``duration_ms``. The
+        activity must not inherit that edge — its ``duration_ms`` is the exact
+        field #1804 exists to keep honest, and a second COMPLETED close would
+        rewrite a real 15-minute duration into "now - started_at" by a brand-new
+        route (reachable from ``_write_terminal_and_gate``'s lost-CAS branch,
+        which passes an explicit ``activity_id`` and closes in the reconciled
+        state). So the predicate is the authority lattice above, stated
+        literally: an authoritative close accepts ``started`` or ``failed``, and
+        nothing else.
     """
     if status == ActivityState.COMPLETED:
-        return agent_activities.c.activity_state != ActivityState.CANCELLED.value
+        return agent_activities.c.activity_state.in_(
+            (ActivityState.STARTED.value, ActivityState.FAILED.value)
+        )
     return agent_activities.c.activity_state == ActivityState.STARTED.value
 
 

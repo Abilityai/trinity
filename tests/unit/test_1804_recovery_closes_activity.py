@@ -181,6 +181,29 @@ class TestCompleteActivityCas:
         ) is ActivityCloseOutcome.ALREADY_CLOSED
         assert _fetch_activity("act-4")["error"] == "first"
 
+    def test_db_layer_completed_row_refuses_second_completed(self, tmp_db, activity_ops):
+        """[R3] The edge the first cut of the lattice left open: `!= 'cancelled'`
+        matched `'completed'`, so a SECOND authoritative close re-dated a real
+        duration — a 15-minute run rewritten to `now - started_at`. That is the
+        #1804 symptom itself, arriving through #1804's own fix.
+
+        Reachable from `_write_terminal_and_gate`'s lost-CAS branch, which passes
+        an explicit `activity_id` (so the `started|failed` lookup can't shield
+        it) and closes in the reconciled state — COMPLETED when the row it lost
+        to is SUCCESS.
+        """
+        from models import ActivityCloseOutcome
+
+        _insert_activity(
+            act_id="act-5b", exec_id="exec-5b", activity_state="completed",
+            completed_at="2026-07-28T10:15:00Z", duration_ms=900_000, error=None,
+        )
+        before = _fetch_activity("act-5b")
+        assert activity_ops.complete_activity(
+            "act-5b", "completed", error="superseded by success"
+        ) is ActivityCloseOutcome.ALREADY_CLOSED
+        assert _fetch_activity("act-5b") == before
+
     def test_db_layer_cancelled_row_refuses_completed(self, tmp_db, activity_ops):
         """Nothing overwrites an authoritative close — mirrors the execution CAS,
         where a SUCCESS write loses only to CANCELLED (#671/#1332)."""
@@ -561,6 +584,41 @@ class TestWriteTerminalAndGate:
         mact = self._run(won=False, persisted_status=None)
         assert mact.close_execution_activity.await_args[0][1] == TaskExecutionStatus.FAILED
 
+    def test_cas_loss_to_success_drops_the_error(self):
+        """A lost CAS to a *successful* row closes the activity COMPLETED — and
+        must carry NO error. The execution genuinely succeeded, and a non-NULL
+        `error` on a `completed` activity reads as a problem in every
+        activity-derived view. Same rule the shipped terminate path already
+        follows (`test_1332_cancelled_activity_state.py::
+        test_cas_lost_to_success_closes_activity_completed_not_cancelled`);
+        this branch is the one that did NOT, stamping "superseded by ..." onto
+        a clean success.
+        """
+        from models import TaskExecutionStatus
+
+        mact = self._run(won=False, persisted_status=TaskExecutionStatus.SUCCESS)
+
+        args, kwargs = mact.close_execution_activity.await_args
+        assert args[1] == TaskExecutionStatus.SUCCESS
+        assert kwargs["error"] is None
+
+    def test_cas_loss_error_label_is_the_value_not_the_enum_repr(self):
+        """`f"{TaskExecutionStatus.FAILED}"` renders as `TaskExecutionStatus.FAILED`
+        on 3.11+, NOT `failed` — the `str, Enum` footgun #1578 already paid for
+        (architecture.md records it as the reason the event payload uses
+        `.value`). This label is operator-visible text persisted on the activity
+        row, so it must be the value.
+
+        The no-row fallback is the branch that genuinely holds an enum *member*
+        — the DB path yields a plain status string — so it is the one that pins
+        the `getattr(..., "value", ...)`.
+        """
+        mact = self._run(won=False, persisted_status=None)
+
+        error = mact.close_execution_activity.await_args[1]["error"]
+        assert error == "superseded by failed"
+        assert "TaskExecutionStatus" not in error
+
     def test_cas_win_closes_with_its_own_terminal(self):
         from models import TaskExecutionStatus
 
@@ -765,6 +823,71 @@ class TestCleanupRecoverySites:
         assert result is False
         mact.close_execution_activity.assert_not_awaited()
         assert stats["activities_closed"] == 0
+
+
+@pytest.mark.unit
+class TestStartupRecoveryCounterBuckets:
+    """`_recover_execution` returning the CAS bool (#1804) changed what a False
+    MEANS to `recover_orphaned_executions`, which counted every False as
+    `errors`. A lost CAS is RELIABILITY-005's guarded writer working exactly as
+    designed — a real completion landed during restart — so folding it into
+    `errors` makes a *healthy* restart race read as a failing one in the startup
+    report, and would have made this fix look like it introduced failures.
+    """
+
+    def _run_recovery(self, *, won=True, raises=False):
+        import services.cleanup_service as cs
+
+        mock_db = MagicMock()
+        # Well outside STARTUP_RECOVERY_GRACE_SECONDS, so #748 does not skip it.
+        mock_db.get_running_executions.return_value = [
+            {"id": "exec-r", "agent_name": "agent-r", "started_at": _ago_iso(600)}
+        ]
+        if raises:
+            mock_db.mark_execution_failed_by_watchdog.side_effect = RuntimeError(
+                "db unreachable"
+            )
+        else:
+            mock_db.mark_execution_failed_by_watchdog.return_value = won
+        mock_activity = MagicMock(close_execution_activity=AsyncMock(return_value=True))
+        with (
+            patch.object(cs, "db", mock_db),
+            patch.object(
+                cs, "get_capacity_manager",
+                return_value=MagicMock(release=AsyncMock()),
+            ),
+            patch.object(cs, "_reconcile_orphaned_slots", AsyncMock(return_value={})),
+            # Imported inside the function body, so patch the source module.
+            patch("services.docker_service.get_agent_container", return_value=None),
+            patch("services.activity_service.activity_service", mock_activity),
+        ):
+            return _await(cs.recover_orphaned_executions())
+
+    def test_lost_cas_is_counted_apart_from_errors(self):
+        result = self._run_recovery(won=False)
+
+        assert result["cas_lost"] == 1
+        assert result["errors"] == 0
+        assert result["recovered"] == 0
+        assert result["activities_closed"] == 0
+
+    def test_a_genuine_failure_still_counts_as_an_error(self):
+        """The bucketing must not swallow real failures — a raising terminal
+        writer is an error, not a benign race. Both return False; only this one
+        is a problem."""
+        result = self._run_recovery(raises=True)
+
+        assert result["errors"] == 1
+        assert result["cas_lost"] == 0
+        assert result["recovered"] == 0
+
+    def test_won_cas_recovers_and_closes_its_activity(self):
+        result = self._run_recovery(won=True)
+
+        assert result["recovered"] == 1
+        assert result["cas_lost"] == 0
+        assert result["errors"] == 0
+        assert result["activities_closed"] == 1
 
 
 @pytest.mark.unit

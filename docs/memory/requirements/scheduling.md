@@ -393,7 +393,7 @@
   winner owns it" true — you cannot guarantee only one writer tries. The activity predicate
   **mirrors** the execution predicate (`db/schedules/executions.py`) rather than inventing a
   stricter one:
-  - incoming COMPLETED (from SUCCESS) → `activity_state != 'cancelled'` — an authoritative close
+  - incoming COMPLETED (from SUCCESS) → `activity_state IN ('started','failed')` — an authoritative close
     MAY upgrade a provisional FAILED (the #1083 late-SUCCESS-after-lease-expiry path);
   - incoming CANCELLED / FAILED → `activity_state = 'started'` — nothing overwrites an
     authoritative close, so a double close never clobbers `completed_at`/`duration_ms`/`error`.

@@ -2407,6 +2407,7 @@ async def recover_orphaned_executions() -> Dict:
             "recovered": 0,
             "still_running": 0,
             "skipped_grace": 0,
+            "cas_lost": 0,
             "errors": 0,
             "redis_slots_reclaimed": sum(redis_reclaimed.values()),
             "activities_closed": 0,
@@ -2423,9 +2424,17 @@ async def recover_orphaned_executions() -> Dict:
     still_running = 0
     skipped_grace = 0
     errors = 0
-    # #1804: activity closes performed by this pass, accumulated by
-    # `_recover_execution` (no CleanupReport on the startup path).
-    stats: Dict[str, int] = {"activities_closed": 0}
+    # #1804: per-pass counters accumulated by `_recover_execution` (the startup
+    # path has no CleanupReport). `errors` lives here rather than in a local
+    # because only `_recover_execution` can tell a genuine failure from a lost
+    # CAS — see the bucketing at the call sites below.
+    stats: Dict[str, int] = {"activities_closed": 0, "errors": 0}
+    # A False from `_recover_execution` is EITHER a lost CAS or an exception,
+    # and the two must PARTITION — counting the same execution into both
+    # `cas_lost` and `errors` makes one failure read as two in the startup
+    # report. Only `_recover_execution` can tell them apart, so it self-counts
+    # errors and we subtract at the end.
+    not_written = 0
 
     for agent_name, executions in by_agent.items():
         # Check if container is running
@@ -2439,7 +2448,14 @@ async def recover_orphaned_executions() -> Dict:
                 if await _recover_execution(execution, agent_name, capacity, stats):
                     recovered += 1
                 else:
-                    errors += 1
+                    # #1804: `_recover_execution` now returns the terminal CAS
+                    # bool (it must, to gate the activity close). A False is
+                    # USUALLY benign — a real completion won the row during
+                    # restart, which is RELIABILITY-005's guarded writer working
+                    # exactly as designed — so it must not read as an error.
+                    # Genuine failures self-count into stats["errors"] and are
+                    # subtracted out below.
+                    not_written += 1
             continue
 
         # Container is up — check agent's process registry
@@ -2464,12 +2480,14 @@ async def recover_orphaned_executions() -> Dict:
                 if await _recover_execution(execution, agent_name, capacity, stats):
                     recovered += 1
                 else:
-                    errors += 1
+                    not_written += 1  # #1804: see the partition note above
 
+    errors = stats["errors"]
+    cas_lost = not_written - errors
     logger.info(
         f"[Recovery] Task execution recovery complete: "
         f"recovered={recovered}, still_running={still_running}, "
-        f"skipped_grace={skipped_grace}, errors={errors}, "
+        f"skipped_grace={skipped_grace}, cas_lost={cas_lost}, errors={errors}, "
         f"activities_closed={stats['activities_closed']}"
     )
 
@@ -2485,6 +2503,9 @@ async def recover_orphaned_executions() -> Dict:
         "recovered": recovered,
         "still_running": still_running,
         "skipped_grace": skipped_grace,
+        # #1804: a terminal CAS lost to a real completion — benign, and counted
+        # apart from `errors` so a healthy restart race can't read as a failure.
+        "cas_lost": cas_lost,
         "errors": errors,
         "redis_slots_reclaimed": redis_reclaimed_total,
         # #1804: dispatch activities closed by this recovery pass.
@@ -2521,8 +2542,13 @@ async def _recover_execution(
     when a real completion had already won the row. It is now captured, gates
     the activity close (only the CAS winner owns it), and is returned.
 
-    ``stats`` (optional) receives the ``activities_closed`` count; the startup
-    path has no ``CleanupReport``, it returns a plain dict.
+    ``stats`` (optional) receives the ``activities_closed`` and ``errors``
+    counts; the startup path has no ``CleanupReport``, it returns a plain dict.
+
+    **Return contract**: True = this pass wrote the terminal. False = it did
+    not, for one of two reasons the caller must NOT conflate — a lost CAS (a
+    real completion landed first; benign) or an exception (counted into
+    ``stats["errors"]`` above). The caller buckets False as ``cas_lost``.
     """
     error_message = "Execution orphaned — recovered on backend restart"
     try:
@@ -2557,6 +2583,10 @@ async def _recover_execution(
         return won
     except Exception as e:
         logger.error(f"[Recovery] Error recovering execution {execution['id']}: {e}")
+        # #1804: self-count so the caller can tell this apart from a lost CAS —
+        # both return False, only this one is an error.
+        if stats is not None:
+            stats["errors"] = stats.get("errors", 0) + 1
         return False
 
 

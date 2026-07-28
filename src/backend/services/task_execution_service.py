@@ -850,10 +850,23 @@ async def _write_terminal_and_gate(
         reconciled_status = (
             reconciled.status if reconciled else TaskExecutionStatus.FAILED
         )
+        # `.value` for the label: a bare `str, Enum` f-strings to
+        # "TaskExecutionStatus.FAILED" on 3.11+, not "failed" (the #1578 footgun
+        # architecture.md records). The DB path yields a plain string; only the
+        # `reconciled is None` fallback is an enum member — hence getattr.
+        reconciled_label = getattr(reconciled_status, "value", reconciled_status)
         await activity_service.close_execution_activity(
             execution_id,
             reconciled_status,
-            error=f"superseded by {reconciled_status}",
+            # No error on an authoritative SUCCESS close: the execution actually
+            # succeeded, and a non-NULL `error` on a `completed` activity reads
+            # as a problem in every activity-derived view. Same rule as
+            # chat_execution_service._close_dispatch_activity_cancelled.
+            error=(
+                None
+                if reconciled_status == TaskExecutionStatus.SUCCESS
+                else f"superseded by {reconciled_label}"
+            ),
             activity_id=activity_id,
         )
     # #1578: the timeout / budget-exhausted / unexpected-exception (+ inline

@@ -183,7 +183,8 @@ The predicate **mirrors** the execution-row predicate in
                        ▼                                          ▼
           failed / cancelled / skipped                   failed / cancelled
                        │                                          │
-   SUCCESS write       │ != CANCELLED        COMPLETED close      │ != 'cancelled'
+   SUCCESS write       │ != CANCELLED        COMPLETED close      │ in (started,
+                       │                                          │     failed)
                        ▼                                          ▼
                     success                                   completed
 
@@ -195,7 +196,18 @@ The predicate **mirrors** the execution-row predicate in
   `pull_coordination_service` documents as "a FAILED row falls through so a late
   SUCCESS can still correct it". Without the upgrade the pair would settle at
   `execution=success, activity=failed` **permanently** — #1804 inverted.
-* Nothing overwrites an authoritative close.
+* Nothing overwrites an authoritative close — including another close of the
+  same authority. This is the one place the mirror is deliberately **tighter**
+  than the execution CAS rather than literal: the execution row's SUCCESS
+  predicate is `!= CANCELLED`, which also admits `success → success` and
+  re-dates its own `completed_at`/`duration_ms`. Copying that verbatim let a
+  second COMPLETED close rewrite a real 15-minute `duration_ms` as
+  `now − started_at` — the exact #1804 symptom, re-entering through #1804's own
+  fix. Reachable from `_write_terminal_and_gate`'s lost-CAS branch, which passes
+  an explicit `activity_id` (so the `started|failed` lookup cannot shield it)
+  and closes in the reconciled state — COMPLETED whenever the row it lost to is
+  SUCCESS. Pinned by
+  `test_db_layer_completed_row_refuses_second_completed`.
 * Do **not** "simplify" this to a flat `WHERE activity_state='started'`. That is
   the bug. The diagram is repeated inline over the predicate for that reason.
 
