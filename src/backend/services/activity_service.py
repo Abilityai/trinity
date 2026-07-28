@@ -17,11 +17,11 @@ from models import (
     ActivityType,
     ActivityState,
     ActivityCreate,
+    ActivityCloseOutcome,
     TaskExecutionStatus,
     activity_state_for_terminal,
 )
 from database import db
-from db.activities import ActivityCloseOutcome
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)

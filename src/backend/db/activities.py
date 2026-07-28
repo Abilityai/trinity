@@ -11,7 +11,6 @@ in ``db/tables.py`` (dialect-agnostic expressions, no ``?``/``%s`` placeholders)
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
-from enum import Enum
 from typing import Optional, List, Dict, Sequence
 
 from sqlalchemy import select, insert, update, and_, case
@@ -19,23 +18,12 @@ from sqlalchemy import select, insert, update, and_, case
 from .engine import get_engine
 from .query_helpers import latest_per_group
 from .tables import agent_activities
-from models import ActivityState, ActivityType
+# ActivityCloseOutcome is defined in `models` (not here) on purpose — it is a
+# contract type shared with the service layer and compared by identity; `models`
+# is the leaf that survives a test harness evicting `db.*` from sys.modules.
+# Re-exported through this module so `db.activities.ActivityCloseOutcome` works.
+from models import ActivityState, ActivityType, ActivityCloseOutcome
 from utils.helpers import utc_now_iso, to_utc_iso, parse_iso_timestamp
-
-
-class ActivityCloseOutcome(Enum):
-    """Tri-state result of a close attempt (#1804).
-
-    One boolean cannot answer both questions the callers ask. ``routers/
-    internal.py`` needs "did this row exist" (it 404s); ``activity_service``
-    needs "did anything change" (it broadcasts). Once the close is a lattice
-    CAS, an idempotent no-op close is a *designed* outcome, so the two answers
-    diverge routinely — hence three states, not two.
-    """
-
-    UPDATED = "updated"                # the CAS won — broadcast
-    ALREADY_CLOSED = "already_closed"  # row exists, predicate refused — no clobber
-    NOT_FOUND = "not_found"            # no such activity — 404 here, and only here
 
 
 # Dispatch activity types opened by ``track_activity`` at execution start. A

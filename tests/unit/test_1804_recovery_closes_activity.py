@@ -121,7 +121,7 @@ class TestCompleteActivityCas:
     """``db.complete_activity`` is a lattice CAS returning a tri-state outcome."""
 
     def test_db_layer_started_row_is_updated(self, tmp_db, activity_ops):
-        from db.activities import ActivityCloseOutcome
+        from models import ActivityCloseOutcome
 
         _insert_activity(act_id="act-1", exec_id="exec-1")
         outcome = activity_ops.complete_activity("act-1", "completed")
@@ -133,14 +133,14 @@ class TestCompleteActivityCas:
 
     def test_db_layer_missing_row_is_not_found(self, tmp_db, activity_ops):
         """[404 semantics] routers/internal.py 404s on NOT_FOUND, and only there."""
-        from db.activities import ActivityCloseOutcome
+        from models import ActivityCloseOutcome
 
         assert activity_ops.complete_activity("nope", "completed") is ActivityCloseOutcome.NOT_FOUND
 
     def test_db_layer_already_closed_never_clobbers(self, tmp_db, activity_ops):
         """[R3] The double-close hazard the CAS exists to defuse: a second closer
         must not overwrite completed_at / duration_ms / error."""
-        from db.activities import ActivityCloseOutcome
+        from models import ActivityCloseOutcome
 
         _insert_activity(
             act_id="act-2", exec_id="exec-2", activity_state="completed",
@@ -154,7 +154,7 @@ class TestCompleteActivityCas:
     def test_db_layer_failed_row_upgrades_to_completed(self, tmp_db, activity_ops):
         """[R1] An authoritative close MAY upgrade a provisional FAILED — the
         #1083 late-SUCCESS-after-lease-expiry path."""
-        from db.activities import ActivityCloseOutcome
+        from models import ActivityCloseOutcome
 
         _insert_activity(
             act_id="act-3", exec_id="exec-3", activity_state="failed",
@@ -170,7 +170,7 @@ class TestCompleteActivityCas:
 
     def test_db_layer_failed_row_refuses_second_failed(self, tmp_db, activity_ops):
         """[R1] A provisional close never overwrites a provisional close."""
-        from db.activities import ActivityCloseOutcome
+        from models import ActivityCloseOutcome
 
         _insert_activity(
             act_id="act-4", exec_id="exec-4", activity_state="failed",
@@ -184,7 +184,7 @@ class TestCompleteActivityCas:
     def test_db_layer_cancelled_row_refuses_completed(self, tmp_db, activity_ops):
         """Nothing overwrites an authoritative close — mirrors the execution CAS,
         where a SUCCESS write loses only to CANCELLED (#671/#1332)."""
-        from db.activities import ActivityCloseOutcome
+        from models import ActivityCloseOutcome
 
         _insert_activity(
             act_id="act-5", exec_id="exec-5", activity_state="cancelled",
@@ -339,7 +339,7 @@ def _svc_with_db(mock_db):
 @pytest.mark.unit
 class TestCloseExecutionActivityService:
     def test_service_maps_terminal_via_shared_helper(self):
-        from db.activities import ActivityCloseOutcome
+        from models import ActivityCloseOutcome
         from models import ActivityState, TaskExecutionStatus
 
         mock_db = MagicMock()
@@ -362,7 +362,7 @@ class TestCloseExecutionActivityService:
     def test_service_lookup_is_lattice_aware(self):
         """[test 6] Authoritative terminals search started|failed; provisional
         terminals search started only. The pairing that keeps the fix live."""
-        from db.activities import ActivityCloseOutcome
+        from models import ActivityCloseOutcome
         from models import TaskExecutionStatus
 
         mock_db = MagicMock()
@@ -384,7 +384,7 @@ class TestCloseExecutionActivityService:
             )
 
     def test_service_caller_held_activity_id_skips_lookup(self):
-        from db.activities import ActivityCloseOutcome
+        from models import ActivityCloseOutcome
         from models import TaskExecutionStatus
 
         mock_db = MagicMock()
@@ -431,7 +431,7 @@ class TestCloseExecutionActivityService:
     def test_service_broadcasts_only_on_updated(self):
         """[test 10 / R3] An ALREADY_CLOSED refusal must not emit an
         agent_activity event claiming the activity just closed."""
-        from db.activities import ActivityCloseOutcome
+        from models import ActivityCloseOutcome
         from models import TaskExecutionStatus
 
         mock_db = MagicMock()
@@ -458,7 +458,7 @@ class TestCloseExecutionActivityService:
     def test_service_already_closed_still_reports_handled(self):
         """Only NOT_FOUND is False — routers/internal.py 404s on that, and only
         that, so an idempotent re-close does not start 404ing the scheduler."""
-        from db.activities import ActivityCloseOutcome
+        from models import ActivityCloseOutcome
 
         mock_db = MagicMock()
         mock_db.get_activity.return_value = {"agent_name": "a", "activity_type": "chat_start"}
@@ -476,7 +476,7 @@ class TestCloseExecutionActivityService:
         """[test 16 part 1] The sync sink (pull_coordination_service) needs a
         no-await entry point; a strong ref keeps the task from being GC'd."""
         import asyncio
-        from db.activities import ActivityCloseOutcome
+        from models import ActivityCloseOutcome
         from models import TaskExecutionStatus
 
         mock_db = MagicMock()

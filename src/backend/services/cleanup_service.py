@@ -2147,12 +2147,20 @@ class CleanupService:
         # still working for up to 2h, then recorded a ~120-minute failure.
         # Placed BEFORE the WS broadcast so the frontend's watchdog event and the
         # activity close land in that order. Fail-open (the helper swallows).
-        from services.activity_service import activity_service
+        try:
+            from services.activity_service import activity_service
 
-        if await activity_service.close_execution_activity(
-            execution_id, TaskExecutionStatus.FAILED, error=combined_error
-        ) and report is not None:
-            report.activities_closed_on_recovery += 1
+            if await activity_service.close_execution_activity(
+                execution_id, TaskExecutionStatus.FAILED, error=combined_error
+            ) and report is not None:
+                report.activities_closed_on_recovery += 1
+        except Exception as e:  # noqa: BLE001
+            # The terminal write + capacity release already succeeded. A failure
+            # in the close must not downgrade this to "recovery failed" — that
+            # would make the watchdog retry a row it has already recovered.
+            logger.warning(
+                f"[Watchdog] Activity close failed for {execution_id}: {e}"
+            )
 
         # Release capacity (idempotent — no error if already released).
         # CAPACITY-CONSOLIDATE (#428): single CapacityManager.release_if_matches
@@ -2530,13 +2538,22 @@ async def _recover_execution(
             # restart the backend mid-run and the execution goes terminal while
             # its chat_start activity stays `started` for the 120-minute
             # backstop to close with a fabricated duration.
-            from services.activity_service import activity_service
+            #
+            # Own try/except: the terminal write and the capacity release above
+            # already succeeded, so a close failure must NOT flip this row from
+            # `recovered` to `errors` in the startup report.
+            try:
+                from services.activity_service import activity_service
 
-            closed = await activity_service.close_execution_activity(
-                execution["id"], TaskExecutionStatus.FAILED, error=error_message
-            )
-            if closed and stats is not None:
-                stats["activities_closed"] = stats.get("activities_closed", 0) + 1
+                closed = await activity_service.close_execution_activity(
+                    execution["id"], TaskExecutionStatus.FAILED, error=error_message
+                )
+                if closed and stats is not None:
+                    stats["activities_closed"] = stats.get("activities_closed", 0) + 1
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"[Recovery] Activity close failed for {execution['id']}: {e}"
+                )
         return won
     except Exception as e:
         logger.error(f"[Recovery] Error recovering execution {execution['id']}: {e}")
