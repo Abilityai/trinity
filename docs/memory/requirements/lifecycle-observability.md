@@ -504,3 +504,59 @@ private). Scoped to **heterogeneous-workspace jobs**
 per-ghost egress control; creation UI (MCP-first); `is_ephemeral` filter on
 `/api/executions` if stats skew materializes; durable-agent volume-leak fix
 (separate public bug — `volume_remove` has no callers).
+
+---
+
+## 46. Behavioral Evaluation — Referee Surface + Completion Relabel (ent#206)
+
+**Description**: The **referee surface** for agent behavioral evaluation, plus the
+honesty fix it exists to enable. `status='success'` is a clean process exit, but was
+rendered to users as "Success rate" — as though it meant the answer was correct. This
+separates the two axes: `completion` (the run finished without erroring) and `quality`
+(the work was good), and gives `quality` a home the graded agent cannot write to.
+
+**The load-bearing rule**: *a score is only trustworthy if the graded agent cannot write
+it.* `agent_reports` (§44) was evaluated as the surface and **rejected** — its create is
+self-gated by design (an agent publishes its own reports), which is precisely the wrong
+boundary for a grade. This surface inverts it.
+
+- **FR-1 — Table `agent_evaluations`**: `id`, `agent_name`, `execution_id` (nullable —
+  an evaluation may concern the agent rather than one run), `archetype` (what "good"
+  means here, per-archetype rubric), `completion` (nullable mirror of the clean-exit
+  axis), `quality` (nullable — **null means "not graded yet", not zero**; the axes are
+  independent), `checks_json` (Tier-0 deterministic results), `judge_json` (Tier-1
+  output), `evaluator`, `created_at`. Indexes on `(agent_name, created_at DESC)` and
+  `(execution_id)`. Dual-track migration (Invariant #3: SQLite `agent_evaluations_table`
+  + Alembic `0031_agent_evaluations`); registered in `AGENT_REFS` so rename re-keys and
+  purge cascades, and canary L-03's orphan scan covers it.
+- **FR-2 — Write fence** (`POST /api/agents/{name}/evaluations`): **human-admin-only** —
+  `require_admin` **AND** `reject_agent_principal`. The second gate is the load-bearing
+  one: an agent-scoped key resolves to its owner and inherits the owner's role, so on a
+  default admin-owned install `require_admin` alone would let a graded agent write its
+  own grade (the trinity-ops-agent#232 trap). No agent-writable route exists on this
+  surface, and a test asserts none appears later.
+- **FR-3 — Read is access-scoped, not fenced**: `GET /api/agents/{name}/evaluations`
+  (`AuthorizedAgentByName` — owner/admin/agent-self), `GET /api/evaluations` (fleet,
+  `accessible_agent_names`-filtered), `GET /api/evaluations/{id}`. An agent reading that
+  it scored badly is the point; read ≠ write.
+- **FR-4 — Completion relabel**: Overview (§#1107), the schedules rollup (#1115) and
+  fleet stats (EXEC-022) render **"Completion"** with a tooltip ("finished without
+  erroring — not answer quality"). **Additive**: the `success_rate` API field is
+  unchanged, so existing clients keep working; only the user-facing label moves.
+- **FR-5 — Three-layer**: `routers/evaluations.py` → `db/evaluations.py`
+  (`EvaluationOperations`) → facade in `database.py` (Invariant #1). Models in
+  `models.py` (Invariant #14).
+
+**Open-core**: OSS-core — decided at the strategy gate (trinity-enterprise#206 §10,
+merged), not by omission. The enforcement primitive (table + write fence), the Tier-0
+deterministic runner, the agent-owned case runner and this relabel are edition-agnostic:
+the load-bearing rule must hold in every edition, and deterministic checks make no
+external call. The managed grading experience — judge panels, calibration, rubric
+management UI — is the paid layer, mirroring §42 (#668) where STATIC is free and the
+AI tier is not.
+
+**Not included** (later children of the epic): the Tier-0 evaluator that *populates*
+`quality`, the agent-owned case runner, the Tier-1 judge (enterprise), and
+replay/shadow evaluation (blocked on #1084 fail-closed + #1408).
+
+See [agent-evaluations.md](../feature-flows/agent-evaluations.md).
