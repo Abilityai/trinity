@@ -13,8 +13,11 @@
         <!-- Compact Header -->
         <div class="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-4 py-2">
           <div class="flex items-center justify-between">
-            <!-- Left: Stats -->
-            <div class="flex items-center min-w-0 overflow-hidden">
+            <!-- Left: Stats — elastic (#1830). `flex-1 min-w-0` makes this the
+                 only cluster that gives ground, and `container-type: inline-size`
+                 (see .stats-cluster below) turns its leftover width into the
+                 query axis the progressive-hide ladder degrades against. -->
+            <div class="stats-cluster flex items-center min-w-0 flex-1 overflow-hidden">
               <div class="flex items-center space-x-3 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
                 <span class="flex items-center space-x-1">
                   <span class="w-1.5 h-1.5 rounded-full bg-status-success-500"></span>
@@ -22,18 +25,18 @@
                   <span>agents</span>
                 </span>
                 <!-- Working-now count (trinity-enterprise#47) -->
-                <span class="text-gray-300 dark:text-gray-600">·</span>
-                <span class="flex items-center space-x-1">
+                <span class="text-gray-300 dark:text-gray-600" data-sep="working">·</span>
+                <span class="flex items-center space-x-1" data-stat="working">
                   <span class="font-medium text-status-info-600 dark:text-status-info-400">{{ workingNowCount }}</span>
                   <span>working now</span>
                 </span>
-                <span class="text-gray-300 dark:text-gray-600">·</span>
-                <span class="flex items-center space-x-1">
+                <span class="text-gray-300 dark:text-gray-600" data-sep="messages">·</span>
+                <span class="flex items-center space-x-1" data-stat="messages">
                   <span class="font-medium text-status-info-600 dark:text-status-info-400">{{ totalCollaborationCount }}</span>
                   <span>messages ({{ timeRangeHours }}h)</span>
                 </span>
-                <!-- Host Telemetry (inline) -->
-                <span class="text-gray-300 dark:text-gray-600">·</span>
+                <!-- Host Telemetry (inline) — owns its own leading separator and
+                     its own container-query hide ladder (HostTelemetry.vue). -->
                 <HostTelemetry />
               </div>
             </div>
@@ -670,6 +673,55 @@ function handleClickOutside(event) {
 </script>
 
 <style scoped>
+
+/*
+ * Stats bar progressive degrade (#1830).
+ *
+ * The header row is [elastic stats cluster | fixed controls cluster]. Before
+ * this, the stats cluster only ever got CLIPPED by `overflow-hidden` — the
+ * telemetry meters were cut mid-element (and their boxes still ran under the
+ * controls) with no visual affordance. Making the cluster a size container
+ * lets the content drop out in a defined order as space runs out, keyed to the
+ * width actually left over — so it adapts to a wider controls cluster (grid
+ * mode, tags chip, owner filter) instead of a guessed viewport breakpoint.
+ *
+ * Ladder (widest → narrowest), split by ownership:
+ *   ≤ 820px  sparklines drop        (HostTelemetry.vue)
+ *   ≤ 700px  Disk meter drops       (HostTelemetry.vue)
+ *   ≤ 560px  Mem meter drops        (HostTelemetry.vue)
+ *   ≤ 420px  telemetry drops whole  (HostTelemetry.vue)
+ *   ≤ 330px  "messages (Nh)" drops  (here)
+ *   ≤ 200px  "working now" drops    (here)
+ * The agent count always survives.
+ *
+ * Each threshold sits ~25-30px ABOVE the measured intrinsic width of the level
+ * it gates (full 791 → no-sparks 663 → no-disk 522 → no-mem 394 → no-telemetry
+ * 308 → no-messages 182 → agents-only 71), so every level still fits its own
+ * band with headroom for wider live values (three-digit fleets, 100.0/128G).
+ * Thresholds set below those widths reintroduce the clip this fixes — re-measure
+ * before moving one.
+ *
+ * The container NAME is the contract HostTelemetry.vue queries against — keep
+ * `statsbar` in sync with the @container rules there if it ever changes.
+ */
+.stats-cluster {
+  container-type: inline-size;
+  container-name: statsbar;
+}
+
+@container statsbar (max-width: 330px) {
+  [data-stat='messages'],
+  [data-sep='messages'] {
+    display: none;
+  }
+}
+
+@container statsbar (max-width: 200px) {
+  [data-stat='working'],
+  [data-sep='working'] {
+    display: none;
+  }
+}
 
 /* Replay Mode Styles */
 .mode-toggle {

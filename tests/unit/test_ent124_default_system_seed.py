@@ -151,9 +151,14 @@ def test_bundled_manifest_parses_and_validates():
 
 
 def test_bundled_manifest_local_templates_exist_in_tree():
-    """learnings 2026-07-23: an absent local: template creates a BLANK agent —
-    deploy reports success and the seed flag latches. Only tree-existence
-    pins the manifest to real content."""
+    """learnings 2026-07-23: an absent local: template used to create a BLANK
+    agent — deploy reported success and the seed flag latched. #1759 closed
+    that (create now 404s `UNKNOWN_LOCAL_TEMPLATE`), so this check is now
+    belt-and-braces rather than the only line of defence. KEPT deliberately: it
+    fails at collection time with a precise message naming the offending
+    manifest entry, whereas the runtime gate would surface as a first-run seed
+    landing in the operator queue. It also still covers the CLAUDE.md half
+    (ent#239), which the create gate does not check at all."""
     manifest = system_service.parse_manifest(REAL_MANIFEST.read_text(encoding="utf-8"))
     for short, cfg in manifest.agents.items():
         assert cfg.template.startswith("local:"), f"{short}: PAT-free seed requires local: templates"

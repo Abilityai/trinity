@@ -258,7 +258,13 @@ def _load_crud(monkeypatch, docker_available=True):
     # set_default_avatar stays unreached for every case but the one that
     # builds its own root. Cases that monkeypatch `_LOCAL_TEMPLATE_ROOTS`
     # themselves still win: their setattr runs after this.
-    _tpl_root = Path(tempfile.mkdtemp(prefix="trinity_1484_templates_"))
+    # `.resolve()` is required, not cosmetic: on macOS `tempfile.mkdtemp()`
+    # returns `/var/folders/...`, but `/var` is a symlink to `/private/var`, so
+    # `_safe_local_template_path`'s `(root / name).resolve()` yields
+    # `/private/var/...` and `is_relative_to(root)` fails — every local: case
+    # 400s `INVALID_LOCAL_TEMPLATE_NAME`. Linux CI has no such symlink, which is
+    # why #1793 shipped green while these 11 cases were red on every Mac.
+    _tpl_root = Path(tempfile.mkdtemp(prefix="trinity_1484_templates_")).resolve()
     _scout = _tpl_root / "scout"
     _scout.mkdir()
     (_scout / "template.yaml").write_text("type: business-assistant\n")

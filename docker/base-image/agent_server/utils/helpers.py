@@ -1,7 +1,20 @@
 """
 Helper utility functions for the agent server.
 """
+from datetime import datetime, timezone
 from typing import Dict, Any
+
+
+def iso_z_from_mtime(mtime: float) -> str:
+    """Format a filesystem mtime (epoch seconds) as a canonical ISO-Z UTC string.
+
+    Uses an explicit UTC timezone so the result is independent of the container's
+    local TZ (Invariant #16: platform timestamps are ISO-Z UTC). A naive
+    ``datetime.fromtimestamp(mtime).isoformat()`` renders in local time with no
+    zone marker, which downstream consumers (that treat naive ISO as UTC) then
+    display hours off. Returns e.g. ``"2026-07-27T08:06:58.549706Z"``.
+    """
+    return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def shorten_path(path: str) -> str:
