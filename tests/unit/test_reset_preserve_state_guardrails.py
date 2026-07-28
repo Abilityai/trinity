@@ -449,6 +449,53 @@ if _backend_path not in sys.path:
     sys.path.insert(0, _backend_path)
 
 
+# The real modules `_load_git_service` replaces with Mocks under their real
+# names. It deliberately leaves them installed *after the loader returns* (the
+# reset path imports `activity_service` lazily at call time) — but before #1804
+# nothing put them back afterwards either, so the Mocks stayed in `sys.modules`
+# for the rest of the SESSION.
+#
+# That is a silent, ordering-dependent landmine for any later test that lazily
+# imports one of these. #1804 made `cleanup_service._close_stale_slot_activity`
+# delegate to `activity_service.close_execution_activity`; with this file
+# running first, `test_1083_lease_reaper.py::test_swallows_errors` awaited the
+# leaked Mock and died with `TypeError: object Mock can't be used in 'await'
+# expression` — a real red under CI's pytest-randomly seeds, in a test that had
+# nothing to do with git reset.
+_STUBBED_MODULE_NAMES = [
+    "database",
+    "services.docker_service",
+    "services.activity_service",
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Confine the loader's `sys.modules` stubs to the test that asked for them.
+
+    Snapshots the stubbed names plus anything under `services.git_service` (the
+    loader force-reimports it *against* the Mocks, so leaving that behind
+    poisons later importers too), and restores both on teardown.
+    """
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    saved_git = {
+        k: v for k, v in sys.modules.items() if k.startswith("services.git_service")
+    }
+    try:
+        yield
+    finally:
+        for name, module in saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+        for key in [
+            k for k in list(sys.modules) if k.startswith("services.git_service")
+        ]:
+            del sys.modules[key]
+        sys.modules.update(saved_git)
+
+
 def _load_git_service():
     """Import git_service with heavy deps mocked out.
 
