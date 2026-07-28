@@ -1,7 +1,7 @@
 <template>
   <aside class="hidden lg:flex flex-col h-full w-64 shrink-0 bg-gray-50 dark:bg-gray-950 border-l border-gray-200 dark:border-gray-800">
     <div class="shrink-0 px-4 h-14 flex items-center border-b border-gray-200 dark:border-gray-800">
-      <span class="text-sm font-semibold">Participants</span>
+      <span class="text-sm font-semibold text-gray-900 dark:text-gray-100">Participants</span>
       <span class="ml-2 text-xs text-gray-400">{{ participants.length }}</span>
     </div>
 
@@ -18,7 +18,7 @@
         </div>
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-1.5">
-            <span class="text-sm truncate">{{ p.kind === 'user' ? p.identity : p.identity }}</span>
+            <span class="text-sm truncate text-gray-900 dark:text-gray-100">{{ p.kind === 'user' ? p.identity : p.identity }}</span>
             <span v-if="p.role !== 'member'" class="text-[10px] text-gray-400">{{ p.role }}</span>
           </div>
           <div class="text-[11px] text-gray-400">{{ p.kind === 'user' ? 'Human' : 'Agent' }}</div>

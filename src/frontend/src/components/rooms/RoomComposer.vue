@@ -29,7 +29,7 @@
         v-model="text"
         rows="1"
         placeholder="Message the room…  @mention an agent to wake it"
-        class="w-full resize-none rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm px-3 py-2.5 pr-12 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
+        class="w-full resize-none rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder:text-gray-400 dark:placeholder:text-gray-500 text-sm px-3 py-2.5 pr-12 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
         @input="onInput"
         @keydown="onKeydown"
       ></textarea>

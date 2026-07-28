@@ -40,7 +40,7 @@
             :class="r.status === 'open' ? 'bg-status-success-500 animate-pulse' : 'bg-gray-400 dark:bg-gray-600'"
             :title="r.status === 'open' ? 'Active' : `Closed — ${r.stop_reason || 'ended'}`"
           ></span>
-          <span class="text-sm font-medium truncate flex-1">{{ r.name }}</span>
+          <span class="text-sm font-medium truncate flex-1 text-gray-900 dark:text-gray-100">{{ r.name }}</span>
         </div>
         <div v-if="r.topic" class="ml-4 text-xs text-gray-400 truncate">{{ r.topic }}</div>
         <div class="ml-4 mt-1 flex items-center gap-3 text-[11px] text-gray-400">

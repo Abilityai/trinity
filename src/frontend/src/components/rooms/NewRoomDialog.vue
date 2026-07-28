@@ -1,20 +1,24 @@
 <template>
   <div class="fixed inset-0 z-40 flex items-center justify-center p-4" @click.self="$emit('close')">
-    <div class="absolute inset-0 bg-black/40"></div>
+    <!-- #1819: 40% was translucent enough that the page behind (the empty-state
+         copy in particular) read as stray text floating beside the dialog. A
+         heavier scrim plus a blur separates the layers instead of hiding the
+         page, so the modal still reads as an overlay. -->
+    <div class="absolute inset-0 bg-black/60 backdrop-blur-sm"></div>
     <div class="relative w-full max-w-lg rounded-2xl bg-white dark:bg-gray-900 shadow-xl border border-gray-200 dark:border-gray-800 max-h-[90vh] flex flex-col">
       <div class="px-5 py-4 border-b border-gray-200 dark:border-gray-800">
-        <h2 class="text-base font-semibold">New session</h2>
+        <h2 class="text-base font-semibold text-gray-900 dark:text-gray-100">New session</h2>
         <p class="text-xs text-gray-400 mt-0.5">Pick agents to work a topic together. You can @mention any of them once the room opens.</p>
       </div>
 
       <div class="px-5 py-4 space-y-4 overflow-y-auto">
         <div>
           <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Name</label>
-          <input v-model="name" type="text" placeholder="Design review" class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 text-sm px-3 py-2 focus:ring-2 focus:ring-action-primary-500/40 focus:outline-none" />
+          <input v-model="name" type="text" placeholder="Design review" class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100 placeholder:text-gray-400 dark:placeholder:text-gray-500 text-sm px-3 py-2 focus:ring-2 focus:ring-action-primary-500/40 focus:outline-none" />
         </div>
         <div>
           <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Topic <span class="text-gray-400">(optional)</span></label>
-          <input v-model="topic" type="text" placeholder="What should they work on?" class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 text-sm px-3 py-2 focus:ring-2 focus:ring-action-primary-500/40 focus:outline-none" />
+          <input v-model="topic" type="text" placeholder="What should they work on?" class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100 placeholder:text-gray-400 dark:placeholder:text-gray-500 text-sm px-3 py-2 focus:ring-2 focus:ring-action-primary-500/40 focus:outline-none" />
         </div>
 
         <div>
@@ -23,7 +27,7 @@
             <label v-for="a in roster" :key="a.name" class="flex items-center gap-2.5 px-3 py-2 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50">
               <input type="checkbox" :value="a.name" v-model="selected" class="rounded text-action-primary-600 focus:ring-action-primary-500" />
               <PortalAvatar :name="a.name" :avatar-url="a.avatar_url" :size="22" />
-              <span class="text-sm truncate">{{ a.name }}</span>
+              <span class="text-sm truncate text-gray-900 dark:text-gray-100">{{ a.name }}</span>
             </label>
             <div v-if="!roster.length" class="px-3 py-4 text-center text-xs text-gray-400">No agents you can access.</div>
           </div>
@@ -32,21 +36,21 @@
         <div class="grid grid-cols-3 gap-3">
           <div>
             <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Max messages</label>
-            <input v-model.number="maxMessages" type="number" min="1" max="500" class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 text-sm px-2.5 py-2 focus:outline-none" />
+            <input v-model.number="maxMessages" type="number" min="1" max="500" class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100 text-sm px-2.5 py-2 focus:outline-none" />
           </div>
           <div>
             <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Max cost $</label>
-            <input v-model.number="maxCost" type="number" min="0" step="0.5" placeholder="—" class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 text-sm px-2.5 py-2 focus:outline-none" />
+            <input v-model.number="maxCost" type="number" min="0" step="0.5" placeholder="—" class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100 placeholder:text-gray-400 dark:placeholder:text-gray-500 text-sm px-2.5 py-2 focus:outline-none" />
           </div>
           <div>
             <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">TTL hours</label>
-            <input v-model.number="ttlHours" type="number" min="0" max="168" class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 text-sm px-2.5 py-2 focus:outline-none" />
+            <input v-model.number="ttlHours" type="number" min="0" max="168" class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100 text-sm px-2.5 py-2 focus:outline-none" />
           </div>
         </div>
 
         <div v-if="selected.length > 1">
           <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Scribe <span class="text-gray-400">(optional — records outcomes)</span></label>
-          <select v-model="scribe" class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 text-sm px-3 py-2 focus:outline-none">
+          <select v-model="scribe" class="w-full rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100 text-sm px-3 py-2 focus:outline-none">
             <option :value="null">None</option>
             <option v-for="n in selected" :key="n" :value="n">{{ n }}</option>
           </select>
