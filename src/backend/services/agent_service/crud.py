@@ -1641,6 +1641,25 @@ def _release_ephemeral_on_no_docker(handles: _RollbackHandles) -> None:
             )
 
 
+def agent_name_is_taken(name: str) -> bool:
+    """True when `name` is claimed by a live, soft-deleted, or container-only
+    agent — the exact predicate the create path refuses on with
+    409 "Agent already exists".
+
+    Exported so a caller that catches that 409 can tell "the agent really is
+    there" from the create path's OTHER 409s (#1664 volume-base still owned,
+    #1667 unclaimed leftover volume, fork-destination in use), which look
+    identical by status code but mean the agent was NOT created (#1790).
+    Sharing one predicate is the point: a copy would drift the moment a new
+    claim source is added here.
+    """
+    return bool(
+        get_agent_by_name(name)
+        or db.get_agent_owner(name)
+        or db.is_agent_name_reserved(name)
+    )
+
+
 def _check_name_availability(config: AgentConfig) -> None:
     """Refuse a name already taken (#834 existence guard, incl. soft-deleted) or
     whose data volumes another agent still owns after a rename (#1664). Both
@@ -1651,11 +1670,7 @@ def _check_name_availability(config: AgentConfig) -> None:
     # create flow walks past the existence guard, the container ends up
     # created, and the agent_ownership INSERT hits a UNIQUE constraint
     # IntegrityError leaving the system half-built.
-    if (
-        get_agent_by_name(config.name)
-        or db.get_agent_owner(config.name)
-        or db.is_agent_name_reserved(config.name)
-    ):
+    if agent_name_is_taken(config.name):
         raise HTTPException(status_code=409, detail="Agent already exists")
 
     # #1664: the name being free does NOT mean its volumes are. Rename frees the
