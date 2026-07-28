@@ -25,6 +25,16 @@ rather than an importlib stub package: those harnesses register
 ``services.agent_service*`` in ``sys.modules`` for the rest of the session and
 are a known cross-file contamination source (#762). The only ``sys.modules``
 touch here is via ``monkeypatch.setitem``, which restores itself.
+
+Not being a contaminator is not the same as being immune to one, so this file
+also defends the other direction (see ``_real_modules_pinned``): five sibling
+unit files replace ``services.agent_service`` / ``.helpers`` with ``Mock``
+objects at COLLECTION time, i.e. before any test here runs. A leaked Mock is
+silent rather than loud — ``is_system_agent_name`` becomes "no agent is the
+system agent", so the AC2 gate never fires and the recreate it exists to
+suppress happens while every assertion still *looks* meaningful. These tests
+must therefore pin the real modules rather than inherit whichever ones import
+order happened to leave behind.
 """
 
 from __future__ import annotations
@@ -32,6 +42,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import re
+import sys
 
 import docker
 from pathlib import Path
@@ -40,6 +51,40 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 pytestmark = pytest.mark.unit
+
+# Imported here, at COLLECTION time, while `sys.modules` is still clean — the
+# sibling harnesses that overwrite these names (test_start_agent_skip_inject,
+# test_inject_assigned_credentials, test_monitoring_router_signatures,
+# test_subscription_auto_switch_no_cred_import) all sort after this file, so
+# collection reaches them second. Binding the real objects now is what makes
+# the pinning below possible at all: by the time a fixture runs, an `import`
+# would resolve to the Mock.
+import services.agent_service as _real_agent_service  # noqa: E402
+import services.agent_service.helpers as _real_helpers  # noqa: E402
+import services.agent_service.lifecycle as _real_lifecycle  # noqa: E402
+import services.system_agent_service as _real_system_agent_service  # noqa: E402
+
+_REAL_MODULES = {
+    "services.agent_service": _real_agent_service,
+    "services.agent_service.helpers": _real_helpers,
+    "services.agent_service.lifecycle": _real_lifecycle,
+    "services.system_agent_service": _real_system_agent_service,
+}
+
+
+@pytest.fixture(autouse=True)
+def _real_modules_pinned(monkeypatch):
+    """Pin the real modules for the duration of every test in this file (#762).
+
+    ``monkeypatch.setitem`` restores whatever the siblings left behind at
+    teardown, so their own harnesses — which hold direct module references, not
+    ``sys.modules`` lookups — are unaffected. Without this, running this file
+    alongside ``test_start_agent_skip_inject.py`` fails 21 tests: the leaked
+    ``helpers`` Mock returns ``False`` from ``is_system_agent_name`` and a
+    ``Mock`` (never ``"unknown"``) from ``check_base_image_state``.
+    """
+    for name, module in _REAL_MODULES.items():
+        monkeypatch.setitem(sys.modules, name, module)
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
