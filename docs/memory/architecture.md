@@ -552,6 +552,14 @@ without reading chat. Three-surface clone of `agent_activities`: `routers/report
 `services/report_service.py` (create + broadcast only; reads go router→`db/reports.py`
 directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{name}/reports`.
 
+- **Prompt discoverability** (#1535): `PLATFORM_INSTRUCTIONS` carries a "Publishing Reports"
+  block (`services/platform_prompt_service.py`) — the call, when to reach for it, and the
+  payload shape per `display_hint` — so reporting is a fleet-wide default instead of a
+  per-template opt-in. Runtime-aware for free via `_adapt_instructions_for_runtime` (#1187:
+  Codex gets the bare `report` name). The documented shapes are CI-pinned to the MCP tool's
+  `display_hint` enum and the `components/reports/` renderer keys
+  (`tests/unit/test_1535_report_prompt_guidance.py`) because that drift is silent — the write
+  succeeds and the report falls back to the raw JSON viewer.
 - **Self-gated create**: `AuthorizedAgent` checks owner-access to the path agent, but an
   agent-scoped key could otherwise report as a *sibling* agent the owner shares; the endpoint
   additionally requires `current_user.agent_name == name` for agent-scoped callers (mirrors

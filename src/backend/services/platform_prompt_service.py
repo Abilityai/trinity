@@ -52,6 +52,29 @@ When the user asks for a file (CSV, PDF, report, image, exported data, etc.) or 
 
 The platform returns a time-limited download URL that works across every channel (web, Slack, Telegram, WhatsApp, email). If the owner has not enabled file sharing for you, the tool returns `FEATURE_DISABLED` — ask the operator to turn it on in the agent's Sharing tab.
 
+### Publishing Reports
+
+Results a human will re-read later — findings from a scheduled run, batch summaries, KPI snapshots, numbers someone compares against next period — belong in a **report**, not only in chat. Chat is read once; a report is persisted on your Reports tab and the fleet Reports view. Reports are one-way: when you need a *decision*, use the operator queue below instead.
+
+```
+mcp__trinity__report(
+    report_type="recon.weekly_summary",    # namespaced, lower_snake
+    title="Week 30: 14 leads, 3 qualified",
+    payload={...},                         # max 256 KB serialized
+    display_hint="table",                  # optional, see below
+    period_start="...", period_end="...")  # optional ISO-8601
+```
+
+Match the payload to the `display_hint` or it renders as raw JSON:
+
+- `table` — `{"columns": ["Name","Status"], "rows": [["Acme","qualified"]]}` (a row may instead be an object keyed by column)
+- `kpi` — `{"tiles": [{"label": "Leads", "value": 14, "unit": "new"}]}`
+- `markdown` — `{"markdown": "## Findings\\n..."}`
+- `timeline` — `{"events": [{"ts": "2026-07-27T09:00:00Z", "label": "Deal closed", "detail": "..."}]}`
+- `json` — any shape, when none of the above fit
+
+Aggregate before publishing: the 20 rows that matter, not 5,000 raw ones. Oversized payloads are rejected and reports are rate-limited.
+
 ### Operator Communication
 
 You can ask your human operator for input — approvals, answers to questions, or alerts — through a file-based queue protocol.
@@ -179,8 +202,9 @@ _CODEX_MCP_ORIENTATION = (
     "## MCP Tools (Codex runtime)\n\n"
     "A Trinity MCP server named `trinity` is configured for you. Call its tools "
     "by the bare names documented below — `list_agents`, `chat_with_agent`, "
-    "`share_file`, `write_user_memory` — exactly as your client auto-discovers "
-    "them. Do not add any vendor-specific tool-name prefix.\n\n---\n\n"
+    "`share_file`, `report`, `write_user_memory` — exactly as your client "
+    "auto-discovers them. Do not add any vendor-specific tool-name prefix."
+    "\n\n---\n\n"
 )
 
 

@@ -317,6 +317,18 @@ endpoint — reports flow agent → MCP → backend.
   the JSON viewer on mismatch. List shows metadata; full payload lazy-loads on expand.
 - **FR-6 — Retention**: cleanup sweep deletes `agent_reports` older than
   `agent_reports_retention_days` (default 90; `0` disables), chunked like the #772 sweeps.
+- **FR-7 — Discoverability via the platform prompt** (#1535, epic #1534): `PLATFORM_INSTRUCTIONS`
+  carries a "Publishing Reports" block, so reporting is a default fleet behaviour instead of
+  something only agents whose own CLAUDE.md mentions it ever do. Documents the call, when to
+  reach for it (results a human re-reads: scheduled-run findings, batch summaries, KPI
+  snapshots), the payload shape per `display_hint` — the shapes FR-5's renderers dispatch on,
+  since a mismatch fails silently as a raw-JSON fallback — the aggregate-before-publishing
+  expectation given the FR-3 cap, and the reports-are-one-way boundary against §26's operator
+  queue. Runtime-aware for free via `_adapt_instructions_for_runtime` (#1187: Codex gets bare
+  `report`, not `mcp__trinity__report`), and the Codex orientation note lists the tool.
+  Additive — templates that already instruct reporting are unaffected. Budget: the block ships
+  on every turn of every agent, so it is capped (~1.3 KB) and CI-pinned to the MCP tool's
+  `display_hint` enum and the renderers' payload keys, which is where silent drift would live.
 
 **Deferred**: effect-guard dedup on `report()` for at-least-once pull-mode re-delivery
 (#1084/Epic #1045); audit-log entry on write; per-report sharing distinct from agent access.
