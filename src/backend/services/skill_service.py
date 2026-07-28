@@ -640,24 +640,35 @@ print(json.dumps({{
         return result
 
     async def _finalize_injected_dirs(
-        self, agent_name: str, skill_names: List[str], exec_paths: List[str]
+        self,
+        agent_name: str,
+        skill_names: List[str],
+        exec_paths: List[str],
+        pruned_paths: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Post-restore finalization in ONE exec: chmod +x (git modes are
-        dropped by restore's write_bytes), per-skill .gitignore lines, and
-        untracking already-committed matches.
+        dropped by restore's write_bytes), per-skill .gitignore lines,
+        untracking already-committed matches, and reaping directories the prune
+        just emptied (#1842).
 
         The gitignore step is load-bearing (strategy review F1): the 15-min git
         auto-sync deliberately COMMITS .claude/, so without per-name ignore
         lines every injected package lands in the agent's GitHub repo — the
         #1595/#1596 fleet bloat class. Only platform-injected names are
         ignored; agent-authored Playbooks keep committing.
+
+        The empty-dir reap rides here rather than next to the per-file DELETEs
+        because it needs to ASK the filesystem whether a directory is now empty
+        — one in-agent exec answers that for every pruned path at once, where
+        the remote file API would need a round trip per directory.
         """
         script = f"""
 import json, os, stat, subprocess
 names = {json.dumps(sorted(set(skill_names)))}
 exec_paths = {json.dumps(sorted(set(exec_paths)))}
+pruned_paths = {json.dumps(sorted(set(pruned_paths or [])))}
 home = os.path.expanduser("~")
-out = {{"chmod": 0, "gitignore": False, "untracked": False, "errors": []}}
+out = {{"chmod": 0, "gitignore": False, "untracked": False, "rmdir": 0, "errors": []}}
 for rel in exec_paths:
     p = os.path.join(home, rel)
     try:
@@ -665,6 +676,27 @@ for rel in exec_paths:
         out["chmod"] += 1
     except Exception:
         out["errors"].append("chmod:" + rel)
+# #1842: compute_prune diffs MANIFESTS, and a manifest holds files, so dropping
+# a package subdirectory deleted its files and left the directory standing. Climb
+# from each pruned file toward the skill root, removing only what is already
+# empty. `os.rmdir` IS the safety property: it refuses a directory holding
+# anything, so runtime artifacts a skill's own scripts wrote (__pycache__,
+# downloaded models) and agent-authored files keep the directory alive — the same
+# "only remove what the platform wrote" guarantee compute_prune states. It also
+# refuses a symlink (NotADirectoryError), so a doctored tree cannot redirect it.
+for rel in pruned_paths:
+    parts = rel.split("/")
+    if len(parts) < 4 or parts[0] != ".claude" or parts[1] != "skills":
+        continue  # prefix confinement, mirroring compute_prune's own guard
+    root = "/".join(parts[:3])
+    d = os.path.dirname(rel)
+    while d.startswith(root + "/"):
+        try:
+            os.rmdir(os.path.join(home, d))
+            out["rmdir"] += 1
+        except OSError:
+            break  # non-empty, already gone, or not a directory — stop climbing
+        d = os.path.dirname(d)
 lines = [".claude/skills/%s/" % n for n in names]
 gi = os.path.join(home, ".gitignore")
 try:
@@ -763,6 +795,9 @@ print(json.dumps(out))
         running_total = 0
         exec_paths: List[str] = []
         injected_names: List[str] = []
+        # #1842: paths the prune deleted, so finalize can reap any directory
+        # they leave empty.
+        pruned_paths: List[str] = []
         contracts: Dict[str, Dict[str, Any]] = {}
 
         for skill_name in skill_names:
@@ -872,14 +907,16 @@ print(json.dumps(out))
                             warnings.append("prune_truncated")
                         for path in stale:
                             deleted = await self._delete_agent_file(client, path)
-                            if not deleted:
+                            if deleted:
+                                pruned_paths.append(path)
+                            else:
                                 warnings.append(f"stale_delete_failed:{path}")
             results[skill_name] = outcome
 
         # Post-restore finalization: chmod + gitignore + untrack, one exec.
         if injected_names:
             finalize = await self._finalize_injected_dirs(
-                agent_name, injected_names, exec_paths
+                agent_name, injected_names, exec_paths, pruned_paths
             )
             if not isinstance(finalize, dict):
                 for name in injected_names:
