@@ -88,11 +88,13 @@ class TestCreateAgent:
             },
         )
 
-        # May fail if template doesn't exist, which is acceptable
-        if response.status_code in [200, 201]:
-            resource_tracker.track_agent(test_agent_name)
-            data = response.json()
-            assert data.get("name") == test_agent_name
+        # #1759: `local:default` is a real shipped template and an absent one
+        # is now a hard 400, so the old `if status in [200, 201]` tolerance had
+        # become a way for this test to silently assert nothing at all.
+        assert_status_in(response, [200, 201])
+        resource_tracker.track_agent(test_agent_name)
+        data = response.json()
+        assert data.get("name") == test_agent_name
 
     def test_create_agent_with_resources(
         self,

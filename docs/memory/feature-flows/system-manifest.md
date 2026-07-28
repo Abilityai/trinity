@@ -61,7 +61,7 @@ agents:
         message: "Check progress and adjust"
 
   writer:
-    template: local:business-assistant
+    template: local:default
     folders:
       expose: true
       consume: true
@@ -69,7 +69,7 @@ agents:
       - worker
 
   editor:
-    template: local:business-assistant
+    template: local:default
     folders:
       expose: false
       consume: true
@@ -168,7 +168,7 @@ permissions:
 ```python
 class SystemAgentConfig(BaseModel):
     """Configuration for a single agent in a system manifest."""
-    template: str  # e.g., "github:Org/repo" or "local:business-assistant"
+    template: str  # e.g., "github:Org/repo" or "local:default"
     resources: Optional[dict] = None  # {"cpu": "2", "memory": "4g"}
     folders: Optional[dict] = None  # {"expose": bool, "consume": bool}
     schedules: Optional[List[dict]] = None  # [{name, cron, message, ...}]
@@ -684,7 +684,7 @@ async def list_systems(current_user: User = Depends(get_current_user)):
         {
           "name": "content-production-writer",
           "status": "running",
-          "template": "local:business-assistant"
+          "template": "local:default"
         }
       ],
       "created_at": "2025-12-18T10:00:00Z"
@@ -822,7 +822,7 @@ agents:
       enabled: true
       timezone: UTC
   writer:
-    template: local:business-assistant
+    template: local:default
     folders:
       expose: true
       consume: true
