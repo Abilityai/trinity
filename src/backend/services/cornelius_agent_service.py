@@ -34,6 +34,7 @@ Two fire-and-forget call sites (neither ever blocks its caller):
      backgrounded via `asyncio.create_task`.
 """
 import logging
+from typing import Optional
 
 from database import db
 from models import AgentConfig, User
@@ -62,7 +63,7 @@ _PROVISION_LOCK_TTL = 300  # seconds
 class CorneliusAgentService:
     """Seeds the default Cornelius agent exactly once on a fresh install."""
 
-    async def ensure_seeded(self) -> dict:
+    async def ensure_seeded(self, fresh: Optional[bool] = None) -> dict:
         """
         Seed the default Cornelius agent if — and only if — this is a genuinely
         fresh install that hasn't been seeded yet.
@@ -70,6 +71,15 @@ class CorneliusAgentService:
         Idempotent and safe to call from multiple triggers / workers. Never raises:
         returns a result dict (mirrors `system_agent_service.ensure_deployed`) so a
         background task or lifespan caller can't be broken by provisioning failure.
+
+        Args:
+            fresh: Precomputed first-run verdict (trinity-enterprise#124). The
+                orchestrator (`system_seed_service.ensure_first_run_seeded`)
+                computes freshness ONCE and passes it to every seeder — without
+                this, agents created by a sibling seeder poison this service's
+                own count on a retry pass (a failed Cornelius would self-mark
+                seeded after the starter fleet lands). `None` preserves the
+                legacy behavior: compute from `count_non_system_agents()`.
         """
         result = {"agent_name": CORNELIUS_AGENT_NAME, "action": None, "status": None, "message": None}
 
@@ -85,16 +95,24 @@ class CorneliusAgentService:
         # 2. Fresh-install only. Any pre-existing non-system agent means this is an
         #    established install being upgraded — do NOT surprise it with a heavy
         #    container. Mark seeded so we stop re-checking every boot.
-        try:
-            if db.count_non_system_agents() > 0:
+        #    A precomputed verdict (ent#124 orchestrator) replaces the live count so
+        #    sibling-seeded agents can't flip a genuinely-fresh install to "not fresh".
+        if fresh is None:
+            try:
+                fresh = db.count_non_system_agents() == 0
+            except Exception as e:  # never let a count query break startup
+                logger.warning("Cornelius seed: non-system agent count failed (%s) — skipping this pass", e)
+                return self._skip(result, "skipped_error", f"agent count failed: {e}")
+        if not fresh:
+            try:
                 db.set_setting(_SEEDED_FLAG, "true")
-                return self._skip(
-                    result, "skipped_not_fresh",
-                    "Existing agents present — not a fresh install; marking seeded without provisioning",
-                )
-        except Exception as e:  # never let a count query break startup
-            logger.warning("Cornelius seed: non-system agent count failed (%s) — skipping this pass", e)
-            return self._skip(result, "skipped_error", f"agent count failed: {e}")
+            except Exception as e:  # preserve the never-raises contract
+                logger.warning("Cornelius seed: failed to persist seeded flag (%s)", e)
+                return self._skip(result, "skipped_error", f"flag write failed: {e}")
+            return self._skip(
+                result, "skipped_not_fresh",
+                "Existing agents present — not a fresh install; marking seeded without provisioning",
+            )
 
         # 3. Owner must exist. On a truly-fresh pre-setup boot the admin row is not
         #    created until first-time setup completes; skip WITHOUT setting the flag
@@ -127,13 +145,35 @@ class CorneliusAgentService:
             logger.info("Cornelius agent seeded and Brain Orb enabled by default")
             return result
         except Exception as e:
-            # 409 = the agent already exists (another worker won, or a prior partial
-            # run). Treat as success: converge the flag so we stop retrying.
+            # A 409 is NOT self-evidently "already exists" (#1790). The create path
+            # raises the same status for conditions under which NOTHING was created:
+            # a leftover unclaimed workspace volume (#1667 — what a `down -v` then
+            # re-setup leaves behind), volumes still owned by a renamed agent
+            # (#1664), a fork destination already bound. Converging the durable flag
+            # on one of those is unrecoverable: the flag suppresses every later
+            # attempt, so the install stays permanently Cornelius-less while
+            # claiming it was seeded (and `system_seed_service.ensure_first_run_
+            # seeded()` then reads the install as not-fresh). Confirm the agent is
+            # actually there before treating the 409 as convergence.
             status_code = getattr(e, "status_code", None)
             if status_code == 409:
-                db.set_setting(_SEEDED_FLAG, "true")
-                self._seed_brain_orb_flag()
-                return self._skip(result, "already_exists", "Cornelius already exists (409) — marking seeded")
+                if self._agent_is_present():
+                    db.set_setting(_SEEDED_FLAG, "true")
+                    self._seed_brain_orb_flag()
+                    return self._skip(result, "already_exists", "Cornelius already exists (409) — marking seeded")
+                # 409 with no agent behind it: a precondition blocked creation. Leave
+                # the flag unset so the next boot retries — the usual cause (a
+                # leftover `agent-cornelius-workspace`) is reclaimed on its own by
+                # the #1581 orphan-volume sweep, so the retry converges unattended.
+                result.update(
+                    action="create_blocked", status="error",
+                    message=f"Cornelius seed blocked (409, agent not created): {e}",
+                )
+                logger.error(
+                    "Cornelius seed blocked by a 409 that created no agent — flag left "
+                    "unset so a later boot retries. Cause: %s", e,
+                )
+                return result
             # Any other failure: do NOT set the flag — retry on the next trigger/boot.
             result.update(action="create_failed", status="error",
                           message=f"Failed to seed Cornelius: {e}")
@@ -161,6 +201,30 @@ class CorneliusAgentService:
             # template.yaml inside create_agent_internal.
         )
         await create_agent_internal(config, admin_user, request=None)
+
+    def _agent_is_present(self) -> bool:
+        """Is a Cornelius actually claiming the name? (#1790)
+
+        Reuses the create path's own `agent_name_is_taken` — the predicate behind
+        its 409 "Agent already exists" — rather than re-deriving one here, so the
+        two can't drift when a new claim source is added (live row, soft-deleted
+        row, container-only leftover).
+
+        Fails toward RETRY: if the probe itself errors we report absent, so the
+        flag stays unset. The two mistakes are not symmetric — a wrong "absent"
+        costs one redundant create attempt that 409s again next boot, while a
+        wrong "present" burns the durable flag and is unrecoverable without
+        hand-editing `system_settings`. That asymmetry is the whole bug.
+        """
+        try:
+            from services.agent_service.crud import agent_name_is_taken
+
+            return agent_name_is_taken(CORNELIUS_AGENT_NAME)
+        except Exception as e:  # noqa: BLE001 — never let the probe raise out of the handler
+            logger.warning(
+                "Cornelius seed: presence probe failed (%s) — treating as absent so a later boot retries", e,
+            )
+            return False
 
     def _seed_brain_orb_flag(self) -> None:
         """Enable the Brain Orb platform flag by default — but only if no explicit

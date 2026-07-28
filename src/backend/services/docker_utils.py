@@ -166,6 +166,26 @@ async def container_get(container_id: str) -> Any:
 
 
 # =============================================================================
+# Image Operations
+# =============================================================================
+
+async def image_get(name: str) -> Any:
+    """Get an image without blocking the event loop.
+
+    Args:
+        name: Image reference — tag (e.g. ``trinity-agent-base:latest``) or ID
+
+    Returns:
+        Image object
+
+    Raises:
+        docker.errors.ImageNotFound: If the image doesn't exist
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_docker_executor, docker_client.images.get, name)
+
+
+# =============================================================================
 # Volume Operations
 # =============================================================================
 

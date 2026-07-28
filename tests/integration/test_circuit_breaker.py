@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
-import os
 import sys
 import time
 import uuid
@@ -31,39 +30,19 @@ import httpx
 import pytest
 import redis as _redis
 
-# Add backend to sys.path BEFORE importing — agent_client imports `config` which
-# fails fast if REDIS_URL lacks credentials. We override REDIS_URL with the
-# backend ACL credentials sourced from .env so the backend's config.py accepts.
+# Add backend to sys.path BEFORE importing — agent_client imports `config`, which
+# fails fast if REDIS_URL lacks credentials. #1775: this module no longer supplies
+# those credentials itself; tests/integration/conftest.py has already resolved and
+# applied the target by the time this file is imported.
 _REPO = Path(__file__).resolve().parent.parent.parent
 _BACKEND = _REPO / "src" / "backend"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 
-def _load_env_password() -> str:
-    """Pull REDIS_BACKEND_PASSWORD out of the repo .env."""
-    env_path = _REPO / ".env"
-    if not env_path.exists():
-        pytest.skip(".env missing — cannot derive Redis credentials", allow_module_level=True)
-    for line in env_path.read_text().splitlines():
-        if line.startswith("REDIS_BACKEND_PASSWORD="):
-            return line.split("=", 1)[1].strip()
-    pytest.skip("REDIS_BACKEND_PASSWORD not found in .env", allow_module_level=True)
-
-
-# Point config.py at the local stack BEFORE importing agent_client.
-# Honor a pre-set REDIS_URL (sibling-stack workflows / CI on alternate
-# ports). Default: derive from .env + localhost:6379 for the standard
-# `./scripts/deploy/start.sh` dev stack.
-if "REDIS_URL" not in os.environ:
-    _PASSWORD = _load_env_password()
-    os.environ["REDIS_URL"] = f"redis://backend:{_PASSWORD}@localhost:6379"
-# REDIS_PASSWORD / REDIS_BACKEND_PASSWORD aren't read by config.py (which
-# only consumes REDIS_URL), but a few test paths still reach for them.
-# Setdefault keeps the contract backward-compatible without overwriting
-# values supplied by the caller's environment.
-os.environ.setdefault("REDIS_PASSWORD", "test")
-os.environ.setdefault("REDIS_BACKEND_PASSWORD", "test")
+# #1775: config.py is pointed at the resolved Redis target by
+# tests/integration/conftest.py, which runs before this module is imported.
+# No import-time os.environ mutation lives here any more.
 
 
 # Import via importlib to avoid pulling in the full services/__init__.py
@@ -83,21 +62,8 @@ pytestmark = pytest.mark.integration
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
-@pytest.fixture(scope="module")
-def redis_client():
-    """Direct Redis client used to inspect state and clean up after tests."""
-    client = _redis.from_url(
-        os.environ["REDIS_URL"],
-        decode_responses=True,
-        socket_connect_timeout=2,
-        socket_timeout=2,
-    )
-    try:
-        client.ping()
-    except Exception as e:
-        pytest.skip(f"Redis unavailable: {e}")
-    yield client
-    client.close()
+# `redis_client` (used below to inspect state and clean up) comes from
+# tests/integration/conftest.py (#1775).
 
 
 @pytest.fixture

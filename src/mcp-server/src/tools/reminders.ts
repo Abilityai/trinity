@@ -69,7 +69,11 @@ export function createReminderTools(
         "`delay_seconds` (relative) or `fire_at` (absolute ISO-8601). The fire " +
         "must be at least 60s and at most 30 days out. Durable — survives a " +
         "backend/scheduler restart. Use `list_reminders`/`cancel_reminder` to " +
-        "manage pending ones.",
+        "manage pending ones. NOTE: reminders only fire while the agent's " +
+        "autonomy mode is ON. If autonomy is off the reminder is accepted and " +
+        "HELD (the response sets `autonomy_hold`), then fires past-due once " +
+        "autonomy is re-enabled — tell the user this rather than promising a " +
+        "reminder that cannot arrive.",
       parameters: z.object({
         agent_name: z
           .string()
@@ -148,7 +152,20 @@ export function createReminderTools(
             timeout_seconds: params.timeout_seconds,
             allowed_tools: params.allowed_tools,
           });
-          return JSON.stringify({ success: true, ...(result as object) }, null, 2);
+          const reminder = result as { autonomy_hold?: boolean };
+          // #1806: the reminder is accepted but the scheduler will not arm it
+          // while autonomy is off. Surface an explicit sentence, not just the
+          // boolean — the caller is an LLM about to tell a user "done".
+          const warning = reminder?.autonomy_hold
+            ? "HELD: this agent's autonomy mode is off, so this reminder will " +
+              "NOT fire until autonomy is re-enabled (it will then fire past-due). " +
+              "Do not tell the user the reminder is scheduled without saying this."
+            : undefined;
+          return JSON.stringify(
+            { success: true, ...(result as object), ...(warning ? { warning } : {}) },
+            null,
+            2
+          );
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           console.error(`[set_reminder] error: ${msg}`);

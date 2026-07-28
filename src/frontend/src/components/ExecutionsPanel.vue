@@ -56,6 +56,24 @@
       </div>
     </div>
 
+    <!--
+      #1743: these totals include executions whose agent has since been deleted.
+      The rows are kept on purpose — cost is billing truth and a soft-deleted
+      agent is recoverable — but no per-agent surface renders a deleted agent, so
+      without this line the fleet totals exceed the sum of the Dashboard tiles by
+      an amount nothing explains. Shown only when there is something to explain.
+    -->
+    <p
+      v-if="store.stats?.deleted_agent_count > 0"
+      class="-mt-2 mb-4 text-xs text-gray-500 dark:text-gray-400"
+    >
+      Includes
+      <span class="font-medium text-gray-700 dark:text-gray-300">{{ store.stats.deleted_agent_count }}</span>
+      execution<span v-if="store.stats.deleted_agent_count !== 1">s</span>
+      ({{ formatCostCompact(store.stats.deleted_agent_cost) }})
+      from deleted agents, which have no tile on the dashboard.
+    </p>
+
     <!-- Filter bar -->
     <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg mb-4">
       <div class="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">

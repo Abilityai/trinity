@@ -47,5 +47,6 @@ These directories are **excluded from the user-facing catalog** (`GET /api/templ
 - **Test/canary fixtures** — `test-echo`, `test-counter`, `test-delegator`, `test-codex`, `test-gemini`, `test-leak-hook`, `sleep-echo`. Used by the test suite and the canary harness; `test-leak-hook` is a deliberately hazardous subprocess-leak repro — do **not** deploy it in production.
 - **Demo fixtures** — `demo-researcher`, `demo-analyst`. A minimal producer→consumer shared-folder pair deployed together by the demo-fleet manifests, not a starting point to build on.
 - **Platform agent** — `trinity-system`. Auto-deployed and deletion-protected platform-operations agent; not something you create yourself.
+- **Minimal reference** — `default`. The smallest template that still resolves: no tools, no schedules, no shared folders. It backs the `local:default` id used by the manifest/API documentation and the integration suites, so those examples deploy a real (if empty) agent instead of silently producing a blank container (#1759). To start a genuinely empty agent from the UI, use **Blank Agent** — not this.
 
 Adding a new fixture? Set `hidden: true` in its `template.yaml` so it never leaks into the catalog (a unit test guards this — see `tests/unit/test_local_templates_listing.py`).

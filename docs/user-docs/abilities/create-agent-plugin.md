@@ -26,13 +26,14 @@ Create new Claude Code agents with domain-specific wizards. Each wizard is a dom
 | **website** | `/create-agent:website` | Single website scaffold (no agent, just a site) |
 | **custom** | `/create-agent:custom` | Custom agent from scratch — you define everything |
 | **clone** | `/create-agent:clone` | Clone an existing agent repository as starting point |
-| **adjust** | `/create-agent:adjust` | Review and improve an existing agent |
+| **review** | `/create-agent:review` | Read-only audit of an existing agent — prioritized findings report, no changes made |
+| **adjust** | `/create-agent:adjust` | Apply best-practice improvements to an existing agent |
 
 ## How It Works
 
 ### Discovery Entry Point
 
-Run `/create-agent:create` to see all 13 available wizards and select one interactively.
+Run `/create-agent:create` to see all 14 available wizards and select one interactively.
 
 ### Wizard Flow
 
@@ -83,13 +84,14 @@ The wizard asks about:
 
 Blank canvas — you define every aspect from scratch.
 
-### Improve an Existing Agent
+### Review and Improve an Existing Agent
 
 ```bash
-/create-agent:adjust
+/create-agent:review    # Read-only audit — prioritized findings, no changes
+/create-agent:adjust    # Apply the improvements
 ```
 
-Audits the current agent against best practices and suggests improvements.
+`review` audits the agent against best practices — CLAUDE.md, skills, composition integrity, Trinity readiness — and produces a prioritized findings report without changing anything. `adjust` is the write-side companion: it proposes exact before/after changes and applies the ones you approve.
 
 ## See Also
 

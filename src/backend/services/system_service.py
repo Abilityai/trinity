@@ -3,16 +3,33 @@ System manifest parsing and deployment service.
 
 Handles YAML parsing, validation, agent naming, and deployment orchestration.
 """
+import json
 import yaml
 import re
 import logging
-from typing import Dict, List, Tuple, Optional
+from typing import Callable, Dict, List, Tuple, Optional
 
-from models import SystemManifest, SystemAgentConfig, SystemPermissions, SystemViewConfig
+from fastapi import HTTPException, Request
+
+from models import (
+    AgentConfig,
+    SystemManifest,
+    SystemAgentConfig,
+    SystemPermissions,
+    SystemViewConfig,
+    SystemDeployFailure,
+    SystemDeployResponse,
+    User,
+)
 from database import db
 from db_models import ScheduleCreate, SystemViewCreate
+from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
 
 logger = logging.getLogger(__name__)
+
+# trinity-enterprise#125: cap on a single agent-create failure reason in the
+# deploy report (the full text is still in the backend log).
+_REASON_MAX_LEN = 500
 
 
 def parse_manifest(yaml_str: str) -> SystemManifest:
@@ -575,14 +592,35 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
     """
     # Extract short names (remove system prefix)
     agent_configs = {}
+    # Agents with no template label, whose manifest entry is inferred (#1759).
+    templateless: List[str] = []
     for agent in agents:
         full_name = agent['name']
         # Remove system prefix and hyphen
         short_name = full_name[len(system_name) + 1:]
 
+        # #1759: `or`, NOT a `.get` default. Every Blank Agent's dict carries
+        # `"template": None` (routers/agents.py builds the label as
+        # `config.template or ''` then `or None`), and `dict.get(key, default)`
+        # returns the default only when the key is ABSENT — so the old
+        # `local:business-assistant` fallback was unreachable dead code, and
+        # blank agents have always exported `template: null`. Since
+        # `SystemAgentConfig.template` is a non-Optional `str`, redeploying
+        # such a manifest already failed Pydantic validation; and
+        # `config/agent-templates/business-assistant` has never existed. This
+        # is a pre-existing broken round-trip on the platform's most common
+        # agent type, not a regression introduced by the create-time gate.
+        # `local:default` is the truthful representation of a template-less
+        # agent (a real, minimal template) — a product template like
+        # `local:scout` would fabricate provenance.
+        template = agent.get('template') or None
+        if template is None:
+            templateless.append(full_name)
+            template = 'local:default'
+
         # Get agent details
         config = {
-            "template": agent.get('template', 'local:business-assistant')
+            "template": template
         }
 
         # Get resources (if available from labels)
@@ -629,6 +667,16 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
             logger.warning(f"Failed to get tags for {full_name}: {e}")
 
         agent_configs[short_name] = config
+
+    if templateless:
+        # `export_manifest` returns a bare YAML string (routers/systems.py), so
+        # there is no structured field to carry this — a log line is the only
+        # non-contract-breaking channel (#1759).
+        logger.warning(
+            "Exported system '%s': %d agent(s) have no template label; their "
+            "manifest entry was inferred as 'local:default': %s",
+            system_name, len(templateless), ", ".join(sorted(templateless)),
+        )
 
     # Build manifest dict
     manifest_dict = {
@@ -711,3 +759,323 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
     yaml_output = yaml.dump(manifest_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
     return yaml_output
+
+
+# ============================================================================
+# Deploy orchestration (moved verbatim from routers/systems.py, ent#124 —
+# Invariant #1: a service (the first-run seeder) must reuse the deploy pipeline
+# without importing a router; #1578 precedent)
+# ============================================================================
+
+def _default_create_agent_fn():
+    """Resolve the agent-create function at call time.
+
+    Deliberately the `routers/agents.py` FACADE — not `services.agent_service
+    .crud.create_agent_internal` — because the facade injects `ws_manager`, so
+    `agent_created` WebSocket broadcasts keep firing on every deploy path
+    (HTTP and first-run seed alike). Lazy call-time import: an import-time edge
+    back into a router would be a cycle (same pattern as `start_all_agents`).
+    Unit seam: tests patch this function (or pass `create_agent_fn=`).
+    """
+    from routers.agents import create_agent_internal
+    return create_agent_internal
+
+
+def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
+    """Normalize an agent-create exception into a (reason, status_code) pair.
+
+    HTTPException details may be dicts (e.g. QUOTA_EXCEEDED) — prefer their
+    'error' field. Reasons are credential-sanitized and URL-userinfo-redacted
+    at this exit point because git/GitHub errors can embed PAT-bearing remote
+    URLs (learnings 2026-07-14) and the deploy report is a durable response
+    surface (trinity-enterprise#125).
+    """
+    status_code: Optional[int] = None
+    if isinstance(exc, HTTPException):
+        status_code = exc.status_code
+        detail = exc.detail
+        if isinstance(detail, dict):
+            reason = detail.get("error")
+            if not isinstance(reason, str) or not reason:
+                reason = json.dumps(detail, default=str)
+        else:
+            reason = str(detail)
+    else:
+        reason = str(exc)
+    reason = sanitize_text(redact_url_userinfo(reason))
+    return reason[:_REASON_MAX_LEN], status_code
+
+
+async def deploy_manifest(
+    manifest_yaml: str,
+    current_user: User,
+    request: Optional[Request] = None,
+    *,
+    dry_run: bool = False,
+    strict: bool = False,
+    create_agent_fn: Optional[Callable] = None,
+) -> SystemDeployResponse:
+    """
+    Deploy a multi-agent system from a YAML manifest.
+
+    This is a "recipe" deployment - agents become independent after creation.
+
+    Best-effort by default (trinity-enterprise#125): a per-agent create failure
+    is reported in `failed[]` and the remaining agents still deploy; callers
+    must check `status`, not just exceptions. `status` is "deployed" (all
+    created), "partial" (some failed), "failed" (none created — RETURNED, not
+    raised; the HTTP router maps it to a 500 JSONResponse), or "valid"
+    (dry_run). `strict=True` aborts on the first agent-create failure (legacy
+    behavior), preserving the failure's original status code by raising
+    HTTPException. Parse/validation errors raise HTTPException(400); any other
+    unexpected error raises HTTPException(500) — callers see HTTPException
+    uniformly (ent#124 verbatim-delta: the catch-all lives here, the
+    failed→500 wrap lives in the router).
+    """
+    try:
+        # 1. Parse YAML
+        try:
+            manifest = parse_manifest(manifest_yaml)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        # 2. Validate manifest
+        try:
+            validation_warnings = validate_manifest(manifest)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        # 3. Resolve agent names (handle conflicts)
+        agent_names, name_warnings = resolve_agent_names(
+            manifest.name,
+            manifest.agents
+        )
+        all_warnings = validation_warnings + name_warnings
+
+        # 4. If dry_run, return preview
+        if dry_run:
+            agents_to_create = [
+                {
+                    "name": final_name,
+                    "short_name": short_name,
+                    "template": manifest.agents[short_name].template
+                }
+                for short_name, final_name in agent_names.items()
+            ]
+
+            return SystemDeployResponse(
+                status="valid",
+                system_name=manifest.name,
+                agents_created=[],
+                agents_to_create=agents_to_create,
+                prompt_updated=bool(manifest.prompt),
+                warnings=all_warnings
+            )
+
+        # 5. Create all agents — best-effort by default (trinity-enterprise#125):
+        # a per-agent failure is collected and the remaining agents still
+        # deploy. `strict=True` restores abort-on-first-error, preserving the
+        # failing agent's original status code. Each failed create self-cleans
+        # via create_agent_internal's own rollback (#1484 _RollbackHandles).
+        create_agent = create_agent_fn or _default_create_agent_fn()
+        created_agents = []
+        failed: list[SystemDeployFailure] = []
+        for short_name, config in manifest.agents.items():
+            final_name = agent_names[short_name]
+
+            try:
+                # Build AgentConfig for existing create_agent logic
+                agent_config = AgentConfig(
+                    name=final_name,
+                    template=config.template,
+                    resources=config.resources or {"cpu": "2", "memory": "4g"}
+                )
+
+                # Create agent using existing internal function
+                await create_agent(
+                    config=agent_config,
+                    current_user=current_user,
+                    request=request,
+                    skip_name_sanitization=True  # Name already validated
+                )
+
+                created_agents.append(final_name)
+                logger.info(f"Created agent '{final_name}' for system '{manifest.name}'")
+
+            except Exception as e:
+                reason, status_code = _failure_reason(e)
+                logger.error(f"Failed to create agent '{final_name}': {reason}")
+
+                if strict:
+                    raise HTTPException(
+                        status_code=status_code or 500,
+                        detail={
+                            "error": "Deployment failed",
+                            "failed_at": final_name,
+                            "created": created_agents,
+                            "reason": reason
+                        }
+                    )
+
+                failed.append(SystemDeployFailure(
+                    name=final_name,
+                    short_name=short_name,
+                    template=config.template,
+                    reason=reason,
+                    status_code=status_code
+                ))
+
+        # 6. Total failure: nothing was created — return the full report; the
+        # HTTP router wraps it in a non-2xx response so code-only callers
+        # (curl -f) don't read it as success.
+        if not created_agents:
+            logger.error(
+                f"System '{manifest.name}' deploy failed: 0/{len(agent_names)} agents created"
+            )
+            return SystemDeployResponse(
+                status="failed",
+                system_name=manifest.name,
+                agents_created=[],
+                prompt_updated=False,
+                warnings=all_warnings,
+                failed=failed
+            )
+
+        # 6b. Update trinity_prompt (if provided) — moved after the create loop
+        # (trinity-enterprise#125) so a totally-failed deploy never mutates the
+        # platform-wide prompt; injection happens at agent start (step 12).
+        prompt_updated = False
+        if manifest.prompt:
+            db.set_setting("trinity_prompt", manifest.prompt)
+            prompt_updated = True
+            logger.info(f"Updated trinity_prompt for system '{manifest.name}'")
+
+        # 6c. Scope post-create configuration to the agents that were actually
+        # created (the config functions skip short_names missing from the map).
+        created_set = set(created_agents)
+        created_map = {s: f for s, f in agent_names.items() if f in created_set}
+
+        if failed:
+            failed_names = [f.name for f in failed]
+            all_warnings.append(
+                f"Partial deploy: {len(failed)} agent(s) failed to create: {failed_names}. "
+                "Re-deploying this manifest will create suffixed duplicates of the "
+                "already-created agents — fix the cause and create the missing agents "
+                "individually."
+            )
+            # An orchestrator-workers system without its orchestrator is a
+            # headless fleet: survivors keep zero inter-agent permissions.
+            if (
+                manifest.permissions
+                and manifest.permissions.preset == "orchestrator-workers"
+                and "orchestrator" in agent_names
+                and agent_names["orchestrator"] not in created_set
+            ):
+                all_warnings.append(
+                    "Orchestrator agent failed to create; the deployed workers have "
+                    "no inter-agent permissions — the system may be non-functional."
+                )
+
+        # 7–11. Post-create configuration — each phase is best-effort
+        # (trinity-enterprise#125): once agents exist, a config failure must
+        # degrade to a warning, never abort the report the caller was promised.
+
+        # 7. Configure shared folders (Phase 2)
+        folders_configured = 0
+        try:
+            folders_configured = configure_folders(
+                agent_names=created_map,
+                agents_config=manifest.agents
+            )
+            logger.info(f"Configured {folders_configured} folder configs for system '{manifest.name}'")
+        except Exception as e:
+            reason, _ = _failure_reason(e)
+            logger.exception(f"Folder configuration failed for system '{manifest.name}'")
+            all_warnings.append(f"Failed to configure shared folders: {reason}")
+
+        # 8. Configure permissions (Phase 2)
+        permissions_count = 0
+        if manifest.permissions:
+            try:
+                permissions_count = await configure_permissions(
+                    agent_names=created_map,
+                    permissions=manifest.permissions,
+                    created_by=current_user.username
+                )
+                logger.info(f"Configured {permissions_count} permissions for system '{manifest.name}'")
+            except Exception as e:
+                reason, _ = _failure_reason(e)
+                logger.exception(f"Permission configuration failed for system '{manifest.name}'")
+                all_warnings.append(f"Failed to configure permissions: {reason}")
+
+        # 9. Create schedules (Phase 2)
+        schedules_count = 0
+        try:
+            schedules_count = create_schedules(
+                agent_names=created_map,
+                agents_config=manifest.agents,
+                owner_username=current_user.username
+            )
+            logger.info(f"Created {schedules_count} schedules for system '{manifest.name}'")
+        except Exception as e:
+            reason, _ = _failure_reason(e)
+            logger.exception(f"Schedule creation failed for system '{manifest.name}'")
+            all_warnings.append(f"Failed to create schedules: {reason}")
+
+        # 10. Configure tags (ORG-001 Phase 4)
+        tags_count = 0
+        try:
+            tags_count = configure_tags(
+                system_name=manifest.name,
+                agent_names=created_map,
+                agents_config=manifest.agents,
+                default_tags=manifest.default_tags
+            )
+            logger.info(f"Configured {tags_count} tags for system '{manifest.name}'")
+        except Exception as e:
+            reason, _ = _failure_reason(e)
+            logger.exception(f"Tag configuration failed for system '{manifest.name}'")
+            all_warnings.append(f"Failed to configure tags: {reason}")
+
+        # 11. Create System View (ORG-001 Phase 4, optional)
+        # create_system_view self-guards (returns None on error).
+        system_view_id = None
+        if manifest.system_view:
+            system_view_id = create_system_view(
+                system_name=manifest.name,
+                system_view=manifest.system_view,
+                default_tags=manifest.default_tags,
+                owner_id=str(current_user.id)
+            )
+            if system_view_id:
+                logger.info(f"Created System View '{manifest.system_view.name}' (ID: {system_view_id}) for system '{manifest.name}'")
+
+        # 12. Start all agents (triggers Trinity injection with updated prompt)
+        start_results = await start_all_agents(created_agents)
+        agents_started = sum(1 for status in start_results.values() if status == "started")
+        agents_failed = len(created_agents) - agents_started
+
+        if agents_failed > 0:
+            failed_agents = [name for name, status in start_results.items() if status != "started"]
+            all_warnings.append(f"Failed to start {agents_failed} agents: {failed_agents}")
+
+        logger.info(f"Started {agents_started}/{len(created_agents)} agents for system '{manifest.name}'")
+
+        return SystemDeployResponse(
+            status="partial" if failed else "deployed",
+            system_name=manifest.name,
+            agents_created=created_agents,
+            prompt_updated=prompt_updated,
+            permissions_configured=permissions_count,
+            schedules_created=schedules_count,
+            tags_configured=tags_count,
+            system_view_created=system_view_id,
+            warnings=all_warnings,
+            failed=failed
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"System deployment failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Deployment failed: {str(e)}")

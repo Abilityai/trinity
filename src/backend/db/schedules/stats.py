@@ -385,13 +385,15 @@ class ScheduleStatsMixin:
                 "total": 0, "success_count": 0, "failed_count": 0,
                 "total_cost": 0.0, "success_rate": 0.0,
                 "running_count": 0, "queued_count": 0, "hours": hours,
+                "deleted_agent_count": 0, "deleted_agent_cost": 0.0,
             }
 
         bind: Dict = {}
         agent_where = ""
         if agent_names is not None:
             keys = [f"an{i}" for i in range(len(agent_names))]
-            agent_where = "WHERE agent_name IN (%s)" % ",".join(f":{k}" for k in keys)
+            # Qualified: the #1743 LEFT JOIN puts agent_name in both tables.
+            agent_where = "WHERE se.agent_name IN (%s)" % ",".join(f":{k}" for k in keys)
             bind.update(dict(zip(keys, agent_names)))
 
         # Single-pass query: windowed totals via conditional aggregation +
@@ -401,7 +403,7 @@ class ScheduleStatsMixin:
         # integer raises; SQLite tolerated it. #300.) The named :cutoff bind is
         # reused across all four CASE expressions.
         if hours:
-            time_cond = "started_at > :cutoff"
+            time_cond = "se.started_at > :cutoff"
             bind["cutoff"] = iso_cutoff(hours)
         else:
             time_cond = "1=1"
@@ -410,12 +412,26 @@ class ScheduleStatsMixin:
             row = conn.execute(text(f"""
                 SELECT
                     SUM(CASE WHEN {time_cond} THEN 1 ELSE 0 END) AS total,
-                    SUM(CASE WHEN {time_cond} AND status = 'success' THEN 1 ELSE 0 END) AS success_count,
-                    SUM(CASE WHEN {time_cond} AND status IN ('failed', 'error') THEN 1 ELSE 0 END) AS failed_count,
-                    SUM(CASE WHEN {time_cond} THEN COALESCE(cost, 0) ELSE 0 END) AS total_cost,
-                    SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_count,
-                    SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_count
-                FROM schedule_executions
+                    SUM(CASE WHEN {time_cond} AND se.status = 'success' THEN 1 ELSE 0 END) AS success_count,
+                    SUM(CASE WHEN {time_cond} AND se.status IN ('failed', 'error') THEN 1 ELSE 0 END) AS failed_count,
+                    SUM(CASE WHEN {time_cond} THEN COALESCE(se.cost, 0) ELSE 0 END) AS total_cost,
+                    SUM(CASE WHEN se.status = 'running' THEN 1 ELSE 0 END) AS running_count,
+                    SUM(CASE WHEN se.status = 'queued' THEN 1 ELSE 0 END) AS queued_count,
+                    -- #1743: the slice of the window that belongs to no LIVE agent.
+                    -- Execution rows outlive their agent on purpose (cost is
+                    -- billing truth, and a soft-deleted agent is recoverable), but
+                    -- the per-agent surfaces only render live agents — so without
+                    -- this the fleet total and the sum of the tiles differ by an
+                    -- amount nothing explains. Reported, never silently dropped.
+                    SUM(CASE WHEN {time_cond} AND ao.agent_name IS NULL THEN 1 ELSE 0 END)
+                        AS deleted_agent_count,
+                    SUM(CASE WHEN {time_cond} AND ao.agent_name IS NULL
+                             THEN COALESCE(se.cost, 0) ELSE 0 END) AS deleted_agent_cost
+                FROM schedule_executions se
+                -- Joins only LIVE agents, so both a soft-deleted row (deleted_at
+                -- set) and a hard-purged one (no row at all) fall to NULL.
+                LEFT JOIN agent_ownership ao
+                       ON ao.agent_name = se.agent_name AND ao.deleted_at IS NULL
                 {agent_where}
             """), bind).mappings().first()
             total = row["total"] or 0
@@ -434,4 +450,6 @@ class ScheduleStatsMixin:
                 "running_count": row["running_count"] or 0,
                 "queued_count": row["queued_count"] or 0,
                 "hours": hours,
+                "deleted_agent_count": row["deleted_agent_count"] or 0,
+                "deleted_agent_cost": round(row["deleted_agent_cost"] or 0.0, 4),
             }

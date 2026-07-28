@@ -21,13 +21,13 @@ from services.docker_service import (
 )
 from services.docker_utils import (
     container_stop, container_remove, container_start, container_reload,
-    volume_get, volume_create, containers_run
+    volume_get, volume_create, containers_run, image_get
 )
 from services.agent_service.helpers import validate_base_image
 from services.agent_runtime_state import clear_agent_breakers
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
 from services.skill_service import skill_service
-from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, is_claude_runtime
+from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, check_base_image_matches, is_claude_runtime
 from services.agent_auth import derive_agent_token
 from utils.helpers import utc_now_iso
 from .file_sharing import check_public_folder_mount_matches
@@ -295,6 +295,28 @@ async def start_agent_internal(agent_name: str) -> dict:
         not check_agent_auth_token_env_matches(container, agent_name)
     )
 
+    # #1809: a rebuilt base image is picked up on COLD start only. Evaluated
+    # lazily — the Docker round-trip runs only when no other predicate already
+    # forced a recreate. Gated on `not was_already_running` because
+    # start-on-running is a load-bearing idempotent no-op (MCP ensure-running
+    # calls, the SUB-003 auto-switch restart, restart_system): config drift is
+    # an owner-intentional per-agent change, while image drift is armed
+    # fleet-wide by any `build-base-image.sh` run — it must never turn a start
+    # of a running agent into a container kill. Ephemeral ghosts are excluded:
+    # they are volume-less by design ("ghosts never recreate"), so an
+    # image-drift recreate would silently destroy their workspace mid-budget
+    # (trinity-enterprise#69).
+    recreate_reason = "config_drift" if needs_recreation else None
+    if not needs_recreation and not was_already_running:
+        try:
+            _eph_gate = db.get_agent_ephemeral_info(agent_name)
+        except Exception:
+            _eph_gate = None
+        if not (isinstance(_eph_gate, dict) and _eph_gate.get("is_ephemeral")):
+            if not await check_base_image_matches(container, agent_name):
+                needs_recreation = True
+                recreate_reason = "image_drift"
+
     # #1560: the heartbeat markers and both circuit breakers are keyed by agent
     # NAME, not by container identity, so a recreated container inherits the
     # verdict recorded against its predecessor — a fresh, healthy agent is
@@ -395,7 +417,12 @@ async def start_agent_internal(agent_name: str) -> dict:
         "skills_injection": skills_status,
         "skills_result": skills_result,
         "read_only_injection": read_only_result.get("status", "unknown"),
-        "read_only_result": read_only_result
+        "read_only_result": read_only_result,
+        # #1809: surface whether (and why) this start replaced the container,
+        # so "why did my container id change / uptime reset" is answerable from
+        # the start response and the audit trail.
+        "recreated": needs_recreation,
+        "recreate_reason": recreate_reason if needs_recreation else None,
     }
 
 
@@ -563,12 +590,35 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
     # Update label to reflect current setting
     labels["trinity.full-capabilities"] = str(full_capabilities).lower()
 
+    # #1809: refresh the base-image version label from the image this recreate
+    # will actually run. Labels are carried forward verbatim from the old
+    # container, and every AgentStatus reader prefers the container label over
+    # an image lookup — so without this an image-drift recreate runs the NEW
+    # image while the UI keeps reporting the OLD version. Best-effort: an
+    # unreadable image keeps the carried-forward label, never blocks recreate.
+    try:
+        _new_image_ver = ((await image_get(image)).labels or {}).get("trinity.base-image-version")
+        if _new_image_ver:
+            labels["trinity.base-image-version"] = _new_image_ver
+    except Exception as e:
+        logger.warning(
+            f"Could not refresh trinity.base-image-version label for {agent_name} "
+            f"({type(e).__name__}: {e}) — keeping the carried-forward value"
+        )
+
     # Stop and remove old container
     try:
         await container_stop(old_container)
     except Exception:
         pass
-    await container_remove(old_container)
+    try:
+        await container_remove(old_container)
+    except docker.errors.NotFound:
+        # #1809: a concurrent start already removed it. Post-rebuild, EVERY
+        # cold start is a recreate, so two racing starts (UI double-click,
+        # --workers 2, restart_system loop + manual start) is routine — fall
+        # through; the 409 adoption below covers the run-side of the race.
+        pass
 
     # Build new volume configuration.
     #
@@ -600,17 +650,31 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
             if vol_name:
                 volumes[vol_name] = {"bind": dest, "mode": "rw" if m.get("RW", True) else "ro"}
 
-    return await _provision_folders_and_run_agent_container(
-        agent_name,
-        image=image,
-        env_vars=env_vars,
-        labels=labels,
-        base_volumes=volumes,
-        ssh_port=ssh_port,
-        cpu=cpu,
-        memory=memory,
-        full_capabilities=full_capabilities,
-    )
+    try:
+        return await _provision_folders_and_run_agent_container(
+            agent_name,
+            image=image,
+            env_vars=env_vars,
+            labels=labels,
+            base_volumes=volumes,
+            ssh_port=ssh_port,
+            cpu=cpu,
+            memory=memory,
+            full_capabilities=full_capabilities,
+        )
+    except docker.errors.APIError as e:
+        # #1809: 409 name-conflict — a concurrent start won the recreate race
+        # and already ran the replacement. Adopt the winner's container instead
+        # of failing this caller with a 500 ("start this agent" is idempotent).
+        if getattr(e, "status_code", None) == 409:
+            existing = get_agent_container(agent_name)
+            if existing is not None:
+                logger.info(
+                    f"Recreate race for {agent_name}: adopting the concurrently "
+                    f"created container"
+                )
+                return existing
+        raise
 
 
 async def _provision_folders_and_run_agent_container(
@@ -775,6 +839,28 @@ def _workspace_volume_name(agent_name: str) -> str:
         return f"agent-{agent_name}-workspace"
 
 
+def _reconstruct_template_id(agent_name: str, tmpl: dict) -> str:
+    """Best-effort rebuild of an agent's template id after its container is gone (#1811).
+
+    Returns "" when nothing identifying survives — the honest answer, and the
+    same value the caller had before, so this can only improve the result.
+    """
+    try:
+        git_cfg = db.get_git_config(agent_name)
+    except Exception:  # noqa: BLE001 — never block recovery on this
+        git_cfg = None
+
+    repo = getattr(git_cfg, "github_repo", None) if git_cfg else None
+    if repo:
+        branch = getattr(git_cfg, "working_branch", None) or getattr(
+            git_cfg, "source_branch", None
+        )
+        return f"github:{repo}@{branch}" if branch else f"github:{repo}"
+
+    name = (tmpl.get("name") or "").strip()
+    return f"local:{name}" if name else ""
+
+
 async def _read_template_yaml_from_volume(agent_name: str) -> dict:
     """Read the agent's `template.yaml` off its persisted workspace volume
     without a running container (#1559).
@@ -843,7 +929,18 @@ async def recreate_missing_container(agent_name: str):
     else:
         runtime = "claude-code"
         runtime_model = ""
-    template_name = tmpl.get("_template") or ""  # display-only; label field
+    # #1811: the original template id (`local:scout`, `github:Org/repo@main`)
+    # lived ONLY in the destroyed container's TEMPLATE_NAME env and
+    # `trinity.template` label — the workspace `template.yaml` carries `name:`
+    # and `type:`, never `_template`, so this was always empty in practice and
+    # both the label and (once restored) the env var came back blank.
+    # Reconstruct from what actually survives:
+    #   * a GitHub-native agent → its persisted git config (repo + branch);
+    #   * otherwise → `local:{name}` from the volume's template.yaml.
+    # This is a reconstruction, not the original string: an agent created from
+    # a github: URL with no branch suffix gets one back. Persisting the id at
+    # creation is the authoritative fix and needs a schema change.
+    template_name = tmpl.get("_template") or _reconstruct_template_id(agent_name, tmpl)
 
     # --- Resource limits: per-agent DB override → system defaults ---
     system_defaults = get_agent_default_resources()
@@ -864,6 +961,13 @@ async def recreate_missing_container(agent_name: str):
         "AGENT_RUNTIME": runtime,
         "AGENT_RUNTIME_MODEL": runtime_model,
         "TMPDIR": AGENT_DEFAULT_TMPDIR,
+        # #1811: creation sets this (crud.py) and two consumers read it —
+        # startup.sh gates local-template init on it, and the agent-server
+        # /info route reports it. Recovery read the value off template.yaml but
+        # used it only for the `trinity.template` LABEL, so a recovered agent
+        # reported an empty template_name and skipped the local-template
+        # branch. Same empty-string-when-absent shape as creation.
+        "TEMPLATE_NAME": template_name,
     }
 
     # OpenTelemetry (default on) — same wiring as create.
@@ -882,6 +986,21 @@ async def recreate_missing_container(agent_name: str):
     owner_username = owner.get("owner_username") or owner.get("username")
     try:
         if owner_username:
+            # #1811: recovery is not idempotent — every call mints a key, and a
+            # repeatedly-recovered agent accumulated active rows (50 observed on
+            # one instance). Deactivate the superseded ones FIRST, so the key we
+            # are about to mint stays active; the same hygiene #1745 gave delete.
+            # Best-effort: never block recovery on credential bookkeeping.
+            try:
+                superseded = db.deactivate_agent_mcp_keys(agent_name)
+                if superseded:
+                    logger.info(
+                        "Deactivated %d superseded MCP key(s) for %s before recovery mint (#1811)",
+                        superseded, agent_name,
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Could not deactivate prior MCP keys for %s: %s", agent_name, e)
+
             agent_mcp_key = db.create_agent_mcp_api_key(
                 agent_name, owner_username, description="recovery-recreate"
             )
@@ -960,15 +1079,33 @@ def _apply_persisted_auth_env(agent_name: str, env_vars: dict, runtime: str) -> 
             env_vars.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
 
     # Per-agent GitHub PAT (opt-in), plus GITHUB_REPO / GIT_SYNC from git config.
+    # ent#123: gate on the REPO, not the PAT — a tokenless (anonymous
+    # public-template) agent rebuilt after container loss must still get
+    # GITHUB_REPO + GIT_SYNC_ENABLED, or startup.sh never attempts the clone
+    # and the rebuild yields a silently empty agent with green health
+    # (the #843/#1439 class). Token vars are injected only when a PAT exists.
     git_config = db.get_git_config(agent_name)
     if git_config:
         from routers.git import get_github_pat_for_agent
+
+        def _gc(key: str):
+            if isinstance(git_config, dict):
+                return git_config.get(key)
+            return getattr(git_config, key, None)
+
         pat = get_github_pat_for_agent(agent_name)
-        repo = git_config.get("github_repo") if isinstance(git_config, dict) else getattr(git_config, "github_repo", None)
-        if pat and repo:
+        repo = _gc("github_repo")
+        if repo:
             env_vars["GITHUB_REPO"] = repo
-            env_vars["GITHUB_PAT"] = pat
+            if pat:
+                env_vars["GITHUB_PAT"] = pat
             env_vars["GIT_SYNC_ENABLED"] = "true"
+            # Source-mode rows also re-derive the mode/branch pair so a
+            # volume-loss rebuild re-clones the right branch instead of a
+            # bare default-branch clone with no tracking.
+            if _gc("source_mode"):
+                env_vars["GIT_SOURCE_MODE"] = "true"
+                env_vars["GIT_SOURCE_BRANCH"] = _gc("source_branch") or "main"
             _git_base = os.getenv("TRINITY_GIT_BASE_URL")
             if _git_base:
                 env_vars["TRINITY_GIT_BASE_URL"] = _git_base

@@ -91,6 +91,10 @@ services:
       - OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS=${OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:-300}  # one flood alert / agent / window
       - GITHUB_PAT=${GITHUB_PAT:-}
       - HOST_TEMPLATES_PATH=${PWD}/config/agent-templates
+      # First-run default system seed (trinity-enterprise#124): a path to an
+      # operator manifest, or `disabled` to skip seeding. Empty = bundled
+      # config/manifests/default-system.yaml.
+      - TRINITY_DEFAULT_SYSTEM_MANIFEST=${TRINITY_DEFAULT_SYSTEM_MANIFEST:-}
       # Agent /tmp tmpfs size (#1231) — read by capabilities.py to build the
       # agent container mount spec. noexec,nosuid stay fixed; only size tunes.
       # Existing agents pick up a change on recreate, not restart.
@@ -162,6 +166,14 @@ services:
       - OPERATOR_INTAKE_ENABLED=${OPERATOR_INTAKE_ENABLED:-true}
       - DO_NOT_TRACK=${DO_NOT_TRACK:-0}
       - OPERATOR_INTAKE_URL=${OPERATOR_INTAKE_URL:-https://intake.abilityai.dev/v1/operator-intake}
+      # Tier-2 opt-in fleet telemetry sharing (ent#12): consent-gated aggregate
+      # egress. TELEMETRY_SHARING_ENABLED=false is the hard kill switch
+      # (DO_NOT_TRACK also disables). URL keeps its FULL non-empty default —
+      # a bare :- would arrive set-but-empty and shadow the code default (#1076).
+      - TELEMETRY_SHARING_ENABLED=${TELEMETRY_SHARING_ENABLED:-true}
+      - TELEMETRY_SHARING_URL=${TELEMETRY_SHARING_URL:-https://intake.abilityai.dev/v1/telemetry-share}
+      - TELEMETRY_SHARING_INTERVAL_HOURS=${TELEMETRY_SHARING_INTERVAL_HOURS:-24}
+      - TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS=${TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS:-30}
       # CORS (comma-separated extra origins)
       - EXTRA_CORS_ORIGINS=${EXTRA_CORS_ORIGINS:-}
       # Slack channel adapter
@@ -252,6 +264,7 @@ services:
       - ./config/process-templates:/agent-configs/process-templates:ro  # Process templates
       - ./config/hooks:/config/hooks:ro  # Read-only hooks (e.g., read-only-guard.py)
       - ./config/process-docs:/app/config/process-docs:ro  # Process documentation
+      - ./config/manifests:/app/config/manifests:ro  # Bundled system manifests (first-run seed, ent#124)
       - agent-configs:/agent-configs
       - trinity-data:/data
       - trinity-logs:/data/logs  # rw: log_archive_service must delete archived originals (#1478); Vector is the sole writer of new lines
@@ -524,6 +537,21 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # #1799: #1478 chowns /data/logs to 1000:1000 (chmod 775) so the UID-1000
+    # backend's retention sweep can delete archived originals. Vector runs as
+    # root, but cap_drop: ALL strips CAP_DAC_OVERRIDE — the capability that lets
+    # root ignore file permissions — so root is neither owner nor group and
+    # falls through to "other" (r-x) on that 775 dir. EVERY sink write then
+    # fails with "Permission denied", silently: a file-sink error does not fail
+    # the :8686 healthcheck, so Vector reports healthy while writing nothing.
+    #
+    # Joining GID 1000 uses the dir's existing group-write bit instead of
+    # restoring a capability, so the cap_drop posture is preserved. Vector must
+    # stay ROOT for the uid: raw container logs under /var/lib/docker/containers
+    # are 0640 root:root, so user: "1000:1000" would swap a write failure for a
+    # read failure.
+    group_add:
+      - "1000"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8686/health"]
       interval: 30s

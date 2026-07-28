@@ -41,10 +41,12 @@
           @click="$emit('open-thread', { session_id: r.session_id, agent_name: r.agent_name })"
         >
           <div class="flex items-center gap-2">
-            <span class="w-2 h-2 rounded-full shrink-0" :style="{ background: agentColor(r.agent_name) }"></span>
-            <span class="text-sm truncate">{{ r.title || 'Chat' }}</span>
+            <PortalAvatar :name="r.agent_name" :avatar-url="avatarFor(r.agent_name)" :size="22" />
+            <span class="min-w-0 flex-1">
+              <span class="block text-sm truncate">{{ r.title || 'Chat' }}</span>
+              <span v-if="r.snippet" class="block text-xs text-gray-400 truncate">{{ r.snippet }}</span>
+            </span>
           </div>
-          <div v-if="r.snippet" class="ml-4 text-xs text-gray-400 truncate">{{ r.snippet }}</div>
         </button>
       </div>
 
@@ -75,7 +77,7 @@
             :class="t.id === currentSessionId ? 'bg-white dark:bg-gray-900 ring-1 ring-gray-200 dark:ring-gray-800' : ''"
             @click="$emit('open-thread', t)"
           >
-            <span class="w-2 h-2 rounded-full shrink-0" :style="{ background: agentColor(t.agent_name) }" :title="t.agent_name"></span>
+            <PortalAvatar :name="t.agent_name" :avatar-url="avatarFor(t.agent_name)" :size="22" />
             <span class="text-sm truncate flex-1">{{ threadTitle(t) }}</span>
           </button>
         </div>
@@ -106,7 +108,7 @@
 <script setup>
 import { computed } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
-import { agentColor, groupThreadsByDate, threadTitle } from './portalUtils'
+import { groupThreadsByDate, threadTitle } from './portalUtils'
 
 const props = defineProps({
   roster: { type: Array, default: () => [] },
@@ -121,4 +123,13 @@ defineEmits(['new-chat', 'new-chat-with-agent', 'open-thread', 'update:search', 
 
 const isSearching = computed(() => (props.search || '').trim().length >= 2)
 const grouped = computed(() => groupThreadsByDate(props.threads))
+
+// ent#186: history + search rows show the conversation's agent avatar instead of
+// a bare color dot. The URL is resolved from the roster already loaded at sign-in
+// (no per-row fetch); an unknown agent or one without a generated avatar falls
+// through to PortalAvatar's initials + tint.
+const avatarByAgent = computed(() =>
+  Object.fromEntries((props.roster || []).map((a) => [a.name, a.avatar_url])),
+)
+const avatarFor = (name) => avatarByAgent.value[name] || null
 </script>

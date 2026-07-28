@@ -162,6 +162,17 @@
             </div>
           </div>
 
+          <!-- ent#184 — Activation funnel (local product events). Capture is
+               OSS-core; this operator view is entitlement-gated (`telemetry`).
+               The panel fetches the gated enterprise endpoint itself. -->
+          <ActivationFunnelPanel v-if="activeTab === 'activation'" />
+
+          <!-- ent#12 — Tier-2 opt-in usage sharing. OSS-core, default-off,
+               reversible. Admin-only (General tab), visible in every edition. -->
+          <div v-if="activeTab === 'general'" class="mb-6">
+            <TelemetrySharingPanel />
+          </div>
+
           <!-- Platform Section -->
           <!-- Admin sign-in email (#82 Phase 1) — lets an existing admin bind a
                real email so they can sign in with email + password, matching
@@ -2306,6 +2317,8 @@ import UserGitHubPatPanel from '../components/settings/UserGitHubPatPanel.vue'
 import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
+import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
+import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const router = useRouter()
@@ -2345,6 +2358,10 @@ const ALL_TABS = [
   { id: 'sso',          label: 'SSO',          adminOnly: true,  requires: 'sso' },
   { id: 'agents',       label: 'Agents',       adminOnly: true  },
   { id: 'retention',    label: 'Retention',    adminOnly: true  },
+  // ent#184 — local product-event activation funnel. Capture is OSS-core;
+  // this operator view is entitlement-gated (`telemetry`), so the tab is hidden
+  // in OSS-only builds. Local-only data, admin-only.
+  { id: 'activation',   label: 'Activation',   adminOnly: true, requires: 'telemetry' },
 ]
 const { isAdmin } = useRole()
 const visibleTabs = computed(() =>

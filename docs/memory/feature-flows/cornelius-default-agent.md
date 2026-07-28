@@ -7,8 +7,20 @@ A fresh Trinity install auto-seeds a default **"Cornelius"** second-brain agent 
 As a first-time Trinity operator, I want a ready-to-use second-brain agent with a rendered Brain Orb the moment I finish setup, so I can see the platform's flagship capability without learning template syntax or cloning a repo first.
 
 ## Entry Points
-- **Setup-completion handler** (fresh installs): `src/backend/routers/setup.py` — right after the admin account is created, schedules `CorneliusAgentService.ensure_seeded()` as a FastAPI `BackgroundTask` (so setup returns immediately; provisioning runs off the request path).
-- **Lifespan safety-net** (upgrades / missed BackgroundTask): `src/backend/main.py` — on boot, gated on `setup_completed && !cornelius_seeded`, backgrounds `ensure_seeded()` via `asyncio.create_task(...)`.
+
+> **ent#124 (2026-07-24):** both call sites now go through the first-run
+> orchestrator `services/system_seed_service.py::ensure_first_run_seeded()`,
+> which resolves ONE persisted freshness verdict (`first_run_fresh` — with
+> `cornelius_seeded=="true"` forcing not-fresh) and passes it to
+> `ensure_seeded(fresh=...)` before ALSO seeding the default starter fleet.
+> The injected verdict replaces this service's internal
+> `count_non_system_agents()` check (step 2) so fleet-seeded agents can't
+> flip a genuinely-fresh install to "not fresh" on a retry pass;
+> `fresh=None` preserves the legacy internal count. Cornelius behavior is
+> otherwise unchanged. See `system-manifest.md` → First-Run Default Seed.
+
+- **Setup-completion handler** (fresh installs): `src/backend/routers/setup.py` — right after the admin account is created, schedules `ensure_first_run_seeded()` (Cornelius + starter fleet) as a FastAPI `BackgroundTask` (so setup returns immediately; provisioning runs off the request path).
+- **Lifespan safety-net** (upgrades / missed BackgroundTask): `src/backend/main.py` — on boot, gated on `setup_completed`, backgrounds `ensure_first_run_seeded()` via `asyncio.create_task(...)` with a module-level strong task reference (asyncio GC footgun).
 - **No operator-facing API change**: no new endpoint, no UI trigger. Provisioning is a platform boot/setup side effect.
 
 ## Bundled Template
@@ -30,7 +42,7 @@ Gates, in order (all fail-open / idempotent — a skip or error never blocks boo
 2. **Fresh-install gate** — `db.count_non_system_agents() > 0` ⇒ skip **and converge the flag** (marks seeded without provisioning) so an upgrade of an established fleet is never surprised by a new agent appearing and we stop re-checking every boot.
 3. **Owner-exists gate** — `db.get_user_by_username('admin')` absent ⇒ **defer WITHOUT setting the flag**. On a truly-fresh pre-setup boot the admin row doesn't exist yet, so this skip lets the setup-completion trigger (or a later boot) retry — this is *why* there are two triggers rather than a lifespan-only hook.
 4. **Cross-worker lock** — Redis `SETNX cornelius:provision` (fail-open, mirrors the #1464 monitoring leader-lock) so `--workers 2` boots can't both provision. If the lock isn't acquired, the other worker owns it.
-5. **Provision** — creates the agent from `local:cornelius` via the ordinary `create_agent_internal(...)` (no PAT, no network, no clone — a local template copy). `create_agent_internal`'s `request` param was widened to `Optional[Request] = None` because the boot-time caller has no HTTP request (the param was never dereferenced). A `409` (agent already exists — a race backstop) is treated as success and converges the flag.
+5. **Provision** — creates the agent from `local:cornelius` via the ordinary `create_agent_internal(...)` (no PAT, no network, no clone — a local template copy). `create_agent_internal`'s `request` param was widened to `Optional[Request] = None` because the boot-time caller has no HTTP request (the param was never dereferenced). A `409` converges the flag **only when the agent is actually there** (#1790). The create path raises the same status for conditions under which nothing was created — a leftover unclaimed workspace volume (#1667, what `docker compose down -v` then re-setup leaves behind), volumes still owned by a renamed agent (#1664), a fork destination already bound — so the handler re-checks with the create path's own claim predicate (`crud.agent_name_is_taken`, shared rather than re-derived so the two cannot drift). Nothing claiming the name ⇒ flag left **unset**, result `create_blocked`, next boot retries; the usual cause is reclaimed unattended by the #1581 orphan-volume sweep, so the retry converges without intervention. The probe fails toward retry: a wrong "absent" costs one redundant create attempt, a wrong "present" burns the durable flag and strands the install permanently Cornelius-less while reporting seeded.
 6. **Existence-guarded flag enable** — turns on the `brain_orb_enabled` platform flag **only when unset**, so it never clobbers an admin who explicitly set it OFF.
 7. **Mark done** — write the `cornelius_seeded` flag. Only a *successful* provision sets it; a genuine failure leaves it unset for the next boot to retry.
 

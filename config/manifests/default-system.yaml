@@ -1,0 +1,59 @@
+# Default first-run starter fleet (trinity-enterprise#124)
+#
+# Auto-deployed ONCE on a genuinely fresh install by
+# `services/system_seed_service.py` through the resilient deploy path
+# (POST /api/systems/deploy semantics, trinity-enterprise#125).
+#
+# Operators: override with your own manifest by setting
+#   TRINITY_DEFAULT_SYSTEM_MANIFEST=/path/to/manifest.yaml   (bind-mount it)
+# or disable first-run seeding entirely with
+#   TRINITY_DEFAULT_SYSTEM_MANIFEST=disabled
+#
+# Content notes:
+# - The scout/sage/scribe templates are written as a collaborating team whose
+#   CLAUDE.md content references the `acme-*` agent names and shared folders —
+#   so this manifest deploys them AS that team (system name `acme`, shared
+#   folders, full-mesh permissions). Deploying them renamed/isolated would
+#   ship agents whose documented commands fail.
+# - No `schedules:`: a zero-credential fresh install must not accumulate
+#   failing cron executions.
+# - No `prompt:`: that key overwrites the platform-wide trinity_prompt.
+# - `local:` templates only: no GitHub PAT, no network dependency at seed time.
+
+name: acme
+description: Acme Consulting AI Team — Scout (research), Sage (strategy), Scribe (content)
+
+agents:
+  # Market research analyst — discovers trends and opportunities
+  scout:
+    template: local:scout
+    resources:
+      cpu: "1"
+      memory: "2g"
+    folders:
+      expose: true    # Shares research findings
+      consume: false
+
+  # Strategic advisor — synthesizes research into strategy
+  sage:
+    template: local:sage
+    resources:
+      cpu: "1"
+      memory: "2g"
+    folders:
+      expose: true    # Shares strategic analysis
+      consume: true   # Reads Scout's research
+
+  # Content writer — creates deliverables
+  scribe:
+    template: local:scribe
+    resources:
+      cpu: "1"
+      memory: "2g"
+    folders:
+      expose: true    # Shares final deliverables
+      consume: true   # Reads Scout's research and Sage's strategy
+
+# All three agents can call each other via Trinity MCP
+permissions:
+  preset: full-mesh

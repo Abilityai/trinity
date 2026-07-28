@@ -54,6 +54,7 @@ def wait_for_agent_ready(monkeypatch):
             container_stop=None, container_remove=None, container_start=None,
             container_reload=None, volume_get=None, volume_create=None,
             containers_run=None,
+            image_get=None,  # added to lifecycle.py import (#1809)
         ),
         "services.agent_service.helpers": types.SimpleNamespace(
             validate_base_image=None,
@@ -64,6 +65,7 @@ def wait_for_agent_ready(monkeypatch):
             check_full_capabilities_match=None,
             check_guardrails_env_matches=None,
             check_agent_auth_token_env_matches=None,  # added to lifecycle.py import (#1159)
+            check_base_image_matches=None,  # added to lifecycle.py import (#1809)
             is_claude_runtime=None,  # added to lifecycle.py import (#1187)
         ),
         "services.settings_service": types.SimpleNamespace(

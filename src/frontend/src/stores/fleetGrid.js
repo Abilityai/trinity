@@ -227,10 +227,32 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     }
   }
 
+  // ent#139 — skill-runner status for the runner's tile variant. Rides the
+  // existing visibility-aware batch refresh (no new polling loop), and the
+  // endpoint is admin-only, so a non-admin simply keeps `null` and the tile
+  // falls back to its standard rendering. Never surfaces an error: absent
+  // status is a legitimate state (OSS build, unentitled, non-admin viewer).
+  const skillRunnerStatus = ref(null)
+
+  async function fetchSkillRunnerStatus() {
+    try {
+      const res = await axios.get('/api/enterprise/skill-runner/status', {
+        headers: authStore.authHeader,
+      })
+      skillRunnerStatus.value = res.data
+    } catch {
+      skillRunnerStatus.value = null
+    }
+  }
+
   let _pollTimer = null
 
   function refreshBatchData() {
-    return Promise.allSettled([fetchSyncHealth(), fetchOpQueuePending()])
+    return Promise.allSettled([
+      fetchSyncHealth(),
+      fetchOpQueuePending(),
+      fetchSkillRunnerStatus(),
+    ])
   }
 
   /** Visibility-aware slow poll; active only while the Grid view is mounted. */
@@ -268,6 +290,7 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     hydrate,
     syncHealth,
     opQueuePending,
+    skillRunnerStatus,
     refreshBatchData,
     startPolling,
     stopPolling,

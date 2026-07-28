@@ -48,7 +48,10 @@ export function createSystemTools(
         "The manifest defines the system name, agents, permissions, schedules, and shared folders. " +
         "Supports dry_run mode for validation without deployment. " +
         "Agents are created with naming pattern '{system}-{agent}' (e.g., 'content-production-orchestrator'). " +
-        "Supports permission presets: 'full-mesh', 'orchestrator-workers', 'none', or explicit rules.",
+        "Supports permission presets: 'full-mesh', 'orchestrator-workers', 'none', or explicit rules. " +
+        "Deploy is best-effort: check `status` ('deployed' | 'partial' | 'failed') and `failed[]` " +
+        "in the response — a partial deploy still creates the remaining agents. " +
+        "Pass strict: true to restore abort-on-first-error.",
       parameters: z.object({
         manifest: z
           .string()
@@ -72,9 +75,17 @@ export function createSystemTools(
             "If true, validates the manifest without creating agents. " +
             "Returns preview of agents to be created and warnings."
           ),
+        strict: z
+          .boolean()
+          .optional()
+          .describe(
+            "If true, abort the deploy on the first agent-create failure " +
+            "(legacy behavior) instead of the default best-effort " +
+            "continue-and-report."
+          ),
       }),
       execute: async (
-        { manifest, dry_run }: { manifest: string; dry_run?: boolean },
+        { manifest, dry_run, strict }: { manifest: string; dry_run?: boolean; strict?: boolean },
         context?: { session?: McpAuthContext }
       ) => {
         const authContext = context?.session;
@@ -82,7 +93,7 @@ export function createSystemTools(
 
         // Call backend deploy endpoint
         const response = await apiClient.request<{
-          status: string;
+          status: string; // "deployed" | "partial" | "failed" | "valid" (dry_run)
           system_name: string;
           agents_created: string[];
           agents_to_create?: Array<{ name: string; short_name: string; template: string }>;
@@ -90,9 +101,17 @@ export function createSystemTools(
           permissions_configured?: number;
           schedules_created?: number;
           warnings: string[];
+          failed?: Array<{
+            name: string;
+            short_name: string;
+            template: string;
+            reason: string;
+            status_code?: number;
+          }>;
         }>("POST", "/api/systems/deploy", {
           manifest,
           dry_run: dry_run || false,
+          strict: strict || false,
         });
 
         return JSON.stringify(response, null, 2);

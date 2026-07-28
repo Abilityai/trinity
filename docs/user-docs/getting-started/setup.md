@@ -46,6 +46,8 @@ Install Trinity, create your admin account, and start managing agents in minutes
 
    On first run, this detects if the base agent image is missing and builds it automatically (takes 5-10 minutes). Then starts the backend, frontend, MCP server, Redis, scheduler, and Vector.
 
+   > **No-prompt install:** run `./scripts/deploy/start.sh --unattended` (or set `TRINITY_UNATTENDED=1`) and the script never stops to ask for input — it auto-generates the `admin` password and prints it in the final summary. Save it: it lands in `.env` and is shown only once. An AI coding agent (Claude Code) can drive the entire local install for you via the runbook at [`docs/AGENT_INSTALL_GUIDE.md`](../../AGENT_INSTALL_GUIDE.md).
+
 4. Open http://localhost in your browser.
 
 ### Logging In

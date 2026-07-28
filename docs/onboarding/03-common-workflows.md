@@ -82,7 +82,7 @@ This guide covers the day-to-day operations you'll perform when working with Tri
    - **Name**: `my-new-agent` (lowercase, hyphens only)
    - **Display Name**: `My New Agent` (optional)
    - **Template**: Choose from:
-     - `local:default` — Basic agent
+     - `local:scout` — Market research analyst (one of the shipped starters)
      - `github:owner/repo` — From GitHub
      - `local:custom-template` — Your custom template
 

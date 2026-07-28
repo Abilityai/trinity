@@ -142,6 +142,14 @@ jobs:
           echo "ADMIN_PASSWORD=$ADMIN_PASSWORD" >> .env
           echo "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" >> .env
           echo "SECRET_KEY=$(openssl rand -hex 32)" >> .env
+          # Keep the e2e baseline at zero user agents (learnings 2026-07-08):
+          # the sentinel disables the ent#124 starter-fleet seeder explicitly.
+          # NOTE it does NOT gate the Cornelius seeder (ent#107, no disable
+          # knob) — Cornelius stays un-seeded here only by timing: the lifespan
+          # gate reads setup_completed=false at boot and the docker-exec flip
+          # below never re-triggers it. If this workflow ever completes setup
+          # via the real endpoint, Cornelius will seed and break the baseline.
+          echo "TRINITY_DEFAULT_SYSTEM_MANIFEST=disabled" >> .env
           ./scripts/deploy/start.sh
 
       - name: Wait for backend health
