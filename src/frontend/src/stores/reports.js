@@ -17,6 +17,42 @@ import api from '../api'
 // the access-controlled REST endpoints. Full payloads load lazily per-report.
 // All HTTP goes through the shared api.js client (Invariant #7).
 
+// Export download (#1536). Deliberately NOT a plain `<a href>`: Trinity
+// authenticates with a Bearer JWT held in localStorage and attached by the
+// api.js interceptor, so a raw browser navigation to the export URL carries no
+// credential and the endpoint answers 401. (That was the original shipped bug —
+// the code comment justifying the anchor assumed cookie auth this platform does
+// not use.) Fetch through the shared client so the interceptor runs, then hand
+// the browser a blob URL. Mirrors `agents.js:getFilePreviewBlob`.
+//
+// The server-supplied Content-Disposition filename is honoured when present, so
+// the downloaded name still comes from the backend rather than being rebuilt here.
+export async function downloadReportExport(reportId, format) {
+  const res = await api.get(`/api/reports/${reportId}/export`, {
+    params: { format },
+    responseType: 'blob',
+  })
+
+  let filename = `report-${reportId}.${format}`
+  const cd = res.headers?.['content-disposition'] || res.headers?.['Content-Disposition']
+  const match = cd && /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd)
+  if (match) filename = decodeURIComponent(match[1])
+
+  const url = URL.createObjectURL(res.data)
+  try {
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+  } finally {
+    // Revoke on the next tick — revoking synchronously can cancel the download
+    // in some browsers before it is handed to the download manager.
+    setTimeout(() => URL.revokeObjectURL(url), 10_000)
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Agent-scoped store: backs the Agent Detail "Reports" tab.
 // ---------------------------------------------------------------------------
