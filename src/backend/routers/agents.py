@@ -628,7 +628,24 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
             target_type="agent",
             target_id=agent_name,
             endpoint=str(request.url.path),
-            details={"credentials_injection": credentials_status},
+            details={
+                "credentials_injection": credentials_status,
+                # #1809: record container replacement + cause (config_drift |
+                # image_drift) so a changed container id is traceable.
+                **(
+                    {"recreated": True, "recreate_reason": result.get("recreate_reason")}
+                    if result.get("recreated")
+                    else {}
+                ),
+                # #1816: a recreate the AC2 gate suppressed (running
+                # trinity-system). Audited so "I clicked Start and my config
+                # change did not apply" is answerable from the trail.
+                **(
+                    {"recreate_deferred": result.get("recreate_deferred")}
+                    if result.get("recreate_deferred")
+                    else {}
+                ),
+            },
         )
 
         event = {
@@ -646,7 +663,17 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
         return {
             "message": f"Agent {agent_name} started",
             "credentials_injection": credentials_status,
-            "credentials_result": credentials_result
+            "credentials_result": credentials_result,
+            # #1809: whether (and why) this start replaced the container —
+            # answers "why did my container id change / uptime reset".
+            "recreated": bool(result.get("recreated")),
+            "recreate_reason": result.get("recreate_reason"),
+            # #1816: set when the AC2 gate suppressed a recreate the predicates
+            # asked for — a running trinity-system is never replaced
+            # mid-operation. None on every normal start. This dict is a fresh
+            # whitelist, NOT start_agent_internal's return value, so a field
+            # added there does not reach the API unless it is also added here.
+            "recreate_deferred": result.get("recreate_deferred"),
         }
     except HTTPException:
         raise
@@ -1401,7 +1428,14 @@ async def agent_execution_result(
     result = await svc.apply_result(
         agent_name,
         envelope,
-        activity_id=db.get_open_activity_id_for_execution(execution_id),
+        # #1804: `include_failed=True` — this endpoint IS the late-SUCCESS path.
+        # A lease reaper that beat the callback already FAILED the row and closed
+        # the activity FAILED; the CAS lets a genuine late SUCCESS correct the
+        # row, and the activity must follow. A `started`-only lookup returns None
+        # here, so the pair would settle at execution=success, activity=failed —
+        # permanently. Harmless for a FAILED callback: the close CAS refuses to
+        # overwrite an already-closed activity.
+        activity_id=db.get_open_activity_id_for_execution(execution_id, include_failed=True),
         breaker_enabled=dispatch_breaker_active(agent_name),
         release_slot=True,
     )

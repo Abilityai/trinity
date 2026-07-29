@@ -1,8 +1,0 @@
-{
-  "_comment": "Canvas tuning for the public seeded KB (decision-science notes). The seeded vault is ~890 Document Insights + 141 book notes, so the impression layer gets most of the budget; every value overlays export_data.py DEFAULT_CONFIG.",
-  "max_edges": 1600,
-  "layer_caps": {
-    "signal": 18, "impression": 480, "insight": 240,
-    "framework": 90, "lens": 14, "synthesis": 110, "index": 30
-  }
-}

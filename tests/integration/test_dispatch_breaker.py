@@ -21,14 +21,12 @@ Covered:
 
 from __future__ import annotations
 
-import os
 import sys
 import time
 import uuid
 from pathlib import Path
 
 import pytest
-import redis as _redis
 
 _REPO = Path(__file__).resolve().parent.parent.parent
 _BACKEND = _REPO / "src" / "backend"
@@ -36,19 +34,8 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 
-def _load_env_password() -> str:
-    env_path = _REPO / ".env"
-    if not env_path.exists():
-        pytest.skip(".env missing — cannot derive Redis credentials", allow_module_level=True)
-    for line in env_path.read_text().splitlines():
-        if line.startswith("REDIS_BACKEND_PASSWORD="):
-            return line.split("=", 1)[1].strip()
-    pytest.skip("REDIS_BACKEND_PASSWORD not found in .env", allow_module_level=True)
-
-
-if "REDIS_URL" not in os.environ:
-    _PW = _load_env_password()
-    os.environ["REDIS_URL"] = f"redis://backend:{_PW}@localhost:6379"
+# #1775: the Redis target is resolved once in tests/integration/conftest.py,
+# which runs before this module is imported. No import-time env mutation here.
 
 # Normal import (linter-safe — no sys.modules mutation). dispatch_breaker is a
 # leaf (only redis_breaker_util) so this stays cheap.
@@ -64,14 +51,7 @@ from services.dispatch_breaker import (  # noqa: E402
 pytestmark = pytest.mark.integration
 
 
-@pytest.fixture
-def redis_client():
-    client = _redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
-    try:
-        client.ping()
-    except Exception as e:  # pragma: no cover
-        pytest.skip(f"Redis unreachable at {os.environ['REDIS_URL']}: {e}")
-    return client
+# `redis_client` comes from tests/integration/conftest.py (#1775).
 
 
 @pytest.fixture

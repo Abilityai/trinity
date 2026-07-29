@@ -184,6 +184,8 @@ class TestFailedPathCasGate:
         mock_activity = MagicMock(
             track_activity=AsyncMock(return_value="act-001"),
             complete_activity=AsyncMock(),
+            # #1804: non-success terminals close through the shared owner.
+            close_execution_activity=AsyncMock(return_value=True),
         )
 
         with (
@@ -206,8 +208,14 @@ class TestFailedPathCasGate:
             )
         return result, mock_activity
 
-    def test_failed_lost_cas_skips_activity_completion(self):
-        """A FAILED terminal that lost the CAS must NOT complete the activity."""
+    def test_failed_lost_cas_closes_activity_in_the_persisted_state(self):
+        """#1804 (was: "lost CAS skips the close"). A FAILED terminal that lost
+        the CAS must still close the activity — in the state of the terminal that
+        actually stands. Skipping it was the #1804 bug: the row goes terminal and
+        the activity orphans until the 120-minute duration-fabricating backstop.
+
+        Here the persisted row is CANCELLED, so the close carries CANCELLED — the
+        activity can never disagree with the row (#1332)."""
         from services.task_execution_service import (
             TaskExecutionErrorCode,
             TaskExecutionStatus,
@@ -215,17 +223,21 @@ class TestFailedPathCasGate:
 
         result, mock_activity = self._run_cb_open(cas_won=False)
 
-        mock_activity.complete_activity.assert_not_awaited()
+        mock_activity.close_execution_activity.assert_awaited_once()
+        args, kwargs = mock_activity.close_execution_activity.await_args
+        assert args[1] == TaskExecutionStatus.CANCELLED  # the persisted terminal
+        assert "superseded by" in kwargs["error"]
         # The FAILED result is still reported (the return is unconditional;
         # only the won-only side effects gate).
         assert result.status == TaskExecutionStatus.FAILED
         assert result.error_code == TaskExecutionErrorCode.CIRCUIT_OPEN
 
     def test_failed_won_cas_completes_activity(self):
-        """A FAILED terminal that won the CAS still completes the activity."""
-        from models import ActivityState
+        """A FAILED terminal that won the CAS closes the activity as FAILED."""
+        from models import TaskExecutionStatus
 
         result, mock_activity = self._run_cb_open(cas_won=True)
 
-        mock_activity.complete_activity.assert_awaited_once()
-        assert mock_activity.complete_activity.await_args.kwargs["status"] == ActivityState.FAILED
+        mock_activity.close_execution_activity.assert_awaited_once()
+        args, _kwargs = mock_activity.close_execution_activity.await_args
+        assert args[1] == TaskExecutionStatus.FAILED

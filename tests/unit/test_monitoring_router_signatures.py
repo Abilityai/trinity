@@ -216,7 +216,10 @@ class TestGetAccessibleAgentsSignature:
         )
         with patch.dict(sys.modules, {
             "services.docker_service": _docker_stub,
-            "services.docker_utils": types.SimpleNamespace(volume_get=MagicMock()),
+            "services.docker_utils": types.SimpleNamespace(
+                volume_get=MagicMock(),
+                image_get=MagicMock(),  # added to helpers.py import (#1809)
+            ),
             "services.settings_service": _settings_stub,
             "database": types.SimpleNamespace(db=MagicMock()),
         }):

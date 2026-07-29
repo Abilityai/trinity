@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://www.ability.ai/trinity">
-    <img src="docs/assets/trinity-hero.webp" alt="Trinity — Run agents like infrastructure" width="720" />
+    <img src="docs/assets/trinity-hero.webp" alt="Trinity — The Sovereign AI Agents Platform" width="720" />
   </a>
 </p>
 
@@ -23,19 +23,22 @@
   <img src="https://img.shields.io/badge/docker-required-blue.svg" alt="Docker">
 </p>
 
+> [!NOTE]
+> **📦 Just released — [v0.8.5](docs/releases/0.8.5.md)** (July 26, 2026): skills as a first-class platform capability, shared multi-agent rooms (sessions), agent display names, ephemeral "ghost" agents, voice replies v2, and a smoother first-run experience. [Read the full release notes →](docs/releases/0.8.5.md)
+
 <p align="center">
-  <a href="https://youtu.be/wxCC6QGtLMA">
-    <img src="https://img.youtube.com/vi/wxCC6QGtLMA/maxresdefault.jpg" alt="Trinity v0.8.0 release tour — video" width="640" />
+  <a href="https://youtu.be/XDLOq1crF9w">
+    <img src="https://img.youtube.com/vi/XDLOq1crF9w/maxresdefault.jpg" alt="Trinity Architecture Explained — animated explainer video" width="640" />
   </a>
   <br/>
-  <em>🎬 New — <a href="https://youtu.be/wxCC6QGtLMA">watch the v0.8.0 release tour</a>: agents that speak, the Brain Orb, and the Grid dashboard.</em>
+  <em>🎬 <a href="https://youtu.be/XDLOq1crF9w">Trinity Architecture Explained</a> — a 4:44 animated explainer: one scheduled task followed end to end through the container, gate, delegation, approval, audit, and breaker machinery.</em>
 </p>
 
 ---
 
-## Run agents like infrastructure
+## The Sovereign AI Agents Platform
 
-Trinity is the production runtime for your AI agents — governed, auditable, on your own infrastructure.
+Trinity is a sovereign AI agents platform — build and run proprietary systems, from fully (or semi-) autonomous businesses to self-improving cognitive systems, all governed, auditable, and on infrastructure you control.
 
 > **Claude Code writes the agent. Trinity runs it in production.**
 
@@ -84,6 +87,7 @@ A short teaser of the live interface — the full, zoomable detail is in [the sc
 
 - [Trinity Demo](https://youtu.be/ivljtZqsxeo) — full platform walkthrough
 - [Trinity Architecture Explained](https://youtu.be/XDLOq1crF9w) — animated explainer (4:44): one scheduled task followed end to end through the container, gate, delegation, approval, audit, and breaker machinery
+- [Trinity v0.8.0 Release Tour](https://youtu.be/wxCC6QGtLMA) — agents that speak, the Brain Orb, and the Grid dashboard
 - [From Zero to Deployed AI Agent](https://youtu.be/-TSZyekDS6o) — your first Trinity agent in 30 minutes
 - [Plugins + Trinity: Build and Deploy Agents in Cursor](https://youtu.be/amqiysdlEWY) — the plugin workflow end-to-end
 - [Loops Engineering with Trinity](https://youtu.be/q3YvFYtuhec) — bounded autonomous work loops in practice
@@ -127,15 +131,7 @@ The runbook ([`docs/AGENT_INSTALL_GUIDE.md`](docs/AGENT_INSTALL_GUIDE.md)) is a
 deterministic verify → install → confirm → report-next-steps loop that any
 capable agent can execute and explain to you as it goes.
 
-**One-line install (run it yourself)**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/main/install.sh | bash
-```
-
-This clones the repository, configures the environment, builds the base image, and starts all services. For a fully non-interactive bring-up (no admin-password prompt — one is generated and printed), run `./scripts/deploy/start.sh --unattended`.
-
-**Manual installation**
+**Install it yourself**
 
 ```bash
 # 1. Clone the repository
@@ -144,8 +140,9 @@ cd trinity
 
 # 2. Configure environment
 cp .env.example .env
-# Edit .env - at minimum set:
-#   SECRET_KEY (generate with: openssl rand -hex 32)
+# Edit .env and set ADMIN_PASSWORD (12+ characters) — the only required edit.
+# start.sh generates SECRET_KEY, the encryption keys and the Redis
+# passwords for you on first run.
 
 # 3. Build the base agent image
 ./scripts/deploy/build-base-image.sh
@@ -154,16 +151,16 @@ cp .env.example .env
 ./scripts/deploy/start.sh
 ```
 
-> Prefer a guided setup? `./quickstart.sh` walks you through it interactively (or `./quickstart.sh --defaults` for non-interactive bring-up with auto-generated secrets).
+For a fully non-interactive bring-up, run `./scripts/deploy/start.sh --unattended` (or set `TRINITY_UNATTENDED=1`) and skip the `.env` edit entirely — an admin password is generated and printed in the final summary.
 
 > **Note**: the repo's git submodules are private and optional — cloning (even with `--recurse-submodules`) needs no credentials; they're skipped automatically. See [docs/ENTERPRISE.md](docs/ENTERPRISE.md).
 
 **First-time setup**
 
 1. Open http://localhost — you'll be redirected to the setup wizard
-2. Set your **admin password** (minimum 8 characters)
-3. Log in with username `admin` and your new password
-4. Go to **Settings** → **API Keys** to configure your Anthropic API key
+2. Enter your **admin email** — this becomes your sign-in identity — and an **admin password** (minimum 12 characters, with upper- and lowercase, a digit, and a special character)
+3. Log in with that email (or the username `admin`) and your password
+4. Go to **Settings** → **Integrations** → **API Keys** to configure your Anthropic API key
 
 **Access**
 
@@ -628,7 +625,7 @@ Trinity Connect enables real-time coordination between local Claude Code instanc
 # Install listener dependencies
 brew install websocat jq
 
-# Set your MCP API key (from Settings → API Keys)
+# Set your MCP API key (from Settings → MCP Keys)
 export TRINITY_API_KEY="trinity_mcp_xxx"
 
 # Listen for events from a specific agent

@@ -37,8 +37,9 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # changes — PR-only: does this PR touch the frontend? Dependency-free (gh diff),
-  # so a frontend PR runs e2e automatically without the `ui` label.
+  # changes — PR-only: does this PR touch the frontend? Checkout-free (the PR
+  # files API, not a clone), so a frontend PR runs e2e automatically without the
+  # `ui` label.
   # ---------------------------------------------------------------------------
   changes:
     if: github.event_name == 'pull_request'
@@ -53,11 +54,46 @@ jobs:
       - id: filter
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          files=$(gh pr diff ${{ github.event.pull_request.number }} \
-            --repo "${{ github.repository }}" --name-only)
-          if echo "$files" | grep -qE '^src/frontend/'; then
+          # `gh pr diff` calls the diff API, which HARD-FAILS with HTTP 406 on PRs
+          # over 300 files (#1782): every release PR (500+ files) turned this gate
+          # red AND skipped the e2e suite instead of running it. The files API
+          # paginates (to a 3000-file ceiling), so use that.
+          #
+          # FAIL OPEN: if the changed-file list cannot be determined, or cannot be
+          # proven COMPLETE, run the suite. This job decides whether e2e runs, so
+          # being unable to decide must never mean "don't run" — and must never
+          # mean a red X. Completeness is proven by comparing the list length to
+          # the PR's own `changed_files`. That comparison is exact: it catches a
+          # truncation at the 3000 ceiling AND a pagination that died mid-way but
+          # still exited 0 (which a `>= 3000` heuristic silently misses).
+          #
+          # NOTE: container-security.yml detects changed files with `git diff`
+          # instead. That job already checks out the repo to build images; this
+          # one must not (a full clone turns a ~5s gate into ~40s), so the two
+          # implementations differ ON PURPOSE. Don't "unify" them.
+          fail_open() {
+            echo "::warning::frontend-e2e change detection failed open ($1) — running e2e"
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          err=$(mktemp)
+          if ! expected=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.changed_files' 2>"$err"); then
+            fail_open "PR lookup failed: $(tr '\n' ' ' < "$err" | cut -c1-300)"
+          fi
+          if ! files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" \
+                         --paginate --jq '.[].filename' 2>"$err"); then
+            fail_open "file list failed: $(tr '\n' ' ' < "$err" | cut -c1-300)"
+          fi
+          count=$(printf '%s\n' "$files" | grep -c . || true)
+          if [ "$count" != "$expected" ]; then
+            fail_open "incomplete list: got $count of $expected files"
+          fi
+          echo "changed files: $count"
+          if printf '%s\n' "$files" | grep -qE '^src/frontend/'; then
             echo "frontend=true" >> "$GITHUB_OUTPUT"
           else
             echo "frontend=false" >> "$GITHUB_OUTPUT"
@@ -68,11 +104,23 @@ jobs:
     # Run when: nightly / manual dispatch, OR the PR touched the frontend, OR the
     # PR carries the `ui` label (manual opt-in, e.g. a non-frontend PR). `always()`
     # so a skipped `changes` job (schedule/dispatch) doesn't gate this out.
+    # Defence in depth (#1782): a `changes` job that FAILED left no verdict, and
+    # "unable to determine" must mean RUN, never silently skip. The step itself
+    # already fails open, so this clause guards a future cause (runner crash, a
+    # later edit reintroducing a hard exit), not today's bug.
+    #
+    # `cancelled` is deliberately NOT covered. On cancellation GitHub re-evaluates
+    # this `if` and keeps the job whenever it returns true (that is what `always()`
+    # means), so a `cancelled` clause would defeat the `cancel-in-progress` above:
+    # every superseded push would still boot the 25-minute stack, and a failure
+    # there would post the very red X this issue exists to remove. A cancelled run
+    # has been superseded — the replacement run evaluates from scratch. Don't re-add.
     if: >-
       always() &&
       ( github.event_name == 'schedule'
         || github.event_name == 'workflow_dispatch'
         || needs.changes.outputs.frontend == 'true'
+        || needs.changes.result == 'failure'
         || contains(github.event.pull_request.labels.*.name, 'ui') )
     runs-on: ubuntu-latest
     timeout-minutes: 25

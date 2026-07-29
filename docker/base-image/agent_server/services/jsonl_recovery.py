@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..model_context import pick_context_window
 from ..models import CompactEvent, ExecutionMetadata
 
 logger = logging.getLogger(__name__)
@@ -404,15 +405,19 @@ def _recover_metadata_from_jsonl(
         if turns is not None:
             metadata.num_turns = turns
             populated = True
-        # contextWindow lives under modelUsage.*; per-model capacity,
-        # not per-call usage, so always safe to copy.
-        model_usage = result_record.get("modelUsage") or {}
-        if isinstance(model_usage, dict):
-            for _, model_data in model_usage.items():
-                if isinstance(model_data, dict) and "contextWindow" in model_data:
-                    metadata.context_window = model_data["contextWindow"]
-                    populated = True
-                    break
+        # contextWindow lives under modelUsage.*; per-model capacity, not
+        # per-call usage, so it is safe to copy — but modelUsage carries one
+        # entry PER MODEL the turn touched, so it must be matched to the model
+        # that answered rather than taken arbitrarily (#1840). The forward scan
+        # above already resolved `last_assistant_model`, so it is available here
+        # even though `metadata.model_name` is assigned further down; no match ⇒
+        # keep the seeded fallback.
+        window = pick_context_window(
+            result_record.get("modelUsage"), last_assistant_model
+        )
+        if window is not None:
+            metadata.context_window = window
+            populated = True
 
     # Per-call usage from the LATEST assistant message. This must NOT
     # be overwritten by cumulative result.usage (would double-count

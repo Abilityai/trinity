@@ -472,3 +472,81 @@ def test_read_jsonl_records_truncates_large_file(tmp_path, patch_projects_dir, m
     # We should have at least the tail record in there (others got skipped
     # by the seek; the tail is what matters for metadata recovery).
     assert any(r.get("type") == "assistant" and r.get("message", {}).get("model") == "m" for r in records)
+
+
+# ---------------------------------------------------------------------------
+# #1840 — the recovery path picks the ANSWERING model's window
+# ---------------------------------------------------------------------------
+
+
+def _multi_model_result(ts: str | None = None) -> dict:
+    """A result record shaped like a real turn: Claude Code bills side work to a
+    cheap Haiku, so `modelUsage` carries the side model FIRST and the model that
+    answered second."""
+    rec: dict = {
+        "type": "result",
+        "total_cost_usd": 0.05,
+        "duration_ms": 1200,
+        "num_turns": 1,
+        "modelUsage": {
+            "claude-haiku-4-5-20251001": {"contextWindow": 200_000, "inputTokens": 522},
+            "claude-sonnet-5": {"contextWindow": 1_000_000, "inputTokens": 2},
+        },
+    }
+    if ts is not None:
+        rec["timestamp"] = ts
+    return rec
+
+
+def test_recovery_picks_the_answering_models_window(tmp_path, patch_projects_dir):
+    """The salvage path repeated the stream parser's bug: it took the first
+    modelUsage entry, which is the SIDE model whenever one ran. The assistant
+    record names the model that answered — match on it."""
+    session_id = "sess-1840"
+    _write_jsonl(
+        tmp_path,
+        session_id,
+        [
+            _user_input("go"),
+            _assistant_message("done", usage={"input_tokens": 10}, model="claude-sonnet-5"),
+            _multi_model_result(),
+        ],
+    )
+    metadata = ExecutionMetadata()
+    assert jsonl_recovery._recover_metadata_from_jsonl(session_id, None, metadata) is True
+    assert metadata.context_window == 1_000_000
+    assert metadata.model_name == "claude-sonnet-5"
+
+
+def test_recovery_keeps_the_seed_when_the_model_is_unidentifiable(tmp_path, patch_projects_dir):
+    """No assistant record in scope ⇒ the answering model is unknown. With two
+    candidate windows the recovery must NOT guess: the seeded catalog value
+    survives, because picking the larger one would hide a compaction wall and
+    picking the first is the bug this fixes."""
+    session_id = "sess-1840-noassistant"
+    _write_jsonl(tmp_path, session_id, [_user_input("go"), _multi_model_result()])
+    metadata = ExecutionMetadata()
+    metadata.context_window = 200_000  # the catalog seed set at construction
+
+    recovered = jsonl_recovery._recover_metadata_from_jsonl(session_id, None, metadata)
+
+    assert metadata.context_window == 200_000
+    # Recovery still succeeds on the other fields — the narrower `populated`
+    # rule must not turn a partial salvage into a total failure.
+    assert recovered is True
+    assert metadata.cost_usd == 0.05
+    assert metadata.num_turns == 1
+
+
+def test_recovery_still_takes_an_unambiguous_single_entry(tmp_path, patch_projects_dir):
+    """The pre-existing single-model case keeps working without an assistant
+    record — one entry is unambiguous, so there is nothing to mismatch."""
+    session_id = "sess-1840-single"
+    _write_jsonl(
+        tmp_path,
+        session_id,
+        [_user_input("go"), _result_record(cost=0.01, context_window=1_000_000)],
+    )
+    metadata = ExecutionMetadata()
+    assert jsonl_recovery._recover_metadata_from_jsonl(session_id, None, metadata) is True
+    assert metadata.context_window == 1_000_000

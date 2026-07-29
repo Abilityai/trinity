@@ -410,6 +410,19 @@ return {
 - Tooltip shows live elapsed time like "In Progress - 45.3s"
 - On task complete: Bar snaps to final size from actual `duration_ms`
 
+> **#1804 — the amber bar used to lie.** `isInProgress` is derived purely from
+> `activity_state === 'started'`, so this component is only as truthful as the
+> `agent_activities` row. Every terminal writer *outside* the dispatching
+> coroutine (watchdog, startup recovery, the bulk sweeps, both backend-shutdown
+> handlers, the lease reaper, the pull sink) used to write the execution terminal
+> and leave the activity `started` — the bar kept growing for up to two hours
+> after the run was over, then snapped to a fabricated ~120-minute failure when
+> the generic backstop closed it with `duration_ms = now − started_at`. **No
+> frontend change was needed or made:** the fix is that the CAS winner of the
+> terminal write now closes the paired activity, so `activity_state` goes
+> terminal within the same cycle as the execution row. See
+> [activity-stream.md → The Close Contract](activity-stream.md#the-close-contract-1804).
+
 ### 9. NOW Marker at 90% Viewport Position
 
 ```javascript

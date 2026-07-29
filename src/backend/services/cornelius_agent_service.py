@@ -10,12 +10,26 @@ Unlike the system agent (`system_agent_service.py`) — a privileged, deletion-p
 orchestrator recreated on EVERY boot — Cornelius is a NORMAL owned/deletable agent
 seeded exactly ONCE on a genuinely-fresh install:
 
-  * Provisioned from the bundled LOCAL template `local:cornelius`
-    (`config/agent-templates/cornelius/`) via the ordinary create path — no GitHub
-    clone, no PAT, no network dependency at boot. (This is why the local bundle was
-    chosen over github-native: `create_agent_internal`'s dynamic-github branch hard-
-    requires a system PAT even for a public repo, and a boot-time clone would add a
-    network SPOF to startup.)
+  * Provisioned from the PUBLIC upstream template `github:Abilityai/cornelius` via
+    the ordinary create path, cloned anonymously (source-mode, no PAT) on the
+    trinity-enterprise#123 tokenless path. `AgentConfig.source_mode` defaults True,
+    which is what that path requires.
+
+    This was a bundled `local:cornelius` snapshot until #1656. The local bundle was
+    originally chosen because the dynamic-github branch hard-required a system PAT
+    even for a public repo — trinity-enterprise#123 removed exactly that constraint.
+    Vendoring was also the direct cause of two shipped first-run defects (#1646
+    phantom skills/capabilities, #1656 dead wikilinks in the seed vault): a snapshot
+    that silently drifts from the prose describing it. Seeding from source retires
+    that failure class, and makes the template's `semantic_search` capability real —
+    `resources/local-brain-search/` ships upstream but was never vendored, which is
+    why #1646 had to trim the claim.
+
+    A boot-time clone is NOT a startup SPOF: seeding is a fire-and-forget background
+    task that never blocks its caller, and a failed pass deliberately leaves the
+    seeded flag unset (see below) so the next boot retries. There is no offline
+    install to protect — building the agent base image alone requires apt/npm/Go
+    downloads, and an agent with no route to the Anthropic API is inert regardless.
   * First-run-only: a durable `cornelius_seeded` system-setting is the "already done"
     marker. A user who DELETES Cornelius is NOT re-provisioned (the flag stays set) —
     the opposite of the system agent's resurrect-every-boot behaviour.
@@ -44,7 +58,7 @@ from redis_breaker_util import get_breaker_redis
 logger = logging.getLogger(__name__)
 
 CORNELIUS_AGENT_NAME = "cornelius"
-CORNELIUS_TEMPLATE = "local:cornelius"
+CORNELIUS_TEMPLATE = "github:Abilityai/cornelius"
 CORNELIUS_TYPE = "knowledge-base"
 CORNELIUS_OWNER = "admin"  # seeded under the admin account, like the system agent
 
@@ -145,13 +159,35 @@ class CorneliusAgentService:
             logger.info("Cornelius agent seeded and Brain Orb enabled by default")
             return result
         except Exception as e:
-            # 409 = the agent already exists (another worker won, or a prior partial
-            # run). Treat as success: converge the flag so we stop retrying.
+            # A 409 is NOT self-evidently "already exists" (#1790). The create path
+            # raises the same status for conditions under which NOTHING was created:
+            # a leftover unclaimed workspace volume (#1667 — what a `down -v` then
+            # re-setup leaves behind), volumes still owned by a renamed agent
+            # (#1664), a fork destination already bound. Converging the durable flag
+            # on one of those is unrecoverable: the flag suppresses every later
+            # attempt, so the install stays permanently Cornelius-less while
+            # claiming it was seeded (and `system_seed_service.ensure_first_run_
+            # seeded()` then reads the install as not-fresh). Confirm the agent is
+            # actually there before treating the 409 as convergence.
             status_code = getattr(e, "status_code", None)
             if status_code == 409:
-                db.set_setting(_SEEDED_FLAG, "true")
-                self._seed_brain_orb_flag()
-                return self._skip(result, "already_exists", "Cornelius already exists (409) — marking seeded")
+                if self._agent_is_present():
+                    db.set_setting(_SEEDED_FLAG, "true")
+                    self._seed_brain_orb_flag()
+                    return self._skip(result, "already_exists", "Cornelius already exists (409) — marking seeded")
+                # 409 with no agent behind it: a precondition blocked creation. Leave
+                # the flag unset so the next boot retries — the usual cause (a
+                # leftover `agent-cornelius-workspace`) is reclaimed on its own by
+                # the #1581 orphan-volume sweep, so the retry converges unattended.
+                result.update(
+                    action="create_blocked", status="error",
+                    message=f"Cornelius seed blocked (409, agent not created): {e}",
+                )
+                logger.error(
+                    "Cornelius seed blocked by a 409 that created no agent — flag left "
+                    "unset so a later boot retries. Cause: %s", e,
+                )
+                return result
             # Any other failure: do NOT set the flag — retry on the next trigger/boot.
             result.update(action="create_failed", status="error",
                           message=f"Failed to seed Cornelius: {e}")
@@ -161,12 +197,14 @@ class CorneliusAgentService:
             self._release_lock()
 
     async def _provision(self, admin_user: User) -> None:
-        """Create the Cornelius agent from the bundled local template.
+        """Create the Cornelius agent from the public upstream template.
 
         Uses the ordinary service-layer create path (not the system agent's bespoke
-        direct-Docker build): a local template needs no PAT/network, and this gives
-        Cornelius a normal, deletable agent lifecycle. `request=None` — the HTTP
-        request object is not dereferenced by the create path (verified).
+        direct-Docker build), which gives Cornelius a normal, deletable agent
+        lifecycle and routes the clone through the trinity-enterprise#123 tokenless
+        public-repo path — anonymous, source-mode, no PAT (#1656).
+        `request=None` — the HTTP request object is not dereferenced by the create
+        path (verified).
         """
         # Imported lazily to avoid a router/service import cycle at module load.
         from services.agent_service.crud import create_agent_internal
@@ -179,6 +217,30 @@ class CorneliusAgentService:
             # template.yaml inside create_agent_internal.
         )
         await create_agent_internal(config, admin_user, request=None)
+
+    def _agent_is_present(self) -> bool:
+        """Is a Cornelius actually claiming the name? (#1790)
+
+        Reuses the create path's own `agent_name_is_taken` — the predicate behind
+        its 409 "Agent already exists" — rather than re-deriving one here, so the
+        two can't drift when a new claim source is added (live row, soft-deleted
+        row, container-only leftover).
+
+        Fails toward RETRY: if the probe itself errors we report absent, so the
+        flag stays unset. The two mistakes are not symmetric — a wrong "absent"
+        costs one redundant create attempt that 409s again next boot, while a
+        wrong "present" burns the durable flag and is unrecoverable without
+        hand-editing `system_settings`. That asymmetry is the whole bug.
+        """
+        try:
+            from services.agent_service.crud import agent_name_is_taken
+
+            return agent_name_is_taken(CORNELIUS_AGENT_NAME)
+        except Exception as e:  # noqa: BLE001 — never let the probe raise out of the handler
+            logger.warning(
+                "Cornelius seed: presence probe failed (%s) — treating as absent so a later boot retries", e,
+            )
+            return False
 
     def _seed_brain_orb_flag(self) -> None:
         """Enable the Brain Orb platform flag by default — but only if no explicit

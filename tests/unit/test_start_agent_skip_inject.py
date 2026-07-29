@@ -90,6 +90,11 @@ def _load_lifecycle():
         check_full_capabilities_match=Mock(return_value=True),
         check_guardrails_env_matches=Mock(return_value=True),
         validate_base_image=Mock(),
+        # #1816: MUST be stubbed explicitly. A bare Mock auto-creates missing
+        # attributes and returns a truthy Mock, so an unstubbed
+        # `is_system_agent_name` reads as "every agent is the system agent" and
+        # the AC2 gate silently suppresses every recreate in this harness.
+        is_system_agent_name=Mock(return_value=False),
     )
     read_only_mod = Mock(inject_read_only_hooks=AsyncMock(
         return_value={"success": True}
@@ -159,6 +164,9 @@ def _reset():
     _mod.check_resource_limits_match = Mock(return_value=True)
     _mod.check_full_capabilities_match = Mock(return_value=True)
     _mod.check_guardrails_env_matches = Mock(return_value=True)
+    # #1809: image matches by default — MUST be stubbed explicitly (async), or
+    # the real predicate would run against Mock containers on cold-start tests.
+    _mod.check_base_image_matches = AsyncMock(return_value=True)
     # By default, public folder mount matches the file_sharing_enabled flag
     _mod.check_public_folder_mount_matches = Mock(return_value=True)
     # By default, no read-only mode

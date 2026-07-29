@@ -1,0 +1,33 @@
+{
+  "version": "1.1",
+  "date": "2026-07-27",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/1809-image-drift-recreate",
+  "merge_base": "e9eb40da",
+  "issue": "abilityai/trinity#1809",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "attack_surface": {
+    "new_unauthenticated_endpoints": 0,
+    "new_authenticated_endpoints": 0,
+    "changed_endpoints": ["POST /api/agents/{name}/start (response/audit fields only; auth unchanged)"],
+    "new_internal_capability": "backend -> local docker images.get (read-only, executor-wrapped, never pulls)"
+  },
+  "findings": [],
+  "supply_chain_summary": "no dependency changes in diff",
+  "filter_stats": {
+    "candidates_evaluated": 4,
+    "reported": 0,
+    "below_confidence_gate": 1,
+    "hard_excluded": 2,
+    "refuted": 1
+  },
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+  "notes": [
+    "SEC-172 validate_base_image verified gating both recreate paths (lifecycle.py:442, :896)",
+    "secrets sweep clean (pattern hits were the check_github_pat_env_matches function name)",
+    "no enterprise-design disclosure in changed docs (issue-number references only)",
+    "A09 improved: recreate cause audit-trailed; drift + fail-open exits logged"
+  ],
+  "trend": {"prior_reports": true, "comparison": "diff-local fingerprints, no overlap computed"}
+}

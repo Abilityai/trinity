@@ -9,10 +9,14 @@ Covers the orchestration invariants surfaced by the autoplan review:
   * owner-must-exist deferral (pre-setup boot: skip WITHOUT burning the flag)
   * Docker-unavailable skip
   * Brain Orb flag defaulted ON, existence-guarded (never clobbers an admin OFF)
-  * 409-on-exists convergence (race backstop) vs. generic-failure retry
+  * 409-on-exists convergence (race backstop) vs. generic-failure retry, and
+    (#1790) the distinction between a 409 that means "the agent is there" and a
+    409 that means "creation was blocked" — only the former may burn the flag
   * the `--workers 2` Redis SETNX provisioning lock (held → skip; Redis down →
     fail-open)
-  * `_provision` builds a `local:cornelius` create with request=None
+  * `_provision` builds a `github:Abilityai/cornelius` create with request=None,
+    source_mode left at its default True (#1656 — the tokenless public-clone path
+    of trinity-enterprise#123 rejects a non-source-mode request)
   * a real-DB smoke of `db.count_non_system_agents()` — defends the facade-
     delegation pitfall (learnings 2026-07-04) that a wholesale-mocked test misses
 
@@ -123,16 +127,84 @@ def test_brain_orb_flag_not_clobbered_when_admin_disabled(env):
     assert env.settings.get("cornelius_seeded") == "true"
 
 
+def _conflict(status_code=409):
+    exc = type("FakeHTTPException", (Exception,), {})()
+    exc.status_code = status_code
+    return exc
+
+
+def _set_presence(env, present):
+    """Patch the create path's own claim predicate — the seam the seeder probes
+    to tell a real "already exists" 409 from a blocked-creation 409 (#1790)."""
+    import services.agent_service.crud as crud
+
+    env.monkeypatch.setattr(crud, "agent_name_is_taken", lambda name: present)
+
+
 def test_409_on_exists_is_treated_as_seeded(env):
     """A concurrent worker (or prior partial run) already created the agent →
-    create raises 409 → converge the flag instead of erroring/retrying forever."""
-    exc = type("FakeHTTPException", (Exception,), {})()
-    exc.status_code = 409
-    env.provision.side_effect = exc
+    create raises 409 AND the name is claimed → converge the flag instead of
+    erroring/retrying forever."""
+    _set_presence(env, True)
+    env.provision.side_effect = _conflict()
     result = _run()
     assert env.settings.get("cornelius_seeded") == "true"
     assert env.settings.get("brain_orb_enabled") == "true"
     assert result["action"] == "already_exists"
+
+
+def test_409_with_no_agent_does_not_burn_flag(env):
+    """#1790 regression. The create path raises 409 for conditions where nothing
+    was created — the classic one being a leftover unclaimed
+    `agent-cornelius-workspace` after `docker compose down -v` (#1667). Marking
+    seeded there is unrecoverable: the flag suppresses every later attempt, so the
+    install stays Cornelius-less forever while reporting success. The flag must
+    stay unset so the next boot retries."""
+    _set_presence(env, False)
+    env.provision.side_effect = _conflict()
+    result = _run()
+    assert env.settings.get("cornelius_seeded") is None       # flag NOT burned
+    assert env.settings.get("brain_orb_enabled") is None      # nothing converged
+    assert result["action"] == "create_blocked"
+    assert result["status"] == "error"
+
+
+def test_409_presence_probe_failure_fails_toward_retry(env):
+    """The probe itself blowing up must not converge the flag. The two errors are
+    not symmetric: a wrong "absent" costs one redundant create attempt, a wrong
+    "present" is unrecoverable without hand-editing system_settings."""
+    import services.agent_service.crud as crud
+
+    def _boom(name):
+        raise RuntimeError("db down")
+
+    env.monkeypatch.setattr(crud, "agent_name_is_taken", _boom)
+    env.provision.side_effect = _conflict()
+    result = _run()
+    assert env.settings.get("cornelius_seeded") is None
+    assert result["action"] == "create_blocked"
+
+
+def test_presence_probe_reads_every_claim_source(monkeypatch):
+    """The seeder must not re-derive its own notion of "exists" — it reuses the
+    create path's predicate, so a claim source added there (live row, soft-deleted
+    row, container-only leftover) is honoured here for free."""
+    import services.agent_service.crud as crud
+
+    sources = ["get_agent_by_name", "get_agent_owner", "is_agent_name_reserved"]
+    for claimed_by in sources:
+        monkeypatch.setattr(crud, "get_agent_by_name", lambda n: None)
+        monkeypatch.setattr(crud.db, "get_agent_owner", lambda n: None)
+        monkeypatch.setattr(crud.db, "is_agent_name_reserved", lambda n: False)
+        target = crud if claimed_by == "get_agent_by_name" else crud.db
+        monkeypatch.setattr(target, claimed_by, lambda n: {"agent_name": "cornelius"})
+        assert crud.agent_name_is_taken("cornelius") is True, claimed_by
+
+    # Nothing claims it → free.
+    monkeypatch.setattr(crud, "get_agent_by_name", lambda n: None)
+    monkeypatch.setattr(crud.db, "get_agent_owner", lambda n: None)
+    monkeypatch.setattr(crud.db, "is_agent_name_reserved", lambda n: False)
+    assert crud.agent_name_is_taken("cornelius") is False
 
 
 def test_generic_provision_failure_does_not_burn_flag(env):
@@ -189,8 +261,12 @@ def test_provision_builds_local_template_config(monkeypatch):
     admin = cas.User(id=1, username="admin", email="a@example.com", role="admin")
     asyncio.run(svc._provision(admin))
 
-    assert captured["config"].template == "local:cornelius"
+    assert captured["config"].template == "github:Abilityai/cornelius"
     assert captured["config"].name == "cornelius"
+    # #1656: the tokenless public-repo clone (trinity-enterprise#123) is source-mode
+    # only — `_gate_tokenless_request` 400s a non-source-mode request. The seeder
+    # relies on the AgentConfig default rather than setting it, so pin the default.
+    assert captured["config"].source_mode is True
     assert captured["request"] is None
     assert captured["user"].username == "admin"
 

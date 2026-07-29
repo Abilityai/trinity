@@ -1546,28 +1546,33 @@ async def _close_dispatch_activity_cancelled(task_execution_id, cancel_won):
     """#1332 (Path B): close the still-open dispatch activity as CANCELLED
     immediately (operator-terminate writes the CANCELLED row first and never
     reaches apply_result). Gate on the CAS result so the activity never disagrees
-    with the row. Best-effort — a close failure never fails the terminate."""
+    with the row. Best-effort — a close failure never fails the terminate.
+
+    #1804: folded onto the shared ``close_execution_activity`` owner — this was
+    the fifth hand-rolled copy of the lookup-then-close idiom, and a hand-rolled
+    copy is invisible to the parity guard. Behaviour is unchanged: the terminal
+    it passes is CANCELLED on a won CAS and the row's REAL terminal on a lost
+    one, the helper applies the same ``activity_state_for_terminal`` mapping,
+    and the error is still dropped for a COMPLETED close.
+    """
     try:
-        dispatch_activity_id = db.get_open_activity_id_for_execution(task_execution_id)
-        if dispatch_activity_id:
-            if cancel_won:
-                close_state = ActivityState.CANCELLED
-                close_error = "Execution terminated by user"
-            else:
-                reconciled = db.get_execution(task_execution_id)
-                close_state = activity_state_for_terminal(
-                    reconciled.status if reconciled else TaskExecutionStatus.CANCELLED
-                )
-                close_error = (
-                    None if close_state == ActivityState.COMPLETED
-                    else "Execution terminated by user"
-                )
-            await activity_service.complete_activity(
-                activity_id=dispatch_activity_id,
-                status=close_state,
-                error=close_error,
+        if cancel_won:
+            close_status = TaskExecutionStatus.CANCELLED
+        else:
+            reconciled = db.get_execution(task_execution_id)
+            close_status = (
+                reconciled.status if reconciled else TaskExecutionStatus.CANCELLED
             )
+        close_error = (
+            None if close_status == TaskExecutionStatus.SUCCESS
+            else "Execution terminated by user"
+        )
+        await activity_service.close_execution_activity(
+            task_execution_id, close_status, error=close_error
+        )
     except Exception as e:
+        # The helper is already fail-open; this keeps the reconcile read
+        # (db.get_execution) inside the same guarantee.
         logger.warning(
             f"[Terminate] Failed to close dispatch activity for "
             f"{task_execution_id} as cancelled: {e}"

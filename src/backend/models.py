@@ -487,6 +487,30 @@ class TaskExecutionStatus(str, Enum):
     PENDING_RETRY = "pending_retry"  # Awaiting retry dispatch (#271)
 
 
+class ActivityCloseOutcome(Enum):
+    """Tri-state result of closing an activity (#1804).
+
+    One boolean cannot answer both questions the callers ask. ``routers/
+    internal.py`` needs "did this row exist" (it 404s); ``activity_service``
+    needs "did anything change" (it broadcasts). Once the close is a lattice
+    CAS (``db/activities.py::_close_predicate``), an idempotent no-op close is a
+    *designed* outcome, so the two answers diverge routinely — hence three
+    states, not two.
+
+    Lives in ``models`` (not ``db/activities``) deliberately: it is a contract
+    type shared by the db layer and the service layer, like ``ActivityState``
+    beside it, and callers compare it by **identity**. ``models`` is the leaf
+    everything imports from and nothing re-imports, so the enum object stays
+    the same one across a test harness that evicts ``db.*`` from ``sys.modules``
+    — otherwise two distinct enum classes exist and every ``is`` check silently
+    goes False.
+    """
+
+    UPDATED = "updated"                # the CAS won — broadcast
+    ALREADY_CLOSED = "already_closed"  # row exists, predicate refused — no clobber
+    NOT_FOUND = "not_found"            # no such activity — 404 here, and only here
+
+
 def activity_state_for_terminal(status) -> "ActivityState":
     """Map a terminal execution status to the activity state that closes its
     dispatch activity (#1332).
@@ -568,7 +592,7 @@ class QueueStatus(BaseModel):
 
 class SystemAgentConfig(BaseModel):
     """Configuration for a single agent in a system manifest."""
-    template: str  # e.g., "github:Org/repo" or "local:business-assistant"
+    template: str  # e.g., "github:Org/repo" or "local:scout" (#1759: must resolve, or create 400s)
     resources: Optional[dict] = None  # {"cpu": "2", "memory": "4g"}
     folders: Optional[dict] = None  # {"expose": bool, "consume": bool}
     schedules: Optional[List[dict]] = None  # [{name, cron, message, ...}]
@@ -622,7 +646,8 @@ class SystemDeployFailure(BaseModel):
 class SystemDeployResponse(BaseModel):
     """Response from system deployment."""
     # "deployed" (all created) | "partial" (some failed) | "failed" (none created)
-    # | "valid" (dry_run) — trinity-enterprise#125
+    # | "valid" (dry_run, will deploy) | "invalid" (dry_run, blockers in `failed`,
+    # #1841) — trinity-enterprise#125
     status: str
     system_name: str
     agents_created: List[str]  # Final agent names created
@@ -2234,6 +2259,11 @@ class ReminderSummary(BaseModel):
     created_at: str
     fired_at: Optional[str] = None
     cancelled_at: Optional[str] = None
+    # #1806: derived at read time (NOT a column) — true when this reminder is
+    # still live but its agent has autonomy off, so the scheduler will not arm
+    # it. Without this a held reminder is indistinguishable from a healthy one:
+    # `pending` with a fire_at that quietly slides into the past.
+    autonomy_hold: bool = False
 
     class Config:
         from_attributes = True

@@ -28,6 +28,21 @@
 - **Key Features**: Optional full capabilities mode for containers needing system access, base image allowlist validation (SEC-172)
 - **Base Image Allowlist** (SEC-172): Agent creation validates `base_image` against configurable allowlist (`base_image_allowlist` system setting, default `["trinity-agent-base:*"]`). Blocks arbitrary Docker image pulls that could access internal network services. Returns HTTP 403 for disallowed images.
 
+### 8.5b Base-Image Adoption Semantics (#1809, #1816)
+- **Status**: ✅ Implemented (2026-07-28)
+- **GitHub Issues**: #1809 (regular agents), #1816 (`trinity-system`)
+- **Description**: A rebuilt `trinity-agent-base:latest` must be adopted by existing agent containers, which stay pinned to the image **id** they were created from. Adoption happens only at a **cold boundary**.
+- **Requirements**:
+  - **ADOPT-001**: An agent container whose own `Config.Image` tag no longer resolves to the image id it runs is recreated on its next **cold** start (`check_base_image_matches`, the lazy ninth predicate). Fail-open: any unreadable state skips the evaluation and logs a WARNING.
+  - **ADOPT-002**: A **running** agent is never image-recreated. A start of a running agent is a load-bearing idempotent no-op (MCP ensure-running, the SUB-003 auto-switch restart, `restart_system`); image drift is armed fleet-wide by any `build-base-image.sh` run and must never turn it into a container kill. Ephemeral ghosts are excluded outright (volume-less by design).
+  - **ADOPT-003** (`trinity-system`): the platform orchestrator adopts at the same cold boundary — backend boot with the container **stopped**, or an explicit `POST /api/system-agent/restart`. `ensure_deployed`'s running branch is **read-only**: it reports `base_image_state` ∈ `stale | current | unknown` and raises an edge-triggered operator-queue alarm on `stale` only (never on `unknown` — a fail-open probe must not manufacture an alert).
+  - **ADOPT-004** (AC2, structural): **no** code path may replace the container of a *running* `trinity-system` without an explicit operator stop. Enforced in `start_agent_internal` as an `is_system AND was_already_running` gate over the whole `needs_recreation` block — deliberately independent of predicate count — returning `recreate_deferred: "system_agent_running"` rather than silently doing nothing.
+  - **ADOPT-005** (convergence invariant): the container produced by `_create_system_agent` and the container produced by `recreate_container_with_updated_config` must both leave **all eight** config predicates `True`. A permanently-false predicate is an ADOPT-004 hole by construction, because a config-drift recreate resolves the image from a *tag* and is therefore also an image adoption.
+  - **ADOPT-006** (rebuild fences): `recreate_missing_container` — the #1559 soft-delete recovery rebuild — **refuses** `trinity-system` with a 409. It reconstructs a regular agent and would irreversibly downgrade the orchestrator (deactivates the **system-scoped** MCP key and mints an agent-scoped replacement, drops `trinity.is-system` / the `/template` bind / `unless-stopped`, arms the scope-403 `TRINITY_BACKEND_URL`). `ensure_deployed`'s create branch is the only supported rebuild. Reachable because `ensure_deployed` runs per uvicorn worker with no leader lock — the race itself is #1817.
+  - **ADOPT-007** (operator remedy is human-only): `POST /api/system-agent/restart` and `/reinitialize` require an admin **and** a human principal (`reject_agent_principal`). `assert_admin` alone lets an agent-scoped key through on a default admin-owned install, and #1816 turns `/restart` into a container replacement.
+- **Tests**: `tests/unit/test_1809_image_drift_recreate.py`, `tests/unit/test_1816_system_agent_convergence.py`, `tests/unit/test_1816_system_agent_adoption.py`
+- **Docs**: [internal-system-agent.md](../feature-flows/internal-system-agent.md) → Base-image adoption; [agent-lifecycle.md](../feature-flows/agent-lifecycle.md)
+
 ### 8.5a SSRF Prevention — Skills Library URL Validation (SEC-179)
 - **Status**: ✅ Implemented (2026-03-27)
 - **GitHub Issue**: #179
@@ -145,7 +160,16 @@
   - Dispatch grace period: 60s grace for newly created executions before orphan detection
   - Systemic failure detection: Warns if >50% of recovery attempts fail in a single cycle
   - **Passive stale cleanup**: Marks stale executions (`status='running'` > 120 min) as `failed`
-  - Marks stale activities (`activity_state='started'` > 120 min) as `failed`
+  - Marks stale activities (`activity_state='started'` > 120 min) as `failed` — a **backstop for
+    the unclaimed only** (#1804): every writer that wins a terminal CAS now closes the paired
+    dispatch activity itself (§10.15 in `scheduling.md`), so a row reaching this sweep means a
+    producer is unowned. Runs **after** `_sweep_stale_slots` in the cycle (it used to run one line
+    before the stale-slot reaper, so within a single cycle the 120-minute duration fabricator could
+    beat a legitimate closer).
+  - Recovery paths (watchdog `_recover_execution`, startup recovery, the two bulk sweeps via
+    `_close_bulk_swept_activities`, the lease reaper, both backend-shutdown `CancelledError`
+    handlers) close their execution's activity on the CAS-won branch — counted in
+    `CleanupReport.activities_closed_on_recovery` (#1804)
   - Cleans up stale Redis slots (entries older than TTL)
   - One-shot startup sweep on backend restart
   - Periodic cleanup every 5 minutes

@@ -6,7 +6,7 @@
 > **Stable URL** (fetch this mid‑install if you have web access):
 > `https://raw.githubusercontent.com/abilityai/trinity/main/docs/AGENT_INSTALL_GUIDE.md`
 >
-> This guide is versioned with the installer (`install.sh` / `scripts/deploy/start.sh`) — it describes what those scripts actually do, so it never drifts. Scope: the local **"install on my computer"** path (macOS Docker Desktop or Linux). Remote/cloud provisioning is a different flow (`trinity:deploy-new-instance`).
+> This guide is versioned with the installer (`scripts/deploy/start.sh`) — it describes what that script actually does, so it never drifts. Scope: the local **"install on my computer"** path (macOS Docker Desktop or Linux). Remote/cloud provisioning is a different flow (`trinity:deploy-new-instance`).
 
 ---
 
@@ -48,7 +48,9 @@ docker compose version >/dev/null 2>&1 && echo "compose: ok" || echo "compose: M
 **Fresh machine (no clone yet):**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/main/install.sh | bash
+git clone https://github.com/abilityai/trinity.git
+cd trinity
+./scripts/deploy/start.sh --unattended
 ```
 
 **Already have the repo (or you cloned it):**
@@ -131,4 +133,4 @@ Safe to re‑run `./scripts/deploy/start.sh` any time:
 
 ---
 
-*Keep this guide in sync with `scripts/deploy/start.sh` and `install.sh`. If you change the installer's behavior or the ports/flags, update this file in the same PR — it is the single source of truth agents fetch.*
+*Keep this guide in sync with `scripts/deploy/start.sh`. If you change the installer's behavior or the ports/flags, update this file in the same PR — it is the single source of truth agents fetch.*

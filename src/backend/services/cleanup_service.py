@@ -325,6 +325,7 @@ class CleanupReport:
     health_checks_pruned: int = 0
     # Issue #1449: backlog_metadata PII scrubbed on authoritative-terminal rows
     backlog_metadata_scrubbed: int = 0
+    legacy_tool_calls_converted: int = 0  # #1741
     orphaned_agent_keys_revoked: int = 0  # #1745
     # Issue #834 Phase 1a: soft-deleted agents purged past their retention window
     soft_deleted_agents_purged: int = 0
@@ -351,6 +352,11 @@ class CleanupReport:
     ssh_credentials_expired: int = 0
     # Issue #1296: terminal agent_reminders rows deleted past their retention window
     agent_reminders_pruned: int = 0
+    # Issue #1804: dispatch activities closed by a recovery path that won the
+    # terminal CAS (watchdog, startup recovery, the bulk sweeps). Post-merge
+    # signal: `stale_activities` should trend to ~0 while this picks up the
+    # volume — a non-zero `stale_activities` means a producer is still unowned.
+    activities_closed_on_recovery: int = 0
 
     @property
     def total(self) -> int:
@@ -368,6 +374,9 @@ class CleanupReport:
                 self.ephemeral_agents_discarded + self.ephemeral_orphans_reclaimed +
                 self.operator_queue_pruned + self.ssh_credentials_expired +
                 self.agent_reminders_pruned)
+    # NOTE (#1804): activities_closed_on_recovery is deliberately NOT summed
+    # into `total` — it is an observability counter over work already counted
+    # by the sweep that closed the execution, not additional cleanup work.
 
     def to_dict(self) -> Dict:
         return {
@@ -383,6 +392,7 @@ class CleanupReport:
             "execution_logs_pruned": self.execution_logs_pruned,
             "execution_rows_pruned": self.execution_rows_pruned,
             "backlog_metadata_scrubbed": self.backlog_metadata_scrubbed,
+            "legacy_tool_calls_converted": self.legacy_tool_calls_converted,
             "orphaned_agent_keys_revoked": self.orphaned_agent_keys_revoked,
             "health_checks_pruned": self.health_checks_pruned,
             "soft_deleted_agents_purged": self.soft_deleted_agents_purged,
@@ -396,6 +406,7 @@ class CleanupReport:
             "operator_queue_pruned": self.operator_queue_pruned,
             "ssh_credentials_expired": self.ssh_credentials_expired,
             "agent_reminders_pruned": self.agent_reminders_pruned,
+            "activities_closed_on_recovery": self.activities_closed_on_recovery,
             "total": self.total,
         }
 
@@ -467,15 +478,28 @@ class CleanupService:
         await self._sweep_expired_leases(report)
         stale_rows = self._sweep_stale_executions(report)
         no_session_rows = self._sweep_no_session_executions(report)
+        bulk_swept_rows = (stale_rows or []) + (no_session_rows or [])
+        # #1804: close the dispatch activity of every CAS-won bulk-swept row.
+        # Runs BEFORE the event emit and is deliberately NOT folded into it —
+        # `_emit_bulk_terminal_events` short-circuits when nobody subscribes,
+        # which would skip the close on every install with no subscribers.
+        report.activities_closed_on_recovery += await self._close_bulk_swept_activities(
+            bulk_swept_rows
+        )
         # #1714: wake subscribers of bulk-swept executions (parity with the
         # individually-reaped writers). One combined, gated, paced, fail-open emit.
         await self._emit_bulk_terminal_events(
-            (stale_rows or []) + (no_session_rows or []),
+            bulk_swept_rows,
             "marked failed by cleanup watchdog sweep",
         )
         self._sweep_orphaned_skipped(report)
-        self._sweep_stale_activities(report)
         await self._sweep_stale_slots(report, confirmed_running_ids)
+        # #1804: the 120-minute activity backstop runs LAST, after every
+        # legitimate closer in this cycle. It used to run one line BEFORE
+        # `_sweep_stale_slots` — which closes activities for the executions it
+        # reclaims — so within a single cycle the duration fabricator could beat
+        # a real closer and permanently record a 15-minute run as a 2-hour one.
+        self._sweep_stale_activities(report)
         self._sweep_rate_limit_events()
         self._sweep_shared_files(report)
         self._sweep_retention_772(report)
@@ -513,7 +537,7 @@ class CleanupService:
         """
         try:
             orphaned, terminated, confirmed_running_ids = (
-                await self._reconcile_orphaned_executions()
+                await self._reconcile_orphaned_executions(report)
             )
             report.orphaned_executions = orphaned
             report.auto_terminated = terminated
@@ -568,6 +592,12 @@ class CleanupService:
             # (its worker never reported a terminal, so nothing else closes it).
             for execution_id in result.parked_execution_ids:
                 await self._close_reaped_activity(execution_id)
+            # #1804: same for a re-queued row — the superseded attempt's activity
+            # is closed CANCELLED (not FAILED: the attempt was superseded, not
+            # failed) so the re-delivery's fresh dispatch activity is the only
+            # open one. Without this the agent reads as running two turns.
+            for execution_id in result.requeued_execution_ids:
+                await self._close_requeued_activity(execution_id)
             if result.requeued or result.parked:
                 logger.info(
                     "[Cleanup] lease reaper: re-queued=%d parked=%d",
@@ -580,26 +610,40 @@ class CleanupService:
         """Close the open dispatch activity for a poison-parked execution (#429).
 
         Mirror of ``_close_stale_slot_activity`` (#1083) for the lease-reaper
-        park path — uses the filtered ``get_open_activity_id_for_execution`` so a
-        shared-eid tool_call row is never cross-closed. Best-effort.
+        park path. #1804: both now delegate to the one owner,
+        ``activity_service.close_execution_activity`` (same filtered lookup, plus
+        the close CAS so a double close can't clobber a real duration).
+        Best-effort — the helper is fail-open.
         """
-        try:
-            activity_id = db.get_open_activity_id_for_execution(execution_id)
-            if not activity_id:
-                return
-            from services.activity_service import activity_service
-            await activity_service.complete_activity(
-                activity_id=activity_id,
-                status=ActivityState.FAILED,
-                error=f"{_LEASE_EXPIRED_TAG}: pull lease expired, poison-parked (#429)",
-            )
-        except Exception as e:  # pragma: no cover - best-effort
-            logger.debug(
-                f"[Cleanup] Could not close activity for poison-parked execution "
-                f"{execution_id}: {e}"
-            )
+        from services.activity_service import activity_service
 
-    def _sweep_stale_executions(self, report: CleanupReport) -> None:
+        await activity_service.close_execution_activity(
+            execution_id,
+            TaskExecutionStatus.FAILED,
+            error=f"{_LEASE_EXPIRED_TAG}: pull lease expired, poison-parked (#429)",
+        )
+
+    async def _close_requeued_activity(self, execution_id: str) -> None:
+        """Close the superseded attempt's dispatch activity on lease re-queue (#1804).
+
+        The re-queue preserves ``execution_id`` by construction (#1402), so the
+        re-delivered turn opens a NEW dispatch activity against the same id. The
+        dead worker's activity must therefore be closed here, or the execution
+        accumulates one permanently-`started` row per re-delivery.
+
+        CANCELLED, not FAILED (Codex 9): the attempt was superseded, not failed —
+        the #1332 distinction exists precisely so activity-derived views don't
+        collapse the two. Fail-open via the shared helper.
+        """
+        from services.activity_service import activity_service
+
+        await activity_service.close_execution_activity(
+            execution_id,
+            TaskExecutionStatus.CANCELLED,
+            error=f"{_LEASE_EXPIRED_TAG}: attempt superseded by lease re-delivery (#1402)",
+        )
+
+    def _sweep_stale_executions(self, report: CleanupReport) -> list:
         """1. Mark stale executions failed (agent-unreachable safety net).
 
         #1083 Finding 1: use the per-agent ``timeout + SLOT_TTL_BUFFER`` window
@@ -607,6 +651,10 @@ class CleanupService:
         a legitimately-running max-timeout async turn isn't failed ~5 min early.
         ``EXECUTION_STALE_TIMEOUT_MINUTES`` stays the fallback for any agent
         absent from the timeout map (e.g. soft-deleted).
+
+        Returns the CAS-won ``(execution_id, agent_name)`` rows (#1714) — also
+        the input to the #1804 bulk activity close. Annotated ``-> list``: it
+        has always returned one, the old ``-> None`` was simply wrong.
         """
         try:
             agent_timeouts = db.get_all_execution_timeouts()
@@ -628,7 +676,7 @@ class CleanupService:
             logger.error(f"[Cleanup] Error marking stale executions: {e}")
             return []
 
-    def _sweep_no_session_executions(self, report: CleanupReport) -> None:
+    def _sweep_no_session_executions(self, report: CleanupReport) -> list:
         """1b. Fast-fail running executions with no Claude session (Issue #106)."""
         try:
             failed_rows: list = []
@@ -689,6 +737,46 @@ class CleanupService:
                 )
         except Exception as e:  # fail-open: never affect the sweep's terminal writes
             logger.warning("[#1714] bulk terminal-event emit failed: %s", e)
+
+    async def _close_bulk_swept_activities(self, rows: list) -> int:
+        """#1804: close the open dispatch activity for every CAS-won bulk-swept row.
+
+        Batched at the db layer (ONE transaction, no per-row WS) — mirrors what
+        ``mark_stale_activities_failed`` already does, and avoids a WebSocket
+        herd during exactly the outage-recovery moment #1085 exists to protect.
+        Routing N rows through the per-row helper would be N transactions AND N
+        broadcasts when the system is least healthy.
+
+        A **sibling** of ``_emit_bulk_terminal_events``, never folded into it:
+        that method short-circuits on ``has_task_terminal_subscribers() is
+        False``, so folding would skip the close entirely on every install with
+        no event subscribers. The #1714 gate scopes the *event*, never the close.
+
+        Takes the ``(execution_id, agent_name)`` rows the sweeps already collect
+        via ``collect_failed`` — no new query, no second collection pass.
+        Returns the number of activities closed. Fail-open: the FAILED rows are
+        already committed; this is best-effort and swallows.
+        """
+        if not rows:
+            return 0
+        try:
+            execution_ids = [eid for eid, _agent in rows if eid]
+            if not execution_ids:
+                return 0
+            closed = db.close_open_activities_for_executions(
+                execution_ids,
+                ActivityState.FAILED,
+                error="Marked as failed by cleanup: execution swept as stale",
+            )
+            if closed:
+                logger.info(
+                    "[#1804] Closed %d dispatch activity(ies) for bulk-swept executions",
+                    closed,
+                )
+            return closed
+        except Exception as e:  # fail-open: never affect the sweep's terminal writes
+            logger.warning("[#1804] bulk activity close failed: %s", e)
+            return 0
 
     def _sweep_orphaned_skipped(self, report: CleanupReport) -> None:
         """1c. Finalize orphaned skipped executions (Issue #106)."""
@@ -921,6 +1009,23 @@ class CleanupService:
                 )
         except Exception as e:
             logger.error(f"[Cleanup] Error scrubbing backlog_metadata: {e}")
+
+        # #1741: convert legacy raw-transcript `tool_calls` blobs to the summary
+        # shape. The writer is fixed going forward, but existing rows would keep
+        # reporting 0 tool calls and rendering an empty panel until they aged
+        # out. Non-destructive (the transcript stays in `execution_log`) and
+        # idempotent, so it simply finds nothing once history is converted.
+        try:
+            converted = db.resummarize_legacy_tool_calls()
+            report.legacy_tool_calls_converted = converted
+            if converted > 0:
+                _log_prune(
+                    converted,
+                    f"[Cleanup] Converted legacy tool_calls on {converted} "
+                    f"executions to the summary shape (#1741)",
+                )
+        except Exception as e:
+            logger.error(f"[Cleanup] Error converting legacy tool_calls: {e}")
 
         # #1745: deactivate per-agent MCP keys whose agent is no longer live.
         # The delete/recover paths keep this in sync going forward; this catches
@@ -1549,26 +1654,19 @@ class CleanupService:
 
         Under fire-and-forget dispatch the ``execute_task`` coroutine returns at
         the 202 ACK, so its ``finally`` never runs to complete the activity. When
-        the lease reaper FAILs the row we close the activity here instead — using
-        the filtered ``get_open_activity_id_for_execution`` so a shared-eid
-        tool_call row is never cross-closed (Codex #8). Best-effort: a failure
-        here never blocks the reaper.
+        the lease reaper FAILs the row we close the activity here instead.
+        #1804: delegates to ``activity_service.close_execution_activity`` — the
+        same filtered lookup (a shared-eid tool_call row is never cross-closed,
+        Codex #8) plus the close CAS. Best-effort: the helper is fail-open, so a
+        failure here never blocks the reaper.
         """
-        try:
-            activity_id = db.get_open_activity_id_for_execution(execution_id)
-            if not activity_id:
-                return
-            from services.activity_service import activity_service
-            await activity_service.complete_activity(
-                activity_id=activity_id,
-                status=ActivityState.FAILED,
-                error=f"{_LEASE_EXPIRED_TAG}: slot lease expired (no result callback)",
-            )
-        except Exception as e:  # pragma: no cover - best-effort
-            logger.debug(
-                f"[Cleanup] Could not close activity for stale-slot execution "
-                f"{execution_id}: {e}"
-            )
+        from services.activity_service import activity_service
+
+        await activity_service.close_execution_activity(
+            execution_id,
+            TaskExecutionStatus.FAILED,
+            error=f"{_LEASE_EXPIRED_TAG}: slot lease expired (no result callback)",
+        )
 
     async def _process_stale_slot_reclaims(
         self,
@@ -1759,7 +1857,9 @@ class CleanupService:
                             f"[Cleanup] Error failing {execution_id} after slot reclaim: {e}"
                         )
 
-    async def _reconcile_orphaned_executions(self) -> tuple[int, int, set]:
+    async def _reconcile_orphaned_executions(
+        self, report: Optional[CleanupReport] = None
+    ) -> tuple[int, int, set]:
         """Reconcile DB execution state against agent process registries.
 
         For each execution marked 'running' in the DB:
@@ -1850,7 +1950,8 @@ class CleanupService:
                                 "— recovered by watchdog"
                             )
                             recovered = await self._recover_execution(
-                                execution_id, agent_name, error_msg, "orphan_recovered", client
+                                execution_id, agent_name, error_msg, "orphan_recovered",
+                                client, report,
                             )
                             if recovered:
                                 orphaned_count += 1
@@ -1882,7 +1983,8 @@ class CleanupService:
                                 f"by watchdog (exceeded timeout of {timeout_seconds}s)"
                             )
                             recovered = await self._recover_execution(
-                                execution_id, agent_name, error_msg, "auto_terminated", client
+                                execution_id, agent_name, error_msg, "auto_terminated",
+                                client, report,
                             )
                             if recovered:
                                 terminated_count += 1
@@ -1995,6 +2097,7 @@ class CleanupService:
         error_msg: str,
         action: str,
         client: Optional[httpx.AsyncClient] = None,
+        report: Optional[CleanupReport] = None,
     ) -> bool:
         """Mark execution as failed and release all associated resources.
 
@@ -2009,6 +2112,10 @@ class CleanupService:
             error_msg: Descriptive error message (cleanup reason).
             action: Event action type ("orphan_recovered" or "auto_terminated").
             client: Optional httpx client for fetching error context from agent.
+            report: Optional CleanupReport — the #1804 activity close is counted
+                into `activities_closed_on_recovery` when supplied. Passed
+                through rather than returned so the reconciler's tuple arity
+                (and its callers' unpacking) is unchanged.
 
         Returns:
             True if recovery succeeded, False if execution already transitioned.
@@ -2032,6 +2139,28 @@ class CleanupService:
         if not updated:
             # Race condition: execution completed normally between check and update
             return False
+
+        # #1804: this writer just won the terminal CAS, so it owns closing the
+        # paired dispatch activity. Before, the row stayed `started` until the
+        # 120-minute backstop closed it with a fabricated
+        # `duration_ms = now - started_at` — the Timeline rendered the agent as
+        # still working for up to 2h, then recorded a ~120-minute failure.
+        # Placed BEFORE the WS broadcast so the frontend's watchdog event and the
+        # activity close land in that order. Fail-open (the helper swallows).
+        try:
+            from services.activity_service import activity_service
+
+            if await activity_service.close_execution_activity(
+                execution_id, TaskExecutionStatus.FAILED, error=combined_error
+            ) and report is not None:
+                report.activities_closed_on_recovery += 1
+        except Exception as e:  # noqa: BLE001
+            # The terminal write + capacity release already succeeded. A failure
+            # in the close must not downgrade this to "recovery failed" — that
+            # would make the watchdog retry a row it has already recovered.
+            logger.warning(
+                f"[Watchdog] Activity close failed for {execution_id}: {e}"
+            )
 
         # Release capacity (idempotent — no error if already released).
         # CAPACITY-CONSOLIDATE (#428): single CapacityManager.release_if_matches
@@ -2278,8 +2407,10 @@ async def recover_orphaned_executions() -> Dict:
             "recovered": 0,
             "still_running": 0,
             "skipped_grace": 0,
+            "cas_lost": 0,
             "errors": 0,
             "redis_slots_reclaimed": sum(redis_reclaimed.values()),
+            "activities_closed": 0,
         }
 
     capacity = get_capacity_manager()
@@ -2293,6 +2424,17 @@ async def recover_orphaned_executions() -> Dict:
     still_running = 0
     skipped_grace = 0
     errors = 0
+    # #1804: per-pass counters accumulated by `_recover_execution` (the startup
+    # path has no CleanupReport). `errors` lives here rather than in a local
+    # because only `_recover_execution` can tell a genuine failure from a lost
+    # CAS — see the bucketing at the call sites below.
+    stats: Dict[str, int] = {"activities_closed": 0, "errors": 0}
+    # A False from `_recover_execution` is EITHER a lost CAS or an exception,
+    # and the two must PARTITION — counting the same execution into both
+    # `cas_lost` and `errors` makes one failure read as two in the startup
+    # report. Only `_recover_execution` can tell them apart, so it self-counts
+    # errors and we subtract at the end.
+    not_written = 0
 
     for agent_name, executions in by_agent.items():
         # Check if container is running
@@ -2303,10 +2445,17 @@ async def recover_orphaned_executions() -> Dict:
                 if _within_startup_grace(execution):
                     skipped_grace += 1
                     continue
-                if await _recover_execution(execution, agent_name, capacity):
+                if await _recover_execution(execution, agent_name, capacity, stats):
                     recovered += 1
                 else:
-                    errors += 1
+                    # #1804: `_recover_execution` now returns the terminal CAS
+                    # bool (it must, to gate the activity close). A False is
+                    # USUALLY benign — a real completion won the row during
+                    # restart, which is RELIABILITY-005's guarded writer working
+                    # exactly as designed — so it must not read as an error.
+                    # Genuine failures self-count into stats["errors"] and are
+                    # subtracted out below.
+                    not_written += 1
             continue
 
         # Container is up — check agent's process registry
@@ -2328,15 +2477,18 @@ async def recover_orphaned_executions() -> Dict:
             elif _within_startup_grace(execution):
                 skipped_grace += 1
             else:
-                if await _recover_execution(execution, agent_name, capacity):
+                if await _recover_execution(execution, agent_name, capacity, stats):
                     recovered += 1
                 else:
-                    errors += 1
+                    not_written += 1  # #1804: see the partition note above
 
+    errors = stats["errors"]
+    cas_lost = not_written - errors
     logger.info(
         f"[Recovery] Task execution recovery complete: "
         f"recovered={recovered}, still_running={still_running}, "
-        f"skipped_grace={skipped_grace}, errors={errors}"
+        f"skipped_grace={skipped_grace}, cas_lost={cas_lost}, errors={errors}, "
+        f"activities_closed={stats['activities_closed']}"
     )
 
     # #749: complete the asymmetric pair. The SQL→Redis pass above flips
@@ -2351,8 +2503,13 @@ async def recover_orphaned_executions() -> Dict:
         "recovered": recovered,
         "still_running": still_running,
         "skipped_grace": skipped_grace,
+        # #1804: a terminal CAS lost to a real completion — benign, and counted
+        # apart from `errors` so a healthy restart race can't read as a failure.
+        "cas_lost": cas_lost,
         "errors": errors,
         "redis_slots_reclaimed": redis_reclaimed_total,
+        # #1804: dispatch activities closed by this recovery pass.
+        "activities_closed": stats["activities_closed"],
     }
 
 
@@ -2375,19 +2532,61 @@ def _within_startup_grace(execution: Dict) -> bool:
     return age_seconds < STARTUP_RECOVERY_GRACE_SECONDS
 
 
-async def _recover_execution(execution: Dict, agent_name: str, capacity) -> bool:
-    """Mark a single execution as orphaned and release its capacity. Returns True on success."""
+async def _recover_execution(
+    execution: Dict, agent_name: str, capacity, stats: Optional[Dict] = None
+) -> bool:
+    """Mark a single execution as orphaned and release its capacity.
+
+    #1804: the CAS bool was **discarded** here — the function returned True
+    unconditionally absent an exception, so the caller counted a recovery even
+    when a real completion had already won the row. It is now captured, gates
+    the activity close (only the CAS winner owns it), and is returned.
+
+    ``stats`` (optional) receives the ``activities_closed`` and ``errors``
+    counts; the startup path has no ``CleanupReport``, it returns a plain dict.
+
+    **Return contract**: True = this pass wrote the terminal. False = it did
+    not, for one of two reasons the caller must NOT conflate — a lost CAS (a
+    real completion landed first; benign) or an exception (counted into
+    ``stats["errors"]`` above). The caller buckets False as ``cas_lost``.
+    """
+    error_message = "Execution orphaned — recovered on backend restart"
     try:
         # Use the guarded writer so a real completion that arrived during restart
         # is not overwritten (RELIABILITY-005).
-        db.mark_execution_failed_by_watchdog(
+        won = db.mark_execution_failed_by_watchdog(
             execution_id=execution["id"],
-            error_message="Execution orphaned — recovered on backend restart",
+            error_message=error_message,
         )
         await capacity.release(agent_name, execution["id"])
-        return True
+        if won:
+            # #1804: startup recovery is the issue's own reproduction path —
+            # restart the backend mid-run and the execution goes terminal while
+            # its chat_start activity stays `started` for the 120-minute
+            # backstop to close with a fabricated duration.
+            #
+            # Own try/except: the terminal write and the capacity release above
+            # already succeeded, so a close failure must NOT flip this row from
+            # `recovered` to `errors` in the startup report.
+            try:
+                from services.activity_service import activity_service
+
+                closed = await activity_service.close_execution_activity(
+                    execution["id"], TaskExecutionStatus.FAILED, error=error_message
+                )
+                if closed and stats is not None:
+                    stats["activities_closed"] = stats.get("activities_closed", 0) + 1
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    f"[Recovery] Activity close failed for {execution['id']}: {e}"
+                )
+        return won
     except Exception as e:
         logger.error(f"[Recovery] Error recovering execution {execution['id']}: {e}")
+        # #1804: self-count so the caller can tell this apart from a lost CAS —
+        # both return False, only this one is an error.
+        if stats is not None:
+            stats["errors"] = stats.get("errors", 0) + 1
         return False
 
 

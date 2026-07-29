@@ -561,12 +561,25 @@ async def _execute_task_internal_background(task_service, request: InternalTaskE
                     TaskExecutionStatus.FAILED,
                     TaskExecutionStatus.CANCELLED,
                 ):
-                    db.update_execution_status(
+                    won = db.update_execution_status(
                         execution_id=request.execution_id,
                         status=TaskExecutionStatus.FAILED,
                         error="Execution cancelled (backend shutdown)",
                     )
                     logger.info(f"Updated execution {request.execution_id} to FAILED on cancel")
+                    # #1804: the second backend-shutdown terminal writer (the
+                    # first is task_execution_service's own CancelledError
+                    # handler). Both wrote the execution terminal and left the
+                    # paired activity open — and because the row is now `failed`,
+                    # startup recovery never revisits it, so nothing but the
+                    # 120-minute duration-fabricating backstop ever closed it.
+                    # No activity_id in scope here; the helper looks it up.
+                    if won:
+                        await activity_service.close_execution_activity(
+                            request.execution_id,
+                            TaskExecutionStatus.FAILED,
+                            error="Execution cancelled (backend shutdown)",
+                        )
             except Exception as db_err:
                 logger.error(f"Failed to update execution status on cancel: {db_err}")
         raise

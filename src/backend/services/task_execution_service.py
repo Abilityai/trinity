@@ -50,6 +50,7 @@ from services import channel_completion_report
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from services.settings_service import settings_service
 from utils.credential_sanitizer import sanitize_dict, sanitize_execution_log, sanitize_response, sanitize_text
+from services.tool_call_summary import extract_tool_calls
 from utils.helpers import utc_now_iso
 from services.platform_prompt_service import (
     ExecutionContext,
@@ -786,7 +787,6 @@ async def _write_terminal_and_gate(
     activity_id: Optional[str],
     *,
     status: str,
-    activity_status: str,
     error: Optional[str] = None,
     cost: Optional[float] = None,
     context_used: Optional[int] = None,
@@ -810,6 +810,14 @@ async def _write_terminal_and_gate(
     (``get_execution() → status != CANCELLED``), which both raced and only
     blocked CANCELLED — the CAS additionally blocks an already-SUCCESS/FAILED
     row and closes the TOCTOU window.
+
+    #1804: BOTH CAS outcomes now close the activity, mirroring the SUCCESS
+    applier's reconcile (``apply_result``, this file). Previously only the won
+    branch closed it, so a writer that lost — to a cancel, or to a recovery path
+    — left the row ``started`` for the 120-minute backstop to close with a
+    fabricated duration. The activity state comes from the terminal that
+    actually stands (this writer's on a win, the persisted row's on a loss), so
+    the activity can never disagree with the row.
     """
     won = True
     if execution_id:
@@ -822,11 +830,44 @@ async def _write_terminal_and_gate(
             context_max=context_max,
             retry_count=retry_count,
         )
-    if won and activity_id:
-        await activity_service.complete_activity(
-            activity_id=activity_id,
-            status=activity_status,
+    if won:
+        # #1804: the CAS winner owns the close. ``activity_status`` was dropped
+        # from the signature — the state is derived from ``status`` via the
+        # shared #1332 mapping, so the two can no longer drift apart.
+        await activity_service.close_execution_activity(
+            execution_id,
+            status,
             error=error,
+            activity_id=activity_id,
+        )
+    elif execution_id:
+        # #1804: lost the CAS — the row holds someone else's terminal (a user
+        # cancel, or a watchdog/lease-reaper recovery). Close the activity in
+        # THAT state, exactly as the SUCCESS applier does at its own lost-CAS
+        # branch. Doing nothing here is the #1804 bug: the terminal is written
+        # and the activity orphans.
+        reconciled = db.get_execution(execution_id)
+        reconciled_status = (
+            reconciled.status if reconciled else TaskExecutionStatus.FAILED
+        )
+        # `.value` for the label: a bare `str, Enum` f-strings to
+        # "TaskExecutionStatus.FAILED" on 3.11+, not "failed" (the #1578 footgun
+        # architecture.md records). The DB path yields a plain string; only the
+        # `reconciled is None` fallback is an enum member — hence getattr.
+        reconciled_label = getattr(reconciled_status, "value", reconciled_status)
+        await activity_service.close_execution_activity(
+            execution_id,
+            reconciled_status,
+            # No error on an authoritative SUCCESS close: the execution actually
+            # succeeded, and a non-NULL `error` on a `completed` activity reads
+            # as a problem in every activity-derived view. Same rule as
+            # chat_execution_service._close_dispatch_activity_cancelled.
+            error=(
+                None
+                if reconciled_status == TaskExecutionStatus.SUCCESS
+                else f"superseded by {reconciled_label}"
+            ),
+            activity_id=activity_id,
         )
     # #1578: the timeout / budget-exhausted / unexpected-exception (+ inline
     # circuit-open/capacity/ephemeral) failure terminals that never reach
@@ -1144,7 +1185,6 @@ class TaskExecutionService:
                     execution_id,
                     activity_id,
                     status=TaskExecutionStatus.FAILED,
-                    activity_status=ActivityState.FAILED,
                     error=error_msg,
                     agent_name=agent_name,  # #1578: emit agent.task.failed on won
                 )
@@ -1580,7 +1620,6 @@ class TaskExecutionService:
                 execution_id,
                 activity_id,
                 status=TaskExecutionStatus.FAILED,
-                activity_status=ActivityState.FAILED,
                 error=error_msg,
                 agent_name=agent_name,  # #1578: emit agent.task.failed on won
             )
@@ -1611,7 +1650,6 @@ class TaskExecutionService:
                 execution_id,
                 activity_id,
                 status=TaskExecutionStatus.FAILED,
-                activity_status=ActivityState.FAILED,
                 error=error_msg,
                 agent_name=agent_name,  # #1578: emit agent.task.failed on won
             )
@@ -1703,7 +1741,6 @@ class TaskExecutionService:
                 execution_id,
                 activity_id,
                 status=TaskExecutionStatus.FAILED,
-                activity_status=ActivityState.FAILED,
                 error=error_msg,
                 agent_name=agent_name,  # #1578: emit agent.task.failed on won
             )
@@ -1726,11 +1763,25 @@ class TaskExecutionService:
                         TaskExecutionStatus.FAILED,
                         TaskExecutionStatus.CANCELLED,
                     ):
-                        db.update_execution_status(
+                        won = db.update_execution_status(
                             execution_id=execution_id,
                             status=TaskExecutionStatus.FAILED,
                             error="Execution cancelled (backend shutdown)",
                         )
+                        # #1804: #767 closed the execution record here so the
+                        # cleanup sweep wouldn't inflate ITS duration — but left
+                        # the paired activity open, so the 120-minute activity
+                        # backstop inflated that instead. Worse: the row is now
+                        # `failed`, so startup recovery (which scans `running`)
+                        # skips it forever and the activity orphans permanently.
+                        # This is the issue's own reproduction step.
+                        if won:
+                            await activity_service.close_execution_activity(
+                                execution_id,
+                                TaskExecutionStatus.FAILED,
+                                error="Execution cancelled (backend shutdown)",
+                                activity_id=activity_id,
+                            )
                 except Exception:
                     pass
             raise
@@ -1798,7 +1849,18 @@ class TaskExecutionService:
                 try:
                     execution_log_json = json.dumps(exec_log)
                     execution_log_json = sanitize_execution_log(execution_log_json)
-                    tool_calls_json = execution_log_json
+                    # #1741: `tool_calls` is a SUMMARY, not a second copy of the
+                    # transcript. It used to be assigned `execution_log_json`
+                    # verbatim, which made `tool_call_total` read 0 forever (every
+                    # consumer looks for `{"tool": …}` entries, the transcript has
+                    # envelope events) and left a transcript copy in a column the
+                    # log-retention sweep never touched. `/api/task` — unlike
+                    # `/api/chat` — sends no `execution_log_simplified`, so derive
+                    # it here: that works on every agent image with no rebuild.
+                    tool_calls = extract_tool_calls(exec_log)
+                    tool_calls_json = (
+                        sanitize_execution_log(json.dumps(tool_calls)) if tool_calls else None
+                    )
                 except Exception as e:
                     logger.error(
                         f"[TaskExecService] Failed to serialize execution_log for {eid}: {e}"

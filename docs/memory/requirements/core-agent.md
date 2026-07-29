@@ -116,6 +116,10 @@
 ### 4.1 Local Templates
 - **Status**: ✅ Implemented
 - **Description**: Auto-discovery from `config/agent-templates/`
+- **Create-time resolution contract (#1793 + #1759)**: `local:<name>` is resolved against the curated catalog first, then the deploy-local store (`/data/deployed-templates`, #950). A well-formed but **unresolvable** id fails with a named **404 `UNKNOWN_LOCAL_TEMPLATE`** (#1793) raised **before any side effect** (no container, no MCP key, no volume, nothing to roll back) — completing the loud-reject contract #843 opened for *unprefixed* template strings. An empty / non-mapping / unparseable `template.yaml` fails in the same pre-side-effect band with **400 `LOCAL_TEMPLATE_INVALID`** (#1759), matching the strictness the listing surface (`GET /api/templates`) already applied; without it a *present* but malformed template reached the identical blank-agent-at-200 outcome through a broad `except Exception`. The traversal barrier keeps precedence: a malformed name is still 400 `INVALID_LOCAL_TEMPLATE_NAME`. `template: null` / `""` (Blank Agent) never enter this branch and are unaffected. Hidden templates (`hidden: true`) are **omitted from the listing but remain creatable by id** — the resolver never reads the flag.
+  - The error is **one identical sentence whichever root missed**, carrying no filesystem path and no root name — deploy-local templates are named after *agent* names, so a root-distinguishing message would let a `creator`-role caller probe another user's agents (#186 adjacency).
+  - Manifest deploys surface it per agent via the ent#125 `failed[]` report (`status_code: 400`), so one typo'd template no longer sinks a whole system.
+  - The curated root falls back to the in-repo `config/agent-templates/` when the container bind mount is absent, so the gate is live in source-run backends too (aligning create with the listing surface, which has had that fallback since #843).
 
 ### 4.2 GitHub Templates
 - **Status**: ✅ Implemented
@@ -434,11 +438,17 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   (no manual create/clone). Provisioned by
   `services/cornelius_agent_service.py::CorneliusAgentService.ensure_seeded()`.
 - **Key Features**:
-  - **Bundled local template**: a new `config/agent-templates/cornelius/` LOCAL template
-    (`capabilities: [brain-orb]`, `CLAUDE.md`, `.trinity/brain-orb/` hooks, a pre-generated
-    `resources/agent-visualization/data.json` seed graph so the orb renders immediately, and a minimal
-    seed `Brain/` vault). Sourced from the public `github.com/Abilityai/cornelius`; provisioned via the
-    ordinary `create_agent_internal` from `local:cornelius` (no PAT / network / clone).
+  - **Public source template** (#1656): provisioned via the ordinary `create_agent_internal` from
+    `github:Abilityai/cornelius` — an anonymous, source-mode clone with **no PAT**, on the
+    trinity-enterprise#123 tokenless public-repo path (`AgentConfig.source_mode` defaults `True`, which
+    that path requires). Carries `capabilities: [brain-orb]`, `CLAUDE.md`, `.trinity/brain-orb/` hooks,
+    a pre-generated `resources/agent-visualization/data.json` seed graph so the orb renders immediately,
+    `resources/local-brain-search/` (so `semantic_search` is real, not a keyword fallback), and the full
+    `Brain/` vault the seed graph was exported from. Was a vendored
+    `config/agent-templates/cornelius/` snapshot until #1656; that snapshot drifted from its own prose
+    and caused #1646 and #1656, so the bundle was deleted rather than re-vendored. **No offline
+    fallback** — a fallback would only fire on a transient clone failure and would burn the durable
+    `cornelius_seeded` flag on the degraded copy; leaving the flag unset to retry next boot is safer.
   - **First-run-only**: a durable `cornelius_seeded` system-setting flag gates the seed — an operator who
     deletes Cornelius is **not** re-provisioned.
   - **Fresh-install-scoped**: skipped when any non-system agent already exists (`db.count_non_system_agents()`),

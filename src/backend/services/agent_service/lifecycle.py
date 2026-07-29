@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import time
+from typing import Optional
 
 import docker
 import httpx
@@ -21,13 +22,13 @@ from services.docker_service import (
 )
 from services.docker_utils import (
     container_stop, container_remove, container_start, container_reload,
-    volume_get, volume_create, containers_run
+    volume_get, volume_create, containers_run, image_get
 )
 from services.agent_service.helpers import validate_base_image
 from services.agent_runtime_state import clear_agent_breakers
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
 from services.skill_service import skill_service
-from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, is_claude_runtime
+from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, check_base_image_matches, is_claude_runtime, is_system_agent_name
 from services.agent_auth import derive_agent_token
 from utils.helpers import utc_now_iso
 from .file_sharing import check_public_folder_mount_matches
@@ -295,6 +296,61 @@ async def start_agent_internal(agent_name: str) -> dict:
         not check_agent_auth_token_env_matches(container, agent_name)
     )
 
+    # #1809: a rebuilt base image is picked up on COLD start only. Evaluated
+    # lazily — the Docker round-trip runs only when no other predicate already
+    # forced a recreate. Gated on `not was_already_running` because
+    # start-on-running is a load-bearing idempotent no-op (MCP ensure-running
+    # calls, the SUB-003 auto-switch restart, restart_system): config drift is
+    # an owner-intentional per-agent change, while image drift is armed
+    # fleet-wide by any `build-base-image.sh` run — it must never turn a start
+    # of a running agent into a container kill. Ephemeral ghosts are excluded:
+    # they are volume-less by design ("ghosts never recreate"), so an
+    # image-drift recreate would silently destroy their workspace mid-budget
+    # (trinity-enterprise#69).
+    recreate_reason = "config_drift" if needs_recreation else None
+    if not needs_recreation and not was_already_running:
+        try:
+            _eph_gate = db.get_agent_ephemeral_info(agent_name)
+        except Exception:
+            _eph_gate = None
+        if not (isinstance(_eph_gate, dict) and _eph_gate.get("is_ephemeral")):
+            if not await check_base_image_matches(container, agent_name):
+                needs_recreation = True
+                recreate_reason = "image_drift"
+
+    # #1816 (AC2): a RUNNING trinity-system is NEVER recreated by this path.
+    #
+    # This is the one code path that could reach a running system agent — every
+    # other caller stops the container first (subscription assign/remove, the
+    # SUB-003 auto-switch, restart_system, /restart, /reinitialize), and delete,
+    # rename, ephemeral discard, the cleanup orphan sweep and restart_fleet all
+    # refuse or skip system agents outright.
+    #
+    # Deliberately gating `needs_recreation` WHOLESALE rather than the image
+    # predicate alone: `recreate_container_with_updated_config` resolves the
+    # image from the container's own Config.Image *tag*, so ANY predicate that
+    # fires also adopts a new image. Gating only the image predicate would leave
+    # AC2 open through the other eight. This makes AC2 a STRUCTURAL invariant,
+    # independent of predicate count — a tenth predicate added next quarter
+    # cannot reopen it with no test failing. #1816's convergence work is what
+    # keeps this gate from firing routinely; the gate is what keeps AC2 true
+    # when the next predicate is added.
+    #
+    # Honest, not silent: the caller is told the recreate was deferred and why,
+    # so the remedy (stop it, then start) is named rather than inferred. This is
+    # a deliberate divergence from regular-agent semantics — an admin who
+    # changes a running system agent's config and clicks Start gets no recreate.
+    recreate_deferred = None
+    if needs_recreation and was_already_running and is_system_agent_name(agent_name):
+        logger.info(
+            f"Deferring {recreate_reason} recreate for {agent_name}: the system "
+            f"agent is running and is never replaced mid-operation (#1816). "
+            f"Stop it, then start it, to apply."
+        )
+        needs_recreation = False
+        recreate_reason = None
+        recreate_deferred = "system_agent_running"
+
     # #1560: the heartbeat markers and both circuit breakers are keyed by agent
     # NAME, not by container identity, so a recreated container inherits the
     # verdict recorded against its predecessor — a fresh, healthy agent is
@@ -395,15 +451,43 @@ async def start_agent_internal(agent_name: str) -> dict:
         "skills_injection": skills_status,
         "skills_result": skills_result,
         "read_only_injection": read_only_result.get("status", "unknown"),
-        "read_only_result": read_only_result
+        "read_only_result": read_only_result,
+        # #1809: surface whether (and why) this start replaced the container,
+        # so "why did my container id change / uptime reset" is answerable from
+        # the start response and the audit trail.
+        "recreated": needs_recreation,
+        "recreate_reason": recreate_reason if needs_recreation else None,
+        # #1816: a recreate the AC2 gate suppressed. None on every normal start.
+        # NB a field added here does NOT reach the API on its own —
+        # routers/agents.py::start_agent_endpoint rebuilds a fresh dict from a
+        # whitelist of keys (#1809's own learning), so this is surfaced there too.
+        "recreate_deferred": recreate_deferred,
     }
 
 
-async def recreate_container_with_updated_config(agent_name: str, old_container, owner_username: str):
+async def recreate_container_with_updated_config(
+    agent_name: str,
+    old_container,
+    owner_username: str,
+    *,
+    full_capabilities: Optional[bool] = None,
+):
     """
     Recreate an agent container with updated configuration.
     Handles shared folder mounts and API key settings.
     Preserves the agent's workspace volume and other configuration.
+
+    Args:
+        full_capabilities: #1816 override for the fleet-wide capabilities
+            setting. ``None`` (every existing caller) resolves it the same way
+            the matching predicate does — the fleet default for a regular
+            agent, and unconditionally ``True`` for ``trinity-system``, whose
+            FULL_CAPABILITIES are contractual (package installation), not
+            fleet-derived. Writer and checker route through the SAME
+            ``is_system_agent_name`` helper so they cannot disagree; if they
+            did, the checker would keep demanding a recreate the writer never
+            satisfies (infinite recreate loop — the hazard this module already
+            documents for the guardrails/PAT matchers).
     """
     # Extract configuration from old container
     old_config = old_container.attrs.get("Config", {})
@@ -517,10 +601,23 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
     # "TRINITY_BACKEND_URL / TRINITY_MCP_API_KEY missing" and never starts).
     # setdefault preserves any value already baked on the container (matching the
     # #1098 TMPDIR idiom above).
-    env_vars.setdefault(
-        'TRINITY_BACKEND_URL',
-        os.getenv('TRINITY_BACKEND_URL', 'http://backend:8000'),
-    )
+    #
+    # #1816: EXCEPT for the system agent. This env var is the agent-side
+    # heartbeat loop's gate, and heartbeat_service.authorize_heartbeat accepts
+    # ONLY `scope == "agent"` keys — trinity-system's key is `scope == "system"`,
+    # so arming it buys nothing and costs a permanent 5-second 403 loop
+    # (swallowed agent-side, ~17k backend log lines/day). Matters now because
+    # #1816 makes this recreate a ROUTINE path for the system agent (boot with
+    # the container stopped → base-image adoption), where before it was
+    # incidental. The system agent also has no #1083 result callback and no
+    # #1081 pull worker, so the other two consumers are moot too. Whether the
+    # orchestrator SHOULD be visible to fleet health is a separate design
+    # question (#1816 §10).
+    if not is_system_agent_name(agent_name):
+        env_vars.setdefault(
+            'TRINITY_BACKEND_URL',
+            os.getenv('TRINITY_BACKEND_URL', 'http://backend:8000'),
+        )
 
     # #946 / #1081 Phase 2: re-apply the pull worker opt-in on recreate. Clear
     # any baked pull env FIRST (set-or-clear, mirroring the guardrails/stall-limit
@@ -557,18 +654,60 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
     labels["trinity.cpu"] = cpu
     labels["trinity.memory"] = memory
 
-    # Get full_capabilities from system-wide setting (not per-agent)
-    full_capabilities = get_agent_full_capabilities()
+    # Get full_capabilities from system-wide setting (not per-agent), unless a
+    # caller overrode it or this is the system agent (#1816 — its
+    # FULL_CAPABILITIES are contractual, so it must not follow the fleet
+    # setting; same helper `check_full_capabilities_match` exempts on).
+    if full_capabilities is None:
+        full_capabilities = (
+            True if is_system_agent_name(agent_name) else get_agent_full_capabilities()
+        )
 
     # Update label to reflect current setting
     labels["trinity.full-capabilities"] = str(full_capabilities).lower()
+
+    # #1816: carry the old container's restart policy onto the replacement.
+    # `old_host_config` was extracted at the top of this function and then never
+    # read — a genuinely dead variable, and precisely why `unless-stopped`
+    # silently vanished from EVERY recreated agent. `trinity-system` is created
+    # with it, so before this a single recreate downgraded the platform
+    # orchestrator to "stays down after a crash or a host reboot".
+    #
+    # Null-safe by construction: `.get("RestartPolicy", {})` returns None when
+    # the key exists with a null value (Docker does emit that), and `.get` on
+    # None would abort the recreate with an AttributeError — the container is
+    # already removed by then, so the agent would be left with none at all.
+    restart_policy = old_host_config.get("RestartPolicy") or {}
+
+    # #1809: refresh the base-image version label from the image this recreate
+    # will actually run. Labels are carried forward verbatim from the old
+    # container, and every AgentStatus reader prefers the container label over
+    # an image lookup — so without this an image-drift recreate runs the NEW
+    # image while the UI keeps reporting the OLD version. Best-effort: an
+    # unreadable image keeps the carried-forward label, never blocks recreate.
+    try:
+        _new_image_ver = ((await image_get(image)).labels or {}).get("trinity.base-image-version")
+        if _new_image_ver:
+            labels["trinity.base-image-version"] = _new_image_ver
+    except Exception as e:
+        logger.warning(
+            f"Could not refresh trinity.base-image-version label for {agent_name} "
+            f"({type(e).__name__}: {e}) — keeping the carried-forward value"
+        )
 
     # Stop and remove old container
     try:
         await container_stop(old_container)
     except Exception:
         pass
-    await container_remove(old_container)
+    try:
+        await container_remove(old_container)
+    except docker.errors.NotFound:
+        # #1809: a concurrent start already removed it. Post-rebuild, EVERY
+        # cold start is a recreate, so two racing starts (UI double-click,
+        # --workers 2, restart_system loop + manual start) is routine — fall
+        # through; the 409 adoption below covers the run-side of the race.
+        pass
 
     # Build new volume configuration.
     #
@@ -600,17 +739,32 @@ async def recreate_container_with_updated_config(agent_name: str, old_container,
             if vol_name:
                 volumes[vol_name] = {"bind": dest, "mode": "rw" if m.get("RW", True) else "ro"}
 
-    return await _provision_folders_and_run_agent_container(
-        agent_name,
-        image=image,
-        env_vars=env_vars,
-        labels=labels,
-        base_volumes=volumes,
-        ssh_port=ssh_port,
-        cpu=cpu,
-        memory=memory,
-        full_capabilities=full_capabilities,
-    )
+    try:
+        return await _provision_folders_and_run_agent_container(
+            agent_name,
+            image=image,
+            env_vars=env_vars,
+            labels=labels,
+            base_volumes=volumes,
+            ssh_port=ssh_port,
+            cpu=cpu,
+            memory=memory,
+            full_capabilities=full_capabilities,
+            restart_policy=restart_policy,
+        )
+    except docker.errors.APIError as e:
+        # #1809: 409 name-conflict — a concurrent start won the recreate race
+        # and already ran the replacement. Adopt the winner's container instead
+        # of failing this caller with a 500 ("start this agent" is idempotent).
+        if getattr(e, "status_code", None) == 409:
+            existing = get_agent_container(agent_name)
+            if existing is not None:
+                logger.info(
+                    f"Recreate race for {agent_name}: adopting the concurrently "
+                    f"created container"
+                )
+                return existing
+        raise
 
 
 async def _provision_folders_and_run_agent_container(
@@ -624,6 +778,7 @@ async def _provision_folders_and_run_agent_container(
     cpu,
     memory,
     full_capabilities: bool,
+    restart_policy: Optional[dict] = None,
 ):
     """Shared tail for every container (re)build: add DB-driven shared/public
     folder mounts onto ``base_volumes`` then run the container with the full
@@ -634,6 +789,19 @@ async def _provision_folders_and_run_agent_container(
     after a soft-delete recovery, #1559) share one canonical run path — the
     security envelope can never drift between them (AC: "goes through the
     supported creation path, not a hand-rolled docker run").
+
+    Args:
+        restart_policy: #1816 — Docker restart policy to carry onto the
+            replacement, e.g. ``{"Name": "unless-stopped"}``. Forwarded ONLY
+            when it names a policy: docker-py rejects a ``None`` and an empty
+            ``{"Name": ""}`` is Docker's "no policy", which is also what
+            omitting the kwarg produces. ``None`` (the default, and every
+            pre-#1816 caller) is therefore exactly today's behaviour.
+
+            Load-bearing for ``trinity-system``, which is created with
+            ``unless-stopped`` and, before this, silently LOST it on every
+            recreate — the old container's HostConfig was extracted and never
+            read.
     """
     volumes = dict(base_volumes)
 
@@ -739,6 +907,10 @@ async def _provision_folders_and_run_agent_container(
         # cpu_count — docker-py's cpu_count maps to the Windows-only CpuCount
         # and leaves NanoCpus=0 on Linux, so the CPU limit was never enforced.
         nano_cpus=int(cpu) * 1_000_000_000,
+        # #1816: carry the restart policy forward (see the arg docstring). The
+        # kwarg is omitted entirely when there is no policy to set, so this is
+        # a no-op for every pre-#1816 caller.
+        **({"restart_policy": restart_policy} if (restart_policy or {}).get("Name") else {}),
     )
 
     logger.info(f"Recreated container for agent {agent_name} with updated configuration")
@@ -773,6 +945,28 @@ def _workspace_volume_name(agent_name: str) -> str:
             e,
         )
         return f"agent-{agent_name}-workspace"
+
+
+def _reconstruct_template_id(agent_name: str, tmpl: dict) -> str:
+    """Best-effort rebuild of an agent's template id after its container is gone (#1811).
+
+    Returns "" when nothing identifying survives — the honest answer, and the
+    same value the caller had before, so this can only improve the result.
+    """
+    try:
+        git_cfg = db.get_git_config(agent_name)
+    except Exception:  # noqa: BLE001 — never block recovery on this
+        git_cfg = None
+
+    repo = getattr(git_cfg, "github_repo", None) if git_cfg else None
+    if repo:
+        branch = getattr(git_cfg, "working_branch", None) or getattr(
+            git_cfg, "source_branch", None
+        )
+        return f"github:{repo}@{branch}" if branch else f"github:{repo}"
+
+    name = (tmpl.get("name") or "").strip()
+    return f"local:{name}" if name else ""
 
 
 async def _read_template_yaml_from_volume(agent_name: str) -> dict:
@@ -827,7 +1021,33 @@ async def recreate_missing_container(agent_name: str):
 
     Caller must confirm a live `agent_ownership` row exists first — this does
     NOT create ownership/child rows, only the container.
+
+    Refuses `trinity-system` (#1816): this path reconstructs a REGULAR agent and
+    cannot reproduce the orchestrator's contract — it mints a fresh
+    *agent-scoped* MCP key after deactivating the existing **system-scoped** one
+    (whose plaintext is unrecoverable, so the downgrade is irreversible), omits
+    the `trinity.is-system` label and the read-only `/template` bind, drops
+    `restart_policy: unless-stopped`, arms `TRINITY_BACKEND_URL` (the scope-403
+    heartbeat loop #1816 exists to avoid), and follows the fleet capabilities
+    setting instead of the contractual one. #1816 made this reachable from the
+    boot path and from `POST /api/system-agent/restart` (both now delegate to
+    `start_agent_internal`), where a concurrent `--workers N` recreate can null
+    the container lookup mid-flight. Failing closed is safe and self-healing:
+    when the system agent genuinely has no container,
+    `SystemAgentService.ensure_deployed`'s create branch rebuilds it correctly
+    on the next boot.
     """
+    if is_system_agent_name(agent_name):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The system agent has no container. It is rebuilt by "
+                "SystemAgentService.ensure_deployed on backend boot, not by the "
+                "generic recovery path, which cannot reproduce its system-scoped "
+                "MCP key, labels and mounts."
+            ),
+        )
+
     image = "trinity-agent-base:latest"
     validate_base_image(image)
 
@@ -843,7 +1063,18 @@ async def recreate_missing_container(agent_name: str):
     else:
         runtime = "claude-code"
         runtime_model = ""
-    template_name = tmpl.get("_template") or ""  # display-only; label field
+    # #1811: the original template id (`local:scout`, `github:Org/repo@main`)
+    # lived ONLY in the destroyed container's TEMPLATE_NAME env and
+    # `trinity.template` label — the workspace `template.yaml` carries `name:`
+    # and `type:`, never `_template`, so this was always empty in practice and
+    # both the label and (once restored) the env var came back blank.
+    # Reconstruct from what actually survives:
+    #   * a GitHub-native agent → its persisted git config (repo + branch);
+    #   * otherwise → `local:{name}` from the volume's template.yaml.
+    # This is a reconstruction, not the original string: an agent created from
+    # a github: URL with no branch suffix gets one back. Persisting the id at
+    # creation is the authoritative fix and needs a schema change.
+    template_name = tmpl.get("_template") or _reconstruct_template_id(agent_name, tmpl)
 
     # --- Resource limits: per-agent DB override → system defaults ---
     system_defaults = get_agent_default_resources()
@@ -864,6 +1095,13 @@ async def recreate_missing_container(agent_name: str):
         "AGENT_RUNTIME": runtime,
         "AGENT_RUNTIME_MODEL": runtime_model,
         "TMPDIR": AGENT_DEFAULT_TMPDIR,
+        # #1811: creation sets this (crud.py) and two consumers read it —
+        # startup.sh gates local-template init on it, and the agent-server
+        # /info route reports it. Recovery read the value off template.yaml but
+        # used it only for the `trinity.template` LABEL, so a recovered agent
+        # reported an empty template_name and skipped the local-template
+        # branch. Same empty-string-when-absent shape as creation.
+        "TEMPLATE_NAME": template_name,
     }
 
     # OpenTelemetry (default on) — same wiring as create.
@@ -882,6 +1120,21 @@ async def recreate_missing_container(agent_name: str):
     owner_username = owner.get("owner_username") or owner.get("username")
     try:
         if owner_username:
+            # #1811: recovery is not idempotent — every call mints a key, and a
+            # repeatedly-recovered agent accumulated active rows (50 observed on
+            # one instance). Deactivate the superseded ones FIRST, so the key we
+            # are about to mint stays active; the same hygiene #1745 gave delete.
+            # Best-effort: never block recovery on credential bookkeeping.
+            try:
+                superseded = db.deactivate_agent_mcp_keys(agent_name)
+                if superseded:
+                    logger.info(
+                        "Deactivated %d superseded MCP key(s) for %s before recovery mint (#1811)",
+                        superseded, agent_name,
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Could not deactivate prior MCP keys for %s: %s", agent_name, e)
+
             agent_mcp_key = db.create_agent_mcp_api_key(
                 agent_name, owner_username, description="recovery-recreate"
             )
