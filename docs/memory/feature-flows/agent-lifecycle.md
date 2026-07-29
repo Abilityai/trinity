@@ -420,6 +420,15 @@ async def start_agent_internal(agent_name: str) -> dict:
         if not await check_base_image_matches(container, agent_name):
             needs_recreation = True  # recreate_reason = "image_drift"
 
+    # #1816: structural AC2 gate — a RUNNING trinity-system is never recreated,
+    # whatever the predicates say. Independent of predicate count, so a future
+    # tenth predicate cannot reopen the hole. Honest, not silent: the caller
+    # gets recreate_deferred="system_agent_running" and the remedy is named.
+    recreate_deferred = None
+    if needs_recreation and was_already_running and is_system_agent_name(agent_name):
+        needs_recreation, recreate_reason = False, None
+        recreate_deferred = "system_agent_running"
+
     if needs_recreation:
         # Recreate container with updated config
         # (sets CLAUDE_CODE_OAUTH_TOKEN if subscription, removes ANTHROPIC_API_KEY, or vice versa).
@@ -483,7 +492,44 @@ async def start_agent_internal(agent_name: str) -> dict:
 - **Auth env var changes** (SUB-002): `ANTHROPIC_API_KEY` and/or `CLAUDE_CODE_OAUTH_TOKEN` added/removed based on `use_platform_api_key` AND subscription assignment. Three-way check ensures mutual exclusion.
 - **Resource limit changes**: Memory/CPU limits updated in database
 - **Capabilities changes**: System-wide full_capabilities setting changed
+- **Base image drift** (#1809): the container's own `Config.Image` **tag** no longer resolves to the image id it runs. Evaluated lazily and **only on a cold start** — see below.
 - API key retrieval uses `get_anthropic_api_key()` from `services/settings_service.py`
+
+**Base-image drift — 3-state core, boolean wrapper (#1809 / #1816):**
+
+```python
+async def check_base_image_state(container, agent_name) -> Literal["match", "drift", "unknown"]
+async def check_base_image_matches(container, agent_name) -> bool:   # unchanged signature
+    return await check_base_image_state(container, agent_name) != "drift"
+```
+
+The four fail-open exits (no image id/reference on the container, `ImageNotFound`, any other Docker error)
+return `"unknown"` instead of a bare `True`, so a caller that wants to *report* drift can tell "the image
+is current" from "the check could not run". `start_agent_internal` consumes only the boolean, so #1809's
+behaviour is byte-identical: `unknown → True`, `match → True`, `drift → False`. The 3-state exists because
+`system_agent_service`'s staleness alarm (#1816) cannot be built on a boolean whose `True` conflates
+"current" with "the check failed" — alarming on that would recreate the #1809 symptom one layer up. One
+comparison, one place: `system_agent_service` must contain **no** hand-rolled image-id comparison
+(source-pinned).
+
+**System-aware `check_full_capabilities_match` (#1816):** the predicate compares the
+`trinity.full-capabilities` label against the admin-settable **fleet** default, but `trinity-system` runs
+`FULL_CAPABILITIES` by contract (package installation). On an `agent_full_capabilities=false` install,
+pinning the system agent's label to `'true'` would produce a mismatch that can never converge — a recreate
+on every start, forever. So the predicate returns `True` for the system agent, and
+`recreate_container_with_updated_config` takes a keyword-only `full_capabilities: Optional[bool]` override
+so the writer honours the same contract. Both sit behind **one** shared `helpers.is_system_agent_name()` — deliberately a NAME test rather than the
+DB-backed `db.is_system_agent`, which can fail and which also honours the `is_system` ownership flag (a
+failure that flipped this answer would either recreate the orchestrator or leak full capabilities to any
+`is_system`-flagged row). So
+writer and checker cannot disagree. `None` (every existing caller) = today's fleet-derived behaviour.
+
+**Restart-policy carry-forward (#1816):** `_provision_folders_and_run_agent_container` takes a keyword-only
+`restart_policy: Optional[dict]` and forwards it to `containers_run` only when `Name` is non-empty.
+`recreate_container_with_updated_config` reads it from the old container's `HostConfig` — previously an
+extracted-but-never-read variable, which is precisely why `unless-stopped` silently vanished on every
+recreate. Read null-safely as `(old_host_config.get("RestartPolicy") or {}).get("Name")`: the key can exist
+with a `null` value, and `.get` on `None` would abort the recreate.
 
 **Authentication Model** (Updated 2026-03-03 for SUB-002):
 
@@ -988,6 +1034,7 @@ await log_audit_event(
 
 | Date | Changes |
 |------|---------|
+| 2026-07-28 | **#1816 — base-image adoption for `trinity-system`**: `check_base_image_matches` split into a 3-state `check_base_image_state` core + an unchanged boolean wrapper (`state != "drift"`); `check_full_capabilities_match` made system-aware and `recreate_container_with_updated_config` gained a keyword-only `full_capabilities` override behind one shared `helpers.is_system_agent_name()`; `_provision_folders_and_run_agent_container` gained a keyword-only `restart_policy` and the recreate now carries `unless-stopped` forward (it was silently dropped); `start_agent_internal` gained the structural AC2 gate (`is_system AND was_already_running` ⇒ `recreate_deferred="system_agent_running"`, surfaced through `routers/agents.py`). See [internal-system-agent.md](internal-system-agent.md) → Base-image adoption. |
 | 2026-07-18 | **#1484 — `create_agent_internal` decomposition (no behavior change)**: the CC-187 / 945-SLOC monolith was cut into a thin orchestrator + fenced private phase-helpers (each CC<20 / <100 SLOC), reading a single orchestrator-populated `_RollbackHandles` dataclass; the `if docker_client: try/except/else` and CC-trivial gates stay inline. Signature/callers unchanged. Characterization-tests-first (`tests/unit/test_1484_create_agent_characterization.py`, 40 tests) pin the byte-identical contract. See `architecture.md` (Services → `agent_service/crud.py`, Network Topology `_create_agent_container`). The numbered "Business Logic" line references above are now stale (helper-relocated). |
 | 2026-03-26 | **Line number refresh + Trinity injection removal**: Updated all line numbers across agents.py (647 lines), lifecycle.py (403 lines), crud.py (552 lines), helpers.py (467 lines), terminal.py (320 lines). Removed all `inject_trinity_meta_prompt()` references and AgentClient injection code (Issue #136). Updated startup injection order to: Credentials, Skills, Read-Only Hooks. Added documentation for bulk endpoints (context-stats :157, execution-stats :163, autonomy-status :232, slots :240), queue endpoints (queue :537, clear :546, release :555), and activity endpoints (activities :568, timeline :594). Updated delete flow for EVT-001 event subscriptions (:381) and AVATAR-002 emotion image cleanup (:410-425). |
 | 2026-03-07 | **AVATAR-001: Avatar lifecycle integration**: Delete agent now cleans up avatar files. Rename agent now renames avatar file from old to new name. Get agent response enriched with `avatar_url` field from `db.get_avatar_identity()`. Added avatar file to cascading deletes list. |

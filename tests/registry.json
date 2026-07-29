@@ -866,7 +866,7 @@
         "infrastructure",
         "brain-orb"
       ],
-      "description": "Cornelius first-run seeder (ent#107): ensure_seeded first-run gating via durable cornelius_seeded flag (deleted agent not resurrected); fresh-install scoping (existing non-system agents -> skip + converge flag, orb flag untouched); owner-must-exist deferral (pre-setup skip without burning the flag); Docker-unavailable skip; Brain Orb flag defaulted ON existence-guarded (admin OFF preserved); 409-on-exists convergence vs generic-failure retry (flag not burned, never raises); --workers 2 Redis SETNX provision lock (held -> skip, winner provisions+releases with TTL, Redis-down fail-open); _provision builds local:cornelius create with request=None; real-DB smoke of db.count_non_system_agents() facade delegation. create_agent_internal/db/redis/docker seams patched; no Docker/backend. ent#124 addition: precomputed freshness verdict \u2014 ensure_seeded(fresh=True) skips the internal count, fresh=False converges the flag without provisioning, fresh=None preserves the legacy count path."
+      "description": "Cornelius first-run seeder (ent#107): ensure_seeded first-run gating via durable cornelius_seeded flag (deleted agent not resurrected); fresh-install scoping (existing non-system agents -> skip + converge flag, orb flag untouched); owner-must-exist deferral (pre-setup skip without burning the flag); Docker-unavailable skip; Brain Orb flag defaulted ON existence-guarded (admin OFF preserved); 409-on-exists convergence vs generic-failure retry (flag not burned, never raises); --workers 2 Redis SETNX provision lock (held -> skip, winner provisions+releases with TTL, Redis-down fail-open); _provision builds a github:Abilityai/cornelius create with request=None and source_mode default True (#1656 — the trinity-enterprise#123 tokenless public-clone path is source-mode only); real-DB smoke of db.count_non_system_agents() facade delegation. create_agent_internal/db/redis/docker seams patched; no Docker/backend. ent#124 addition: precomputed freshness verdict \u2014 ensure_seeded(fresh=True) skips the internal count, fresh=False converges the flag without provisioning, fresh=None preserves the legacy count path."
     },
     {
       "file": "unit/test_1557_autonomy_breaker_decoupled.py",
@@ -1166,6 +1166,60 @@
         "unit"
       ],
       "description": "export_manifest template round-trip (#1759). Blank Agents carry template: None (key PRESENT), and dict.get(key, default) returns the default only when the key is ABSENT \u2014 so the old local:business-assistant fallback was unreachable dead code and every template-less agent exported template: null, which SystemAgentConfig.template (non-Optional str) rejects on redeploy. Pins the `or` fix emitting local:default, pass-through of a real template, that the exported manifest both validates and names a template that exists in-tree, and that inferred agents are logged."
+    },
+    {
+      "file": "unit/test_1771c_schedules_cas_edges.py",
+      "feature": "#1771",
+      "added": "2026-07-26",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "scheduling",
+        "reliability"
+      ],
+      "description": "Edge-case matrix (sub-area A) for the #1082 CAS status writers in db/schedules/{executions,queue}.py on db_harness (#300): SUCCESS-wins over queued/pending_retry/skipped, cancelled-blocks-SUCCESS, replayed SUCCESS (UNSPEC), missing row, started_at NOT NULL schema guard, malformed started_at raising before the CAS (accepted gap), mixed naive/Z/offset formats, retry_count=None preservation, agent-scoped bulk writers, expire_stale_queued cutoff band + window arithmetic, NULL queued_at, get_queued_count isolation, find_expired_leases exclusions. Carries ONE strict xfail: clock-skewed started_at persists a negative duration_ms (#1771 AC#4 - reported, not fixed)."
+    },
+    {
+      "file": "unit/test_1771c_schedules_cas_properties.py",
+      "feature": "#1771",
+      "added": "2026-07-26",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "scheduling",
+        "reliability",
+        "property-based"
+      ],
+      "description": "Hypothesis properties (sub-area A) for the CAS status writers: P-A1 bounded RuleBasedStateMachine proving 'terminal is absorbing' (canary E-02 at the DB layer) plus a meta-test that injects a phantom reversal and proves the machine reports it; P-A2/P-A3 no-crash-total and idempotence asserted PER RETURN CLASS (bool / int rowcount / Optional[Dict] are three different contracts, exhaustive over the status domain); P-A4 lexicographic-ISO-equals-chronological oracle plus its negative mixed-offset case."
+    },
+    {
+      "file": "unit/test_1771c_schedules_analytics_edges.py",
+      "feature": "#1771",
+      "added": "2026-07-26",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "analytics",
+        "scheduling"
+      ],
+      "description": "Edge-case matrix (sub-area B) for db/schedules/analytics.py on db_harness (#300): _TRIGGER_BUCKETS subset of _BUCKET_ORDER regression guard (the existing literal assertion omits 'Reminders'), unknown/empty/None trigger bucketing, zero-terminal day reports None not 0%, headline-0.0 spec gap (UNSPEC), terminal-based success_rate incl. the legacy 'error' alias, NULL-skipping context AVG, percentile-cap boundary, full-set avg vs sampled p95 (the locked data-source discipline), percentile pool 0/1/2 rows, offset-bearing day bucketing [SQLITE-ONLY], strict '>' window boundary with a frozen iso_cutoff, gap-filled contiguous timeline, and _schedule_command_label unicode/length boundaries. Also covers get_schedule_analytics end-to-end (agent-written tool_calls SHAPE guards \u2014 valid-JSON-not-a-list, list-of-scalars, dict-without-name, non-numeric duration \u2014 on BOTH that surface and get_agent_schedules_summary; the FAILED arm of the per-schedule timeline; and its own 0/1/2/3-row percentile ladder, a second implementation of the same statistics.quantiles arithmetic get_agent_analytics has)."
+    },
+    {
+      "file": "unit/test_1771c_schedules_analytics_properties.py",
+      "feature": "#1771",
+      "added": "2026-07-26",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "analytics",
+        "scheduling",
+        "property-based"
+      ],
+      "description": "Hypothesis properties (sub-area B) for analytics aggregation: P-B1 conservation (sum of by_type totals equals total_executions over arbitrary unicode triggered_by, the mechanised 'a new trigger never silently vanishes') plus its per-day form, P-B2 rate/count bounds incl. the zero-terminal-day-is-None rule, P-B2b sampling-metadata self-consistency, P-B3 contiguous duplicate-free UTC-day timeline over arbitrary windows, P-B4 no-crash-total on _bucket_for_trigger and _schedule_command_label. Uses Hypothesis event() markers so --hypothesis-show-statistics proves non-vacuity; P-B2b DRAWS the percentile cap instead of leaving it at its production 5000, because with <=12 seeded rows the 'sampled is True' arm of the biconditional would otherwise be unreachable and half the property would pass vacuously."
     }
   ]
 }

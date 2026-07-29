@@ -186,6 +186,26 @@ async def image_get(name: str) -> Any:
 
 
 # =============================================================================
+# Network Operations
+# =============================================================================
+
+async def network_get(name: str) -> Any:
+    """Get a network without blocking the event loop.
+
+    Args:
+        name: Network name (e.g. ``trinity-agent-network``)
+
+    Returns:
+        Network object
+
+    Raises:
+        docker.errors.NotFound: If the network doesn't exist
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_docker_executor, docker_client.networks.get, name)
+
+
+# =============================================================================
 # Volume Operations
 # =============================================================================
 

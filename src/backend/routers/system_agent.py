@@ -18,13 +18,21 @@ from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSo
 
 from models import User
 from database import db
-from dependencies import get_current_user, decode_token, assert_admin
+from dependencies import (
+    get_current_user,
+    decode_token,
+    assert_admin,
+    reject_agent_principal,
+)
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, docker_client
 from services.docker_utils import (
     container_reload, container_stop, container_start,
     container_exec_run, api_exec_create, api_exec_start
 )
+from services.agent_service.helpers import check_base_image_state
+from services.agent_service.lifecycle import start_agent_internal
+from services.system_agent_service import BASE_IMAGE_STATE_LABELS
 from db.agents import SYSTEM_AGENT_NAME
 
 router = APIRouter(prefix="/api/system-agent", tags=["system-agent"])
@@ -69,8 +77,20 @@ async def get_system_agent_status(
         result["created_at"] = owner.get("created_at")
         result["is_system"] = owner.get("is_system", True)
 
-    # If running, try to get health info from agent
+    # #1816: is the running container still on the image its tag resolves to?
+    # An ENUM only (`current` | `stale` | `unknown`) — never image ids or
+    # digests, mirroring the `/health clone_status` contract (#1439). Admin-only
+    # (assert_admin above). Additive: no existing consumer reads it.
+    #
+    # Only meaningful while running: a stopped container adopts on its next
+    # start, so reporting staleness for it would be advice about a state that
+    # is about to be fixed.
     if status == "running":
+        result["base_image_state"] = BASE_IMAGE_STATE_LABELS[
+            await check_base_image_state(container, SYSTEM_AGENT_NAME)
+        ]
+
+        # Try to get health info from the agent.
         try:
             agent_url = f"http://agent-{SYSTEM_AGENT_NAME}:8000/api/health"
             async with agent_httpx_client(SYSTEM_AGENT_NAME, timeout=5.0) as client:
@@ -100,6 +120,14 @@ async def reinitialize_system_agent(
     Does NOT delete database records or MCP API key.
     This is a "reset to clean state" operation.
     """
+    # #1816: human-only. `assert_admin` alone is insufficient — an agent-scoped
+    # MCP key resolves to its OWNER carrying the owner's role, and the default
+    # install is admin-owned, so any non-ephemeral agent's TRINITY_MCP_API_KEY
+    # would pass (the trinity-ops-agent#232 pattern, already applied to the
+    # retention-acknowledge endpoint). Wiping the orchestrator's workspace is an
+    # operator decision. No-op for JWT / user-scoped / system-scoped principals,
+    # so the ops agent is unaffected.
+    reject_agent_principal(current_user)
     assert_admin(current_user)
 
     container = get_agent_container(SYSTEM_AGENT_NAME)
@@ -187,6 +215,12 @@ async def restart_system_agent(
     Admin-only endpoint that stops and starts the system agent.
     Does NOT clear workspace or re-initialize - just a simple restart.
     """
+    # #1816: human-only, same reasoning as /reinitialize above. Load-bearing
+    # here because this endpoint is no longer a stop+start: it now delegates to
+    # `start_agent_internal`, so a cold start REPLACES the container (base-image
+    # adoption), destroying anything outside /home/developer. A prompt-injected
+    # agent must not be able to reach that.
+    reject_agent_principal(current_user)
     assert_admin(current_user)
 
     container = get_agent_container(SYSTEM_AGENT_NAME)
@@ -203,8 +237,25 @@ async def restart_system_agent(
         if was_running:
             await container_stop(container, timeout=30)
 
-        await container_start(container)
-        await container_reload(container)
+        # #1816: an explicit stop makes this a COLD start, which is the boundary
+        # at which a rebuilt base image is adopted — so this is the operator's
+        # remedy for the staleness alarm. Delegating to `start_agent_internal`
+        # rather than a bare `container_start` buys the #1809 image gate, #1560
+        # clear-before-recreate ordering, the concurrent-recreate hardening and
+        # every future predicate, with no code here to keep in sync.
+        #
+        # No stale-handle hazard: the local `container` is never used to start.
+        # But a recreate REPLACES the container, so the response must read a
+        # freshly fetched one — the local handle points at a removed container
+        # and `container.status` would report the corpse.
+        start_result = await start_agent_internal(SYSTEM_AGENT_NAME)
+
+        refreshed = get_agent_container(SYSTEM_AGENT_NAME)
+        if refreshed is not None:
+            await container_reload(refreshed)
+            status = refreshed.status
+        else:
+            status = "unknown"
 
         # NOTE: Trinity platform instructions are now injected at runtime via
         # --append-system-prompt on every chat/task request (Issue #136).
@@ -213,7 +264,11 @@ async def restart_system_agent(
             "success": True,
             "message": "System agent restarted successfully",
             "name": SYSTEM_AGENT_NAME,
-            "status": container.status
+            "status": status,
+            # #1816: whether this restart replaced the container, and why —
+            # `image_drift` is the adoption that answers the staleness alarm.
+            "recreated": bool(start_result.get("recreated")),
+            "recreate_reason": start_result.get("recreate_reason"),
         }
 
     except Exception as e:

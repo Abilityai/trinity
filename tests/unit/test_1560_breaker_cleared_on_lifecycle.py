@@ -293,11 +293,25 @@ def test_create_path_clears_breakers_before_the_container_exists():
 def test_system_agent_create_clears_breakers_too():
     """`trinity-system` is a permanently-recycled fixed name, so its bootstrap is
     the create path in miniature. Fixing only `crud.py` would leave the one agent
-    guaranteed to reuse its name unprotected."""
+    guaranteed to reuse its name unprotected.
+
+    #1816: sliced to `_create_system_agent` first. `str.index` is FIRST
+    occurrence, so a whole-file ordering assert stayed green while silently
+    ceasing to pin the create path the moment anything above `_create_system_agent`
+    (e.g. `ensure_deployed`, which now delegates to `start_agent_internal`) grew a
+    `clear_agent_breakers(SYSTEM_AGENT_NAME)` call. Running the test never caught
+    that — which is the point of repairing it rather than trusting it.
+    """
     src = _src("services/system_agent_service.py")
 
     assert "clear_agent_breakers(SYSTEM_AGENT_NAME)" in src
-    assert src.index("clear_agent_breakers(SYSTEM_AGENT_NAME)") < src.index(
+
+    create = src[src.index("async def _create_system_agent("):]
+    assert "clear_agent_breakers(SYSTEM_AGENT_NAME)" in create, (
+        "the clear must live INSIDE _create_system_agent — a call anywhere else "
+        "does not protect the create path"
+    )
+    assert create.index("clear_agent_breakers(SYSTEM_AGENT_NAME)") < create.index(
         "container = await containers_run("
     ), "the clear must precede container creation"
 
