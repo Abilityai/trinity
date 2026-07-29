@@ -247,6 +247,19 @@ services:
       # packaging-gap class).
       - TELEMETRY_CONTAINER_STATS_TTL=${TELEMETRY_CONTAINER_STATS_TTL:-10}
       - TELEMETRY_DOCKER_POOL_SIZE=${TELEMETRY_DOCKER_POOL_SIZE:-16}
+      # Canary invariant harness (CANARY-001 / Issue #411). Mirrors
+      # docker-compose.yml; without these lines the .env knobs are inert in prod
+      # (the #1039 packaging-gap class). Load-bearing here specifically: the
+      # harness is documented as "CANARY_ENABLED=1 on staging/dev", and the dev
+      # instance deploys via THIS file (.github/workflows/deploy-dev.yml,
+      # scripts/deploy/gcp-deploy.sh) — so omitting them made the watcher
+      # un-enableable on the very instance it exists to watch.
+      # Default 0 — production users see no canary activity.
+      - CANARY_ENABLED=${CANARY_ENABLED:-0}
+      # Slack alert sink for canary green→red transitions. URL is the
+      # credential — leaking it lets anyone post to that one channel.
+      # Unset = canary cycles run silently (still persists violations).
+      - CANARY_SLACK_WEBHOOK_URL=${CANARY_SLACK_WEBHOOK_URL:-}
       # SSH access host override (read by services/ssh_service.py). Mirrors
       # docker-compose.yml; without this line the .env value is inert in prod (the
       # #1039 packaging-gap class) and SSH host detection falls back to localhost.
