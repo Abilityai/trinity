@@ -665,6 +665,35 @@ agent_skills = Table(
     Column("skill_name", Text),
     Column("assigned_by", Text),
     Column("assigned_at", Text),
+    # ent#237: which source this assignment resolved from. Recorded, not keyed
+    # — see the agent_skills note in db/schema.py.
+    Column("source_id", Text),
+)
+
+# ent#237: one row per git repo the skills library syncs from.
+skill_sources = Table(
+    "skill_sources",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("name", Text),
+    Column("url", Text),
+    # `ref` is a branch OR tag name; `ref_type` says which. The bundled
+    # community source pins to a tag (ent#237 AC#5) so a merged upstream PR
+    # never reaches a fleet unattended; custom sources track a branch.
+    Column("ref", Text),
+    Column("ref_type", Text),
+    Column("is_default", Integer),
+    Column("enabled", Integer),
+    # Lower wins on a name collision. Custom sources default to 100, the
+    # bundled default source to 1000 — i.e. custom-wins (ent#237 AC#4).
+    Column("priority", Integer),
+    Column("last_sync_at", Text),
+    Column("last_sync_status", Text),
+    Column("last_commit_sha", Text),
+    Column("last_error", Text),
+    Column("created_by", Text),
+    Column("created_at", Text),
+    Column("updated_at", Text),
 )
 
 agent_tags = Table(

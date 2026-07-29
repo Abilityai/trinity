@@ -123,6 +123,7 @@ from db.settings import SettingsOperations
 from db.public_links import PublicLinkOperations
 from db.email_auth import EmailAuthOperations
 from db.skills import SkillsOperations
+from db.skill_sources import SkillSourcesOperations
 from db.public_chat import PublicChatOperations
 from db.tags import TagOperations
 from db.system_views import SystemViewOperations
@@ -443,6 +444,7 @@ class DatabaseManager:
         self._public_link_ops = PublicLinkOperations(self._user_ops, self._agent_ops)
         self._email_auth_ops = EmailAuthOperations(self._user_ops)
         self._skills_ops = SkillsOperations()
+        self._skill_sources_ops = SkillSourcesOperations()
         self._public_chat_ops = PublicChatOperations()
         self._tag_ops = TagOperations()
         self._system_view_ops = SystemViewOperations()
@@ -1880,14 +1882,20 @@ class DatabaseManager:
     def get_agent_skill_names(self, agent_name: str):
         return self._skills_ops.get_agent_skill_names(agent_name)
 
-    def assign_skill(self, agent_name: str, skill_name: str, assigned_by: str):
-        return self._skills_ops.assign_skill(agent_name, skill_name, assigned_by)
+    def assign_skill(self, agent_name: str, skill_name: str, assigned_by: str,
+                     source_id: str = None):
+        return self._skills_ops.assign_skill(
+            agent_name, skill_name, assigned_by, source_id
+        )
 
     def unassign_skill(self, agent_name: str, skill_name: str):
         return self._skills_ops.unassign_skill(agent_name, skill_name)
 
-    def set_agent_skills(self, agent_name: str, skill_names: list, assigned_by: str):
-        return self._skills_ops.set_agent_skills(agent_name, skill_names, assigned_by)
+    def set_agent_skills(self, agent_name: str, skill_names: list, assigned_by: str,
+                         source_ids: dict = None):
+        return self._skills_ops.set_agent_skills(
+            agent_name, skill_names, assigned_by, source_ids
+        )
 
     def delete_agent_skills(self, agent_name: str):
         return self._skills_ops.delete_agent_skills(agent_name)
@@ -1897,6 +1905,34 @@ class DatabaseManager:
 
     def get_agents_with_skill(self, skill_name: str):
         return self._skills_ops.get_agents_with_skill(skill_name)
+
+    # =========================================================================
+    # Skill Sources (delegated to db/skill_sources.py) — ent#237 multi-source
+    # =========================================================================
+
+    def list_skill_sources(self, enabled_only: bool = False):
+        return self._skill_sources_ops.list_sources(enabled_only)
+
+    def get_skill_source(self, source_id: str):
+        return self._skill_sources_ops.get_source(source_id)
+
+    def get_default_skill_source(self):
+        return self._skill_sources_ops.get_default_source()
+
+    def count_skill_sources(self):
+        return self._skill_sources_ops.count_sources()
+
+    def create_skill_source(self, **kwargs):
+        return self._skill_sources_ops.create_source(**kwargs)
+
+    def update_skill_source(self, source_id: str, **fields):
+        return self._skill_sources_ops.update_source(source_id, **fields)
+
+    def delete_skill_source(self, source_id: str):
+        return self._skill_sources_ops.delete_source(source_id)
+
+    def record_skill_source_sync(self, source_id: str, **kwargs):
+        return self._skill_sources_ops.record_sync(source_id, **kwargs)
 
     # =========================================================================
     # Public Chat Sessions (delegated to db/public_chat.py) - Phase 12.2.5

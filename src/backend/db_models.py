@@ -656,6 +656,34 @@ class AgentSkill(BaseModel):
     skill_name: str
     assigned_by: str  # Username of who assigned
     assigned_at: datetime
+    # ent#237: which source this assignment resolved from when it was made.
+    # None = assigned before multi-source, or the source row is gone. Recorded
+    # so a later cross-source swap under the same bare name is detectable.
+    source_id: Optional[str] = None
+
+
+class SkillSource(BaseModel):
+    """One git repo the skills library syncs from (ent#237).
+
+    Replaces the single ``skills_library_url`` system setting. Resolution on a
+    name collision is ``priority`` ascending then ``created_at`` ascending —
+    custom sources (100) beat the bundled default (1000), i.e. custom-wins.
+    """
+    id: str
+    name: str
+    url: str
+    ref: str = "main"
+    ref_type: str = "branch"   # 'branch' (tracks a moving head) | 'tag' (pinned)
+    is_default: bool = False   # the bundled community source; at most one
+    enabled: bool = True
+    priority: int = 100
+    last_sync_at: Optional[datetime] = None
+    last_sync_status: Optional[str] = None   # 'success' | 'failed' | 'never'
+    last_commit_sha: Optional[str] = None
+    last_error: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class SkillInfo(BaseModel):
