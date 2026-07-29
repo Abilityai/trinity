@@ -49,6 +49,7 @@ class CanaryAlerts:
         "B-01": "Queue accessor drift",
         "B-02": "Stalled backlog drain",
         "R-01": "Zombie Claude process",
+        "H-01": "Canary is blind (collector sees no fleet)",
     }
 
     # One-line runbook hint per invariant. Kept short on purpose —
@@ -106,6 +107,15 @@ class CanaryAlerts:
             "Agent container has unreaped zombie `claude` processes (#407 class). "
             "Restart the affected agent to clear; check agent-server's subprocess "
             "wait() path for the reaped child."
+        ),
+        "H-01": (
+            "The harness itself cannot see the fleet, so EVERY other green this "
+            "cycle is meaningless — triage this before any other canary result. "
+            "Check `DATABASE_URL` and that the backend points at the live "
+            "database (#1540 class); `roster_read_failed` means the read raised, "
+            "`roster_empty_contradicted` means it returned zero while Docker or "
+            "Redis still saw agents, `roster_empty_unverifiable` means the "
+            "independent sources were themselves unreachable."
         ),
     }
 
@@ -559,6 +569,19 @@ class CanaryAlerts:
             return (
                 f"{total} zombie claude process(es) across {len(agents)} "
                 f"agent(s): {', '.join(agents)[:160]}."
+            )
+        if invariant_id == "H-01":
+            # H-01 is fleet-wide, so it emits at most one violation and carries
+            # no `agent_name` — the generic "fired N violation(s)" line would be
+            # useless for the one alarm whose entire job is to be legible.
+            obs = violations[0].observed_state or {}
+            return (
+                f"Canary cannot see the fleet ({obs.get('reason', 'unknown')}): "
+                f"roster reported {obs.get('known_agent_count', '?')} agents "
+                f"while independent sources saw "
+                f"{obs.get('evidence_agent_count', '?')}. "
+                f"Blind since {obs.get('blind_since') or 'this cycle'}. "
+                "Every other green this cycle is unreliable."
             )
         return f"{invariant_id} fired {len(violations)} violation(s)."
 

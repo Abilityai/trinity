@@ -320,10 +320,44 @@
   after it. **Credential safety:** E-04/G-04 violations persist to
   `canary_violations`, so neither ever echoes the raw `backlog_metadata` — E-04
   reports the failed-predicate reason code, G-04 the matched pattern name only.
+- **Phase 5 (shipped, #1813)**: **H-01 collector blindness** — the harness's
+  first *self*-check, and the reason the `H-` (harness health) id family exists:
+  every other invariant means "the system is broken", H-01 means "the observer
+  is blind", and an H-01 violation invalidates every other green in that cycle.
+  #1540 repointed the SQL-tier collectors onto the configured engine but left
+  the failure *shape* untouched — a collector reading an empty or unreachable
+  source returns zero rows, which is indistinguishable from a genuinely clean
+  fleet, so both report green. H-01 fires when the roster read
+  (`_collect_known_agents`) returns zero rows or raises **while an independent,
+  non-SQL source proves the fleet is alive**: Docker container presence
+  (`docker_agent_names`, read from the container list *before* any `exec_run`,
+  since `zombie_counts` is keyed by exec success and thins on a degraded
+  container) ∪ Redis slot keys (`orphan_redis_slots`, corroborating only — slot
+  keys exist solely while an execution holds a slot). Reason codes
+  (stable — trinity-enterprise#202 scores on them): `roster_read_failed` /
+  `roster_empty_contradicted` (critical) / `roster_empty_unverifiable` (major,
+  the evidence source was itself unreachable). **Two-cycle confirmation**
+  (`canary:h01:suspect_since`, E-02's cross-cycle-state precedent) so the
+  last-agent delete race — DB row gone, container still tearing down — cannot
+  false-fire; an unreadable marker fires *unconfirmed* rather than skipping,
+  because a guard that cannot self-check must say so. Scoped to the roster read
+  ONLY: on a live-but-quiet fleet `terminal_rows`/`enabled_schedules`/
+  `orphan_refs`/`terminal_exec_statuses` are all legitimately empty, so a
+  general "any SQL collector reads zero" rule would false-alarm on every idle
+  install. Dual-track by construction (a pure function over the `Snapshot`; it
+  issues no SQL). **Residual:** an entirely *stopped* fleet has no containers
+  and no slots, so no evidence exists and H-01 can only reach
+  `roster_empty_unverifiable`; partial blindness (roster returns 1 of 20) is out
+  of scope, since a count comparison would false-fire on create/stop races.
 - **Registration**: each new invariant is a new file under
   `src/backend/canary/invariants/` + a registry entry (per the catalog at
   `docs/testing/orchestration-invariant-catalog.md`); the service and API
-  surface stay unchanged.
+  surface stay unchanged. An invariant whose alert must be *actionable* also
+  needs a `_INVARIANT_NAMES` + `_INVARIANT_RUNBOOKS` entry (and, when it carries
+  no `agent_name`, a `_render_message` branch) in `services/canary_alerts.py` —
+  otherwise the Slack line degrades to the opaque `"<ID> fired N violation(s)"`
+  fallback. *Known gap: E-03/E-04/E-06/G-03/G-04 (Phase 4) were never added to
+  those dicts and still render the fallback — pre-existing, tracked separately.*
 
 ---
 

@@ -367,6 +367,37 @@ Running cleanup twice back-to-back produces an empty second report. Failure here
 
 ---
 
+## 15. Harness health (self-check)
+
+Every invariant above answers *"is the system broken?"*. This family answers
+*"is the harness blind?"* — and carries its own `H-` prefix so a detector outage
+is never triaged as a platform defect. An `H-` violation invalidates every other
+green in the same cycle.
+
+**H-01** Collector not blind *(Tier A, 🔴 critical / 🟡 major)* — ✅ **SHIPPED Phase 5, #1813** (registry id `H-01`; follow-up to #1540).
+The SQL roster read (`_collect_known_agents`) must not return zero rows — or raise — while an **independent,
+non-SQL** source proves the fleet is alive. #1540 repointed the collectors at the configured engine but left the
+failure *shape* intact: a collector reading an empty or unreachable source returns zero rows, and zero rows is
+indistinguishable from a genuinely clean fleet, so both produce a green cycle. Signal: `known_agents == ∅`
+(or a `sqlite.agent_ownership` entry in `sources_unavailable`) **AND** `docker_agent_names ∪ orphan_redis_slots`
+non-empty.
+- **Evidence must not be circular.** Docker container presence (from the container LIST, before any `exec_run` —
+  `zombie_counts` is keyed by exec success and silently thins on a degraded container) and Redis slot keys.
+  Redis is corroborating only: slot keys exist solely while an execution holds a slot, so an idle fleet has none.
+- **Two-cycle confirmation** (`canary:h01:suspect_since`, following E-02's cross-cycle-state precedent) so the
+  last-agent delete race — DB row deleted, container still tearing down — cannot false-fire. Costs ~5 extra
+  minutes to alarm; irrelevant for a config regression that persists until a human fixes it.
+- **Fail-loud:** an unreadable marker fires *unconfirmed* rather than skipping, and an unavailable evidence source
+  fires `roster_empty_unverifiable` (major) rather than staying quiet — a dead smoke detector should chirp.
+- **Scope:** the roster read ONLY. On a live-but-quiet fleet `terminal_rows`, `enabled_schedules`, `orphan_refs`
+  and `terminal_exec_statuses` are all legitimately empty, so a general "any SQL collector reads zero" rule would
+  false-alarm on every idle install.
+- **Residual:** an entirely stopped fleet has no containers and no slots, so no evidence is available and H-01 can
+  only reach `roster_empty_unverifiable`. Partial blindness (roster returns 1 of 20) is out of scope — a count
+  comparison would false-fire on legitimate create/stop races between the two reads.
+
+---
+
 ## Design notes
 
 - **Every Tier-A invariant is a single SQL/Redis query** — make the canary compute it continuously. Tier-B invariants run every SLA window.

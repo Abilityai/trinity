@@ -315,6 +315,22 @@ class Snapshot:
     # `sources_unavailable` and the R-01 check skips that agent rather
     # than firing.
     zombie_counts: Dict[str, int] = field(default_factory=dict)
+    # H-01 input (#1813): agent names Docker reports as RUNNING agent
+    # containers. Deliberately NOT derived from `zombie_counts` above, which is
+    # keyed by `exec_run` SUCCESS — a container that exists but cannot be
+    # exec'd (busy, restarting, degraded shell) drops out of that map into
+    # `sources_unavailable`, so it is a liveness signal, not a presence one.
+    # H-01 needs *presence*, taken from the container list itself before any
+    # exec, because it is the independent (non-SQL) proof that the fleet is
+    # non-empty when the SQL roster read comes back empty.
+    #
+    # Blind spot, documented rather than papered over: Docker is filtered to
+    # `status=running`, so a fleet whose agents are all STOPPED is invisible
+    # here — and stopped agents hold no Redis slots either. A blind SQL tier
+    # plus an entirely stopped fleet therefore has no available evidence and
+    # H-01 reports `roster_empty_unverifiable` at most, never a confirmed
+    # contradiction.
+    docker_agent_names: Set[str] = field(default_factory=set)
     # E-06 input: enabled, non-deleted schedules → {schedule_id, agent_name,
     # next_run_at}. The check flags any whose next_run_at is more than the
     # misfire grace behind the snapshot time (a stale projection the scheduler
@@ -478,15 +494,22 @@ def _collect_zombie_counts() -> Dict[str, Any]:
     pattern misses. Verified live against a real zombie spawned via
     `os.fork()` + `prctl(PR_SET_NAME, "claude")`.
 
-    Returns a dict with two keys:
+    Returns a dict with three keys:
       "counts":     {agent_name: int}   for containers we successfully exec'd.
+      "names":      {agent_name, ...}   every running agent container Docker
+                                        listed, BEFORE any exec (#1813). This is
+                                        the presence signal H-01 uses as
+                                        independent proof the fleet is non-empty;
+                                        it must not be conflated with "counts",
+                                        which an exec failure silently thins.
       "unavailable": [str, ...]         per-agent failure messages for the
                                         caller to append to sources_unavailable.
 
     All-or-nothing failure (e.g. docker_client None) returns
-    {"counts": {}, "unavailable": ["docker: <reason>"]}.
+    {"counts": {}, "names": set(), "unavailable": ["docker: <reason>"]}, so an
+    unreadable Docker is distinguishable from a genuinely empty fleet.
     """
-    out: Dict[str, Any] = {"counts": {}, "unavailable": []}
+    out: Dict[str, Any] = {"counts": {}, "names": set(), "unavailable": []}
     try:
         from services.docker_service import docker_client
     except Exception as exc:
@@ -514,6 +537,9 @@ def _collect_zombie_counts() -> Dict[str, Any]:
         # correctly per docker_service.list_all_agents_fast). Strip the
         # historical `agent-` prefix to align with agent_ownership.agent_name.
         agent_name = container.name.removeprefix("agent-")
+        # Record presence FIRST: H-01's evidence must not depend on the exec
+        # below succeeding (#1813).
+        out["names"].add(agent_name)
         try:
             result = container.exec_run(cmd)
             raw = result.output
@@ -1108,6 +1134,7 @@ def collect_snapshot() -> Snapshot:
     try:
         z = _collect_zombie_counts()
         snap.zombie_counts = z["counts"]
+        snap.docker_agent_names = z["names"]
         snap.sources_unavailable.extend(z["unavailable"])
     except Exception as exc:
         logger.exception("canary snapshot: zombie collector raised")
