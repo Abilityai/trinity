@@ -70,6 +70,24 @@ bcrypt>=4.2.0,<5
 pydantic-settings>=2.0.0
 google-genai>=1.0.0
 payments-py>=1.0.0
+# tzdata: the IANA database as a pure-Python fallback for `zoneinfo`. The #1771
+# timestamp properties draw real IANA zones (`st.timezones()`) deliberately —
+# DST transitions, quarter-hour offsets and historical LMT offsets are what stop
+# the ordering property from degenerating into "a zero-padded format sorts
+# correctly". `zoneinfo` reads the SYSTEM database first and falls back to this
+# package; without either, `available_timezones()` is empty, `st.timezones()`
+# cannot generate, and `ZoneInfo("Europe/London")` raises at import — which is
+# the intended failure mode (the fallback that would have degraded silently to
+# fixed offsets, i.e. to a vacuous green, was deliberately removed). Declaring
+# it makes the properties independent of whatever the runner image ships.
+# A FLOOR here, deliberately NOT the exact pin used for `hypothesis` above.
+# That pin exists to freeze a reproducible derandomized input SET; these
+# properties are zone-agnostic format/ordering invariants, so a tz-database
+# revision changes WHICH zones are drawn but cannot change whether the property
+# holds. An exact pin would instead freeze a stale IANA database — a real
+# hazard for any future test that does assert real-world DST behaviour.
+# `hypothesis[zoneinfo]` declares tzdata as a floor for the same reason.
+tzdata>=2024.1
 # NOTE: trinity-cli (needed by test_cli_*.py) is intentionally NOT listed here.
 # An editable local path (`-e ./src/cli`) breaks GitHub's dependency-graph
 # updater — it resolves `-e` targets relative to THIS file's dir (tests/src/cli,
