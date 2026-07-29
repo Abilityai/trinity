@@ -487,6 +487,30 @@ class TaskExecutionStatus(str, Enum):
     PENDING_RETRY = "pending_retry"  # Awaiting retry dispatch (#271)
 
 
+class ActivityCloseOutcome(Enum):
+    """Tri-state result of closing an activity (#1804).
+
+    One boolean cannot answer both questions the callers ask. ``routers/
+    internal.py`` needs "did this row exist" (it 404s); ``activity_service``
+    needs "did anything change" (it broadcasts). Once the close is a lattice
+    CAS (``db/activities.py::_close_predicate``), an idempotent no-op close is a
+    *designed* outcome, so the two answers diverge routinely — hence three
+    states, not two.
+
+    Lives in ``models`` (not ``db/activities``) deliberately: it is a contract
+    type shared by the db layer and the service layer, like ``ActivityState``
+    beside it, and callers compare it by **identity**. ``models`` is the leaf
+    everything imports from and nothing re-imports, so the enum object stays
+    the same one across a test harness that evicts ``db.*`` from ``sys.modules``
+    — otherwise two distinct enum classes exist and every ``is`` check silently
+    goes False.
+    """
+
+    UPDATED = "updated"                # the CAS won — broadcast
+    ALREADY_CLOSED = "already_closed"  # row exists, predicate refused — no clobber
+    NOT_FOUND = "not_found"            # no such activity — 404 here, and only here
+
+
 def activity_state_for_terminal(status) -> "ActivityState":
     """Map a terminal execution status to the activity state that closes its
     dispatch activity (#1332).

@@ -1416,13 +1416,18 @@ class DatabaseManager:
         return self._activity_ops.create_activity(activity)
 
     def complete_activity(self, activity_id: str, status: str = "completed", details: dict = None, error: str = None):
+        """#1804: returns an ``ActivityCloseOutcome`` (tri-state), not a bool."""
         return self._activity_ops.complete_activity(activity_id, status, details, error)
+
+    def close_open_activities_for_executions(self, execution_ids, status: str = "failed", error: str = None):
+        """#1804: batched bulk-sweep close (one transaction, no per-row WS)."""
+        return self._activity_ops.close_open_activities_for_executions(execution_ids, status, error)
 
     def get_activity(self, activity_id: str):
         return self._activity_ops.get_activity(activity_id)
 
-    def get_open_activity_id_for_execution(self, execution_id: str):
-        return self._activity_ops.get_open_activity_id_for_execution(execution_id)
+    def get_open_activity_id_for_execution(self, execution_id: str, include_failed: bool = False):
+        return self._activity_ops.get_open_activity_id_for_execution(execution_id, include_failed)
 
     def get_agent_activities(self, agent_name: str, activity_type: str = None, activity_state: str = None, limit: int = 100):
         return self._activity_ops.get_agent_activities(agent_name, activity_type, activity_state, limit)

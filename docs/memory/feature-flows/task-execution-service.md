@@ -312,6 +312,45 @@ Slot TTL: Dynamic (agent timeout + 5 min buffer). See parallel-capacity.md for d
 | Execution success | `complete_activity(status="completed")` | After response persisted (line 297) |
 | Execution failure | `complete_activity(status="failed")` | On any exception (lines 332, 374, 398) |
 | Terminal applier close | `complete_activity(status=activity_state_for_terminal(envelope.status))` | `apply_result` won-CAS failure branch + the SUCCESS-lost-CAS-to-cancel reconcile branch — a CANCELLED terminal closes the dispatch activity as `cancelled`, not `failed` (#1332) |
+| **Every** CAS-won terminal (#1804) | `activity_service.close_execution_activity(execution_id, terminal_status, …)` | The close is a property of **winning the terminal CAS**, not of holding the `activity_id` local. See [activity-stream.md → The Close Contract](activity-stream.md#the-close-contract-1804) for the owner, the lattice, and the full writer list |
+
+#### `_write_terminal_and_gate` — both CAS outcomes close (#1804)
+
+This writer handles the terminals that never reach `apply_result` (timeout,
+budget exhausted, unexpected exception, and the inline circuit-open/capacity/
+ephemeral fast-fails). It gated the close on `won` and did nothing on a loss —
+while the SUCCESS applier had reconciled its own lost CAS since #1332. Same
+file, two appliers, one of them handling it. Now:
+
+```python
+if won:
+    await activity_service.close_execution_activity(
+        execution_id, status, error=error, activity_id=activity_id)
+elif execution_id:
+    # The row holds someone else's terminal (a user cancel, or a
+    # watchdog/lease-reaper recovery). Close the activity in THAT state.
+    reconciled = db.get_execution(execution_id)
+    await activity_service.close_execution_activity(
+        execution_id,
+        reconciled.status if reconciled else TaskExecutionStatus.FAILED,
+        error=f"superseded by {…}", activity_id=activity_id)
+```
+
+The `activity_status` parameter is **gone** from the signature — the state is
+derived from `status` through the shared #1332 mapping, so the two can no longer
+drift. All four call sites passed `FAILED`/`ActivityState.FAILED`, so this is a
+no-op for behaviour and one fewer thing to keep in sync.
+
+#### Backend shutdown (`except asyncio.CancelledError`) — #1804
+
+`execute_task`'s cancellation handler (and its twin in
+`routers/internal._execute_task_internal_background`) writes FAILED so the
+cleanup sweep can't inflate the execution's duration (#767) — then left the
+activity open for the 120-minute activity backstop to inflate *its* duration
+instead. Worse: the row is now `failed`, so startup recovery (which scans
+`running`) skips it forever and the activity orphans permanently. Both handlers
+now close on the CAS-won branch. This is the issue's own reproduction step:
+restart the backend mid-run under `--reload` and watch the Timeline.
 
 ### WebSocket Broadcasts
 
@@ -391,7 +430,7 @@ When subscription tokens expire, Claude Code sometimes hangs for up to an hour b
 
 **Result**: Auth failures now fast-fail in seconds instead of hanging for up to an hour.
 
-> **Status Enums (#92)**: Execution statuses use `TaskExecutionStatus` (`running/success/failed/cancelled/skipped`). Activity statuses use `ActivityState` (`started/completed/failed`). Both are defined in `models.py`.
+> **Status Enums (#92)**: Execution statuses use `TaskExecutionStatus` (`running/success/failed/cancelled/skipped`). Activity statuses use `ActivityState` (`started/completed/failed`/`cancelled` since #1332). Both are defined in `models.py`; the terminal→activity mapping is `models.activity_state_for_terminal`, and the close itself is a CAS returning `ActivityCloseOutcome` (#1804).
 
 ## Execution Lifecycle Diagram
 

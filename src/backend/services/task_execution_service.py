@@ -787,7 +787,6 @@ async def _write_terminal_and_gate(
     activity_id: Optional[str],
     *,
     status: str,
-    activity_status: str,
     error: Optional[str] = None,
     cost: Optional[float] = None,
     context_used: Optional[int] = None,
@@ -811,6 +810,14 @@ async def _write_terminal_and_gate(
     (``get_execution() → status != CANCELLED``), which both raced and only
     blocked CANCELLED — the CAS additionally blocks an already-SUCCESS/FAILED
     row and closes the TOCTOU window.
+
+    #1804: BOTH CAS outcomes now close the activity, mirroring the SUCCESS
+    applier's reconcile (``apply_result``, this file). Previously only the won
+    branch closed it, so a writer that lost — to a cancel, or to a recovery path
+    — left the row ``started`` for the 120-minute backstop to close with a
+    fabricated duration. The activity state comes from the terminal that
+    actually stands (this writer's on a win, the persisted row's on a loss), so
+    the activity can never disagree with the row.
     """
     won = True
     if execution_id:
@@ -823,11 +830,44 @@ async def _write_terminal_and_gate(
             context_max=context_max,
             retry_count=retry_count,
         )
-    if won and activity_id:
-        await activity_service.complete_activity(
-            activity_id=activity_id,
-            status=activity_status,
+    if won:
+        # #1804: the CAS winner owns the close. ``activity_status`` was dropped
+        # from the signature — the state is derived from ``status`` via the
+        # shared #1332 mapping, so the two can no longer drift apart.
+        await activity_service.close_execution_activity(
+            execution_id,
+            status,
             error=error,
+            activity_id=activity_id,
+        )
+    elif execution_id:
+        # #1804: lost the CAS — the row holds someone else's terminal (a user
+        # cancel, or a watchdog/lease-reaper recovery). Close the activity in
+        # THAT state, exactly as the SUCCESS applier does at its own lost-CAS
+        # branch. Doing nothing here is the #1804 bug: the terminal is written
+        # and the activity orphans.
+        reconciled = db.get_execution(execution_id)
+        reconciled_status = (
+            reconciled.status if reconciled else TaskExecutionStatus.FAILED
+        )
+        # `.value` for the label: a bare `str, Enum` f-strings to
+        # "TaskExecutionStatus.FAILED" on 3.11+, not "failed" (the #1578 footgun
+        # architecture.md records). The DB path yields a plain string; only the
+        # `reconciled is None` fallback is an enum member — hence getattr.
+        reconciled_label = getattr(reconciled_status, "value", reconciled_status)
+        await activity_service.close_execution_activity(
+            execution_id,
+            reconciled_status,
+            # No error on an authoritative SUCCESS close: the execution actually
+            # succeeded, and a non-NULL `error` on a `completed` activity reads
+            # as a problem in every activity-derived view. Same rule as
+            # chat_execution_service._close_dispatch_activity_cancelled.
+            error=(
+                None
+                if reconciled_status == TaskExecutionStatus.SUCCESS
+                else f"superseded by {reconciled_label}"
+            ),
+            activity_id=activity_id,
         )
     # #1578: the timeout / budget-exhausted / unexpected-exception (+ inline
     # circuit-open/capacity/ephemeral) failure terminals that never reach
@@ -1145,7 +1185,6 @@ class TaskExecutionService:
                     execution_id,
                     activity_id,
                     status=TaskExecutionStatus.FAILED,
-                    activity_status=ActivityState.FAILED,
                     error=error_msg,
                     agent_name=agent_name,  # #1578: emit agent.task.failed on won
                 )
@@ -1581,7 +1620,6 @@ class TaskExecutionService:
                 execution_id,
                 activity_id,
                 status=TaskExecutionStatus.FAILED,
-                activity_status=ActivityState.FAILED,
                 error=error_msg,
                 agent_name=agent_name,  # #1578: emit agent.task.failed on won
             )
@@ -1612,7 +1650,6 @@ class TaskExecutionService:
                 execution_id,
                 activity_id,
                 status=TaskExecutionStatus.FAILED,
-                activity_status=ActivityState.FAILED,
                 error=error_msg,
                 agent_name=agent_name,  # #1578: emit agent.task.failed on won
             )
@@ -1704,7 +1741,6 @@ class TaskExecutionService:
                 execution_id,
                 activity_id,
                 status=TaskExecutionStatus.FAILED,
-                activity_status=ActivityState.FAILED,
                 error=error_msg,
                 agent_name=agent_name,  # #1578: emit agent.task.failed on won
             )
@@ -1727,11 +1763,25 @@ class TaskExecutionService:
                         TaskExecutionStatus.FAILED,
                         TaskExecutionStatus.CANCELLED,
                     ):
-                        db.update_execution_status(
+                        won = db.update_execution_status(
                             execution_id=execution_id,
                             status=TaskExecutionStatus.FAILED,
                             error="Execution cancelled (backend shutdown)",
                         )
+                        # #1804: #767 closed the execution record here so the
+                        # cleanup sweep wouldn't inflate ITS duration — but left
+                        # the paired activity open, so the 120-minute activity
+                        # backstop inflated that instead. Worse: the row is now
+                        # `failed`, so startup recovery (which scans `running`)
+                        # skips it forever and the activity orphans permanently.
+                        # This is the issue's own reproduction step.
+                        if won:
+                            await activity_service.close_execution_activity(
+                                execution_id,
+                                TaskExecutionStatus.FAILED,
+                                error="Execution cancelled (backend shutdown)",
+                                activity_id=activity_id,
+                            )
                 except Exception:
                     pass
             raise

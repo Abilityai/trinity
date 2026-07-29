@@ -160,7 +160,16 @@
   - Dispatch grace period: 60s grace for newly created executions before orphan detection
   - Systemic failure detection: Warns if >50% of recovery attempts fail in a single cycle
   - **Passive stale cleanup**: Marks stale executions (`status='running'` > 120 min) as `failed`
-  - Marks stale activities (`activity_state='started'` > 120 min) as `failed`
+  - Marks stale activities (`activity_state='started'` > 120 min) as `failed` — a **backstop for
+    the unclaimed only** (#1804): every writer that wins a terminal CAS now closes the paired
+    dispatch activity itself (§10.15 in `scheduling.md`), so a row reaching this sweep means a
+    producer is unowned. Runs **after** `_sweep_stale_slots` in the cycle (it used to run one line
+    before the stale-slot reaper, so within a single cycle the 120-minute duration fabricator could
+    beat a legitimate closer).
+  - Recovery paths (watchdog `_recover_execution`, startup recovery, the two bulk sweeps via
+    `_close_bulk_swept_activities`, the lease reaper, both backend-shutdown `CancelledError`
+    handlers) close their execution's activity on the CAS-won branch — counted in
+    `CleanupReport.activities_closed_on_recovery` (#1804)
   - Cleans up stale Redis slots (entries older than TTL)
   - One-shot startup sweep on backend restart
   - Periodic cleanup every 5 minutes

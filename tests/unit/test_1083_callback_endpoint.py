@@ -253,7 +253,12 @@ class TestAccept:
         _, kwargs = apply_mock.await_args
         assert kwargs["release_slot"] is True
         assert kwargs["activity_id"] == "act-1"
-        mdb.get_open_activity_id_for_execution.assert_called_once_with("exec-1")
+        # #1804: include_failed=True — this endpoint is the late-SUCCESS path,
+        # and a `started`-only lookup can't reach an activity a lease reaper
+        # already closed FAILED.
+        mdb.get_open_activity_id_for_execution.assert_called_once_with(
+            "exec-1", include_failed=True
+        )
 
     def test_failed_callback_builds_failed_envelope(self):
         from models import ExecutionResultEnvelope
