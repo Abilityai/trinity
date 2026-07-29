@@ -71,16 +71,26 @@ export const useSkillsStore = defineStore('skills', () => {
     try {
       // Library reads are shared platform state; the assignment read is
       // per-agent. Fetched together so the tab renders in one paint.
-      const [status, lib, mine] = await Promise.all([
+      const [status, mine] = await Promise.all([
         api.get('/api/skills/library/status'),
-        // A library that isn't configured 404s/errors on list — that is an
-        // empty state, not a failure, so it must not blank the whole tab.
-        api.get('/api/skills/library').catch(() => ({ data: [] })),
         api.get(`/api/agents/${name}/skills`),
       ])
       libraryStatus.value = status.data
-      library.value = lib.data || []
       assigned.value = mine.data || []
+
+      // Only ask for the list once we know a library exists. The previous
+      // shape — `.catch(() => ({data: []}))` — swallowed EVERY error, so a 500
+      // or an auth failure rendered as "the library is configured but has no
+      // skills yet": a confident, wrong empty state pointing the operator at
+      // the wrong problem. An unconfigured library is a known empty state and
+      // is already reported by `status.configured`; anything else is a real
+      // failure and must say so.
+      if (libraryStatus.value?.configured) {
+        const lib = await api.get('/api/skills/library')
+        library.value = lib.data || []
+      } else {
+        library.value = []
+      }
     } catch (e) {
       error.value = e?.response?.data?.detail || 'Could not load skills'
     } finally {

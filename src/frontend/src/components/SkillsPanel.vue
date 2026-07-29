@@ -30,7 +30,7 @@
           Skills come from a git repository shared across the fleet. Once it's configured,
           every agent can be assigned skills from it.
         </p>
-        <router-link v-if="isAdmin" to="/settings?tab=skills"
+        <router-link v-if="isAdmin" to="/settings?tab=agents"
                      class="mt-3 inline-block px-3 py-1.5 rounded-lg bg-action-primary-600 hover:bg-action-primary-700 text-white text-sm">
           Configure the library
         </router-link>
