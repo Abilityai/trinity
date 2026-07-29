@@ -1,3 +1,15 @@
+# #1871: bound every container's json-file log. Docker's json-file driver has
+# NO max-size and NO max-file by default, so each container's log under
+# /var/lib/docker/containers/ grows forever — silently, until the Docker data
+# root hits 100% and dockerd wedges. Agent containers are created through the
+# Docker SDK, not compose, so they are capped separately by AGENT_LOG_CONFIG in
+# src/backend/services/agent_service/capabilities.py.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${CONTAINER_LOG_MAX_SIZE:-10m}"
+    max-file: "${CONTAINER_LOG_MAX_FILE:-3}"
+
 services:
   backend:
     build:
@@ -15,6 +27,7 @@ services:
         GIT_BRANCH: ${GIT_BRANCH:-unknown}
         BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: trinity-backend
+    logging: *default-logging
     ports:
       - "8000:8000"
     environment:
@@ -99,6 +112,13 @@ services:
       # agent container mount spec. noexec,nosuid stay fixed; only size tunes.
       # Existing agents pick up a change on recreate, not restart.
       - AGENT_TMP_SIZE=${AGENT_TMP_SIZE:-512m}
+      # Agent container log cap (#1871) — read by capabilities.py to build the
+      # agent container's json-file log_config. The x-logging anchor above bounds
+      # the PLATFORM services; agents are SDK-created, so these must reach the
+      # backend process itself or the knobs are inert (#1039 class).
+      # Existing agents pick up a change on recreate, not restart.
+      - AGENT_LOG_MAX_SIZE=${AGENT_LOG_MAX_SIZE:-10m}
+      - AGENT_LOG_MAX_FILE=${AGENT_LOG_MAX_FILE:-3}
       # Headless per-tool stall-watchdog ceiling (#1369) — seconds; scoped to
       # mcp__* tools. Threaded into agent containers by crud.py/lifecycle.py, so
       # it must reach the backend here or the .env lever is inert (#1039 class).
@@ -308,6 +328,7 @@ services:
       dockerfile: ../../docker/frontend/Dockerfile
     image: trinity-frontend:latest
     container_name: trinity-frontend
+    logging: *default-logging
     ports:
       - "${FRONTEND_PORT:-80}:80"
     volumes:
@@ -330,6 +351,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: trinity-redis
+    logging: *default-logging
     # Loopback-only host port (test suites connect from the dev machine).
     # External LAN cannot reach Redis even with auth — defense in depth.
     ports:
@@ -420,6 +442,7 @@ services:
       context: ./src/mcp-server
       dockerfile: Dockerfile
     container_name: trinity-mcp-server
+    logging: *default-logging
     ports:
       - "8080:8080"
     environment:
@@ -465,6 +488,7 @@ services:
       context: .
       dockerfile: docker/scheduler/Dockerfile
     container_name: trinity-scheduler
+    logging: *default-logging
     restart: unless-stopped
     environment:
       - DATABASE_PATH=/data/trinity.db
@@ -513,6 +537,7 @@ services:
   logs-init:
     image: alpine:3.20
     container_name: trinity-logs-init
+    logging: *default-logging
     command: ["sh", "-c", "chown 1000:1000 /data/logs && chmod 775 /data/logs"]
     volumes:
       - trinity-logs:/data/logs
@@ -524,6 +549,7 @@ services:
   vector:
     image: timberio/vector:0.43.1-alpine
     container_name: trinity-vector
+    logging: *default-logging
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -564,6 +590,7 @@ services:
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.120.0
     container_name: trinity-otel-collector
+    logging: *default-logging
     restart: unless-stopped
     ports:
       - "4317:4317"   # gRPC receiver (OTLP)
@@ -592,6 +619,7 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: trinity-postgres
+    logging: *default-logging
     restart: unless-stopped
     profiles: ["postgres"]
     environment:

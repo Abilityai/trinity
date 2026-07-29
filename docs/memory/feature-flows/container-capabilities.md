@@ -23,6 +23,7 @@ Both modes apply the same baseline security (`cap_drop=['ALL']`, AppArmor, noexe
 - `cap_add=FULL_CAPABILITIES` (9 caps: restricted set + `DAC_OVERRIDE`, `FOWNER`, `KILL`)
 - `security_opt=['apparmor:docker-default']`
 - `tmpfs={'/tmp': 'noexec,nosuid,size=<AGENT_TMP_SIZE>'}` (default `512m`; size operator-configurable via the `AGENT_TMP_SIZE` env var, `noexec,nosuid` always fixed — see [Agent `/tmp` tmpfs size](#agent-tmp-tmpfs-size-1231--tmpdir-scratch-redirect-1098))
+- `log_config=AGENT_LOG_CONFIG` (json-file `max-size`/`max-file`, default `10m` × 3 — see [Container log rotation](#container-log-rotation-agent_log_max_size--agent_log_max_file-1871))
 - **Allows**: `sudo apt-get install` and similar package-installation flows
 - **Still prevents** (Issue #602 / Phase 3c, 2026-05-13): `SYS_PTRACE` (heap-read escalation), `MKNOD` (device-node escape), `NET_RAW` (raw-packet crafting), `FSETID` (setuid-preserve on chmod)
 
@@ -31,6 +32,7 @@ Both modes apply the same baseline security (`cap_drop=['ALL']`, AppArmor, noexe
 - `cap_add=RESTRICTED_CAPABILITIES` (6 caps: `NET_BIND_SERVICE`, `SETGID`, `SETUID`, `CHOWN`, `SYS_CHROOT`, `AUDIT_WRITE`)
 - `security_opt=['apparmor:docker-default']`
 - `tmpfs={'/tmp': 'noexec,nosuid,size=<AGENT_TMP_SIZE>'}` (default `512m`; see [Agent `/tmp` tmpfs size](#agent-tmp-tmpfs-size-1231--tmpdir-scratch-redirect-1098))
+- `log_config=AGENT_LOG_CONFIG` (json-file `max-size`/`max-file`, default `10m` × 3 — see [Container log rotation](#container-log-rotation-agent_log_max_size--agent_log_max_file-1871))
 - **Prevents**: Package installation, most privileged operations
 
 ## Backend Layer
@@ -138,6 +140,7 @@ container = docker_client.containers.run(
     cap_drop=[] if full_capabilities else ['ALL'],
     cap_add=[] if full_capabilities else ['NET_BIND_SERVICE', 'SETGID', 'SETUID', 'CHOWN', 'SYS_CHROOT', 'AUDIT_WRITE'],
     tmpfs=AGENT_TMPFS_MOUNT,  # {'/tmp': 'noexec,nosuid,size=<AGENT_TMP_SIZE>'}, default 512m
+    log_config=AGENT_LOG_CONFIG,  # json-file max-size/max-file, default 10m x 3 (#1871)
     ...
 )
 ```
@@ -209,6 +212,7 @@ new_container = docker_client.containers.run(
     cap_drop=[] if full_capabilities else ['ALL'],
     cap_add=[] if full_capabilities else ['NET_BIND_SERVICE', 'SETGID', 'SETUID', 'CHOWN', 'SYS_CHROOT', 'AUDIT_WRITE'],
     tmpfs=AGENT_TMPFS_MOUNT,  # {'/tmp': 'noexec,nosuid,size=<AGENT_TMP_SIZE>'}, default 512m
+    log_config=AGENT_LOG_CONFIG,  # json-file max-size/max-file, default 10m x 3 (#1871)
     ...
 )
 ```
@@ -219,20 +223,37 @@ The recreate path imports the same `AGENT_TMPFS_MOUNT` / `AGENT_DEFAULT_TMPDIR` 
 
 Agent `/tmp` is a RAM-backed tmpfs, hardened `noexec,nosuid` so a compromised agent can't stage/execute payloads there. Only the **size** is configurable — the `noexec,nosuid` flags are a security boundary and stay hardcoded.
 
-**Single source of truth**: `src/backend/services/agent_service/capabilities.py:72-116`. The mount spec is built **once** as the module constant `AGENT_TMPFS_MOUNT` (`capabilities.py:107-109`) and imported by both the create path (`crud.py:39,791`) and the recreate path (`lifecycle.py:98,587`), so the two can't drift.
+**Single source of truth**: `src/backend/services/agent_service/capabilities.py` (`/tmp` block, `_AGENT_TMP_SIZE_DEFAULT` → `AGENT_DEFAULT_TMPDIR`). The mount spec is built **once** as the module constant `AGENT_TMPFS_MOUNT` and imported by both the create path (`crud.py`) and the recreate path (`lifecycle.py`), so the two can't drift.
 
 | Aspect | Detail | Reference |
 |--------|--------|-----------|
-| Env var | `AGENT_TMP_SIZE` on the **backend** service (e.g. `512m`, `2g`) | `.env.example:329`, `docker-compose.yml:52`, `docker-compose.prod.yml:96` (`${AGENT_TMP_SIZE:-512m}`) |
-| Default | `_AGENT_TMP_SIZE_DEFAULT = "512m"` | `capabilities.py:92` |
-| Validation | `_AGENT_TMP_SIZE_RE = re.compile(r"^\d+[mg]$")` — `<int>m`/`<int>g` (case-insensitive); empty / bare number / Kubernetes-style suffix → falls back to default (never a broken or unbounded mount) | `capabilities.py:93,96-104` |
-| Resolution | `_resolve_agent_tmp_size()` reads the env var, lower-cases, returns it if it matches the regex else the default | `capabilities.py:96-104` |
-| Memory accounting | The size counts against the agent's memory cgroup — kept bounded by design | `capabilities.py:84-86` |
-| Apply semantics | Mount specs are creation-time, so a changed `AGENT_TMP_SIZE` is picked up on **recreate**, not on a plain restart | `capabilities.py:87-88` |
+| Env var | `AGENT_TMP_SIZE` on the **backend** service (e.g. `512m`, `2g`) | `.env.example`, `docker-compose.yml`, `docker-compose.prod.yml` (`${AGENT_TMP_SIZE:-512m}`) |
+| Default | `_AGENT_TMP_SIZE_DEFAULT = "512m"` | `capabilities.py` |
+| Validation | `_AGENT_TMP_SIZE_RE = re.compile(r"^\d+[mg]$")` — `<int>m`/`<int>g` (case-insensitive); empty / bare number / Kubernetes-style suffix → falls back to default (never a broken or unbounded mount) | `capabilities.py` |
+| Resolution | `_resolve_agent_tmp_size()` reads the env var, lower-cases, returns it if it matches the regex else the default | `capabilities.py` |
+| Memory accounting | The size counts against the agent's memory cgroup — kept bounded by design | `capabilities.py` |
+| Apply semantics | Mount specs are creation-time, so a changed `AGENT_TMP_SIZE` is picked up on **recreate**, not on a plain restart | `capabilities.py` |
 
 ### TMPDIR Scratch Redirect (#1098)
 
 `/tmp`'s `noexec` + size cap breaks heavy scratch (pip/npm installs, compiling C extensions, ML wheels like torch/transformers — "No space left on device" at the cap, "Permission denied" on `noexec`). The default `TMPDIR` is therefore set to `AGENT_DEFAULT_TMPDIR = '/home/developer/.tmp'` (`capabilities.py:116`) — the disk-backed, exec-capable agent home volume — which dodges both the size cap and `noexec` while keeping /tmp's hardened posture. `TMPDIR` is injected at container create (`crud.py:522`) and recreate (`lifecycle.py:363`); the directory itself is created writable by UID 1000 at container start by `docker/base-image/startup.sh`, so existing agents pick it up on restart. Tools that hardcode `/tmp` (e.g. the `gh` CLI) ignore `TMPDIR` and still exhaust the cap — the larger default `512m` (#1231) is the mitigation for those.
+
+## Container Log Rotation (`AGENT_LOG_MAX_SIZE` / `AGENT_LOG_MAX_FILE`, #1871)
+
+Docker's `json-file` driver ships with **no** `max-size` and **no** `max-file`, so every agent's log grew forever under `/var/lib/docker/containers/` — silently, until the Docker data root hit 100%, dockerd could no longer parse its own logs, and the whole fleet wedged at once (2026-07-27). `docker-compose`'s `logging:` anchor bounds the platform services, but it **cannot** reach agent containers: those are created through the Docker SDK, not compose. `AGENT_LOG_CONFIG` is the agent-side half — and agents are the fleet's fastest log writers (~7 MB/day each, measured).
+
+**Single source of truth**: the log block in `capabilities.py`, built once as the module constant `AGENT_LOG_CONFIG` and imported by all three agent-container create sites — `crud.py` (`_create_agent_container`), `lifecycle.py` (`_provision_folders_and_run_agent_container`) and `system_agent_service.py` (`_create_system_agent`) — so they can't drift. `lifecycle.py`'s site is the shared tail of **both** `recreate_container_with_updated_config` and `recreate_missing_container`, so one constant covers every retrofit path.
+
+| Aspect | Detail |
+|--------|--------|
+| Env vars | `AGENT_LOG_MAX_SIZE` / `AGENT_LOG_MAX_FILE` on the **backend** service (agents). The platform services use the separate `CONTAINER_LOG_MAX_SIZE` / `CONTAINER_LOG_MAX_FILE`, interpolated into the `x-logging` anchor in both compose files |
+| Defaults | `10m` × `3` = 30 MB per container (~4 days for a busy agent) |
+| Validation — format | `^(\d+)([kmg])$` for size; `^[1-9]\d*$` for file count |
+| Validation — **magnitude** | Ceilings of `1g` per file and `10` files. A well-formed but absurd value (`1000g`, `max-file: 9999`) passes any format-only check while effectively **removing** the cap — the exact failure the constant exists to prevent — so out-of-range falls back to the default too. Zero is rejected (a `0` cap means "never roll") |
+| Rejection behavior | Malformed **or** out-of-range → bounded default. An *explicitly set* rejected value logs a `WARNING` naming the variable, the value and the default; an **unset** variable is the normal case and stays quiet (a silently-ignored knob is the #1039 inert-by-obscurity class) |
+| Apply semantics | Creation-time, exactly like the tmpfs spec: platform services adopt on the next `docker compose up`; existing agents adopt on **recreate**, not on a plain restart |
+| Relationship to Vector | The raw Docker log is a **secondary** copy. Vector's aggregate at `/data/logs` is the primary, queryable one and keeps its own `LOG_RETENTION_DAYS` — see [vector-logging.md](vector-logging.md). Live streaming is lossless across rotation; only post-hoc `docker logs` history shortens, and the platform's own log endpoint defaults to `tail=100` |
+| Drift guard | `tests/unit/test_1871_log_config_parity.py` fails CI when a **new** durable-container create site ships without `log_config` (the `learnings.md` 2026-07-10 "the create path is never one call site" class). Ephemeral `remove=True` helpers are exempt — Docker deletes their log with the container |
 
 ## Frontend Layer
 
