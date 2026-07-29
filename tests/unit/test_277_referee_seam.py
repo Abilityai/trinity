@@ -89,7 +89,10 @@ async def test_referee_verdict_replaces_the_same_agent_pass(svc, monkeypatch):
     async def referee(**kwargs):
         assert kwargs["agent_name"] == "atlas"
         # Transcript only — the referee is handed no workspace handle, no tools.
-        assert set(kwargs) == {"agent_name", "original_message", "execution_response"}
+        assert set(kwargs) == {
+            "execution_id", "agent_name", "original_message", "execution_response"
+        }
+        assert kwargs["execution_id"] == "e1"
         return _verdict(vs, vs.ValidationStatus.PASS)
 
     vs.register_referee(referee)

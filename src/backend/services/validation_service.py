@@ -130,7 +130,11 @@ class ValidationResult:
 # path below behaves exactly as it did before this change.
 
 # A referee is an async callable:
-#     (agent_name, original_message, execution_response) -> ValidationResult | None
+#     (execution_id, agent_name, original_message, execution_response)
+#         -> ValidationResult | None
+# `execution_id` is passed so the module can correlate its stored verdict with
+# the execution being judged — it is an identifier, not a capability, and the
+# referee still receives no workspace, tools, or session.
 # Returning None means "no verdict available" (not configured for this agent, or
 # the provider was unreachable) — the caller degrades, never fails the run.
 _referee = None
@@ -210,6 +214,7 @@ class ValidationService:
         if referee is not None:
             try:
                 verdict = await referee(
+                    execution_id=execution_id,
                     agent_name=agent_name,
                     original_message=original_message,
                     execution_response=execution_response,
