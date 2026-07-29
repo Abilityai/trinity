@@ -241,8 +241,10 @@
 
             <!-- Settings Tab Content (#1108) — sectioned home for per-agent
                  config; Guardrails (GUARD-001 UI, #967) is section #1 -->
-            <div v-if="activeTab === 'settings' && agent.can_share">
+            <div v-if="activeTab === 'settings' && agent.can_share" class="space-y-6">
               <SettingsPanel :agent-name="agent.name" :notify="showNotification" />
+              <!-- ent#277: renders only when the entitlement is present. -->
+              <CrossModelValidationPanel :agent-name="agent.name" />
             </div>
 
           </div>
@@ -323,6 +325,7 @@ import InfoPanel from '../components/InfoPanel.vue'
 import DashboardPanel from '../components/DashboardPanel.vue'
 import FoldersPanel from '../components/FoldersPanel.vue'
 import SettingsPanel from '../components/settings/SettingsPanel.vue'
+import CrossModelValidationPanel from '../components/CrossModelValidationPanel.vue'
 
 // Panel Components (newly extracted)
 import AgentHeader from '../components/AgentHeader.vue'
