@@ -438,11 +438,17 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   (no manual create/clone). Provisioned by
   `services/cornelius_agent_service.py::CorneliusAgentService.ensure_seeded()`.
 - **Key Features**:
-  - **Bundled local template**: a new `config/agent-templates/cornelius/` LOCAL template
-    (`capabilities: [brain-orb]`, `CLAUDE.md`, `.trinity/brain-orb/` hooks, a pre-generated
-    `resources/agent-visualization/data.json` seed graph so the orb renders immediately, and a minimal
-    seed `Brain/` vault). Sourced from the public `github.com/Abilityai/cornelius`; provisioned via the
-    ordinary `create_agent_internal` from `local:cornelius` (no PAT / network / clone).
+  - **Public source template** (#1656): provisioned via the ordinary `create_agent_internal` from
+    `github:Abilityai/cornelius` — an anonymous, source-mode clone with **no PAT**, on the
+    trinity-enterprise#123 tokenless public-repo path (`AgentConfig.source_mode` defaults `True`, which
+    that path requires). Carries `capabilities: [brain-orb]`, `CLAUDE.md`, `.trinity/brain-orb/` hooks,
+    a pre-generated `resources/agent-visualization/data.json` seed graph so the orb renders immediately,
+    `resources/local-brain-search/` (so `semantic_search` is real, not a keyword fallback), and the full
+    `Brain/` vault the seed graph was exported from. Was a vendored
+    `config/agent-templates/cornelius/` snapshot until #1656; that snapshot drifted from its own prose
+    and caused #1646 and #1656, so the bundle was deleted rather than re-vendored. **No offline
+    fallback** — a fallback would only fire on a transient clone failure and would burn the durable
+    `cornelius_seeded` flag on the degraded copy; leaving the flag unset to retry next boot is safer.
   - **First-run-only**: a durable `cornelius_seeded` system-setting flag gates the seed — an operator who
     deletes Cornelius is **not** re-provisioned.
   - **Fresh-install-scoped**: skipped when any non-system agent already exists (`db.count_non_system_agents()`),

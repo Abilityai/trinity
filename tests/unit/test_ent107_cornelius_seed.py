@@ -14,7 +14,9 @@ Covers the orchestration invariants surfaced by the autoplan review:
     409 that means "creation was blocked" — only the former may burn the flag
   * the `--workers 2` Redis SETNX provisioning lock (held → skip; Redis down →
     fail-open)
-  * `_provision` builds a `local:cornelius` create with request=None
+  * `_provision` builds a `github:Abilityai/cornelius` create with request=None,
+    source_mode left at its default True (#1656 — the tokenless public-clone path
+    of trinity-enterprise#123 rejects a non-source-mode request)
   * a real-DB smoke of `db.count_non_system_agents()` — defends the facade-
     delegation pitfall (learnings 2026-07-04) that a wholesale-mocked test misses
 
@@ -259,8 +261,12 @@ def test_provision_builds_local_template_config(monkeypatch):
     admin = cas.User(id=1, username="admin", email="a@example.com", role="admin")
     asyncio.run(svc._provision(admin))
 
-    assert captured["config"].template == "local:cornelius"
+    assert captured["config"].template == "github:Abilityai/cornelius"
     assert captured["config"].name == "cornelius"
+    # #1656: the tokenless public-repo clone (trinity-enterprise#123) is source-mode
+    # only — `_gate_tokenless_request` 400s a non-source-mode request. The seeder
+    # relies on the AgentConfig default rather than setting it, so pin the default.
+    assert captured["config"].source_mode is True
     assert captured["request"] is None
     assert captured["user"].username == "admin"
 
