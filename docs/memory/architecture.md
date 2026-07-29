@@ -216,7 +216,7 @@
 - `skill_service.py` - Skills library sync + full-directory package injection (ent#183): `git archive`-sourced tars via the existing agent-server restore primitive, tree-SHA versioning, manifest prune, declaration-only dep check — see [skill-injection.md](feature-flows/skill-injection.md)
 - `skill_packaging.py` - Pure skill-package primitives (ent#183): hardened frontmatter contract parse, archive member vetting, injection-tar assembly, prune diff
 - `system_agent_service.py` - System agent lifecycle
-- `cornelius_agent_service.py` - First-run auto-seed of the default "Cornelius" second-brain agent (bundled `local:cornelius`, Brain Orb enabled) — see [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) (trinity-enterprise#107). Invoked via the ent#124 first-run orchestrator; accepts an optional precomputed `fresh` verdict
+- `cornelius_agent_service.py` - First-run auto-seed of the default "Cornelius" second-brain agent (public `github:Abilityai/cornelius`, cloned anonymously on the ent#123 tokenless path, Brain Orb enabled) — see [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) (trinity-enterprise#107, source-seeded #1656). Invoked via the ent#124 first-run orchestrator; accepts an optional precomputed `fresh` verdict
 - `system_seed_service.py` - First-run seed of the default system manifest (trinity-enterprise#124): `ensure_first_run_seeded()` (both call sites: setup-completion bg task + lifespan safety-net) resolves a **persisted first-run verdict** (`first_run_fresh` — computed once BEFORE Cornelius provisions, so sibling-seeded agents can't poison later passes), runs the Cornelius seeder, then deploys the bundled `config/manifests/default-system.yaml` (env override/disable via `TRINITY_DEFAULT_SYSTEM_MANIFEST`) through `system_service.deploy_manifest` — durable `default_system_seeded` flag + `system_seed:provision` SETNX lock + reserved-name existence backstop (the deploy path suffixes collisions instead of 409ing); partial/failed seeds raise an operator-queue alert; fail-open, never blocks boot. See requirements §16.5.1 (roadmap.md)
 - `system_service.py` - System manifest operations; owns the full deploy orchestration `deploy_manifest()` (moved out of `routers/systems.py` in ent#124 — Invariant #1; the router is a thin HTTP wrapper, and the default `create_agent_fn` lazily resolves the `routers/agents` ws-broadcasting facade)
 - `log_archive_service.py` / `archive_storage.py` - Log archival + storage backend
@@ -718,8 +718,9 @@ control. Default OFF — no impact on other agents. Full flow:
 [brain-orb.md](feature-flows/brain-orb.md).
 
 **Default Cornelius (trinity-enterprise#107):** a **fresh install** auto-seeds a
-default "Cornelius" second-brain agent from the bundled `local:cornelius` template
-(`services/cornelius_agent_service.py`) and existence-guarded-enables the
+default "Cornelius" second-brain agent from the public `github:Abilityai/cornelius`
+template — cloned anonymously (source-mode, no PAT) on the trinity-enterprise#123
+tokenless path (`services/cornelius_agent_service.py`) — and existence-guarded-enables the
 `brain_orb_enabled` flag, so the orb renders out-of-the-box. First-run-only (durable
 `cornelius_seeded` system-setting flag — deleting Cornelius does not re-provision)
 and skipped when any non-system agent already exists (established fleets are never
