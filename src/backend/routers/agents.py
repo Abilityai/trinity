@@ -637,6 +637,14 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
                     if result.get("recreated")
                     else {}
                 ),
+                # #1816: a recreate the AC2 gate suppressed (running
+                # trinity-system). Audited so "I clicked Start and my config
+                # change did not apply" is answerable from the trail.
+                **(
+                    {"recreate_deferred": result.get("recreate_deferred")}
+                    if result.get("recreate_deferred")
+                    else {}
+                ),
             },
         )
 
@@ -660,6 +668,12 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
             # answers "why did my container id change / uptime reset".
             "recreated": bool(result.get("recreated")),
             "recreate_reason": result.get("recreate_reason"),
+            # #1816: set when the AC2 gate suppressed a recreate the predicates
+            # asked for — a running trinity-system is never replaced
+            # mid-operation. None on every normal start. This dict is a fresh
+            # whitelist, NOT start_agent_internal's return value, so a field
+            # added there does not reach the API unless it is also added here.
+            "recreate_deferred": result.get("recreate_deferred"),
         }
     except HTTPException:
         raise

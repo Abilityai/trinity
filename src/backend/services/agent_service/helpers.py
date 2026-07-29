@@ -7,7 +7,7 @@ import fnmatch
 import json
 import logging
 import asyncio
-from typing import Optional, List, Callable, Any
+from typing import Optional, List, Callable, Any, Literal
 
 import docker
 import httpx
@@ -15,6 +15,7 @@ from fastapi import HTTPException
 
 from models import User, AgentStatus
 from database import db
+from db.agents import SYSTEM_AGENT_NAME
 from services.docker_service import (
     docker_client,
     list_all_agents,
@@ -75,6 +76,31 @@ def validate_runtime(runtime: Optional[str]) -> None:
                 f"Supported runtimes: {sorted(KNOWN_RUNTIME_NAMES)}."
             ),
         )
+
+
+def is_system_agent_name(agent_name: str) -> bool:
+    """#1816: is this the platform orchestrator (``trinity-system``)?
+
+    Deliberately a **name** test, not ``db.is_system_agent`` (which also honours
+    the ``is_system`` ownership flag and does a DB round-trip). Three reasons:
+
+    * It must be **deterministic and unfailable** — it gates a config predicate
+      and a recreate override, and the two must agree on every call. A DB read
+      can fail, and a failure that flips this answer would either recreate the
+      orchestrator or leak full capabilities.
+    * It must **not widen**. Exempting the capabilities predicate for any
+      ``is_system``-flagged row would let such an agent keep FULL_CAPABILITIES
+      after an admin sets the fleet default to ``false`` — a security-relevant
+      widening this issue has no business making.
+    * ``SYSTEM_AGENT_NAME`` is exactly what ``_create_system_agent`` writes and
+      what the recreate override must honour, so the name IS the contract.
+
+    THE shared helper: `check_full_capabilities_match` (checker),
+    `recreate_container_with_updated_config`'s `full_capabilities` override
+    (writer) and `start_agent_internal`'s AC2 gate all route through it, so
+    they can never disagree about who the system agent is.
+    """
+    return agent_name == SYSTEM_AGENT_NAME
 
 
 def validate_base_image(image: str) -> None:
@@ -624,6 +650,26 @@ def check_full_capabilities_match(container, agent_name: str) -> bool:
 
     Note: This is now a system-wide setting, not per-agent.
     """
+    # #1816: the system agent runs FULL_CAPABILITIES by CONTRACT (package
+    # installation — see system_agent_service._create_system_agent), not by the
+    # admin-settable fleet default this predicate otherwise compares against.
+    #
+    # The exemption is what makes creation's `trinity.full-capabilities: 'true'`
+    # label safe. That label is required by the #1816 convergence invariant (a
+    # missing label reads as `false` and leaves this predicate PERMANENTLY
+    # mismatched, and because a config recreate resolves the image from a tag,
+    # a permanent mismatch is also a permanent image-adoption trigger). But
+    # pinning the label ALONE would, on any install with
+    # `agent_full_capabilities=false`, produce a mismatch that can never
+    # converge: recreate on every start, forever — exactly the hazard this
+    # module documents for the guardrails/PAT matchers.
+    #
+    # `recreate_container_with_updated_config`'s `full_capabilities` override is
+    # the writer half of the same contract; both route through
+    # `is_system_agent_name` so writer and checker cannot disagree.
+    if is_system_agent_name(agent_name):
+        return True
+
     # Get system-wide setting
     system_full_caps = get_agent_full_capabilities()
 
@@ -638,19 +684,30 @@ def check_full_capabilities_match(container, agent_name: str) -> bool:
     return True
 
 
-async def check_base_image_matches(container, agent_name: str) -> bool:
-    """#1809: does the container still run the image its own tag resolves to?
+async def check_base_image_state(
+    container, agent_name: str
+) -> Literal["match", "drift", "unknown"]:
+    """#1809 core / #1816 3-state: does the container still run the image its
+    own tag resolves to?
 
-    Returns True (match — no recreate needed) or False (the base image was
-    rebuilt underneath the container). FAIL-OPEN: any unreadable state returns
-    True, because a false mismatch would recreate the whole fleet — and on
-    ``ImageNotFound`` a recreate would fail on the same missing reference
-    anyway. Never silent: every fail-open exit logs a WARNING (a permanently
-    unreadable check would otherwise be indistinguishable from "no drift" —
-    the #1809 symptom itself), and a detected drift logs the old→new ids.
+    * ``"match"`` — the reference resolves to the id the container runs.
+    * ``"drift"`` — the base image was rebuilt underneath the container.
+    * ``"unknown"`` — the check could not run (unreadable attrs, unresolvable
+      reference, Docker error). Never silent: every ``unknown`` exit logs a
+      WARNING, because a permanently unreadable check would otherwise be
+      indistinguishable from "no drift" — the #1809 symptom itself. A detected
+      drift logs the old→new ids.
+
+    #1816 split this out of :func:`check_base_image_matches` so a caller that
+    *reports* drift rather than acting on it — the system-agent bootstrap's
+    read-only running branch and its staleness alarm — can tell "the image is
+    current" from "the check failed". An alarm built on a boolean that
+    conflates the two would recreate the #1809 symptom one layer up. The
+    recreate path still consumes only the boolean wrapper below, so its
+    behaviour is unchanged.
 
     The comparison is against the container's OWN ``Config.Image`` reference,
-    so a version-pinned container (``trinity-agent-base:0.8.0``) recreates only
+    so a version-pinned container (``trinity-agent-base:0.8.0``) drifts only
     when that specific tag is re-pointed, and an ID/digest-pinned container
     compares its ID to itself — a deliberate, documented no-op.
 
@@ -667,7 +724,7 @@ async def check_base_image_matches(container, agent_name: str) -> bool:
             f"Base-image check for {agent_name}: container attrs carry no image "
             f"id/reference — skipping image-drift evaluation (fail-open)"
         )
-        return True
+        return "unknown"
     try:
         current_id = (await image_get(image_ref)).id
     except docker.errors.ImageNotFound:
@@ -676,17 +733,34 @@ async def check_base_image_matches(container, agent_name: str) -> bool:
             f"no longer resolves — skipping image-drift evaluation (fail-open; "
             f"a recreate would fail on the same missing reference)"
         )
-        return True
+        return "unknown"
     except Exception as e:
         logger.warning(
             f"Base-image check for {agent_name} failed ({type(e).__name__}: {e}) "
             f"— skipping image-drift evaluation (fail-open)"
         )
-        return True
+        return "unknown"
     if current_id != running_image_id:
         logger.info(
             f"Base image drift for {agent_name}: {running_image_id} -> "
             f"{current_id} (reference '{image_ref}')"
         )
-        return False
-    return True
+        return "drift"
+    return "match"
+
+
+async def check_base_image_matches(container, agent_name: str) -> bool:
+    """#1809: does the container still run the image its own tag resolves to?
+
+    Returns True (match — no recreate needed) or False (the base image was
+    rebuilt underneath the container). FAIL-OPEN: any unreadable state returns
+    True, because a false mismatch would recreate the whole fleet — and on
+    ``ImageNotFound`` a recreate would fail on the same missing reference
+    anyway.
+
+    Thin wrapper over the #1816 3-state :func:`check_base_image_state` — only
+    ``"drift"`` is actionable, so ``"match"`` and ``"unknown"`` both return
+    True, reproducing this function's pre-#1816 behaviour exactly. One
+    comparison, one place: no caller may hand-roll an image-id compare.
+    """
+    return await check_base_image_state(container, agent_name) != "drift"
