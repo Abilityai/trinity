@@ -112,6 +112,13 @@ services:
       # agent container mount spec. noexec,nosuid stay fixed; only size tunes.
       # Existing agents pick up a change on recreate, not restart.
       - AGENT_TMP_SIZE=${AGENT_TMP_SIZE:-512m}
+      # Agent container log cap (#1871) — read by capabilities.py to build the
+      # agent container's json-file log_config. The x-logging anchor above bounds
+      # the PLATFORM services; agents are SDK-created, so these must reach the
+      # backend process itself or the knobs are inert (#1039 class).
+      # Existing agents pick up a change on recreate, not restart.
+      - AGENT_LOG_MAX_SIZE=${AGENT_LOG_MAX_SIZE:-10m}
+      - AGENT_LOG_MAX_FILE=${AGENT_LOG_MAX_FILE:-3}
       # Headless per-tool stall-watchdog ceiling (#1369) — seconds; scoped to
       # mcp__* tools. Threaded into agent containers by crud.py/lifecycle.py, so
       # it must reach the backend here or the .env lever is inert (#1039 class).
