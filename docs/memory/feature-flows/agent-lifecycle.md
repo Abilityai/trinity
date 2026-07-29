@@ -795,8 +795,14 @@ cap_drop=['ALL'],
 # Add back only the capabilities needed for the mode
 cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
 read_only=False,
-# Always apply noexec,nosuid to /tmp for security
-tmpfs={'/tmp': 'noexec,nosuid,size=100m'}
+# Always apply noexec,nosuid to /tmp for security (#1231: size is
+# operator-tunable via AGENT_TMP_SIZE, default 512m; the flags are fixed)
+tmpfs=AGENT_TMPFS_MOUNT,          # {'/tmp': 'noexec,nosuid,size=512m'}
+# #1871: always bound the container's json-file log. Docker's driver has no
+# default max-size/max-file, so an uncapped log grows until the Docker data
+# root fills and dockerd wedges. Creation-time — existing agents adopt on
+# recreate, not restart.
+log_config=AGENT_LOG_CONFIG,      # {'type': 'json-file', 'config': {'max-size': '10m', 'max-file': '3'}}
 ```
 
 **Files Using These Constants**:

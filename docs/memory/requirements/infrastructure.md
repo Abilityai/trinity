@@ -43,6 +43,21 @@
 - **Tests**: `tests/unit/test_1809_image_drift_recreate.py`, `tests/unit/test_1816_system_agent_convergence.py`, `tests/unit/test_1816_system_agent_adoption.py`
 - **Docs**: [internal-system-agent.md](../feature-flows/internal-system-agent.md) → Base-image adoption; [agent-lifecycle.md](../feature-flows/agent-lifecycle.md)
 
+### 8.5c Container Log Rotation (#1871)
+- **Status**: ✅ Implemented (2026-07-29)
+- **GitHub Issue**: #1871
+- **Description**: Docker's `json-file` driver ships with **no** `max-size` and **no** `max-file`, so every platform and agent container log grew without bound under `/var/lib/docker/containers/`. Nothing fails while it happens; then the Docker data root reaches 100%, dockerd can no longer parse its own logs, and the entire fleet wedges at once (2026-07-27 incident). Trinity's existing retention (`log_archive_service`, `LOG_RETENTION_DAYS`) governs only Vector's aggregate copy at `/data/logs` — the raw Docker copy had no owner.
+- **Requirements**:
+  - **LOG-001** (platform services): every service in **both** `docker-compose.yml` and `docker-compose.prod.yml` carries a bounded `logging:` block, sourced from one shared `x-logging` anchor so the two files cannot drift. Operator-tunable via `CONTAINER_LOG_MAX_SIZE` / `CONTAINER_LOG_MAX_FILE`.
+  - **LOG-002** (agent containers): compose's `logging:` **cannot** reach agent containers — they are created through the Docker SDK, not compose. `AGENT_LOG_CONFIG` (`services/agent_service/capabilities.py`) is the agent-side half, defined once and imported by all three agent-container create sites beside `AGENT_TMPFS_MOUNT`. Operator-tunable via `AGENT_LOG_MAX_SIZE` / `AGENT_LOG_MAX_FILE`.
+  - **LOG-003** (fail-safe in **both** directions): a malformed value falls back to the bounded default, **and so does a well-formed but out-of-range one** (>`1g` per file, >`10` files, or zero). A format-only check is insufficient: `1000g` parses cleanly while effectively removing the cap — the exact failure this control exists to prevent, so magnitude is bounded too. A typo must never silently disable rotation (same principle as #1638).
+  - **LOG-004** (discoverability): an *explicitly set* value that is rejected logs a `WARNING` naming the variable, the rejected value and the applied default; an **unset** variable is the normal case and stays silent. A silently-ignored knob is the #1039 inert-by-obscurity class.
+  - **LOG-005** (apply semantics): `log_config` is **creation-time**, like the tmpfs spec. Platform services adopt on the next `docker compose up`; existing agents adopt on **recreate**, not on a plain restart. Capping does not shrink logs already on disk — reclaiming those on deployed instances is ops-tooling follow-up, out of scope here.
+  - **LOG-006** (drift guard): a CI guard fails when a **new** durable-container create site ships without `log_config`, closing the `learnings.md` (2026-07-10) "the create path is never one call site" class. Ephemeral `remove=True` helpers are exempt — Docker deletes their log with the container.
+- **Non-goal**: a host-level `/etc/docker/daemon.json`. That belongs to ops provisioning and is defense-in-depth; this makes Trinity correct regardless of host configuration.
+- **Tests**: `tests/unit/test_1871_container_log_rotation.py`, `tests/unit/test_1871_log_config_parity.py`
+- **Docs**: [container-capabilities.md](../feature-flows/container-capabilities.md) → Container Log Rotation; [vector-logging.md](../feature-flows/vector-logging.md) → Interaction with Docker Log Rotation
+
 ### 8.5a SSRF Prevention — Skills Library URL Validation (SEC-179)
 - **Status**: ✅ Implemented (2026-03-27)
 - **GitHub Issue**: #179

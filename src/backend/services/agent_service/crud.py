@@ -44,7 +44,13 @@ from utils.helpers import sanitize_agent_name, to_utc_iso, utc_now_iso
 from .fork_to_own import fork_template_to_own_repo
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
-from .capabilities import AGENT_TMPFS_MOUNT, AGENT_DEFAULT_TMPDIR, normalize_cpu, normalize_memory
+from .capabilities import (
+    AGENT_TMPFS_MOUNT,
+    AGENT_DEFAULT_TMPDIR,
+    AGENT_LOG_CONFIG,
+    normalize_cpu,
+    normalize_memory,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1536,6 +1542,10 @@ async def _create_agent_container(
         # Always apply noexec,nosuid to /tmp for security (#1098: scratch
         # is redirected off this tiny tmpfs via the TMPDIR env var).
         tmpfs=AGENT_TMPFS_MOUNT,
+        # #1871: bound the container's json-file log. Docker's default is
+        # unbounded, so without this the log grows until the Docker data root
+        # fills and dockerd wedges. Creation-time — see AGENT_LOG_CONFIG.
+        log_config=AGENT_LOG_CONFIG,
         network='trinity-agent-network',
         # #1197: cpu/memory normalized + validated above (raises 400 on
         # a bad template value), so these are guaranteed Docker-valid.
