@@ -1280,7 +1280,7 @@ CREATE TABLE mcp_api_keys (
     is_active INTEGER DEFAULT 1,
     user_id INTEGER NOT NULL,
     agent_name TEXT,                 -- non-null for agent-scoped keys
-    scope TEXT DEFAULT 'user',       -- user | agent | system
+    scope TEXT DEFAULT 'user',       -- user | agent | system | connector | portal_delegate
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 ```
@@ -1982,6 +1982,7 @@ Enforced at the **MCP server layer** (`src/mcp-server/src/tools/`), not the back
 | `user` | Owner/admin/shared checks | Owner/admin/shared checks |
 | `agent` | Explicit permission list (`agent_permissions`) | Resolves to owner user; ownership/sharing checks only |
 | `system` | **Bypasses all checks** | Resolves to owner user (system agent owner) |
+| `portal_delegate` | n/a (not an MCP tool principal) | **Fenced to a single route** — may only exchange an asserted end-user email for a portal session; every other path 403s (ent#163) |
 
 ### 7. External Credentials (Agent → External Services)
 

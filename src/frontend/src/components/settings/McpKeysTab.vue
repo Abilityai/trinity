@@ -86,6 +86,14 @@
                   <span v-else-if="key.scope === 'system'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-status-urgent-100 dark:bg-status-urgent-900/50 text-status-urgent-800 dark:text-status-urgent-300">
                     System
                   </span>
+                  <!-- ent#163: this key can act as ANY end user with portal
+                       access, so it must never render like an ordinary user
+                       key on the page where an admin audits keys. -->
+                  <span v-else-if="key.scope === 'portal_delegate'"
+                        class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-status-warning-100 dark:bg-status-warning-900/50 text-status-warning-800 dark:text-status-warning-300"
+                        title="Can exchange an end-user email for a portal session — treat as a delegated-identity credential">
+                    Portal Delegate
+                  </span>
                 </div>
                 <p v-if="key.description" class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ key.description }}</p>
                 <div class="mt-1 flex items-center text-xs text-gray-400 dark:text-gray-500 space-x-4">
@@ -157,6 +165,23 @@
                   class="mt-1 block w-full border border-gray-300 dark:border-gray-600 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
                   placeholder="Used for..."
                 ></textarea>
+              </div>
+
+              <!-- ent#163. Admin-only, and deliberately opt-in rather than a
+                   default: a delegate key acts as other people, so creating one
+                   should be a conscious choice, never a stray click. -->
+              <div v-if="isAdmin">
+                <label class="flex items-start gap-2 cursor-pointer">
+                  <input type="checkbox" v-model="newKey.portalDelegate" class="mt-0.5 rounded text-action-primary-600 focus:ring-action-primary-500" />
+                  <span class="text-sm text-gray-700 dark:text-gray-300">
+                    Portal delegate key
+                    <span class="block text-xs text-gray-500 dark:text-gray-400">
+                      Lets a trusted backend exchange one of your client emails for a
+                      portal session — it acts as that person. It can do nothing else:
+                      every other endpoint is refused. Revoke it to stop delegation.
+                    </span>
+                  </span>
+                </label>
               </div>
             </div>
           </div>
@@ -326,7 +351,8 @@ const copiedConfig = ref(false)
 
 const newKey = ref({
   name: '',
-  description: ''
+  description: '',
+  portalDelegate: false
 })
 
 const confirmDialog = reactive({
@@ -432,7 +458,10 @@ const createKey = async () => {
       },
       body: JSON.stringify({
         name: newKey.value.name,
-        description: newKey.value.description || null
+        description: newKey.value.description || null,
+        // Omitted (not `null`) for an ordinary key so the backend
+        // default stands and nothing changes for existing callers.
+        ...(newKey.value.portalDelegate ? { scope: 'portal_delegate' } : {})
       })
     })
 
@@ -441,7 +470,7 @@ const createKey = async () => {
       createdApiKey.value = data.api_key
       showCreateModal.value = false
       showKeyModal.value = true
-      newKey.value = { name: '', description: '' }
+      newKey.value = { name: '', description: '', portalDelegate: false }
       await fetchApiKeys()
     } else {
       const error = await response.json()

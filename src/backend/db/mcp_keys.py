@@ -90,10 +90,25 @@ class McpKeyOperations:
             scope=scope
         )
 
+    # ent#163: the scopes this endpoint may mint. `agent`, `connector` and
+    # `system` are deliberately absent — they are bound to an agent and are
+    # minted by their own code paths; accepting them here would let a caller
+    # forge an agent principal with no agent behind it.
+    _USER_CREATABLE_SCOPES = ("user", "portal_delegate")
+
     def create_mcp_api_key(self, username: str, key_data: McpApiKeyCreate) -> Optional[McpApiKeyWithSecret]:
-        """Create a new MCP API key for a user (scope: user)."""
+        """Create a new MCP API key for a user.
+
+        Scope defaults to `user`. `portal_delegate` (ent#163) is admin-gated at
+        the router; this layer only refuses anything outside the creatable set
+        so a bad value can never reach the column.
+        """
         user = self._user_ops.get_user_by_username(username)
         if not user:
+            return None
+
+        scope = getattr(key_data, "scope", None) or "user"
+        if scope not in self._USER_CREATABLE_SCOPES:
             return None
 
         key_id = self._generate_id()
@@ -112,7 +127,17 @@ class McpKeyOperations:
                     created_at=now,
                     user_id=user["id"],
                     agent_name=None,
-                    scope="user",
+                    scope=scope,
+                    # Set explicitly rather than leaning on the column default:
+                    # `schema.py` declares `is_active INTEGER DEFAULT 1` but
+                    # `db/tables.py` (the Core/Alembic source) declares a bare
+                    # `Column("is_active", Integer)` with no default, so a table
+                    # built from the metadata yields NULL here — and
+                    # `validate_mcp_api_key` treats a falsy is_active as revoked,
+                    # i.e. every minted key would be born invalid. Harmless today
+                    # (both live schema paths carry the DDL default) but a real
+                    # trap for anything built off the metadata.
+                    is_active=1,
                 )
             )
 
@@ -129,7 +154,7 @@ class McpKeyOperations:
             username=username,
             user_email=user.get("email"),
             agent_name=None,
-            scope="user",
+            scope=scope,
             api_key=api_key
         )
 

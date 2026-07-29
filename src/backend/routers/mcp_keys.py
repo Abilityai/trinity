@@ -6,7 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from models import User
 from database import db, McpApiKeyCreate, McpApiKey, McpApiKeyWithSecret
-from dependencies import get_current_user
+from dependencies import (
+    PORTAL_DELEGATE_SCOPE,
+    assert_admin,
+    get_current_user,
+    reject_agent_principal,
+)
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
@@ -21,7 +26,27 @@ async def create_mcp_api_key_endpoint(
     """
     Create a new MCP API key for the current user.
     The full API key is only returned once during creation - store it securely.
+
+    Scope is `user` unless explicitly requested. `portal_delegate` (ent#163) is
+    admin-only: it lets the holder act as any end user who has portal access, so
+    it must never be self-issuable by an ordinary account.
     """
+    requested_scope = (getattr(key_data, "scope", None) or "user").strip()
+    if requested_scope != "user":
+        if requested_scope != PORTAL_DELEGATE_SCOPE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported key scope '{requested_scope}'",
+            )
+        # Human-only AND admin. `assert_admin` alone is not enough: it rejects
+        # connector principals but not agent-scoped ones, and an agent key
+        # resolves to its OWNER carrying the owner's role — on a default
+        # admin-owned install that passes a bare role check outright
+        # (trinity-ops-agent#232). Minting an impersonation key is a human
+        # decision, so the agent guard runs first.
+        reject_agent_principal(current_user)
+        assert_admin(current_user)
+
     try:
         api_key = db.create_mcp_api_key(current_user.username, key_data)
 
