@@ -207,6 +207,13 @@ class User(BaseModel):
     # key itself is minted by an entitled module (core-primitive + enterprise-
     # knob, same shape as users.suspended_at #995).
     connector_agent: Optional[str] = None
+    # ent#163: True for a `portal_delegate` MCP key — a trusted issuer that may
+    # exchange an asserted end-user email for a portal session, and NOTHING else
+    # (fenced centrally in `dependencies.get_current_user`). Like every MCP key
+    # it resolves to the key OWNER, so a consumer must branch on this flag
+    # rather than on the resolved user: the whole point of the request is that
+    # it concerns somebody other than the owner.
+    portal_delegate: bool = False
 
 
 class Token(BaseModel):
