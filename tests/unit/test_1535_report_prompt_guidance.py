@@ -140,6 +140,52 @@ def test_documented_payload_ceiling_matches_the_enforced_one():
     assert "256 KB" not in block
 
 
+def _file_sharing_block(runtime: str = "claude-code") -> str:
+    prompt = get_platform_system_prompt(runtime)
+    return prompt[prompt.index("### Sharing Files with Users"):prompt.index("### Publishing Reports")]
+
+
+def test_file_sharing_block_does_not_claim_structured_results():
+    """The two blocks are adjacent and were competing for the same request.
+
+    Found in live use: asked for "weather for 500 places", the agent wrote a CSV
+    to /home/developer/public/ and called share_file — because the file-sharing
+    block's trigger list literally read "(CSV, PDF, report, image, exported
+    data, etc.)". It then hit FEATURE_DISABLED and delivered nothing, while the
+    report block sat directly underneath unused.
+
+    A prompt block cannot be evaluated alone; what the NEIGHBOURING block claims
+    decides which one fires. Keep 'report'/'CSV'/'exported data' out of the
+    file-sharing trigger so structured results route to the report tool.
+    """
+    block = _file_sharing_block()
+    # Scope the assertion to the PARENTHESISED claim list, not the whole
+    # sentence — the sentence legitimately names the report block when handing
+    # structured results off to it.
+    claim_list = re.search(r"When the user asks for a file \(([^)]*)\)", block)
+    assert claim_list, "could not locate the file-sharing trigger list"
+    listed = claim_list.group(1).lower()
+    for claimed in ("report", "csv", "exported data"):
+        assert claimed not in listed, (
+            f"the file-sharing trigger list claims {claimed!r}, which steals "
+            f"rows-and-columns requests from the Publishing Reports block: {listed!r}"
+        )
+    # …and it must actively hand those off rather than stay silent.
+    assert "Publishing Reports" in block
+
+
+def test_report_trigger_covers_a_one_off_table_not_only_scheduled_work():
+    """The original trigger was framed entirely around recurring work ("a
+    scheduled run", "compares against next period"), so a one-off interactive
+    "give me 500 rows" matched nothing. Volume and shape are the trigger too."""
+    block = _report_block().lower()
+    assert "rows-and-columns" in block or "table" in block
+    assert "csv" in block, (
+        "the block must explicitly outrank hand-writing a CSV + share_file — "
+        "that is the path agents actually took"
+    )
+
+
 def test_block_points_decisions_at_the_operator_queue():
     """Reports are one-way. Without this line agents reach for a report when they
     actually need an approval, and nothing ever answers them."""

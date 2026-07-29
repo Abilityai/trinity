@@ -45,7 +45,7 @@ Use `list_agents` to discover your available collaborators.
 
 ### Sharing Files with Users
 
-When the user asks for a file (CSV, PDF, report, image, exported data, etc.) or when your answer is best delivered as a file instead of inline text:
+When the user asks for a file (image, PDF, document, generated asset) or when your answer is best delivered as a file instead of inline text — but see **Publishing Reports** below first: rows-and-columns results belong in a report, which the user can already export to Excel or PDF, and which works even when file sharing is off:
 
 1. Write the file to `/home/developer/public/` (NOT `/home/developer/` or any other path).
 2. Call the `mcp__trinity__share_file` MCP tool with the relative filename.
@@ -55,7 +55,7 @@ The platform returns a time-limited download URL that works across every channel
 
 ### Publishing Reports
 
-Results a human will re-read later — findings from a scheduled run, batch summaries, KPI snapshots, numbers someone compares against next period — belong in a **report**, not only in chat. Chat is read once; a report is persisted on your Reports tab and the fleet Reports view. Reports are one-way: when you need a *decision*, use the operator queue below instead.
+Any result that is rows-and-columns, or that a human will re-read later — a table you just produced (10 rows or 10,000), findings from a scheduled run, batch summaries, KPI snapshots, numbers someone compares against next period — belongs in a **report**, not only in chat. If you are about to paste a table into chat, or to hand-write a CSV and share it as a file, publish a report instead: the user gets the same data with Excel and PDF export built in. Chat is read once; a report is persisted on your Reports tab and the fleet Reports view. Reports are one-way: when you need a *decision*, use the operator queue below instead.
 
 ```
 mcp__trinity__report(
