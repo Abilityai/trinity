@@ -109,6 +109,46 @@ class ValidationResult:
 
 
 # ---------------------------------------------------------------------------
+# Independent-referee seam (ent#277)
+# ---------------------------------------------------------------------------
+#
+# VALIDATE-001 above runs the auditor as the SAME agent: same model, same
+# provider, same container, with the workspace and tools still reachable. That
+# is useful — it can check whether a file really exists — but it is not an
+# independent referee. It shares the failure mode it is meant to catch: when a
+# provider retunes the model, the auditor drifts with the executor.
+#
+# This seam lets an entitled module register a referee that judges the SAME
+# execution using a DIFFERENT model, called directly by the backend with only
+# the transcript as input — no workspace, no tools, nothing the agent can write
+# to. That independence is the point (ent#205's core invariant), not merely the
+# model change.
+#
+# Edition-agnostic by construction: OSS owns the hook and the graceful-
+# degradation contract; the entitled module owns provider routing, config, and
+# storage. With nothing registered, `get_referee()` returns None and every code
+# path below behaves exactly as it did before this change.
+
+# A referee is an async callable:
+#     (agent_name, original_message, execution_response) -> ValidationResult | None
+# Returning None means "no verdict available" (not configured for this agent, or
+# the provider was unreachable) — the caller degrades, never fails the run.
+_referee = None
+
+
+def register_referee(fn) -> None:
+    """Register the independent referee. Called once by an entitled module."""
+    global _referee
+    _referee = fn
+    logger.info("[Validation] independent referee registered: %s", getattr(fn, "__qualname__", fn))
+
+
+def get_referee():
+    """The registered referee, or None in OSS-only builds."""
+    return _referee
+
+
+# ---------------------------------------------------------------------------
 # Validation Service
 # ---------------------------------------------------------------------------
 
@@ -153,6 +193,53 @@ class ValidationService:
         """
         # 1. Mark original execution as pending validation
         db.update_business_status(execution_id, BusinessStatus.PENDING_VALIDATION)
+
+        # 1b. ent#277 — independent referee, when an entitled module registered
+        # one AND it is configured for this agent. A verdict here REPLACES the
+        # same-agent auditor rather than running alongside it: two validations
+        # per execution doubles cost and latency, and when they disagree there
+        # is no principled tie-break — the whole argument for the referee is
+        # that the same-agent auditor shares the executor's drift, so it is not
+        # the one to defer to.
+        #
+        # Graceful degradation is the contract (AC): a referee that cannot
+        # answer returns None, and we fall through to the same-agent path
+        # below. It never raises into the caller — an execution that already
+        # succeeded must not be failed by its own validation being unavailable.
+        referee = get_referee()
+        if referee is not None:
+            try:
+                verdict = await referee(
+                    agent_name=agent_name,
+                    original_message=original_message,
+                    execution_response=execution_response,
+                )
+            except Exception:
+                logger.exception(
+                    "[Validation] referee raised for execution=%s; "
+                    "degrading to the same-agent auditor", execution_id,
+                )
+                verdict = None
+
+            if verdict is not None:
+                business_status = self._map_validation_to_business_status(verdict.status)
+                # No `validation_execution_id` is passed: the referee is a
+                # backend-side provider call, so it deliberately creates NO
+                # execution row — it consumes no slot and no agent capacity, and
+                # cannot be mistaken for work the agent performed. The verdict
+                # travels back to the caller; the entitled module persists it to
+                # its own store.
+                db.update_business_status(
+                    execution_id=execution_id,
+                    business_status=business_status,
+                )
+                if verdict.status in (ValidationStatus.FAIL, ValidationStatus.PARTIAL):
+                    await self._notify_operator_on_failure(
+                        execution_id=execution_id,
+                        agent_name=agent_name,
+                        validation_result=verdict,
+                    )
+                return verdict
 
         # 2. Build the auditor prompt
         validation_prompt = self._build_validation_prompt(
