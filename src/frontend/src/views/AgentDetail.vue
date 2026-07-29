@@ -231,7 +231,11 @@
 
             <!-- Skills Tab Content -->
             <div v-if="activeTab === 'skills'">
-              <SkillsPanel :agent-name="agent.name" :agent-status="agent.status" />
+              <SkillsPanel
+                :agent-name="agent.name"
+                :can-manage="!!agent.can_share"
+                :agent-running="agent.status === 'running'"
+              />
             </div>
 
             <!-- Shared Folders Tab Content -->
@@ -825,6 +829,15 @@ const visibleTabs = computed(() => {
   // Folders - hide for system agent
   if (agent.value?.can_share && !isSystem) {
     tabs.push({ id: 'folders', label: 'Folders' })
+  }
+
+  // Skills (#235) — unhidden. Was kept out of `visibleTabs` per requirements
+  // §22.2 ("component preserved for potential admin-only access") while
+  // assignment stayed REST/MCP-only, so the #182/#183 machinery had no product
+  // surface at all. Owner/admin and non-system, matching the other management
+  // tabs; OverflowTabs absorbs the extra entry.
+  if (agent.value?.can_share && !isSystem) {
+    tabs.push({ id: 'skills', label: 'Skills' })
   }
 
   // Settings - owner-only (#1108); sectioned config home, Guardrails is section #1
