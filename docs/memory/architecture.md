@@ -563,7 +563,8 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
 - **Self-gated create**: `AuthorizedAgent` checks owner-access to the path agent, but an
   agent-scoped key could otherwise report as a *sibling* agent the owner shares; the endpoint
   additionally requires `current_user.agent_name == name` for agent-scoped callers (mirrors
-  `authorize_heartbeat`). Payload capped at 256 KB → 413; fields strictly validated in
+  `authorize_heartbeat`). Payload capped at `REPORT_PAYLOAD_MAX_BYTES` (5 MiB, #1537) → 413;
+  fields strictly validated in
   `ReportCreate`. Create is rate-limited per agent (`REPORT_RATE_LIMIT`/30 per 60s, shared
   `services/rate_limiter.py`, fail-open) so a runaway agent can't flood the table between
   retention sweeps → 429.
@@ -577,7 +578,7 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   parameterized difference: `search` matches `agent_name` on the fleet list but not on a
   single-agent list, where every row carries that name and a matching term would return
   the agent's whole history. Payload contents are not searched — that needs the #1537
-  storage rework, not an unindexed `LIKE` over a 256 KB blob.
+  storage rework, not an unindexed `LIKE` over a multi-MiB blob.
 - **Large payloads** (#1537): cap raised to 5 MiB (measured first — the fleet's reports
   averaged 201 bytes, so the old 256 KiB cap was the wall the first real table would hit,
   not one agents were meeting). `GET /api/reports/{id}/rows` windows a `table` payload
@@ -1923,7 +1924,7 @@ CREATE TABLE agent_reports (
     user_id INTEGER,                     -- author = MCP-key owner (current_user.id)
     report_type TEXT NOT NULL,           -- namespaced, e.g. 'recon.weekly_summary'
     title TEXT NOT NULL,
-    payload TEXT NOT NULL,               -- arbitrary JSON, ≤256 KB (413 over cap)
+    payload TEXT NOT NULL,               -- arbitrary JSON, ≤5 MiB (413 over cap, #1537)
     display_hint TEXT,                   -- table|kpi|markdown|timeline|json|NULL
     schema_version INTEGER DEFAULT 1,
     period_start TEXT,

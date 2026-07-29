@@ -303,7 +303,7 @@ endpoint — reports flow agent → MCP → backend.
   the retention sweep. Dual-track migration (SQLite `migrations.py` + Alembic `0006`).
 - **FR-3 — Backend API** (access control mirrors `/api/executions`): self-gated `POST
   /api/agents/{name}/reports` (agent-scoped key must equal the path agent; payload capped at
-  256 KB → 413; fields strictly validated), `GET /api/agents/{name}/reports` (metadata only),
+  5 MiB → 413; fields strictly validated), `GET /api/agents/{name}/reports` (metadata only),
   `GET /api/reports` (fleet, accessible-agent filtered; `agent`/`report_type`/`hours`/`search`),
   `GET /api/reports/stats` (total / by_type / agents KPI counts), `GET /api/reports/{id}`
   (full payload; 404 on no-access), `DELETE /api/agents/{name}/reports/{id}` (owner; scoped by
@@ -340,7 +340,7 @@ endpoint — reports flow agent → MCP → backend.
   7-day default rather than erroring so an old client keeps working. UI: the same filter
   bar as the fleet view minus the agent picker, with the empty state distinguishing "no
   reports yet" from "no reports match these filters". **Payload contents are deliberately
-  NOT searched** — a `LIKE` over a 256 KB TEXT blob with no index degrades exactly as the
+  NOT searched** — a `LIKE` over a multi-MiB TEXT blob with no index degrades exactly as the
   feature succeeds; an FTS answer belongs with #1537's storage rework.
 - **FR-10 — Large payloads: raised ceiling + row windowing** (#1537, epic #1534):
   `REPORT_PAYLOAD_MAX_BYTES` 256 KiB → **5 MiB**, and `GET /api/reports/{id}/rows`

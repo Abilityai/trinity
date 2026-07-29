@@ -13,6 +13,7 @@ from typing import List, Optional
 import httpx
 
 from database import db
+from models import REPORT_PAYLOAD_MAX_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ Results a human will re-read later — findings from a scheduled run, batch summ
 mcp__trinity__report(
     report_type="recon.weekly_summary",    # namespaced, lower_snake
     title="Week 30: 14 leads, 3 qualified",
-    payload={...},                         # max 256 KB serialized
+    payload={...},                         # max __REPORT_PAYLOAD_MAX__ serialized
     display_hint="table",                  # optional, see below
     period_start="...", period_end="...")  # optional ISO-8601
 ```
@@ -183,6 +184,17 @@ The `execution_id` is in the **Execution Context** block below. The platform sto
 - Write the complete updated memory blob each time (read → update → write).
 - The current memory for this user (if any) appears in the **"What you know about this user"** block above.
 - Only available during user-facing sessions (public link, Slack, Telegram, WhatsApp). The tool returns an error if called from a scheduled task or agent-to-agent call."""
+
+# The payload ceiling is INTERPOLATED, never typed twice (#1838 review). The
+# block shipped `256 KB` while `REPORT_PAYLOAD_MAX_BYTES` was already 5 MiB in
+# the same PR — so every agent would have been told a ceiling 20x below the real
+# one, and would pre-aggregate away exactly the payloads #1537 raised the cap to
+# accept. A literal here is a second source of truth for a number the platform
+# already owns; `test_1535_report_prompt_guidance.py` pins the substitution too.
+PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(
+    "__REPORT_PAYLOAD_MAX__", f"{REPORT_PAYLOAD_MAX_BYTES // (1024 * 1024)} MB"
+)
+
 
 
 # ---------------------------------------------------------------------------

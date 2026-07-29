@@ -115,6 +115,31 @@ def test_block_stays_within_the_context_budget():
     )
 
 
+def test_documented_payload_ceiling_matches_the_enforced_one():
+    """The seventh drift guard, and the one that was missing when it mattered.
+
+    The block shipped `max 256 KB` in the same PR that raised
+    `REPORT_PAYLOAD_MAX_BYTES` to 5 MiB — a 20x understatement told to every
+    agent on every turn. That doesn't just misinform: it partly cancels #1537,
+    because an agent that believes the wall is at 256 KB pre-aggregates the very
+    payloads the raise exists to accept, and the raise buys nothing.
+
+    Six guards pinned the block against the MCP enum and the renderer keys;
+    none pinned a number. The block now interpolates the constant, so this test
+    is really asserting that nobody replaces the interpolation with a literal.
+    """
+    from models import REPORT_PAYLOAD_MAX_BYTES
+
+    block = _report_block()
+    expected = f"{REPORT_PAYLOAD_MAX_BYTES // (1024 * 1024)} MB"
+    assert expected in block, (
+        f"the prompt must state the enforced ceiling ({expected}); "
+        "interpolate REPORT_PAYLOAD_MAX_BYTES rather than typing a literal"
+    )
+    # A stale hand-typed figure is the exact failure being guarded against.
+    assert "256 KB" not in block
+
+
 def test_block_points_decisions_at_the_operator_queue():
     """Reports are one-way. Without this line agents reach for a report when they
     actually need an approval, and nothing ever answers them."""

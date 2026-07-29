@@ -103,7 +103,13 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
         ),
         title: z.string().max(300).describe("Short human-readable title (required, max 300 chars)."),
         payload: z.record(z.unknown()).describe(
-          "Arbitrary JSON body of the report (max 256 KB serialized)."
+          // Keep in step with REPORT_PAYLOAD_MAX_BYTES (backend `models.py`).
+          // This is the SECOND agent-facing statement of the ceiling; it was
+          // left at 256 KB while #1537 raised the real cap to 5 MiB — the same
+          // divergence the platform prompt carried (#1838 review). The backend
+          // is the enforcer; both descriptions merely report it, so neither may
+          // understate it or agents pre-aggregate away what the cap now allows.
+          "Arbitrary JSON body of the report (max 5 MB serialized)."
         ),
         display_hint: z.enum(["table", "kpi", "markdown", "timeline", "json"]).optional()
           .describe(

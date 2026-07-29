@@ -55,13 +55,42 @@ REPORT_RATE_WINDOW = 60  # seconds
 # Agent-scoped endpoints  (/api/agents/{name}/reports)
 # ============================================================================
 
+
+def _report_or_404(report_id: str, current_user: User) -> dict:
+    """Fetch a report and gate it, or 404.
+
+    ONE gate for all three read routes (detail / rows / export). It answers
+    **404, never 403**, for a missing report AND for one the caller cannot
+    reach: a 403 would confirm the id exists, turning any of these routes into
+    an existence oracle for another tenant's reports.
+
+    Extracted per review of #1838: the three routes each carried a byte-identical
+    copy of this check, which is exactly the duplication Invariant #8's static
+    guard (`test_1310_auth_wiring`) proxies for — three copies are three chances
+    for one to drift into a 403, or to lose the access half entirely. The
+    allowlist entry is now this single helper rather than one per route.
+    """
+    report = db.get_report(report_id)
+    if not report or not db.can_user_access_agent(current_user.username, report["agent_name"]):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+    return report
+
+
 @router.post("/agents/{name}/reports", response_model=Report, status_code=201)
 async def create_report(
     data: ReportCreate,
     name: AuthorizedAgent,
-    # Optional so a direct in-process call (tests, any future internal caller)
+    # Defaulted so a direct in-process call (tests, any future internal caller)
     # keeps working; FastAPI injects it regardless of the default, and the
     # header guard below already treats absence as "no hint available".
+    #
+    # Deliberately NOT `Optional[Request]` (raised in #1838 review, verified
+    # wrong): FastAPI special-cases the BARE `Request` annotation as an ASGI
+    # injection. Wrapping it in Optional loses that, so FastAPI tries to build a
+    # Pydantic field for it and the module fails to import:
+    #   FastAPIError: Invalid args for response field! ... typing.Optional[
+    #   starlette.requests.Request] is a valid Pydantic field type
+    # The annotation is a framework contract here, not a nullability claim.
     request: Request = None,
     current_user: User = Depends(get_current_user),
 ):
@@ -231,9 +260,7 @@ async def export_report(
     image, but an instance that upgrades code without rebuilding (#1814) would
     otherwise see an opaque crash instead of "rebuild the image".
     """
-    report = db.get_report(report_id)
-    if not report or not db.can_user_access_agent(current_user.username, report["agent_name"]):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+    report = _report_or_404(report_id, current_user)
 
     title = report.get("title") or "report"
     try:
@@ -298,11 +325,7 @@ async def get_report_rows(
     database needs the rows off-row — deliberately not built until real payloads
     justify the migration (see REPORT_PAYLOAD_MAX_BYTES).
     """
-    report = db.get_report(report_id)
-    # 404 (not 403) on no-access, matching GET /reports/{id}: an id must not be
-    # probeable for existence through the sibling route either.
-    if not report or not db.can_user_access_agent(current_user.username, report["agent_name"]):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+    report = _report_or_404(report_id, current_user)
 
     payload = report.get("payload")
     columns = payload.get("columns") if isinstance(payload, dict) else None
@@ -326,7 +349,4 @@ async def get_report_rows(
 @router.get("/reports/{report_id}", response_model=Report)
 async def get_report(report_id: str, current_user: User = Depends(get_current_user)):
     """Full report incl. payload. 404 (not 403) on no-access to avoid id leak."""
-    report = db.get_report(report_id)
-    if not report or not db.can_user_access_agent(current_user.username, report["agent_name"]):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
-    return Report(**report)
+    return Report(**_report_or_404(report_id, current_user))

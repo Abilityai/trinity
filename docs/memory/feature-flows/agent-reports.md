@@ -29,7 +29,7 @@ agent --report(...)--> MCP reports.ts (resolves agent from auth context; agent-s
          - AuthorizedAgent (owner-access to path agent)
          - self-gate: agent-scoped key => current_user.agent_name == name  (no sibling spoof)
          - rate_limiter.enforce(report:{name}, 30/60s) => 429 (fail-open, runaway guard)
-         - payload <= 256 KB else 413; ReportCreate strict validation
+         - payload <= 5 MiB else 413; ReportCreate strict validation
        --> report_service.create_report
              --> db.create_report (agent_reports row; SQLite/PG via SQLAlchemy Core)
              --> THIN WS trigger {type:agent_report, agent_name, report_id, report_type, created_at}
@@ -72,7 +72,7 @@ calling agent.
   `database.py`.
 - **Models** `models.py` — `ReportCreate` (regex `report_type`, `Literal` `display_hint`,
   ranged `schema_version`, ISO + ordered periods), `ReportSummary` (no payload), `Report`
-  (full), `FleetReportStats`. `REPORT_PAYLOAD_MAX_BYTES = 256 KiB`.
+  (full), `FleetReportStats`. `REPORT_PAYLOAD_MAX_BYTES = 5 MiB` (#1537).
 
 ## Schema & Migration
 `agent_reports` table (see architecture.md → Database Schema). Dual-track: SQLite
@@ -169,7 +169,7 @@ Including `agent_name` on a single-agent list would be actively misleading: ever
 carries that name, so searching `recon` inside agent `recon-bot` would return the agent's
 entire history — indistinguishable from search being ignored.
 
-**Payload is not searched.** `LIKE` over a 256 KB TEXT column with no index gets slower
+**Payload is not searched.** `LIKE` over a multi-MiB TEXT column with no index gets slower
 exactly as reporting succeeds. An FTS/extracted-column answer belongs with the #1537
 storage rework rather than being smuggled in behind a filter box.
 
