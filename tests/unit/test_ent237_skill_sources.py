@@ -476,3 +476,92 @@ class TestLegacyAdoption:
         assert (service.library_root / source.id / ".git").exists()
         assert not (service.library_root / ".git").exists()
         assert [s["name"] for s in service.list_skills()] == ["old-skill"]
+
+
+# =============================================================================
+# AC#3 — "the library is never empty out of the box"
+# =============================================================================
+
+class TestFreshInstallSeed:
+    """The default source is seeded as a ROW on a fresh install, not resolved as
+    a code default at read time. That distinction is the whole design: a
+    read-time default would resurrect a source the admin deleted, and would
+    silently add one to an existing install that never chose it."""
+
+    @pytest.fixture
+    def fresh_db(self, tmp_path, monkeypatch):
+        import sqlite3
+
+        from db.schema import init_schema
+
+        db_path = tmp_path / "fresh.db"
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+        conn = sqlite3.connect(db_path)
+        init_schema(conn.cursor(), conn)
+        conn.commit()
+        return conn
+
+    def test_seeded_on_a_fresh_install(self, fresh_db):
+        import database as D
+
+        D._seed_fresh_install_skill_source(fresh_db.cursor(), fresh_db)
+
+        row = fresh_db.execute(
+            "SELECT name, ref_type, is_default, priority FROM skill_sources"
+        ).fetchone()
+        assert row is not None
+        _name, ref_type, is_default, priority = row
+        # AC#5: tag-pinned, never branch-tracking.
+        assert ref_type == "tag"
+        assert is_default == 1
+        # AC#4: highest number = lowest precedence, so any custom source the
+        # operator adds later wins a collision with no reordering.
+        from db.skill_sources import CUSTOM_SOURCE_PRIORITY
+
+        assert priority > CUSTOM_SOURCE_PRIORITY
+
+    def test_idempotent_under_a_worker_race(self, fresh_db):
+        """Both migration locks fail open, so two workers can race this."""
+        import database as D
+
+        for _ in range(3):
+            D._seed_fresh_install_skill_source(fresh_db.cursor(), fresh_db)
+
+        count = fresh_db.execute("SELECT COUNT(*) FROM skill_sources").fetchone()[0]
+        assert count == 1
+
+    def test_not_seeded_on_an_existing_install(self, fresh_db):
+        """A single `users` row means this install predates the boot and must
+        not silently acquire a source it never configured."""
+        import database as D
+
+        fresh_db.execute(
+            "INSERT INTO users (username, role, created_at, updated_at) "
+            "VALUES ('admin', 'admin', 'x', 'x')"
+        )
+        fresh_db.commit()
+
+        D._seed_fresh_install_skill_source(fresh_db.cursor(), fresh_db)
+
+        count = fresh_db.execute("SELECT COUNT(*) FROM skill_sources").fetchone()[0]
+        assert count == 0
+
+    def test_disabled_by_empty_env(self, fresh_db, monkeypatch):
+        """An operator who wants no community catalog sets the env to empty."""
+        import config
+        import database as D
+
+        monkeypatch.setattr(config, "DEFAULT_SKILL_SOURCE_URL", "")
+        D._seed_fresh_install_skill_source(fresh_db.cursor(), fresh_db)
+
+        count = fresh_db.execute("SELECT COUNT(*) FROM skill_sources").fetchone()[0]
+        assert count == 0
+
+    def test_seed_failure_never_raises(self, fresh_db):
+        """init_database runs at import — raising here would crash-loop boot."""
+        import database as D
+
+        fresh_db.execute("DROP TABLE skill_sources")
+        fresh_db.commit()
+
+        D._seed_fresh_install_skill_source(fresh_db.cursor(), fresh_db)   # no raise

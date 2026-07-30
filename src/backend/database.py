@@ -22,6 +22,7 @@ Redis is still used for:
 """
 
 import os
+import secrets
 from datetime import datetime
 from pathlib import Path
 
@@ -168,6 +169,8 @@ def init_database():
         upgrade_to_head()
         # #1638: seed BEFORE _ensure_admin_user_engine — see the sqlite path.
         _seed_fresh_install_retention_engine()
+        # ent#237: same fresh-install window, same ordering requirement.
+        _seed_fresh_install_skill_source_engine()
         _ensure_admin_user_engine()
         return
 
@@ -200,6 +203,11 @@ def init_database():
             # BEFORE _ensure_admin_user (which makes `users` non-empty and so
             # would make this install look pre-existing).
             _seed_fresh_install_retention(cursor, conn)
+
+            # ent#237: seed the bundled community skills source. Same
+            # fresh-install window and the same must-precede-_ensure_admin_user
+            # ordering, since that is what makes `users` non-empty.
+            _seed_fresh_install_skill_source(cursor, conn)
 
             # Create default admin user if not exists
             _ensure_admin_user(cursor, conn)
@@ -260,6 +268,113 @@ def _seed_fresh_install_retention(cursor, conn):
     except Exception as e:
         print(f"WARNING: [#1638] retention seed skipped ({e}); "
               f"install keeps the default (wider) retention windows")
+
+
+_DEFAULT_SOURCE_SEED_NOTE = (
+    "[ent#237] Fresh install: seeded default skills source %s @ %s "
+    "(admin can disable or remove it in Settings)."
+)
+
+
+def _default_skill_source_values():
+    """The seed row, or None when seeding is disabled/misconfigured."""
+    from config import (
+        DEFAULT_SKILL_SOURCE_NAME,
+        DEFAULT_SKILL_SOURCE_REF,
+        DEFAULT_SKILL_SOURCE_URL,
+    )
+    from db.skill_sources import DEFAULT_SOURCE_PRIORITY
+
+    url = (DEFAULT_SKILL_SOURCE_URL or "").strip()
+    ref = (DEFAULT_SKILL_SOURCE_REF or "").strip()
+    if not url or not ref:
+        return None
+    return {
+        "id": "src_" + secrets.token_hex(8),
+        "name": DEFAULT_SKILL_SOURCE_NAME,
+        "url": url,
+        "ref": ref,
+        # AC#5: the community catalog is TAG-pinned, never branch-tracking.
+        "ref_type": "tag",
+        "is_default": 1,
+        "enabled": 1,
+        "priority": DEFAULT_SOURCE_PRIORITY,
+        "last_sync_status": "never",
+        "created_by": "seed:ent237",
+    }
+
+
+def _seed_fresh_install_skill_source(cursor, conn):
+    """Seed the bundled community skills source on a fresh install (ent#237 AC#3).
+
+    Fresh-install ONLY, for the reason spelled out in config: an existing
+    install must not silently acquire a source it never chose, and a deleted or
+    disabled source must stay that way across restarts — which a read-time code
+    default could not honour.
+
+    Priority is DEFAULT_SOURCE_PRIORITY (the highest number = lowest
+    precedence), so any custom source the operator adds later wins a name
+    collision without them having to reorder anything (AC#4).
+
+    Same fail-safe contract as the retention seed: never raises. `init_database`
+    runs at import, so raising here would crash-loop boot; a skipped seed just
+    means an empty library, which is the pre-ent#237 status quo.
+    """
+    try:
+        if not _is_fresh_install_sqlite(cursor):
+            return
+        values = _default_skill_source_values()
+        if values is None:
+            return
+        now = utc_now_iso()
+        # OR IGNORE on the partial-unique default index: two workers racing the
+        # fail-open migration lock must not produce two default sources.
+        cursor.execute(
+            "INSERT OR IGNORE INTO skill_sources "
+            "(id, name, url, ref, ref_type, is_default, enabled, priority, "
+            " last_sync_status, created_by, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                values["id"], values["name"], values["url"], values["ref"],
+                values["ref_type"], values["is_default"], values["enabled"],
+                values["priority"], values["last_sync_status"],
+                values["created_by"], now, now,
+            ),
+        )
+        conn.commit()
+        print(_DEFAULT_SOURCE_SEED_NOTE % (values["url"], values["ref"]))
+    except Exception as e:
+        print(f"WARNING: [ent#237] default skills source seed skipped ({e}); "
+              f"the library starts empty until an admin adds a source")
+
+
+def _seed_fresh_install_skill_source_engine():
+    """Default-source seed — engine-based path for PostgreSQL (#300).
+
+    Mirrors `_seed_fresh_install_skill_source`; see it for the rationale.
+    """
+    from sqlalchemy import func, select
+
+    from db.engine import get_engine, make_insert
+    from db.tables import skill_sources, users
+
+    try:
+        values = _default_skill_source_values()
+        if values is None:
+            return
+        with get_engine().begin() as conn:
+            if conn.execute(select(func.count()).select_from(users)).scalar():
+                return
+            now = utc_now_iso()
+            conn.execute(
+                make_insert(skill_sources)
+                .values(created_at=now, updated_at=now, **values)
+                .on_conflict_do_nothing()
+            )
+        print(_DEFAULT_SOURCE_SEED_NOTE % (values["url"], values["ref"]))
+    except Exception as e:
+        print(f"WARNING: [ent#237] default skills source seed skipped ({e}); "
+              f"the library starts empty until an admin adds a source")
 
 
 def _seed_fresh_install_retention_engine():
