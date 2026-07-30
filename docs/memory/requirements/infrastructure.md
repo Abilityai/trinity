@@ -351,10 +351,14 @@
   keys exist solely while an execution holds a slot). Reason codes
   (stable — trinity-enterprise#202 scores on them): `roster_read_failed` /
   `roster_empty_contradicted` (critical) / `roster_empty_unverifiable` (major,
-  the evidence source was itself unreachable). **Two-cycle confirmation**
-  (`canary:h01:suspect_since`, E-02's cross-cycle-state precedent) so the
-  last-agent delete race — DB row gone, container still tearing down — cannot
-  false-fire; an unreadable marker fires *unconfirmed* rather than skipping,
+  the evidence source was itself unreachable). **Confirmation on elapsed
+  wall-clock** (`CONFIRMATION_MIN_SECONDS`, marker `canary:h01:suspect_since`,
+  E-02's cross-cycle-state precedent) so the last-agent delete race — DB row
+  gone, container still tearing down — cannot false-fire. Deliberately NOT "a
+  second cycle": prod runs `--workers 2` and `canary_service` holds no leader
+  lease, so both loops share the marker and worker B would confirm worker A's
+  sighting seconds later, collapsing the gate. An unreadable *or unwritable*
+  marker fires *unconfirmed* rather than skipping,
   because a guard that cannot self-check must say so. Scoped to the roster read
   ONLY: on a live-but-quiet fleet `terminal_rows`/`enabled_schedules`/
   `orphan_refs`/`terminal_exec_statuses` are all legitimately empty, so a

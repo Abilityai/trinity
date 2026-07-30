@@ -43,7 +43,7 @@ whose violation means "the observer is blind" rather than "the observed system
 is broken", hence its own `H-` id family:
 
 - H-01: collector blindness (SQL roster empty/unreadable while Docker or Redis
-  proves the fleet is alive; two-cycle confirmed)
+  proves the fleet is alive; confirmed after a minimum elapsed interval)
 
 Subsequent phases register additional invariants here without changes to
 the snapshot collector or the run-cycle endpoint.

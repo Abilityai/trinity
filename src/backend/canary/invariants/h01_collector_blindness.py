@@ -276,7 +276,9 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
         _clear_marker()
         return []
 
-    # Two-cycle confirmation gate.
+    # Elapsed-time confirmation gate (CONFIRMATION_MIN_SECONDS) — deliberately
+    # NOT "a second cycle": the marker is shared across workers, so cycle count
+    # is not a delay. See the module docstring.
     try:
         blind_since = _read_marker()
     except Exception:

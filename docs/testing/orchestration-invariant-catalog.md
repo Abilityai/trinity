@@ -384,9 +384,12 @@ non-empty.
 - **Evidence must not be circular.** Docker container presence (from the container LIST, before any `exec_run` —
   `zombie_counts` is keyed by exec success and silently thins on a degraded container) and Redis slot keys.
   Redis is corroborating only: slot keys exist solely while an execution holds a slot, so an idle fleet has none.
-- **Two-cycle confirmation** (`canary:h01:suspect_since`, following E-02's cross-cycle-state precedent) so the
-  last-agent delete race — DB row deleted, container still tearing down — cannot false-fire. Costs ~5 extra
-  minutes to alarm; irrelevant for a config regression that persists until a human fixes it.
+- **Confirmation on elapsed wall-clock** (`CONFIRMATION_MIN_SECONDS`, marker `canary:h01:suspect_since`, following
+  E-02's cross-cycle-state precedent) so the last-agent delete race — DB row deleted, container still tearing
+  down — cannot false-fire. Deliberately NOT "a second cycle": prod runs `--workers 2` and `canary_service` holds
+  no leader lease, so the two loops share the marker and worker B would confirm worker A's sighting seconds later,
+  collapsing the gate to nothing. Costs at most one extra cycle to alarm; irrelevant for a config regression that
+  persists until a human fixes it.
 - **Fail-loud:** an unreadable marker fires *unconfirmed* rather than skipping, and an unavailable evidence source
   fires `roster_empty_unverifiable` (major) rather than staying quiet — a dead smoke detector should chirp.
 - **Scope:** the roster read ONLY. On a live-but-quiet fleet `terminal_rows`, `enabled_schedules`, `orphan_refs`
