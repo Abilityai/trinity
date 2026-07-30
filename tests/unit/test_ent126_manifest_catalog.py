@@ -26,6 +26,7 @@ The two groups that earn their keep:
 from __future__ import annotations
 
 import types
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -121,6 +122,30 @@ def test_list_empty_directory_is_empty_not_an_error(env):
     r = env.client.get("/api/systems/manifests")
     assert r.status_code == 200
     assert r.json() == []
+
+
+def test_empty_env_var_falls_back_to_the_default_directory(monkeypatch):
+    """`TRINITY_MANIFESTS_DIR=""` must mean "use the default", not `Path("")`.
+
+    Load-bearing since ent#126 wired the var into both compose files as
+    `${TRINITY_MANIFESTS_DIR:-}`: every deployment now sets it to the EMPTY STRING
+    unless an operator overrides it. `os.getenv(name, default)` would return `""`
+    there — `Path("")` is the CWD, so the catalog would list nothing on every
+    install while looking perfectly configured. The `or` is what prevents it.
+
+    Exactly the trap #1759 hit one seam over, where an empty `HOST_TEMPLATES_PATH`
+    turned `Path("") / name` into an empty NAMED VOLUME.
+    """
+    monkeypatch.setenv(system_service.MANIFESTS_DIR_ENV, "")
+    assert system_service._manifests_dir() == Path("config/manifests")
+
+    monkeypatch.setenv(system_service.MANIFESTS_DIR_ENV, "   ")
+    # Whitespace is a real (if odd) path; only truly empty falls back. Pinned so
+    # the behaviour is a decision rather than an accident.
+    assert system_service._manifests_dir() != Path("config/manifests")
+
+    monkeypatch.delenv(system_service.MANIFESTS_DIR_ENV, raising=False)
+    assert system_service._manifests_dir() == Path("config/manifests")
 
 
 def test_list_missing_directory_is_empty_not_an_error(env, monkeypatch, tmp_path):
