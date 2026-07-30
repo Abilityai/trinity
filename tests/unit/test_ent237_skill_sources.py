@@ -81,6 +81,18 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
 
 
+def _router_source() -> str:
+    """The skills router's source, read from DISK.
+
+    Deliberately not `inspect.getsource(routers.skills)`: importing the router
+    can be affected by another test module's sys.modules stubs, and a static
+    guard that silently stops running is worse than no guard.
+    """
+    return (
+        Path(_BACKEND_STR) / "routers" / "skills.py"
+    ).read_text()
+
+
 def _clone(source_id: str, url: Path, ref: str, ref_type: str, root: Path):
     from services.skill_source_clone import SkillSourceClone
 
@@ -338,6 +350,46 @@ def _fake_legacy_setting(monkeypatch, legacy_repo: Path) -> None:
     monkeypatch.setattr(ss, "get_skills_library_branch", lambda: "main")
 
 
+class _SourcesFacade:
+    """The slice of the `db` facade that skill_service uses for sources.
+
+    Injected instead of relying on the `database.db` singleton: another test
+    module (test_ent183_skill_packages) installs sys.modules stubs at IMPORT
+    time, which permanently binds `skill_service.db` to a MagicMock for the rest
+    of the session. Whether that has happened depends on module import order, so
+    depending on the singleton makes these tests pass or fail based on which
+    other files ran first. Passing the dependency in explicitly removes the
+    ordering question entirely.
+    """
+
+    def __init__(self, ops):
+        self._ops = ops
+
+    def list_skill_sources(self, enabled_only=False):
+        return self._ops.list_sources(enabled_only)
+
+    def get_skill_source(self, source_id):
+        return self._ops.get_source(source_id)
+
+    def get_default_skill_source(self):
+        return self._ops.get_default_source()
+
+    def count_skill_sources(self):
+        return self._ops.count_sources()
+
+    def create_skill_source(self, **kwargs):
+        return self._ops.create_source(**kwargs)
+
+    def update_skill_source(self, source_id, **fields):
+        return self._ops.update_source(source_id, **fields)
+
+    def delete_skill_source(self, source_id):
+        return self._ops.delete_source(source_id)
+
+    def record_skill_source_sync(self, source_id, **kwargs):
+        return self._ops.record_sync(source_id, **kwargs)
+
+
 @pytest.fixture
 def service(sources_db, tmp_path, monkeypatch):
     """A SkillService whose clones land in tmp, with the SSRF allowlist relaxed.
@@ -350,6 +402,13 @@ def service(sources_db, tmp_path, monkeypatch):
     import services.skill_service as ss
 
     monkeypatch.setattr(ss, "validate_skills_library_url", lambda u: u)
+    monkeypatch.setattr(ss, "db", _SourcesFacade(sources_db))
+    # No legacy `skills_library_url` unless a test asks for one via
+    # _fake_legacy_setting. Pinned explicitly because another test module stubs
+    # this getter to a real-looking URL, which would make every sync here also
+    # adopt a phantom legacy source and quietly add one to the expected counts.
+    monkeypatch.setattr(ss, "get_skills_library_url", lambda: None)
+    monkeypatch.setattr(ss, "get_skills_library_branch", lambda: "main")
     svc = ss.SkillService()
     svc.library_root = tmp_path / "clones"
     svc.library_path = tmp_path / "clones"
@@ -599,11 +658,8 @@ class TestSourceEndpointGating:
         this must fail loudly the moment a new mutating route is added without
         the gate."""
         import ast
-        import inspect
 
-        import routers.skills as skills_router
-
-        tree = ast.parse(inspect.getsource(skills_router))
+        tree = ast.parse(_router_source())
         funcs = {
             n.name: n for n in ast.walk(tree)
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -622,11 +678,8 @@ class TestSourceEndpointGating:
         """Guards the guard: a new POST/PUT/DELETE under /skills/sources that
         this test does not know about is a failure, not a silent pass."""
         import ast
-        import inspect
 
-        import routers.skills as skills_router
-
-        tree = ast.parse(inspect.getsource(skills_router))
+        tree = ast.parse(_router_source())
         found = set()
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):

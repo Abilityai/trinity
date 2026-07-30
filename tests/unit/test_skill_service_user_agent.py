@@ -105,15 +105,33 @@ def _captured_cmd(call_args_list, sentinel):
     raise AssertionError(f"No subprocess.run call contained {sentinel!r}")
 
 
+# ent#237: the git subprocess calls moved from SkillService onto
+# SkillSourceClone (one checkout per configured source). The UA property is
+# unchanged and still worth pinning — just at its new home.
+import services.skill_source_clone as clone_mod  # noqa: E402
+
+_SOURCE_ID = "src_aaaaaaaa"
+
+
+def _clone(tmp_path, *, exists: bool = False):
+    """A clone rooted in tmp_path. `exists=True` creates the directory, since
+    _git() short-circuits to a synthetic failure when the clone is absent."""
+    c = clone_mod.SkillSourceClone(
+        _SOURCE_ID, "https://github.com/owner/repo", "main", "branch", tmp_path
+    )
+    if exists:
+        c.path.mkdir(parents=True, exist_ok=True)
+    return c
+
+
 class TestSkillServiceGitUserAgent:
 
     def test_clone_includes_user_agent_override(self, tmp_path):
-        svc = skill_service_mod.SkillService()
-        svc.library_path = tmp_path / "skills-library"
+        clone = _clone(tmp_path)
 
-        with patch.object(skill_service_mod.subprocess, "run") as mock_run:
+        with patch.object(clone_mod.subprocess, "run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            result = svc._git_clone("https://github.com/owner/repo", "main")
+            result = clone._clone("https://github.com/owner/repo")
 
         assert result["success"] is True
         cmd = _captured_cmd(mock_run.call_args_list, "clone")
@@ -127,13 +145,11 @@ class TestSkillServiceGitUserAgent:
         assert cmd.index("clone") > c_idx + 1
 
     def test_pull_fetch_includes_user_agent_override(self, tmp_path):
-        svc = skill_service_mod.SkillService()
-        svc.library_path = tmp_path / "skills-library"
-        svc.library_path.mkdir(parents=True)
+        clone = _clone(tmp_path, exists=True)
 
-        with patch.object(skill_service_mod.subprocess, "run") as mock_run:
+        with patch.object(clone_mod.subprocess, "run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            result = svc._git_pull("main")
+            result = clone._update_branch()
 
         assert result["success"] is True
 
@@ -150,13 +166,11 @@ class TestSkillServiceGitUserAgent:
         no need to thread the flag through. This is documentation as much as
         a test: if someone adds the flag here later, they should at least
         consider whether reset has started doing remote calls."""
-        svc = skill_service_mod.SkillService()
-        svc.library_path = tmp_path / "skills-library"
-        svc.library_path.mkdir(parents=True)
+        clone = _clone(tmp_path, exists=True)
 
-        with patch.object(skill_service_mod.subprocess, "run") as mock_run:
+        with patch.object(clone_mod.subprocess, "run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            svc._git_pull("main")
+            clone._update_branch()
 
         reset_cmd = _captured_cmd(mock_run.call_args_list, "reset")
         # Either way is acceptable; this asserts the current minimal-scope choice.
@@ -164,13 +178,11 @@ class TestSkillServiceGitUserAgent:
 
     def test_get_current_commit_does_not_need_user_agent(self, tmp_path):
         """`git rev-parse HEAD` is a local query — same reasoning as reset."""
-        svc = skill_service_mod.SkillService()
-        svc.library_path = tmp_path / "skills-library"
-        svc.library_path.mkdir(parents=True)
+        clone = _clone(tmp_path, exists=True)
 
-        with patch.object(skill_service_mod.subprocess, "run") as mock_run:
+        with patch.object(clone_mod.subprocess, "run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="abc123def456\n", stderr="")
-            sha = svc._get_current_commit()
+            sha = clone.current_commit()
 
         assert sha == "abc123def456"
         rev_cmd = _captured_cmd(mock_run.call_args_list, "rev-parse")
