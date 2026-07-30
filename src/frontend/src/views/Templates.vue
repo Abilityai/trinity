@@ -4,14 +4,12 @@
 
     <main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
       <div class="px-4 sm:px-0">
-        <div class="flex justify-between items-center mb-8">
+        <div class="flex justify-between items-center mb-6">
           <div>
-            <h1 class="text-3xl font-bold text-gray-900 dark:text-white">Agent Templates</h1>
-            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              Pre-configured agent templates with MCP servers and credentials
-            </p>
+            <h1 class="text-3xl font-bold text-gray-900 dark:text-white">{{ pageTitle }}</h1>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ pageSubtitle }}</p>
           </div>
-          <div class="flex items-center gap-2">
+          <div v-if="activeTab === 'agents'" class="flex items-center gap-2">
             <button
               @click="fetchTemplates"
               class="p-2 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-colors"
@@ -24,6 +22,52 @@
           </div>
         </div>
 
+        <!-- Install-something tabs (ent#126).
+             One hub for every "install" path rather than a 7th nav entry (the
+             NavBar already has 6). ent#15's agent-import wizard and ent#108's
+             registry slot in here as further tabs. -->
+        <div class="mb-8 border-b border-gray-200 dark:border-gray-700">
+          <nav class="-mb-px flex gap-6" aria-label="Catalog sections">
+            <button
+              v-for="tab in TABS"
+              :key="tab.id"
+              :class="[
+                'whitespace-nowrap border-b-2 px-1 pb-3 text-sm font-medium transition-colors',
+                activeTab === tab.id
+                  ? 'border-action-primary-500 text-action-primary-600 dark:text-action-primary-400'
+                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 hover:text-gray-700 dark:hover:text-gray-200'
+              ]"
+              :data-testid="`tab-${tab.id}`"
+              @click="switchTab(tab.id)"
+            >
+              {{ tab.label }}
+            </button>
+          </nav>
+        </div>
+
+        <!-- Systems tab ---------------------------------------------------- -->
+        <div v-if="activeTab === 'systems'">
+          <!-- Deploying a system creates agents, so the surface mirrors
+               POST /api/systems/deploy's own require_role("creator") (AC #6).
+               An explanatory empty state, never a blank panel. -->
+          <div
+            v-if="!canInstallSystems"
+            class="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-8 text-center"
+          >
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
+              You do not have permission to install systems
+            </h2>
+            <p class="mx-auto mt-2 max-w-md text-sm text-gray-600 dark:text-gray-400">
+              Installing a system creates agents, so it needs the
+              <span class="font-medium">creator</span> role or above. Ask an administrator to
+              change your role if you need this.
+            </p>
+          </div>
+          <SystemInstallPanel v-else />
+        </div>
+
+        <!-- Agents tab (unchanged content) --------------------------------- -->
+        <template v-else>
         <!-- Loading state -->
         <div v-if="loading && templates.length === 0" class="flex justify-center py-12">
           <div class="flex items-center gap-3 text-gray-500 dark:text-gray-400">
@@ -227,6 +271,7 @@
             <p class="text-gray-400 dark:text-gray-500 text-sm">Configure GitHub templates in config.py or add local templates to config/agent-templates/</p>
           </div>
         </div>
+        </template>
       </div>
     </main>
 
@@ -242,14 +287,51 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import axios from 'axios'
 import NavBar from '../components/NavBar.vue'
 import CreateAgentModal from '../components/CreateAgentModal.vue'
+import SystemInstallPanel from '../components/systems/SystemInstallPanel.vue'
 import { useAuthStore } from '../stores/auth'
+import { useRole } from '../composables/useRole'
 
+const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
+const { hasMinRole } = useRole()
+
+// ent#126: `?tab=`-driven, copying the Operations.vue pattern so the tab is
+// deep-linkable and survives a reload.
+const TABS = [
+  { id: 'agents', label: 'Agent templates' },
+  { id: 'systems', label: 'Install a system' }
+]
+const VALID_TABS = TABS.map(t => t.id)
+
+function resolveTab(q) {
+  return VALID_TABS.includes(q) ? q : 'agents'
+}
+
+const activeTab = ref(resolveTab(route.query.tab))
+
+// `hasMinRole` is a plain FUNCTION, not a computed ref — call it directly.
+// (The composable's own usage docstring says `hasMinRole.value(...)` and is
+// stale; copying it TypeErrors.)
+const canInstallSystems = computed(() => hasMinRole('creator'))
+
+const pageTitle = computed(() =>
+  activeTab.value === 'systems' ? 'Install a System' : 'Agent Templates'
+)
+const pageSubtitle = computed(() =>
+  activeTab.value === 'systems'
+    ? 'Deploy a whole multi-agent system from a manifest — preview it first'
+    : 'Pre-configured agent templates with MCP servers and credentials'
+)
+
+function switchTab(tab) {
+  activeTab.value = tab
+  router.replace({ query: { ...route.query, tab } })
+}
 
 const templates = ref([])
 const loading = ref(false)

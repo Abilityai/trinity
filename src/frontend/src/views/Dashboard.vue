@@ -488,6 +488,34 @@ const stoppedCount = computed(() => {
   return agents.value.filter(a => a.status?.toLowerCase() !== 'running').length
 })
 
+// ent#126: land here filtered to a freshly installed system.
+//
+// A manifest deploy always tags every agent it creates with the system name, so
+// `?tags=<system>` is the fallback that ALWAYS works; `?view=<id>` is preferred
+// when the manifest also declared a `system_view:` and it was created.
+// Additive and deliberately narrow: it seeds the same state the tag chips and the
+// view sidebar already drive, and does nothing when the query is absent.
+function applyDeepLinkFilters() {
+  const viewId = route.query.view
+  if (typeof viewId === 'string' && viewId) {
+    // A view carries its own filter tags; selecting it wins over ?tags=.
+    systemViewsStore.selectView(viewId)
+    return
+  }
+
+  const tagsParam = route.query.tags
+  if (typeof tagsParam !== 'string' || !tagsParam.trim()) return
+  const tags = tagsParam.split(',').map(t => t.trim().toLowerCase()).filter(Boolean)
+  if (!tags.length) return
+
+  // An active system view owns the filter, so don't fight it.
+  if (systemViewsStore.activeViewId) return
+
+  selectedQuickTags.value = tags
+  networkStore.setFilterTags([...tags])
+  localStorage.setItem('trinity-dashboard-quick-tags', JSON.stringify(tags))
+}
+
 onMounted(async () => {
   // Initialize system views store (restores persisted view selection)
   systemViewsStore.initialize()
@@ -499,6 +527,9 @@ onMounted(async () => {
   if (!systemViewsStore.activeViewId && selectedQuickTags.value.length > 0) {
     networkStore.setFilterTags([...selectedQuickTags.value])
   }
+
+  // ent#126: ?view= / ?tags= override the persisted selection above.
+  applyDeepLinkFilters()
 
   // PERF-269: Parallelize independent mount calls
   await Promise.allSettled([
