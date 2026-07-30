@@ -597,6 +597,12 @@ class QueueStatus(BaseModel):
 # System Manifest Models (Recipe-based Multi-Agent Deployment)
 # ============================================================================
 
+# ent#126: cap on a manifest accepted over the wire OR read from the bundled
+# catalog. Generous — the largest bundled manifest is ~2 KB — so it bounds abuse
+# without constraining a real fleet definition.
+MANIFEST_MAX_BYTES = 256 * 1024
+
+
 class SystemAgentConfig(BaseModel):
     """Configuration for a single agent in a system manifest."""
     template: str  # e.g., "github:Org/repo" or "local:scout" (#1759: must resolve, or create 400s)
@@ -634,7 +640,13 @@ class SystemManifest(BaseModel):
 
 class SystemDeployRequest(BaseModel):
     """Request to deploy a system from YAML manifest."""
-    manifest: str  # Raw YAML string
+    # ent#126: server-side size cap. The UI's upload path caps at the same size
+    # client-side, but that is cosmetic — curl bypasses it, and this is the only
+    # place the limit is actually enforced. NOT a YAML-bomb defence: safe_load
+    # still expands anchors/aliases, so a few-hundred-byte manifest can pin a
+    # worker. That needs the alias + duplicate-key guard `pipelines.ts` (#919)
+    # already implements, tracked as a follow-up.
+    manifest: str = Field(..., max_length=MANIFEST_MAX_BYTES)
     dry_run: bool = False
     # trinity-enterprise#125: abort on the first agent-create failure (legacy
     # behavior) instead of the default best-effort continue-and-report.
@@ -648,6 +660,53 @@ class SystemDeployFailure(BaseModel):
     template: str
     reason: str  # Sanitized, truncated failure reason
     status_code: Optional[int] = None  # Original HTTP status when the failure was an HTTPException
+
+
+class SystemSchedulePreview(BaseModel):
+    """One schedule a manifest would create, as shown in the dry-run preview (ent#126).
+
+    Mirrors what `create_schedules` would build, including its `.get()` defaults
+    — `enabled` in particular defaults to True, which is why a manifest that
+    merely lists a schedule starts autonomous executions on deploy.
+    """
+    agent: str  # Final (resolved) agent name
+    short_name: str
+    name: str
+    cron: str
+    message: str
+    enabled: bool
+    timezone: str
+    description: Optional[str] = None
+
+
+class BundledManifestSummary(BaseModel):
+    """One manifest shipped in `config/manifests/`, as listed in the catalog (ent#126)."""
+    id: str  # Filename stem — the {manifest_id} path parameter
+    filename: str
+    # None when the file could not be parsed; the card still renders, with `reason`.
+    name: Optional[str] = None
+    description: Optional[str] = None
+    agent_count: int = 0
+    templates: List[str] = []
+    schedule_count: int = 0
+    # True when the manifest carries a top-level `prompt:`, which OVERWRITES the
+    # platform-wide trinity_prompt for every agent. The UI gates deploy on an
+    # explicit acknowledgement for this.
+    sets_prompt: bool = False
+    permissions_preset: Optional[str] = None
+    # parse + validate + the same side-effect-free template/resource preflight the
+    # dry-run uses. Named `valid` only because all three ran; a parse-only check
+    # would be `parseable`.
+    valid: bool = False
+    reason: Optional[str] = None  # Why it is not valid (short, human-readable)
+    # At least one agent this manifest would create already exists, so deploying
+    # produces `_N`-suffixed duplicates.
+    already_deployed: bool = False
+
+
+class BundledManifestDetail(BundledManifestSummary):
+    """A bundled manifest plus its raw YAML, for loading into the editor (ent#126)."""
+    manifest: str  # Raw YAML text
 
 
 class SystemDeployResponse(BaseModel):
@@ -666,6 +725,23 @@ class SystemDeployResponse(BaseModel):
     system_view_created: Optional[str] = None  # ORG-001 Phase 4: View ID if created
     warnings: List[str] = []
     failed: List[SystemDeployFailure] = []  # trinity-enterprise#125: per-agent create failures
+    # ent#126 dry-run preview fields (None on a real deploy). Computed by the
+    # SAME pure resolvers the writers consume, so the preview cannot drift from
+    # what deploy actually does.
+    #
+    # `permission_edges` is {source: targets} rather than the resolver's ordered
+    # pair list: write ORDER does not matter for display, and the sources are
+    # unique by construction (each branch writes any given agent at most once —
+    # explicit's clear phase and set phase are disjoint), so collapsing to a dict
+    # is lossless for the set of writes.
+    permission_edges: Optional[Dict[str, List[str]]] = None
+    schedules_preview: Optional[List[SystemSchedulePreview]] = None
+    # `system_view_created` is None both when a view was never requested AND when
+    # creating it failed (create_system_view swallows the exception), so a caller
+    # cannot tell "no view wanted" from "view lost". This disambiguates it: the
+    # frontend needs it to choose its post-deploy navigation, and a requested view
+    # that failed also appends a warning.
+    system_view_requested: bool = False
 
 
 # ============================================================================

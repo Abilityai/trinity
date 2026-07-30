@@ -19,6 +19,7 @@ from models import (
     SystemViewConfig,
     SystemDeployFailure,
     SystemDeployResponse,
+    SystemSchedulePreview,
     User,
 )
 from database import db
@@ -272,26 +273,53 @@ def resolve_agent_names(
 # Phase 2: Configuration Functions
 # ============================================================================
 
-async def configure_permissions(
+def resolve_permission_edges(
     agent_names: Dict[str, str],  # {short_name: final_name}
     permissions: Optional[SystemPermissions],
-    created_by: str
-) -> int:
-    """
-    Apply permission configuration based on preset or explicit rules.
+) -> Tuple[List[Tuple[str, List[str]]], int]:
+    """Compute the permission write-set WITHOUT touching the database (ent#126).
 
-    Args:
-        agent_names: Mapping of short names to final agent names
-        permissions: Permission configuration from manifest
-        created_by: Username for audit trail
+    Returns ``(write_set, permissions_count)`` where ``write_set`` is the exact
+    ordered sequence of ``db.set_agent_permissions(source, targets)`` calls the
+    deploy would make, and ``permissions_count`` is the integer it would report.
 
-    Returns:
-        Number of permissions configured
+    This exists so the dry-run preview and the real deploy compute topology from
+    ONE piece of code: only the backend knows the resolved ``_N``-suffixed names,
+    and a preview that re-derived the preset rules separately would drift from
+    the writer the first time either changed. ``configure_permissions`` below is
+    now a thin loop over this.
+
+    An ordered list of pairs, not a dict, so the write SEQUENCE is faithful by
+    construction — clearing an agent and then granting to it is observable
+    ordering that a dict would silently normalise away.
+
+    Every truthiness guard here is load-bearing and is pinned by
+    ``tests/unit/test_ent126_permission_characterization.py``:
+
+    * ``full-mesh``: ``if targets`` — a source with no targets is skipped
+      entirely, never written as an empty list.
+    * ``orchestrator-workers``: ``if workers`` guards the WHOLE body, so a lone
+      orchestrator with zero workers writes nothing and counts 0; the count is
+      ``len(workers)`` by assignment, and the worker-clearing writes are not
+      counted.
+    * ``none``: clears every agent but counts 0 — clearing is not "configuring".
+    * ``explicit``: ``{}`` is falsy, so the branch is skipped and NOTHING is
+      cleared (that is the ``none`` preset's job). Phase 1 clears every agent
+      absent from ``explicit`` as a SOURCE — so a target-only agent is cleared
+      first and granted-to second. Unknown targets are silently filtered;
+      an unknown source is skipped.
+
+    The unknown-source/target branches are unreachable from a manifest
+    (``validate_manifest`` rejects them) but ARE reachable on the partial-deploy
+    path, where the caller passes ``created_map`` — a subset of the resolved
+    names. The preview is called with the FULL map, so it shows the optimistic
+    topology; the UI says so.
     """
     if not permissions:
-        return 0
+        return [], 0
 
     final_names = list(agent_names.values())
+    write_set: List[Tuple[str, List[str]]] = []
     permissions_count = 0
 
     if permissions.preset == "full-mesh":
@@ -299,9 +327,8 @@ async def configure_permissions(
         for source in final_names:
             targets = [t for t in final_names if t != source]
             if targets:
-                db.set_agent_permissions(source, targets, created_by)
+                write_set.append((source, targets))
                 permissions_count += len(targets)
-                logger.info(f"Granted {source} permissions to call: {targets}")
 
     elif permissions.preset == "orchestrator-workers":
         # Only orchestrator can call workers
@@ -312,28 +339,24 @@ async def configure_permissions(
             workers = [n for n in final_names if n != orchestrator]
             if workers:
                 # Set orchestrator permissions to call all workers
-                db.set_agent_permissions(orchestrator, workers, created_by)
+                write_set.append((orchestrator, workers))
                 permissions_count = len(workers)
-                logger.info(f"Granted {orchestrator} permissions to call workers: {workers}")
 
                 # Clear worker permissions (set to empty list = clear all)
                 for worker in workers:
-                    db.set_agent_permissions(worker, [], created_by)
-                    logger.info(f"Cleared permissions for worker {worker}")
+                    write_set.append((worker, []))
 
     elif permissions.preset == "none":
         # No permissions - clear all default permissions for all system agents
         for agent in final_names:
-            db.set_agent_permissions(agent, [], created_by)
-        logger.info(f"Cleared all permissions for {len(final_names)} agents (preset: none)")
+            write_set.append((agent, []))
 
     elif permissions.explicit:
         # Apply explicit permission matrix
         # First, clear permissions for all system agents not in explicit config
         for short_name, final_name in agent_names.items():
             if short_name not in permissions.explicit:
-                db.set_agent_permissions(final_name, [], created_by)
-                logger.info(f"Cleared default permissions for {final_name} (not in explicit config)")
+                write_set.append((final_name, []))
 
         # Then set explicit permissions
         for source_short, target_shorts in permissions.explicit.items():
@@ -343,12 +366,111 @@ async def configure_permissions(
                 continue
             targets = [agent_names[t] for t in target_shorts if t in agent_names]
             # set_agent_permissions does a full replacement
-            db.set_agent_permissions(source, targets, created_by)
+            write_set.append((source, targets))
             permissions_count += len(targets)
-            if targets:
-                logger.info(f"Granted {source} permissions to call: {targets}")
-            else:
-                logger.info(f"Cleared permissions for {source} (empty target list)")
+
+    return write_set, permissions_count
+
+
+def resolve_schedule_previews(
+    agent_names: Dict[str, str],  # {short_name: final_name}
+    agents_config: Dict[str, SystemAgentConfig],
+) -> List[SystemSchedulePreview]:
+    """Compute the schedules a deploy would create, WITHOUT writing them (ent#126).
+
+    The schedule sibling of `resolve_permission_edges`, and `create_schedules`
+    is now a thin loop over it. Mirrors that writer's iteration and its `.get()`
+    defaults exactly — `enabled` defaulting to **True** is why a manifest that
+    merely lists a schedule begins autonomous executions the moment it deploys,
+    which is the thing the preview has to surface.
+
+    Each preview is built through `ScheduleCreate` so the model's own validation
+    runs HERE, in the preview, rather than degrading to a post-deploy warning
+    once agents already exist.
+
+    Pinned by `tests/unit/test_ent126_schedule_characterization.py`.
+    """
+    previews: List[SystemSchedulePreview] = []
+
+    for short_name, config in agents_config.items():
+        final_name = agent_names.get(short_name)
+        if not final_name or not config.schedules:
+            continue
+
+        for schedule_data in config.schedules:
+            # Borrow the writer's own model for validation (e.g. a missing/bad
+            # field) so a broken schedule is a PREVIEW blocker, not a warning
+            # discovered after the fleet exists.
+            schedule_create = _build_schedule_create(schedule_data)
+            previews.append(SystemSchedulePreview(
+                agent=final_name,
+                short_name=short_name,
+                name=schedule_create.name,
+                cron=schedule_create.cron_expression,
+                message=schedule_create.message,
+                enabled=schedule_create.enabled,
+                timezone=schedule_create.timezone,
+                description=schedule_create.description,
+            ))
+
+    return previews
+
+
+def _build_schedule_create(schedule_data: dict) -> ScheduleCreate:
+    """Map one manifest schedule entry onto `ScheduleCreate` (ent#126).
+
+    The single mapping shared by the preview resolver and the writer, so the
+    manifest key names (`cron` -> `cron_expression`) and the three `.get()`
+    defaults cannot diverge between what a preview shows and what deploy writes.
+    Fields the manifest never populates (timeout_seconds, model, allowed_tools,
+    retries) keep their model defaults.
+    """
+    return ScheduleCreate(
+        name=schedule_data["name"],
+        cron_expression=schedule_data["cron"],
+        message=schedule_data["message"],
+        enabled=schedule_data.get("enabled", True),
+        timezone=schedule_data.get("timezone", "UTC"),
+        description=schedule_data.get("description")
+    )
+
+
+async def configure_permissions(
+    agent_names: Dict[str, str],  # {short_name: final_name}
+    permissions: Optional[SystemPermissions],
+    created_by: str
+) -> int:
+    """
+    Apply permission configuration based on preset or explicit rules.
+
+    Thin writer over `resolve_permission_edges` (ent#126): the topology decision
+    lives in the pure resolver the dry-run preview also uses, and this function
+    only performs the writes and the logging. Behaviour is unchanged and pinned
+    by `tests/unit/test_ent126_permission_characterization.py`.
+
+    Args:
+        agent_names: Mapping of short names to final agent names
+        permissions: Permission configuration from manifest
+        created_by: Username for audit trail
+
+    Returns:
+        Number of permissions configured
+    """
+    write_set, permissions_count = resolve_permission_edges(agent_names, permissions)
+
+    for source, targets in write_set:
+        db.set_agent_permissions(source, targets, created_by)
+        if targets:
+            logger.info(f"Granted {source} permissions to call: {targets}")
+        else:
+            logger.info(f"Cleared permissions for {source}")
+
+    if permissions:
+        mode = permissions.preset or ("explicit" if permissions.explicit else "none-specified")
+        logger.info(
+            f"Permission mode '{mode}': {len(write_set)} write(s), "
+            f"{permissions_count} permission(s) granted"
+        )
 
     return permissions_count
 
@@ -413,14 +535,10 @@ def create_schedules(
             continue
 
         for schedule_data in config.schedules:
-            schedule_create = ScheduleCreate(
-                name=schedule_data["name"],
-                cron_expression=schedule_data["cron"],
-                message=schedule_data["message"],
-                enabled=schedule_data.get("enabled", True),
-                timezone=schedule_data.get("timezone", "UTC"),
-                description=schedule_data.get("description")
-            )
+            # ent#126: the manifest -> ScheduleCreate mapping is shared with
+            # `resolve_schedule_previews`, so the dry-run preview shows exactly
+            # the schedules (and `enabled` states) this writer will create.
+            schedule_create = _build_schedule_create(schedule_data)
 
             # Create schedule in database
             schedule = db.create_schedule(
