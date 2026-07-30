@@ -52,6 +52,8 @@ try:
 except ImportError:  # pragma: no cover - exercised by unit tests
     from orphan_allowlist import resolve_allowlist, _read_cmdline  # type: ignore[no-redef]
 
+from .credential_sanitizer import sanitize_cmdline
+
 logger = logging.getLogger(__name__)
 
 
@@ -162,7 +164,13 @@ def kill_cgroup_orphans(
     for i, pid in enumerate(orphan_pids):
         if i >= _LOG_DETAIL_CAP:
             break
-        cmd = (_read_cmdline(pid) or "?")[:_CMDLINE_LOG_CAP]
+        # ent#292: argv carries a live credential. Trinity writes git remotes
+        # as `https://oauth2:<PAT>@github.com/...`, so every reaped git helper
+        # logged a working PAT verbatim — into the container log, then into
+        # Vector's persisted archives and any snapshot of that volume.
+        # Sanitize BEFORE the length cap: truncating first can slice a token
+        # mid-value and leave a partial secret that no pattern then matches.
+        cmd = sanitize_cmdline(_read_cmdline(pid) or "?")[:_CMDLINE_LOG_CAP]
         try:
             pgid_str = str(os.getpgid(pid))
         except OSError:
