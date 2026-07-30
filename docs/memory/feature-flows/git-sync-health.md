@@ -129,6 +129,19 @@ Migration: `sync_health` in `src/backend/db/migrations.py` (idempotent,
   `services/agent_service/crud.py` sets `GIT_SYNC_AUTO=true` only for
   non-source-mode GitHub-template agents (auto-pushing to `main` would
   clobber protected branches).
+- **On every container rebuild (ent#109)** the flag is re-derived by
+  `lifecycle.py::_apply_git_env_from_db` as **`auto_sync_enabled` OR the baked
+  env**, not from the column alone. The two creation writers disagree today:
+  the DB opt-in in `crud.py::_materialize_agent_files` carries
+  `and not config.ephemeral` inside a swallowing `try/except` while
+  `_apply_github_env` does not, and the column defaults to `0` — so
+  env-`true`/DB-`0` is reachable from one transient DB hiccup at creation and
+  permanently for ghosts, and DB-only derivation would **silently stop
+  auto-push** for that slice of the fleet (no error, just a stale
+  `agent_sync_state`). The helper backfills `auto_sync_enabled = 1` the first
+  time it observes the disagreement, so the OR retires itself. Making
+  `PUT /git/auto-sync` authoritative over the baked env is a tracked
+  follow-up.
 - Loop swallows every exception so a single bad tick can't kill the
   heartbeat.
 - **#1595:** the cycle runs in a worker thread (`asyncio.to_thread`) so a
@@ -286,6 +299,7 @@ the data-loss setup.
 | `services/sync_health_service.py` | Background poller + operator-queue emitter |
 | `services/fleet_audit_service.py` | `build_fleet_sync_audit()` aggregation |
 | `services/agent_service/crud.py` | Sets `GIT_SYNC_AUTO` env + `auto_sync_enabled=1` for non-source-mode agents |
+| `services/agent_service/lifecycle.py` | `_apply_git_env_from_db` re-derives `GIT_SYNC_AUTO` on every container rebuild as `auto_sync_enabled` OR the baked env, and backfills the column (ent#109) |
 | `routers/git.py` | `/git/auto-sync`, `/git/freeze-schedules-if-failing`, `/git/sync-state` |
 | `routers/agents.py` | `GET /api/agents/sync-health` (batch) |
 | `routers/fleet.py` | `GET /api/fleet/sync-audit` (new router) |
@@ -333,7 +347,7 @@ Baseline: 75 passing tests added across the two PRs.
 |---------|-----|---------|
 | Auto-sync on/off per agent | `PUT /api/agents/{name}/git/auto-sync` body `{enabled: bool}` | `true` for non-source-mode GitHub-template agents |
 | Interval override | `GIT_SYNC_INTERVAL_SECONDS` env var in the agent container | 900 s (15 min) |
-| Fleet kill-switch | `GIT_SYNC_AUTO` env var (if missing/false the loop never starts) | `true` only if backend set it at creation |
+| Fleet kill-switch | `GIT_SYNC_AUTO` env var (if missing/false the loop never starts) | `true` if the backend set it at creation **or** `auto_sync_enabled = 1` — re-derived as the OR of both on every container rebuild (ent#109) |
 | Freeze schedules when sync failing | `PUT /api/agents/{name}/git/freeze-schedules-if-failing` | `false` (opt-in) |
 | Alert threshold | Hardcoded in `SyncHealthService.ALERT_THRESHOLD` | 3 consecutive failures |
 
