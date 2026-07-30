@@ -215,3 +215,148 @@ def test_the_same_write_still_works_for_a_human_admin(monkeypatch):
         )
     except Exception as e:  # pragma: no cover - surfaces a real regression
         pytest.fail(f"a human admin must still be able to set the library: {e!r}")
+
+
+# ---------------------------------------------------------------------------
+# Surface coherence — raised in review of this PR
+# ---------------------------------------------------------------------------
+#
+# Closing the admin gate to agent keys had fallout the first audit missed: six
+# MCP tools call admin-gated routes. Four of those 403s are INTENDED and are the
+# grant-vs-use line working —
+#
+#   get_credential_encryption_key  -> pulling the platform master key
+#   get_agent_ssh_access           -> already documents itself as admin-only
+#   register_subscription          -> granting a platform credential
+#   delete_subscription            -> revoking one
+#
+# — but two were reads, not grants, and left a half-working workflow, which is
+# worse than a cleanly closed door. These pin the resolution so the next change
+# to the gate cannot silently re-break them.
+
+def _dependency_names(fn) -> set:
+    """Names of the FastAPI dependencies a handler actually resolves.
+
+    Reads the resolved `Depends(...)` objects rather than grepping the source —
+    a substring search matches the word inside a docstring explaining the very
+    change, which is how the first version of these tests failed.
+    """
+    import inspect
+
+    names = set()
+    for param in inspect.signature(fn).parameters.values():
+        dep = getattr(param.default, "dependency", None)
+        if dep is not None:
+            names.add(getattr(dep, "__name__", str(dep)))
+        # Annotated[...] form: Depends lives in the metadata
+        for meta in getattr(param.annotation, "__metadata__", ()):  # noqa: B007
+            dep = getattr(meta, "dependency", None)
+            if dep is not None:
+                names.add(getattr(dep, "__name__", str(dep)))
+    return names
+
+
+def _calls_in_body(fn, name: str) -> bool:
+    """True if the function BODY calls `name` — AST, so comments and docstrings
+    cannot produce a false positive."""
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    return any(
+        isinstance(n, ast.Call)
+        and getattr(n.func, "id", getattr(n.func, "attr", None)) == name
+        for n in ast.walk(tree)
+    )
+
+
+def test_triggering_a_health_check_is_not_admin_gated():
+    """An ops agent could READ health (`GET /status`, `GET /agents/{name}` — both
+    non-admin) but not REFRESH it. Probing an agent you can already see is a use,
+    not a grant, and the access control it relies on must remain."""
+    try:
+        from routers import monitoring
+    except ImportError:  # pragma: no cover
+        pytest.skip("backend venv required")
+
+    assert "require_admin" not in _dependency_names(monitoring.trigger_health_check)
+    assert not _calls_in_body(monitoring.trigger_health_check, "assert_admin")
+
+    # The per-agent access gate stays. Asserted from the SOURCE annotation, not
+    # the runtime-resolved dependency: sibling monitoring tests override that
+    # dependency with a lambda, so a runtime check here passes alone and fails
+    # in a full run purely on collection order.
+    import ast
+    import inspect
+    import textwrap
+
+    fn_ast = ast.parse(
+        textwrap.dedent(inspect.getsource(monitoring.trigger_health_check))
+    ).body[0]
+    annotations = {
+        ast.unparse(a.annotation)
+        for a in fn_ast.args.args
+        if a.annotation is not None
+    }
+    assert "AuthorizedAgentByName" in annotations
+
+
+def test_listing_subscriptions_is_not_admin_gated():
+    """`assign_subscription` / `clear_agent_subscription` / `get_agent_auth` all
+    kept working under owner gates, so an agent could ASSIGN a subscription it
+    could no longer ENUMERATE. The read is restored; assignment stays owner-gated.
+    """
+    try:
+        from routers import subscriptions
+    except ImportError:  # pragma: no cover
+        pytest.skip("backend venv required")
+
+    assert not _calls_in_body(subscriptions.list_subscriptions, "assert_admin")
+    # The write path must NOT have been widened along with the read.
+    assert _calls_in_body(subscriptions.assign_subscription_to_agent, "assert_agent_owner")
+
+
+def test_the_restored_read_is_scoped_not_ungated(monkeypatch):
+    """Un-gating this read outright was the first attempt and it traded one
+    disclosure for another: the payload carries `owner_email` and every agent
+    name, so any `role=user` account would enumerate the whole fleet. Each
+    caller sees only their own — and an agent key is NOT the fleet-wide admin
+    view even though it carries the owner's admin role, which is the entire
+    point of ent#293."""
+    import asyncio
+
+    try:
+        from routers import subscriptions
+    except ImportError:  # pragma: no cover
+        pytest.skip("backend venv required")
+
+    seen = []
+    monkeypatch.setattr(
+        subscriptions.db, "list_subscriptions_with_agents",
+        lambda owner_id=None: seen.append(owner_id) or [],
+        raising=False,
+    )
+
+    asyncio.run(subscriptions.list_subscriptions(current_user=HUMAN_ADMIN))
+    asyncio.run(subscriptions.list_subscriptions(current_user=NON_ADMIN))
+    asyncio.run(subscriptions.list_subscriptions(current_user=AGENT_KEY))
+
+    fleet_wide, non_admin, agent_key = seen
+    assert fleet_wide is None                 # a human admin still sees the fleet
+    assert non_admin == NON_ADMIN.id          # everyone else is scoped
+    assert agent_key == AGENT_KEY.id          # NOT the fleet view, despite role="admin"
+
+
+def test_the_granting_endpoints_stay_admin_only():
+    """The four intended 403s. If any of these loses its admin gate, the fix has
+    been widened past its own rationale."""
+    try:
+        from routers import subscriptions, credentials, agent_ssh
+    except ImportError:  # pragma: no cover
+        pytest.skip("backend venv required")
+
+    assert _calls_in_body(subscriptions.register_subscription, "assert_admin")
+    assert _calls_in_body(subscriptions.delete_subscription, "assert_admin")
+    assert "require_admin" in _dependency_names(credentials.get_encryption_key)
+    assert "require_admin" in _dependency_names(agent_ssh.create_ssh_access)
