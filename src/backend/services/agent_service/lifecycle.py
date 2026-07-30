@@ -7,7 +7,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Optional
+from typing import Literal, Optional
 
 import docker
 import httpx
@@ -500,6 +500,189 @@ async def restart_agent_internal(agent_name: str, *, stop_timeout: int = 30) -> 
     return await start_agent_internal(agent_name)
 
 
+# =============================================================================
+# GitHub sync env derivation (trinity-enterprise#109)
+# =============================================================================
+
+# Every env var `_apply_git_env_from_db` owns, named once so the set-or-clear
+# sweep, the writers below, and the tests cannot drift apart.
+#
+# Deliberately NOT owned here:
+#   GIT_WORKING_BRANCH  — only read by startup.sh's *clone* branch, which a
+#                         recreate never reaches (the volume, and therefore
+#                         .git, is carried forward); GIT_SOURCE_MODE=true wins
+#                         over it in startup.sh:187 anyway, so a stale value is
+#                         inert. Deriving it is a separate change.
+#   GIT_UPSTREAM_REPO   — has no DB column (ent#93 bakes it at creation only).
+#                         The `upstream` remote lives in .git/config on the
+#                         pinned workspace volume and survives every recreate,
+#                         so re-deriving is a repair mechanism, not a
+#                         correctness requirement.
+_GIT_ENV_KEYS = (
+    "GITHUB_REPO",
+    "GITHUB_PAT",
+    "GIT_SYNC_ENABLED",
+    "GIT_SOURCE_MODE",
+    "GIT_SOURCE_BRANCH",
+    "GIT_SYNC_AUTO",
+    "TRINITY_GIT_BASE_URL",
+)
+
+
+def _apply_git_env_from_db(
+    agent_name: str,
+    env_vars: dict,
+    *,
+    pat_gate: Literal["effective", "per_agent_only"],
+) -> None:
+    """Single owner of the GitHub-sync env block across BOTH rebuild paths.
+
+    Before ent#109 this block existed only in `_apply_persisted_auth_env`
+    (`recreate_missing_container`, the rebuild-from-nothing path).
+    `recreate_container_with_updated_config` — whose one production caller is
+    `start_agent_internal`, fired by nine config-drift predicates **and by
+    base-image drift at cold start** — seeded env from the OLD container and
+    re-derived only `GITHUB_PAT`. So a fleet-wide base-image rebuild replayed
+    whatever git env each container happened to be carrying.
+
+    **The gate is the REPO, not the PAT** (ent#123). A tokenless agent (an
+    anonymous public-template clone, e.g. Cornelius) must still receive
+    `GITHUB_REPO` + `GIT_SYNC_ENABLED`, or startup.sh never attempts the clone
+    and the rebuild yields a silently empty agent reporting green health — the
+    #843/#1439 class.
+
+    ``pat_gate`` — **never inherited, always stated by the call site.** The two
+    paths gate the PAT differently on purpose and a shared default would be a
+    credential leak:
+
+    ``"per_agent_only"`` (config-drift recreate)
+        `#211`'s opt-in guard, verbatim: resolve the effective PAT only when
+        the container **already carries** one, or a **per-agent** PAT row
+        exists. A global-only platform PAT is therefore never injected into a
+        previously-tokenless container. Without this, `configure_push_remote`
+        (startup.sh) would clear the push blackhole on the next recreate and a
+        tokenless agent could push a private workspace to a shared public
+        upstream (`learnings.md` ent#162).
+
+    ``"effective"`` (rebuild-from-nothing)
+        The 2-tier per-agent → global resolution this path has always used.
+        There is no old container to inherit a token from, so a rebuild needs
+        *something*; the row's own existence is the opt-in.
+
+    Set-or-clear, with one deliberate asymmetry. Both callers write into a dict
+    that may carry values forward (`recreate_container_with_updated_config`
+    seeds from the old container), so every repo-derived var is cleared when it
+    no longer applies — a deleted `agent_git_config` row (reachable from the
+    `routers/git.py` orphan cleanup and `_rollback_failed_creation`) pops the
+    whole set, and a `source_mode` flip clears the mode/branch pair.
+    ``GITHUB_PAT`` alone is **set-only while a repo is bound**: clearing it
+    would revoke a live agent's push on an unrelated recreate, which is not
+    this change's business.
+
+    Named behaviour change (the only divergence from a verbatim lift): a
+    container with a baked `GITHUB_PAT` and **no git binding** previously had
+    that token refreshed *from the global platform PAT* on every recreate; it
+    is now popped instead. The per-agent PAT is a column on `agent_git_config`,
+    so "no row" means "no per-agent credential and nothing to push to" by
+    construction. The population is transient (an aborted create, or an
+    orphan-cleanup window), and popping runs in the same direction as ent#162.
+    """
+    git_config = db.get_git_config(agent_name)
+
+    def _gc(key: str):
+        if git_config is None:
+            return None
+        if isinstance(git_config, dict):
+            return git_config.get(key)
+        return getattr(git_config, key, None)
+
+    repo = _gc("github_repo")
+
+    if not repo:
+        # No git binding — clear every var this helper owns rather than
+        # stranding stale ones in a carried-forward dict.
+        for _key in _GIT_ENV_KEYS:
+            env_vars.pop(_key, None)
+        return
+
+    env_vars["GITHUB_REPO"] = repo
+    env_vars["GIT_SYNC_ENABLED"] = "true"
+
+    # --- PAT: set-only, gated per the call site (see docstring) -------------
+    if pat_gate == "effective":
+        _pat_allowed = True
+    elif pat_gate == "per_agent_only":
+        # Verbatim #211 gate. The original also ANDed `bool(db.get_git_config(
+        # agent_name))`, which is unconditionally true here (we have a repo).
+        # Kept inlined via `db` rather than importing
+        # `helpers.needs_per_agent_pat_injection`, so a test stubbing
+        # `services.agent_service.helpers` cannot break this module (#1271 CI).
+        _pat_allowed = bool(env_vars.get("GITHUB_PAT")) or bool(
+            db.get_agent_github_pat(agent_name)
+        )
+    else:
+        raise ValueError(f"unknown pat_gate: {pat_gate!r}")
+
+    if _pat_allowed:
+        from routers.git import get_github_pat_for_agent
+
+        _pat = get_github_pat_for_agent(agent_name)
+        if _pat:
+            env_vars["GITHUB_PAT"] = _pat
+
+    # --- source mode / branch: set-or-clear ---------------------------------
+    # Source-mode rows re-derive the mode/branch pair so a volume-loss rebuild
+    # re-clones the right branch instead of a bare default-branch clone with no
+    # tracking; a row that flipped to working-branch mode clears both.
+    if _gc("source_mode"):
+        env_vars["GIT_SOURCE_MODE"] = "true"
+        env_vars["GIT_SOURCE_BRANCH"] = _gc("source_branch") or "main"
+    else:
+        env_vars.pop("GIT_SOURCE_MODE", None)
+        env_vars.pop("GIT_SOURCE_BRANCH", None)
+
+    # --- GIT_SYNC_AUTO: DB flag OR baked env, then converge -----------------
+    # #389's `auto_sync_enabled` column and the creation-time env genuinely
+    # disagree today: `crud.py`'s DB writer carries `and not config.ephemeral`
+    # inside a swallowing try/except while `_apply_github_env` does not, and the
+    # column defaults to 0. So env-`true`/DB-`0` is reachable from a single
+    # transient DB hiccup at creation and permanently for ghosts — and deriving
+    # from the DB flag alone would silently STOP auto-push for that slice of the
+    # fleet (no error, just a stale `agent_sync_state`). OR the two for one
+    # release, and backfill the column the moment the disagreement is observed,
+    # so the OR retires itself. Making the #389 toggle authoritative is a
+    # separate follow-up, not a side effect of this fix.
+    _baked_auto = str(env_vars.get("GIT_SYNC_AUTO") or "").strip().lower() == "true"
+    _db_auto = bool(_gc("auto_sync_enabled"))
+    if _db_auto or _baked_auto:
+        env_vars["GIT_SYNC_AUTO"] = "true"
+    else:
+        env_vars.pop("GIT_SYNC_AUTO", None)
+
+    if _baked_auto and not _db_auto:
+        # Best-effort convergence — never fails the recreate.
+        try:
+            db.set_git_auto_sync_enabled(agent_name, True)
+            logger.info(
+                "Backfilled auto_sync_enabled=1 for %s from its baked "
+                "GIT_SYNC_AUTO=true (#389 / ent#109)",
+                agent_name,
+            )
+        except Exception as e:  # noqa: BLE001 — cosmetic convergence only
+            logger.warning(
+                "Could not backfill auto_sync_enabled for %s: %s", agent_name, e
+            )
+
+    # --- optional self-hosted git base URL: refresh from the CURRENT backend
+    # env (the AGENT_TOOL_STALL_LIMIT_S idiom), so pointing the platform at or
+    # away from a gitea/GHES harness takes effect on recreate.
+    _git_base = (os.getenv("TRINITY_GIT_BASE_URL") or "").strip()
+    if _git_base:
+        env_vars["TRINITY_GIT_BASE_URL"] = _git_base
+    else:
+        env_vars.pop("TRINITY_GIT_BASE_URL", None)
+
+
 async def recreate_container_with_updated_config(
     agent_name: str,
     old_container,
@@ -579,13 +762,18 @@ async def recreate_container_with_updated_config(
         env_vars.pop('ANTHROPIC_API_KEY', None)
         env_vars.pop('CLAUDE_CODE_OAUTH_TOKEN', None)
 
-    # Update GITHUB_PAT using per-agent PAT first, then platform PAT.
-    _per_agent_pat = bool(db.get_agent_github_pat(agent_name)) and bool(db.get_git_config(agent_name))
-    if env_vars.get('GITHUB_PAT') or _per_agent_pat:
-        from routers.git import get_github_pat_for_agent
-        current_pat = get_github_pat_for_agent(agent_name)
-        if current_pat:
-            env_vars['GITHUB_PAT'] = current_pat
+    # ent#109: the whole GitHub-sync env block is derived from persisted DB
+    # state by the single shared owner. Before this, THIS path re-derived only
+    # GITHUB_PAT and replayed whatever GITHUB_REPO / GIT_SYNC_* the old
+    # container happened to carry — and a base-image rebuild makes every cold
+    # start a recreate, so that replay was fleet-wide.
+    #
+    # `per_agent_only` preserves #211's opt-in guard verbatim: a global-only
+    # platform PAT is never injected into a previously-tokenless container,
+    # and it stays in sync with the recreate matcher
+    # (`helpers.needs_per_agent_pat_injection`) so the two converge in one pass
+    # instead of looping.
+    _apply_git_env_from_db(agent_name, env_vars, pat_gate="per_agent_only")
     # #1574: mirror the resolved PAT onto GH_TOKEN/GITHUB_TOKEN so the `gh` CLI +
     # REST API authenticate too — always tracking the final GITHUB_PAT, and never
     # set when no token resolved (identical gating, no empty/broken credential).
@@ -596,11 +784,6 @@ async def recreate_container_with_updated_config(
     else:
         env_vars.pop('GH_TOKEN', None)
         env_vars.pop('GITHUB_TOKEN', None)
-    # NB: gated on db.get_agent_github_pat (NOT the global fallback) so a global-
-    # only PAT is never injected into a previously-tokenless container (#211's
-    # opt-in path); kept in sync with the recreate matcher so the two converge.
-    # Inlined via db rather than importing the helper, so a test stubbing
-    # services.agent_service.helpers can't break this module's import (#1271 CI).
 
     # GUARD-001: re-serialise guardrails overrides into env so startup.sh
     # can render the runtime config with the latest values.
@@ -1254,36 +1437,12 @@ def _apply_persisted_auth_env(agent_name: str, env_vars: dict, runtime: str) -> 
             env_vars.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
 
     # Per-agent GitHub PAT (opt-in), plus GITHUB_REPO / GIT_SYNC from git config.
-    # ent#123: gate on the REPO, not the PAT — a tokenless (anonymous
-    # public-template) agent rebuilt after container loss must still get
-    # GITHUB_REPO + GIT_SYNC_ENABLED, or startup.sh never attempts the clone
-    # and the rebuild yields a silently empty agent with green health
-    # (the #843/#1439 class). Token vars are injected only when a PAT exists.
-    git_config = db.get_git_config(agent_name)
-    if git_config:
-        from routers.git import get_github_pat_for_agent
-
-        def _gc(key: str):
-            if isinstance(git_config, dict):
-                return git_config.get(key)
-            return getattr(git_config, key, None)
-
-        pat = get_github_pat_for_agent(agent_name)
-        repo = _gc("github_repo")
-        if repo:
-            env_vars["GITHUB_REPO"] = repo
-            if pat:
-                env_vars["GITHUB_PAT"] = pat
-            env_vars["GIT_SYNC_ENABLED"] = "true"
-            # Source-mode rows also re-derive the mode/branch pair so a
-            # volume-loss rebuild re-clones the right branch instead of a
-            # bare default-branch clone with no tracking.
-            if _gc("source_mode"):
-                env_vars["GIT_SOURCE_MODE"] = "true"
-                env_vars["GIT_SOURCE_BRANCH"] = _gc("source_branch") or "main"
-            _git_base = os.getenv("TRINITY_GIT_BASE_URL")
-            if _git_base:
-                env_vars["TRINITY_GIT_BASE_URL"] = _git_base
+    # ent#123: gate on the REPO, not the PAT (see `_apply_git_env_from_db`).
+    # `effective` = the 2-tier per-agent -> global PAT resolution this path has
+    # always used: there is no old container to inherit a token from, so a
+    # rebuild-from-nothing needs *something*, and the git-config row's own
+    # existence is the opt-in.
+    _apply_git_env_from_db(agent_name, env_vars, pat_gate="effective")
 
     guardrails_override = db.get_guardrails_config(agent_name)
     if guardrails_override:
