@@ -567,7 +567,10 @@ class SchedulerDatabase:
 
             started_at = parse_scheduler_ts(row["started_at"])
             completed_at = datetime.utcnow()
-            duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+            # Clock skew between the writer of started_at and this process can
+            # make the subtraction negative; clamp so a poisoned duration never
+            # reaches the analytics chart (#1832).
+            duration_ms = max(0, int((completed_at - started_at).total_seconds() * 1000))
 
             cursor.execute("""
                 UPDATE schedule_executions
@@ -1217,7 +1220,10 @@ class SchedulerDatabase:
 
             started_at = parse_scheduler_ts(row["started_at"])
             completed_at = datetime.utcnow()
-            duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+            # Clock skew between the writer of started_at and this process can
+            # make the subtraction negative; clamp so a poisoned duration never
+            # reaches the analytics chart (#1832).
+            duration_ms = max(0, int((completed_at - started_at).total_seconds() * 1000))
 
             cursor.execute("""
                 UPDATE process_schedule_executions

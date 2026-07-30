@@ -10,6 +10,18 @@
 #   - 4318: OTel Collector HTTP (OTLP)
 #   - 8889: OTel Prometheus metrics
 
+# #1871: bound every container's json-file log. Docker's json-file driver has
+# NO max-size and NO max-file by default, so each container's log under
+# /var/lib/docker/containers/ grows forever — silently, until the Docker data
+# root hits 100% and dockerd wedges. Agent containers are created through the
+# Docker SDK, not compose, so they are capped separately by AGENT_LOG_CONFIG in
+# src/backend/services/agent_service/capabilities.py.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${CONTAINER_LOG_MAX_SIZE:-10m}"
+    max-file: "${CONTAINER_LOG_MAX_FILE:-3}"
+
 services:
   backend:
     build:
@@ -27,6 +39,7 @@ services:
         GIT_BRANCH: ${GIT_BRANCH:-unknown}
         BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: trinity-backend
+    logging: *default-logging
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -147,6 +160,13 @@ services:
       # agent container mount spec. noexec,nosuid stay fixed; only size tunes.
       # Existing agents pick up a change on recreate, not restart.
       - AGENT_TMP_SIZE=${AGENT_TMP_SIZE:-512m}
+      # Agent container log cap (#1871) — read by capabilities.py to build the
+      # agent container's json-file log_config. The x-logging anchor above bounds
+      # the PLATFORM services; agents are SDK-created, so these must reach the
+      # backend process itself or the knobs are inert (#1039 class).
+      # Existing agents pick up a change on recreate, not restart.
+      - AGENT_LOG_MAX_SIZE=${AGENT_LOG_MAX_SIZE:-10m}
+      - AGENT_LOG_MAX_FILE=${AGENT_LOG_MAX_FILE:-3}
       # Headless per-tool stall-watchdog ceiling (#1369) — seconds; scoped to
       # mcp__* tools. Threaded into agent containers by crud.py/lifecycle.py, so
       # it must reach the backend here or the .env lever is inert (#1039 class).
@@ -247,6 +267,19 @@ services:
       # packaging-gap class).
       - TELEMETRY_CONTAINER_STATS_TTL=${TELEMETRY_CONTAINER_STATS_TTL:-10}
       - TELEMETRY_DOCKER_POOL_SIZE=${TELEMETRY_DOCKER_POOL_SIZE:-16}
+      # Canary invariant harness (CANARY-001 / Issue #411). Mirrors
+      # docker-compose.yml; without these lines the .env knobs are inert in prod
+      # (the #1039 packaging-gap class). Load-bearing here specifically: the
+      # harness is documented as "CANARY_ENABLED=1 on staging/dev", and the dev
+      # instance deploys via THIS file (.github/workflows/deploy-dev.yml,
+      # scripts/deploy/gcp-deploy.sh) — so omitting them made the watcher
+      # un-enableable on the very instance it exists to watch.
+      # Default 0 — production users see no canary activity.
+      - CANARY_ENABLED=${CANARY_ENABLED:-0}
+      # Slack alert sink for canary green→red transitions. URL is the
+      # credential — leaking it lets anyone post to that one channel.
+      # Unset = canary cycles run silently (still persists violations).
+      - CANARY_SLACK_WEBHOOK_URL=${CANARY_SLACK_WEBHOOK_URL:-}
       # SSH access host override (read by services/ssh_service.py). Mirrors
       # docker-compose.yml; without this line the .env value is inert in prod (the
       # #1039 packaging-gap class) and SSH host detection falls back to localhost.
@@ -337,6 +370,7 @@ services:
         - VITE_BUG_INTAKE_URL=${VITE_BUG_INTAKE_URL:-https://intake.abilityai.dev/v1/report-bug}
     image: trinity-frontend:prod
     container_name: trinity-frontend
+    logging: *default-logging
     restart: unless-stopped
     # Issue #874: container nginx binds 8080 (unprivileged). Host port 80
     # preserved so external URLs do not change.
@@ -362,6 +396,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: trinity-redis
+    logging: *default-logging
     restart: unless-stopped
     # Redis not exposed externally in production
     expose:
@@ -455,6 +490,7 @@ services:
       context: .
       dockerfile: docker/scheduler/Dockerfile
     container_name: trinity-scheduler
+    logging: *default-logging
     restart: unless-stopped
     environment:
       - DATABASE_PATH=/data/trinity.db
@@ -501,6 +537,7 @@ services:
   logs-init:
     image: alpine:3.20
     container_name: trinity-logs-init
+    logging: *default-logging
     command: ["sh", "-c", "chown 1000:1000 /data/logs && chmod 775 /data/logs"]
     volumes:
       - trinity-logs:/data/logs
@@ -512,6 +549,7 @@ services:
   vector:
     image: timberio/vector:0.43.1-alpine
     container_name: trinity-vector
+    logging: *default-logging
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -552,6 +590,7 @@ services:
       context: ./src/mcp-server
       dockerfile: Dockerfile
     container_name: trinity-mcp-server
+    logging: *default-logging
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -602,6 +641,7 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: trinity-cloudflared
+    logging: *default-logging
     restart: unless-stopped
     command: tunnel run
     environment:
@@ -627,6 +667,7 @@ services:
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.120.0
     container_name: trinity-otel-collector
+    logging: *default-logging
     restart: unless-stopped
     ports:
       - "4317:4317"   # gRPC receiver (OTLP)

@@ -1220,6 +1220,32 @@
         "property-based"
       ],
       "description": "Hypothesis properties (sub-area B) for analytics aggregation: P-B1 conservation (sum of by_type totals equals total_executions over arbitrary unicode triggered_by, the mechanised 'a new trigger never silently vanishes') plus its per-day form, P-B2 rate/count bounds incl. the zero-terminal-day-is-None rule, P-B2b sampling-metadata self-consistency, P-B3 contiguous duplicate-free UTC-day timeline over arbitrary windows, P-B4 no-crash-total on _bucket_for_trigger and _schedule_command_label. Uses Hypothesis event() markers so --hypothesis-show-statistics proves non-vacuity; P-B2b DRAWS the percentile cap instead of leaving it at its production 5000, because with <=12 seeded rows the 'sampled is True' arm of the biconditional would otherwise be unreachable and half the property would pass vacuously."
+    },
+    {
+      "file": "unit/test_1871_container_log_rotation.py",
+      "feature": "#1871",
+      "added": "2026-07-29",
+      "categories": [
+        "backend",
+        "agents",
+        "unit",
+        "reliability",
+        "infrastructure"
+      ],
+      "description": "Agent container log cap (#1871): Docker's json-file driver has no default max-size/max-file, so every container log grew forever under /var/lib/docker/containers/ until the Docker data root hit 100% and dockerd wedged. AGENT_LOG_CONFIG bounds the SDK-created agent containers that compose's `logging:` anchor cannot reach. Covers _resolve_agent_log_max_size / _resolve_agent_log_max_file: default when unset, valid pass-through, case-fold/strip, malformed -> default, and the #1871 MAGNITUDE guard - a well-formed but absurd value ('1000g', max-file '9999') passes any format-only regex while effectively removing the cap, which is the exact failure the constant exists to prevent, so out-of-range falls back too (1g / 10-file ceilings, inclusive-boundary case pinned). Zero rejected (a 0 cap means 'never roll'); an unknown size unit falls back rather than raising KeyError at import (the regex/unit-table coupling would otherwise crash-loop boot). Rejections are asserted via capsys, NOT caplog: the report is print(flush=True) because AGENT_LOG_CONFIG resolves at IMPORT time, before lifespan calls setup_logging() (#858) - a caplog assertion would pass under pytest's injected handler while the real backend emitted an unstructured stderr line. An unset variable stays quiet. AGENT_LOG_CONFIG import-time shape is pinned, plus the 'never uncapped' invariant: whatever the operator sets, the emitted config always carries both bounds within the documented ceilings."
+    },
+    {
+      "file": "unit/test_1871_log_config_parity.py",
+      "feature": "#1871",
+      "added": "2026-07-29",
+      "categories": [
+        "backend",
+        "agents",
+        "unit",
+        "reliability",
+        "guard"
+      ],
+      "description": "Static guard: every durable container Trinity creates has a bounded log (#1871). Exists because of the named bug class in docs/memory/learnings.md (2026-07-10) - 'the create path is never one call site'. Scans BOTH docker-py creation entry points - containers_run(...) AND <client>.containers.create(...) - because covering only the first was the guard's own first blind spot (deploy.py already used the second). Rule: pass log_config (durable -> capped), or remove=True (ephemeral -> Docker deletes the log with the container), or be allowlisted with a stated reason (a create/teardown pair like deploy.py's finally: remove(force=True), which a static scan cannot distinguish from a durable create). Uses the AST, not a regex, so a MENTION of containers_run( in a comment or docstring is never a call site (lifecycle.py's own comments do exactly that, and a regex draft flagged them). A 'containers' substring pre-filter keeps the guard interpreter-agnostic - an unrelated file using syntax newer than the running Python (except* under a 3.9 venv) is skipped rather than reported - while staying fail-closed for any unparseable file that could contain a call; the token is deliberately 'containers' and not 'create', which matches half the codebase and re-lights those false positives. Meta-tested on the guard's own machinery: planted violations for both call forms, a capped create, an ephemeral helper, unrelated .create() on volumes/networks/services, a mixed file where only one of two calls is capped, prose/newer-syntax skips, pre-filter-covers-every-call-form, and allowlisted-paths-still-exist - so neither the scan nor its exemptions can rot into a no-op."
     }
   ]
 }

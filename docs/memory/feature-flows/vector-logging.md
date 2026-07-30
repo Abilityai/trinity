@@ -597,6 +597,13 @@ Vector's `docker_logs` source **only captures logs from after it starts watching
 **Mitigation in Trinity:**
 - Backend depends on Vector being healthy before starting (`condition: service_healthy`)
 - This ensures all newly created agents have their logs captured from the start
+
+### Interaction with Docker Log Rotation (#1871)
+
+Since #1871 every container's raw Docker log is bounded (`json-file` `max-size`/`max-file`, default `10m` × 3) — platform services via the `x-logging` anchor in both compose files, agent containers via `AGENT_LOG_CONFIG` (see [container-capabilities.md](container-capabilities.md)). Two consequences for this flow, both verified empirically:
+
+- **Vector is unaffected.** Rotation does **not** interrupt log collection. Measured across ~10 forced rotations with zero gaps on all three paths: the `docker_logs` source (production), the `file` source used by the Docker Desktop override (#1432), and the underlying Docker follow endpoint. Vector streams continuously, so it behaves like a live follower, not like post-hoc history.
+- **`docker logs` history shortens; the aggregate does not.** Rotation discards the oldest file, so a post-hoc `docker logs <container>` reaches back only as far as the retained set (~4 days for a busy agent). This does **not** shrink the aggregate at `/data/logs`, which is the primary queryable copy and keeps its own `LOG_RETENTION_DAYS`. It also does not widen the limitation above: `docker_logs` already never read historical logs.
 - Pre-existing containers (from before Vector started) need to be restarted to begin log capture
 
 ## Security Considerations

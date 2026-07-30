@@ -157,9 +157,14 @@ section in addition to GitHub, so it shows the same curated set as
   "mcp_servers": ["heygen", "twitter-mcp"],
   "required_credentials": [
     {"name": "HEYGEN_API_KEY", "source": "mcp:heygen"}
-  ]
+  ],
+  "credential_errors": []
 }
 ```
+
+`credential_errors` (trinity-enterprise#128) carries one named message per
+structural problem in the template's `credentials:` block — empty on a healthy
+template. See [Malformed `credentials:` resilience](#malformed-credentials-resilience-trinity-enterprise128).
 
 ---
 
@@ -346,6 +351,54 @@ def generate_credential_files(
     3. Generate config files from templates (lines 287-297)
     """
 ```
+
+### Malformed `credentials:` resilience (trinity-enterprise#128)
+
+A `template.yaml` is untrusted input — `github:` templates come from arbitrary
+repos and `local:` ones can be uploaded by any authenticated user via
+`deploy_local_agent_logic`. Every reader used to reach straight through the
+block (`data.get("credentials", {}).get("mcp_servers", {}).keys()`), which made
+one malformed template fatal to the whole catalog.
+
+Four tolerant readers in `template_service.py` are now the only way in:
+
+| Helper | Contract |
+|---|---|
+| `credential_shape_errors(block)` | Named errors for a malformed block. Never raises. Absent / null / `{}` = zero credentials, **not** an error |
+| `credential_mcp_server_names(block)` | Server names, `[]` for any odd shape at either level |
+| `credential_env_file_names(block)` | `env_file` variable names, non-empty strings only |
+| `CredentialDeclarationError` | HTTP-free domain error (Invariant #1) raised by the **write** path only |
+
+Two deliberately different contracts:
+
+- **Read paths never raise.** `_build_local_template` / `_build_template` degrade
+  the derived field to empty, attach `credential_errors` to the entry, and log
+  exactly one WARNING naming the template id. The template **still lists** — a
+  broken block costs that template its credential metadata, not the catalog.
+  `get_local_templates` additionally fences each per-template build, so a future
+  unguarded field can't regress the property. The `except` around the YAML parse
+  is deliberately `Exception`, not `(OSError, yaml.YAMLError)`: deeply nested
+  YAML raises `RecursionError`, a `RuntimeError` that escapes a `YAMLError`
+  handler entirely.
+- **The write path fails loud.** `generate_credential_files` validates first and
+  raises `CredentialDeclarationError`; `crud._stage_config_files` maps it 1:1 to
+  **400 `INVALID_CREDENTIAL_DECLARATION`**. Emitting an agent's `.env` from a
+  declaration nobody could parse is the silent failure this closes — a string
+  `env_file: "OPENAI_API_KEY"` (the list dash forgotten) used to be iterated
+  character by character into fifteen single-letter variables, never writing the
+  real credential, with no error, warning or crash.
+
+`credentials.config_files[].path` is additionally rejected when absolute or
+carrying a `..` segment (it becomes `open(cred_files_dir / path, "w")`, i.e. an
+arbitrary-file-write primitive), and re-checked at the write sink by
+`crud._safe_cred_file_path` → **400 `INVALID_CREDENTIAL_FILE_PATH`**
+(validate-at-boundary **and** at-sink; the same resolve + `is_relative_to`
+CodeQL barrier as `_safe_local_template_path`).
+
+`credentials.env_file` stays a **names-only list**. The enriched per-variable
+declaration (trinity-enterprise#128 PR-B) lands under its own top-level key
+precisely so an older Trinity reading a newer template is structurally
+untouched.
 
 ### Trinity-Compatible Validation (`services/template_service.py:608-728`)
 ```python

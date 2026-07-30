@@ -207,6 +207,13 @@ class User(BaseModel):
     # key itself is minted by an entitled module (core-primitive + enterprise-
     # knob, same shape as users.suspended_at #995).
     connector_agent: Optional[str] = None
+    # ent#163: True for a `portal_delegate` MCP key — a trusted issuer that may
+    # exchange an asserted end-user email for a portal session, and NOTHING else
+    # (fenced centrally in `dependencies.get_current_user`). Like every MCP key
+    # it resolves to the key OWNER, so a consumer must branch on this flag
+    # rather than on the resolved user: the whole point of the request is that
+    # it concerns somebody other than the owner.
+    portal_delegate: bool = False
 
 
 class Token(BaseModel):
@@ -627,6 +634,10 @@ class SystemManifest(BaseModel):
 
 class SystemDeployRequest(BaseModel):
     """Request to deploy a system from YAML manifest."""
+    # #1884: the raw YAML is parsed by `system_service.parse_manifest`, which
+    # applies the size / expansion-cost / duplicate-key guards mirroring the MCP
+    # pipeline reader (#919). Not validated here — a Pydantic field cannot see
+    # YAML structure.
     manifest: str  # Raw YAML string
     dry_run: bool = False
     # trinity-enterprise#125: abort on the first agent-create failure (legacy
