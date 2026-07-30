@@ -627,6 +627,10 @@ class SystemManifest(BaseModel):
 
 class SystemDeployRequest(BaseModel):
     """Request to deploy a system from YAML manifest."""
+    # #1884: the raw YAML is parsed by `system_service.parse_manifest`, which
+    # applies the size / expansion-cost / duplicate-key guards mirroring the MCP
+    # pipeline reader (#919). Not validated here — a Pydantic field cannot see
+    # YAML structure.
     manifest: str  # Raw YAML string
     dry_run: bool = False
     # trinity-enterprise#125: abort on the first agent-create failure (legacy
