@@ -88,18 +88,37 @@ export interface McpApiKeyValidationResult {
 // side-effect-free here (this module only *defines* `createServer`), so the
 // mirror had no justification.
 //
-// These MUST be allow-lists, not "not connector" deny-checks. Two
-// fastmcp@4.4.0 behaviours make a deny-check fail OPEN:
-//   1. `#createSession` skips filtering entirely when auth is falsy —
+// These MUST be allow-lists, not "not connector" deny-checks. Two fastmcp
+// behaviours make a deny-check fail OPEN. Both re-verified against the version
+// this repo actually installs — `fastmcp@4.12.1` (package-lock), NOT the 4.4.0
+// an earlier revision of this comment cited. Cited by SYMBOL first and line
+// second: the minified chunk filename changes between releases (4.4.0
+// chunk-MDIESGNI.js → 4.12.1 chunk-5BQXF2VT.js), so a bare line number rots
+// silently and invites reasoning about a version nobody runs.
+//   1. `FastMCP#createSession` skips filtering entirely when auth is falsy —
 //      `const allowedTools = auth ? this.#tools.filter(...) : this.#tools`
-//      — so a session with no auth context gets EVERY registered tool.
-//   2. The stateful httpStream branch (the one we run) does NOT reject an
-//      `authenticate()` that returns undefined; only the stateless branch
-//      guards that. Today our callback throws instead of returning undefined,
-//      so nothing is exposed — but a pre-login session (#848) is exactly the
-//      change that would trip it.
+//      (4.12.1 dist/chunk-5BQXF2VT.js:1998-2000) — so a session with no auth
+//      context gets EVERY registered tool and `canAccess` never runs. The guard
+//      immediately above it (`:1994`, present since 4.4.0) does not help: it
+//      rejects only an auth OBJECT carrying `authenticated: false`, so falsy
+//      auth still short-circuits past the filter.
+//   2. The stateful httpStream branch (the one we run — index.ts sets no
+//      `stateless: true`) does NOT reject an `authenticate()` that returns
+//      undefined (`:1924-1926`); only the stateless branch guards it
+//      (`:1874-1878`). Today our callback throws instead of returning
+//      undefined, so nothing is exposed — but a pre-login session (#848) is
+//      exactly the change that would trip it.
 // A deny-check also admits every scope it has not heard of. Widening the
 // operator surface must therefore be a deliberate edit to this set.
+//
+// Enforcement is real, not advertisement-only — but NOT via a per-call
+// `canAccess`, which is never re-invoked. `setupToolHandlers(tools)` (`:1180`)
+// closes over `toolsMap = new Map(tools.map(...))` built from the FILTERED list
+// (`:1181`), and the `CallToolRequestSchema` handler does `toolsMap.get(name)` →
+// `throw new McpError(ErrorCode.MethodNotFound)` (`:1214-1220`). A filtered-out
+// tool is absent from the call map, not merely hidden from `tools/list`.
+// `tool-visibility.test.ts` pins that property so a future fastmcp regression to
+// advertisement-only filtering fails the suite instead of silently un-gating.
 
 /** Scopes that denote a fully-credentialed operator principal. */
 export const OPERATOR_SCOPES: ReadonlySet<string> = new Set([
@@ -136,16 +155,17 @@ export const anonymousOnly = (auth: any): boolean => auth?.scope === "anonymous"
  * The reason is NOT that the list cannot change — an earlier version of this
  * comment claimed FastMCP had "no per-session refresh API", and that is wrong.
  * `FastMCPSession.toolsListChanged` re-filters a LIVE session against its
- * current `#auth` and rebuilds the call map (fastmcp@4.4.0
- * dist/chunk-MDIESGNI.js:548-553), fanned to every session by
- * addTool/removeTool (`:2202-2206`) — and Trinity triggers exactly that every
+ * current `#auth` and rebuilds the call map via `setupToolHandlers`
+ * (fastmcp@4.12.1 dist/chunk-5BQXF2VT.js:661-666), fanned to every session by
+ * addTool/addTools/removeTool/removeTools (`:1550`, `:1561`, `:1754`, `:1765` →
+ * `#toolsListChanged` `:2479-2481`) — and Trinity triggers exactly that every
  * ~20s via the #846 exposed-agents reconciler.
  *
  * That makes a login-state-dependent gate WORSE, not impossible: visibility
  * would flip asynchronously whenever the reconciler happened to fire, so the
  * same session would show different tools depending on timing unrelated to the
  * login. A static surface is deterministic. Related trap: `updateAuth` REPLACES
- * `#auth` (`:572-574`) rather than mutating it, so if anything ever calls it the
+ * `#auth` (`:685-687`) rather than mutating it, so if anything ever calls it the
  * in-place upgrade `verify_login` performs is silently discarded and the session
  * reverts to pre-login — another reason not to key visibility on that state.
  */
@@ -257,7 +277,7 @@ export async function createServer(config: ServerConfig = {}) {
             // INVALID one (below) stays an error. Gated OFF by default, in
             // which case this is the pre-#848 rejection, unchanged.
             if (inlineAuthEnabled) {
-              // MUST be a truthy object: fastmcp@4.4.0 skips canAccess
+              // MUST be a truthy object: fastmcp@4.12.1 skips canAccess
               // filtering entirely for falsy auth, which would hand this
               // session every registered tool. Must also NOT carry
               // `authenticated: false`, which fastmcp treats as a rejection.

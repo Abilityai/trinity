@@ -1,18 +1,22 @@
 /**
  * #848 — tool-visibility gate must be an ALLOW-list, not a deny-check.
  *
- * Why this file exists: `fastmcp@4.4.0` makes a "not connector" deny-check
- * fail OPEN in two independent ways.
+ * Why this file exists: `fastmcp@4.12.1` — the version package-lock actually
+ * resolves — makes a "not connector" deny-check fail OPEN in two independent
+ * ways. (An earlier revision cited 4.4.0; both behaviours were re-verified on
+ * 4.12.1 and the conclusion is unchanged, but the chunk filename moved, so these
+ * citations lead with the SYMBOL and treat the line as an "as of" locator.)
  *
  *   1. `FastMCP#createSession` skips filtering entirely for a falsy auth:
  *        const allowedTools = auth ? this.#tools.filter(
  *          (tool) => tool.canAccess ? tool.canAccess(auth) : true
  *        ) : this.#tools;
- *      (dist/chunk-MDIESGNI.js:1762) — a session with no auth context is
- *      handed EVERY registered tool, `canAccess` never runs.
+ *      (dist/chunk-5BQXF2VT.js:1998-2000) — a session with no auth context is
+ *      handed EVERY registered tool, `canAccess` never runs. The
+ *      `authenticated: false` guard just above (`:1994`) does not cover it.
  *   2. The stateful httpStream branch we run (index.ts: no `stateless: true`)
- *      does NOT reject an `authenticate()` returning undefined; only the
- *      stateless branch has that guard (`:1640` vs `:1690`).
+ *      does NOT reject an `authenticate()` returning undefined (`:1924-1926`);
+ *      only the stateless branch has that guard (`:1874-1878`).
  *
  * Trinity is not exposed today only because our callback THROWS rather than
  * returning undefined. Inline email auth (#848) needs a pre-login session, so
@@ -30,10 +34,23 @@
  * a mirrored constant has no owner, and a test pinning its own copy pins the
  * drift as the requirement.
  *
+ * The final block is different in kind: it boots a REAL FastMCP server and
+ * connects a REAL MCP client to pin that `canAccess` is enforced when a tool is
+ * CALLED, not merely omitted from `tools/list`. The whole allow-list defence
+ * assumes that; nothing else in the suite would notice fastmcp regressing to
+ * advertisement-only filtering. It is deliberately behavioural rather than a
+ * grep over `node_modules`, so it keeps holding across minified-chunk renames —
+ * the churn that made the version citations above wrong twice.
+ *
  * Runner: built-in node:test → `node --import tsx --test src/*.test.ts`.
  */
 import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
+import { createServer } from "node:net";
+
+import { FastMCP } from "fastmcp";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 import {
   OPERATOR_SCOPES,
@@ -45,6 +62,23 @@ import {
 
 /** The old, vulnerable predicate — kept to prove the fix actually changes behaviour. */
 const legacyConnectorDenied = (auth: any): boolean => auth?.scope !== "connector";
+
+/** Ask the OS for a free port so parallel test files cannot collide. */
+async function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      if (typeof addr === "string" || addr === null) {
+        srv.close(() => reject(new Error("no port")));
+        return;
+      }
+      const { port } = addr;
+      srv.close(() => resolve(port));
+    });
+  });
+}
 
 describe("#848 operator tool-visibility gate", () => {
   const operatorOnly = makeOperatorOnly(true);
@@ -136,5 +170,132 @@ describe("#848 operator tool-visibility gate", () => {
         `scope '${scope}' must not satisfy both gates`
       );
     }
+  });
+});
+
+/**
+ * The load-bearing library assumption, tested against the library.
+ *
+ * `canAccess` is only a security control if a filtered-out tool cannot be
+ * INVOKED. If fastmcp ever filtered `tools/list` but still dispatched
+ * `tools/call`, every predicate above would keep passing while an anonymous
+ * session could drive `delete_agent` by name — the gate would be a UI hint.
+ *
+ * As of fastmcp@4.12.1 the mechanism is not a per-call `canAccess` re-check (it
+ * is never re-invoked): `setupToolHandlers(tools)` closes over a `toolsMap` built
+ * from the FILTERED list, and the `CallToolRequestSchema` handler throws
+ * `MethodNotFound` on a miss. This test does not encode that mechanism — only the
+ * observable outcome — so a fastmcp refactor that preserves enforcement stays
+ * green and one that drops it goes red.
+ */
+describe("#848 canAccess is enforced at call time, not just advertisement", () => {
+  /**
+   * Boot a real FastMCP httpStream server whose `authenticate` asserts `scope`,
+   * register one operator-gated and one anonymous-gated tool using the REAL
+   * predicates, and drive it with a real MCP client.
+   */
+  async function withProbeServer(
+    scope: string,
+    body: (client: Client, ran: { operator: number; anon: number }) => Promise<void>
+  ): Promise<void> {
+    const ran = { operator: 0, anon: 0 };
+    const port = await freePort();
+
+    const server = new FastMCP({
+      name: "gate-probe",
+      version: "0.0.0",
+      // Mirrors Trinity's tiering: always returns a truthy context, never
+      // undefined (which would skip filtering entirely — see the header).
+      authenticate: async () => ({ scope, userId: "probe", keyName: "probe" }),
+    });
+
+    server.addTool({
+      name: "operator_tool",
+      description: "operator-only probe",
+      canAccess: makeOperatorOnly(true) as (auth: any) => boolean,
+      execute: async () => {
+        ran.operator += 1;
+        return "operator ran";
+      },
+    });
+    server.addTool({
+      name: "anon_tool",
+      description: "anonymous-visible probe",
+      canAccess: anonymousOnly as (auth: any) => boolean,
+      execute: async () => {
+        ran.anon += 1;
+        return "anon ran";
+      },
+    });
+
+    await server.start({
+      transportType: "httpStream",
+      httpStream: { port, host: "127.0.0.1" },
+    });
+
+    const client = new Client({ name: "probe-client", version: "0.0.0" });
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${port}/mcp`)
+    );
+
+    try {
+      await client.connect(transport);
+      await body(client, ran);
+    } finally {
+      await client.close().catch(() => {});
+      await server.stop().catch(() => {});
+    }
+  }
+
+  it("an anonymous session cannot LIST or CALL an operator tool", async () => {
+    await withProbeServer("anonymous", async (client, ran) => {
+      const listed = (await client.listTools()).tools.map((t) => t.name).sort();
+      assert.deepEqual(
+        listed,
+        ["anon_tool"],
+        "operator_tool must not be advertised to an anonymous session"
+      );
+
+      // The property that actually matters: naming it directly must fail.
+      await assert.rejects(
+        () => client.callTool({ name: "operator_tool", arguments: {} }),
+        (err: unknown) => {
+          const msg = String((err as Error)?.message ?? err);
+          assert.match(
+            msg,
+            /not found|unknown tool|method not found/i,
+            `expected a not-found rejection, got: ${msg}`
+          );
+          return true;
+        },
+        "calling a filtered-out tool by name must be rejected, not dispatched"
+      );
+
+      assert.equal(
+        ran.operator,
+        0,
+        "SECURITY: the operator tool's body ran despite the gate — canAccess is " +
+          "advertisement-only in this fastmcp version and the allow-list is not a control"
+      );
+
+      // Control: the tool the gate DOES admit works, so the assertion above is
+      // about the gate and not about a broken probe server.
+      await client.callTool({ name: "anon_tool", arguments: {} });
+      assert.equal(ran.anon, 1, "anonymous tool should have executed");
+    });
+  });
+
+  it("an operator session can call the operator tool (gate is not blanket-deny)", async () => {
+    await withProbeServer("user", async (client, ran) => {
+      const listed = (await client.listTools()).tools.map((t) => t.name).sort();
+      assert.deepEqual(listed, ["operator_tool"], "operator sees only its own tier here");
+
+      await client.callTool({ name: "operator_tool", arguments: {} });
+      assert.equal(ran.operator, 1, "operator tool should have executed");
+
+      // And the anonymous-only tool is symmetrically unreachable.
+      await assert.rejects(() => client.callTool({ name: "anon_tool", arguments: {} }));
+      assert.equal(ran.anon, 0);
+    });
   });
 });

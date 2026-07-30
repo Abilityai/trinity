@@ -75,13 +75,31 @@ again. Accepted as the cost of the no-credential-on-disk model.
 - `MCP_INLINE_AUTH_ENABLED` (env, **default OFF**) gates the whole feature. With it off,
   behaviour is byte-identical to today: a request with no `Authorization` header is
   rejected at `authenticate` and no session is created.
+- **TWO processes read this one key**, so it must be wired into **both** the `backend` and
+  `mcp-server` services in **both** `docker-compose.yml` and `docker-compose.prod.yml` —
+  four wirings. The mcp-server read (`server.ts`) is the session-tier gate; the backend read
+  (`config.py`) gates `/api/internal/mcp-auth/*` (404 when off) and the keyless connector
+  snippet. Neither compose file carried it when the feature was first written, which fails
+  *safe* but renders the whole feature un-switchable: the surface 404s, keyless connections
+  are refused and `keyless_snippets` never appears, with no operator lever. Neither CI nor
+  `/verify-local` can catch that class — both boot at defaults, so a flag that can never be
+  turned on boots clean and goes green. `GET /api/settings/feature-flags` surfaces
+  `mcp_inline_auth_enabled` (observability-only) so an operator can confirm the two halves
+  agree after a deploy.
+- **Operational prerequisite:** set `INTERNAL_API_SECRET` **explicitly** in production
+  rather than relying on its `→ SECRET_KEY` fallback. This feature widens that secret — a
+  holder can assert any verified email over the internal surface. It grants no privilege
+  beyond internal-secret compromise (already backend god-mode over `/api/internal/*`), but
+  the value now deserves its own rotation lifecycle rather than `SECRET_KEY`'s. (CSO N1.)
 - With it on, a request carrying **no** `Authorization` header yields a truthy
   **anonymous sentinel** auth context (`scope: "anonymous"`), not `undefined`. A request
   carrying an **invalid** key still throws — a wrong credential is an error, an absent one
   is an invitation to log in.
-- The sentinel must be truthy and must not carry an `authenticated: false` key: `fastmcp@4.4.0`
+- The sentinel must be truthy and must not carry an `authenticated: false` key: fastmcp
   skips `canAccess` filtering entirely for a falsy auth (`#createSession`, giving a session
-  EVERY registered tool) and rejects `{authenticated: false}` outright.
+  EVERY registered tool) and rejects `{authenticated: false}` outright. Verified against
+  `fastmcp@4.12.1`, the version `package-lock.json` resolves; the behavioural test
+  `tool-visibility.test.ts` pins it so a future bump cannot quietly change it.
 - Tool visibility is enforced by the §7.5 allow-list gates (`operatorOnly` /
   `connectorOnly` / anonymous), hardened for this feature — operator tools are never
   visible to an anonymous or unknown scope.

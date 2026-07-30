@@ -39,7 +39,7 @@
       "internal-secret authz boundary (re-gate before idempotency + dispatch; no normalization split)",
       "cross-user idempotency replay (make_inline_auth_scope folds normalized email)",
       "enumeration / email relay (constant response + BackgroundTask + fail-closed known-check + global cap)",
-      "anonymous -> operator tool reach (allow-list gate; canAccess enforced at tools/call in fastmcp 4.4.0)",
+      "anonymous -> operator tool reach (allow-list gate; a filtered-out tool is absent from the call map -> MethodNotFound, re-verified on the installed fastmcp 4.12.1 and pinned by a behavioural test; the original 'enforced at tools/call in fastmcp 4.4.0' wording was wrong on both version and mechanism -- see the .md note dated 2026-07-30)",
       "verify_login info disclosure (uniform INVALID_CODE_RESPONSE, upstream detail swallowed)",
       "audit integrity (actor_email is resolver-fallback only; forgery needs the internal secret)"
     ]

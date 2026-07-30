@@ -141,6 +141,7 @@ async def get_public_feature_flags(
         VOICE_ENABLED,
         VOIP_ENABLED,
         MCP_AGENT_CHAT_PULL_ENABLED,
+        MCP_INLINE_AUTH_ENABLED,
         REDELIVERY_GOVERNOR_ENABLED,
     )
     from services.entitlement_service import entitlement_service
@@ -181,6 +182,14 @@ async def get_public_feature_flags(
         # of the same env var. Lets an operator confirm, via the API, whether the
         # treatment window is active during the soak. NOT a UI surface.
         "mcp_agent_chat_pull_enabled": MCP_AGENT_CHAT_PULL_ENABLED,
+        # MCP inline email auth (#848) — default OFF. Observability-only here,
+        # mirroring the two flags around it: the real gates are the mcp-server's
+        # own read of the same env var (the keyless session tier) and
+        # require_inline_auth_enabled on /api/internal/mcp-auth/*. Both processes
+        # read ONE key, so this is also how an operator confirms the two halves
+        # actually agree after a deploy — the failure mode that shipped this PR
+        # with the flag wired into neither container. NOT a UI surface.
+        "mcp_inline_auth_enabled": MCP_INLINE_AUTH_ENABLED,
         # Re-delivery governor (#1085) — default OFF. Observability-only here:
         # the actual gates live at the callback endpoint / reaper / drain read
         # points. Lets an operator confirm via the API whether the correlated-
