@@ -24,7 +24,7 @@
            what to do about it, which a generic message would throw away. -->
       <div
         v-if="store.error"
-        class="rounded-md bg-status-error-50 dark:bg-status-error-900/30 p-3 text-sm text-status-error-700 dark:text-status-error-300"
+        class="rounded-md bg-status-danger-50 dark:bg-status-danger-900/30 p-3 text-sm text-status-danger-700 dark:text-status-danger-300"
       >
         {{ store.error }}
       </div>
@@ -78,7 +78,7 @@
                   · {{ s.skill_count }} {{ s.skill_count === 1 ? 'skill' : 'skills' }} in use
                 </span>
               </p>
-              <p v-if="s.last_error" class="mt-0.5 text-xs text-status-error-600 dark:text-status-error-400 break-words">
+              <p v-if="s.last_error" class="mt-0.5 text-xs text-status-danger-600 dark:text-status-danger-400 break-words">
                 {{ s.last_error }}
               </p>
             </div>
@@ -97,7 +97,7 @@
               <button
                 @click="confirmRemove(s)"
                 :disabled="store.busyId === s.id"
-                class="px-2 py-1 text-xs border border-status-error-300 dark:border-status-error-700 rounded text-status-error-700 dark:text-status-error-400 hover:bg-status-error-50 dark:hover:bg-status-error-900/30 disabled:opacity-50"
+                class="px-2 py-1 text-xs border border-status-danger-300 dark:border-status-danger-700 rounded text-status-danger-700 dark:text-status-danger-400 hover:bg-status-danger-50 dark:hover:bg-status-danger-900/30 disabled:opacity-50"
               >Remove</button>
             </div>
           </div>
@@ -183,7 +183,7 @@ function statusLabel (s) {
 
 function statusClass (s) {
   if (s.last_sync_status === 'success') return 'text-gray-500 dark:text-gray-400'
-  if (s.last_sync_status === 'failed') return 'text-status-error-600 dark:text-status-error-400'
+  if (s.last_sync_status === 'failed') return 'text-status-danger-600 dark:text-status-danger-400'
   return 'text-gray-400 dark:text-gray-500'
 }
 

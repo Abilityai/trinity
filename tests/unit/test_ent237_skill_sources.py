@@ -761,3 +761,43 @@ class TestSourceEndpointGating:
 
         with pytest.raises(pydantic.ValidationError):
             SkillSourceCreate(name="ok", url="github.com/x/y", ref_type="sha")
+
+
+class TestEmbeddedCredentialRejection:
+    """`validate_skills_library_url` checks `parsed.hostname`, which ignores
+    userinfo, and returns the URL unchanged — so a tokenized clone URL passes
+    SSRF validation and would be persisted verbatim, returned by the API, and
+    rendered in the Settings panel."""
+
+    def test_validator_alone_does_not_strip_userinfo(self):
+        """Pins WHY the extra guard exists — if the shared validator ever starts
+        stripping userinfo this test fails and the guard can be reconsidered."""
+        from utils.url_validation import validate_skills_library_url
+
+        out = validate_skills_library_url("https://tok_placeholder@github.com/o/r")
+        assert "tok_placeholder@" in out
+
+    @pytest.mark.parametrize("url", [
+        "https://tok_placeholder@github.com/owner/repo",
+        "https://user:pw_placeholder@github.com/owner/repo",
+        "tok_placeholder@github.com/owner/repo",
+    ])
+    def test_rejected(self, url):
+        import fastapi
+        from routers.skills import _reject_embedded_credentials
+
+        with pytest.raises(fastapi.HTTPException) as exc:
+            _reject_embedded_credentials(url)
+        assert exc.value.status_code == 400
+        # Names the supported mechanism instead of a generic rejection.
+        assert "PAT" in exc.value.detail
+
+    @pytest.mark.parametrize("url", [
+        "https://github.com/owner/repo",
+        "github.com/owner/repo",
+        "owner/repo",
+    ])
+    def test_normal_urls_still_accepted(self, url):
+        from routers.skills import _reject_embedded_credentials
+
+        _reject_embedded_credentials(url)   # no raise

@@ -12,6 +12,8 @@ Endpoints:
 """
 
 from typing import List
+from urllib.parse import urlparse
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from models import User
@@ -261,6 +263,34 @@ async def unassign_skill(
 # follows and ent#236 automates the sync + re-inject. Reading and syncing an
 # already-configured source is USE and stays role-gated only.
 
+def _reject_embedded_credentials(url: str) -> None:
+    """Refuse a source URL carrying userinfo (`https://<token>@github.com/...`).
+
+    `validate_skills_library_url` checks `parsed.hostname`, which IGNORES
+    userinfo, and returns the URL unchanged — so a tokenized clone URL passes
+    SSRF validation and is then persisted verbatim in `skill_sources.url`,
+    returned by GET /skills/sources, and rendered in the Settings panel. Pasting
+    one is an easy mistake: it is the form GitHub hands you for scripted clones.
+
+    Fail closed with a named reason pointing at the supported mechanism, rather
+    than stripping the credential silently — a silently-stripped token would
+    leave the admin believing private-repo auth was configured when it was not.
+    Deliberately enforced HERE and not in the shared validator: that helper also
+    serves the pre-ent#237 `skills_library_url` setting, and an install relying
+    on an embedded token for private-repo access would break on upgrade.
+    """
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    if parsed.username or parsed.password:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Repository URL must not embed a token or password. It is stored "
+                "and displayed in plain text. Configure a GitHub PAT in Settings "
+                "for private repositories instead."
+            ),
+        )
+
+
 async def _audit_source(request, actor, action: str, source_id: str, details: dict):
     """Audit a source mutation. Best-effort — an audit failure must not undo a
     write that already succeeded."""
@@ -311,6 +341,7 @@ async def create_skill_source(
 
     # SSRF allowlist (#179) at the boundary, so a bad URL is rejected on write
     # rather than surfacing later as a recurring sync failure.
+    _reject_embedded_credentials(body.url)
     try:
         url = validate_skills_library_url(body.url)
     except ValueError as e:
@@ -350,6 +381,7 @@ async def update_skill_source(
 
     fields = body.model_dump(exclude_unset=True, exclude_none=True)
     if "url" in fields:
+        _reject_embedded_credentials(fields["url"])
         try:
             fields["url"] = validate_skills_library_url(fields["url"])
         except ValueError as e:
