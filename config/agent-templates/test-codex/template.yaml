@@ -27,9 +27,27 @@ mcp_servers: []
 
 # Codex authenticates with an OpenAI API key read from the agent's .env
 # (CRED-002). Declaring it here makes the Quick Inject UI prompt for it.
+#
+# `credentials:` is names-only and always will be — see
+# docs/schemas/trinity-agent-credentials.schema.json.
 credentials:
   env_file:
     - OPENAI_API_KEY
+
+# ent#128 — per-variable setup guidance. DECORATES the names above; it cannot
+# declare a variable that `credentials:` does not. Optional: without it the
+# variable still works, it just normalizes with `required: "unknown"` because a
+# bare name carries no authorial intent.
+credential_setup:
+  - name: OPENAI_API_KEY
+    title: OpenAI API key
+    description: >-
+      Authenticates the Codex CLI runtime. Without it the agent starts but every
+      turn fails at the model call.
+    required: true
+    secret: true
+    format: secret
+    setup_url: https://platform.openai.com/api-keys
 
 slash_commands:
   - name: /test

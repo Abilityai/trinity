@@ -1079,3 +1079,73 @@ def test_schema_is_itself_a_valid_json_schema():
     jsonschema = pytest.importorskip("jsonschema")
 
     jsonschema.Draft202012Validator.check_schema(_schema())
+
+
+# ===========================================================================
+# AC #4 — the bundled templates as reference examples, and the ratchet
+# ===========================================================================
+
+_BUNDLE = _PROJECT_ROOT / "config" / "agent-templates"
+
+
+def _bundled_templates():
+    import yaml
+
+    for path in sorted(_BUNDLE.glob("*/template.yaml")):
+        yield path.parent.name, yaml.safe_load(path.read_text()) or {}
+
+
+def test_every_bundled_template_normalizes_with_zero_errors():
+    """The ratchet.
+
+    Honest about its own weight: the bundle carries one enriched declaration and
+    one names-only one, so today this is thin. Its value is as a RATCHET — the
+    moment ent#137's curated fleet lands, a malformed declaration in any bundled
+    template fails CI instead of shipping.
+    """
+    offenders = {}
+    for name, data in _bundled_templates():
+        _records, errors = _norm(data, trust="bundled")
+        if errors:
+            offenders[name] = errors
+    assert offenders == {}
+
+
+def test_the_seeded_trio_declares_an_explicit_zero_credential_block():
+    """G3: `{}` says "considered, and there are none"; absent is ambiguous to a human."""
+    for name in ("scout", "sage", "scribe"):
+        data = dict(_bundled_templates())[name]
+        assert "credentials" in data, f"{name} must state the zero-credential contract"
+        assert data["credentials"] in ({}, None)
+        records, errors = _norm(data, trust="bundled")
+        assert records == [] and errors == []
+
+
+def test_test_codex_is_the_enriched_reference_example():
+    data = dict(_bundled_templates())["test-codex"]
+    records, errors = _norm(data, trust="bundled")
+    assert errors == []
+    assert len(records) == 1
+    record = records[0]
+    assert record["name"] == "OPENAI_API_KEY"
+    assert record["title"] == "OpenAI API key"
+    assert record["required"] is True
+    assert record["secret"] is True
+    assert record["format"] == "secret"
+    assert record["setup_url"] == "https://platform.openai.com/api-keys"
+    assert record["source"] == "template:env_file"
+    assert record["platform_injected"] is False
+
+
+def test_no_reference_example_asks_for_a_platform_injected_variable():
+    """G3 amendment: an example using `GEMINI_API_KEY` would violate the very rule
+    the guide documents, and would make a K-002 fixture pass VACUOUSLY."""
+    from services.template_service import _is_platform_injected
+
+    for name, data in _bundled_templates():
+        for entry in data.get("credential_setup") or []:
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+                assert not _is_platform_injected(entry["name"]), (
+                    f"{name} asks an operator for the platform-injected "
+                    f"{entry['name']}"
+                )
