@@ -415,11 +415,22 @@ def resolve_schedule_previews(
     merely lists a schedule begins autonomous executions the moment it deploys,
     which is the thing the preview has to surface.
 
-    Each preview is built through `ScheduleCreate` so the model's own validation
-    runs HERE, in the preview, rather than degrading to a post-deploy warning
-    once agents already exist.
+    Each preview is built through the same `ScheduleCreate` the writer constructs,
+    so whatever that model rejects is rejected HERE, in the preview, instead of
+    degrading to a post-deploy warning once the fleet already exists.
 
-    Pinned by `tests/unit/test_ent126_schedule_characterization.py`.
+    **What that does NOT include: the cron expression.** `ScheduleCreate` declares
+    `cron_expression: str` with no validator, and `validate_manifest` only checks
+    that the key is PRESENT — so neither layer parses it. A syntactically invalid
+    cron still previews clean, deploys clean, and surfaces only when the scheduler
+    tries to arm it. Validating it here would change a shipped path (manifests with
+    a bad cron deploy today), so it is left as a documented gap rather than
+    silently half-fixed. What this DOES catch is a schedule entry whose field types
+    the model rejects (e.g. a non-string `name`), which `validate_manifest`'s
+    presence-only checks let through.
+
+    Pinned by `tests/unit/test_ent126_schedule_characterization.py`; both the
+    caught and the uncaught case are pinned in `test_ent126_dry_run_preview.py`.
     """
     previews: List[SystemSchedulePreview] = []
 
@@ -429,9 +440,9 @@ def resolve_schedule_previews(
             continue
 
         for schedule_data in config.schedules:
-            # Borrow the writer's own model for validation (e.g. a missing/bad
-            # field) so a broken schedule is a PREVIEW blocker, not a warning
-            # discovered after the fleet exists.
+            # The writer's own model, so a field type it rejects is a PREVIEW
+            # blocker rather than a warning discovered after the fleet exists.
+            # NOT a cron-syntax check — see the docstring.
             schedule_create = _build_schedule_create(schedule_data)
             previews.append(SystemSchedulePreview(
                 agent=final_name,

@@ -335,6 +335,51 @@ def test_unresolvable_local_template_is_still_a_blocker(env, monkeypatch):
     assert body["failed"][0]["status_code"] == 404
 
 
+def test_schedule_the_model_rejects_is_a_preview_blocker(env):
+    """A schedule entry whose field TYPES ScheduleCreate rejects.
+
+    Reachable because `validate_manifest` checks only that `name`/`cron`/`message`
+    are PRESENT, not their types — so a non-string name passes validation and then
+    fails model construction. Surfacing it as a preview blocker is the point:
+    post-deploy it degrades to a warning once the fleet already exists.
+    """
+    body = _dry_run(env, _manifest(agents="""  a:
+    template: local:default
+    schedules:
+      - name:
+          nested: mapping
+        cron: "0 3 * * *"
+        message: "/run"
+"""))
+    assert body["status"] == "invalid"
+    blocker = next(f for f in body["failed"] if f["short_name"] == "(schedules)")
+    assert "Invalid schedule definition" in blocker["reason"]
+    assert body["schedules_preview"] == []
+
+
+def test_a_syntactically_invalid_cron_is_NOT_caught(env):
+    """Documents a real, deliberate gap rather than implying coverage.
+
+    `ScheduleCreate.cron_expression` is a bare `str` with no validator and
+    `validate_manifest` only checks presence, so nothing parses the expression.
+    A bad cron previews clean and deploys clean; it surfaces when the scheduler
+    tries to arm it. Validating it would change a shipped path (such manifests
+    deploy today), so this test pins the current contract — if cron validation is
+    ever added, this test is the one that must change, on purpose.
+    """
+    body = _dry_run(env, _manifest(agents="""  a:
+    template: local:default
+    schedules:
+      - name: bad-cron
+        cron: "not a cron at all"
+        message: "/run"
+"""))
+    assert body["status"] == "valid"
+    assert body["failed"] == []
+    (sched,) = body["schedules_preview"]
+    assert sched["cron"] == "not a cron at all"
+
+
 # --------------------------------------------------- response contract + view
 
 def test_dry_run_response_always_carries_the_new_keys(env):
