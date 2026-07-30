@@ -328,29 +328,12 @@ def test_a5b_queued_at_is_unvalidated_at_this_layer(ops):
 # ===========================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: a `started_at` in the future relative to the finalizing process's "
-        "clock makes update_execution_status persist a NEGATIVE duration_ms "
-        "(unguarded `completed_at - started_at`), which then flows into "
-        "get_agent_analytics duration avg/p95. Producible because started_at and "
-        "completed_at are written by DIFFERENT processes (backend --workers 2 and "
-        "the standalone src/scheduler container, which repeats the same unguarded "
-        "subtraction at scheduler/database.py). Canary G-03 DETECTS the skew but "
-        "nothing prevents the poisoned metric. See /edge-cases report 2026-07-26 "
-        "(#1771 target 3) — follow-up issue not yet filed."
-    ),
-)
 def test_a6_clock_skew_must_not_persist_negative_duration(ops):
-    """A6 — ``duration_ms`` must never be negative. Currently it can be.
+    """A6 — ``duration_ms`` must never be negative.
 
-    Asserted as the *desired* contract (non-negative), marked ``xfail(strict)``
-    so the day a clamp or a validation lands, this test flips to XPASS and the
-    suite tells us instead of us having to remember.
-
-    Fixing is deliberately OUT of scope (#1771 AC#4: a real bug ships as a
-    strict xfail + a follow-up, never a silent product-code change).
+    Was a ``strict=True`` xfail pinning the unguarded subtraction. The clamp
+    landed in #1832, so the marker is gone and this now asserts the contract
+    directly, exactly as the xfail reason predicted it would.
     """
     future = _iso(datetime.now(timezone.utc) + timedelta(seconds=300))
     eid = insert_execution("a6-skew", status="running", started_at=future)
@@ -361,14 +344,18 @@ def test_a6_clock_skew_must_not_persist_negative_duration(ops):
     assert duration >= 0, f"negative duration_ms persisted: {duration}"
 
 
-def test_a6_current_behaviour_negative_duration_is_persisted(ops):
-    """A6 (companion) — pins what actually happens today, so the xfail above is
-    demonstrably about the *contract* and not about a flaky environment."""
+def test_a6_skewed_row_clamps_to_zero(ops):
+    """A6 (companion) — pins the post-clamp value, not just the sign.
+
+    Replaces the characterization test that asserted ``< 0``. A skewed row
+    lands on exactly ``0``, which is what makes it indistinguishable from a
+    genuine sub-millisecond execution — a deliberate trade recorded in #1832.
+    """
     future = _iso(datetime.now(timezone.utc) + timedelta(seconds=300))
     eid = insert_execution("a6-observed", status="running", started_at=future)
 
     assert ops.update_execution_status(eid, "success") is True
-    assert column_of(eid, "duration_ms") < 0
+    assert column_of(eid, "duration_ms") == 0
 
 
 # ===========================================================================
