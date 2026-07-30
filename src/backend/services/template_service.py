@@ -213,6 +213,32 @@ def credential_shape_errors(block) -> List[str]:
 
     errors: List[str] = []
 
+    def _full() -> bool:
+        """True once the error list is at its cap; appends one marker on arrival.
+
+        The cap has to bound the WALK, not just the output. `credentials:` is
+        author-controlled YAML, and a single alias reused across servers presents
+        ~160k malformed `env_vars` elements from 13 KB of source — so a cap
+        applied after the loops would still have built and joined every string.
+        Measured before this bound: one `/api/templates` catalog entry serialized
+        to 15.0 MB, and `generate_credential_files`' agent-creation 400 body to
+        14.6 MB (~1100x amplification), reachable since ent#123 by any creator-role
+        user pointing at an arbitrary public repo.
+
+        `_MAX_CREDENTIAL_ERRORS` (defined below with the other ent#128 caps) is the
+        SAME cap `normalize_credential_requirements` applies to its own error list.
+        This function is the sibling producer feeding the same two surfaces, and
+        capping only one of them leaves the amplification fully open. (ent#128)
+        """
+        if len(errors) < _MAX_CREDENTIAL_ERRORS:
+            return False
+        if len(errors) == _MAX_CREDENTIAL_ERRORS:
+            errors.append(
+                f"credentials: more than {_MAX_CREDENTIAL_ERRORS} problems found; "
+                f"the rest are not shown. Fix these first."
+            )
+        return True
+
     mcp_servers = block.get("mcp_servers")
     if mcp_servers is not None and not isinstance(mcp_servers, dict):
         errors.append(
@@ -227,6 +253,8 @@ def credential_shape_errors(block) -> List[str]:
         # before ent#128 this function checked only that `mcp_servers` was a dict —
         # so the single most dangerous shape in the block was unnamed. (ent#128)
         for server_name, server_config in mcp_servers.items():
+            if _full():
+                break
             label = f"credentials.mcp_servers.{_sanitize_for_warning(str(server_name))}"
             if not isinstance(server_config, dict):
                 errors.append(
@@ -244,6 +272,8 @@ def credential_shape_errors(block) -> List[str]:
                 )
                 continue
             for i, entry in enumerate(env_vars):
+                if _full():
+                    break
                 if not isinstance(entry, str) or not entry.strip():
                     errors.append(
                         f"{label}.env_vars[{i}]: expected a variable name "
@@ -260,13 +290,18 @@ def credential_shape_errors(block) -> List[str]:
         )
     elif isinstance(env_file, list):
         for i, entry in enumerate(env_file):
+            if _full():
+                break
             if not isinstance(entry, str) or not entry.strip():
                 errors.append(
                     f"credentials.env_file[{i}]: expected a variable name "
                     f"(string), got {_type_name(entry)}"
                 )
 
-    errors.extend(_config_files_shape_errors(block.get("config_files")))
+    for message in _config_files_shape_errors(block.get("config_files")):
+        if _full():
+            break
+        errors.append(message)
     return errors
 
 
@@ -685,7 +720,11 @@ def normalize_credential_requirements(data, *, source_trust: str):
     Absent / `{}` / `null` `credentials:` means "this agent needs no credentials"
     and is not an error.
     """
-    if source_trust not in _SOURCE_TRUST_LEVELS:
+    # `not in` on a frozenset raises TypeError for an unhashable value, i.e.
+    # BEFORE the guard that exists precisely so a bad `source_trust` cannot raise.
+    # Unreachable from parsed YAML (every call site passes a literal), but the
+    # docstring's "NEVER RAISES" is load-bearing enough to be literally true.
+    if not isinstance(source_trust, str) or source_trust not in _SOURCE_TRUST_LEVELS:
         # A coding error at the call site — but raising here would reopen exactly
         # the empty-catalog path this function exists to keep closed, so degrade to
         # the strictest posture and say so loudly instead.

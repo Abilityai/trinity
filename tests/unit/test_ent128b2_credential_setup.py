@@ -539,6 +539,31 @@ def test_unknown_source_trust_degrades_instead_of_raising():
     assert len(records) == 2 and errors == []
 
 
+def test_unhashable_source_trust_degrades_instead_of_raising():
+    """The guard against a bad `source_trust` was itself a raise.
+
+    `source_trust not in _SOURCE_TRUST_LEVELS` is frozenset membership, so an
+    UNHASHABLE value raises `TypeError: unhashable type` **on the guard line** —
+    before reaching the degrade-to-`github` branch the guard exists to provide.
+    The sibling test above covers only the hashable-but-unknown case, which takes
+    the branch and never exercises the membership test's own failure mode.
+
+    This is the one function whose docstring makes "NEVER RAISES" a load-bearing
+    security property: a raise here is an empty catalog (`_build_template` runs
+    unfenced in `get_all_templates()`) and a dark HARD gate (`run_static` catches
+    `Exception` -> `skipped`, and `_counts` counts only `status == "fail"`).
+    Unreachable from parsed YAML today — every call site passes a literal — but
+    the property has to be literally true, not true-by-call-site-audit. (ent#128)
+    """
+    for bad in ({"a": 1}, ["github"], {"github"}, bytearray(b"github")):
+        records, errors = _norm(_DECLARED, trust=bad)
+        assert [r["name"] for r in records] == [
+            "STRIPE_API_KEY",
+            "VAULT_BASE_PATH",
+        ], bad
+        assert errors == [], bad
+
+
 def test_source_is_sanitized():
     """W7: the MCP server name is arbitrary author-controlled text, and it lands
     in `source` — the exact string `_sanitize_for_warning`'s docstring names as the
@@ -625,6 +650,55 @@ def test_records_and_errors_are_both_capped():
     records, errors = _norm(hostile)
     assert len(records) == _MAX_CREDENTIAL_RECORDS
     assert len(errors) <= _MAX_CREDENTIAL_ERRORS
+
+
+def test_shape_errors_are_capped_on_both_the_read_and_the_write_path():
+    """The SIBLING producer of W8, capped for the same reason.
+
+    `normalize_credential_requirements` caps its own error list, but
+    `credential_shape_errors` — which this PR extended with a per-ELEMENT loop —
+    emitted one string per bad `env_vars` entry with no bound, and it feeds BOTH
+    surfaces: `credential_errors` on the catalog entry, and the `"; ".join(errors)`
+    that becomes `CredentialDeclarationError`'s agent-creation 400 body.
+
+    A single YAML alias reused across servers presents ~160k malformed elements
+    from 13 KB of source. Measured before the cap: 160,000 errors, a 15.0 MB
+    catalog entry and a 14.6 MB 400 body (~1100x). Reachable since ent#123 by any
+    creator-role user pointing at an arbitrary public repo.
+
+    The cap must bound the WALK, not just the output — a cap applied after the
+    loops has already built and joined every string.
+    """
+    import yaml
+
+    from services.template_service import (
+        _MAX_CREDENTIAL_ERRORS,
+        CredentialDeclarationError,
+        credential_shape_errors,
+        generate_credential_files,
+    )
+
+    # One anchor, referenced by every server: small source, huge parsed walk.
+    source = "x: &big [" + ",".join(
+        "{k: v}" for _ in range(200)
+    ) + "]\n" "name: t\ncredentials:\n  mcp_servers:\n" + "".join(
+        "    s%d: {env_vars: *big}\n" % i for i in range(200)
+    )
+    assert len(source) < 20_000, "the point is a SMALL source with a huge walk"
+    data = yaml.safe_load(source)
+
+    errors = credential_shape_errors(data["credentials"])
+    assert len(errors) <= _MAX_CREDENTIAL_ERRORS + 1, len(errors)
+    assert "more than" in errors[-1], "the cap must say it truncated, not go silent"
+
+    # The write path joins the whole list into one exception message.
+    with pytest.raises(CredentialDeclarationError) as excinfo:
+        generate_credential_files(data, {}, "agent")
+    assert len(str(excinfo.value)) < 100_000, "400 body must not carry the full walk"
+
+    # An honest template is unaffected — the cap never truncates real feedback.
+    ok = {"mcp_servers": {"s": {"env_vars": [{"bad": 1}, "GOOD"]}}}
+    assert len(credential_shape_errors(ok)) == 1
 
 
 def test_long_fields_are_capped_but_not_at_the_terminal_default():
