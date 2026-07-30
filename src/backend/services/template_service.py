@@ -1115,13 +1115,20 @@ def contained_template_dir(name, root: Path) -> Optional[Path]:
     return candidate
 
 
-def _build_local_template(template_dir: Path) -> Optional[dict]:
+def _build_local_template(template_dir: Path, *, is_bundled: bool) -> Optional[dict]:
     """Build a template-list entry from a local-template directory.
 
     Returns None if the directory doesn't contain a readable
     `template.yaml`. Shape mirrors `_build_template` so the frontend's
     rendering code (CreateAgentModal.vue:117) works without a
     per-source branch.
+
+    `is_bundled` is supplied by the CALLER because only the caller knows the
+    provenance, and deriving it here meant calling `.resolve()` on a path built
+    from a user-supplied template id — a tainted-path sink (CodeQL
+    py/path-injection, alert 260) added purely to pick a log level. The catalog
+    scan iterates the curated root, so its children are bundled by construction;
+    the by-id lookup decides from the id string. (trinity-enterprise#128)
     """
     template_yaml = template_dir / "template.yaml"
     if not template_yaml.exists():
@@ -1146,11 +1153,8 @@ def _build_local_template(template_dir: Path) -> Optional[dict]:
     # `bundled` only when this really is the curated catalog root. The deploy-local
     # writable store (#950) is operator-uploaded and must not inherit our own
     # templates' trust label — trust selects the log level only today, but a wrong
-    # label is exactly what gets read as a security boundary later.
-    try:
-        is_bundled = template_dir.resolve().parent == _local_templates_dir().resolve()
-    except OSError:
-        is_bundled = False
+    # label is exactly what gets read as a security boundary later. Decided by the
+    # caller (see the `is_bundled` note in the docstring).
     credential_requirements, setup_errors = _catalog_credential_metadata(
         data, f"local:{name}", "bundled" if is_bundled else "deployed"
     )
@@ -1225,7 +1229,7 @@ def get_local_templates() -> List[dict]:
         # — one malformed template costs *itself*, never the catalog — survives
         # a future field being reached through without a guard.
         try:
-            entry = _build_local_template(child)
+            entry = _build_local_template(child, is_bundled=True)
         except Exception:  # noqa: BLE001
             logger.exception(
                 "Skipping local template %s: failed to build entry", child.name
@@ -1267,7 +1271,22 @@ def get_local_template(template_id: str) -> Optional[dict]:
         return None
     if not template_dir.is_dir():
         return None
-    return _build_local_template(template_dir)
+    # Provenance from the id STRING. A plain single segment is by construction a
+    # direct child of the curated root; anything carrying a separator or a
+    # dot-segment is not, and must not inherit the `bundled` trust label.
+    #
+    # Since #1900 the containment barrier above rejects every non-plain name, so
+    # this is redundant today — provably True wherever it is reached. It is kept
+    # as defence in depth: it decides a trust LABEL, and `contained_template_dir`
+    # is a shared primitive the remote-template-registry work
+    # (trinity-enterprise#14) is expected to edit. A label that silently became
+    # `bundled` if that barrier were ever widened is the exact failure this
+    # keyword argument exists to prevent. It re-adds no tainted-path sink: it
+    # reads the id string, never the filesystem.
+    is_plain_segment = (
+        bool(name) and name not in (".", "..") and "/" not in name and "\\" not in name
+    )
+    return _build_local_template(template_dir, is_bundled=is_plain_segment)
 
 
 def get_all_templates() -> List[dict]:

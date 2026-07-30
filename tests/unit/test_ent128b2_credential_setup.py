@@ -261,7 +261,7 @@ def _local_entry(tmp_path, body: str, name: str = "fixture") -> dict:
     d = tmp_path / name
     d.mkdir(parents=True, exist_ok=True)
     (d / "template.yaml").write_text(body)
-    return ts._build_local_template(d)
+    return ts._build_local_template(d, is_bundled=True)
 
 
 _HEAD = "name: fixture\nresources:\n  cpu: '2'\n  memory: '4g'\n"
