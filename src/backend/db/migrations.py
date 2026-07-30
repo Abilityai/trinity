@@ -2788,7 +2788,7 @@ def _migrate_agent_ownership_a2a_exposed(cursor, conn):
     default). Edition-agnostic OSS primitive (the OSS routes read + enforce it);
     the WRITE is entitlement-gated by the enterprise A2A module (like
     ``mcp_exposed`` reads OSS but ``suspended_at`` is set only by enterprise).
-    Mirrored by the Alembic revision 0029_agent_ownership_a2a_exposed for
+    Mirrored by the Alembic revision 0031_agent_ownership_a2a_exposed for
     PostgreSQL (re-chained onto dev's head 0028_agent_reminders, #157).
     """
     _safe_add_column(
