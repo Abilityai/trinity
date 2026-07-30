@@ -108,8 +108,8 @@ def test_sanitize_runs_before_the_length_cap():
         l for l in src.splitlines()
         if "_read_cmdline(pid)" in l and "cmd =" in l
     )
-    assert "sanitize_cmdline(" in line
-    assert line.index("sanitize_cmdline(") < line.index("_CMDLINE_LOG_CAP")
+    assert "_safe_cmdline(" in line
+    assert line.index("_safe_cmdline(") < line.index("_CMDLINE_LOG_CAP")
 
 
 def test_the_sweeper_has_no_unsanitized_cmdline_sink():
@@ -118,7 +118,7 @@ def test_the_sweeper_has_no_unsanitized_cmdline_sink():
     src = (_UTILS / "orphan_sweep.py").read_text()
     for ln, line in enumerate(src.splitlines(), 1):
         if "_read_cmdline(" in line and "def " not in line:
-            assert "sanitize_cmdline(" in line, (
+            assert "_safe_cmdline(" in line, (
                 f"orphan_sweep.py:{ln} reads a cmdline without sanitizing it: "
                 f"{line.strip()}"
             )
@@ -136,3 +136,21 @@ def test_url_redactor_is_shared_not_duplicated():
     assert 're.sub(r"(://)[^/@\\s]+@"' not in body, (
         "routers/git.py re-derived the regex instead of using the shared helper"
     )
+
+
+def test_the_sweeper_redacts_with_no_importable_helper():
+    """The sweeper's baseline redaction must not depend on an import.
+
+    This module is loaded three ways — package-relative in production, flat by
+    `subprocess_pgroup`'s test, and during a full-suite collection where
+    `src/backend` is also on sys.path carrying a DIFFERENT `credential_sanitizer`
+    without `sanitize_cmdline`. An import-time dependency on the richer helper
+    aborted collection outright. Load the sweeper standalone and prove a
+    credential is still redacted.
+    """
+    sweep = _load("orphan_sweep")
+    out = sweep._safe_cmdline(
+        "git remote-https origin https://oauth2:ghp_" + "F" * 36 + "@github.com/o/r.git"
+    )
+    assert "ghp_" not in out
+    assert "***@github.com" in out

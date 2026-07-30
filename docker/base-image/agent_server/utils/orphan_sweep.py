@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import signal
 import time
 from pathlib import Path
@@ -52,15 +53,38 @@ try:
 except ImportError:  # pragma: no cover - exercised by unit tests
     from orphan_allowlist import resolve_allowlist, _read_cmdline  # type: ignore[no-redef]
 
-# Dual import, matching `subprocess_pgroup` two files over: these utils are
-# imported package-relatively in production (inside `agent_server`) but flat by
-# tests that add `utils/` to sys.path without loading the package. A bare
-# relative import breaks the flat path at collection time — which is exactly
-# what happened when this line was first added.
-try:
-    from .credential_sanitizer import sanitize_cmdline
-except ImportError:  # pragma: no cover - exercised by the flat-import tests
-    from credential_sanitizer import sanitize_cmdline  # type: ignore[no-redef]
+# ent#292: URL-userinfo redaction, guaranteed at module scope with no import.
+#
+# This module is imported three different ways — package-relative in production,
+# flat by `subprocess_pgroup`'s test (sys.path + `import orphan_sweep`), and
+# transitively during a full-suite collection where `src/backend` is ALSO on
+# sys.path and carries a DIFFERENT `credential_sanitizer` with no
+# `sanitize_cmdline`. An import-time dependency on the richer helper therefore
+# broke collection outright (the head suite aborted, not just one test).
+#
+# So the baseline rule lives here, self-contained: no import can fail, and a
+# credential can never reach the log because a helper was unreachable. The
+# richer sanitizer is layered on when it IS importable, resolved lazily at call
+# time rather than at import.
+_URL_USERINFO_RE = re.compile(r"(://)[^/@\s]+@")
+
+
+def _safe_cmdline(cmd: str) -> str:
+    """Redact credentials from a process cmdline before it reaches a log sink.
+
+    Always applies URL-userinfo redaction (the form Trinity's git remotes use);
+    additionally applies the shared token-shape/known-value sanitizer when this
+    module is loaded in a context where it resolves.
+    """
+    out = _URL_USERINFO_RE.sub(r"\1***@", cmd or "")
+    try:
+        from .credential_sanitizer import sanitize_text  # local import: see above
+    except Exception:  # pragma: no cover - flat/standalone load
+        return out
+    try:
+        return sanitize_text(out)
+    except Exception:  # pragma: no cover - never let redaction raise into a sweep
+        return out
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +202,7 @@ def kill_cgroup_orphans(
         # Vector's persisted archives and any snapshot of that volume.
         # Sanitize BEFORE the length cap: truncating first can slice a token
         # mid-value and leave a partial secret that no pattern then matches.
-        cmd = sanitize_cmdline(_read_cmdline(pid) or "?")[:_CMDLINE_LOG_CAP]
+        cmd = _safe_cmdline(_read_cmdline(pid) or "?")[:_CMDLINE_LOG_CAP]
         try:
             pgid_str = str(os.getpgid(pid))
         except OSError:
