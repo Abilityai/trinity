@@ -183,6 +183,38 @@ def decode_mfa_challenge(token: str) -> Optional[dict]:
 PORTAL_SESSION_SCOPE = "portal_session"
 PORTAL_SESSION_EXPIRE_HOURS = 12
 
+# --- Delegated portal identity (ent#163) ---------------------------------
+#
+# A `portal_delegate` MCP key lets a TRUSTED backend assert which of *its* end
+# users a request is for, and exchange that assertion for a portal session
+# token. It is how a licensee runs their own customer portal against Trinity
+# while keeping their own IdP: they already authenticated bob@example.com and
+# want Trinity to act as bob, not as the key owner.
+#
+# Why a dedicated scope rather than reusing `scope='user'`: this capability
+# reads another person's chat history. Riding it on an ordinary user key would
+# silently turn EVERY user key into a fleet-wide impersonation key. It is
+# admin-issued, and revoking the key stops delegation immediately.
+#
+# Why a mint rather than a per-request `X-On-Behalf-Of` header: a header puts
+# impersonation in the auth path of every current *and future* portal endpoint —
+# an ambient capability each new route silently inherits. A mint is one
+# auditable event, and everything downstream keeps using the portal session
+# token it already understands.
+#
+# Edition-agnostic, exactly like PORTAL_SESSION_SCOPE above: OSS owns the scope,
+# the containment fence, and the mint primitive; the entitled module owns the
+# endpoint that decides *whether* this email may be delegated. In an OSS-only
+# build the fenced path is not registered, so such a key can reach nothing.
+PORTAL_DELEGATE_SCOPE = "portal_delegate"
+
+# The ONLY (method, path) a portal_delegate key may reach. Deliberately a single
+# exchange route, not a prefix: the minted portal session — not this key — is
+# what drives the portal surface afterwards, so this key never needs breadth.
+PORTAL_DELEGATE_ALLOWED_ROUTES = {
+    ("POST", "/api/enterprise/client-portal/auth/exchange"),
+}
+
 
 def create_portal_session_token(email: str, mode: str = "prod") -> str:
     """Mint a Client Portal session token for a verified email. Carries no
@@ -330,6 +362,24 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
             # agent (see _enforce_connector_scope). The key is minted by an
             # entitled module; core only recognizes + enforces the scope.
             connector_agent = mcp_key_info.get("agent_name") if scope == "connector" else None
+            # ent#163: a delegated-portal key is fenced to the single exchange
+            # route. Enforced HERE at the one auth entry point — not only in the
+            # portal router — for the same reason as the connector fence above:
+            # this principal resolves to the key OWNER, so any endpoint doing an
+            # inline access check would otherwise treat it as that human. The
+            # key's whole job is to mint a portal session; it never needs to
+            # reach anything else, including the portal endpoints themselves.
+            portal_delegate = scope == PORTAL_DELEGATE_SCOPE
+            if portal_delegate and (
+                (request.method.upper(), request.url.path) not in PORTAL_DELEGATE_ALLOWED_ROUTES
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        "Portal delegate keys may only exchange an end-user email "
+                        "for a portal session"
+                    ),
+                )
             if connector_agent:
                 # Central containment (ent#46): a connector key may reach ONLY
                 # its bound agent's chat + connector playbook list. Enforced here
@@ -365,6 +415,7 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
                 role=user["role"],
                 agent_name=agent_name,
                 connector_agent=connector_agent,
+                portal_delegate=portal_delegate,
             )
 
     # Both JWT and MCP key failed

@@ -116,6 +116,149 @@ AGENT_TMPFS_MOUNT: dict[str, str] = {
 AGENT_DEFAULT_TMPDIR: str = '/home/developer/.tmp'
 
 
+# Agent container log rotation (#1871)
+# -----------------------------------------------------------------------------
+# Docker's json-file driver ships with NO max-size and NO max-file, so every
+# container log grows forever under /var/lib/docker/containers/. Nothing fails
+# while that happens — then the Docker data root hits 100%, dockerd can no
+# longer parse its own logs, and the whole fleet wedges at once (2026-07-27).
+#
+# docker-compose's `logging:` block bounds the platform services, but it CANNOT
+# reach agent containers: those are created through the Docker SDK, not compose.
+# This constant is the agent-side half, and agents are the fleet's fastest log
+# writers (~7 MB/day each, measured).
+#
+# Defined here (single source of truth) so the create path (crud.py), the
+# recreate path (lifecycle.py) and the system agent (system_agent_service.py)
+# can't drift — all three import this constant. Like AGENT_TMPFS_MOUNT above,
+# `log_config` is CREATION-TIME: existing agents adopt a changed value on
+# recreate, not on restart.
+#
+# Validation is fail-safe in BOTH directions, because this is a safety control
+# and a typo must never silently disable it:
+#   * FORMAT    — `<int>k|m|g` (size) / a positive integer (file count).
+#   * MAGNITUDE — a well-formed but absurd value ("1000g", max-file "9999")
+#     passes any format-only regex while effectively removing the cap. That is
+#     precisely the failure this constant exists to prevent, so bounds are
+#     enforced too; a format-only check would leave the door open.
+# Both rejections fall back to the bounded default. An explicitly-set value that
+# is rejected also logs a WARNING naming the variable, the value and the default
+# — a silently-ignored knob is inert-by-obscurity (#1039). An UNSET variable is
+# the normal case and stays quiet.
+_AGENT_LOG_MAX_SIZE_DEFAULT = "10m"
+_AGENT_LOG_MAX_FILE_DEFAULT = "3"
+
+_AGENT_LOG_MAX_SIZE_RE = re.compile(r"^(\d+)([kmg])$")
+_AGENT_LOG_MAX_FILE_RE = re.compile(r"^[1-9]\d*$")
+
+# Ceilings. A busy agent writes ~7 MB/day, so 1 GiB/file × 10 files is already
+# orders of magnitude past any real retention need — past this, the value is a
+# fat-finger ("1000m" for "100m"), not an intent.
+_AGENT_LOG_MAX_SIZE_LIMIT_BYTES = 1024 ** 3   # 1g
+_AGENT_LOG_MAX_FILE_LIMIT = 10
+
+_LOG_SIZE_UNIT_BYTES = {"k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}
+
+
+def _reject_log_opt(env_var: str, raw: str, reason: str, default: str) -> str:
+    """Report the rejection of an explicitly-set value and return the default.
+
+    `print(..., flush=True)`, not `logger.*`: this module resolves
+    AGENT_LOG_CONFIG at **import** time, which runs long before `lifespan`
+    calls `setup_logging()` — the same constraint that makes the enterprise
+    registration and OpenTelemetry blocks in `main.py` print rather than log
+    (#858). A `logger.warning` here would still reach stderr via Python's
+    `lastResort` handler, but *unstructured* — no JSON envelope, so it would
+    never match a `.level` filter over `/data/logs`. `%r` on the raw value
+    keeps a newline-bearing value from forging extra log lines.
+    """
+    print(
+        f"WARNING: ignoring {env_var}={raw!r} ({reason}); "
+        f"using the default {default!r} instead. "
+        "Container log rotation remains bounded.",
+        flush=True,
+    )
+    return default
+
+
+def _resolve_agent_log_max_size() -> str:
+    """Validated json-file ``max-size`` from AGENT_LOG_MAX_SIZE, else the default.
+
+    Accepts ``<int>k`` / ``<int>m`` / ``<int>g`` (case-insensitive) up to 1g.
+    A malformed OR oversized value falls back to the default, so neither a typo
+    nor an absurd number can leave an agent's logs effectively uncapped.
+    """
+    raw = (os.getenv("AGENT_LOG_MAX_SIZE") or "").strip().lower()
+    if not raw:
+        return _AGENT_LOG_MAX_SIZE_DEFAULT
+
+    match = _AGENT_LOG_MAX_SIZE_RE.match(raw)
+    if not match:
+        return _reject_log_opt(
+            "AGENT_LOG_MAX_SIZE", raw,
+            "expected <int> followed by k, m or g",
+            _AGENT_LOG_MAX_SIZE_DEFAULT,
+        )
+
+    amount, unit = int(match.group(1)), match.group(2)
+    if amount == 0:
+        return _reject_log_opt(
+            "AGENT_LOG_MAX_SIZE", raw, "zero disables rotation",
+            _AGENT_LOG_MAX_SIZE_DEFAULT,
+        )
+    # `.get`, not `[...]`: the unit table and the regex's character class are
+    # two places that must agree. They do today, so this cannot fire — but a
+    # future edit widening the regex alone would raise KeyError at IMPORT time
+    # and crash-loop backend boot, which is the one outcome a fail-safe
+    # constant must never produce. Unknown unit → the bounded default.
+    unit_bytes = _LOG_SIZE_UNIT_BYTES.get(unit)
+    if unit_bytes is None:
+        return _reject_log_opt(
+            "AGENT_LOG_MAX_SIZE", raw, f"unknown size unit {unit!r}",
+            _AGENT_LOG_MAX_SIZE_DEFAULT,
+        )
+    if amount * unit_bytes > _AGENT_LOG_MAX_SIZE_LIMIT_BYTES:
+        return _reject_log_opt(
+            "AGENT_LOG_MAX_SIZE", raw, "exceeds the 1g per-file ceiling",
+            _AGENT_LOG_MAX_SIZE_DEFAULT,
+        )
+    return raw
+
+
+def _resolve_agent_log_max_file() -> str:
+    """Validated json-file ``max-file`` from AGENT_LOG_MAX_FILE, else the default.
+
+    Accepts a positive integer up to 10. ``0`` and non-numeric values are
+    rejected: Docker treats a max-file of 0/1 as "never roll", which would
+    silently defeat the cap this constant exists to enforce.
+    """
+    raw = (os.getenv("AGENT_LOG_MAX_FILE") or "").strip()
+    if not raw:
+        return _AGENT_LOG_MAX_FILE_DEFAULT
+
+    if not _AGENT_LOG_MAX_FILE_RE.match(raw):
+        return _reject_log_opt(
+            "AGENT_LOG_MAX_FILE", raw, "expected a positive integer",
+            _AGENT_LOG_MAX_FILE_DEFAULT,
+        )
+    if int(raw) > _AGENT_LOG_MAX_FILE_LIMIT:
+        return _reject_log_opt(
+            "AGENT_LOG_MAX_FILE", raw,
+            f"exceeds the {_AGENT_LOG_MAX_FILE_LIMIT}-file ceiling",
+            _AGENT_LOG_MAX_FILE_DEFAULT,
+        )
+    return raw
+
+
+AGENT_LOG_CONFIG: dict[str, object] = {
+    "type": "json-file",
+    "config": {
+        "max-size": _resolve_agent_log_max_size(),
+        "max-file": _resolve_agent_log_max_file(),
+    },
+}
+
+
 # Container resource limits (#1197)
 # -----------------------------------------------------------------------------
 # Canonical allowed values for the per-agent CPU / memory limits, shared by the

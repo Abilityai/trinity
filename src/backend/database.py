@@ -910,6 +910,54 @@ class DatabaseManager:
         return self._agent_ops.set_max_backlog_depth(agent_name, depth)
 
     # =========================================================================
+    # Business validation (delegated to db/schedules/cleanup.py) — VALIDATE-001
+    # =========================================================================
+    #
+    # These two were MISSING from the facade (found while building ent#277).
+    # `ScheduleCleanupMixin` defines them and `ScheduleOperations` composes it,
+    # but nothing re-exported them here — so every call in
+    # `services/validation_service.py` raised AttributeError on the first line
+    # of `validate_execution`.
+    #
+    # The failure was invisible: the internal endpoint answers "accepted"
+    # immediately and runs validation in a background task whose `except
+    # Exception` turns the crash into one log line. An operator who enabled
+    # `validation_enabled` got an accepted request, no verdict, no operator-queue
+    # item, and a `business_status` that was never even set to
+    # `pending_validation` — the very silent-failure mode validation exists to
+    # prevent. Same class as the #1539 facade-delegation bug: a mixin method
+    # nothing re-exported, which no test using a mocked `db` can see.
+    # Keyword-forwarded so a future signature change can't rebind positionally.
+
+    def update_business_status(
+        self,
+        execution_id: str,
+        business_status: str,
+        validation_execution_id: str = None,
+    ) -> bool:
+        return self._schedule_ops.update_business_status(
+            execution_id=execution_id,
+            business_status=business_status,
+            validation_execution_id=validation_execution_id,
+        )
+
+    def create_validation_execution(
+        self,
+        validates_execution_id: str,
+        agent_name: str,
+        schedule_id: str,
+        message: str,
+        timeout_seconds: int = 120,
+    ):
+        return self._schedule_ops.create_validation_execution(
+            validates_execution_id=validates_execution_id,
+            agent_name=agent_name,
+            schedule_id=schedule_id,
+            message=message,
+            timeout_seconds=timeout_seconds,
+        )
+
+    # =========================================================================
     # Backlog Execution Queries (delegated to db/schedules.py) - BACKLOG-001
     # =========================================================================
 

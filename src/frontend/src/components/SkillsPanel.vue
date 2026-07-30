@@ -1,324 +1,260 @@
 <template>
-  <div class="p-6">
-    <!-- Skills Assignment Section -->
-    <div class="space-y-4">
-      <!-- Header -->
-      <div class="flex items-center justify-between">
-        <div>
-          <h3 class="text-lg font-medium text-gray-900 dark:text-white">Assigned Skills</h3>
-          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Select skills to enable for this agent. Skills are injected when the agent starts.
-          </p>
-        </div>
-        <div class="flex gap-2">
-          <button
-            v-if="agentStatus === 'running'"
-            @click="injectSkills"
-            :disabled="injecting || assignedSkills.length === 0"
-            class="inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <svg v-if="injecting" class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-            {{ injecting ? 'Injecting...' : 'Inject to Agent' }}
-          </button>
-          <button
-            @click="saveAssignments"
-            :disabled="saving || !hasChanges"
-            class="inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-md text-white bg-status-success-600 hover:bg-status-success-700 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <svg v-if="saving" class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-            {{ saving ? 'Saving...' : 'Save' }}
-          </button>
-        </div>
+  <div class="space-y-5">
+    <div class="flex items-start justify-between gap-4">
+      <div>
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Skills</h2>
+        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400 max-w-2xl">
+          Assign skills from the shared library to this agent. Assignment is durable;
+          the files are copied into the agent on start, or when you sync below.
+        </p>
       </div>
+      <button
+        v-if="canManage && !store.loading"
+        @click="onSync"
+        :disabled="store.injecting || !agentRunning"
+        :title="agentRunning ? 'Re-copy every assigned skill into the agent' : 'The agent is stopped — start it to sync skills'"
+        class="shrink-0 px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
+      >{{ store.injecting ? 'Syncing…' : 'Sync now' }}</button>
+    </div>
 
-      <!-- Loading State -->
-      <div v-if="loading" class="flex justify-center py-8">
-        <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-600"></div>
+    <p v-if="store.error" class="text-sm text-status-danger-600 dark:text-status-danger-400">{{ store.error }}</p>
+    <p v-if="store.loading" class="text-sm text-gray-500 dark:text-gray-400">Loading skills…</p>
+
+    <!-- Empty states: each says what is wrong AND what to do next (AC: no dead
+         empty states). Which one shows is decided by the store, so the panel
+         can't invent a fourth. -->
+    <template v-else-if="store.emptyReason === 'library_unconfigured'">
+      <div class="rounded-lg border border-gray-200 dark:border-gray-700 p-5 text-sm">
+        <p class="font-medium text-gray-900 dark:text-gray-100">No skills library is configured</p>
+        <p class="mt-1 text-gray-500 dark:text-gray-400">
+          Skills come from a git repository shared across the fleet. Once it's configured,
+          every agent can be assigned skills from it.
+        </p>
+        <router-link v-if="isAdmin" to="/settings?tab=agents"
+                     class="mt-3 inline-block px-3 py-1.5 rounded-lg bg-action-primary-600 hover:bg-action-primary-700 text-white text-sm">
+          Configure the library
+        </router-link>
+        <p v-else class="mt-3 text-gray-500 dark:text-gray-400">Ask an admin to configure it in Settings.</p>
       </div>
+    </template>
 
-      <!-- Library Not Configured -->
-      <div v-else-if="!libraryStatus.configured" class="bg-state-autonomous-50 dark:bg-state-autonomous-900/20 border border-state-autonomous-200 dark:border-state-autonomous-800 rounded-lg p-4">
-        <div class="flex">
-          <svg class="h-5 w-5 text-state-autonomous-400 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
-            <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
-          </svg>
-          <div class="ml-3">
-            <h3 class="text-sm font-medium text-state-autonomous-800 dark:text-state-autonomous-300">Skills Library Not Configured</h3>
-            <p class="mt-1 text-sm text-state-autonomous-700 dark:text-state-autonomous-400">
-              Configure the skills library URL in Settings to enable skills management.
-            </p>
-          </div>
-        </div>
+    <template v-else-if="store.emptyReason === 'library_empty'">
+      <div class="rounded-lg border border-gray-200 dark:border-gray-700 p-5 text-sm">
+        <p class="font-medium text-gray-900 dark:text-gray-100">The library is configured but has no skills yet</p>
+        <p class="mt-1 text-gray-500 dark:text-gray-400">
+          Add a skill directory to the repository, then re-sync the library.
+          <span v-if="store.libraryStatus?.url" class="block mt-1 font-mono text-xs break-all">{{ store.libraryStatus.url }}</span>
+        </p>
       </div>
+    </template>
 
-      <!-- Skills Grid -->
-      <div v-else-if="availableSkills.length > 0" class="space-y-4">
-        <!-- Search -->
-        <div class="relative">
-          <input
-            v-model="searchQuery"
-            type="text"
-            placeholder="Search skills..."
-            class="block w-full pl-10 pr-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
-          />
-          <svg class="absolute left-3 top-2.5 h-5 w-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
-        </div>
+    <template v-else-if="!store.loading">
+      <!-- Assigned, with the honest per-skill outcome of the last sync -->
+      <section>
+        <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">
+          Assigned to this agent
+          <span class="ml-1 text-xs font-normal text-gray-400">{{ store.assigned.length }}</span>
+        </h3>
 
-        <!-- Skills List -->
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          <div
-            v-for="skill in filteredSkills"
-            :key="skill.name"
-            class="relative flex items-start p-3 border rounded-lg cursor-pointer transition-colors"
-            :class="[
-              selectedSkills.has(skill.name)
-                ? 'border-action-primary-500 bg-action-primary-50 dark:bg-action-primary-900/30 dark:border-action-primary-600'
-                : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'
-            ]"
-            @click="toggleSkill(skill.name)"
-          >
-            <div class="flex items-center h-5">
-              <input
-                type="checkbox"
-                :checked="selectedSkills.has(skill.name)"
-                class="h-4 w-4 text-action-primary-600 border-gray-300 dark:border-gray-600 rounded focus:ring-action-primary-500"
-                @change.stop="toggleSkill(skill.name)"
-              />
+        <p v-if="store.emptyReason === 'none_assigned'" class="mt-2 text-sm text-gray-500 dark:text-gray-400">
+          No skills assigned yet — pick some from the library below and save.
+        </p>
+
+        <ul v-else class="mt-2 space-y-2">
+          <li v-for="s in store.assignedSkills" :key="s.name"
+              class="rounded-lg border border-gray-200 dark:border-gray-700 px-4 py-3">
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ s.name }}</span>
+                  <span v-if="s.version" class="text-[11px] font-mono text-gray-400">{{ s.version.slice(0, 7) }}</span>
+                  <!-- The injection verdict. Absent = never synced this session,
+                       which is stated rather than shown as success. -->
+                  <span v-if="resultFor(s.name)"
+                        class="text-[11px] px-1.5 py-0.5 rounded-full font-medium"
+                        :class="statusClass(resultFor(s.name).status)">
+                    {{ statusLabel(resultFor(s.name).status) }}
+                  </span>
+                </div>
+                <p v-if="s.description" class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ s.description }}</p>
+
+                <!-- Named warnings, verbatim and translated. A skill that landed
+                     with a missing binary is NOT a success, and this is the line
+                     that says so. -->
+                <ul v-if="resultFor(s.name)?.warnings?.length" class="mt-2 space-y-1">
+                  <li v-for="w in resultFor(s.name).warnings" :key="w"
+                      class="text-xs text-status-warning-700 dark:text-status-warning-400">
+                    ⚠ {{ warningText(w) }}
+                  </li>
+                </ul>
+                <p v-if="resultFor(s.name)?.error"
+                   class="mt-2 text-xs text-status-danger-600 dark:text-status-danger-400">
+                  {{ resultFor(s.name).error }}
+                </p>
+              </div>
+              <SkillMeta :skill="s" />
             </div>
-            <div class="ml-3 flex-1">
-              <label class="font-medium text-sm text-gray-900 dark:text-white cursor-pointer">
-                {{ skill.name }}
-              </label>
-              <p v-if="skill.description" class="text-xs text-gray-500 dark:text-gray-400 mt-0.5 line-clamp-2">
-                {{ skill.description }}
-              </p>
-            </div>
-          </div>
+          </li>
+        </ul>
+
+        <p v-if="store.lastInjectionAt" class="mt-2 text-xs text-gray-400">
+          Last sync {{ new Date(store.lastInjectionAt).toLocaleString() }}
+        </p>
+        <p v-else-if="store.assigned.length" class="mt-2 text-xs text-gray-400">
+          Not synced from this screen yet — statuses appear after a sync. Skills are
+          also copied in automatically when the agent starts.
+        </p>
+      </section>
+
+      <!-- Library browse + assignment -->
+      <section v-if="canManage">
+        <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Library</h3>
+        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+          {{ store.library.length }} skill{{ store.library.length === 1 ? '' : 's' }} available.
+          Tick to assign, then save.
+        </p>
+
+        <ul class="mt-2 divide-y divide-gray-200 dark:divide-gray-700 rounded-lg border border-gray-200 dark:border-gray-700">
+          <li v-for="s in store.library" :key="s.name" class="px-4 py-3">
+            <label class="flex items-start gap-3 cursor-pointer">
+              <input type="checkbox" :value="s.name" v-model="draft"
+                     class="mt-1 rounded text-action-primary-600 focus:ring-action-primary-500" />
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ s.name }}</span>
+                  <span v-if="s.automation" class="text-[11px] px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300">{{ s.automation }}</span>
+                  <span v-if="!s.user_invocable" class="text-[11px] px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400" title="Runs automatically; a user cannot invoke it directly">not user-invocable</span>
+                </div>
+                <p v-if="s.description" class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ s.description }}</p>
+                <SkillMeta :skill="s" class="mt-1" />
+                <!-- Declared dependencies, surfaced BEFORE assignment: this is
+                     what turns into a missing_binary/missing_env warning later. -->
+                <p v-if="deps(s)" class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                  Requires {{ deps(s) }}
+                </p>
+              </div>
+            </label>
+          </li>
+        </ul>
+
+        <div class="mt-3 flex items-center gap-3">
+          <button @click="onSave" :disabled="store.saving || !dirty"
+                  class="px-3 py-1.5 rounded-lg bg-action-primary-600 hover:bg-action-primary-700 text-white text-sm disabled:opacity-50">
+            {{ store.saving ? 'Saving…' : 'Save assignments' }}
+          </button>
+          <button v-if="dirty" @click="resetDraft"
+                  class="text-sm text-gray-500 dark:text-gray-400 hover:underline">Reset</button>
+          <span v-if="savedNote" class="text-xs text-status-success-600 dark:text-status-success-400">{{ savedNote }}</span>
         </div>
-
-        <!-- No Results -->
-        <div v-if="filteredSkills.length === 0" class="text-center py-8 text-gray-500 dark:text-gray-400">
-          No skills found matching "{{ searchQuery }}"
-        </div>
-      </div>
-
-      <!-- No Skills Available -->
-      <div v-else class="text-center py-8">
-        <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-        </svg>
-        <p class="mt-2 text-gray-500 dark:text-gray-400">No skills available in the library.</p>
-        <p class="text-sm text-gray-400 dark:text-gray-500">Sync the library in Settings to load skills.</p>
-      </div>
-
-      <!-- Library Status Footer -->
-      <div v-if="libraryStatus.configured" class="mt-6 pt-4 border-t border-gray-200 dark:border-gray-700">
-        <div class="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
-          <div class="flex items-center gap-4">
-            <span>
-              Library: <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded">{{ libraryStatus.url || 'Not configured' }}</code>
-            </span>
-            <span v-if="libraryStatus.commit_sha">
-              Commit: <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded">{{ libraryStatus.commit_sha }}</code>
-            </span>
-          </div>
-          <span v-if="libraryStatus.last_sync">
-            Last synced: {{ formatDate(libraryStatus.last_sync) }}
-          </span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Success Message -->
-    <div v-if="successMessage" class="fixed bottom-4 right-4 z-50 bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300 px-4 py-3 rounded-lg shadow-lg">
-      {{ successMessage }}
-    </div>
-
-    <!-- Error Message -->
-    <div v-if="errorMessage" class="fixed bottom-4 right-4 z-50 bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300 px-4 py-3 rounded-lg shadow-lg">
-      {{ errorMessage }}
-    </div>
+      </section>
+    </template>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
-import axios from 'axios'
-import { useAuthStore } from '../stores/auth'
+import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useSkillsStore } from '../stores/skills'
+import { useRole } from '../composables/useRole'
 
 const props = defineProps({
-  agentName: {
-    type: String,
-    required: true
-  },
-  agentStatus: {
-    type: String,
-    default: 'stopped'
-  }
+  agentName: { type: String, required: true },
+  canManage: { type: Boolean, default: false },
+  agentRunning: { type: Boolean, default: false },
 })
 
-const authStore = useAuthStore()
+const store = useSkillsStore()
+const { isAdmin } = useRole()
 
-// State
-const loading = ref(true)
-const saving = ref(false)
-const injecting = ref(false)
-const searchQuery = ref('')
-const successMessage = ref('')
-const errorMessage = ref('')
+const draft = ref([])
+const savedNote = ref('')
 
-// Data
-const availableSkills = ref([])
-const assignedSkills = ref([])
-const selectedSkills = ref(new Set())
-const originalSelection = ref(new Set())
-const libraryStatus = ref({
-  configured: false,
-  url: null,
-  branch: 'main',
-  last_sync: null,
-  commit_sha: null,
-  skill_count: 0
+/** Small inline renderer for the package facts — same markup in both lists. */
+const SkillMeta = (p) => {
+  const s = p.skill
+  const bits = []
+  if (s.multi_file) bits.push(`${s.file_count} files`)
+  if (s.size_bytes) bits.push(formatBytes(s.size_bytes))
+  if (!bits.length) return null
+  return h('p', { class: 'text-[11px] text-gray-400 whitespace-nowrap' }, bits.join(' · '))
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+function deps(s) {
+  const r = s.requires || {}
+  const parts = []
+  if (r.binaries?.length) parts.push(r.binaries.join(', '))
+  if (r.packages?.length) parts.push(r.packages.join(', '))
+  if (r.env?.length) parts.push(r.env.join(', '))
+  return parts.join(' · ') || null
+}
+
+function resultFor(name) {
+  return store.injectionResults?.[name] || null
+}
+
+/**
+ * #183 statuses. `fallback` is the one worth naming precisely: the package
+ * could not be delivered whole, so a reduced form went in — a green tick there
+ * would be a lie.
+ */
+function statusLabel(status) {
+  return {
+    injected: 'synced',
+    unchanged: 'up to date',
+    fallback: 'partial',
+    failed: 'failed',
+  }[status] || status
+}
+
+function statusClass(status) {
+  if (status === 'failed') return 'bg-status-danger-100 dark:bg-status-danger-900/50 text-status-danger-700 dark:text-status-danger-300'
+  if (status === 'fallback') return 'bg-status-warning-100 dark:bg-status-warning-900/50 text-status-warning-800 dark:text-status-warning-300'
+  if (status === 'unchanged') return 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'
+  return 'bg-status-success-100 dark:bg-status-success-900/50 text-status-success-700 dark:text-status-success-300'
+}
+
+/** Named warnings are machine tokens; say what they mean for this agent. */
+function warningText(w) {
+  const [kind, detail] = String(w).split(':')
+  if (kind === 'missing_binary') return `${detail} is not installed in this agent — the skill may not run`
+  if (kind === 'missing_env') return `${detail} is not set in this agent's environment`
+  if (kind === 'multi_file_dropped_old_image') return 'Only SKILL.md was copied — the agent image predates multi-file skills. Rebuild the base image for the full package.'
+  return w
+}
+
+const dirty = computed(() => {
+  const a = [...draft.value].sort().join('|')
+  const b = [...store.assignedNames].sort().join('|')
+  return a !== b
 })
 
-// Computed
-const filteredSkills = computed(() => {
-  if (!searchQuery.value) return availableSkills.value
-  const query = searchQuery.value.toLowerCase()
-  return availableSkills.value.filter(skill =>
-    skill.name.toLowerCase().includes(query) ||
-    (skill.description && skill.description.toLowerCase().includes(query))
-  )
-})
+function resetDraft() {
+  draft.value = [...store.assignedNames]
+}
 
-const hasChanges = computed(() => {
-  if (selectedSkills.value.size !== originalSelection.value.size) return true
-  for (const skill of selectedSkills.value) {
-    if (!originalSelection.value.has(skill)) return true
-  }
-  return false
-})
-
-// Methods
-async function loadData() {
-  loading.value = true
-  try {
-    // Load library status, available skills, and assigned skills in parallel
-    const [statusRes, skillsRes, assignedRes] = await Promise.all([
-      axios.get('/api/skills/library/status', { headers: authStore.authHeader }),
-      axios.get('/api/skills/library', { headers: authStore.authHeader }).catch(() => ({ data: [] })),
-      axios.get(`/api/agents/${props.agentName}/skills`, { headers: authStore.authHeader })
-    ])
-
-    libraryStatus.value = statusRes.data
-    availableSkills.value = skillsRes.data
-    assignedSkills.value = assignedRes.data
-
-    // Initialize selection from assigned skills
-    selectedSkills.value = new Set(assignedSkills.value.map(s => s.skill_name))
-    originalSelection.value = new Set(selectedSkills.value)
-  } catch (e) {
-    console.error('Failed to load skills data:', e)
-    errorMessage.value = 'Failed to load skills data'
-    setTimeout(() => { errorMessage.value = '' }, 3000)
-  } finally {
-    loading.value = false
+async function onSave() {
+  savedNote.value = ''
+  if (await store.saveAssignments([...draft.value])) {
+    resetDraft()
+    savedNote.value = 'Saved. Sync now, or the agent picks them up on next start.'
   }
 }
 
-function toggleSkill(skillName) {
-  if (selectedSkills.value.has(skillName)) {
-    selectedSkills.value.delete(skillName)
-  } else {
-    selectedSkills.value.add(skillName)
-  }
-  // Force reactivity
-  selectedSkills.value = new Set(selectedSkills.value)
+async function onSync() {
+  savedNote.value = ''
+  await store.inject()
 }
 
-async function saveAssignments() {
-  saving.value = true
-  try {
-    await axios.put(
-      `/api/agents/${props.agentName}/skills`,
-      { skills: Array.from(selectedSkills.value) },
-      { headers: authStore.authHeader }
-    )
+watch(() => store.assigned, resetDraft, { deep: true })
 
-    originalSelection.value = new Set(selectedSkills.value)
-    successMessage.value = 'Skills saved successfully'
-    setTimeout(() => { successMessage.value = '' }, 3000)
-  } catch (e) {
-    console.error('Failed to save skills:', e)
-    errorMessage.value = e.response?.data?.detail || 'Failed to save skills'
-    setTimeout(() => { errorMessage.value = '' }, 3000)
-  } finally {
-    saving.value = false
-  }
-}
-
-async function injectSkills() {
-  injecting.value = true
-  try {
-    const response = await axios.post(
-      `/api/agents/${props.agentName}/skills/inject`,
-      {},
-      { headers: authStore.authHeader }
-    )
-
-    const result = response.data
-    if (result.success) {
-      successMessage.value = `Injected ${result.skills_injected} skills`
-    } else {
-      successMessage.value = `Injected ${result.skills_injected} skills, ${result.skills_failed} failed`
-    }
-    setTimeout(() => { successMessage.value = '' }, 3000)
-  } catch (e) {
-    console.error('Failed to inject skills:', e)
-    errorMessage.value = e.response?.data?.detail || 'Failed to inject skills'
-    setTimeout(() => { errorMessage.value = '' }, 3000)
-  } finally {
-    injecting.value = false
-  }
-}
-
-function formatDate(dateString) {
-  if (!dateString) return 'Never'
-  const date = new Date(dateString)
-  const now = new Date()
-  const diffInMs = now - date
-  const diffInMins = Math.floor(diffInMs / (1000 * 60))
-
-  if (diffInMins < 1) return 'Just now'
-  if (diffInMins < 60) return `${diffInMins}m ago`
-  if (diffInMins < 1440) return `${Math.floor(diffInMins / 60)}h ago`
-  return date.toLocaleDateString()
-}
-
-// Lifecycle
-onMounted(() => {
-  loadData()
+onMounted(async () => {
+  await store.load(props.agentName)
+  resetDraft()
 })
-
-// Reload when agent changes
-watch(() => props.agentName, () => {
-  loadData()
-})
+onUnmounted(() => store.clear())
 </script>
-
-<style scoped>
-.line-clamp-2 {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-</style>

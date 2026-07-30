@@ -55,8 +55,8 @@ SECRET_VALUE_PATTERNS = [
     r'sk-[a-zA-Z0-9]{20,}',           # OpenAI API keys
     r'sk-proj-[a-zA-Z0-9\-_]{20,}',   # OpenAI project keys
     r'sk-ant-[a-zA-Z0-9\-_]{20,}',    # Anthropic API keys
-    r'ghp_[a-zA-Z0-9]{36,}',          # GitHub PAT (fine-grained)
-    r'github_pat_[a-zA-Z0-9_]{22,}',  # GitHub PAT (classic)
+    r'ghp_[a-zA-Z0-9]{36,}',          # GitHub PAT (classic, ~40 chars)
+    r'github_pat_[a-zA-Z0-9_]{22,}',  # GitHub PAT (fine-grained, ~93 chars)
     r'gho_[a-zA-Z0-9]{36,}',          # GitHub OAuth token
     r'ghs_[a-zA-Z0-9]{36,}',          # GitHub App token
     r'ghr_[a-zA-Z0-9]{36,}',          # GitHub refresh token
@@ -184,6 +184,42 @@ def refresh_credential_values():
     logger.info(f"Refreshed credential cache with {len(_credential_values)} values")
 
 
+# URL userinfo: `scheme://user:secret@host/...` → `scheme://***@host/...`
+#
+# Shape-INDEPENDENT, and that is the point. The value patterns above only catch
+# tokens whose prefix we already know; this catches any credential embedded in a
+# URL, including formats that do not exist yet. Trinity writes git remotes as
+# `https://oauth2:<PAT>@github.com/...` (and `x-access-token:` in the field), so
+# every git subprocess carries a live PAT in its argv.
+#
+# Anchored on `://` and stopping at the first `@` before any `/`, so a path or
+# query containing `@` is untouched.
+_URL_USERINFO_RE = re.compile(r"(://)[^/@\s]+@")
+
+
+def redact_url_userinfo(text: str) -> str:
+    """Strip credentials from URLs. Promoted from `routers/git.py` (#1595) so
+    every log exit can use it, not just the two git-stderr sinks it was written
+    for."""
+    if not text:
+        return text
+    return _URL_USERINFO_RE.sub(r"\1***@", text)
+
+
+def sanitize_cmdline(cmd: str) -> str:
+    """Sanitize a process command line before it reaches a log sink.
+
+    THE entry point for anything read out of `/proc/<pid>/cmdline` or otherwise
+    derived from argv. A reaped `git remote-https` carries the PAT in argv, and
+    logging it verbatim wrote a live credential into the container log, into
+    Vector's persisted archives, and into any snapshot of the log volume.
+
+    Log level is not a mitigation: agent logs are routed by container class with
+    no level filter, so INFO and WARNING persist identically.
+    """
+    return sanitize_text(redact_url_userinfo(cmd))
+
+
 def sanitize_text(text: str) -> str:
     """
     Sanitize sensitive values from text.
@@ -203,6 +239,11 @@ def sanitize_text(text: str) -> str:
         return text
 
     result = text
+
+    # 0. Redact URL userinfo FIRST. It is shape-independent, so it covers
+    #    credentials the value patterns below would miss entirely — including a
+    #    PAT format that does not exist yet.
+    result = redact_url_userinfo(result)
 
     # 1. Replace known credential values (exact match)
     for value in get_credential_values():
