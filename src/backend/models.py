@@ -636,6 +636,12 @@ class SystemManifest(BaseModel):
     # ORG-001 Phase 4: Tags and System View support
     default_tags: Optional[List[str]] = None  # Applied to all agents in manifest
     system_view: Optional[SystemViewConfig] = None  # Auto-create System View on deploy
+    # ent#126: top-level keys the parser does not recognise, recorded so
+    # `validate_manifest` can WARN about them. Silently dropping them is how
+    # `trinity_prompt:` (a typo for `prompt:`) sat in a shipped manifest doing
+    # nothing. Warned, never rejected — rejecting would 400 manifests that
+    # deploy today.
+    unknown_keys: List[str] = []
 
 
 class SystemDeployRequest(BaseModel):

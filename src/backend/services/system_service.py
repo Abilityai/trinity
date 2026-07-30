@@ -32,6 +32,13 @@ logger = logging.getLogger(__name__)
 # deploy report (the full text is still in the backend log).
 _REASON_MAX_LEN = 500
 
+# ent#126: every top-level manifest key `parse_manifest` reads. Kept next to the
+# parser so adding a key to one without the other is visible in review.
+_KNOWN_MANIFEST_KEYS = frozenset({
+    "name", "description", "prompt", "agents", "permissions",
+    "default_tags", "system_view",
+})
+
 
 def parse_manifest(yaml_str: str) -> SystemManifest:
     """
@@ -104,7 +111,13 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
         agents=agents,
         permissions=permissions,
         default_tags=default_tags,
-        system_view=system_view
+        system_view=system_view,
+        # ent#126: everything above is every key this parser reads. Anything else
+        # is silently dropped, which is how `trinity_prompt:` (a typo for
+        # `prompt:`) and `auto_start:` sat in a shipped manifest doing nothing.
+        # Recorded, not rejected — `validate_manifest` turns these into warnings,
+        # because rejecting would 400 manifests that deploy successfully today.
+        unknown_keys=sorted(set(data.keys()) - _KNOWN_MANIFEST_KEYS),
     )
 
 
@@ -208,6 +221,18 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
     if manifest.system_view:
         if not manifest.system_view.name or not manifest.system_view.name.strip():
             raise ValueError("system_view.name is required")
+
+    # ent#126: surface silently-dropped top-level keys. A warning, not an error:
+    # rejecting would break manifests that deploy today. The common case is a
+    # near-miss key name (`trinity_prompt` for `prompt`) whose intent is lost
+    # with no signal anywhere.
+    if manifest.unknown_keys:
+        warnings.append(
+            "Ignored unknown top-level key(s): "
+            f"{', '.join(manifest.unknown_keys)}. "
+            "Recognized keys are: "
+            f"{', '.join(sorted(_KNOWN_MANIFEST_KEYS))}."
+        )
 
     return warnings
 
@@ -900,16 +925,19 @@ def _default_create_agent_fn():
 
 
 def _preflight_template(
-    final_name: str, short_name: str, template: Optional[str]
+    final_name: str,
+    short_name: str,
+    template: Optional[str],
+    resources: Optional[dict] = None,
 ) -> Optional[SystemDeployFailure]:
-    """Can this agent's template resolve? Returns a failure, or None if it can.
+    """Can this agent's template resolve, with usable resources? (failure or None)
 
-    Reuses the CREATE path's own resolver rather than re-deriving "does this
-    template exist", so the preview cannot drift from the deploy: the reason
-    string and status code a caller sees here are produced by the same code that
-    will produce them for real (#1841).
+    Reuses the CREATE path's own resolver and its own validators rather than
+    re-deriving "does this template exist" / "is this cpu usable", so the preview
+    cannot drift from the deploy: the reason string and status code a caller sees
+    here are produced by the same code that will produce them for real (#1841).
 
-    Scope, deliberately:
+    Template scope, deliberately:
       * ``local:`` — resolved (a filesystem read, no side effects). This is
         where the cheap typo lives, and where #1793/#1759 made an unresolvable
         id a hard 404 instead of a silent blank agent.
@@ -918,26 +946,59 @@ def _preflight_template(
         new outbound call on a path that had none. A dry run therefore still
         cannot promise a github-template manifest deploys.
       * no template — valid by construction (creates a bare agent by design).
-    """
-    if not template or not template.startswith("local:"):
-        return None
 
-    # Lazy import: crud imports service-layer modules, so a module-level import
+    Resource validation (ent#126) closes a hole this function used to have. It
+    checked template SHAPE only, so a manifest carrying an unusable resource
+    value previewed as `valid` and then failed 100% of its agents at create —
+    the exact class of defect #1841 exists to prevent, through a different door.
+    A shipped bundled manifest had `cpu: 1.0` (an unquoted YAML float, which
+    `normalize_cpu` rejects because it compares against the string set
+    ``("1","2","4","8","16")``) and every deploy of it returned
+    ``status: "failed"`` / HTTP 500 with a clean preview beforehand.
+
+    The values checked are the MERGED ones, mirroring the create path's own
+    precedence: `_resolve_local_template` overwrites `config.resources` with the
+    template's block when the template declares one (`crud.py`
+    ``config.resources = template_data.get("resources", config.resources)``), so
+    a manifest value only survives when the template is silent — which is exactly
+    the case the bundled manifest hit.
+
+    For a ``github:`` template the merge cannot be computed without the network
+    call this function refuses to make, so the manifest's DECLARED values are
+    validated instead. That can over-report: if the remote template declares its
+    own resources, an invalid manifest value would have been discarded and the
+    deploy would have succeeded. Accepted deliberately — the alternative is
+    staying silent about a value that is either fatal or dead config, and the fix
+    (quote it, or use a supported value) is harmless in both cases.
+    """
+    # Lazy imports: crud imports service-layer modules, so a module-level import
     # here would close a cycle (same reason `_default_create_agent_fn` is lazy).
     from models import AgentConfig
-    from services.agent_service.crud import _resolve_local_template
+    from services.agent_service.capabilities import normalize_cpu, normalize_memory
+    from services.agent_service.crud import _get_default_resource, _resolve_local_template
+
+    # A throwaway config: `_resolve_local_template` mutates the object it is
+    # given (type/resources/tools/runtime from template.yaml). The manifest's
+    # resources are COPIED in rather than handed over, so neither the resolver
+    # nor the normalizers below (which write canonical values back) can mutate
+    # the parsed manifest during what must stay a read-only preview.
+    config = AgentConfig(
+        name=final_name, template=template, resources=dict(resources or {})
+    )
 
     try:
-        # A throwaway config: `_resolve_local_template` mutates the object it is
-        # given (type/resources/tools/runtime from template.yaml), which is why
-        # the manifest's own config is never handed to it.
-        _resolve_local_template(AgentConfig(name=final_name, template=template))
+        if template and template.startswith("local:"):
+            _resolve_local_template(config)
+
+        # Same validators, same defaults, same actionable messages as create.
+        normalize_cpu(config.resources.get("cpu"), _get_default_resource("cpu"))
+        normalize_memory(config.resources.get("memory"), _get_default_resource("memory"))
     except Exception as e:  # noqa: BLE001 — mirrors the create loop's catch
         reason, status_code = _failure_reason(e)
         return SystemDeployFailure(
             name=final_name,
             short_name=short_name,
-            template=template,
+            template=template or "",
             reason=reason,
             status_code=status_code,
         )
@@ -1036,11 +1097,49 @@ async def deploy_manifest(
             preview_failed = [
                 failure for failure in (
                     _preflight_template(
-                        final_name, short_name, manifest.agents[short_name].template
+                        final_name,
+                        short_name,
+                        manifest.agents[short_name].template,
+                        manifest.agents[short_name].resources,
                     )
                     for short_name, final_name in agent_names.items()
                 ) if failure is not None
             ]
+
+            # ent#126 (AC #2): the preview must show permission topology and
+            # schedules, not just agent names. Both come from the pure resolvers
+            # the real writers consume, so what is previewed is what deploys.
+            #
+            # `permission_edges` collapses the resolver's ordered write-set to
+            # {source: targets} for display. Lossless for the set of writes —
+            # each branch writes any given agent at most once (explicit's clear
+            # and set phases are disjoint) — and write order carries no meaning
+            # for a reader.
+            #
+            # Topology is OPTIMISTIC: it is resolved against the full agent map,
+            # whereas a partial deploy configures permissions against
+            # `created_map` (a subset). The UI states this.
+            edges, _preview_permission_count = resolve_permission_edges(
+                agent_names, manifest.permissions
+            )
+            try:
+                schedules_preview = resolve_schedule_previews(
+                    agent_names, manifest.agents
+                )
+            except Exception as e:  # noqa: BLE001
+                # A schedule the writer could not construct (e.g. a field
+                # ScheduleCreate rejects). Surfacing it as a preview BLOCKER is
+                # the point: post-deploy it degrades to a warning once the fleet
+                # already exists (deploy step 9).
+                reason, status_code = _failure_reason(e)
+                schedules_preview = []
+                preview_failed.append(SystemDeployFailure(
+                    name=manifest.name,
+                    short_name="(schedules)",
+                    template="",
+                    reason=f"Invalid schedule definition: {reason}",
+                    status_code=status_code,
+                ))
 
             return SystemDeployResponse(
                 # "valid" keeps its meaning — a manifest that will deploy. A
@@ -1054,6 +1153,13 @@ async def deploy_manifest(
                 prompt_updated=bool(manifest.prompt),
                 warnings=all_warnings,
                 failed=preview_failed,
+                permission_edges=dict(edges),
+                schedules_preview=schedules_preview,
+                system_view_requested=bool(manifest.system_view),
+                # `permissions_configured` / `schedules_created` deliberately stay
+                # at their 0 defaults on this branch: they mean "written", and
+                # changing a shipped field's meaning would mislead any existing
+                # consumer. Callers count the new arrays instead.
             )
 
         # 5. Create all agents — best-effort by default (trinity-enterprise#125):
@@ -1233,6 +1339,16 @@ async def deploy_manifest(
             )
             if system_view_id:
                 logger.info(f"Created System View '{manifest.system_view.name}' (ID: {system_view_id}) for system '{manifest.name}'")
+            else:
+                # ent#126: create_system_view swallows its exception and returns
+                # None, so without this the only trace of a lost view was a log
+                # line — the response looked identical to "no view requested"
+                # and a caller would navigate to an unfiltered dashboard.
+                all_warnings.append(
+                    f"System View '{manifest.system_view.name}' was requested but "
+                    "could not be created; the agents are still tagged with the "
+                    "system name."
+                )
 
         # 12. Start all agents (triggers Trinity injection with updated prompt)
         start_results = await start_all_agents(created_agents)
@@ -1254,6 +1370,7 @@ async def deploy_manifest(
             schedules_created=schedules_count,
             tags_configured=tags_count,
             system_view_created=system_view_id,
+            system_view_requested=bool(manifest.system_view),
             warnings=all_warnings,
             failed=failed
         )
