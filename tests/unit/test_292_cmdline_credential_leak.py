@@ -21,8 +21,6 @@ assumptions failing:
 from __future__ import annotations
 
 import importlib.util
-import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -34,18 +32,19 @@ _UTILS = (
 
 
 def _load(name: str):
-    """Load a module from the agent-server utils package directly.
+    """Load a module from the agent-server utils package by path.
 
     Importing `agent_server` pulls in FastAPI, which these pure-text helpers do
     not need and CI need not install in order to check a redaction rule.
+
+    Loaded WITHOUT registering anything in `sys.modules`: the sanitizer imports
+    only stdlib, so it needs no package parent, and a test that mutates
+    `sys.modules` leaks into whatever runs next under a shared interpreter.
     """
-    if not (_UTILS / f"{name}.py").exists():  # pragma: no cover
+    path = _UTILS / f"{name}.py"
+    if not path.exists():  # pragma: no cover
         pytest.skip("agent base image sources not present")
-    pkg = types.ModuleType("_ent292_pkg")
-    sys.modules["_ent292_pkg"] = pkg
-    spec = importlib.util.spec_from_file_location(
-        f"_ent292_pkg.{name}", _UTILS / f"{name}.py"
-    )
+    spec = importlib.util.spec_from_file_location(f"_ent292_{name}", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
