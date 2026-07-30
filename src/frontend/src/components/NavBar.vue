@@ -37,12 +37,14 @@
             >
               Agents
             </router-link>
+            <!-- ent#263 — Templates renamed to Library (templates + skills).
+                 startsWith keeps the tab lit for future /library/... deep links. -->
             <router-link
-              to="/templates"
+              to="/library"
               class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium"
-              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path === '/templates' }"
+              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path.startsWith('/library') }"
             >
-              Templates
+              Library
             </router-link>
             <!-- #1109 — single Operations entry replaces the former
                  Health / Ops / Executions links. One unified badge carries

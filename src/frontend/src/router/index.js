@@ -110,11 +110,20 @@ const routes = [
   // REMOVED: /files route - file management is now per-agent via Files tab in AgentDetail
   // REMOVED: /credentials route - credentials are now managed per-agent only
   // Old global credential management is replaced by per-agent CredentialsPanel
+  // ent#263 — Templates page renamed to Library: one surface for installable
+  // assets (agent templates + the skills library).
+  {
+    path: '/library',
+    name: 'Library',
+    component: () => import('../views/Library.vue'),
+    meta: { requiresAuth: true, title: 'Library' }
+  },
+  // Legacy redirect — function form so query AND hash survive the hop (the
+  // #1109 precedent preserves query only; hash carry added here for the
+  // Library's in-page section anchors).
   {
     path: '/templates',
-    name: 'Templates',
-    component: () => import('../views/Templates.vue'),
-    meta: { requiresAuth: true, title: 'Templates' }
+    redirect: to => ({ path: '/library', query: to.query, hash: to.hash })
   },
   // Legacy redirect: Events consolidated into the Operations Notifications tab (#1109)
   {
