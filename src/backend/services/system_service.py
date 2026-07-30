@@ -4,9 +4,12 @@ System manifest parsing and deployment service.
 Handles YAML parsing, validation, agent naming, and deployment orchestration.
 """
 import json
+import os
+import stat
 import yaml
 import re
 import logging
+from pathlib import Path
 from typing import Callable, Dict, List, Tuple, Optional
 
 from fastapi import HTTPException, Request
@@ -17,6 +20,9 @@ from models import (
     SystemAgentConfig,
     SystemPermissions,
     SystemViewConfig,
+    BundledManifestDetail,
+    BundledManifestSummary,
+    MANIFEST_MAX_BYTES,
     SystemDeployFailure,
     SystemDeployResponse,
     SystemSchedulePreview,
@@ -909,6 +915,266 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
 # Invariant #1: a service (the first-run seeder) must reuse the deploy pipeline
 # without importing a router; #1578 precedent)
 # ============================================================================
+
+# ============================================================================
+# ent#126: bundled-manifest catalog (read-only)
+#
+# `config/manifests/` is bind-mounted read-only into the backend at
+# /app/config/manifests by BOTH compose files, and WORKDIR is /app. Until now
+# the only code reading that directory was the first-run seeder, against one
+# hard-coded filename. These two functions turn it into a catalog the UI can
+# offer as "pick a system to install".
+# ============================================================================
+
+# Env-overridable because the bare relative default is correct at runtime
+# (WORKDIR /app + the :ro mount) but CWD-dependent under pytest — and a catalog
+# that silently returns [] because the CWD differs is a silent failure. Read at
+# CALL time, not import, so a test (or an operator) can point it elsewhere
+# without reloading the module.
+MANIFESTS_DIR_ENV = "TRINITY_MANIFESTS_DIR"
+_DEFAULT_MANIFESTS_DIR = "config/manifests"
+
+_MANIFEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_MANIFEST_SUFFIXES = (".yaml", ".yml")
+# Generous for a real manifest name, and short enough that `{id}.yaml` can never
+# reach the filesystem's own NAME_MAX. Without this an over-long id escapes as
+# OSError(ENAMETOOLONG) from `os.open` and surfaces as a bare 500 instead of the
+# 400 that a malformed id deserves.
+_MANIFEST_ID_MAX_LEN = 128
+
+
+def _manifests_dir() -> Path:
+    return Path(os.getenv(MANIFESTS_DIR_ENV) or _DEFAULT_MANIFESTS_DIR)
+
+
+def _resolve_manifest_path(manifest_id: str) -> Path:
+    """Map a manifest id onto a confined path under the manifests dir.
+
+    Raises ValueError on anything that is not a plain, in-directory id — the
+    router maps that to 400.
+
+    Layered on purpose, because no single check here is sufficient:
+
+    1. Character allowlist. Rejects `/`, backslashes, NUL and (being ASCII-only)
+       Unicode homoglyph tricks. FastAPI has already percent-decoded the path
+       parameter, so `%2e%2e%2f` arrives as `../` and is caught here.
+    2. EXPLICIT rejection of "", ".", ".." and any id containing "..". The regex
+       above does NOT do this — `.` is inside the character class, so `..` and
+       `...` match it happily. Relying on the regex for traversal is the mistake
+       #1759 taught (a guard tested against 9 leak shapes missed 8).
+    3. The suffix is ours by construction: the id is a STEM and we append
+       `.yaml`/`.yml` ourselves, so a caller cannot steer the extension at all.
+       A trailing `.yaml`/`.yml` in the id is tolerated and stripped, so both
+       `default-system` and `default-system.yaml` address the same file.
+    4. `.resolve()` both sides, then `is_relative_to`. This is what actually
+       defeats a symlink inside the directory pointing outside it.
+    """
+    raw = (manifest_id or "").strip()
+    if not raw or not _MANIFEST_ID_RE.match(raw):
+        raise ValueError(
+            "Invalid manifest id: must be letters, digits, dot, underscore or hyphen"
+        )
+    if len(raw) > _MANIFEST_ID_MAX_LEN:
+        raise ValueError(
+            f"Invalid manifest id: longer than {_MANIFEST_ID_MAX_LEN} characters"
+        )
+    # Tolerate (and normalise away) an explicit extension before the dot checks.
+    lowered = raw.lower()
+    for suffix in _MANIFEST_SUFFIXES:
+        if lowered.endswith(suffix):
+            raw = raw[: -len(suffix)]
+            break
+    if raw in ("", ".", "..") or ".." in raw:
+        raise ValueError("Invalid manifest id: path traversal is not allowed")
+
+    base = _manifests_dir().resolve()
+    for suffix in _MANIFEST_SUFFIXES:
+        candidate = (base / f"{raw}{suffix}").resolve()
+        if not candidate.is_relative_to(base):
+            # A symlink inside the directory pointing outside it.
+            raise ValueError("Invalid manifest id: resolves outside the manifests directory")
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"No bundled manifest '{manifest_id}'")
+
+
+def _read_manifest_text(path: Path) -> str:
+    """Read a confined manifest path safely.
+
+    Opened ONCE and fstat'd through that same descriptor, rather than
+    stat-then-read: `config/manifests` is a host bind mount in both compose
+    files, so a swap or a growth between a separate stat and a later read is a
+    real window, and the file that was checked must be the file that is read.
+
+    `O_NOFOLLOW` refuses a symlinked final component (the confinement check in
+    `_resolve_manifest_path` covers where a symlink POINTS; this covers the
+    TOCTOU race on the link itself), and at most `cap + 1` bytes are read so an
+    oversized file is detected without being slurped into memory first.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("Not a regular file")
+        if st.st_size > MANIFEST_MAX_BYTES:
+            raise ValueError(
+                f"Manifest is larger than {MANIFEST_MAX_BYTES} bytes"
+            )
+        with os.fdopen(fd, "rb") as fh:
+            fd = -1  # ownership transferred to the file object
+            raw = fh.read(MANIFEST_MAX_BYTES + 1)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+    if len(raw) > MANIFEST_MAX_BYTES:
+        raise ValueError(f"Manifest is larger than {MANIFEST_MAX_BYTES} bytes")
+    return raw.decode("utf-8")
+
+
+def _assess_manifest(yaml_text: str) -> Tuple[Optional[SystemManifest], bool, Optional[str]]:
+    """Run the FULL three-stage check a deploy would run. -> (manifest, valid, reason)
+
+    `parse_manifest` alone is not a validity check: it accepts invalid system and
+    agent names, unsupported template prefixes and bogus permission presets, and
+    on a non-mapping `agents:` value it raises AttributeError rather than
+    ValueError. So a card marked "valid" on parsing alone would still fail to
+    deploy. All three stages run — parse, validate, and the same side-effect-free
+    template/resource preflight the dry-run uses — and the field is called `valid`
+    only because all three ran. If this is ever reduced to parsing, rename it
+    `parseable`.
+    """
+    try:
+        manifest = parse_manifest(yaml_text)
+    except Exception as e:  # noqa: BLE001 — incl. the AttributeError shape above
+        return None, False, str(e)
+
+    try:
+        validate_manifest(manifest)
+    except Exception as e:  # noqa: BLE001
+        return manifest, False, str(e)
+
+    # Base names, not `_N`-resolved ones: suffixing is a deploy-time concern and
+    # resolving it here would mean a DB round trip per agent per card.
+    blockers = [
+        f"{short}: {failure.reason}"
+        for short, failure in (
+            (
+                short,
+                _preflight_template(
+                    f"{manifest.name}-{short}", short, cfg.template, cfg.resources
+                ),
+            )
+            for short, cfg in manifest.agents.items()
+        )
+        if failure is not None
+    ]
+    if blockers:
+        return manifest, False, "; ".join(blockers)
+
+    return manifest, True, None
+
+
+def _summarize_manifest(path: Path, yaml_text: str) -> BundledManifestSummary:
+    """Build one catalog entry. Never raises."""
+    manifest, valid, reason = _assess_manifest(yaml_text)
+    summary = BundledManifestSummary(
+        id=path.stem,
+        filename=path.name,
+        valid=valid,
+        reason=reason,
+    )
+    if manifest is None:
+        return summary
+
+    summary.name = manifest.name
+    summary.description = manifest.description
+    summary.agent_count = len(manifest.agents)
+    summary.templates = sorted({c.template for c in manifest.agents.values() if c.template})
+    summary.schedule_count = sum(
+        len(c.schedules or []) for c in manifest.agents.values()
+    )
+    # A top-level `prompt:` OVERWRITES the platform-wide trinity_prompt for every
+    # agent, so the UI needs it up front to gate deploy behind an acknowledgement.
+    summary.sets_prompt = bool(manifest.prompt)
+    summary.permissions_preset = (
+        manifest.permissions.preset if manifest.permissions else None
+    )
+    try:
+        summary.already_deployed = any(
+            agent_exists(f"{manifest.name}-{short}") for short in manifest.agents
+        )
+    except Exception:  # noqa: BLE001 — a DB hiccup must not blank the catalog
+        logger.warning(
+            f"Could not determine deployed state for manifest '{path.name}'",
+            exc_info=True,
+        )
+    return summary
+
+
+def list_bundled_manifests() -> List[BundledManifestSummary]:
+    """List the manifests shipped in `config/manifests/` (ent#126).
+
+    Fail-soft per file: an unparseable, invalid or oversized manifest is listed
+    with `valid: false` and a short reason rather than 500-ing the request. One
+    bad file must not hide the others — that is precisely how a broken bundled
+    manifest stays invisible.
+    """
+    directory = _manifests_dir()
+    try:
+        entries = sorted(
+            child for child in directory.iterdir()
+            if child.suffix.lower() in _MANIFEST_SUFFIXES
+        )
+    except (OSError, FileNotFoundError) as e:
+        # A missing directory is an empty catalog, not an error — but say so,
+        # because the alternative reading is a silently misconfigured CWD.
+        logger.warning(f"Manifest directory '{directory}' is unreadable: {e}")
+        return []
+
+    summaries: List[BundledManifestSummary] = []
+    seen_ids: set = set()
+    for path in entries:
+        if path.stem in seen_ids:
+            # Both `x.yaml` and `x.yml` present: the id is the stem, so only the
+            # first (.yaml, by sort order) is addressable. Say so rather than
+            # listing an entry that resolves to a different file.
+            logger.warning(
+                f"Skipping '{path.name}': manifest id '{path.stem}' is already taken"
+            )
+            continue
+        seen_ids.add(path.stem)
+        # Checked BEFORE the read: `_read_manifest_text` opens with O_NOFOLLOW and
+        # would fail on a symlink anyway, but as an unexplained ELOOP listed as a
+        # broken manifest. A symlink is not a broken file, it is a file we decline
+        # to serve, and the reason should say that.
+        if path.is_symlink():
+            logger.warning(f"Skipping '{path.name}': symlinked manifests are not served")
+            continue
+        try:
+            text = _read_manifest_text(path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not read bundled manifest '{path.name}': {e}")
+            summaries.append(BundledManifestSummary(
+                id=path.stem, filename=path.name, valid=False, reason=str(e)
+            ))
+            continue
+        summaries.append(_summarize_manifest(path, text))
+    return summaries
+
+
+def read_bundled_manifest(manifest_id: str) -> BundledManifestDetail:
+    """Read one bundled manifest plus its summary (ent#126).
+
+    Raises ValueError (-> 400) on a malformed id and FileNotFoundError (-> 404)
+    on an unknown one.
+    """
+    path = _resolve_manifest_path(manifest_id)
+    text = _read_manifest_text(path)
+    summary = _summarize_manifest(path, text)
+    return BundledManifestDetail(**summary.model_dump(), manifest=text)
+
 
 def _default_create_agent_fn():
     """Resolve the agent-create function at call time.
