@@ -687,11 +687,17 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
 
     An agent-scoped key resolves to its owner CARRYING THE OWNER'S ROLE, so on a
     default admin-owned install every agent's injected `TRINITY_MCP_API_KEY`
-    satisfied this gate. That is three consecutive incidents of one class —
+    satisfied this gate. ent#297 traced FIVE occurrences of one class —
     trinity-ops-agent#232, #1644 (retention acknowledge), #1816 (system-agent
-    restart) — each previously closed by bolting `reject_agent_principal` onto
-    one more endpoint. Three occurrences means the GATE was wrong, not the
-    endpoints, so the rejection moves here and the class closes at once.
+    restart), ent#236 and ent#293 (skills-library repointing) — each previously
+    closed by bolting `reject_agent_principal` onto one more endpoint, 18 of
+    them, against 114 admin-gated call sites. Five occurrences means the GATE
+    was wrong, not the endpoints, so the rejection moves here.
+
+    Note this closes the class for THIS gate and `assert_admin`. It does not
+    reach `require_role("admin")`, a third spelling that must not exist — see
+    `require_role`'s docstring for why it stays permissive and the guard that
+    keeps the spelling from coming back.
 
     Safe by construction, verified rather than assumed: the agent-key flows that
     must keep working — heartbeat, structured reports, the #1083 result callback
@@ -727,6 +733,24 @@ def require_role(min_role: str):
 
     Raises:
         HTTPException(403): If user's role is below the minimum required
+
+    **Deliberately does NOT call `reject_agent_principal`** — read this before
+    "fixing" it to match `require_admin`/`assert_admin` (ent#293/ent#297).
+
+    Those two gates reject agent principals because an admin gate is never
+    agent-callable. This one is different: its main consumer is
+    `require_role("creator")` on `POST /api/agents`, and agent-spawned agent
+    creation is a SUPPORTED feature (ent#69 Part 2 — the spawn persists
+    `spawned_by_agent`, auto-grants the parent→child permission edge, and is
+    bounded by `enforce_agent_spawn_scope` + the per-parent spawn rate limit).
+    Adding a blanket rejection here would break ghost spawning outright.
+
+    The corollary, and the trap ent#297 walked into: `require_role("admin")` was
+    a THIRD spelling of an admin gate that this permissiveness left open after
+    the other two were closed. Do not write `require_role("admin")` — use
+    `require_admin`, which is equivalent (`admin` is last in ROLE_HIERARCHY) and
+    carries the agent rejection. `tests/unit/test_293_admin_gate_rejects_agent_keys.py`
+    fails the build if a `require_role("admin")` reappears.
     """
     def _require_role(current_user: User = Depends(get_current_user)) -> User:
         _reject_connector_principal(current_user)
@@ -961,11 +985,17 @@ def assert_admin(current_user: User, *, detail: str = "Admin access required") -
 
     An agent-scoped key resolves to its owner CARRYING THE OWNER'S ROLE, so on a
     default admin-owned install every agent's injected `TRINITY_MCP_API_KEY`
-    satisfied this gate. That is three consecutive incidents of one class —
+    satisfied this gate. ent#297 traced FIVE occurrences of one class —
     trinity-ops-agent#232, #1644 (retention acknowledge), #1816 (system-agent
-    restart) — each previously closed by bolting `reject_agent_principal` onto
-    one more endpoint. Three occurrences means the GATE was wrong, not the
-    endpoints, so the rejection moves here and the class closes at once.
+    restart), ent#236 and ent#293 (skills-library repointing) — each previously
+    closed by bolting `reject_agent_principal` onto one more endpoint, 18 of
+    them, against 114 admin-gated call sites. Five occurrences means the GATE
+    was wrong, not the endpoints, so the rejection moves here.
+
+    Note this closes the class for THIS gate and `assert_admin`. It does not
+    reach `require_role("admin")`, a third spelling that must not exist — see
+    `require_role`'s docstring for why it stays permissive and the guard that
+    keeps the spelling from coming back.
 
     Safe by construction, verified rather than assumed: the agent-key flows that
     must keep working — heartbeat, structured reports, the #1083 result callback

@@ -360,3 +360,57 @@ def test_the_granting_endpoints_stay_admin_only():
     assert _calls_in_body(subscriptions.delete_subscription, "assert_admin")
     assert "require_admin" in _dependency_names(credentials.get_encryption_key)
     assert "require_admin" in _dependency_names(agent_ssh.create_ssh_access)
+
+
+# ---------------------------------------------------------------------------
+# The third spelling — found reviewing this PR
+# ---------------------------------------------------------------------------
+
+def test_no_route_uses_require_role_admin_as_an_admin_gate():
+    """`require_role("admin")` is a THIRD spelling of an admin gate, and the one
+    this PR's first pass missed.
+
+    `require_role` rejects connector principals but NOT agent ones, and that is
+    deliberate — agent-spawned agent creation runs through
+    `require_role("creator")` (ent#69 Part 2), so a blanket rejection there would
+    break ghost spawning. The consequence is that closing `require_admin` and
+    `assert_admin` left `require_role("admin")` open, and its one call site was
+    `POST /api/agents/{name}/circuit-breaker/reset` — a route ent#297 names in
+    its blast radius. An agent able to re-close its own dispatch breaker on
+    demand defeats the control that exists to contain it.
+
+    `require_admin` is equivalent for the admin case (`admin` is last in
+    ROLE_HIERARCHY, so ">= admin" is "== admin") AND rejects agent principals,
+    so it is the only correct spelling. Pinned as a source scan because the
+    failure mode is a NEW route choosing the wrong helper, which no behavioural
+    test of existing routes can see.
+    """
+    import ast
+    from pathlib import Path
+
+    routers = Path(__file__).resolve().parents[2] / "src" / "backend" / "routers"
+    offenders = []
+    for path in sorted(routers.rglob("*.py")):
+        # AST, not a regex over lines: the comment ON the fixed call site
+        # explains what not to write and therefore CONTAINS the offending
+        # string. A text scan flags its own documentation — which is exactly
+        # how the first version of this test failed, and how the sibling
+        # `_calls_in_body` helper above came to exist.
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:            # newer syntax than this interpreter
+            continue
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and getattr(node.func, "id", None) == "require_role"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "admin"
+            ):
+                offenders.append(f"{path.name}:{node.lineno}")
+
+    assert not offenders, (
+        "use `require_admin` (rejects agent principals) rather than "
+        f'`require_role("admin")` (does not): {offenders}'
+    )

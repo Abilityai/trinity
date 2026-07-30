@@ -31,7 +31,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope
+from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -826,7 +826,20 @@ async def force_release_agent(
 @router.post("/{agent_name}/circuit-breaker/reset")
 async def reset_circuit_breaker_endpoint(
     agent_name: AuthorizedAgentByName,
-    current_user: User = Depends(require_role("admin")),
+    # ent#293/ent#297: was `require_role("admin")` — the THIRD spelling of an
+    # admin gate, and the one this PR's first pass missed. `require_role`
+    # rejects connector principals but NOT agent ones, deliberately: agent
+    # -spawned agent creation runs through `require_role("creator")` (ent#69
+    # Part 2). So after `require_admin`/`assert_admin` were closed, an
+    # admin-owned agent's own key still passed HERE — and ent#297 names
+    # circuit-breaker resets in its blast radius. An agent that can re-close its
+    # own dispatch breaker on demand defeats the control built to contain it.
+    #
+    # `require_admin` is equivalent for this case (`admin` is last in
+    # ROLE_HIERARCHY, so ">= admin" is "== admin") and additionally rejects
+    # agent principals. Swapping this ONE call site is the fix; adding the
+    # rejection to `require_role` itself would break ghost spawning.
+    current_user: User = Depends(require_admin),
 ):
     """Force the agent's circuit breakers to closed (#921, #526).
 
