@@ -21,6 +21,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+from services.credential_charset import (
+    CREDENTIAL_DETECTOR_NAME_RE,
+    CREDENTIAL_DETECTOR_REF_RE,
+)
 from services.template_service import _is_platform_injected
 from services.git_service import _GITIGNORE_PATTERNS
 
@@ -92,7 +96,12 @@ def _template(snap: Dict[str, Any]) -> Tuple[Optional[dict], Optional[str]]:
     return (data if isinstance(data, dict) else {}), None
 
 
-_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# The shared detector charset (services/credential_charset.py). This finder was
+# already the wide one; naming the constant is what stops a future "align the
+# regexes" pass from narrowing it to match `_env_example_vars` — the wrong
+# direction, because the substitution engines accept the wide form. Read that
+# module's NON-MEMBERS list before touching any sibling pattern.
+_VAR_RE = CREDENTIAL_DETECTOR_REF_RE
 
 
 def _mcp_vars(snap: Dict[str, Any]) -> List[str]:
@@ -124,8 +133,14 @@ def _env_example_vars(snap: Dict[str, Any]) -> List[str]:
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        # The shared detector charset, NOT uppercase-only. This reader is the
+        # `provided` side of K-001 (HARD) and the `has_vars` precondition of
+        # K-003 (SOFT): an uppercase-only view made a correctly documented
+        # `my_var=` invisible, so K-001 HARD-failed a template that documents
+        # every variable it references. `.strip()` above is load-bearing — the
+        # validator anchors with `\Z`. (ent#128)
         name = line.split("=", 1)[0].strip()
-        if re.match(r"^[A-Z][A-Z0-9_]*$", name):
+        if CREDENTIAL_DETECTOR_NAME_RE.match(name):
             out.append(name)
     return out
 

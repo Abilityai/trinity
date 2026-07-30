@@ -17,6 +17,10 @@ from pathlib import Path, PurePosixPath
 import httpx
 import yaml
 from config import DEFAULT_GITHUB_TEMPLATE_REPOS, GITHUB_PAT_CREDENTIAL_ID
+from services.credential_charset import (
+    CREDENTIAL_DETECTOR_NAME_RE,
+    CREDENTIAL_DETECTOR_REF_RE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +312,39 @@ def credential_env_file_names(block) -> List[str]:
     if not isinstance(env_file, list):
         return []
     return [entry for entry in env_file if isinstance(entry, str) and entry.strip()]
+
+
+def credential_mcp_env_vars(block) -> Dict[str, List[str]]:
+    """`{server name: [declared variable names]}`, tolerant of any shape.
+
+    The per-server companion to `credential_mcp_server_names`, tolerant at all
+    THREE levels a template can break: the block, the `mcp_servers` mapping, and
+    each server's `env_vars` list. Returns only non-empty strings, so a mapping
+    or a list smuggled in as an `env_vars` element can never reach a consumer —
+    that element is exactly the shape that turns a `{r["name"] for r in ...}`
+    comprehension into `TypeError: unhashable type: 'dict'`, and a raise inside a
+    compatibility check downgrades a HARD gate to `skipped`. Never raises.
+
+    Deliberately does NOT validate names against the detector charset: this
+    answers "what did the author DECLARE", which is compared against `${VAR}`
+    references as-is. Charset validation belongs to the enriched
+    `credential_setup:` descriptors, where a bad name is an authoring error worth
+    naming.
+    """
+    servers = _credentials_mapping(block).get("mcp_servers")
+    if not isinstance(servers, dict):
+        return {}
+
+    out: Dict[str, List[str]] = {}
+    for name, server_config in servers.items():
+        env_vars = server_config.get("env_vars") if isinstance(server_config, dict) else None
+        if not isinstance(env_vars, list):
+            out[str(name)] = []
+            continue
+        out[str(name)] = [
+            entry for entry in env_vars if isinstance(entry, str) and entry.strip()
+        ]
+    return out
 
 
 def _template_credential_errors(block, template_id: str) -> List[str]:
@@ -762,7 +799,11 @@ def extract_env_vars_from_mcp_json(file_path: Path) -> Dict[str, List[str]]:
         print(f"Warning: Could not parse {file_path}: {e}")
         return {}
 
-    pattern = r'\$\{([A-Z][A-Z0-9_]*)\}'
+    # The shared detector charset, NOT uppercase-only: `${my_var}` is substituted
+    # at runtime, so an uppercase-only finder here left a real reference invisible
+    # to the deploy-time credential-gap warning while K-001/K-002 HARD-failed on
+    # the same variable. See services/credential_charset.py. (ent#128)
+    pattern = CREDENTIAL_DETECTOR_REF_RE
     result = {}
     mcp_servers = data.get("mcpServers", {})
 
@@ -799,7 +840,13 @@ def extract_credentials_from_template_yaml(file_path: Path) -> Dict:
         print(f"Warning: Could not parse {file_path}: {e}")
         return {}
 
-    return data.get("credentials", {})
+    # `yaml.safe_load("")` returns None and a scalar/list document returns a
+    # non-mapping, so a bare `.get()` raises AttributeError. Route both levels
+    # through the tolerant reader: this always answers with a mapping, which is
+    # what its caller immediately `.get("mcp_servers", {})`s. (ent#128)
+    return _credentials_mapping(
+        (data if isinstance(data, dict) else {}).get("credentials")
+    )
 
 
 def extract_credentials_from_env_example(file_path: Path) -> List[str]:
@@ -815,8 +862,10 @@ def extract_credentials_from_env_example(file_path: Path) -> List[str]:
                 if not line or line.startswith('#'):
                     continue
                 if '=' in line:
+                    # `.strip()` before the anchored match is load-bearing — the
+                    # validator uses `\Z`, so it would reject a trailing newline.
                     var_name = line.split('=')[0].strip()
-                    if var_name and re.match(r'^[A-Z][A-Z0-9_]*$', var_name):
+                    if var_name and CREDENTIAL_DETECTOR_NAME_RE.match(var_name):
                         vars.append(var_name)
     except IOError as e:
         print(f"Warning: Could not read {file_path}: {e}")
@@ -873,15 +922,23 @@ def extract_agent_credentials(repo_path: Path) -> Dict:
     if template_yaml.exists():
         template_creds = extract_credentials_from_template_yaml(template_yaml)
 
-        for server_name, server_config in template_creds.get("mcp_servers", {}).items():
-            env_vars = server_config.get("env_vars", [])
+        for server_name, env_vars in credential_mcp_env_vars(template_creds).items():
             for var in env_vars:
                 if var not in all_vars:
                     all_vars[var] = []
-                if f"mcp:{server_name}" not in all_vars[var]:
+                # Test BOTH source spellings. The guard used to check `mcp:<s>`
+                # while appending `template:mcp:<s>`, so it could only ever
+                # suppress the cross-source duplicate and never its own —
+                # harmless today because the loop visits each server once, but a
+                # guard that does not cover what it appends is a trap for the
+                # next caller. (ent#128)
+                if (
+                    f"mcp:{server_name}" not in all_vars[var]
+                    and f"template:mcp:{server_name}" not in all_vars[var]
+                ):
                     all_vars[var].append(f"template:mcp:{server_name}")
 
-        env_file_vars = template_creds.get("env_file", [])
+        env_file_vars = credential_env_file_names(template_creds)
         result["env_file_vars"] = env_file_vars
         for var in env_file_vars:
             if var not in all_vars:
