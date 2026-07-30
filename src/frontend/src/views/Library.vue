@@ -11,6 +11,13 @@
               Installable assets for your fleet — agent templates and skills
             </p>
           </div>
+          <!-- In-page jump anchors — deliberately NOT ?kind= filter pills:
+               two disjoint section shapes, stacked (ent#263). -->
+          <nav class="hidden sm:flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+            <a href="#agent-templates" class="hover:text-gray-700 dark:hover:text-gray-200 hover:underline">Agent templates</a>
+            <span aria-hidden="true">·</span>
+            <a href="#skills" class="hover:text-gray-700 dark:hover:text-gray-200 hover:underline">Skills</a>
+          </nav>
         </div>
 
         <!-- Agent Templates section (ent#263: the Library's first asset kind).
@@ -234,6 +241,15 @@
           </div>
         </div>
         </section>
+
+        <!-- Skills section (ent#263): fleet-level browse over the shared
+             skills library. Assignment stays on each agent's Skills tab
+             (ent#182: one skill model, no parallel mechanisms); this section
+             owns its own loading/error/empty states, isolated from the
+             templates fetch above. -->
+        <section id="skills" class="mb-8">
+          <LibrarySkillsSection />
+        </section>
       </div>
     </main>
 
@@ -252,6 +268,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import NavBar from '../components/NavBar.vue'
 import CreateAgentModal from '../components/CreateAgentModal.vue'
+import LibrarySkillsSection from '../components/LibrarySkillsSection.vue'
 import api from '../api'
 
 const router = useRouter()
