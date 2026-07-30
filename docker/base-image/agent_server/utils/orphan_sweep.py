@@ -52,7 +52,15 @@ try:
 except ImportError:  # pragma: no cover - exercised by unit tests
     from orphan_allowlist import resolve_allowlist, _read_cmdline  # type: ignore[no-redef]
 
-from .credential_sanitizer import sanitize_cmdline
+# Dual import, matching `subprocess_pgroup` two files over: these utils are
+# imported package-relatively in production (inside `agent_server`) but flat by
+# tests that add `utils/` to sys.path without loading the package. A bare
+# relative import breaks the flat path at collection time — which is exactly
+# what happened when this line was first added.
+try:
+    from .credential_sanitizer import sanitize_cmdline
+except ImportError:  # pragma: no cover - exercised by the flat-import tests
+    from credential_sanitizer import sanitize_cmdline  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 
