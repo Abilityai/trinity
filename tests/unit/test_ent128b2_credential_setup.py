@@ -874,3 +874,208 @@ def test_credential_setup_is_invisible_to_the_write_path():
         "agent-x",
     )
     assert files[".env"].endswith("STRIPE_API_KEY=v")
+
+
+# ===========================================================================
+# The schema artifact — it is a published contract, so it gets tested
+# ===========================================================================
+
+_SCHEMA_PATH = _PROJECT_ROOT / "docs" / "schemas" / "trinity-agent-credentials.schema.json"
+
+
+def _schema() -> dict:
+    import json
+
+    return json.loads(_SCHEMA_PATH.read_text())
+
+
+def test_schema_is_valid_json_and_draft_2020_12():
+    schema = _schema()
+    assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+    # Date-stamped $id: a future revision gets a new date and this one keeps
+    # answering for templates written against it.
+    assert "2026-07-30" in schema["$id"]
+
+
+def test_schema_keeps_unknown_template_keys_valid():
+    """template.yaml carries many keys this schema says nothing about, and a
+    template predating the schema must stay VALID."""
+    schema = _schema()
+    assert schema["additionalProperties"] is True
+    assert schema["properties"]["credentials"]["additionalProperties"] is True
+
+
+def test_schema_documents_config_files_as_deprecated_rather_than_omitting_it():
+    """G2/W13: undocumented is not a control.
+
+    The previous posture left `config_files` out entirely, which made the
+    authoritative contract answer VALID to `path: /etc/cron.d/pwn`. Enumerated +
+    deprecated + a containment pattern keeps it reversible AND stops the schema
+    blessing a traversal.
+    """
+    config_files = _schema()["properties"]["credentials"]["properties"]["config_files"]
+    assert config_files["deprecated"] is True
+    assert "DEPRECATED" in config_files["description"]
+
+    import re
+
+    pattern = re.compile(config_files["items"]["properties"]["path"]["pattern"])
+    assert pattern.match("app/config.json")
+    for escape in ("/etc/cron.d/pwn", "../../etc/passwd", "a/../../b", "..", "../x"):
+        assert not pattern.match(escape), f"schema accepts {escape!r}"
+
+
+def test_schema_setup_url_pattern_rejects_userinfo_and_non_https():
+    import re
+
+    pattern = re.compile(
+        _schema()["properties"]["credential_setup"]["items"]["properties"]["setup_url"][
+            "pattern"
+        ]
+    )
+    assert pattern.match("https://dashboard.stripe.com/apikeys")
+    assert pattern.match("HTTPS://dashboard.stripe.com/apikeys")
+    assert not pattern.match("https://google.com@evil.tld/apikey")
+    assert not pattern.match("http://example.com/k")
+    assert not pattern.match("javascript:alert(1)")
+
+
+def test_schema_carries_the_unknown_consumer_requirement():
+    """A2: without this MUST, a naive consumer renders un-enriched legacy names as
+    required fields."""
+    comment = _schema()["$comment"]
+    assert 'required: \\"unknown\\"' in comment or 'required: "unknown"' in comment
+    assert "MUST NOT present it as a required field" in comment
+    assert "platform_injected" in comment
+
+
+def test_schema_field_caps_match_the_implementation():
+    """The reviewed text and the enforced text must not drift."""
+    from services.template_service import _CREDENTIAL_FIELD_MAX, _MAX_SETUP_URL_LEN
+
+    props = _schema()["properties"]["credential_setup"]["items"]["properties"]
+    for field, cap in _CREDENTIAL_FIELD_MAX.items():
+        if field == "format":
+            continue  # an enum, not a length
+        assert props[field]["maxLength"] == cap, field
+    assert props["setup_url"]["maxLength"] == _MAX_SETUP_URL_LEN
+
+
+def test_schema_vocabulary_matches_the_implementation():
+    from services.template_service import _CREDENTIAL_FORMATS, _CREDENTIAL_SETUP_FIELDS
+
+    items = _schema()["properties"]["credential_setup"]["items"]
+    assert set(items["properties"]) == set(_CREDENTIAL_SETUP_FIELDS)
+    assert set(items["properties"]["format"]["enum"]) == set(_CREDENTIAL_FORMATS)
+    # The `x-` escape hatch is part of the contract, so it is in the artifact.
+    assert "^x-" in items["patternProperties"]
+
+
+def test_schema_record_cap_matches_the_implementation():
+    from services.template_service import _MAX_CREDENTIAL_RECORDS
+
+    assert _schema()["properties"]["credential_setup"]["maxItems"] == _MAX_CREDENTIAL_RECORDS
+
+
+# `jsonschema` is not a declared Trinity dependency (it is only transitively
+# present in some venvs), so the live validation is opportunistic. The pattern
+# assertions above are the unconditional guard and cover every security-relevant
+# constraint on their own.
+_SCHEMA_CASES = [
+    pytest.param(
+        {
+            "name": "x",
+            "credentials": {
+                "mcp_servers": {"stripe": {"env_vars": ["STRIPE_API_KEY"]}},
+                "env_file": ["VAULT_BASE_PATH"],
+            },
+            "credential_setup": [
+                {
+                    "name": "STRIPE_API_KEY",
+                    "title": "Stripe secret key",
+                    "description": "Powers the stripe MCP server.",
+                    "required": True,
+                    "secret": True,
+                    "setup_url": "https://dashboard.stripe.com/apikeys",
+                },
+                {
+                    "name": "VAULT_BASE_PATH",
+                    "required": False,
+                    "secret": False,
+                    "format": "dirpath",
+                    "default": "./Brain",
+                },
+            ],
+        },
+        True,
+        id="worked-example",
+    ),
+    pytest.param({"name": "x", "credentials": {}}, True, id="zero-cred-explicit"),
+    pytest.param({"name": "x", "credentials": None}, True, id="zero-cred-null"),
+    pytest.param({"name": "x", "skills": ["a"]}, True, id="no-credentials-key"),
+    pytest.param(
+        {"credentials": {"config_files": [{"path": "app/cfg.json", "template": "k={K}"}]}},
+        True,
+        id="legacy-config_files-relative",
+    ),
+    pytest.param(
+        {"credentials": {"config_files": [{"path": "/etc/cron.d/pwn", "template": "x"}]}},
+        False,
+        id="config_files-absolute",
+    ),
+    pytest.param(
+        {"credentials": {"config_files": [{"path": "../../etc/passwd", "template": "x"}]}},
+        False,
+        id="config_files-traversal",
+    ),
+    pytest.param(
+        {"credentials": {"mcp_servers": {"s": {"env_vars": [{"K": "v"}]}}}},
+        False,
+        id="env_vars-element-mapping",
+    ),
+    pytest.param(
+        {"credentials": {"env_file": "OPENAI_API_KEY"}}, False, id="env_file-bare-string"
+    ),
+    pytest.param(
+        {
+            "credentials": {"env_file": ["A"]},
+            "credential_setup": [{"name": "A", "setup_url": "https://google.com@evil.tld/x"}],
+        },
+        False,
+        id="setup_url-userinfo",
+    ),
+    pytest.param(
+        {"credentials": {"env_file": ["A"]}, "credential_setup": [{"name": "A", "is_required": True}]},
+        False,
+        id="unknown-setup-key",
+    ),
+    pytest.param(
+        {"credentials": {"env_file": ["A"]}, "credential_setup": [{"name": "A", "x-vendor": {"z": 1}}]},
+        True,
+        id="x-extension",
+    ),
+    # W13's accepted asymmetry, asserted rather than left as a surprise: the root
+    # keeps `additionalProperties: true` for backward compatibility, so a made-up
+    # top-level key is VALID. The schema constrains the credential contract, not
+    # the whole of template.yaml.
+    pytest.param(
+        {"credentials": {"env_file": ["A"]}, "exec_on_start": "curl evil"},
+        True,
+        id="unknown-root-key-is-valid-by-design",
+    ),
+]
+
+
+@pytest.mark.parametrize("document,expected_valid", _SCHEMA_CASES)
+def test_schema_validates_real_documents(document, expected_valid):
+    jsonschema = pytest.importorskip("jsonschema")
+
+    validator = jsonschema.Draft202012Validator(_schema())
+    errors = list(validator.iter_errors(document))
+    assert (not errors) is expected_valid, [e.message for e in errors]
+
+
+def test_schema_is_itself_a_valid_json_schema():
+    jsonschema = pytest.importorskip("jsonschema")
+
+    jsonschema.Draft202012Validator.check_schema(_schema())
