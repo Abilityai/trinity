@@ -1149,3 +1149,185 @@ def test_no_reference_example_asks_for_a_platform_injected_variable():
                     f"{name} asks an operator for the platform-injected "
                     f"{entry['name']}"
                 )
+
+
+# ===========================================================================
+# §4's new shape-error rows for `mcp_servers`
+# ===========================================================================
+#
+# Before ent#128 `credential_shape_errors` checked only that `mcp_servers` was a
+# dict, so the per-server and per-ELEMENT shapes were unnamed — and the element
+# shape is the dangerous one: an `env_vars` entry smuggled in as a mapping is what
+# turns a downstream set comprehension into `TypeError: unhashable type: 'dict'`.
+
+@pytest.mark.parametrize(
+    "block,fragment",
+    [
+        (
+            {"mcp_servers": {"stripe": "nope"}},
+            "credentials.mcp_servers.stripe: expected a mapping with an 'env_vars' list, got string",
+        ),
+        (
+            {"mcp_servers": {"stripe": ["a"]}},
+            "credentials.mcp_servers.stripe: expected a mapping with an 'env_vars' list, got list",
+        ),
+        (
+            {"mcp_servers": {"stripe": {"env_vars": "nope"}}},
+            "credentials.mcp_servers.stripe.env_vars: expected a list of variable names, got string",
+        ),
+        (
+            {"mcp_servers": {"stripe": {"env_vars": [{"K": "v"}]}}},
+            "credentials.mcp_servers.stripe.env_vars[0]: expected a variable name (string), got mapping",
+        ),
+        (
+            {"mcp_servers": {"stripe": {"env_vars": ["OK", ["a"]]}}},
+            "credentials.mcp_servers.stripe.env_vars[1]: expected a variable name (string), got list",
+        ),
+        (
+            {"mcp_servers": {"stripe": {"env_vars": [None]}}},
+            "credentials.mcp_servers.stripe.env_vars[0]: expected a variable name (string), got null",
+        ),
+    ],
+)
+def test_mcp_servers_shape_errors_are_named(block, fragment):
+    from services.template_service import credential_shape_errors
+
+    assert fragment in credential_shape_errors(block), credential_shape_errors(block)
+
+
+def test_a_wellformed_mcp_servers_block_produces_no_errors():
+    from services.template_service import credential_shape_errors
+
+    assert credential_shape_errors(
+        {"mcp_servers": {"stripe": {"env_vars": ["STRIPE_API_KEY"]}}, "env_file": ["A"]}
+    ) == []
+    # A server with no `env_vars` at all is legal — it declares no credentials.
+    assert credential_shape_errors({"mcp_servers": {"stripe": {}}}) == []
+
+
+def test_the_server_name_is_sanitized_in_its_own_error():
+    """The label is built from an author-controlled mapping key."""
+    from services.template_service import credential_shape_errors
+
+    errors = credential_shape_errors({"mcp_servers": {"bad\x1b[2Jname": "nope"}})
+    assert errors and all("\x1b" not in e for e in errors)
+
+
+def test_the_write_path_now_rejects_a_malformed_env_vars_element():
+    """Behaviour change, release-noted: `generate_credential_files` fails loud.
+
+    Previously a template with `env_vars: [{K: v}]` created an agent silently — the
+    writer never reads `env_vars`. Per PR-A's write-path contract, a declaration
+    nobody can parse must not produce credential files.
+    """
+    from services.template_service import (
+        CredentialDeclarationError,
+        generate_credential_files,
+    )
+
+    with pytest.raises(CredentialDeclarationError) as exc:
+        generate_credential_files(
+            {"name": "f", "credentials": {"mcp_servers": {"s": {"env_vars": [{"K": "v"}]}}}},
+            {},
+            "agent-x",
+        )
+    assert "env_vars[0]" in str(exc.value)
+
+
+# --- remaining normalizer branches -----------------------------------------
+
+def test_an_unparseable_url_is_reported_not_raised():
+    """`urlsplit` raises ValueError on a malformed IPv6 literal."""
+    _records, errors = _norm(
+        {**_DECLARED, "credential_setup": [{"name": "STRIPE_API_KEY", "setup_url": "https://[::1"}]}
+    )
+    assert any("setup_url" in e for e in errors), errors
+
+
+def test_a_variable_declared_twice_yields_one_record():
+    """First declaration wins, so `source` is stable across a re-declaration."""
+    records, errors = _norm(
+        {
+            "credentials": {
+                "mcp_servers": {
+                    "stripe": {"env_vars": ["SHARED_KEY"]},
+                    "linear": {"env_vars": ["SHARED_KEY"]},
+                },
+                "env_file": ["SHARED_KEY"],
+            }
+        }
+    )
+    assert [r["name"] for r in records] == ["SHARED_KEY"]
+    assert records[0]["source"] == "template:mcp:stripe"
+    assert errors == []
+
+
+def test_a_non_string_key_in_a_descriptor_is_named():
+    """YAML allows `1: x` as a mapping key; it must not reach `_did_you_mean`."""
+    _records, errors = _norm({**_DECLARED, "credential_setup": [{"name": "STRIPE_API_KEY", 1: "x"}]})
+    assert any("is not a string" in e for e in errors), errors
+
+
+# ===========================================================================
+# The caller-less extractor — cheap hardening, made real rather than asserted
+# ===========================================================================
+#
+# `extract_agent_credentials` has NO production caller, so its latent crashes were
+# never reachable. That makes hardening cheap, not unnecessary: the next caller
+# would have inherited them. These tests exist so the hardening is exercised
+# instead of merely present.
+
+def test_extractor_tolerates_every_malformed_credentials_shape(tmp_path):
+    from services.template_service import extract_agent_credentials
+
+    for block in (
+        'credentials: "OPENAI_API_KEY"',
+        "credentials:",
+        "credentials:\n  - A",
+        "credentials:\n  mcp_servers: nope",
+        "credentials:\n  mcp_servers:\n    s: nope",
+        "credentials:\n  mcp_servers:\n    s:\n      env_vars: nope",
+        "credentials:\n  mcp_servers:\n    s:\n      env_vars:\n        - {K: v}",
+        "credentials:\n  env_file: {a: b}",
+    ):
+        (tmp_path / "template.yaml").write_text("name: f\n" + block + "\n")
+        result = extract_agent_credentials(tmp_path)
+        assert result["required_credentials"] == []
+        assert result["env_file_vars"] == []
+
+
+def test_extractor_reads_a_wellformed_declaration(tmp_path):
+    from services.template_service import extract_agent_credentials
+
+    (tmp_path / "template.yaml").write_text(
+        "name: f\ncredentials:\n"
+        "  mcp_servers:\n    stripe:\n      env_vars: [STRIPE_API_KEY]\n"
+        "  env_file: [VAULT_BASE_PATH]\n"
+    )
+    (tmp_path / ".env.example").write_text("# doc\nmy_var=x\n")
+    result = extract_agent_credentials(tmp_path)
+
+    names = [c["name"] for c in result["required_credentials"]]
+    assert names == ["STRIPE_API_KEY", "VAULT_BASE_PATH", "my_var"]
+    assert result["env_file_vars"] == ["VAULT_BASE_PATH"]
+    # `template:` prefix preserved — a consumer distinguishes a declared variable
+    # from one merely observed in .mcp.json.
+    sources = {c["name"]: c["source"] for c in result["required_credentials"]}
+    assert sources["STRIPE_API_KEY"] == "template:mcp:stripe"
+    assert sources["VAULT_BASE_PATH"] == "template:env_file"
+    # And the lowercase var is now visible (the detector charset), where an
+    # uppercase-only reader dropped it.
+    assert sources["my_var"] == ".env.example"
+
+
+def test_extractor_tolerates_an_empty_and_a_non_mapping_template_yaml(tmp_path):
+    from services.template_service import (
+        extract_agent_credentials,
+        extract_credentials_from_template_yaml,
+    )
+
+    for content in ("", "- a\n- b\n", "just a string\n", "null\n"):
+        path = tmp_path / "template.yaml"
+        path.write_text(content)
+        assert extract_credentials_from_template_yaml(path) == {}
+        assert extract_agent_credentials(tmp_path)["required_credentials"] == []
