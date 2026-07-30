@@ -94,12 +94,21 @@ async def request_inline_login(
 
     **The response is constant.** Same 202, same bytes whether the address is
     known, unknown, or rate-limited, and **no audit row is written**. Latency is
-    constant too, but only because every branch-dependent step runs off the
-    request path in a worker thread — do not move any of it back inline
-    — an audit entry is itself an enumeration oracle, which is why the web path
-    (``routers/auth.py``, #186) emits none either. Do NOT add a 4xx for an
-    unknown address, a distinct message, an ``expires_in_seconds`` field, or a
-    blocking send: each one re-opens the oracle this endpoint exists to close.
+    constant too, but only because every branch-dependent step is deferred to a
+    Starlette ``BackgroundTasks`` task, which runs after the response has been
+    flushed — do not move any of it back inline. An audit entry is itself an
+    enumeration oracle, which is why the web path (``routers/auth.py``, #186)
+    emits none either. Do NOT add a 4xx for an unknown address, a distinct
+    message, an ``expires_in_seconds`` field, or a blocking send: each one
+    re-opens the oracle this endpoint exists to close.
+
+    ``BackgroundTasks`` specifically — **not** a thread. Deferring is what the
+    constant-time property needs; leaving the event loop is not, and
+    ``asyncio.to_thread`` here silently breaks the feature outright (SQLite
+    connections are thread-affine, so the known-check raises in the worker and
+    its own fail-closed handler swallows that into "unknown address" — every code
+    send stops while this endpoint keeps answering 202). See
+    ``mcp_auth_service._process_login_request``, which owns that reasoning.
     """
     mcp_auth_service.schedule_login_code(background_tasks, body.email, body.session_id)
     return _GENERIC_REQUEST_BODY

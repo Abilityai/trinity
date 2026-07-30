@@ -1,0 +1,109 @@
+{
+  "version": "cso-diff",
+  "date": "2026-07-30",
+  "mode": "daily",
+  "scope": "--diff",
+  "branch": "feature/848-mcp-inline-email-auth",
+  "base": "origin/dev",
+  "head": "e54f0974",
+  "issue": 848,
+  "pr": 1707,
+  "prior_report": "cso-diff-2026-07-21-848.md",
+  "rerun_rationale": "The prior audit assessed gates that were correct but UNREACHABLE: MCP_INLINE_AUTH_ENABLED was wired into zero compose services and could never be turned on, so the 'default-safe posture' was unconditional rather than opt-in. That blocker is fixed on this branch (4 wirings, verified via compose config resolution), making the audited surface genuinely reachable on an opt-in deploy. This pass re-verifies the now-live controls against code.",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "attack_surface": {
+    "new_internal_endpoints": 4,
+    "new_endpoint_paths": [
+      "POST /api/internal/mcp-auth/request",
+      "POST /api/internal/mcp-auth/verify",
+      "POST /api/internal/mcp-auth/playbooks",
+      "POST /api/internal/mcp-auth/chat"
+    ],
+    "new_mcp_tools": ["request_login", "verify_login"],
+    "new_session_tier": "anonymous (keyless, flag-gated, default OFF)",
+    "compose_wirings_added": 6,
+    "changed_files": 40,
+    "unauthenticated_reachable": "the MCP port's keyless session tier, ONLY when MCP_INLINE_AUTH_ENABLED=true"
+  },
+  "findings": [],
+  "informational": [
+    {
+      "id": "N1",
+      "title": "INTERNAL_API_SECRET can act as any verified email",
+      "status": "ACCEPTED (carried forward, unchanged)",
+      "severity": "informational",
+      "detail": "The mechanism the session-not-a-minted-key design requires. Grants nothing beyond internal-secret compromise, which is already backend god-mode over /api/internal/*. Now that the surface is reachable, the operational recommendation was carried into .env.example and requirements mcp.md 7.6: set INTERNAL_API_SECRET explicitly in production rather than relying on the -> SECRET_KEY fallback, so it gets its own rotation lifecycle."
+    },
+    {
+      "id": "N2",
+      "title": "Stale docstring recommended the approach that caused a silent total outage",
+      "status": "FIXED in this pass",
+      "severity": "informational (not security — invited failure is availability, not bypass)",
+      "file": "src/backend/routers/mcp_auth.py:98",
+      "detail": "Claimed the branch-dependent work on the enumeration-safe /request path runs 'in a worker thread'. It does not and must not: an earlier asyncio.to_thread revision silently stopped every code send (SQLite connections are thread-affine, so _email_is_known raised in the worker and its own fail-closed handler swallowed it into 'unknown address') while still answering 202. The router is the entry-point file, so the natural consistency edit was to reintroduce the outage. Corrected to name BackgroundTasks explicitly and state why a thread is wrong."
+    },
+    {
+      "id": "N3",
+      "title": "Transitive npm vulnerabilities in src/mcp-server",
+      "status": "OUT OF SCOPE (pre-existing on dev)",
+      "severity": "informational",
+      "detail": "npm audit reports 4 vulns (1 high fast-uri, 2 moderate, 1 low), all isDirect:false. This PR changes no dependency file, so they belong to the repo-wide dependabot backlog (12 open alerts). Noted because package.json already carries overrides pinning fast-uri and @hono/node-server, so the override is evidently not fully resolving the advisory — worth a look outside this PR."
+    }
+  ],
+  "controls_verified": [
+    "flag gates all 4 backend routes via router-level dependencies (404 not 403; no per-route override)",
+    "assert_email_may_reach_agent runs first, and on /chat before the idempotency claim",
+    "per-call re-gate on email_has_agent_access + connector-enabled; fail-closed on DB error",
+    "uniform 403 for both denial reasons (no exists-vs-forbidden oracle, Invariant #8)",
+    "account-only login/OTP limiters never touch _ip_key (the #591 fleet-wide lockout class)",
+    "/request: constant 202, no audit row, all branch-dependent work in BackgroundTasks, global cap checked before the branch",
+    "_email_is_known fails closed; code sent only to a known address (account or agent_sharing entry)",
+    "role from whitelist default_role, never forced (#314 silent promotion stays closed)",
+    "no credential returned by /verify (session binding is MCP-server memory only)",
+    "make_inline_auth_scope folds the verified email in (cross-user replay closed)",
+    "build_tool_description is name-only (#846 metadata-leak precedent respected)",
+    "OPERATOR_SCOPES allow-list excludes anonymous and connector; scope stays anonymous after login",
+    "compose defaults are ${VAR:-false} so an unset .env byte-reproduces pre-#848 behaviour"
+  ],
+  "library_assumption": {
+    "package": "fastmcp",
+    "prior_citation": "4.4.0 (wrong: stale local node_modules; lock resolved 4.8.0 at review, 4.12.1 now)",
+    "prior_mechanism_claim": "canAccess enforced at tools/call (wrong: canAccess is never re-invoked per call)",
+    "actual_mechanism": "setupToolHandlers closes over a toolsMap built from the FILTERED list; CallToolRequestSchema handler throws MethodNotFound on a miss — enforcement is by absence from the call map",
+    "reverified_on": "4.12.1",
+    "conclusion_changed": false,
+    "now_pinned_by": "src/mcp-server/src/tool-visibility.test.ts — boots a real FastMCP server + real MCP client, asserts a filtered-out tool is rejected on call AND its body never executes (mutation-checked against the pre-#848 deny-check)"
+  },
+  "guards_run": {
+    "test_credential_paths_parity": "pass",
+    "test_model_context_parity": "pass",
+    "test_186_enumeration_uniformity": "pass",
+    "test_agent_auth_header_guard": "pass",
+    "total": "38 passed"
+  },
+  "filter_stats": {
+    "hard_exclusions_applied": [
+      "availability/DoS (N2's invited failure mode)",
+      "transitive dependency CVEs with no change in this diff (N3)"
+    ]
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "informational": 3,
+    "above_gate": 0
+  },
+  "trend": {
+    "vs_prior": "cso-diff-2026-07-21-848",
+    "resolved": [
+      "the un-switchable flag (not a security finding but the reason the prior posture assessment was unconditional)",
+      "N2 stale worker-thread docstring (found and fixed this pass)"
+    ],
+    "persistent": ["N1 INTERNAL_API_SECRET widening (accepted design)"],
+    "new": ["N3 transitive npm vulns, pre-existing on dev, out of diff scope"],
+    "direction": "stable — no new attack surface introduced by the post-review changes; the surface became reachable, and its gates re-verified clean"
+  },
+  "limitations": "AI-assisted scan authored by the change's own author, on a keyless auth surface. Same authorship caveat as the prior audit. Independent assurance requires a fresh-context /cso --diff by someone who did not write the code; the reviewer identified this gap and it remains outstanding. --diff scope means the unchanged codebase was not re-audited."
+}
