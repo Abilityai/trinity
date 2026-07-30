@@ -1,0 +1,118 @@
+{
+  "version": "1.1",
+  "date": "2026-07-29",
+  "mode": "diff",
+  "confidence_gate": 8,
+  "scope": {
+    "branch": "feature/ent-236-skills-lifecycle-automation",
+    "merge_base": "a8418a2fce0f9c1a486f5827a9813a423f5ab13b",
+    "issue": "abilityai/trinity-enterprise#236"
+  },
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "admin_endpoints_added": 2,
+    "public_endpoints_added": 0,
+    "agent_key_endpoints_added": 0,
+    "background_jobs_added": 1,
+    "agent_write_paths_added": 1,
+    "in_container_exec_payloads_added": 2,
+    "dependencies_added": 0,
+    "workflows_changed": 0,
+    "dockerfiles_changed": 0
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "HIGH",
+      "confidence": 9,
+      "status": "FIXED",
+      "phase": "P9/A01",
+      "category": "Broken Access Control",
+      "title": "PUT /api/settings/skills-library grants unattended fleet-wide agent-filesystem write, gated only by role",
+      "file": "src/backend/routers/settings.py",
+      "line": 1876,
+      "introduced_by_diff": true,
+      "recurring_class": "assert_admin is a role gate, not a human gate (trinity-ops-agent#232 -> trinity#1644 -> trinity#1816)",
+      "occurrence_number": 3,
+      "evidence": "assert_admin(current_user) only; dependencies.py:740 rejects connector principals and checks role == 'admin'. An agent-scoped MCP key resolves to its owner carrying the owner's role.",
+      "exploit": "Prompt-injected agent arranges for the configured library to carry attacker-authored skills (mechanism REDACTED \u2014 depends on finding 2, still open) -> PUT /settings/skills-library {auto_sync_enabled, auto_reinject_enabled} passes assert_admin -> scheduled loop pulls the library -> fleet sweep writes SKILL.md into every running agent's ~/.claude/skills/ and rewrites each CLAUDE.md -> every agent reads attacker instructions on every subsequent turn, persistently and unattended. Step 3 is what this fix breaks.",
+      "impact": "Privilege escalation plus fleet-wide lateral movement and persistent prompt injection.",
+      "recommendation": "Add reject_agent_principal(current_user) before assert_admin on the PUT. GET may remain role-only.",
+      "remediation_status": "FIXED \u2014 reject_agent_principal added to the PUT (routers/settings.py), regression tests in tests/unit/test_ent236_skills_lifecycle.py::TestAutomationSwitchIsHumanOnly"
+    },
+    {
+      "id": 2,
+      "severity": "HIGH",
+      "confidence": 8,
+      "status": "REDACTED",
+      "phase": "P9/A01",
+      "category": "Broken Access Control",
+      "title": "REDACTED \u2014 pre-existing access-control weakness in the same area, still open",
+      "introduced_by_diff": false,
+      "redaction_reason": "abilityai/trinity is a public repository and this finding is not yet fixed. Mechanism, affected setting, file:line and exploit path are recorded only in the private tracker.",
+      "tracked_at": "abilityai/trinity-enterprise#293",
+      "relationship_to_finding_1": "Supplies step 2 of finding 1's chain. Finding 1's fix breaks the chain at step 3 independently, so this report is still actionable without the withheld detail.",
+      "remediation_status": "open \u2014 fold the full write-up back into this report once ent#293 closes"
+    }
+  ],
+  "fixed_before_audit": [
+    {
+      "title": "PAT could reach system_settings['skills_library_last_error'] and the admin Settings panel",
+      "class": "canary G-04 (secrets in durable operator-visible state)",
+      "closed_in": "/review on this branch (_scrub_pat at the write, regression test asserts https://***@)"
+    },
+    {
+      "title": "No lock around the shared library clone; scheduled + manual sync race git reset --hard",
+      "class": "Tampering / concurrency re-priced by automation",
+      "closed_in": "/review on this branch (cross-worker SETNX lock, busy -> 409, no false failure status)"
+    },
+    {
+      "title": "Bulk PUT could remove a concurrently re-assigned skill (TOCTOU)",
+      "class": "check-then-write (#1445 pattern)",
+      "closed_in": "/review on this branch (assignments re-read inside the lock; still_assigned refusal)"
+    }
+  ],
+  "supply_chain_summary": {
+    "python_deps_added": 0,
+    "node_deps_added": 0,
+    "lockfile_changes": 0,
+    "install_script_deps_added": 0
+  },
+  "filter_stats": {
+    "candidates_considered": 11,
+    "discarded_hard_exclusions": 2,
+    "discarded_false_positive_rules": 1,
+    "below_confidence_gate": 6,
+    "reported": 2
+  },
+  "totals": {
+    "critical": 0,
+    "high": 2,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior_reports": 89,
+    "new": 1,
+    "persistent_class_new_instance": 1,
+    "resolved": 0,
+    "direction": "class recurring \u2014 recommend a platform-level gate rather than per-endpoint fixes"
+  },
+  "verification_note": "Independent verification performed in-context rather than via fresh-context subagents: the session's operating instructions prohibit spawning subagents unless the user requests them. Every finding's gate was read directly at the cited line and every hop of finding 1's chain was traced to its guard."
+}

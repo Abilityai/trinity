@@ -743,6 +743,60 @@ def get_skills_library_branch() -> str:
     return settings_service.get_setting('skills_library_branch', 'main')
 
 
+# ---------------------------------------------------------------------------
+# Library lifecycle automation (trinity-enterprise#236)
+# ---------------------------------------------------------------------------
+#
+# All three default to the pre-#236 behavior (no scheduled sync, no fleet
+# sweep), so a zero-config install is byte-identical to before. Resolved fresh
+# on every read — the loop re-reads each cycle, which is what lets an admin
+# change the interval or flip a flag without a backend restart, and matches the
+# #506 "no per-process cache under --workers 2" discipline.
+
+SKILLS_AUTO_SYNC_ENABLED_KEY = "skills_library_auto_sync_enabled"
+SKILLS_AUTO_SYNC_INTERVAL_KEY = "skills_library_auto_sync_interval_seconds"
+SKILLS_AUTO_REINJECT_ENABLED_KEY = "skills_library_auto_reinject_enabled"
+
+SKILLS_AUTO_SYNC_INTERVAL_DEFAULT = 3600
+# Floor is a real guard, not decoration: each cycle forks `git fetch` against
+# GitHub for the whole install, so a 10-second interval is a self-inflicted
+# rate-limit ban. Ceiling keeps "enabled" meaningful.
+SKILLS_AUTO_SYNC_INTERVAL_MIN = 300
+SKILLS_AUTO_SYNC_INTERVAL_MAX = 86400
+
+
+def is_skills_auto_sync_enabled() -> bool:
+    """Scheduled skills-library auto-sync flag (ent#236). Default OFF."""
+    return settings_service._resolve_bool_flag(
+        SKILLS_AUTO_SYNC_ENABLED_KEY, "SKILLS_LIBRARY_AUTO_SYNC_ENABLED", False
+    )
+
+
+def is_skills_auto_reinject_enabled() -> bool:
+    """Fleet-wide re-inject-after-sync flag (ent#236). Default OFF."""
+    return settings_service._resolve_bool_flag(
+        SKILLS_AUTO_REINJECT_ENABLED_KEY, "SKILLS_LIBRARY_AUTO_REINJECT_ENABLED", False
+    )
+
+
+def get_skills_auto_sync_interval() -> int:
+    """Auto-sync interval in seconds, clamped into [MIN, MAX] (ent#236).
+
+    Read-side clamping (the #506 `clamp_to_ceiling` shape) so a stray value
+    written straight to the DB — or by a future unvalidated path — cannot spin
+    the loop into a tight fetch flood or park it past a day. Fail-safe on a bad
+    row: fall back to the default rather than raising inside the loop.
+    """
+    raw = settings_service.get_setting(SKILLS_AUTO_SYNC_INTERVAL_KEY)
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError, AttributeError):
+        return SKILLS_AUTO_SYNC_INTERVAL_DEFAULT
+    return max(
+        SKILLS_AUTO_SYNC_INTERVAL_MIN, min(SKILLS_AUTO_SYNC_INTERVAL_MAX, value)
+    )
+
+
 # ============================================================================
 # Agent Default Resources (RES-001)
 # ============================================================================
