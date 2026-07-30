@@ -707,6 +707,16 @@ class SkillInfo(BaseModel):
     file_count: int = 0
     size_bytes: int = 0
     version: Optional[str] = None  # git tree SHA of the skill dir
+    # ent#237 provenance. `source_name` carries no URL, so this model stays safe
+    # for the non-admin per-agent Skills tab (source URLs are admin-only, on
+    # GET /skills/sources).
+    source_id: Optional[str] = None
+    source_name: Optional[str] = None
+    # Lower-precedence sources that also ship this name and are therefore
+    # UNREACHABLE. Non-empty means the operator is running someone else's
+    # version of this skill than a given source intended — AC#4 requires that be
+    # visible, never a silent overwrite.
+    shadowed_by: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class AgentSkillsUpdate(BaseModel):

@@ -60,6 +60,12 @@ async def list_skills(current_user: User = Depends(get_current_user)):
             file_count=s.get("file_count", 0),
             size_bytes=s.get("size_bytes", 0),
             version=s.get("version"),
+            # ent#237: provenance. Explicitly constructed models drop anything
+            # not named here, so a new service field is invisible over REST
+            # until it is listed — which is why these three are spelled out.
+            source_id=s.get("source_id"),
+            source_name=s.get("source_name"),
+            shadowed_by=s.get("shadowed_by") or [],
         )
         for s in skills
     ]
