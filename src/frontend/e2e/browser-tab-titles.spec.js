@@ -23,8 +23,8 @@ test.describe('browser tab titles (#1418)', () => {
     await page.getByRole('link', { name: 'Agents', exact: true }).click()
     await expect(page).toHaveTitle('Trinity — Agents')
 
-    await page.getByRole('link', { name: 'Templates', exact: true }).click()
-    await expect(page).toHaveTitle('Trinity — Templates')
+    await page.getByRole('link', { name: 'Library', exact: true }).click()
+    await expect(page).toHaveTitle('Trinity — Library')
   })
 
   test('@smoke redirect resolves to the destination route title', async ({ page }) => {
@@ -33,5 +33,11 @@ test.describe('browser tab titles (#1418)', () => {
     await page.goto('/operating-room')
     await expect(page).toHaveURL(/\/operations/, { timeout: 10000 })
     await expect(page).toHaveTitle('Trinity — Operations')
+
+    // /templates → /library (ent#263 rename) — same title-follows-redirect
+    // contract.
+    await page.goto('/templates')
+    await expect(page).toHaveURL(/\/library/, { timeout: 10000 })
+    await expect(page).toHaveTitle('Trinity — Library')
   })
 })
