@@ -94,9 +94,30 @@ def test_sanitize_text_itself_gained_the_rule(cs):
     "/usr/bin/python3 /app/agent_server/main.py",
     "curl https://github.com/Org/Repo.git",
 ])
-def test_a_non_credential_at_sign_is_left_alone(cs, benign):
-    """The rule must not eat ordinary text. An over-broad redactor gets switched
-    off, and then nothing is redacted at all."""
+def test_the_url_rule_does_not_eat_ordinary_text(cs, benign):
+    """The rule THIS change adds must not over-redact. An over-broad redactor
+    gets switched off, and then nothing is redacted at all.
+
+    Asserted against `redact_url_userinfo` rather than the full
+    `sanitize_cmdline`, deliberately: `sanitize_text` also substitutes the VALUES
+    of environment variables whose names look sensitive, and `GITHUB_.*` is one
+    of those patterns. On a GitHub Actions runner `GITHUB_SERVER_URL` is
+    literally `https://github.com`, so the last case above is legitimately
+    rewritten to `curl ***REDACTED***/Org/Repo.git` there and byte-equality is
+    environment-dependent by construction. That is correct behaviour of a
+    pre-existing rule; pinning it here would make the suite pass locally and
+    fail in CI, which is exactly what happened.
+    """
+    assert cs.redact_url_userinfo(benign) == benign
+
+
+@pytest.mark.parametrize("benign", [
+    "git log --format=%an user@example.com",
+    "/usr/bin/python3 /app/agent_server/main.py",
+])
+def test_full_sanitize_keeps_a_cmdline_diagnosable(cs, benign):
+    """End to end, a line with no credential must still be readable — the log
+    exists to answer "which process keeps dying?"."""
     assert cs.sanitize_cmdline(benign) == benign
 
 
@@ -138,7 +159,7 @@ def test_url_redactor_is_shared_not_duplicated():
     )
 
 
-def test_the_sweeper_redacts_with_no_importable_helper():
+def test_the_sweeper_redacts_with_no_importable_helper(monkeypatch):
     """The sweeper's baseline redaction must not depend on an import.
 
     This module is loaded three ways — package-relative in production, flat by
@@ -148,6 +169,10 @@ def test_the_sweeper_redacts_with_no_importable_helper():
     aborted collection outright. Load the sweeper standalone and prove a
     credential is still redacted.
     """
+    # `orphan_sweep` also imports `orphan_allowlist`, so the flat form needs
+    # `utils/` importable — the same shape `subprocess_pgroup`'s test uses.
+    # `syspath_prepend` reverts automatically, so nothing leaks to later tests.
+    monkeypatch.syspath_prepend(str(_UTILS))
     sweep = _load("orphan_sweep")
     out = sweep._safe_cmdline(
         "git remote-https origin https://oauth2:ghp_" + "F" * 36 + "@github.com/o/r.git"
