@@ -364,6 +364,7 @@ class _SourcesFacade:
 
     def __init__(self, ops):
         self._ops = ops
+        self.deleted_settings = []
 
     def list_skill_sources(self, enabled_only=False):
         return self._ops.list_sources(enabled_only)
@@ -388,6 +389,12 @@ class _SourcesFacade:
 
     def record_skill_source_sync(self, source_id, **kwargs):
         return self._ops.record_sync(source_id, **kwargs)
+
+    def delete_setting(self, key):
+        """Records the consumed legacy keys so a test can assert the one-way
+        migration actually closed the door."""
+        self.deleted_settings.append(key)
+        return True
 
 
 @pytest.fixture
@@ -524,6 +531,32 @@ class TestLegacyAdoption:
         service.sync_library()
 
         assert sources_db.count_sources() == 1
+
+    def test_deleted_source_is_not_resurrected_by_the_legacy_setting(
+        self, service, sources_db, tmp_path, monkeypatch
+    ):
+        """A one-way migration, not a read-time default.
+
+        If the setting survived adoption it would re-create the source on the
+        next sync after an admin deliberately deleted it — the same resurrection
+        trap the fresh-install seed is a ROW to avoid (#1638). So the setting is
+        consumed, and a deleted source stays deleted.
+        """
+        import services.skill_service as ss
+
+        legacy = _mkrepo(tmp_path / "repos", "legacy", {"old-skill": "legacy"})
+        _fake_legacy_setting(monkeypatch, legacy)
+
+        service.sync_library()
+        adopted = sources_db.list_sources()[0]
+        assert "skills_library_url" in ss.db.deleted_settings
+
+        # The admin removes it; the setting is gone, so nothing re-adds it.
+        sources_db.delete_source(adopted.id)
+        monkeypatch.setattr(ss, "get_skills_library_url", lambda: None)
+        service.sync_library()
+
+        assert sources_db.count_sources() == 0
 
     def test_legacy_clone_is_moved_not_abandoned(
         self, service, sources_db, tmp_path, monkeypatch

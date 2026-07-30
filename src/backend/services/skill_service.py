@@ -313,6 +313,13 @@ class SkillService:
         no row points at — an orphan nothing ever cleans up. Idempotent and
         fail-soft; a failure here must never block a sync of already-migrated
         sources.
+
+        The `skills_library_url` setting is DELETED once adoption succeeds, so
+        this is a genuine one-way migration. Leaving it in place would make the
+        setting a read-time default that re-creates the source on the next sync
+        after an admin deliberately deleted it — the same resurrection trap the
+        fresh-install seed is a row precisely to avoid (#1638's lesson). Nothing
+        else reads the key after ent#237, so consuming it strands no consumer.
         """
         legacy_git = self.library_root / ".git"
         try:
@@ -358,6 +365,19 @@ class SkillService:
             except OSError as e:
                 # The row survives; the next sync clones fresh into the subdir.
                 logger.warning(f"could not move legacy skills clone: {e}")
+
+        # Consume the setting — see the one-way-migration note above. Best-effort:
+        # a failure here leaves a harmless duplicate-suppressed re-adoption on
+        # the next sync (the `existing` check above), never a broken migration.
+        try:
+            db.delete_setting("skills_library_url")
+            db.delete_setting("skills_library_branch")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "adopted skills_library_url into source %s but could not clear "
+                "the legacy setting (%s); it will be re-checked next sync",
+                source.id, e,
+            )
 
         logger.info("migrated skills_library_url into skill source %s", source.id)
         return source.id
