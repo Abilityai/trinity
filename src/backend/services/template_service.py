@@ -13,7 +13,7 @@ import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import httpx
 import yaml
 from config import DEFAULT_GITHUB_TEMPLATE_REPOS, GITHUB_PAT_CREDENTIAL_ID
@@ -130,6 +130,205 @@ def _coerce_priority(value) -> int:
     return _DEFAULT_TEMPLATE_PRIORITY
 
 
+# ============================================================================
+# `credentials:` block — tolerant readers (trinity-enterprise#128)
+# ============================================================================
+#
+# A template.yaml is untrusted input: bundled ones are hand-authored, `github:`
+# ones come from arbitrary repos, and `local:` ones can be uploaded by any
+# authenticated user via deploy_local_agent_logic. Every historical reader of
+# this block assumed the happy shape and reached straight through it —
+# `data.get("credentials", {}).get("mcp_servers", {}).keys()` — so ONE
+# malformed template took down the whole catalog with an uncaught
+# AttributeError, and a string `env_file:` was iterated character by character
+# straight into the agent's `.env`.
+#
+# Two contracts, deliberately different:
+#   * read paths (the catalog) NEVER raise — they degrade to a safe empty
+#     value and collect named errors, so the other templates still list;
+#   * the write path (`generate_credential_files`) raises, because writing an
+#     agent's credential files from a declaration nobody can parse is exactly
+#     the silent failure this closes.
+
+class CredentialDeclarationError(ValueError):
+    """A template's `credentials:` block is structurally invalid.
+
+    HTTP-free by design (Invariant #1 — services hold no HTTP concerns):
+    raised by `generate_credential_files` and mapped 1:1 to a 400 by its only
+    caller, `agent_service.crud._stage_config_files`.
+    """
+
+
+_TYPE_NAMES = {
+    type(None): "null",
+    bool: "boolean",
+    int: "number",
+    float: "number",
+    str: "string",
+    list: "list",
+    dict: "mapping",
+}
+
+
+def _type_name(value) -> str:
+    """YAML-flavoured type name for an error message ('mapping', not 'dict')."""
+    return _TYPE_NAMES.get(type(value), type(value).__name__)
+
+
+def _credentials_mapping(block) -> dict:
+    """Return the `credentials:` block as a mapping, `{}` for anything else.
+
+    `.get("credentials", {})` is NOT enough: the default only applies when the
+    key is *absent*, so a present-but-null `credentials:` (a trailing colon
+    with nothing under it — an ordinary authoring slip) yields `None` and every
+    downstream `.get()` / `.keys()` raises.
+    """
+    return block if isinstance(block, dict) else {}
+
+
+def credential_shape_errors(block) -> List[str]:
+    """Named, operator-readable errors for a malformed `credentials:` block.
+
+    Scope is *shape* — is each section the right kind of thing — not the
+    per-variable descriptor validation. Never raises.
+
+    An absent, null, or empty block all mean "this agent needs no credentials"
+    and are NOT errors, so a template that comments its block out does not
+    acquire a spurious warning.
+    """
+    if block is None or block == {}:
+        return []
+    if not isinstance(block, dict):
+        return [
+            f"credentials: expected a mapping of section name to declaration, "
+            f"got {_type_name(block)}"
+        ]
+
+    errors: List[str] = []
+
+    mcp_servers = block.get("mcp_servers")
+    if mcp_servers is not None and not isinstance(mcp_servers, dict):
+        errors.append(
+            f"credentials.mcp_servers: expected a mapping of server name to "
+            f"config, got {_type_name(mcp_servers)}"
+        )
+
+    env_file = block.get("env_file")
+    if env_file is not None and not isinstance(env_file, list):
+        errors.append(
+            f"credentials.env_file: expected a list of variable names, got "
+            f"{_type_name(env_file)}. Give each name its own list item "
+            f'("- OPENAI_API_KEY") — a bare string is read one character at a '
+            f"time, which writes one variable per letter."
+        )
+    elif isinstance(env_file, list):
+        for i, entry in enumerate(env_file):
+            if not isinstance(entry, str) or not entry.strip():
+                errors.append(
+                    f"credentials.env_file[{i}]: expected a variable name "
+                    f"(string), got {_type_name(entry)}"
+                )
+
+    errors.extend(_config_files_shape_errors(block.get("config_files")))
+    return errors
+
+
+def _config_files_shape_errors(config_files) -> List[str]:
+    """Shape + path-containment errors for `credentials.config_files`.
+
+    `path` is an author-controlled string that the creation path turns into
+    `open(cred_files_dir / path, "w")`, so an absolute path or a `..` segment
+    is an arbitrary-file-write primitive reachable from any authenticated user
+    (deploy_local_agent_logic accepts an uploaded template archive). Rejected
+    here at the boundary AND re-checked at the write sink in crud.py.
+    """
+    if config_files is None:
+        return []
+    if not isinstance(config_files, list):
+        return [
+            f"credentials.config_files: expected a list of "
+            f"{{path, template}} entries, got {_type_name(config_files)}"
+        ]
+
+    errors: List[str] = []
+    for i, entry in enumerate(config_files):
+        if not isinstance(entry, dict):
+            errors.append(
+                f"credentials.config_files[{i}]: expected a mapping with "
+                f"'path' and 'template', got {_type_name(entry)}"
+            )
+            continue
+
+        path = entry.get("path", "")
+        if not path:
+            continue
+        if not isinstance(path, str):
+            errors.append(
+                f"credentials.config_files[{i}].path: expected a string, got "
+                f"{_type_name(path)}"
+            )
+            continue
+
+        safe_path = _sanitize_for_warning(path)
+        if PurePosixPath(path).is_absolute():
+            errors.append(
+                f"credentials.config_files[{i}].path: expected a path relative "
+                f"to the agent's credential directory, got absolute path "
+                f"{safe_path!r}"
+            )
+        elif ".." in PurePosixPath(path).parts:
+            errors.append(
+                f"credentials.config_files[{i}].path: '..' segments are not "
+                f"allowed, got {safe_path!r}"
+            )
+    return errors
+
+
+def credential_mcp_server_names(block) -> List[str]:
+    """Server names under `credentials.mcp_servers`, tolerant of any shape.
+
+    The read-path replacement for `credentials.mcp_servers.keys()`. Returns
+    `[]` — never raises — for a null, list, string or scalar block at either
+    level, so a malformed template cannot empty the catalog.
+    """
+    servers = _credentials_mapping(block).get("mcp_servers")
+    if not isinstance(servers, dict):
+        return []
+    return [str(name) for name in servers]
+
+
+def credential_env_file_names(block) -> List[str]:
+    """Variable names under `credentials.env_file`, tolerant of any shape.
+
+    Backs the `.env` writer. Returns only non-empty strings, so a malformed
+    entry can never reach the generated file — callers that must fail loud
+    (the writer) check `credential_shape_errors()` first.
+    """
+    env_file = _credentials_mapping(block).get("env_file")
+    if not isinstance(env_file, list):
+        return []
+    return [entry for entry in env_file if isinstance(entry, str) and entry.strip()]
+
+
+def _template_credential_errors(block, template_id: str) -> List[str]:
+    """`credential_shape_errors()` for a catalog entry, logged once.
+
+    Exactly one WARNING per malformed template, naming the id, so an operator
+    can find the offender without diffing the catalog. The entry still lists —
+    a broken `credentials:` block costs that template its credential metadata,
+    not its place in the catalog.
+    """
+    errors = credential_shape_errors(block)
+    if errors:
+        logger.warning(
+            "Template %s has a malformed `credentials:` block (%d problem(s)): %s",
+            _sanitize_for_warning(template_id),
+            len(errors),
+            "; ".join(errors),
+        )
+    return errors
+
+
 def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> dict:
     """Build a full template dict from repo + fetched metadata + optional admin overrides.
 
@@ -138,7 +337,21 @@ def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> d
       2. template.yaml value (from GitHub) — if available
       3. Repo name fallback
     """
-    override = admin_override or {}
+    # A GitHub repo's template.yaml is untrusted, and `_fetch_template_yaml`
+    # returns `yaml.safe_load(content) or {}` — a top-level list or scalar is
+    # truthy, so it comes back as a non-mapping and every `metadata.get()`
+    # below raises AttributeError, 500ing the whole catalog for one bad repo.
+    # `_build_local_template` has always had this guard; this path had none.
+    # (trinity-enterprise#128)
+    if not isinstance(metadata, dict):
+        logger.warning(
+            "Template metadata for %s is a %s, not a mapping — ignoring it",
+            _sanitize_for_warning(repo),
+            _type_name(metadata),
+        )
+        metadata = {}
+
+    override = admin_override if isinstance(admin_override, dict) else {}
 
     display_name = (
         override.get("display_name")
@@ -170,6 +383,13 @@ def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> d
         "skills": metadata.get("skills", []),
         "mcp_servers": metadata.get("mcp_servers", []),
         "required_credentials": metadata.get("required_credentials", []),
+        # Named errors for a malformed `credentials:` block, so a broken
+        # declaration is reported against its own template instead of taking
+        # the catalog down. Empty list = nothing wrong. Shape mirrors
+        # `_build_local_template`. (trinity-enterprise#128)
+        "credential_errors": _template_credential_errors(
+            metadata.get("credentials"), f"github:{repo}"
+        ),
         # Surface `persistent_state` from template.yaml so crud.py can
         # materialize `.trinity/persistent-state.yaml` at creation. Falls
         # back to the global default list when the template omits the key.
@@ -223,7 +443,11 @@ def _build_local_template(template_dir: Path) -> Optional[dict]:
     try:
         with open(template_yaml) as f:
             data = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError) as e:
+    except Exception as e:  # noqa: BLE001 — one bad file must not empty the catalog
+        # Deliberately broader than `(OSError, yaml.YAMLError)`: deeply nested
+        # YAML raises RecursionError, which is a RuntimeError and therefore
+        # escapes a `yaml.YAMLError` handler entirely, 500ing the catalog.
+        # (trinity-enterprise#128)
         logger.warning("Failed to parse local template %s: %s", template_dir.name, e)
         return None
 
@@ -231,6 +455,7 @@ def _build_local_template(template_dir: Path) -> Optional[dict]:
         return None
 
     name = template_dir.name
+    credentials_block = data.get("credentials")
     return {
         "id": f"local:{name}",
         "display_name": data.get("display_name") or data.get("name") or name,
@@ -249,9 +474,16 @@ def _build_local_template(template_dir: Path) -> Optional[dict]:
         "hidden": bool(data.get("hidden", False)),
         "resources": data.get("resources", {"cpu": "2", "memory": "4g"}),
         "skills": data.get("skills", []),
-        "mcp_servers": list(data.get("credentials", {}).get("mcp_servers", {}).keys())
+        "mcp_servers": credential_mcp_server_names(credentials_block)
             or data.get("mcp_servers", []),
         "required_credentials": data.get("required_credentials", []),
+        # Named errors for a malformed `credentials:` block. The template still
+        # lists — it just loses its credential metadata, instead of taking
+        # every other template down with an uncaught AttributeError.
+        # (trinity-enterprise#128)
+        "credential_errors": _template_credential_errors(
+            credentials_block, f"local:{name}"
+        ),
         # Local templates surface their full capabilities/use-cases so the
         # frontend can preview them without a second round-trip.
         "capabilities": data.get("capabilities", []),
@@ -283,7 +515,17 @@ def get_local_templates() -> List[dict]:
     for child in sorted(templates_dir.iterdir()):
         if not child.is_dir():
             continue
-        entry = _build_local_template(child)
+        # Last-resort per-template fence (trinity-enterprise#128). The tolerant
+        # readers above are the real fix; this guarantees the property they buy
+        # — one malformed template costs *itself*, never the catalog — survives
+        # a future field being reached through without a guard.
+        try:
+            entry = _build_local_template(child)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Skipping local template %s: failed to build entry", child.name
+            )
+            continue
         if entry is not None and not entry.get("hidden"):
             out.append(entry)
     return out
@@ -588,9 +830,35 @@ def generate_credential_files(
     """
     Generate credential files (.mcp.json, .env, config files) with real values.
     Returns dict of {filepath: content} to write into container.
+
+    Raises `CredentialDeclarationError` when the template's `credentials:`
+    block is structurally invalid. This path WRITES the agent's credential
+    files, so — unlike the catalog readers, which degrade and keep listing —
+    it must fail loud: silently emitting a `.env` built from a declaration
+    nobody could parse is the failure mode this closes.
+    (trinity-enterprise#128)
     """
     files = {}
-    creds_schema = template_data.get("credentials", {})
+    if not isinstance(template_data, dict):
+        # A non-mapping template.yaml declares no credentials. Whether such a
+        # template may create an agent at all is the resolver's call, not the
+        # credential writer's — but it must not AttributeError here.
+        logger.warning(
+            "Template data for agent %s is a %s, not a mapping — generating no "
+            "credential files",
+            _sanitize_for_warning(str(agent_name)),
+            _type_name(template_data),
+        )
+        return files
+
+    credentials_block = template_data.get("credentials")
+    errors = credential_shape_errors(credentials_block)
+    if errors:
+        raise CredentialDeclarationError(
+            "Template `credentials:` block is invalid: " + "; ".join(errors)
+        )
+
+    creds_schema = _credentials_mapping(credentials_block)
 
     # Generate .mcp.json with real credentials
     mcp_servers_schema = creds_schema.get("mcp_servers", {})
@@ -629,8 +897,13 @@ def generate_credential_files(
 
             files[".mcp.json"] = json.dumps(mcp_config, indent=2)
 
-    # Generate .env file
-    env_vars = creds_schema.get("env_file", [])
+    # Generate .env file. Read through the tolerant accessor rather than
+    # iterating the raw value: `for var_name in "OPENAI_API_KEY"` iterates a
+    # bare string CHARACTER BY CHARACTER, writing `O=`, `P=`, `E=` ... and never
+    # the real credential — with no error, no warning and no crash. The shape
+    # check above now rejects that outright; this keeps the writer safe by
+    # construction. (trinity-enterprise#128)
+    env_vars = credential_env_file_names(creds_schema)
     if env_vars:
         env_lines = ["# Generated by Trinity - Agent credentials", ""]
         for var_name in env_vars:
@@ -638,8 +911,10 @@ def generate_credential_files(
             env_lines.append(f"{var_name}={value}")
         files[".env"] = "\n".join(env_lines)
 
-    # Generate config files from templates
-    config_files = creds_schema.get("config_files", [])
+    # Generate config files from templates. `path` is validated by the shape
+    # check above (relative, no `..`); crud.py re-checks containment at the
+    # write sink.
+    config_files = creds_schema.get("config_files") or []
     for config_file in config_files:
         file_path = config_file.get("path", "")
         template_content = config_file.get("template", "")

@@ -24,6 +24,8 @@ from ..utils.registered_run import run_registered
 from .files import _read_persistent_state
 from .snapshot import build_snapshot, restore_from_tar
 
+from ..utils.credential_sanitizer import redact_url_userinfo
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -560,13 +562,12 @@ def _run_auto_sync_once(home_dir: Path) -> Dict:
 def _redact_url_userinfo(text: str) -> str:
     """Strip credentials from URLs in git output (#1595 review).
 
-    Git error lines print the full remote URL — for PAT-embedded remotes that
-    is `https://x-access-token:ghp_…@github.com/…` — and both the sync-state
-    error summary and the push-collision operator-queue entry persist and
-    surface that output. Redact userinfo everywhere git output leaves the
-    process.
+    Kept as a name so the two git-stderr call sites read unchanged, but the rule
+    itself now lives in `utils.credential_sanitizer` (ent#292): the same
+    credential leaks through argv as well as stderr, so one regex serving both
+    is what stops the next sink from re-deriving its own.
     """
-    return re.sub(r"(://)[^/@\s]+@", r"\1***@", text)
+    return redact_url_userinfo(text)
 
 
 def _summarize_git_error(raw: str) -> str:

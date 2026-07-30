@@ -231,7 +231,11 @@
 
             <!-- Skills Tab Content -->
             <div v-if="activeTab === 'skills'">
-              <SkillsPanel :agent-name="agent.name" :agent-status="agent.status" />
+              <SkillsPanel
+                :agent-name="agent.name"
+                :can-manage="!!agent.can_share"
+                :agent-running="agent.status === 'running'"
+              />
             </div>
 
             <!-- Shared Folders Tab Content -->
@@ -241,8 +245,10 @@
 
             <!-- Settings Tab Content (#1108) — sectioned home for per-agent
                  config; Guardrails (GUARD-001 UI, #967) is section #1 -->
-            <div v-if="activeTab === 'settings' && agent.can_share">
+            <div v-if="activeTab === 'settings' && agent.can_share" class="space-y-6">
               <SettingsPanel :agent-name="agent.name" :notify="showNotification" />
+              <!-- ent#277: renders only when the entitlement is present. -->
+              <CrossModelValidationPanel :agent-name="agent.name" />
             </div>
 
           </div>
@@ -323,6 +329,7 @@ import InfoPanel from '../components/InfoPanel.vue'
 import DashboardPanel from '../components/DashboardPanel.vue'
 import FoldersPanel from '../components/FoldersPanel.vue'
 import SettingsPanel from '../components/settings/SettingsPanel.vue'
+import CrossModelValidationPanel from '../components/CrossModelValidationPanel.vue'
 
 // Panel Components (newly extracted)
 import AgentHeader from '../components/AgentHeader.vue'
@@ -825,6 +832,15 @@ const visibleTabs = computed(() => {
   // Folders - hide for system agent
   if (agent.value?.can_share && !isSystem) {
     tabs.push({ id: 'folders', label: 'Folders' })
+  }
+
+  // Skills (#235) — unhidden. Was kept out of `visibleTabs` per requirements
+  // §22.2 ("component preserved for potential admin-only access") while
+  // assignment stayed REST/MCP-only, so the #182/#183 machinery had no product
+  // surface at all. Owner/admin and non-system, matching the other management
+  // tabs; OverflowTabs absorbs the extra entry.
+  if (agent.value?.can_share && !isSystem) {
+    tabs.push({ id: 'skills', label: 'Skills' })
   }
 
   // Settings - owner-only (#1108); sectioned config home, Guardrails is section #1

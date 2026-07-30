@@ -101,6 +101,7 @@ from .capabilities import (  # noqa: F401
     PROHIBITED_CAPABILITIES,
     AGENT_TMPFS_MOUNT,
     AGENT_DEFAULT_TMPDIR,
+    AGENT_LOG_CONFIG,
     normalize_cpu,
     normalize_memory,
 )
@@ -913,6 +914,12 @@ async def _provision_folders_and_run_agent_container(
         # Always apply noexec,nosuid to /tmp for security (#1098: scratch is
         # redirected off this tiny tmpfs via the TMPDIR env var above).
         tmpfs=AGENT_TMPFS_MOUNT,
+        # #1871: bound the container's json-file log (Docker's default is
+        # unbounded). This is the retrofit seam — `log_config` is creation-time,
+        # so an existing agent adopts the cap when it passes through here, which
+        # covers BOTH recreate_container_with_updated_config and
+        # recreate_missing_container (this is their shared tail).
+        log_config=AGENT_LOG_CONFIG,
         network='trinity-agent-network',
         mem_limit=memory,
         # #1126: nano_cpus (Linux CFS quota → HostConfig.NanoCpus), NOT

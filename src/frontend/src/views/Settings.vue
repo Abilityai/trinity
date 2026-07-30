@@ -2,7 +2,14 @@
   <div class="min-h-screen bg-gray-100 dark:bg-gray-900">
     <NavBar />
 
-    <main class="max-w-4xl mx-auto py-6 sm:px-6 lg:px-8">
+    <!-- #1862: `max-w-4xl` (896px) was too narrow for this view's own tab
+         strip — the ten tabs measure ~925px, so `main` overflowed by ~61px
+         and scrolled horizontally at any desktop width. Settings was also
+         the ONLY top-level view on 4xl; Agents, Operations, Templates and
+         ExecutionDetail all use 7xl. Matching them fixes the overflow and
+         removes the odd one out rather than inventing a bespoke width.
+         `max-w-*` is a ceiling, so narrow viewports are unaffected. -->
+    <main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
       <div class="px-4 py-6 sm:px-0">
         <div class="mb-8">
           <h1 class="text-3xl font-bold text-gray-900 dark:text-white">Settings</h1>
@@ -1670,8 +1677,10 @@ Example:
               </div>
 
               <!-- Users Table — padding trimmed + compact actions so the
-                   entitlement-gated Management column fits the max-w-4xl
-                   card without a horizontal scrollbar (#995). -->
+                   entitlement-gated Management column fits without a horizontal
+                   scrollbar (#995). That trimming was sized against the old
+                   max-w-4xl container; the view is max-w-7xl since #1862, so
+                   there is now headroom here rather than a tight fit. -->
               <div class="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
                 <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                   <thead class="bg-gray-50 dark:bg-gray-700">

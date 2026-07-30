@@ -37,6 +37,7 @@ from services.agent_service.lifecycle import (
     FULL_CAPABILITIES,
     AGENT_TMPFS_MOUNT,
     AGENT_DEFAULT_TMPDIR,
+    AGENT_LOG_CONFIG,
     start_agent_internal,
 )
 from services.agent_service.capabilities import normalize_cpu, normalize_memory
@@ -500,6 +501,10 @@ class SystemAgentService:
             # Always apply noexec,nosuid to /tmp for security (#1098: scratch
             # redirected off this tiny tmpfs via the TMPDIR env var).
             tmpfs=AGENT_TMPFS_MOUNT,
+            # #1871: bound the container's json-file log. The system agent is
+            # long-lived and permanently recycled under a fixed name, so an
+            # unbounded log here accumulates for the life of the install.
+            log_config=AGENT_LOG_CONFIG,
         )
 
         # Register ownership with is_system=True

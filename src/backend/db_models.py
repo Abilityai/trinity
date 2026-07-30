@@ -87,6 +87,11 @@ class AgentShareRequest(BaseModel):
 class McpApiKeyCreate(BaseModel):
     name: str
     description: Optional[str] = None
+    # ent#163: normally omitted → a plain `user` key. The only other value a
+    # caller may request is `portal_delegate`, and the router gates that on
+    # admin. Agent/connector/system keys are minted by their own code paths,
+    # never by this endpoint, so they are not accepted here.
+    scope: Optional[str] = None
 
 
 class McpApiKey(BaseModel):
