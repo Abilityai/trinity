@@ -680,9 +680,30 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     Dependency that requires the current user to be an admin.
 
     Raises:
-        HTTPException(403): If user is not an admin
+        HTTPException(403): If user is not an admin, or is an agent/connector
+            principal.
+
+    ent#293 — an ADMIN gate is never agent-callable.
+
+    An agent-scoped key resolves to its owner CARRYING THE OWNER'S ROLE, so on a
+    default admin-owned install every agent's injected `TRINITY_MCP_API_KEY`
+    satisfied this gate. That is three consecutive incidents of one class —
+    trinity-ops-agent#232, #1644 (retention acknowledge), #1816 (system-agent
+    restart) — each previously closed by bolting `reject_agent_principal` onto
+    one more endpoint. Three occurrences means the GATE was wrong, not the
+    endpoints, so the rejection moves here and the class closes at once.
+
+    Safe by construction, verified rather than assumed: the agent-key flows that
+    must keep working — heartbeat, structured reports, the #1083 result callback
+    — authorize on `current_user.agent_name` self-checks and never touch an admin
+    gate. System-scoped keys are unaffected because `User.agent_name` is set only
+    for `scope == "agent"`, so `trinity-system` still passes.
+
+    This is the grant-vs-use line from `learnings.md`: the endpoint that USES a
+    capability may be agent-callable; the endpoint that GRANTS one is human-only.
     """
     _reject_connector_principal(current_user)
+    reject_agent_principal(current_user)
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -932,11 +953,31 @@ def get_owned_agent_by_name(
 def assert_admin(current_user: User, *, detail: str = "Admin access required") -> None:
     """Imperative admin gate — parity with the ``require_admin`` Depends form.
 
-    Rejects connector principals first (they are consumption-only), then requires
-    ``role == "admin"``. Raises 403 on failure; returns None on success. Use in a
-    router body where the admin check is inline rather than a ``Depends``.
+    Rejects connector AND agent principals (neither is a human admin), then
+    requires ``role == "admin"``. Raises 403 on failure; returns None on success.
+    Use in a router body where the admin check is inline rather than a ``Depends``.
+
+    ent#293 — an ADMIN gate is never agent-callable.
+
+    An agent-scoped key resolves to its owner CARRYING THE OWNER'S ROLE, so on a
+    default admin-owned install every agent's injected `TRINITY_MCP_API_KEY`
+    satisfied this gate. That is three consecutive incidents of one class —
+    trinity-ops-agent#232, #1644 (retention acknowledge), #1816 (system-agent
+    restart) — each previously closed by bolting `reject_agent_principal` onto
+    one more endpoint. Three occurrences means the GATE was wrong, not the
+    endpoints, so the rejection moves here and the class closes at once.
+
+    Safe by construction, verified rather than assumed: the agent-key flows that
+    must keep working — heartbeat, structured reports, the #1083 result callback
+    — authorize on `current_user.agent_name` self-checks and never touch an admin
+    gate. System-scoped keys are unaffected because `User.agent_name` is set only
+    for `scope == "agent"`, so `trinity-system` still passes.
+
+    This is the grant-vs-use line from `learnings.md`: the endpoint that USES a
+    capability may be agent-callable; the endpoint that GRANTS one is human-only.
     """
     _reject_connector_principal(current_user)
+    reject_agent_principal(current_user)
     if current_user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
