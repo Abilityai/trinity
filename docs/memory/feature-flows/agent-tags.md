@@ -700,6 +700,17 @@ toggleQuickTag(tag)
 - When a quick tag is clicked, the system view selection is cleared (line 697)
 - Both methods call `networkStore.setFilterTags()` to apply the filter
 
+**URL deep link (`?tags=` / `?view=`, ent#126):** `Dashboard.vue::applyDeepLinkFilters()`
+is a third entry point into this same state, run in `onMounted` after the persisted
+quick-tags restore. `?view=<id>` selects a System View (which carries its own filter
+tags and therefore wins); otherwise `?tags=a,b` seeds `selectedQuickTags` +
+`networkStore.setFilterTags()` + the localStorage key, and yields entirely when a
+System View is already active. It exists so a freshly installed system manifest can
+land the operator on their new fleet rather than an unfiltered dashboard: manifest
+deploy always applies the system name as a tag to every agent it creates, so
+`/?tags=<system>` is the fallback that always works even when the manifest declared
+no `system_view:`. See [system-manifest.md](system-manifest.md).
+
 ### 3c. Bulk Tag Operations (Agents Page)
 
 Multi-select checkboxes and bulk add/remove tag actions on the Agents page.
