@@ -249,3 +249,100 @@ def test_template_info_endpoint_survives_a_malformed_credentials_block(
     assert payload["name"] == "broken"
     # Degraded to empty, not crashed.
     assert payload["mcp_servers"] == []
+
+
+# ===========================================================================
+# Defect D + Defect C / W6 — MCP precedence and the credentials badge
+# ===========================================================================
+
+def _local_entry(tmp_path, body: str, name: str = "fixture") -> dict:
+    from services import template_service as ts
+
+    d = tmp_path / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "template.yaml").write_text(body)
+    return ts._build_local_template(d)
+
+
+_HEAD = "name: fixture\nresources:\n  cpu: '2'\n  memory: '4g'\n"
+
+
+def test_templates_own_mcp_servers_outranks_the_credentials_block(tmp_path):
+    """Defect D: the operands were the other way round. Must fail on baseline.
+
+    `agent_server/routers/info.py` has always read them in this order, so the
+    catalog and the agent's own Info tab disagreed for any template declaring both.
+    """
+    entry = _local_entry(
+        tmp_path,
+        _HEAD
+        + "mcp_servers: [mermaid-diagram, aistudio, ebook-mcp]\n"
+        + "credentials:\n  mcp_servers:\n    aistudio:\n      env_vars: [AISTUDIO_KEY]\n",
+    )
+    assert entry["mcp_servers"] == ["mermaid-diagram", "aistudio", "ebook-mcp"]
+
+
+def test_credentials_block_is_still_the_fallback(tmp_path):
+    """Flipping precedence must not delete the legacy path."""
+    entry = _local_entry(
+        tmp_path,
+        _HEAD + "credentials:\n  mcp_servers:\n    stripe:\n      env_vars: [STRIPE_API_KEY]\n",
+    )
+    assert entry["mcp_servers"] == ["stripe"]
+
+
+def test_github_builder_gains_the_same_fallback():
+    """W14: the GitHub builder had NO credentials fallback, so all three
+    surfaces disagreed. Must fail on baseline."""
+    from services import template_service as ts
+
+    entry = ts._build_template(
+        "Owner/repo",
+        {"credentials": {"mcp_servers": {"stripe": {"env_vars": ["STRIPE_API_KEY"]}}}},
+    )
+    assert entry["mcp_servers"] == ["stripe"]
+
+
+def test_badge_counts_declared_credentials(tmp_path):
+    """Defect C: `required_credentials` read a top-level key NO template defines,
+    so the catalog badge rendered 0 for everything. Must fail on baseline."""
+    entry = _local_entry(
+        tmp_path,
+        _HEAD
+        + "credentials:\n"
+        + "  mcp_servers:\n    stripe:\n      env_vars: [STRIPE_API_KEY]\n"
+        + "  env_file: [VAULT_BASE_PATH]\n",
+    )
+    assert entry["required_credentials"] == ["STRIPE_API_KEY", "VAULT_BASE_PATH"]
+
+
+def test_badge_excludes_platform_injected_vars(tmp_path):
+    """W6/A1: the badge means "credentials you must supply".
+
+    Fixture is the seeded-cornelius shape — 5 declared, 3 platform-injected, so an
+    operator supplies 2. Before this, the badge said 5.
+    """
+    entry = _local_entry(
+        tmp_path,
+        _HEAD
+        + "credentials:\n"
+        + "  mcp_servers:\n"
+        + "    google:\n      env_vars: [GEMINI_API_KEY]\n"
+        + "    trinity:\n      env_vars: [TRINITY_MCP_API_KEY]\n"
+        + "  env_file: [GITHUB_PAT, VAULT_BASE_PATH, EBOOK_MCP_PATH]\n",
+    )
+    assert entry["required_credentials"] == ["VAULT_BASE_PATH", "EBOOK_MCP_PATH"]
+
+
+def test_badge_is_empty_for_a_zero_credential_template(tmp_path):
+    """An explicit `credentials: {}` means "needs nothing", not "unknown"."""
+    assert _local_entry(tmp_path, _HEAD + "credentials: {}\n")["required_credentials"] == []
+    assert _local_entry(tmp_path, _HEAD)["required_credentials"] == []
+
+
+@pytest.mark.parametrize("block", ['credentials: "OOPS"', "credentials:\n  - A", "credentials:"])
+def test_badge_degrades_on_a_malformed_block(tmp_path, block):
+    """A malformed declaration costs the badge, never the catalog entry."""
+    entry = _local_entry(tmp_path, _HEAD + block + "\n")
+    assert entry["required_credentials"] == []
+    assert entry["mcp_servers"] == []

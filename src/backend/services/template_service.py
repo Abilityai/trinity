@@ -382,6 +382,27 @@ def declared_credential_names(block) -> List[str]:
     return names
 
 
+def operator_supplied_credential_names(block) -> List[str]:
+    """Declared names an OPERATOR must actually supply — the badge feed.
+
+    `declared_credential_names` minus the platform-injected vars Trinity sets on
+    the container itself at create time. That subtraction IS the badge's semantic:
+    the catalog's "N credentials" chip is read as "how much work is this to set
+    up", and counting `GEMINI_API_KEY` / `GITHUB_PAT` / `TRINITY_*` inflates it
+    with rows nobody can fill. Measured on the real shipped catalog before this
+    change, the count was correct on 1 of 7 repos — the ent#124 first-run agent
+    read 5 when the operator supplies 2.
+
+    Note this makes the badge a *count of work*, not a count of declarations. A
+    consumer wanting every declared variable (including the injected ones) wants
+    `declared_credential_names` or `credential_requirements`.
+    """
+    return [
+        name for name in declared_credential_names(block)
+        if not _is_platform_injected(name)
+    ]
+
+
 def _template_credential_errors(block, template_id: str) -> List[str]:
     """`credential_shape_errors()` for a catalog entry, logged once.
 
@@ -453,8 +474,22 @@ def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> d
         "priority": _coerce_priority(metadata.get("priority")),
         "resources": metadata.get("resources", {"cpu": "2", "memory": "4g"}),
         "skills": metadata.get("skills", []),
-        "mcp_servers": metadata.get("mcp_servers", []),
-        "required_credentials": metadata.get("required_credentials", []),
+        # The template's own `mcp_servers:` is authoritative; `credentials:` is the
+        # legacy fallback. W14: this builder had NO fallback at all, so a GitHub
+        # template declaring only `credentials.mcp_servers` showed an empty list in
+        # the catalog while its own Info tab listed them. All three surfaces
+        # (catalog-local, catalog-github, agent `/api/template/info`) now agree.
+        "mcp_servers": metadata.get("mcp_servers")
+            or credential_mcp_server_names(metadata.get("credentials")),
+        # Derived, never read from a top-level `required_credentials:` key. That
+        # key is declared by ZERO templates anywhere — 25 bundled and all 7
+        # configured GitHub repos — so the catalog's "N credentials" badge rendered
+        # 0 for everything (Defect C). Derived unconditionally rather than
+        # "explicit key wins, else derive": one code path, and the override branch
+        # was dead. Platform-injected vars are excluded — see the accessor.
+        "required_credentials": operator_supplied_credential_names(
+            metadata.get("credentials")
+        ),
         # Named errors for a malformed `credentials:` block, so a broken
         # declaration is reported against its own template instead of taking
         # the catalog down. Empty list = nothing wrong. Shape mirrors
@@ -611,9 +646,14 @@ def _build_local_template(template_dir: Path) -> Optional[dict]:
         "hidden": bool(data.get("hidden", False)),
         "resources": data.get("resources", {"cpu": "2", "memory": "4g"}),
         "skills": data.get("skills", []),
-        "mcp_servers": credential_mcp_server_names(credentials_block)
-            or data.get("mcp_servers", []),
-        "required_credentials": data.get("required_credentials", []),
+        # Defect D: the operands were the other way round, so a `credentials:`
+        # block silently OUTRANKED the template's own `mcp_servers:` declaration.
+        # `agent_server/routers/info.py` has always read them in THIS order, so the
+        # catalog and the agent's own Info tab disagreed for any template declaring
+        # both.
+        "mcp_servers": data.get("mcp_servers")
+            or credential_mcp_server_names(credentials_block),
+        "required_credentials": operator_supplied_credential_names(credentials_block),
         # Named errors for a malformed `credentials:` block. The template still
         # lists — it just loses its credential metadata, instead of taking
         # every other template down with an uncaught AttributeError.
