@@ -2105,102 +2105,8 @@ Example:
             </div>
           </div>
 
-          <!-- Skills Library Section -->
-          <div v-if="activeTab === 'agents'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
-            <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-              <h2 class="text-lg font-medium text-gray-900 dark:text-white">Skills Library</h2>
-              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                Configure a GitHub repository containing reusable agent skills.
-                Skills are stored in <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">.claude/skills/&lt;name&gt;/SKILL.md</code>.
-              </p>
-            </div>
-
-            <div class="px-6 py-4 space-y-4">
-              <!-- Repository URL -->
-              <div>
-                <label for="skills-library-url" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                  Repository URL
-                </label>
-                <div class="mt-1">
-                  <input
-                    type="text"
-                    id="skills-library-url"
-                    v-model="skillsLibraryUrl"
-                    placeholder="github.com/owner/skills-library"
-                    class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
-                  />
-                </div>
-                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  Use format: <code>github.com/owner/repo</code> or <code>https://github.com/owner/repo</code>
-                </p>
-              </div>
-
-              <!-- Branch -->
-              <div>
-                <label for="skills-library-branch" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                  Branch
-                </label>
-                <div class="mt-1">
-                  <input
-                    type="text"
-                    id="skills-library-branch"
-                    v-model="skillsLibraryBranch"
-                    placeholder="main"
-                    class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
-                  />
-                </div>
-              </div>
-
-              <!-- Status -->
-              <div v-if="skillsLibraryStatus.cloned" class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
-                <div class="flex items-center justify-between text-sm">
-                  <div class="flex items-center gap-4 text-gray-600 dark:text-gray-300">
-                    <span>
-                      <svg class="h-4 w-4 text-status-success-500 inline mr-1" fill="currentColor" viewBox="0 0 20 20">
-                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
-                      </svg>
-                      {{ skillsLibraryStatus.skill_count }} skills available
-                    </span>
-                    <span v-if="skillsLibraryStatus.commit_sha">
-                      Commit: <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-600 rounded text-xs">{{ skillsLibraryStatus.commit_sha }}</code>
-                    </span>
-                  </div>
-                  <span v-if="skillsLibraryStatus.last_sync" class="text-gray-500 dark:text-gray-400">
-                    Last synced: {{ formatDate(skillsLibraryStatus.last_sync) }}
-                  </span>
-                </div>
-              </div>
-
-              <!-- Actions -->
-              <div class="flex justify-end gap-3">
-                <button
-                  @click="syncSkillsLibrary"
-                  :disabled="syncingSkillsLibrary || !skillsLibraryUrl"
-                  class="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 shadow-sm text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <svg v-if="syncingSkillsLibrary" class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  <svg v-else class="-ml-1 mr-2 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
-                  {{ syncingSkillsLibrary ? 'Syncing...' : 'Sync Library' }}
-                </button>
-                <button
-                  @click="saveSkillsLibrarySettings"
-                  :disabled="savingSkillsLibrary"
-                  class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <svg v-if="savingSkillsLibrary" class="animate-spin -ml-1 mr-2 h-4 w-4" fill="none" viewBox="0 0 24 24">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  {{ savingSkillsLibrary ? 'Saving...' : 'Save Settings' }}
-                </button>
-              </div>
-            </div>
-          </div>
+          <!-- Skills Library sources (ent#237) -->
+          <SkillSourcesPanel v-if="activeTab === 'agents'" />
 
           <!-- Default Avatars (AVATAR-003) -->
           <div v-if="activeTab === 'general'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
@@ -2324,6 +2230,7 @@ import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'
 import UserGitHubPatPanel from '../components/settings/UserGitHubPatPanel.vue'
 import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
+import SkillSourcesPanel from '../components/SkillSourcesPanel.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
@@ -2814,18 +2721,8 @@ const savingQuotas = ref(false)
 const autoSwitchEnabled = ref(false)
 const savingAutoSwitch = ref(false)
 
-// Skills Library state
-const skillsLibraryUrl = ref('')
-const skillsLibraryBranch = ref('main')
-const skillsLibraryStatus = ref({
-  configured: false,
-  cloned: false,
-  skill_count: 0,
-  commit_sha: null,
-  last_sync: null
-})
-const syncingSkillsLibrary = ref(false)
-const savingSkillsLibrary = ref(false)
+// Skills Library state now lives in SkillSourcesPanel / stores/skillSources
+// (ent#237): the single skills_library_url setting became a list of sources.
 
 // Default Avatars state (AVATAR-003)
 const generatingDefaultAvatars = ref(false)
@@ -3850,77 +3747,6 @@ async function toggleAutoSwitch() {
   }
 }
 
-// Skills Library methods
-async function loadSkillsLibrarySettings() {
-  try {
-    const response = await axios.get('/api/skills/library/status', {
-      headers: authStore.authHeader
-    })
-    skillsLibraryStatus.value = response.data
-    skillsLibraryUrl.value = response.data.url || ''
-    skillsLibraryBranch.value = response.data.branch || 'main'
-  } catch (e) {
-    console.error('Failed to load skills library status:', e)
-  }
-}
-
-async function saveSkillsLibrarySettings() {
-  savingSkillsLibrary.value = true
-  error.value = null
-
-  try {
-    // Save URL setting
-    if (skillsLibraryUrl.value.trim()) {
-      await settingsStore.updateSetting('skills_library_url', skillsLibraryUrl.value.trim())
-    } else {
-      await settingsStore.deleteSetting('skills_library_url')
-    }
-
-    // Save branch setting
-    if (skillsLibraryBranch.value.trim() && skillsLibraryBranch.value !== 'main') {
-      await settingsStore.updateSetting('skills_library_branch', skillsLibraryBranch.value.trim())
-    } else {
-      await settingsStore.deleteSetting('skills_library_branch')
-    }
-
-    showSuccess.value = true
-    setTimeout(() => {
-      showSuccess.value = false
-    }, 3000)
-  } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to save skills library settings'
-  } finally {
-    savingSkillsLibrary.value = false
-  }
-}
-
-async function syncSkillsLibrary() {
-  syncingSkillsLibrary.value = true
-  error.value = null
-
-  try {
-    // Save settings first
-    await saveSkillsLibrarySettings()
-
-    // Then sync
-    const response = await axios.post('/api/skills/library/sync', {}, {
-      headers: authStore.authHeader
-    })
-
-    // Reload status
-    await loadSkillsLibrarySettings()
-
-    showSuccess.value = true
-    setTimeout(() => {
-      showSuccess.value = false
-    }, 3000)
-  } catch (e) {
-    error.value = e.response?.data?.detail || 'Failed to sync skills library'
-  } finally {
-    syncingSkillsLibrary.value = false
-  }
-}
-
 // Default Avatars methods (AVATAR-003)
 async function generateDefaultAvatars() {
   generatingDefaultAvatars.value = true
@@ -4123,7 +3949,6 @@ function loadAdminOnlySettings() {
   loadGithubTemplates()
   loadOpsSettings()
   loadAgentQuotas()
-  loadSkillsLibrarySettings()
   loadSubscriptions()
   loadAutoSwitchSetting()
 }
