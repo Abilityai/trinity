@@ -7,6 +7,24 @@
    don't shift horizontally. Issue #954. */
 html {
   scrollbar-gutter: stable;
+
+  /* Paint the page canvas. The app background lives on the #app wrapper, so it
+     stops at that element's box — anything the browser draws outside it (macOS
+     elastic overscroll past the top/bottom, and the gap a short page leaves)
+     falls back to the default white canvas, which flashes bright against the
+     dark UI. The canvas takes its color from <html>, which Tailwind's preflight
+     leaves transparent; setting it here is the only place that covers it. */
+  background-color: theme('colors.gray.100');
+
+  /* Tell the browser which scheme its own chrome should use: native scrollbars
+     (Firefox ignores the ::-webkit-scrollbar rules below), form-control
+     defaults, and the fallback canvas. */
+  color-scheme: light;
+}
+
+html.dark {
+  background-color: theme('colors.gray.900');
+  color-scheme: dark;
 }
 
 /* Theme transition for smooth dark mode switching */
