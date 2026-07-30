@@ -128,15 +128,10 @@ export const useSystemsStore = defineStore('systems', () => {
     return Boolean(preview.value.prompt_updated) || enabledSchedules > 0
   })
 
-  /**
-   * At least one agent would be created with an `_N` suffix because the name is
-   * taken. On a fresh install this is the DEFAULT outcome of re-installing a
-   * bundled manifest, and recovery is manual and per-agent — so the UI treats it
-   * as a confirm-grade blocker, not a passive row.
-   */
-  const duplicateWarnings = computed(
-    () => (preview.value?.warnings || []).filter(w => /already exists/i.test(w))
-  )
+  // NOTE: the `_N`-duplicate warning split lives in ManifestPreview.vue, which
+  // needs BOTH halves (duplicates get a confirm-grade panel, everything else a
+  // notes list). Keeping a second copy of that heuristic here would be two
+  // regexes to drift apart for no gain.
 
   const canDeploy = computed(
     () => previewIsCurrent.value && !previewHasBlockers.value && !isDeploying.value
@@ -301,7 +296,6 @@ export const useSystemsStore = defineStore('systems', () => {
     previewIsCurrent,
     previewHasBlockers,
     needsAcknowledgement,
-    duplicateWarnings,
     canDeploy,
     // actions
     setManifestText,

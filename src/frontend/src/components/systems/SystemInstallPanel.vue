@@ -254,7 +254,7 @@
  * binding a user can preview manifest A, edit it to B, and deploy B while reading
  * A's preview.
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSystemsStore } from '../../stores/systems'
 import ManifestPreview from './ManifestPreview.vue'
@@ -302,6 +302,17 @@ function resetLocalState () {
   acknowledged.value = false
   uploadError.value = ''
 }
+
+// Consent is per-manifest, so it dies with the text it was given for.
+//
+// Without this, the acknowledgement outlives the manifest it applied to: preview a
+// manifest with schedules, tick the box, edit the YAML, preview again — the box is
+// still ticked and Deploy re-enables, so the user consented to manifest A's
+// consequences and deployed manifest B's. That is the same
+// deploy-what-you-didn't-look-at failure the preview/previewedText binding exists
+// to prevent, one field over. Covers every source (typing, an uploaded file, a
+// bundled card) because they all funnel through setManifestText.
+watch(() => store.manifestText, () => { acknowledged.value = false })
 
 async function pickBundled (manifest) {
   resetLocalState()

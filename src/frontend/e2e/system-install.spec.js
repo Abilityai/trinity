@@ -122,6 +122,30 @@ test.describe('System install surface', () => {
     await expect(deploy).toBeEnabled()
   })
 
+  test('the acknowledgement does not survive a manifest edit', async ({ page }) => {
+    // Consent is per-manifest. Without the reset, a user could tick the box for
+    // manifest A's schedules, edit the YAML, re-preview, and deploy manifest B's
+    // consequences under A's consent — the deploy-what-you-didn't-look-at failure
+    // the preview binding exists to prevent, one field over.
+    await openSystemsTab(page)
+    await pasteManifest(page, VALID_MANIFEST)
+    await page.getByTestId('dry-run').click()
+    await expect(page.getByText('No blockers found')).toBeVisible()
+    await page.getByTestId('ack-checkbox').check()
+    await expect(page.getByTestId('deploy')).toBeEnabled()
+
+    // Same hazard shape (still has an enabled schedule), different manifest.
+    await page.getByTestId('manifest-textarea').fill(
+      VALID_MANIFEST.replace('e2e-preview-only', 'e2e-preview-edited')
+    )
+    await page.getByTestId('dry-run').click()
+    await expect(page.getByText('No blockers found')).toBeVisible()
+
+    // The box must be clear again, and Deploy must be blocked until it is re-ticked.
+    await expect(page.getByTestId('ack-checkbox')).not.toBeChecked()
+    await expect(page.getByTestId('deploy')).toBeDisabled()
+  })
+
   test('editing after a preview disables Deploy until re-previewed', async ({ page }) => {
     await openSystemsTab(page)
     // No schedules and no prompt -> no acknowledgement needed, so Deploy's state
