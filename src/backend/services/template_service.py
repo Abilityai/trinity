@@ -5,6 +5,7 @@ Metadata for GitHub templates is fetched from each repo's template.yaml
 via the GitHub API and cached in memory (10-minute TTL).
 """
 import base64
+import difflib
 import json
 import logging
 import re
@@ -14,12 +15,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlsplit
 import httpx
 import yaml
 from config import DEFAULT_GITHUB_TEMPLATE_REPOS, GITHUB_PAT_CREDENTIAL_ID
 from services.credential_charset import (
     CREDENTIAL_DETECTOR_NAME_RE,
     CREDENTIAL_DETECTOR_REF_RE,
+    is_credential_var_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -216,6 +219,36 @@ def credential_shape_errors(block) -> List[str]:
             f"credentials.mcp_servers: expected a mapping of server name to "
             f"config, got {_type_name(mcp_servers)}"
         )
+    elif isinstance(mcp_servers, dict):
+        # Per-server + per-ELEMENT rows, mirroring what `env_file` already gets
+        # below. The element row is the one that matters: an `env_vars` entry
+        # smuggled in as a mapping is what turns a downstream
+        # `{r["name"] for r in ...}` into `TypeError: unhashable type: 'dict'`, and
+        # before ent#128 this function checked only that `mcp_servers` was a dict —
+        # so the single most dangerous shape in the block was unnamed. (ent#128)
+        for server_name, server_config in mcp_servers.items():
+            label = f"credentials.mcp_servers.{_sanitize_for_warning(str(server_name))}"
+            if not isinstance(server_config, dict):
+                errors.append(
+                    f"{label}: expected a mapping with an 'env_vars' list, got "
+                    f"{_type_name(server_config)}"
+                )
+                continue
+            env_vars = server_config.get("env_vars")
+            if env_vars is None:
+                continue
+            if not isinstance(env_vars, list):
+                errors.append(
+                    f"{label}.env_vars: expected a list of variable names, got "
+                    f"{_type_name(env_vars)}"
+                )
+                continue
+            for i, entry in enumerate(env_vars):
+                if not isinstance(entry, str) or not entry.strip():
+                    errors.append(
+                        f"{label}.env_vars[{i}]: expected a variable name "
+                        f"(string), got {_type_name(entry)}"
+                    )
 
     env_file = block.get("env_file")
     if env_file is not None and not isinstance(env_file, list):
@@ -403,6 +436,407 @@ def operator_supplied_credential_names(block) -> List[str]:
     ]
 
 
+# ============================================================================
+# `credential_setup:` — the enriched declaration standard (ent#128)
+# ============================================================================
+#
+# `credentials:` is FROZEN as names-only, forever. Enrichment lives in a NEW
+# sibling top-level key, and the two are joined by a mandatory validated
+# cross-reference:
+#
+#   credentials:                      # names-only, valid forever
+#     mcp_servers:
+#       stripe:
+#         env_vars: [STRIPE_API_KEY]
+#     env_file: [VAULT_BASE_PATH]
+#
+#   credential_setup:                 # NEW — enriched, opt-in, DECORATES the above
+#     - name: STRIPE_API_KEY
+#       title: "Stripe secret key"
+#       description: "Powers the stripe MCP server."
+#       required: true
+#       secret: true
+#       setup_url: https://dashboard.stripe.com/apikeys
+#
+# Why a sibling key rather than enriching `credentials.env_file` in place: an
+# already-deployed older Trinity reads `env_file` through
+# `credential_env_file_names` and then does `agent_credentials.get(var_name, "")`.
+# Hand it a list of mappings and that is `TypeError: unhashable type: 'dict'` at
+# the moment it writes the agent's `.env`. A sibling key is STRUCTURALLY invisible
+# to that binary, so there is no floor version and enrichment can be distributed
+# immediately.
+#
+# Why base-set-plus-overlay rather than "credential_setup declares things": the
+# sibling-key shape is normally where two places describe the same variable and
+# drift. Here they cannot. One record per variable that `credentials:` declares,
+# decorated by `credential_setup:` entries joined BY NAME; an entry naming nothing
+# is a named error and is dropped, valid siblings survive. `credential_setup:` can
+# only ever decorate — drift is impossible by construction, not by discipline.
+#
+# What drift DOES remain, stated honestly: for an external template a
+# `credential_setup:` entry naming an undeclared variable is neither impossible
+# nor visible in the UI — `credential_errors` has zero frontend and zero MCP
+# consumers, so the only human channel is the backend WARNING. It is LOGGED, not
+# surfaced. Say that rather than claiming visibility.
+
+# One record per declared variable, hard-capped. The cap is on the INPUT, before
+# any per-field work, because the cost this bounds is the walk itself, not the
+# output: `str()` on an aliased YAML node EXPANDS it (443 B → 52 MB measured), so a
+# cap applied after the loop bounds nothing. Both the enriched list AND the base
+# set are capped — the base set comes from `credentials:`, which the enriched cap
+# does not cover.
+_MAX_CREDENTIAL_RECORDS = 100
+
+# Errors are capped for the same reason and separately: 400k malformed entries
+# yielded 1 capped record and 400,000 uncapped errors — a 35 MB response built out
+# of the cap that was supposed to prevent exactly that.
+_MAX_CREDENTIAL_ERRORS = 100
+
+# Per-field, field-appropriate. `_sanitize_for_warning`'s 80-char default is for a
+# terminal warning line, and reusing it here truncated a realistic 159-char
+# `description` and made a real 90-char vendor console URL unusable.
+_CREDENTIAL_FIELD_MAX = {
+    "name": 128,
+    "title": 120,
+    "description": 500,
+    "default": 200,
+    "format": 40,
+}
+_MAX_SETUP_URL_LEN = 2048
+
+# Open vocabulary — a hint for a future guided-setup UI, never an enforcement.
+# `format` outside it is an error so a typo is caught, but the set is expected to
+# grow; unknown values degrade the record, they never drop it.
+_CREDENTIAL_FORMATS = frozenset(
+    {
+        "secret",
+        "filepath",
+        "dirpath",
+        "url",
+        "email",
+        "number",
+        "boolean",
+        "text",
+    }
+)
+
+# The authored top-level key. Named once so the error strings, the reader and the
+# schema artifact cannot drift.
+_CREDENTIAL_SETUP_KEY = "credential_setup"
+
+# snake_case authored keys. Silent-ignore plus camelCase would turn an
+# `is_required:` typo into a silent semantic flip, so unknown keys are named with a
+# "did you mean" — and `x-` is the documented escape hatch for a vendor extension
+# that must not become an error.
+_CREDENTIAL_SETUP_FIELDS = frozenset(
+    {
+        "name",
+        "title",
+        "description",
+        "required",
+        "secret",
+        "format",
+        "setup_url",
+        "default",
+    }
+)
+
+_SOURCE_TRUST_LEVELS = frozenset({"bundled", "deployed", "github"})
+
+
+def _did_you_mean(key: str, allowed) -> str:
+    """Nearest allowed key, for an unknown-key error.
+
+    `difflib` rather than prefix matching: the typos worth catching are
+    transpositions and near-misses (`titel`, `descriptoin`), and a prefix test
+    catches none of them. Also normalizes `-` to `_` so a camelCase-adjacent or
+    kebab-case author is pointed at the snake_case key rather than told nothing.
+    """
+    lowered = key.lower().replace("-", "_")
+    matches = difflib.get_close_matches(lowered, sorted(allowed), n=1, cutoff=0.6)
+    return f" — did you mean '{matches[0]}'?" if matches else ""
+
+
+def _clean_field(value, field: str) -> Optional[str]:
+    """Sanitize one author-controlled string, or `None` if it is not a string.
+
+    Returns `None` for a non-string so the CALLER emits the named type error. This
+    never coerces: `str()` on a container from untrusted YAML expands a shared
+    alias during the walk (443 B → 52 MB in 1.5 s, x10 per alias level), and both
+    the sanitizer and the record cap act AFTER that cost is already paid. Type-guard
+    first, always.
+    """
+    if not isinstance(value, str):
+        return None
+    return _sanitize_for_warning(value, max_len=_CREDENTIAL_FIELD_MAX[field])
+
+
+def _setup_url_error(url) -> Optional[str]:
+    """`None` if `url` is an acceptable setup link, else the reason it is not.
+
+    Scheme-only is below the floor. `https://google.com@evil.tld/apikey` passes a
+    scheme check and renders as a Google link while resolving to the attacker —
+    and this string lands in an operator-facing "paste your API key here"
+    checklist, so the display/resolve split IS the attack.
+
+    Validate, THEN sanitize — and never run a URL through a truncator, which is
+    what silently broke real 90-char vendor console links.
+
+    Named residual: `isprintable()` is False for Cf/Cc, so RTL overrides and ANSI
+    escapes are rejected, but IDN homographs and full-width characters SURVIVE.
+    A lookalike host still gets through, which is why a consumer must render the
+    parsed hostname beside the link rather than only the anchor text.
+    """
+    if not isinstance(url, str):
+        return f"expected an https URL (string), got {_type_name(url)}"
+    if len(url) > _MAX_SETUP_URL_LEN:
+        return f"URL is {len(url)} characters (limit {_MAX_SETUP_URL_LEN})"
+    if any(not ch.isprintable() for ch in url):
+        return "URL contains non-printable characters"
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "URL could not be parsed"
+    # Case-insensitive: `HTTPS://` is a legitimate author today and lowercasing
+    # the whole URL to test it would corrupt a case-sensitive path.
+    if parts.scheme.lower() != "https":
+        return f"expected an https URL, got scheme {parts.scheme.lower() or '(none)'!r}"
+    if not parts.hostname:
+        return "URL has no host"
+    if parts.username or parts.password:
+        return (
+            "URL contains userinfo (the `user@host` form renders as one host and "
+            "resolves to another)"
+        )
+    return None
+
+
+def _base_credential_records(block) -> List[dict]:
+    """One un-enriched record per variable `credentials:` declares, in order.
+
+    This is the cross-reference universe: `credential_setup:` can only decorate a
+    name that appears here. `source` keeps the `template:` prefix — an
+    `extract_agent_credentials` consumer distinguishes a `template:`-declared
+    variable from one merely observed in `.mcp.json`, and first declaration wins.
+    """
+    records: List[dict] = []
+    seen: Dict[str, dict] = {}
+
+    def add(name: str, source: str) -> None:
+        if name in seen:
+            return
+        record = {
+            "name": name,
+            "title": name,
+            "description": None,
+            # Tri-state. A bare `- FOO` carries NO authorial intent, so it must not
+            # read as `True`: an ent#127-style checklist that renders every legacy
+            # name as a required field cries wolf on templates whose authors never
+            # opted in. `"unknown"` is also the enriched/un-enriched discriminator —
+            # `required == "unknown"` <=> this record was never decorated.
+            "required": "unknown",
+            # Fail-safe: assume a declared variable is sensitive until an author
+            # says otherwise, so a consumer masks by default.
+            "secret": True,
+            "format": None,
+            "setup_url": None,
+            "default": None,
+            "source": _sanitize_for_warning(source, max_len=160),
+            "platform_injected": _is_platform_injected(name),
+        }
+        seen[name] = record
+        records.append(record)
+
+    for server_name, env_vars in credential_mcp_env_vars(block).items():
+        # The server name is an arbitrary author-controlled mapping key and it goes
+        # straight into `source`, which reaches an operator-facing surface — the
+        # exact string `_sanitize_for_warning`'s own docstring names as the threat.
+        # It was not on the sanitize list before ent#128.
+        for name in env_vars:
+            add(name, f"template:mcp:{server_name}")
+    for name in credential_env_file_names(block):
+        add(name, "template:env_file")
+    return records
+
+
+def normalize_credential_requirements(data, *, source_trust: str):
+    """Normalized per-variable credential requirements for a parsed template.yaml.
+
+    Returns `(records, errors)`. Base-set-plus-overlay: one record per variable
+    `credentials:` declares, decorated by matching `credential_setup:` entries.
+
+    **NEVER RAISES, and that is a load-bearing security property, not a nicety.**
+    Two callers make it so: `_build_template` runs inside bare list comprehensions
+    in `get_all_templates()`, where a raise is an HTTP 500 and an EMPTY CATALOG —
+    the exact bug PR-A closed; and the K-002/T-015 HARD compatibility gate consumes
+    the same readers, where a raise downgrades to a verdict indistinguishable from
+    a pass. Callers on those paths ALSO wrap this, deliberately: the property must
+    not rest on one function's discipline.
+
+    **NEVER MUTATES `data`.** `_metadata_cache` holds the parsed dict for 600 s and
+    YAML aliases genuinely share nodes, so one in-place normalize would rewrite
+    both aliased fields and persist for ten minutes.
+
+    `source_trust` (`bundled` | `deployed` | `github`) is a required kwarg with no
+    default — fail-safe, and every level gets identical validation. It selects the
+    LOG level only: a malformed bundled template is our own build bug and worth a
+    WARNING, while an external one is routine untrusted input.
+
+    Absent / `{}` / `null` `credentials:` means "this agent needs no credentials"
+    and is not an error.
+    """
+    if source_trust not in _SOURCE_TRUST_LEVELS:
+        # A coding error at the call site — but raising here would reopen exactly
+        # the empty-catalog path this function exists to keep closed, so degrade to
+        # the strictest posture and say so loudly instead.
+        logger.warning(
+            "normalize_credential_requirements: unknown source_trust %r; treating "
+            "as 'github'",
+            source_trust,
+        )
+        source_trust = "github"
+
+    errors: List[str] = []
+
+    def error(message: str) -> None:
+        if len(errors) < _MAX_CREDENTIAL_ERRORS:
+            errors.append(message)
+
+    if not isinstance(data, dict):
+        return [], errors
+
+    records = _base_credential_records(data.get("credentials"))
+    if len(records) > _MAX_CREDENTIAL_RECORDS:
+        error(
+            f"credentials: {len(records)} variables declared (limit "
+            f"{_MAX_CREDENTIAL_RECORDS}); the rest are ignored"
+        )
+        records = records[:_MAX_CREDENTIAL_RECORDS]
+    by_name = {record["name"]: record for record in records}
+
+    setup = data.get(_CREDENTIAL_SETUP_KEY)
+    if setup is None:
+        return records, errors
+    if not isinstance(setup, list):
+        error(
+            f"{_CREDENTIAL_SETUP_KEY}: expected a list of variable descriptors, "
+            f"got {_type_name(setup)}"
+        )
+        return records, errors
+
+    if len(setup) > _MAX_CREDENTIAL_RECORDS:
+        error(
+            f"{_CREDENTIAL_SETUP_KEY}: too many declarations "
+            f"({len(setup)}, limit {_MAX_CREDENTIAL_RECORDS})"
+        )
+        setup = setup[:_MAX_CREDENTIAL_RECORDS]
+
+    decorated: set = set()
+    for i, entry in enumerate(setup):
+        where = f"{_CREDENTIAL_SETUP_KEY}[{i}]"
+        if not isinstance(entry, dict):
+            error(
+                f"{where}: expected a mapping with a 'name' key, got {_type_name(entry)}"
+            )
+            continue
+
+        for key in entry:
+            if not isinstance(key, str):
+                error(f"{where}: key {_type_name(key)} is not a string")
+            elif key.startswith("x-"):
+                continue  # documented vendor-extension escape hatch
+            elif key not in _CREDENTIAL_SETUP_FIELDS:
+                error(
+                    f"{where}: unknown key "
+                    f"{_sanitize_for_warning(key, max_len=40)!r}"
+                    f"{_did_you_mean(key, _CREDENTIAL_SETUP_FIELDS)}"
+                )
+
+        raw_name = entry.get("name")
+        if raw_name is None:
+            error(f"{where}: missing required key 'name'")
+            continue
+        name = _clean_field(raw_name, "name")
+        if name is None:
+            error(
+                f"{where}.name: expected a variable name (string), got {_type_name(raw_name)}"
+            )
+            continue
+        if not is_credential_var_name(name):
+            error(f"{where}.name: invalid variable name {name!r}")
+            continue
+        if name in decorated:
+            error(f"{where}.name: duplicate declaration of {name!r}")
+            continue
+
+        record = by_name.get(name)
+        if record is None:
+            # The mandatory cross-reference. Three lines on purpose — problem,
+            # cause, FIX — because the whole no-drift guarantee rests on an author
+            # understanding that this key decorates and does not declare.
+            error(
+                f"{where}.name: {name!r} is not declared in `credentials:`. "
+                f"Add it to `credentials.env_file` or "
+                f"`credentials.mcp_servers.<server>.env_vars` — `credential_setup:` "
+                f"adds setup guidance for variables `credentials:` declares, it does "
+                f"not declare them."
+            )
+            continue
+        decorated.add(name)
+
+        for field in ("title", "description", "default", "format"):
+            if field not in entry:
+                continue
+            cleaned = _clean_field(entry[field], field)
+            if cleaned is None:
+                error(
+                    f"{where}.{field}: expected a string, got {_type_name(entry[field])}"
+                )
+                continue
+            if field == "format" and cleaned not in _CREDENTIAL_FORMATS:
+                error(f"{where}.format: unknown format {cleaned!r}")
+                continue
+            record[field] = cleaned
+
+        for field in ("required", "secret"):
+            if field not in entry:
+                continue
+            value = entry[field]
+            if not isinstance(value, bool):
+                error(
+                    f"{where}.{field}: expected true or false, got {_type_name(value)}"
+                )
+                continue
+            record[field] = value
+
+        if "setup_url" in entry:
+            reason = _setup_url_error(entry["setup_url"])
+            if reason:
+                error(f"{where}.setup_url: {reason}")
+            else:
+                # Validated, THEN sanitized — and never truncated.
+                record["setup_url"] = "".join(
+                    ch for ch in entry["setup_url"] if ch.isprintable()
+                )
+
+        # Enriched-and-omitted means REQUIRED: this cohort is "a form a human
+        # completes", and an author who described a variable but left `required`
+        # off meant it. Only an un-decorated legacy name stays `"unknown"`.
+        if "required" not in entry:
+            record["required"] = True
+
+    if errors:
+        level = logger.warning if source_trust == "bundled" else logger.info
+        level(
+            "`%s` in a %s template has %d problem(s): %s",
+            _CREDENTIAL_SETUP_KEY,
+            source_trust,
+            len(errors),
+            "; ".join(errors),
+        )
+    return records, errors
+
+
 def _template_credential_errors(block, template_id: str) -> List[str]:
     """`credential_shape_errors()` for a catalog entry, logged once.
 
@@ -420,6 +854,37 @@ def _template_credential_errors(block, template_id: str) -> List[str]:
             "; ".join(errors),
         )
     return errors
+
+
+def _catalog_credential_metadata(data, template_id: str, source_trust: str):
+    """`(requirements, errors)` for one catalog entry. Cannot raise. (ent#128)
+
+    The belt over `normalize_credential_requirements`' own "never raises", and it
+    is not redundant. `_build_template` (the GitHub builder — the untrusted path
+    since ent#123) is called in BARE list comprehensions inside
+    `get_all_templates()`, outside PR-A's per-template fence, which covers
+    `_build_local_template` only. A raise there propagates to
+    `routers/templates.py` as HTTP 500 with an EMPTY CATALOG: PR-A's exact bug,
+    reopened by the change that surfaces the new metadata.
+
+    Degrading here rather than fencing the comprehensions is deliberate — it keeps
+    the NAMED error the resilience contract promises, instead of dropping the
+    template silently.
+    """
+    try:
+        requirements, errors = normalize_credential_requirements(
+            data, source_trust=source_trust
+        )
+    except Exception:  # noqa: BLE001 — a 500 here is an empty catalog
+        logger.exception(
+            "Template %s: credential requirements could not be normalized",
+            _sanitize_for_warning(template_id),
+        )
+        return [], [
+            "credential_setup: could not be read; this template's credential "
+            "setup metadata is unavailable"
+        ]
+    return requirements, errors
 
 
 def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> dict:
@@ -461,6 +926,13 @@ def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> d
     # git_service, which imports database/docker modules at module load.
     from services.git_service import DEFAULT_PERSISTENT_STATE
 
+    # Computed BEFORE the dict literal, and through the non-raising wrapper: this
+    # builder runs in bare list comprehensions in `get_all_templates()`, so a raise
+    # inside the literal is an HTTP 500 and an empty catalog.
+    credential_requirements, setup_errors = _catalog_credential_metadata(
+        metadata, f"github:{repo}", "github"
+    )
+
     return {
         "id": f"github:{repo}",
         "display_name": display_name,
@@ -496,7 +968,11 @@ def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> d
         # `_build_local_template`. (trinity-enterprise#128)
         "credential_errors": _template_credential_errors(
             metadata.get("credentials"), f"github:{repo}"
-        ),
+        ) + setup_errors,
+        # Per-variable setup metadata (ent#128 AC #2). Empty list when the template
+        # declares nothing; `required == "unknown"` marks a record carrying no
+        # authorial intent.
+        "credential_requirements": credential_requirements,
         # Surface `persistent_state` from template.yaml so crud.py can
         # materialize `.trinity/persistent-state.yaml` at creation. Falls
         # back to the global default list when the template omits the key.
@@ -628,6 +1104,17 @@ def _build_local_template(template_dir: Path) -> Optional[dict]:
 
     name = template_dir.name
     credentials_block = data.get("credentials")
+    # `bundled` only when this really is the curated catalog root. The deploy-local
+    # writable store (#950) is operator-uploaded and must not inherit our own
+    # templates' trust label — trust selects the log level only today, but a wrong
+    # label is exactly what gets read as a security boundary later.
+    try:
+        is_bundled = template_dir.resolve().parent == _local_templates_dir().resolve()
+    except OSError:
+        is_bundled = False
+    credential_requirements, setup_errors = _catalog_credential_metadata(
+        data, f"local:{name}", "bundled" if is_bundled else "deployed"
+    )
     return {
         "id": f"local:{name}",
         "display_name": data.get("display_name") or data.get("name") or name,
@@ -660,7 +1147,9 @@ def _build_local_template(template_dir: Path) -> Optional[dict]:
         # (trinity-enterprise#128)
         "credential_errors": _template_credential_errors(
             credentials_block, f"local:{name}"
-        ),
+        ) + setup_errors,
+        # Per-variable setup metadata (ent#128 AC #2).
+        "credential_requirements": credential_requirements,
         # Local templates surface their full capabilities/use-cases so the
         # frontend can preview them without a second round-trip.
         "capabilities": data.get("capabilities", []),
