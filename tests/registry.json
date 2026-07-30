@@ -1256,6 +1256,20 @@
         "unit",
         "ops"
       ]
+    },
+    {
+      "file": "unit/test_ent109_git_env_seam.py",
+      "feature": "trinity-enterprise#109",
+      "added": "2026-07-30",
+      "categories": [
+        "backend",
+        "agents",
+        "git",
+        "unit",
+        "reliability",
+        "security"
+      ],
+      "description": "Single-owner git env derivation across both container-rebuild paths (ent#109 PR 1). recreate_container_with_updated_config seeds env from the OLD container and re-derived only GITHUB_PAT, replaying whatever GITHUB_REPO / GIT_SYNC_* each container carried; its one production caller is start_agent_internal, fired by nine config-drift predicates AND base-image drift at cold start, so a base-image rebuild arms that replay fleet-wide. 17 tests over the 1484-shape purge-and-mock harness (copied from test_ent123_tokenless_clone, deliberately not shared - sys.modules leaks). (1) PAT gate is a REQUIRED per-call-site parameter: the ent#162 regression verbatim - a tokenless agent plus a configured GLOBAL platform PAT must NOT get GITHUB_PAT under pat_gate='per_agent_only' (a verbatim lift would have swapped #211's per-agent gate for the 2-tier per-agent->global resolver, configure_push_remote clears the push blackhole, and Cornelius can push a private KB to the shared public upstream) - plus the contrast case proving pat_gate='effective' DOES resolve it (so the assertion is the gate's doing, not a dead resolver), the per-agent-row and already-tokened-container arms, an unknown gate rejected, and an AST-free source-grep static guard pinning which literal each call site passes. (2) GIT_SYNC_AUTO = DB flag OR baked env: baked-true/DB-0 keeps auto-push and backfills the column once (crud.py's two writers genuinely disagree - 'and not config.ephemeral' sits inside a swallowing try/except on the DB side only, column default 0 - so DB-only derivation silently stops auto-push for that slice of the fleet); DB-only enables without backfilling; neither source clears a stale flag; a raising backfill never breaks the recreate. (3) Set-or-clear: a deleted agent_git_config row pops every var in _GIT_ENV_KEYS from a carried-forward dict and touches nothing else, a source_mode flip clears the mode/branch pair, TRINITY_GIT_BASE_URL refreshes from the CURRENT backend env, the owned key set is complete, and the one deliberate divergence from a verbatim lift is asserted (a container with a baked PAT and NO git binding loses it rather than having it refreshed from the global platform PAT - the per-agent PAT is a column ON that row). (4) Idempotence: two passes produce an identical env dict and the backfill fires exactly once, so the writer can never feed a config-drift matcher into an infinite recreate loop. Every one of the four behaviours was proved to have teeth by mutation (un-gate the PAT, flip the call site to 'effective', derive GIT_SYNC_AUTO DB-only, drop the clear sweep, drop the source-mode clear, diverge the GIT_SYNC_AUTO literal, unguard the backfill: all seven go red). No Docker, no backend, no Redis."
     }
   ]
 }
