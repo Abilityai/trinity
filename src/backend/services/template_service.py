@@ -347,6 +347,41 @@ def credential_mcp_env_vars(block) -> Dict[str, List[str]]:
     return out
 
 
+def declared_credential_names(block) -> List[str]:
+    """Every variable name a `credentials:` block DECLARES, tolerant of any shape.
+
+    The union of `credentials.mcp_servers.<server>.env_vars` and
+    `credentials.env_file` — the two places a template names a credential. This
+    is the "what did the author declare" universe: the cross-reference target for
+    `credential_setup:` and the `listed` set the K-002/T-015 compatibility gate
+    compares `${VAR}` references against.
+
+    Deduplicated, order-preserving (first declaration wins) so a caller can build
+    stable records. Every element is a non-empty `str` **structurally** — the
+    tolerant readers below cannot emit anything else — so a caller's
+    `{r["name"] for r in ...}` set comprehension can never meet the unhashable
+    `dict` that turns a compatibility check into a `skipped` verdict. Callers on
+    a security path defend anyway (`if isinstance(n, str)`): the gate must not
+    depend on this contract holding.
+
+    Path-free by construction — it takes a parsed block, never a filename — so
+    the pending `template.yaml` → `trinity.yaml` rename (trinity#570) cannot
+    reach it.
+    """
+    names: List[str] = []
+    seen = set()
+    for env_vars in credential_mcp_env_vars(block).values():
+        for name in env_vars:
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+    for name in credential_env_file_names(block):
+        if name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
 def _template_credential_errors(block, template_id: str) -> List[str]:
     """`credential_shape_errors()` for a catalog entry, logged once.
 

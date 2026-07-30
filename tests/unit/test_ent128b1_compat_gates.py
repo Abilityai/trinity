@@ -298,3 +298,226 @@ def test_s010_still_flags_an_uppercase_generic_name():
     )
     assert status == "fail"
     assert detail["names"] == ["API_KEY"]
+
+
+# ===========================================================================
+# Tests 1-4 — K-002 / T-015 (HARD): read the DECLARATION, not the section names
+# ===========================================================================
+#
+# STRIPE_API_KEY, not GEMINI_API_KEY: the latter is in
+# `template_service._PLATFORM_INJECTED_EXACT`, so a fixture using it passes
+# VACUOUSLY and proves nothing about the declaration being read.
+
+_TEMPLATE_HEAD = "name: fixture\nresources:\n  cpu: '2'\n  memory: '4g'\n"
+
+
+def test_k002_accepts_the_structured_mcp_servers_declaration():
+    """`credentials.mcp_servers.<s>.env_vars` is THE documented form.
+
+    It declares variables one level deeper than `set(creds.keys())` ever looked,
+    so the structured form satisfied nothing and this HARD gate failed a correctly
+    declared template. Must fail on baseline.
+    """
+    snap = _snap(
+        mcp_template=_mcp_template(stripe="STRIPE_API_KEY"),
+        template_yaml=_TEMPLATE_HEAD
+        + "credentials:\n  mcp_servers:\n    stripe:\n      env_vars: [STRIPE_API_KEY]\n",
+    )
+    for check_id in ("T-015", "K-002"):
+        status, _msg, detail = _run(check_id, snap)
+        assert status == "pass", f"{check_id} still fails a declared var: {detail}"
+
+
+def test_k002_accepts_the_env_file_declaration():
+    """The other declaration site. Must fail on baseline."""
+    snap = _snap(
+        mcp_template=_mcp_template(vault="VAULT_BASE_PATH"),
+        template_yaml=_TEMPLATE_HEAD + "credentials:\n  env_file: [VAULT_BASE_PATH]\n",
+    )
+    for check_id in ("T-015", "K-002"):
+        status, _msg, detail = _run(check_id, snap)
+        assert status == "pass", f"{check_id} still fails a declared var: {detail}"
+
+
+def test_k002_still_fails_a_genuinely_undeclared_variable():
+    """Widening `listed` must not disarm the gate."""
+    snap = _snap(
+        mcp_template=_mcp_template(stripe="STRIPE_API_KEY", other="HEYGEN_API_KEY"),
+        template_yaml=_TEMPLATE_HEAD
+        + "credentials:\n  mcp_servers:\n    stripe:\n      env_vars: [STRIPE_API_KEY]\n",
+    )
+    status, _msg, detail = _run("T-015", snap)
+    assert status == "fail"
+    assert detail["missing"] == ["HEYGEN_API_KEY"]
+
+
+def test_k002_keeps_tolerating_the_flat_legacy_mapping():
+    """`credentials: {STRIPE_API_KEY: '...'}` is legitimate and must keep passing.
+
+    This is what the section-name subtraction must NOT break: only the three known
+    STRUCTURE keys are removed, so a flat variable-name mapping survives.
+    """
+    snap = _snap(
+        mcp_template=_mcp_template(stripe="STRIPE_API_KEY"),
+        template_yaml=_TEMPLATE_HEAD + "credentials:\n  STRIPE_API_KEY: 'from the vault'\n",
+    )
+    status, _msg, detail = _run("T-015", snap)
+    assert status == "pass", detail
+
+
+@pytest.mark.parametrize("section", ["env_file", "mcp_servers", "config_files"])
+def test_k002_no_longer_passes_a_reference_to_a_section_name(section):
+    """A deliberate `pass → fail`: a closed false negative, release-noted.
+
+    `listed` was `set(creds.keys())` — "whichever section names this template
+    happens to use" — so `${env_file}` PASSED. A blind spot that depends on the
+    template's own contents cannot be found by reading the check. This test
+    PASSES on baseline (that is what makes it the `pass → fail` evidence).
+    """
+    snap = _snap(
+        mcp_template=_mcp_template(broken=section),
+        template_yaml=_TEMPLATE_HEAD
+        + f"credentials:\n  {section}:\n    stripe:\n      env_vars: [STRIPE_API_KEY]\n",
+    )
+    status, _msg, detail = _run("T-015", snap)
+    assert status == "fail", f"${{{section}}} is a section name, not a credential"
+    assert detail["missing"] == [section]
+
+
+# ===========================================================================
+# Tests 8-9 — the gate must FAIL CLOSED, never go dark
+# ===========================================================================
+#
+# W1: `run_static` caught `Exception` → `skipped`, and `_counts` counted only
+# `status == "fail"`, so a raise inside a HARD check DROPPED `hard_count` and
+# could flip `overall_status` from `issues` to `compatible`. `c_k002` delegates to
+# `c_t015`, so ONE raise took both HARD gates dark together — indistinguishable
+# from a clean pass. Four lines of untrusted YAML were the whole trigger.
+
+_HOSTILE_DECLARATIONS = [
+    pytest.param("  mcp_servers:\n    s:\n      env_vars:\n        - {K: v}\n", id="element-mapping"),
+    pytest.param("  mcp_servers:\n    s:\n      env_vars:\n        - [a, b]\n", id="element-sequence"),
+    pytest.param("  mcp_servers:\n    s:\n      env_vars:\n        - null\n", id="element-null"),
+    pytest.param("  mcp_servers:\n    s:\n      env_vars:\n        - 7\n", id="element-int"),
+    pytest.param("  mcp_servers:\n    s:\n      env_vars: nope\n", id="env_vars-string"),
+    pytest.param("  mcp_servers:\n    s: nope\n", id="server-string"),
+    pytest.param("  mcp_servers: nope\n", id="mcp_servers-string"),
+    pytest.param("  env_file: {a: b}\n", id="env_file-mapping"),
+    pytest.param("  env_file:\n    - {K: v}\n", id="env_file-element-mapping"),
+]
+
+
+@pytest.mark.parametrize("declaration", _HOSTILE_DECLARATIONS)
+def test_hostile_declaration_still_hard_fails_and_never_skips(declaration):
+    """The undeclared credential must still be reported. Must fail on baseline."""
+    snap = _snap(
+        mcp_template=_mcp_template(stripe="STRIPE_SECRET_KEY"),
+        template_yaml=_TEMPLATE_HEAD + "credentials:\n" + declaration,
+    )
+    for check_id in ("T-015", "K-002"):
+        status, _msg, detail = _run(check_id, snap)
+        assert status == "fail", f"{check_id} went dark on a hostile declaration"
+        assert detail.get("skip_reason") != "check_error"
+        assert detail["missing"] == ["STRIPE_SECRET_KEY"]
+
+
+def test_a_raising_check_is_a_failure_not_a_skip():
+    """`run_static`'s own handler: a check that cannot evaluate did not pass."""
+    from services.compatibility import static_checks as sc
+
+    def boom(_snap):
+        raise TypeError("unhashable type: 'dict'")
+
+    original = sc.STATIC_CHECKS["T-015"]
+    try:
+        sc.STATIC_CHECKS["T-015"] = boom
+        status, msg, detail = sc.run_static({}, ["T-015"])["T-015"]
+    finally:
+        sc.STATIC_CHECKS["T-015"] = original
+
+    assert status == "fail", "a raising check still downgrades to skipped"
+    assert "could not be evaluated" in msg
+    assert detail["check_error"]
+
+
+def test_check_error_cannot_erase_a_hard_finding():
+    """The `_counts` belt: a `skipped`+`check_error` row still counts as hard.
+
+    Second layer at the sink (#1525). `run_static` no longer produces this shape,
+    but if any future path reintroduces it the count must still hold — that is the
+    property whose absence let 4 lines of YAML take `hard_count` 1 → 0.
+    """
+    from services.compatibility import _counts
+
+    crashed = [
+        {"status": "skipped", "severity": "hard", "skip_reason": "check_error"},
+        {"status": "skipped", "severity": "soft", "skip_reason": "check_error"},
+    ]
+    assert _counts(crashed) == {"hard_count": 1, "soft_count": 1, "info_count": 0}
+
+    # A legitimate precondition skip is NOT a finding — that distinction is the
+    # reason `run_static` has a skip path at all.
+    benign = [
+        {"status": "skipped", "severity": "hard", "skip_reason": "no_template"},
+        {"status": "skipped", "severity": "soft", "skip_reason": "ai_not_run"},
+    ]
+    assert _counts(benign) == {"hard_count": 0, "soft_count": 0, "info_count": 0}
+
+
+def test_overall_status_cannot_flip_to_compatible_on_a_hostile_declaration():
+    """The end-to-end property, asserted on counts rather than a single verdict.
+
+    `hard_count` alone cannot distinguish `fail → pass` from `fail → skipped`,
+    which is exactly how this hid. Assert both the verdict AND the count.
+    """
+    from services.compatibility import _counts, _check_dict, spec
+
+    snap = _snap(
+        mcp_template=_mcp_template(stripe="STRIPE_SECRET_KEY"),
+        template_yaml=_TEMPLATE_HEAD
+        + "credentials:\n  mcp_servers:\n    s:\n      env_vars:\n        - {K: v}\n",
+    )
+    from services.compatibility.static_checks import run_static
+
+    ids = ["T-015", "K-002"]
+    results = run_static(snap, ids)
+    checks = [
+        _check_dict(next(c for c in spec.CHECKS if c.id == cid), *results[cid])
+        for cid in ids
+    ]
+    counts = _counts(checks)
+
+    assert counts["hard_count"] >= 1, "a HARD gate went dark"
+    overall = "issues" if (counts["hard_count"] + counts["soft_count"]) > 0 else "compatible"
+    assert overall == "issues"
+
+
+def test_the_new_union_term_fails_closed_when_the_reader_raises(monkeypatch):
+    """The `try/except` around the union degrades to the NARROW verdict.
+
+    `test_hostile_declaration_still_hard_fails_and_never_skips` above cannot prove
+    this on its own: `declared_credential_names` filters those shapes structurally,
+    so nothing raises and the assertion holds for the wrong reason. This forces the
+    raise directly.
+
+    Degrading must make `missing` LARGER, never smaller — shrinking `listed` errs
+    toward failing, which is the definition of fail-closed here.
+    """
+    from services.compatibility import static_checks as sc
+
+    def boom(_block):
+        raise TypeError("unhashable type: 'dict'")
+
+    monkeypatch.setattr(sc, "declared_credential_names", boom)
+
+    snap = _snap(
+        mcp_template=_mcp_template(stripe="STRIPE_API_KEY"),
+        template_yaml=_TEMPLATE_HEAD
+        + "credentials:\n  mcp_servers:\n    stripe:\n      env_vars: [STRIPE_API_KEY]\n",
+    )
+    status, _msg, detail = _run("T-015", snap)
+
+    # Not `skipped`, not `pass` — the pre-fix verdict, loudly.
+    assert status == "fail"
+    assert detail["missing"] == ["STRIPE_API_KEY"]
+    assert "check_error" not in detail
