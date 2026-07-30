@@ -148,17 +148,103 @@ permissions:
 - `get_system_manifest` - Export system configuration as YAML
 
 ### UI
-- **Status**: Not yet implemented (Phase 1-3 are API/MCP only)
-- **Planned**: Manifest editor with syntax highlighting, deployment history
+- **Status**: ✅ Implemented (trinity-enterprise#126, 2026-07-30) — install surface only
+- **Where**: the `?tab=systems` tab of the Templates page (`/templates?tab=systems`)
+- **Not built**: a browser for *already-deployed* systems (see Frontend Layer below)
 
 ## Frontend Layer
 
-**Status**: No UI implementation yet (API-only feature)
+**Status**: ✅ Install surface implemented (trinity-enterprise#126, 2026-07-30).
 
-**Planned Components**:
-- `SystemManifestEditor.vue` - YAML editor with validation
-- `SystemsList.vue` - View deployed systems
-- `SystemDetail.vue` - System overview with agents, permissions, schedules
+Pick a bundled manifest / upload a file / paste YAML → preview → deploy. Home is a
+`?tab=`-driven catalog on the existing Templates page rather than a new NavBar entry
+(the bar already has six), so all "install something" paths share one hub — ent#15's
+agent-import wizard and ent#108's agent registry slot in as further tabs.
+
+**Components** (`src/frontend/src/components/systems/`):
+
+| Component | Responsibility |
+|---|---|
+| `SystemInstallPanel.vue` | Source picker (bundled cards / upload / paste), the manifest textarea, Preview + Deploy actions, and the outcome-unknown state |
+| `ManifestPreview.vue` | Dry-run render: agents table, permission topology grouped by source, schedules table, blockers, warnings, and the acknowledgement gate |
+| `DeployResult.vue` | Post-deploy render: switches on all five `status` values, created/failed lists, prominent warnings, next-action navigation |
+
+**Store**: `src/frontend/src/stores/systems.js` — a new domain-scoped store (Invariant
+#6), deliberately **not** added to `systemViews.js`: a *System* is a manifest-deployed
+set of agents sharing a name prefix; a *System View* is a saved tag filter over agents.
+Different domains that share a word. All calls go through the single `api` axios
+instance (Invariant #7).
+
+**Host**: `views/Templates.vue` gained the `?tab=agents|systems` strip (copying
+`Operations.vue`'s `resolveTab` + `router.replace` pattern). The Systems tab is gated on
+`hasMinRole('creator')`, mirroring `POST /api/systems/deploy`, with an explanatory empty
+state for lower roles. Note `hasMinRole` is a plain **function** — `composables/useRole.js`'s
+own usage docstring says `hasMinRole.value(...)` and is stale.
+
+**Editor**: a plain `<textarea>`. The repo's orphaned monaco-based `components/YamlEditor.vue`
+(zero consumers since the Process Engine was decommissioned) was **not** revived: the
+production CSP is `script-src 'self'` with no `unsafe-eval` and no `worker-src`, while the
+dev CSP *does* allow `unsafe-eval` — so `npm run dev` cannot prove production. Every
+acceptance criterion is satisfiable without it. Reviving it (or deleting the unreachable
+`monaco-editor` dependency) is a scoped follow-up gated on proving it against the real
+nginx CSP.
+
+### Error contract the store must honour
+
+The store never switches on the HTTP status code, because the code alone identifies
+none of the six outcomes:
+
+| Outcome | HTTP | Body |
+|---|---|---|
+| `deployed` / `partial` / `valid` / `invalid` | **200** | full report |
+| `failed` (0 agents created) | **500** | **full report AS THE BODY** |
+| parse / validation error | 400 | `{detail: "<string>"}` |
+| request-model violation (e.g. over the size cap) | 422 | `{detail: [ … ]}` — a **list** |
+| unexpected error, possibly after agents exist | 500 | `{detail: "<string>"}` |
+| client timeout — **the server keeps deploying** | — | none |
+
+Two are traps. `partial` is a 200, so a naive `.then()` renders a degraded outcome as
+clean success. `failed` is a 500 whose body *is* the report, so a naive `catch` discards
+exactly the `failed[]` list the "show created + failed" requirement needs. `normalizeError`
+in the store collapses all six into one renderable shape and returns the 500-with-a-report
+as a **result**, not an error.
+
+### Honesty constraints in the UI
+
+Each corresponds to a real way the backend can mislead a reader:
+
+- **"agents created", never "success"** — `status` describes agent creation only.
+  Folder/permission/schedule/tag/start failures land in `warnings[]` with `status` still
+  `deployed`, so warnings render as their own prominent panel rather than a footnote.
+- **Never "this will deploy"** — `github:` templates are not probed by the preview, and the
+  permission topology is resolved against *all* agents while a partial deploy wires up only
+  those created. Both limits are stated in the UI.
+- **Acknowledgement, not a banner** — a manifest setting `prompt:` replaces the
+  platform-wide `trinity_prompt` for **every agent on the instance**, and enabled schedules
+  start recurring autonomous executions that spend API budget. Deploy is gated on an
+  explicit checkbox.
+- **Duplicate names are confirm-grade** — on a fresh install, re-installing a bundled
+  manifest resolves to `_N` suffixes by default and recovery is manual, per agent.
+- **No blind retry** — a timeout or bare 5xx renders "outcome unknown — may still be
+  running" and offers the agent list instead of a retry, because cancelling the request does
+  not cancel the (synchronous, serial) server-side deploy.
+- **Preview is bound to its text** — `previewedText` is compared against the textarea, so
+  editing after a preview disables Deploy until re-previewed.
+- **Plain text only** — manifest descriptions, failure `reason`s and warnings never render
+  via `v-html` (H-005). `reason` is credential-sanitized server-side but **not**
+  HTML-sanitized.
+
+### Still not built (deliberately out of scope)
+
+- **`SystemDetail.vue` / a deployed-systems browser.** `GET /api/systems` and
+  `GET /api/systems/{name}` exist and have no frontend consumer. Unowned; ent#126 scoped
+  itself to *installing*, not browsing. This doc previously listed `SystemManifestEditor.vue`,
+  `SystemsList.vue` and `SystemDetail.vue` as "planned"; only the install surface shipped, so
+  the other two names are retired rather than left as a standing promise.
+- **Async deploy with a job id + reconciliation** — the real fix for the timeout window.
+- **Remote / registry manifest sources** — ent#14 and ent#108 own those; this ships the tab
+  they slot into.
+- **Per-agent credential setup after deploy** — ent#127.
 
 ## Backend Layer
 
