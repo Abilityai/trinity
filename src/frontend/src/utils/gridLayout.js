@@ -10,10 +10,14 @@
 // Interaction constants from the approved design of record (issue #47 mockup).
 // GAP_X exceeds the 26px avatar overhang, so a protruding avatar always
 // floats in clear space between columns.
+// Org-overlay revision: gaps are sized so a department-zone frame's chrome
+// (22px left / 10px right / 34px header top / 10px bottom, see gridOrg.js)
+// fits INSIDE the regular gap — two different zones can occupy adjacent
+// rows/columns with no spacer cells and no frame collision.
 export const CELL_W = 384
 export const CELL_H = 216
-export const GAP_X = 34
-export const GAP_Y = 18
+export const GAP_X = 40
+export const GAP_Y = 50
 export const COORD_LIMIT = 60 // sanity bound, ~unbounded in practice
 export const Z_MIN = 0.25
 export const Z_MAX = 1.6
