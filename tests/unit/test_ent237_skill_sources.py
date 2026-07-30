@@ -303,3 +303,176 @@ class TestAssignmentProvenance:
         skills = SkillsOperations()
         skills.assign_skill("agent4", "pdf-export", "admin")
         assert skills.get_agent_skills("agent4")[0].source_id is None
+
+
+# =============================================================================
+# The merge — where AC#4's "never a silent overwrite" is actually enforced
+# =============================================================================
+
+def _mkrepo(root: Path, name: str, skills: dict, tag: str | None = None) -> Path:
+    repo = root / name
+    repo.mkdir(parents=True)
+    for skill, body in skills.items():
+        d = repo / ".claude" / "skills" / skill
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(f"---\nname: {skill}\ndescription: {body}\n---\n{body}\n")
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "seed")
+    if tag:
+        _git(repo, "tag", tag)
+    return repo
+
+
+@pytest.fixture
+def service(sources_db, tmp_path, monkeypatch):
+    """A SkillService whose clones land in tmp, with the SSRF allowlist relaxed.
+
+    The allowlist pins sources to github.com, so local fixture repos would be
+    rejected. Relaxed here ONLY so the merge logic can be tested against real
+    git repos rather than mocks — `validate_skills_library_url` keeps its own
+    coverage elsewhere.
+    """
+    import services.skill_service as ss
+
+    monkeypatch.setattr(ss, "validate_skills_library_url", lambda u: u)
+    svc = ss.SkillService()
+    svc.library_root = tmp_path / "clones"
+    svc.library_path = tmp_path / "clones"
+    monkeypatch.setattr(svc, "_authenticated_url", lambda url, pat: url, raising=False)
+    return svc
+
+
+class TestMultiSourceMerge:
+    @pytest.fixture
+    def two_sources(self, service, sources_db, tmp_path):
+        community = _mkrepo(tmp_path / "repos", "community", {
+            "pdf-export": "COMMUNITY version", "research": "community research",
+        }, tag="v1.0.0")
+        acme = _mkrepo(tmp_path / "repos", "acme", {
+            "pdf-export": "ACME version", "invoicing": "acme invoicing",
+        })
+        sources_db.create_source(name="Community", url=str(community),
+                                 ref="v1.0.0", ref_type="tag", is_default=True)
+        sources_db.create_source(name="Acme", url=str(acme), ref="main")
+        service.sync_library()
+        return service
+
+    def test_collision_resolves_to_the_custom_source(self, two_sources):
+        skills = {s["name"]: s for s in two_sources.list_skills()}
+        assert skills["pdf-export"]["source_name"] == "Acme"
+        assert "ACME" in two_sources.get_skill("pdf-export")["content"]
+
+    def test_collision_is_reported_not_silent(self, two_sources):
+        """The AC: conflict surfaced, never a silent overwrite."""
+        skills = {s["name"]: s for s in two_sources.list_skills()}
+        shadowed = skills["pdf-export"]["shadowed_by"]
+        assert [x["source_name"] for x in shadowed] == ["Community"]
+
+    def test_non_colliding_skills_come_from_their_own_source(self, two_sources):
+        skills = {s["name"]: s for s in two_sources.list_skills()}
+        assert skills["research"]["source_name"] == "Community"
+        assert skills["invoicing"]["source_name"] == "Acme"
+        assert skills["research"]["shadowed_by"] == []
+
+    def test_the_loser_is_not_a_second_list_entry(self, two_sources):
+        """A shadowed copy is unreachable — listing it would offer a choice the
+        flat `.claude/skills/<name>/` namespace cannot honour."""
+        names = [s["name"] for s in two_sources.list_skills()]
+        assert names == ["invoicing", "pdf-export", "research"]
+        assert len(names) == len(set(names))
+
+    def test_disabling_the_winner_hands_the_name_over(self, two_sources, sources_db):
+        acme = next(s for s in sources_db.list_sources() if s.name == "Acme")
+        sources_db.update_source(acme.id, enabled=False)
+
+        skills = {s["name"]: s for s in two_sources.list_skills()}
+        assert skills["pdf-export"]["source_name"] == "Community"
+        assert skills["pdf-export"]["shadowed_by"] == []
+        assert "invoicing" not in skills
+
+    def test_cache_invalidates_when_a_source_is_disabled(self, two_sources, sources_db):
+        """The cache key spans every enabled source's commit; a single-SHA key
+        would serve the pre-disable list indefinitely."""
+        before = two_sources.list_skills()
+        assert any(s["name"] == "invoicing" for s in before)
+
+        acme = next(s for s in sources_db.list_sources() if s.name == "Acme")
+        sources_db.update_source(acme.id, enabled=False)
+
+        after = two_sources.list_skills()   # no explicit cache clear
+        assert not any(s["name"] == "invoicing" for s in after)
+
+    def test_one_broken_source_does_not_blind_the_others(self, service, sources_db, tmp_path):
+        good = _mkrepo(tmp_path / "repos", "good", {"research": "ok"})
+        sources_db.create_source(name="Good", url=str(good), ref="main")
+        sources_db.create_source(name="Gone", url=str(tmp_path / "does-not-exist"),
+                                 ref="main")
+
+        result = service.sync_library()
+
+        assert result["success"] is True      # at least one worked
+        assert result["synced"] == 1 and result["failed"] == 1
+        assert [s["name"] for s in service.list_skills()] == ["research"]
+
+    def test_status_reports_per_source(self, two_sources):
+        status = two_sources.get_library_status()
+        assert status["configured"] is True
+        assert status["source_count"] == 2
+        assert status["shadowed_count"] == 1
+        wins = {s["name"]: s["skill_count"] for s in status["sources"]}
+        assert wins == {"Acme": 2, "Community": 1}   # wins, not shipped
+
+
+class TestLegacyAdoption:
+    """AC#6 — an existing single-repo install keeps working with no admin action."""
+
+    def test_existing_setting_becomes_a_custom_source(self, service, sources_db, tmp_path):
+        legacy = _mkrepo(tmp_path / "repos", "legacy", {"old-skill": "legacy"})
+        import services.skill_service as ss
+
+        ss.get_skills_library_url = lambda: str(legacy)
+        ss.get_skills_library_branch = lambda: "main"
+
+        service.sync_library()
+
+        sources = sources_db.list_sources()
+        assert [s.url for s in sources] == [str(legacy)]
+        # CUSTOM, not default: precedence must keep preferring the repo the
+        # operator actually chose over a community catalog they never picked.
+        assert sources[0].is_default is False
+        assert [s["name"] for s in service.list_skills()] == ["old-skill"]
+
+    def test_adoption_is_idempotent(self, service, sources_db, tmp_path):
+        legacy = _mkrepo(tmp_path / "repos", "legacy", {"old-skill": "legacy"})
+        import services.skill_service as ss
+
+        ss.get_skills_library_url = lambda: str(legacy)
+        ss.get_skills_library_branch = lambda: "main"
+
+        service.sync_library()
+        service.sync_library()
+        service.sync_library()
+
+        assert sources_db.count_sources() == 1
+
+    def test_legacy_clone_is_moved_not_abandoned(self, service, sources_db, tmp_path):
+        """The old checkout lived AT the root that now holds per-source subdirs.
+        Leaving it there would strand a repo nothing points at."""
+        legacy = _mkrepo(tmp_path / "repos", "legacy", {"old-skill": "legacy"})
+        import services.skill_service as ss
+
+        ss.get_skills_library_url = lambda: str(legacy)
+        ss.get_skills_library_branch = lambda: "main"
+
+        # Simulate the pre-ent#237 layout: a git clone directly at the root.
+        subprocess.run(["git", "clone", "-q", str(legacy), str(service.library_root)],
+                       capture_output=True)
+        assert (service.library_root / ".git").exists()
+
+        service.sync_library()
+
+        source = sources_db.list_sources()[0]
+        assert (service.library_root / source.id / ".git").exists()
+        assert not (service.library_root / ".git").exists()
+        assert [s["name"] for s in service.list_skills()] == ["old-skill"]

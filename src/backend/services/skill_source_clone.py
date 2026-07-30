@@ -29,7 +29,12 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Issue #184: keep git's User-Agent generic on HTTP-bearing subcommands.
+# Issue #184 (UnderDefense pentest 3.3.1): override git's default User-Agent
+# (`git/<version> (libcurl/...)`) on every HTTP-bearing git subcommand so
+# outbound requests don't fingerprint the backend stack. The SSRF allowlist
+# (#179) already locks the destination to github.com, but defense-in-depth: even
+# if the allowlist is ever loosened, the UA stays generic. Deliberately carries
+# no version suffix, to avoid another version string drifting against VERSION.
 _GIT_HTTP_UA_ARGS = ["-c", "http.useragent=Trinity-Skills-Sync"]
 
 # Source ids are server-minted (`src_<hex>`), never user-supplied — but this is
@@ -250,6 +255,23 @@ class SkillSourceClone:
 
     def _git(self, args: List[str], *, text: bool = True,
              timeout: int = _QUICK_TIMEOUT) -> subprocess.CompletedProcess:
+        """Run git in this clone, tolerating a clone that isn't there.
+
+        A source whose very first clone failed has no directory, and
+        `subprocess.run(cwd=<missing>)` raises FileNotFoundError — which would
+        escape through every read path (`current_commit` → the list cache
+        fingerprint) and take down the whole merged listing over ONE unreachable
+        repo. Multi-source makes that likely rather than theoretical: with
+        several sources configured, some will be broken at any given moment.
+        Returning a synthetic failure keeps every caller's existing
+        returncode check as the single way this is handled.
+        """
+        if not self.path.is_dir():
+            return subprocess.CompletedProcess(
+                args=["git", *args], returncode=128,
+                stdout="" if text else b"",
+                stderr="clone directory does not exist" if text else b"",
+            )
         return subprocess.run(
             ["git", *args], cwd=self.path,
             capture_output=True, text=text, timeout=timeout,
