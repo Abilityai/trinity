@@ -288,7 +288,15 @@ async def list_skill_sources(admin_user: User = Depends(require_admin)):
     Admin-only because the rows carry repo URLs, which for a private source are
     themselves sensitive. The per-agent Skills tab does not use this — it gets
     `source_name` from `GET /skills/library`, which exposes no URLs.
+
+    `reject_agent_principal` even though this is a READ: `require_admin` alone
+    would not deliver the sensitivity argument above. An agent-scoped MCP key
+    resolves to its owner carrying the owner's role (ent#293), so on a default
+    admin-owned install every agent could read the private repo URLs this gate
+    exists to protect — and a prompt-injected agent reading them is precisely
+    the disclosure the admin-gating is for.
     """
+    reject_agent_principal(admin_user)
     return skill_service.get_library_status()
 
 

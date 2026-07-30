@@ -685,6 +685,11 @@ class TestSourceEndpointGating:
     """
 
     MUTATING = ["create_skill_source", "update_skill_source", "delete_skill_source"]
+    # Reads that must ALSO reject agent principals. list_skill_sources is
+    # admin-gated specifically because the rows carry private repo URLs — a
+    # rationale `require_admin` alone does not deliver, since an agent-scoped key
+    # resolves to its owner's role.
+    GATED_READS = ["list_skill_sources"]
 
     def test_mutating_routes_reject_agent_principals(self):
         """Static, on purpose: an integration test needs a live app + DB, and
@@ -698,7 +703,7 @@ class TestSourceEndpointGating:
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
 
-        for name in self.MUTATING:
+        for name in self.MUTATING + self.GATED_READS:
             assert name in funcs, f"{name} missing — did a route get renamed?"
             body = ast.dump(funcs[name])
             assert "reject_agent_principal" in body, (
