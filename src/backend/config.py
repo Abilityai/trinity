@@ -379,7 +379,7 @@ COMMUNITY_FRESH_INSTALL_SEED = {
 # ============================================================================
 # `PUT /api/settings/ops/config` took `Dict[str, str]` and wrote it straight to
 # `db.set_setting` with NO type or range check, so every ops setting — including
-# the seven retention windows that drive irreversible deletion — accepted any
+# the eight retention windows that drive irreversible deletion — accepted any
 # string at all.
 #
 # Read the failure modes precisely, because they are asymmetric and the
@@ -401,7 +401,14 @@ COMMUNITY_FRESH_INSTALL_SEED = {
 # silently coercing to a value nobody chose, which is the #1525
 # validate-at-the-boundary rule and the same reasoning as the #506 ceiling's
 # dedicated range-checked route.
-_DAYS_MAX = 36500                   # ~100 years; larger is a typo, not a policy
+# 10 years. Chosen to MATCH the enterprise `retention` module's own
+# `_MAX_DAYS` (`RetentionConfigUpdate` validates every window `ge=0, le=3650`),
+# not picked independently — these are two write paths to the same values, and
+# a wider OSS bound would let an admin store a window the managed panel then
+# refuses to edit, i.e. a value its own GET surfaces and its own PUT rejects.
+# The enterprise constant can't be imported here (private submodule, and OSS
+# must build without it), so the alignment is by value + this note.
+_DAYS_MAX = 3650
 _PERCENT = (0, 100)
 _MINUTES = (0, 525600)              # 1 year
 
@@ -416,7 +423,7 @@ OPS_SETTINGS_VALIDATION = {
     "ops_log_retention_days": ("int", 0, _DAYS_MAX),
     "ops_health_check_interval": ("int", 1, 86400),
     "ssh_access_enabled": ("bool", None, None),
-    # The seven retention windows (RETENTION_OPS_KEYS). `0` is a documented,
+    # The eight retention windows (RETENTION_OPS_KEYS). `0` is a documented,
     # meaningful value on every one — "disable this sweep" — so the lower bound
     # is 0 and NOT the community floor. Clamping to the floor here would be
     # wrong twice over: it would silently rewrite an operator's explicit choice,

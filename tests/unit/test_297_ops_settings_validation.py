@@ -81,6 +81,22 @@ def test_absurdly_large_is_rejected(cfg):
         cfg.validate_ops_setting("execution_row_retention_days", "99999999")
 
 
+def test_the_upper_bound_matches_the_enterprise_contract(cfg):
+    """There are TWO validated write paths to these values — this one and the
+    enterprise `retention` module's `PUT /api/enterprise/retention/config`,
+    whose `RetentionConfigUpdate` validates every window `ge=0, le=3650`.
+
+    A wider OSS bound would let an admin store a window the managed panel then
+    refuses to edit — a value its own GET surfaces and its own PUT rejects. The
+    enterprise constant can't be imported (private submodule; OSS must build
+    without it), so the alignment is pinned here by value. If the enterprise
+    bound moves, this test is the thing that says so."""
+    assert cfg._DAYS_MAX == 3650
+    assert cfg.validate_ops_setting("execution_row_retention_days", "3650") == "3650"
+    with pytest.raises(ValueError):
+        cfg.validate_ops_setting("execution_row_retention_days", "3651")
+
+
 def test_zero_is_accepted_because_it_means_disabled(cfg):
     """`0` is documented and meaningful on every retention window. A validator
     that rejected it would break the supported way to turn a sweep off."""

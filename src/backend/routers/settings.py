@@ -2403,8 +2403,11 @@ async def update_ops_settings(
     Admin-only. Only accepts valid ops setting keys.
     Invalid keys are ignored with a warning.
 
-    ent#297 — this is the ONLY write path to the seven retention windows, and it
-    used to write `Dict[str, str]` straight through with no type or range check.
+    ent#297 — the OSS write path for the eight retention windows (the enterprise
+    `retention` module has its own already-validated `PUT /api/enterprise/
+    retention/config`, which clamps to the community floor and covers 7 of the 8
+    — `agent_reminders_retention_days` is absent there). This one used to write
+    `Dict[str, str]` straight through with no type or range check.
     Two things changed:
 
     * **Values are validated** (`config.validate_ops_setting`); the request is
