@@ -138,8 +138,16 @@ Migration: `sync_health` in `src/backend/db/migrations.py` (idempotent,
   env-`true`/DB-`0` is reachable from one transient DB hiccup at creation and
   permanently for ghosts, and DB-only derivation would **silently stop
   auto-push** for that slice of the fleet (no error, just a stale
-  `agent_sync_state`). The helper backfills `auto_sync_enabled = 1` the first
-  time it observes the disagreement, so the OR retires itself. Making
+  `agent_sync_state`). The helper **derives only — it never writes the column
+  back**: `PUT /{agent}/git/auto-sync` writes the row and nothing else while
+  the agent gates on container env, so "baked `true` / DB `0`" is *also*
+  exactly what an owner's explicit disable looks like. A backfill would
+  silently re-enable it, erase the only record of that intent, and — since
+  `PUT .../auto-sync` is `OwnedAgentByName` while `POST .../start` (which
+  triggers the recreate) is `AuthorizedAgentByName` — let a shared non-owner,
+  or an agent-scoped key resolving to its owner with the owner's role
+  (trinity-ops-agent#232), flip an owner-only flag. The disagreement is
+  logged instead. Making
   `PUT /git/auto-sync` authoritative over the baked env is a tracked
   follow-up.
 - Loop swallows every exception so a single bad tick can't kill the
@@ -299,7 +307,7 @@ the data-loss setup.
 | `services/sync_health_service.py` | Background poller + operator-queue emitter |
 | `services/fleet_audit_service.py` | `build_fleet_sync_audit()` aggregation |
 | `services/agent_service/crud.py` | Sets `GIT_SYNC_AUTO` env + `auto_sync_enabled=1` for non-source-mode agents |
-| `services/agent_service/lifecycle.py` | `_apply_git_env_from_db` re-derives `GIT_SYNC_AUTO` on every container rebuild as `auto_sync_enabled` OR the baked env, and backfills the column (ent#109) |
+| `services/agent_service/lifecycle.py` | `_apply_git_env_from_db` re-derives `GIT_SYNC_AUTO` on every container rebuild as `auto_sync_enabled` OR the baked env — derive-only, never writing the column back (ent#109) |
 | `routers/git.py` | `/git/auto-sync`, `/git/freeze-schedules-if-failing`, `/git/sync-state` |
 | `routers/agents.py` | `GET /api/agents/sync-health` (batch) |
 | `routers/fleet.py` | `GET /api/fleet/sync-audit` (new router) |

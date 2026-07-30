@@ -9,7 +9,7 @@ arms that replay for the entire fleet. `_apply_git_env_from_db` is now the sole
 writer, shared with `_apply_persisted_auth_env` (`recreate_missing_container`,
 the rebuild-from-nothing path).
 
-The four load-bearing behaviours, each with a named test:
+The five load-bearing behaviours, each with a named test:
 
   1. **The PAT gate is a parameter, never inherited** (`learnings.md` ent#162).
      A verbatim lift would have replaced the config-drift path's deliberate
@@ -22,8 +22,16 @@ The four load-bearing behaviours, each with a named test:
      The two writers in `crud.py` genuinely disagree (`and not config.ephemeral`
      inside a swallowing try/except on the DB side only, column default 0), so
      DB-only derivation silently stops auto-push fleet-wide.
-  3. **Set-or-clear**, because the recreate writes into a carried-forward dict.
-  4. **Idempotence** — two passes produce an identical dict, so the writer can
+  3. **Correct, never introduce** (config-drift path only). The repo half is
+     repo-gated (ent#123) while the PAT half keeps #211's narrower per-agent
+     gate, and those two disagree for a real row shape — an agent bound via
+     `POST /{agent}/git/initialize` on the GLOBAL platform PAT, whose only
+     credential lives in the container's `.git/config`. Introducing
+     `GIT_SYNC_ENABLED=true` with no `GITHUB_PAT` makes startup.sh's restart
+     branch rewrite origin to the credential-less URL — destroying that token —
+     and `configure_push_remote` blackhole the push remote.
+  4. **Set-or-clear**, because the recreate writes into a carried-forward dict.
+  5. **Idempotence** — two passes produce an identical dict, so the writer can
      never feed a config-drift matcher into an infinite recreate loop.
 
 Plus the ent#123 invariant this must not regress: the gate is the REPO, not the
@@ -144,6 +152,17 @@ def lc_env(monkeypatch):
         patcher.stop()
 
 
+def _carried(**overrides) -> dict:
+    """A config-drift recreate seeds `env_vars` from the OLD container, so a
+    git-bound agent always arrives carrying its baked git env. Tests that mean
+    "an already-bound container" must say so — an empty dict now means "this
+    container was never git-env-baked", which the introduce-guard treats
+    differently on purpose."""
+    env = {"GITHUB_REPO": "Abilityai/cornelius", "GIT_SYNC_ENABLED": "true"}
+    env.update(overrides)
+    return env
+
+
 def _row(**overrides) -> dict:
     row = {
         "github_repo": "Abilityai/cornelius",
@@ -168,7 +187,7 @@ class TestPatGate:
         db.get_agent_github_pat.return_value = None       # no per-agent PAT
         rg.get_github_pat_for_agent.return_value = "ghp_GLOBAL_PLATFORM"
 
-        env = {}                                          # tokenless container
+        env = _carried()                                  # tokenless container
         lc._apply_git_env_from_db("cornelius", env, pat_gate="per_agent_only")
 
         assert "GITHUB_PAT" not in env, (
@@ -176,6 +195,11 @@ class TestPatGate:
             "container — configure_push_remote will clear the push blackhole "
             "and the agent can push a private KB to the shared upstream"
         )
+        # NB the #1574 GH_TOKEN/GITHUB_TOKEN mirror lives in the CALLER
+        # (`recreate_container_with_updated_config`), which pops both whenever
+        # no GITHUB_PAT resolved. These two lines therefore only pin that the
+        # helper never grows its own mirror — the caller's gating is what
+        # actually keeps the ent#162 leak's second surface closed.
         assert "GH_TOKEN" not in env
         assert "GITHUB_TOKEN" not in env
         # ent#123 preserved: the gate is the REPO, so the clone still happens.
@@ -256,7 +280,7 @@ class TestPatGate:
 # 2. GIT_SYNC_AUTO — DB flag OR baked env, plus the convergence backfill
 # ---------------------------------------------------------------------------
 class TestGitSyncAuto:
-    def test_baked_true_db_zero_keeps_auto_push_and_backfills(self, lc_env):
+    def test_baked_true_db_zero_keeps_auto_push(self, lc_env):
         """The disagreement is real: crud.py writes the DB flag under
         `and not config.ephemeral` inside a swallowing try/except, the env
         writer does not, and the column defaults to 0. Deriving from the DB flag
@@ -266,22 +290,48 @@ class TestGitSyncAuto:
             source_mode=False, auto_sync_enabled=False
         )
 
-        env = {"GIT_SYNC_AUTO": "true"}
+        env = _carried(GIT_SYNC_AUTO="true")
         lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only")
 
         assert env["GIT_SYNC_AUTO"] == "true", (
             "DB-only derivation silently disabled the 15-min auto-sync "
             "heartbeat for an agent whose container was auto-pushing"
         )
-        db.set_git_auto_sync_enabled.assert_called_once_with("a1", True)
 
-    def test_db_flag_alone_enables_auto_push_without_backfill(self, lc_env):
+    def test_the_disagreement_is_never_written_back(self, lc_env):
+        """The helper DERIVES env from the DB; it must not mutate the DB.
+
+        `PUT /{agent}/git/auto-sync {enabled:false}` writes the row and nothing
+        else, while the agent gates on container env — and creation sets BOTH
+        true for the ordinary non-source-mode PAT agent. So "baked true / DB 0"
+        is ALSO exactly what an owner's explicit disable looks like, and a
+        backfill cannot tell the two apart: it would re-enable the flag, erase
+        the only record of that intent, and make the toggle unable to stick.
+
+        It is a privilege boundary too: `PUT .../auto-sync` is
+        `OwnedAgentByName`, but `POST .../start` — which triggers the recreate —
+        is `AuthorizedAgentByName`, so the write would let a shared non-owner
+        (or an agent-scoped key resolving to its owner WITH the owner's role,
+        trinity-ops-agent#232) flip an owner-only flag that arms a 15-minute
+        background commit-and-push loop.
+        """
+        lc, db, _rg = lc_env
+        db.get_git_config.return_value = _row(
+            source_mode=False, auto_sync_enabled=False
+        )
+
+        env = _carried(GIT_SYNC_AUTO="true")
+        lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only")
+
+        db.set_git_auto_sync_enabled.assert_not_called()
+
+    def test_db_flag_alone_enables_auto_push(self, lc_env):
         lc, db, _rg = lc_env
         db.get_git_config.return_value = _row(
             source_mode=False, auto_sync_enabled=True
         )
 
-        env = {}
+        env = _carried()
         lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only")
 
         assert env["GIT_SYNC_AUTO"] == "true"
@@ -291,25 +341,109 @@ class TestGitSyncAuto:
         lc, db, _rg = lc_env
         db.get_git_config.return_value = _row(auto_sync_enabled=False)
 
-        env = {"GIT_SYNC_AUTO": "false"}
+        env = _carried(GIT_SYNC_AUTO="false")
         lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only")
 
         assert "GIT_SYNC_AUTO" not in env
         db.set_git_auto_sync_enabled.assert_not_called()
 
-    def test_backfill_failure_never_breaks_the_recreate(self, lc_env):
-        lc, db, _rg = lc_env
-        db.get_git_config.return_value = _row(auto_sync_enabled=False)
-        db.set_git_auto_sync_enabled.side_effect = RuntimeError("db down")
 
-        env = {"GIT_SYNC_AUTO": "true"}
+# ---------------------------------------------------------------------------
+# 3. Correct, never introduce (config-drift path only)
+# ---------------------------------------------------------------------------
+class TestIntroduceGuard:
+    """`POST /{agent}/git/initialize` (routers/git.py) writes an
+    `agent_git_config` row and pushes with `get_github_pat_for_agent` — often
+    the GLOBAL platform PAT — but never recreates the container, never bakes any
+    git env, never persists a per-agent PAT row, and never writes the token into
+    the workspace `.env` (so startup.sh's #1264 fallback does not cover it).
+    Its only credential is the one embedded in `.git/config`'s origin URL.
+
+    Repo-gating the block while per-agent-gating the PAT would hand startup.sh
+    `GIT_SYNC_ENABLED=true` with no `GITHUB_PAT` — which it reads as
+    "deliberately tokenless": `git remote set-url origin ${CLONE_URL}` installs
+    the credential-less URL (destroying the token) and `configure_push_remote`
+    blackholes the push remote. Silent, unrecoverable without a per-agent PAT,
+    and armed fleet-wide by the same base-image drift this helper exists to fix.
+    """
+
+    def _init_sync_row(self):
+        """The shape `initialize_github_sync` leaves behind: a reserved
+        `trinity/<agent>/<id>` working branch, hence source_mode = 0."""
+        return _row(source_mode=False, github_repo="acme/agent-repo")
+
+    def test_never_introduces_the_block_for_an_unbaked_container(self, lc_env):
+        lc, db, rg = lc_env
+        db.get_git_config.return_value = self._init_sync_row()
+        db.get_agent_github_pat.return_value = None          # global tier used
+        rg.get_github_pat_for_agent.return_value = "ghp_GLOBAL_PLATFORM"
+
+        env = {"AGENT_NAME": "kb"}                           # no git env baked
+        lc._apply_git_env_from_db("kb", env, pat_gate="per_agent_only")
+
+        assert "GIT_SYNC_ENABLED" not in env, (
+            "startup.sh would rewrite origin to the credential-less URL and "
+            "blackhole the push remote, destroying the only copy of this "
+            "agent's working credential"
+        )
+        assert "GITHUB_REPO" not in env
+        assert env == {"AGENT_NAME": "kb"}
+
+    def test_a_carried_repo_is_still_corrected(self, lc_env):
+        """The guard must not blunt the fix: a container that ALREADY carries
+        the block gets it re-derived from the DB, stale value and all."""
+        lc, db, _rg = lc_env
+        db.get_git_config.return_value = _row(github_repo="owner/rebound")
+
+        env = {"GITHUB_REPO": "owner/stale", "GIT_SYNC_ENABLED": "true"}
         lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only")
 
-        assert env["GIT_SYNC_AUTO"] == "true"
+        assert env["GITHUB_REPO"] == "owner/rebound"
+
+    def test_a_resolvable_pat_also_introduces_the_block(self, lc_env):
+        """An agent whose PAT gate opens is writable by construction, so the
+        blackhole hazard cannot apply — introduce and converge its env."""
+        lc, db, rg = lc_env
+        db.get_git_config.return_value = self._init_sync_row()
+        db.get_agent_github_pat.return_value = "ghp_PER_AGENT"
+        rg.get_github_pat_for_agent.return_value = "ghp_PER_AGENT"
+
+        env = {}
+        lc._apply_git_env_from_db("kb", env, pat_gate="per_agent_only")
+
+        assert env["GIT_SYNC_ENABLED"] == "true"
+        assert env["GITHUB_PAT"] == "ghp_PER_AGENT"
+
+    def test_rebuild_from_nothing_is_exempt(self, lc_env):
+        """`effective` MUST introduce the block: there is no old container to
+        carry anything, and staying silent is the #843/#1439 silently-empty
+        agent (green health, no clone)."""
+        lc, db, rg = lc_env
+        db.get_git_config.return_value = self._init_sync_row()
+        db.get_agent_github_pat.return_value = None
+        rg.get_github_pat_for_agent.return_value = "ghp_GLOBAL_PLATFORM"
+
+        env = {}
+        lc._apply_git_env_from_db("kb", env, pat_gate="effective")
+
+        assert env["GITHUB_REPO"] == "acme/agent-repo"
+        assert env["GIT_SYNC_ENABLED"] == "true"
+        assert env["GITHUB_PAT"] == "ghp_GLOBAL_PLATFORM"
+
+    def test_a_deleted_row_still_clears_an_unbaked_container(self, lc_env):
+        """The guard sits AFTER the no-row clear sweep, so orphan cleanup is
+        unaffected."""
+        lc, db, _rg = lc_env
+        db.get_git_config.return_value = None
+
+        env = {"GITHUB_PAT": "ghp_ORPHANED"}
+        lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only")
+
+        assert env == {}
 
 
 # ---------------------------------------------------------------------------
-# 3. Set-or-clear — the recreate writes into a carried-forward dict
+# 4. Set-or-clear — the recreate writes into a carried-forward dict
 # ---------------------------------------------------------------------------
 class TestSetOrClear:
     def test_no_git_config_row_pops_every_owned_var(self, lc_env):
@@ -360,7 +494,7 @@ class TestSetOrClear:
         db.get_git_config.return_value = _row()
 
         monkeypatch.setenv("TRINITY_GIT_BASE_URL", "http://gitea:3000")
-        env = {}
+        env = _carried()
         lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only")
         assert env["TRINITY_GIT_BASE_URL"] == "http://gitea:3000"
 
@@ -396,10 +530,15 @@ class TestSetOrClear:
         lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only")
 
         assert set(env) == set(lc._GIT_ENV_KEYS)
+        # ...and every one of them is popped again when the row goes away, so
+        # the owned set and the clear sweep can never drift apart.
+        db.get_git_config.return_value = None
+        lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only")
+        assert env == {}
 
 
 # ---------------------------------------------------------------------------
-# 4. Idempotence — no writer/matcher feedback loop
+# 5. Idempotence — no writer/matcher feedback loop
 # ---------------------------------------------------------------------------
 class TestIdempotence:
     def test_two_passes_produce_an_identical_env_dict(self, lc_env):
@@ -413,29 +552,21 @@ class TestIdempotence:
         db.get_agent_github_pat.return_value = "ghp_PER_AGENT"
         rg.get_github_pat_for_agent.return_value = "ghp_PER_AGENT"
 
-        # The backfill is real state: model it, so pass 2 sees the converged row.
-        def _backfill(_name, enabled):
-            row["auto_sync_enabled"] = enabled
-            return True
-
-        db.set_git_auto_sync_enabled.side_effect = _backfill
-
-        env = {"GIT_SYNC_AUTO": "true", "UNRELATED": "keep-me"}
+        env = _carried(GIT_SYNC_AUTO="true", UNRELATED="keep-me")
         lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only")
         first = dict(env)
 
         lc._apply_git_env_from_db("a1", env, pat_gate="per_agent_only")
 
         assert env == first
-        # And the backfill retires itself rather than re-firing every recreate.
-        assert db.set_git_auto_sync_enabled.call_count == 1
+        assert row["auto_sync_enabled"] is False   # the DB is never mutated
 
     def test_idempotent_for_the_tokenless_flagship(self, lc_env):
         lc, db, rg = lc_env
         db.get_git_config.return_value = _row()
         rg.get_github_pat_for_agent.return_value = "ghp_GLOBAL_PLATFORM"
 
-        env = {}
+        env = _carried()
         lc._apply_git_env_from_db("cornelius", env, pat_gate="per_agent_only")
         first = dict(env)
         lc._apply_git_env_from_db("cornelius", env, pat_gate="per_agent_only")

@@ -551,6 +551,17 @@ def _apply_git_env_from_db(
     and the rebuild yields a silently empty agent reporting green health — the
     #843/#1439 class.
 
+    **Correct, never introduce — on the config-drift path only.** Because the
+    repo half is repo-gated and the PAT half keeps #211's narrower per-agent
+    gate, the two disagree for a real row shape (`POST /{agent}/git/initialize`
+    on the global platform PAT), and introducing `GIT_SYNC_ENABLED=true` with
+    no `GITHUB_PAT` makes startup.sh scrub that agent's only credential and
+    blackhole its push remote. So `per_agent_only` writes the block only when
+    the old container already carried a `GITHUB_REPO` (or a PAT resolves) —
+    correcting a stale repo, a flipped `source_mode` or a deleted row, which is
+    every case this fix is about. `effective` is exempt: with no old container,
+    not introducing the block IS the #843/#1439 bug. See the inline note.
+
     ``pat_gate`` — **never inherited, always stated by the call site.** The two
     paths gate the PAT differently on purpose and a shared default would be a
     credential leak:
@@ -586,6 +597,11 @@ def _apply_git_env_from_db(
     so "no row" means "no per-agent credential and nothing to push to" by
     construction. The population is transient (an aborted create, or an
     orphan-cleanup window), and popping runs in the same direction as ent#162.
+
+    **Reads DB state; writes none.** `GIT_SYNC_AUTO` is derived as
+    `DB flag OR baked env` and the disagreement is only logged — see the inline
+    note for why a write-back cannot distinguish a creation-time discrepancy
+    from an owner's explicit disable.
     """
     git_config = db.get_git_config(agent_name)
 
@@ -605,10 +621,10 @@ def _apply_git_env_from_db(
             env_vars.pop(_key, None)
         return
 
-    env_vars["GITHUB_REPO"] = repo
-    env_vars["GIT_SYNC_ENABLED"] = "true"
-
-    # --- PAT: set-only, gated per the call site (see docstring) -------------
+    # --- PAT gate, resolved per the call site (see docstring) ---------------
+    # Computed BEFORE the repo block because the introduce-guard below consults
+    # it. Safe to hoist: it reads only the carried-forward env, which the repo
+    # block does not touch.
     if pat_gate == "effective":
         _pat_allowed = True
     elif pat_gate == "per_agent_only":
@@ -622,6 +638,37 @@ def _apply_git_env_from_db(
         )
     else:
         raise ValueError(f"unknown pat_gate: {pat_gate!r}")
+
+    # --- Correct what is carried; never INTRODUCE the block -----------------
+    # Config-drift only. The repo half is gated on the REPO (ent#123) while the
+    # PAT half keeps #211's narrower per-agent gate, and for one real row shape
+    # those two disagree: `POST /{agent}/git/initialize` writes an
+    # `agent_git_config` row and pushes with the resolved — often GLOBAL —
+    # platform PAT, but never recreates the container, never bakes any git env,
+    # never persists a per-agent PAT row, and never writes the token into the
+    # workspace `.env` (so startup.sh's #1264 fallback does not cover it). Its
+    # only credential lives in the container's `.git/config` origin URL.
+    #
+    # Introducing `GIT_SYNC_ENABLED=true` with no `GITHUB_PAT` is exactly the
+    # input startup.sh reads as "deliberately tokenless": the restart branch
+    # rewrites origin to the credential-less CLONE_URL — DESTROYING that token —
+    # and `configure_push_remote` blackholes the push remote. Silent, and armed
+    # fleet-wide by the same base-image drift this helper exists to fix.
+    #
+    # So on this path the helper only ever CORRECTS a git env the container
+    # already carries (a stale repo, a flipped source_mode, a deleted row —
+    # every case the fix is actually about; a tokenless ent#123 agent carries
+    # GITHUB_REPO from creation, so the flagship is unaffected). The
+    # rebuild-from-nothing path is deliberately exempt: it has no old container
+    # to carry anything, and NOT introducing the block there is the #843/#1439
+    # silently-empty-agent bug.
+    if pat_gate == "per_agent_only" and not (
+        env_vars.get("GITHUB_REPO") or _pat_allowed
+    ):
+        return
+
+    env_vars["GITHUB_REPO"] = repo
+    env_vars["GIT_SYNC_ENABLED"] = "true"
 
     if _pat_allowed:
         from routers.git import get_github_pat_for_agent
@@ -648,10 +695,22 @@ def _apply_git_env_from_db(
     # column defaults to 0. So env-`true`/DB-`0` is reachable from a single
     # transient DB hiccup at creation and permanently for ghosts — and deriving
     # from the DB flag alone would silently STOP auto-push for that slice of the
-    # fleet (no error, just a stale `agent_sync_state`). OR the two for one
-    # release, and backfill the column the moment the disagreement is observed,
-    # so the OR retires itself. Making the #389 toggle authoritative is a
-    # separate follow-up, not a side effect of this fix.
+    # fleet (no error, just a stale `agent_sync_state`). So: OR the two.
+    #
+    # Deliberately NO write-back. A `PUT /{agent}/git/auto-sync {enabled:false}`
+    # writes the DB row and nothing else (routers/git.py), while the agent gates
+    # on container env (`agent_server/auto_sync.py`) — and creation sets BOTH to
+    # true for the ordinary non-source-mode PAT agent. So "baked true / DB 0" is
+    # ALSO exactly what an owner's explicit disable looks like, and a backfill
+    # cannot tell the two apart: it would silently re-enable the flag, erase the
+    # only record of that intent, and make the toggle unable to ever stick.
+    # Worse, `PUT .../auto-sync` is OwnedAgentByName while `POST .../start` (the
+    # recreate's trigger) is AuthorizedAgentByName, so the write would let a
+    # shared non-owner — or an agent-scoped key resolving to its owner WITH the
+    # owner's role (trinity-ops-agent#232) — flip an owner-only flag that arms a
+    # 15-minute background commit-and-push loop. Log the disagreement instead.
+    # Making the #389 toggle authoritative (one writer, env re-baked on toggle)
+    # is the separate follow-up that retires this OR honestly.
     _baked_auto = str(env_vars.get("GIT_SYNC_AUTO") or "").strip().lower() == "true"
     _db_auto = bool(_gc("auto_sync_enabled"))
     if _db_auto or _baked_auto:
@@ -660,18 +719,13 @@ def _apply_git_env_from_db(
         env_vars.pop("GIT_SYNC_AUTO", None)
 
     if _baked_auto and not _db_auto:
-        # Best-effort convergence — never fails the recreate.
-        try:
-            db.set_git_auto_sync_enabled(agent_name, True)
-            logger.info(
-                "Backfilled auto_sync_enabled=1 for %s from its baked "
-                "GIT_SYNC_AUTO=true (#389 / ent#109)",
-                agent_name,
-            )
-        except Exception as e:  # noqa: BLE001 — cosmetic convergence only
-            logger.warning(
-                "Could not backfill auto_sync_enabled for %s: %s", agent_name, e
-            )
+        logger.info(
+            "Agent %s carries GIT_SYNC_AUTO=true but auto_sync_enabled=0; "
+            "keeping auto-push on (the env wins until the #389 toggle is "
+            "authoritative). NOT rewriting the DB flag — it may be a "
+            "deliberate owner disable (ent#109)",
+            agent_name,
+        )
 
     # --- optional self-hosted git base URL: refresh from the CURRENT backend
     # env (the AGENT_TOOL_STALL_LIMIT_S idiom), so pointing the platform at or
