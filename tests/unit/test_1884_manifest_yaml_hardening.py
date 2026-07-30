@@ -186,3 +186,46 @@ def test_invalid_yaml_still_reports_as_a_parse_error():
     with pytest.raises(svc.ManifestError) as exc:
         svc.parse_manifest("name: [unclosed\n")
     assert exc.value.code == "manifest_yaml_invalid"
+
+
+# ---------------------------------------------------------------------------
+# Gaps found reviewing this change, not writing it
+# ---------------------------------------------------------------------------
+
+def test_a_wide_shallow_bomb_is_also_refused():
+    """The tests above are all DEEP pyramids. A bomb can equally be wide and
+    shallow — two levels with a huge fan — which a level-based intuition misses
+    entirely. The budget is shape-agnostic because it counts expanded nodes, and
+    this pins that rather than leaving it to luck."""
+    svc = _svc()
+    fan = 400
+    doc = (
+        "name: b\n"
+        'a: &a ["' + '","'.join(["x"] * fan) + '"]\n'
+        f"b: [{','.join(['*a'] * fan)}]\n"
+    )
+    assert len(doc) < 4000
+    with pytest.raises(svc.ManifestError) as exc:
+        svc.parse_manifest(doc)
+    assert exc.value.code == "manifest_alias_budget_exceeded"
+
+
+def test_every_shipped_manifest_still_parses():
+    """The guard must not brick first-run seeding.
+
+    `config/manifests/default-system.yaml` is deployed automatically on a fresh
+    install (`system_seed_service`), so a false positive here would not be a
+    rejected request — it would be a broken installation. Parse everything the
+    repo ships.
+    """
+    import glob
+
+    svc = _svc()
+    root = Path(__file__).resolve().parents[2]
+    manifests = sorted(glob.glob(str(root / "config" / "manifests" / "*.yaml")))
+    assert manifests, "expected bundled manifests to exist"
+
+    for path in manifests:
+        with open(path) as fh:
+            manifest = svc.parse_manifest(fh.read())
+        assert manifest.agents, f"{path} parsed to zero agents"
