@@ -324,6 +324,20 @@ def _mkrepo(root: Path, name: str, skills: dict, tag: str | None = None) -> Path
     return repo
 
 
+def _fake_legacy_setting(monkeypatch, legacy_repo: Path) -> None:
+    """Point the pre-ent#237 `skills_library_url` setting at a fixture repo.
+
+    Via monkeypatch, NOT a direct module assignment: `skill_service` imports
+    these getters by value, so a plain assignment persists for the rest of the
+    session and every later test's sync silently adopts this repo as an extra
+    source. Random test ordering turns that into unrelated failures elsewhere.
+    """
+    import services.skill_service as ss
+
+    monkeypatch.setattr(ss, "get_skills_library_url", lambda: str(legacy_repo))
+    monkeypatch.setattr(ss, "get_skills_library_branch", lambda: "main")
+
+
 @pytest.fixture
 def service(sources_db, tmp_path, monkeypatch):
     """A SkillService whose clones land in tmp, with the SSRF allowlist relaxed.
@@ -427,12 +441,11 @@ class TestMultiSourceMerge:
 class TestLegacyAdoption:
     """AC#6 — an existing single-repo install keeps working with no admin action."""
 
-    def test_existing_setting_becomes_a_custom_source(self, service, sources_db, tmp_path):
+    def test_existing_setting_becomes_a_custom_source(
+        self, service, sources_db, tmp_path, monkeypatch
+    ):
         legacy = _mkrepo(tmp_path / "repos", "legacy", {"old-skill": "legacy"})
-        import services.skill_service as ss
-
-        ss.get_skills_library_url = lambda: str(legacy)
-        ss.get_skills_library_branch = lambda: "main"
+        _fake_legacy_setting(monkeypatch, legacy)
 
         service.sync_library()
 
@@ -443,12 +456,9 @@ class TestLegacyAdoption:
         assert sources[0].is_default is False
         assert [s["name"] for s in service.list_skills()] == ["old-skill"]
 
-    def test_adoption_is_idempotent(self, service, sources_db, tmp_path):
+    def test_adoption_is_idempotent(self, service, sources_db, tmp_path, monkeypatch):
         legacy = _mkrepo(tmp_path / "repos", "legacy", {"old-skill": "legacy"})
-        import services.skill_service as ss
-
-        ss.get_skills_library_url = lambda: str(legacy)
-        ss.get_skills_library_branch = lambda: "main"
+        _fake_legacy_setting(monkeypatch, legacy)
 
         service.sync_library()
         service.sync_library()
@@ -456,14 +466,13 @@ class TestLegacyAdoption:
 
         assert sources_db.count_sources() == 1
 
-    def test_legacy_clone_is_moved_not_abandoned(self, service, sources_db, tmp_path):
+    def test_legacy_clone_is_moved_not_abandoned(
+        self, service, sources_db, tmp_path, monkeypatch
+    ):
         """The old checkout lived AT the root that now holds per-source subdirs.
         Leaving it there would strand a repo nothing points at."""
         legacy = _mkrepo(tmp_path / "repos", "legacy", {"old-skill": "legacy"})
-        import services.skill_service as ss
-
-        ss.get_skills_library_url = lambda: str(legacy)
-        ss.get_skills_library_branch = lambda: "main"
+        _fake_legacy_setting(monkeypatch, legacy)
 
         # Simulate the pre-ent#237 layout: a git clone directly at the root.
         subprocess.run(["git", "clone", "-q", str(legacy), str(service.library_root)],
@@ -565,3 +574,99 @@ class TestFreshInstallSeed:
         fresh_db.commit()
 
         D._seed_fresh_install_skill_source(fresh_db.cursor(), fresh_db)   # no raise
+
+
+# =============================================================================
+# The source-management endpoints — the ent#293 gate is the point
+# =============================================================================
+
+class TestSourceEndpointGating:
+    """`require_admin` answers "what role", NOT "is this a human".
+
+    An agent-scoped MCP key resolves to its OWNER carrying the owner's role, so
+    on a default admin-owned install every agent's injected TRINITY_MCP_API_KEY
+    satisfies `require_admin` (ent#293 — third occurrence of the class after
+    trinity-ops-agent#232 → #1644 → #1816). Registering a source is the GRANT
+    action: it decides which repo the fleet executes code from. So each mutating
+    route needs `reject_agent_principal` on top, and these tests pin that so it
+    cannot be dropped by a later refactor.
+    """
+
+    MUTATING = ["create_skill_source", "update_skill_source", "delete_skill_source"]
+
+    def test_mutating_routes_reject_agent_principals(self):
+        """Static, on purpose: an integration test needs a live app + DB, and
+        this must fail loudly the moment a new mutating route is added without
+        the gate."""
+        import ast
+        import inspect
+
+        import routers.skills as skills_router
+
+        tree = ast.parse(inspect.getsource(skills_router))
+        funcs = {
+            n.name: n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+
+        for name in self.MUTATING:
+            assert name in funcs, f"{name} missing — did a route get renamed?"
+            body = ast.dump(funcs[name])
+            assert "reject_agent_principal" in body, (
+                f"{name} does not call reject_agent_principal. require_admin "
+                f"alone is satisfied by any agent-scoped key on an "
+                f"admin-owned install (ent#293)."
+            )
+
+    def test_every_mutating_source_route_is_covered(self):
+        """Guards the guard: a new POST/PUT/DELETE under /skills/sources that
+        this test does not know about is a failure, not a silent pass."""
+        import ast
+        import inspect
+
+        import routers.skills as skills_router
+
+        tree = ast.parse(inspect.getsource(skills_router))
+        found = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for dec in node.decorator_list:
+                if not isinstance(dec, ast.Call):
+                    continue
+                attr = getattr(dec.func, "attr", "")
+                path = dec.args[0].value if dec.args and isinstance(
+                    dec.args[0], ast.Constant
+                ) else ""
+                if attr in ("post", "put", "delete") and "/skills/sources" in path:
+                    found.add(node.name)
+
+        # `sync` is USE, not GRANT — it pulls an already-admin-configured repo,
+        # so it is role-gated only. Everything else must be in MUTATING.
+        assert found - {"sync_skill_source"} == set(self.MUTATING), (
+            f"unreviewed mutating source routes: "
+            f"{found - {'sync_skill_source'} - set(self.MUTATING)}"
+        )
+
+    def test_is_default_cannot_be_claimed_via_the_api(self):
+        """The create model has no `is_default`, so a caller cannot claim the
+        bundled source's trust posture (tag-pinned, ours to bump) for an
+        arbitrary repo."""
+        from models import SkillSourceCreate, SkillSourceUpdate
+
+        assert "is_default" not in SkillSourceCreate.model_fields
+        assert "is_default" not in SkillSourceUpdate.model_fields
+
+    def test_create_model_rejects_control_characters(self):
+        import pydantic
+        from models import SkillSourceCreate
+
+        with pytest.raises(pydantic.ValidationError):
+            SkillSourceCreate(name="ok", url="github.com/x/y", ref="ma\nin")
+
+    def test_create_model_rejects_unknown_ref_type(self):
+        import pydantic
+        from models import SkillSourceCreate
+
+        with pytest.raises(pydantic.ValidationError):
+            SkillSourceCreate(name="ok", url="github.com/x/y", ref_type="sha")

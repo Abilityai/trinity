@@ -12,7 +12,7 @@ Endpoints:
 """
 
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from models import User
 from dependencies import (
@@ -24,6 +24,10 @@ from dependencies import (
 )
 from database import db
 from db_models import AgentSkill, SkillInfo, AgentSkillsUpdate
+from models import SkillSourceCreate, SkillSourceUpdate
+from db.skill_sources import DuplicateSkillSource, DefaultSourceExists
+from services.platform_audit_service import platform_audit_service, AuditEventType
+from utils.url_validation import validate_skills_library_url
 from services.skill_service import skill_service, SkillInjectionBusy
 from services.skill_packaging import validate_skill_name
 
@@ -230,3 +234,158 @@ async def unassign_skill(
         "removed": removed,
         "skill_name": skill_name
     }
+
+
+# ============================================================================
+# Skill Source Management (ent#237 — multi-source library)
+# ============================================================================
+#
+# Every MUTATION here carries `reject_agent_principal` in ADDITION to
+# `require_admin`, and that is load-bearing rather than defensive padding.
+# `require_admin` answers "what role", not "is this a human": an agent-scoped
+# MCP key resolves to its owner CARRYING the owner's role, so on a default
+# admin-owned install every agent's injected TRINITY_MCP_API_KEY satisfies
+# `require_admin` (ent#293, the third occurrence of that class after
+# trinity-ops-agent#232 → #1644 → #1816).
+#
+# Adding a source is the GRANT action from the learnings.md grant-vs-use
+# distinction — it decides which repo the fleet executes code from. A
+# prompt-injected agent that could register its own repo would get unattended,
+# fleet-wide, persistent prompt injection, since skills are instructions Claude
+# follows and ent#236 automates the sync + re-inject. Reading and syncing an
+# already-configured source is USE and stays role-gated only.
+
+async def _audit_source(request, actor, action: str, source_id: str, details: dict):
+    """Audit a source mutation. Best-effort — an audit failure must not undo a
+    write that already succeeded."""
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action=action,
+            source="api",
+            actor_user=actor,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            target_type="skill_source",
+            target_id=source_id,
+            details=details,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@router.get("/skills/sources")
+async def list_skill_sources(admin_user: User = Depends(require_admin)):
+    """List configured skill sources in RESOLUTION order (first wins a clash).
+
+    Admin-only because the rows carry repo URLs, which for a private source are
+    themselves sensitive. The per-agent Skills tab does not use this — it gets
+    `source_name` from `GET /skills/library`, which exposes no URLs.
+    """
+    return skill_service.get_library_status()
+
+
+@router.post("/skills/sources", status_code=201)
+async def create_skill_source(
+    request: Request,
+    body: SkillSourceCreate,
+    admin_user: User = Depends(require_admin),
+):
+    """Register a skills repo as a source."""
+    reject_agent_principal(admin_user)
+
+    # SSRF allowlist (#179) at the boundary, so a bad URL is rejected on write
+    # rather than surfacing later as a recurring sync failure.
+    try:
+        url = validate_skills_library_url(body.url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid repository URL: {e}")
+
+    try:
+        source = db.create_skill_source(
+            name=body.name,
+            url=url,
+            ref=body.ref,
+            ref_type=body.ref_type,
+            enabled=body.enabled,
+            is_default=False,
+            created_by=str(admin_user.id),
+        )
+    except DuplicateSkillSource as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except DefaultSourceExists as e:  # pragma: no cover — is_default is forced False
+        raise HTTPException(status_code=409, detail=str(e))
+
+    await _audit_source(
+        request, admin_user, "skill_source_create", source.id,
+        {"url": url, "ref": body.ref, "ref_type": body.ref_type},
+    )
+    return source
+
+
+@router.put("/skills/sources/{source_id}")
+async def update_skill_source(
+    request: Request,
+    source_id: str,
+    body: SkillSourceUpdate,
+    admin_user: User = Depends(require_admin),
+):
+    """Patch a source (name, url, ref, ref_type, enabled, priority)."""
+    reject_agent_principal(admin_user)
+
+    fields = body.model_dump(exclude_unset=True, exclude_none=True)
+    if "url" in fields:
+        try:
+            fields["url"] = validate_skills_library_url(fields["url"])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid repository URL: {e}")
+
+    try:
+        source = db.update_skill_source(source_id, **fields)
+    except DuplicateSkillSource as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    if source is None:
+        raise HTTPException(status_code=404, detail="Skill source not found")
+
+    await _audit_source(
+        request, admin_user, "skill_source_update", source_id,
+        {"changed": sorted(fields.keys())},
+    )
+    return source
+
+
+@router.delete("/skills/sources/{source_id}")
+async def delete_skill_source(
+    request: Request,
+    source_id: str,
+    admin_user: User = Depends(require_admin),
+):
+    """Remove a source.
+
+    Assignments referencing it are intentionally left alone: the skill keeps
+    resolving by bare name through whatever source still provides it, and
+    cascading would silently strip capabilities that are still available.
+    """
+    reject_agent_principal(admin_user)
+
+    if not db.delete_skill_source(source_id):
+        raise HTTPException(status_code=404, detail="Skill source not found")
+
+    await _audit_source(request, admin_user, "skill_source_delete", source_id, {})
+    return {"deleted": True, "source_id": source_id}
+
+
+@router.post("/skills/sources/{source_id}/sync")
+async def sync_skill_source(
+    source_id: str,
+    admin_user: User = Depends(require_admin),
+):
+    """Sync ONE source, leaving the others untouched."""
+    if db.get_skill_source(source_id) is None:
+        raise HTTPException(status_code=404, detail="Skill source not found")
+
+    result = skill_service.sync_library(source_id=source_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Sync failed"))
+    return result

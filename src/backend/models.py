@@ -2870,3 +2870,50 @@ class WhatsAppConfigureRequest(BaseModel):
 class WhatsAppTestRequest(BaseModel):
     to_number: Optional[str] = None
     message: str = "Hello from Trinity! Your WhatsApp integration is configured correctly."
+
+
+# ============================================================================
+# Skill Sources (ent#237 — multi-source skills library)
+# ============================================================================
+
+class SkillSourceCreate(BaseModel):
+    """Register a skills repo as a source.
+
+    `is_default` is absent by design: the bundled community source is seeded at
+    fresh install and there can be only one, so an API caller never sets the
+    flag. Its trust posture (tag-pinned, ours to bump) is not a property a
+    caller should be able to claim for an arbitrary repo.
+    """
+    name: str = Field(..., min_length=1, max_length=100)
+    url: str = Field(..., min_length=1, max_length=500)
+    ref: str = Field("main", min_length=1, max_length=200)
+    # 'branch' tracks a moving head; 'tag' pins and REFUSES a moved tag. An
+    # operator syncing a repo whose write access they do not fully control
+    # should pin (ent#237 AC#5).
+    ref_type: Literal["branch", "tag"] = "branch"
+    enabled: bool = True
+
+    @field_validator("name", "ref")
+    @classmethod
+    def _no_control_chars(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("must not be blank")
+        if any(ord(c) < 32 or ord(c) == 127 for c in v):
+            raise ValueError("must not contain control characters")
+        return v
+
+
+class SkillSourceUpdate(BaseModel):
+    """Patch a source. Every field optional; omitted fields are untouched.
+
+    `is_default` is not patchable — promoting a custom source would change its
+    trust posture without changing where it points (enforced in the db layer
+    too, so an added field here cannot silently start working).
+    """
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    url: Optional[str] = Field(None, min_length=1, max_length=500)
+    ref: Optional[str] = Field(None, min_length=1, max_length=200)
+    ref_type: Optional[Literal["branch", "tag"]] = None
+    enabled: Optional[bool] = None
+    priority: Optional[int] = Field(None, ge=1, le=10000)
