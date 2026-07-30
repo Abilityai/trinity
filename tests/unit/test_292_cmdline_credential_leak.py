@@ -159,19 +159,8 @@ def test_url_redactor_is_shared_not_duplicated():
     )
 
 
-def test_the_sweeper_redacts_with_no_importable_helper(monkeypatch):
-    """The sweeper's baseline redaction must not depend on an import.
-
-    This module is loaded three ways — package-relative in production, flat by
-    `subprocess_pgroup`'s test, and during a full-suite collection where
-    `src/backend` is also on sys.path carrying a DIFFERENT `credential_sanitizer`
-    without `sanitize_cmdline`. An import-time dependency on the richer helper
-    aborted collection outright. Load the sweeper standalone and prove a
-    credential is still redacted.
-    """
-    # `orphan_sweep` also imports `orphan_allowlist`, so the flat form needs
-    # `utils/` importable — the same shape `subprocess_pgroup`'s test uses.
-    # `syspath_prepend` reverts automatically, so nothing leaks to later tests.
+def test_the_sweeper_redacts_when_the_helper_is_reachable(monkeypatch):
+    """End to end through the sweeper's own entry point."""
     monkeypatch.syspath_prepend(str(_UTILS))
     sweep = _load("orphan_sweep")
     out = sweep._safe_cmdline(
@@ -179,3 +168,44 @@ def test_the_sweeper_redacts_with_no_importable_helper(monkeypatch):
     )
     assert "ghp_" not in out
     assert "***@github.com" in out
+
+
+def test_the_sweeper_drops_the_cmdline_when_the_helper_is_unreachable(monkeypatch):
+    """The security guarantee must not depend on an import succeeding.
+
+    Rather than keep a second copy of the redaction regex here — which is
+    exactly the drift that caused this bug, since #1595 fixed the same
+    credential in git stderr with a local regex and the argv sink was missed —
+    the sweeper DROPS the cmdline when the sanitizer cannot be reached.
+    Diagnostics degrade; a credential still cannot leak.
+    """
+    monkeypatch.syspath_prepend(str(_UTILS))
+    sweep = _load("orphan_sweep")
+
+    def _no_helper(*a, **k):
+        raise ImportError("simulated: sanitizer unreachable")
+
+    monkeypatch.setattr(sweep, "__import__", _no_helper, raising=False)
+    import builtins
+    monkeypatch.setattr(builtins, "__import__", _no_helper)
+
+    out = sweep._safe_cmdline(
+        "git remote-https origin https://oauth2:ghp_" + "G" * 36 + "@github.com/o/r.git"
+    )
+    assert "ghp_" not in out
+    assert "github.com" not in out
+    assert out == sweep._CMD_UNAVAILABLE
+
+
+def test_the_redaction_rule_has_exactly_one_definition():
+    """The issue's explicit instruction: promote a SHARED helper rather than add
+    a sweeper-local regex, because "the exposure exists anywhere argv or env is
+    logged". Two copies of a security pattern drift, and the drift is what this
+    whole issue is."""
+    sweep_src = (_UTILS / "orphan_sweep.py").read_text()
+    git_src = (_UTILS.parent / "routers" / "git.py").read_text()
+    for name, body in (("orphan_sweep.py", sweep_src), ("routers/git.py", git_src)):
+        assert "(://)[^/@" not in body, (
+            f"{name} re-derived the URL-userinfo regex instead of using the "
+            "shared helper in credential_sanitizer"
+        )

@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import signal
 import time
 from pathlib import Path
@@ -53,38 +52,44 @@ try:
 except ImportError:  # pragma: no cover - exercised by unit tests
     from orphan_allowlist import resolve_allowlist, _read_cmdline  # type: ignore[no-redef]
 
-# ent#292: URL-userinfo redaction, guaranteed at module scope with no import.
+# ent#292: sanitize a cmdline before it reaches a log sink.
 #
-# This module is imported three different ways — package-relative in production,
-# flat by `subprocess_pgroup`'s test (sys.path + `import orphan_sweep`), and
-# transitively during a full-suite collection where `src/backend` is ALSO on
-# sys.path and carries a DIFFERENT `credential_sanitizer` with no
-# `sanitize_cmdline`. An import-time dependency on the richer helper therefore
-# broke collection outright (the head suite aborted, not just one test).
+# The redaction RULE lives in exactly one place — `credential_sanitizer` — and
+# is imported lazily here rather than at module scope. Two reasons, and the
+# first is not stylistic:
 #
-# So the baseline rule lives here, self-contained: no import can fail, and a
-# credential can never reach the log because a helper was unreachable. The
-# richer sanitizer is layered on when it IS importable, resolved lazily at call
-# time rather than at import.
-_URL_USERINFO_RE = re.compile(r"(://)[^/@\s]+@")
+# 1. A second copy of a security regex is how this bug happened. #1595 fixed
+#    the same credential in git stderr with a local regex; the argv sink kept
+#    its own behaviour and was missed. Duplicating the pattern here would set
+#    up the identical drift for whoever improves it next.
+#
+# 2. It must be a LAZY import. This module is loaded three ways —
+#    package-relative in production, flat by `subprocess_pgroup`'s test, and
+#    during a full-suite collection where `src/backend` is also on sys.path
+#    carrying a DIFFERENT `credential_sanitizer` without `sanitize_cmdline`. An
+#    import-time dependency therefore aborted collection outright.
+#
+# When the helper genuinely cannot be reached, the cmdline is DROPPED rather
+# than logged raw. Diagnostics degrade; the credential never leaks. That is the
+# right trade for a log line whose whole purpose is answering "which process
+# keeps dying?" — a placeholder still says a process was reaped.
+_CMD_UNAVAILABLE = "<redacted: sanitizer unavailable>"
 
 
 def _safe_cmdline(cmd: str) -> str:
-    """Redact credentials from a process cmdline before it reaches a log sink.
-
-    Always applies URL-userinfo redaction (the form Trinity's git remotes use);
-    additionally applies the shared token-shape/known-value sanitizer when this
-    module is loaded in a context where it resolves.
-    """
-    out = _URL_USERINFO_RE.sub(r"\1***@", cmd or "")
+    """Redact credentials from a process cmdline, or drop it entirely."""
     try:
-        from .credential_sanitizer import sanitize_text  # local import: see above
+        from .credential_sanitizer import sanitize_cmdline
     except Exception:  # pragma: no cover - flat/standalone load
-        return out
+        try:
+            from credential_sanitizer import sanitize_cmdline  # type: ignore[no-redef]
+        except Exception:
+            return _CMD_UNAVAILABLE
     try:
-        return sanitize_text(out)
-    except Exception:  # pragma: no cover - never let redaction raise into a sweep
-        return out
+        return sanitize_cmdline(cmd or "")
+    except Exception:  # pragma: no cover - redaction must never break a sweep
+        return _CMD_UNAVAILABLE
+
 
 logger = logging.getLogger(__name__)
 
