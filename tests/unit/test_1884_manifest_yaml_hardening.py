@@ -229,3 +229,40 @@ def test_every_shipped_manifest_still_parses():
         with open(path) as fh:
             manifest = svc.parse_manifest(fh.read())
         assert manifest.agents, f"{path} parsed to zero agents"
+
+
+# ---------------------------------------------------------------------------
+# The loader is still SAFE — raised by CodeQL review of this PR
+# ---------------------------------------------------------------------------
+
+def test_the_hardened_loader_is_a_safeloader_not_a_full_loader():
+    """CodeQL flags `yaml.load(..., Loader=...)` as unsafe deserialization by
+    call shape, without resolving the subclass.
+
+    It is a false positive here — but "trust me, it subclasses SafeLoader" is an
+    assertion, and this change is the reason the call moved off `safe_load` in
+    the first place. So the safety property is pinned rather than argued: if
+    anyone ever re-parents this loader to `FullLoader` or `yaml.Loader`, the
+    build fails instead of a reviewer having to notice.
+    """
+    import yaml
+
+    svc = _svc()
+    mro = svc._HardenedManifestLoader.__mro__
+    assert yaml.SafeLoader in mro
+    unsafe = {"FullLoader", "UnsafeLoader", "Loader", "CLoader", "CFullLoader"}
+    assert not {c.__name__ for c in mro} & unsafe
+
+
+@pytest.mark.parametrize("payload", [
+    '!!python/object/apply:os.system ["echo pwned"]',
+    'name: !!python/object/apply:subprocess.check_output [["id"]]',
+    "!!python/name:os.system {}",
+    "!!python/object/new:type [x, !!python/tuple [], {}]",
+])
+def test_python_object_tags_are_refused(payload):
+    """The behavioural half: arbitrary object construction must be impossible,
+    which is the actual property CodeQL's rule exists to protect."""
+    svc = _svc()
+    with pytest.raises(svc.ManifestError):
+        svc.parse_manifest(payload)
