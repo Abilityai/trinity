@@ -44,15 +44,22 @@
             <!-- Right: Controls -->
             <div class="flex items-center space-x-2 flex-shrink-0">
               <!-- Create Agent (trinity-enterprise#260) — chassis-level so agent
-                   creation is reachable from every mode, not just the List tab -->
+                   creation is reachable from every mode, not just the List tab.
+                   The label degrades to icon-only below `md` (pre-decided in the
+                   plan): the controls cluster is flex-shrink-0, and at 640px in
+                   grid mode the full label pushes the stats cluster below the
+                   71px `agents-only` floor of the #1830 degrade ladder — the
+                   stats-overflow spec's clip assertion would fire. -->
               <button
                 @click="showCreateModal = true"
                 class="flex items-center space-x-1 px-2 py-1 rounded text-xs font-medium bg-action-primary-600 hover:bg-action-primary-700 text-white whitespace-nowrap transition-colors"
+                title="Create Agent"
+                aria-label="Create Agent"
               >
                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
                 </svg>
-                <span>Create Agent</span>
+                <span class="hidden md:inline">Create Agent</span>
               </button>
 
               <!-- Quick Tag Filter Dropdown -->

@@ -35,14 +35,20 @@ stores/network.js
  │     Feeds the GRID and LIST panes ONLY (Dashboard :agents prop).
  │     The timeline/node paths deliberately do NOT read it — sibling ent#261
  │     switches ReplayTimeline's :agents prop to this computed itself.
- └─ fetchAgents → agents.value = data ; agentsStore.agents = data
+ └─ fetchAgents → agents.value = data ; agentsStore.agents = [...data]
        (write-through: keeps #1643 displayNameForSlug tab titles warm with
-        zero extra HTTP; cycle-free — agents.js no longer imports this store)
+        zero extra HTTP; cycle-free — agents.js no longer imports this store.
+        GATED on no active quick-tag filter — `params.tags` narrows the
+        response server-side, and a filtered subset must not clobber the
+        full-fleet list agentsStore consumers read; shallow copy so the two
+        stores share rows but never the array)
 
 views/Dashboard.vue (chassis)
  ├─ header: mode toggle ['timeline','grid','list'] (second home of VIEW_MODES)
  │          + Create Agent button + CreateAgentModal (all modes; close →
- │            fetchAgents, since the WS agent_created event can lag)
+ │            fetchAgents, since the WS agent_created event can lag; label
+ │            icon-only below `md` so the fixed controls cluster leaves the
+ │            #1830 stats ladder its 71px agents-only floor at 640px)
  ├─ watch(route.query.view, {immediate}) → setViewMode(v, {persist:false})
  │          → router.replace strips `view` (spreads the rest — ?onboarding=1
  │            survives), .catch(() => {}) for redundant-navigation rejections
@@ -86,7 +92,8 @@ NavBar: Agents entry removed; Dashboard active on '/' || isAgentSection
 - **D1 — data spine**: networkStore feeds everything (single `/api/agents`
   fetch, chassis-coherent filters, WS-live rows); agentsStore composed in for
   exactly `sortBy` + `syncHealth`. The fetch write-through keeps
-  `agentsStore.agents` warm for #1643 tab titles and the WS merge target.
+  `agentsStore.agents` warm for #1643 tab titles and the WS merge target
+  (gated: a quick-tag-filtered fetch never clobbers the full-fleet list).
 - **D2 — redirect-with-intent**: `/agents` → `/?view=list`, applied via an
   immediate route **watch** (an onMounted-only read would no-op when
   navigating to `/?view=list` on an already-mounted Dashboard), then stripped.

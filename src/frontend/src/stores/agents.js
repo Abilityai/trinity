@@ -8,9 +8,10 @@ import { agentDisplayName } from '../utils/agentName'
 // composes THIS store in for exactly two members — `sortBy`/`setSortBy`
 // (session-lived sort state) and `syncHealth`/`fetchSyncHealth` (#389).
 // `agents` stays warm via networkStore.fetchAgents' write-through (the #1643
-// displayNameForSlug base fetch) plus the App.vue WS handlers that merge
-// agent_created / agent_label_changed rows in. The sort comparator itself
-// lives in utils/agentSort.js (pure function — no store access).
+// displayNameForSlug base fetch — gated: a quick-tag-FILTERED fetch never
+// clobbers this full-fleet list) plus the utils/websocket.js handlers that
+// merge agent_created / agent_label_changed rows in. The sort comparator
+// itself lives in utils/agentSort.js (pure function — no store access).
 export const useAgentsStore = defineStore('agents', {
   state: () => ({
     agents: [],

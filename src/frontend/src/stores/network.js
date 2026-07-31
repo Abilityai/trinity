@@ -172,9 +172,17 @@ export const useNetworkStore = defineStore('network', () => {
       // Write-through (ent#260 / #1643): keep agentsStore.agents warm from the
       // same response — with the Agents page gone this is the base fetch that
       // backs displayNameForSlug (browser-tab titles on Dashboard → AgentDetail
-      // nav) and the WS agent_created/label handlers' merge target. One line,
-      // zero extra HTTP; cycle-free since agents.js no longer imports this store.
-      useAgentsStore().agents = response.data
+      // nav) and the WS agent_created/label handlers' merge target. Zero extra
+      // HTTP; cycle-free since agents.js no longer imports this store.
+      // GATED on no active quick-tag filter: `params.tags` narrows the response
+      // SERVER-side, and agentsStore.agents means "the full fleet" to its
+      // consumers (Executions agent dropdown, tab titles) — a filtered subset
+      // must not clobber it. Shallow copy so array-level ops in one store
+      // (push/filter/sort) can't silently mutate the other's list; row objects
+      // stay shared, so in-place status/label patches propagate to both.
+      if (filterTags.value.length === 0) {
+        useAgentsStore().agents = [...response.data]
+      }
       // Apply client-side owner filter before converting to nodes
       const filtered = filterOwner.value
         ? response.data.filter(a => (a.owner || null) === (filterOwner.value === '__unassigned__' ? null : filterOwner.value))
