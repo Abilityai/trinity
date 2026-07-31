@@ -404,7 +404,7 @@ non-empty.
 ## Design notes
 
 - **Every Tier-A invariant is a single SQL/Redis query** — make the canary compute it continuously. Tier-B invariants run every SLA window.
-- **S-01, E-02, E-06, L-03, G-01 are the five "must never break" invariants** — these encode the fixes from #378/#403/#407/#129 and agent-delete cascades. Put them in a red-alert dashboard.
+- **S-01, E-02, E-06, L-03, G-01 are the five "must never break" invariants** — these encode the fixes from #378/#403/#407/#129 and agent-delete cascades. Put them in a red-alert dashboard. (**E-06 here is the _catalog_ id** — the #129 check, still unimplemented. The shipped registry `E-06` is a different invariant; see the drift note above.)
 - **Invariants with Redis ↔ SQLite ↔ Docker triplets** (S-01, L-01, L-03, G-01) are the highest-leverage targets for chaos testing — they fail under partition/crash, not under ordinary load.
 - **Audit log** (AU-01/02) gives you retroactive reasoning when a live invariant fires — without it, a Tier-A violation has no forensic trail.
 - **Gaps to fill next**: chat-session cascade on user-delete (no such path today); soft-delete vs hard-delete of shared-with-me agents; per-subscription quota invariants (SUB-004 path); fan-out (`fan_out_id`) completion aggregation.
@@ -423,12 +423,19 @@ Twelve invariants cover ~80% of orchestration risk:
 | E-01 | Terminal-state closure | No stuck executions |
 | E-02 | No phantom reversal | #378/#403 |
 | E-05 | Dispatched rows have session | #106 |
-| E-06 | No completed-but-not-reported | #129 |
+| E-06 † | No completed-but-not-reported | #129 |
 | B-01 | Queue-status coherence | Backlog integrity |
 | B-02 | No queued without slots-full | Drain liveness |
 | L-03 | Delete cascades | Prevents dangling references |
 | G-01 | No resource leak on restart | Recovery correctness |
 | R-01 | No zombie Claude processes | #407 |
+
+† **Catalog id, not the registry id.** Catalog `E-06` is the #129
+"completed-but-not-reported" check, which remains unimplemented. The shipped
+registry `E-06` is "no overdue `next_run_at`" (#1472) — semantically **SCH-03**
+in this catalog. Do not source an alert name or runbook for registry `E-06`
+from this row; the invariant module's own docstring title is the source of
+truth (`src/backend/canary/invariants/*.py`). See the drift note in §Executions.
 
 Start here. Expand as the harness stabilizes.
 

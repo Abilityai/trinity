@@ -371,12 +371,17 @@
 - **Registration**: each new invariant is a new file under
   `src/backend/canary/invariants/` + a registry entry (per the catalog at
   `docs/testing/orchestration-invariant-catalog.md`); the service and API
-  surface stay unchanged. An invariant whose alert must be *actionable* also
-  needs a `_INVARIANT_NAMES` + `_INVARIANT_RUNBOOKS` entry (and, when it carries
-  no `agent_name`, a `_render_message` branch) in `services/canary_alerts.py` —
-  otherwise the Slack line degrades to the opaque `"<ID> fired N violation(s)"`
-  fallback. *Known gap: E-03/E-04/E-06/G-03/G-04 (Phase 4) were never added to
-  those dicts and still render the fallback — pre-existing, tracked separately.*
+  surface stay unchanged. **It must also carry all four per-invariant alert
+  surfaces in `services/canary_alerts.py`** — `_INVARIANT_NAMES`,
+  `_INVARIANT_RUNBOOKS`, and an id branch in each of `_render_message` and
+  `_render_forensic` — or its green→red Slack alert degrades to a bare-id
+  fallback with no name, evidence, or next step (#1880). Enforced by
+  `tests/unit/test_1880_canary_alert_parity.py`, bidirectionally (a stale or
+  typo'd id fails too). Source the name from the invariant module's own
+  docstring title, **not** the catalog: catalog ids are not registry ids
+  (catalog `E-06` is the unimplemented #129 check, while registry `E-06` is
+  "no overdue `next_run_at`"), so a catalog-sourced name can confidently
+  mislabel a live alert.
 
 ---
 

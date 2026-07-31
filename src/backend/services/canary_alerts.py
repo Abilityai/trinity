@@ -14,7 +14,7 @@ these methods lived on `CanaryService` as classmethods. Tests pivoted from
 import logging
 import os
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from canary.snapshot import ViolationReport
 
@@ -34,17 +34,35 @@ class CanaryAlerts:
         "minor": "🟡",
     }
 
-    # Friendly invariant names — paired with the catalog at
-    # docs/testing/orchestration-invariant-catalog.md. The bare ID
-    # (S-01, E-02, …) is opaque to anyone not steeped in the catalog;
-    # the name is what makes the Slack alert immediately interpretable.
+    # Friendly invariant names. The bare ID (S-01, E-02, …) is opaque to
+    # anyone not steeped in the catalog; the name is what makes the Slack
+    # alert immediately interpretable.
+    #
+    # SOURCE OF TRUTH is the invariant module's own docstring title line
+    # (`canary/invariants/<id>_*.py`, "X-NN — <title> (CANARY-001 …)"), NOT
+    # docs/testing/orchestration-invariant-catalog.md. The catalog IDs are
+    # not the registry IDs: catalog E-06 is the unimplemented #129 check
+    # while registry E-06 is "no overdue next_run_at" (#1472) — the catalog
+    # flags this itself, and its own cross-references are stale. G-03/G-04's
+    # catalog titles also over-claim scope relative to what shipped. Sourcing
+    # a name from the catalog can therefore put a confidently WRONG label on
+    # a real alert, which is worse than the bare-ID fallback.
+    #
+    # Register differs from the docstring on purpose: a docstring names the
+    # property that HOLDS ("Terminal-state closure"), an alert header names
+    # the defect that FIRED ("Stuck running execution"). Derive, don't copy.
     _INVARIANT_NAMES = {
         "S-01": "Slot–row bijection",
         "S-02": "Slot overbooking",
         "S-03": "Slot TTL below floor",
         "E-01": "Stuck running execution",
         "E-02": "Phantom execution reversal",
+        "E-03": "Terminal row missing completed_at",
+        "E-04": "Queued row metadata unusable",
         "E-05": "Dispatched execution without session",
+        "E-06": "Overdue schedule projection",
+        "G-03": "Terminal row finished before it started",
+        "G-04": "Credential pattern in backlog metadata",
         "L-03": "Delete cascades",
         "B-01": "Queue accessor drift",
         "B-02": "Stalled backlog drain",
@@ -81,6 +99,45 @@ class CanaryAlerts:
         "E-02": (
             "An execution went terminal then non-terminal. Look for retry "
             "logic that resurrects completed rows or a status-write race."
+        ),
+        "E-03": (
+            "A terminal `schedule_executions` row has a NULL `completed_at` — "
+            "the status CAS landed but the paired timestamp write did not. "
+            "Check the terminal writers (`task_execution_service.apply_result`, "
+            "`_write_terminal_and_gate`) and `cleanup_service`'s recovery "
+            "sweeps for a path that sets status without the timestamp."
+        ),
+        "E-04": (
+            "A `queued` row's drain-replay contract is broken: `queued_at` is "
+            "NULL, or `backlog_metadata` is NULL or not JSON-parseable. "
+            "`backlog_service.drain_next` decodes that blob to reconstruct the "
+            "task, so a malformed one stalls the agent's FIFO. The violation "
+            "records a reason code only — never the metadata value."
+        ),
+        "E-06": (
+            "An enabled schedule's `next_run_at` is further in the past than "
+            "the misfire grace — the scheduler never advanced the projection "
+            "(#1472; the UI renders this as \"Next: Nd ago\"). Look in "
+            "`src/scheduler/` for a silent `_add_job` failure at registration "
+            "or a fire path that did not re-arm the next window."
+        ),
+        "G-03": (
+            "A terminal `schedule_executions` row has `started_at` after "
+            "`completed_at`. Either the two timestamps were written by "
+            "different callers against a skewed clock, or a producer copied "
+            "the wrong execution's timestamp. Compare the writers in "
+            "`task_execution_service` and the standalone `src/scheduler/`."
+        ),
+        "G-04": (
+            "Rotate the matched credential first — `backlog_metadata` is "
+            "stored plaintext and survives until the row is deleted (the "
+            "#1449 scrub deliberately skips FAILED rows, so it can persist "
+            "for the full row-retention window). Then find the producer that "
+            "serialized a secret into the drain-replay payload "
+            "(`backlog_service` enqueue → `task_execution_service` metadata "
+            "construction) and replace it with an opaque identity token. The "
+            "violation records the pattern name and row ids only; triage from "
+            "those — do not read or paste the blob."
         ),
         "E-05": (
             "A `running` execution over 60s old has no `claude_session_id`. "
@@ -285,13 +342,14 @@ class CanaryAlerts:
                     refs.append(r)
             lines: List[str] = []
             if tables:
-                lines.append(f"*Tables hit:* {', '.join(sorted(tables))}")
+                lines.append(f"*Tables hit:* {', '.join(_mrkdwn_safe(t) for t in sorted(tables))}")
             if refs:
                 lines.append("*Sample refs:*")
                 for r in refs[:5]:
                     lines.append(
-                        f"  • `{r.get('table')}.{r.get('column')}` "
-                        f"(row `{r.get('row_id')}`)"
+                        f"  • `{_mrkdwn_safe(r.get('table'))}."
+                        f"{_mrkdwn_safe(r.get('column'))}` "
+                        f"(row `{_mrkdwn_safe(r.get('row_id'))}`)"
                     )
                 if len(refs) > 5:
                     lines.append(f"  • _… +{len(refs) - 5} more_")
@@ -301,7 +359,7 @@ class CanaryAlerts:
             lines: List[str] = []
             for v in violations[:5]:
                 obs = v.observed_state or {}
-                agent = obs.get("agent_name", "?")
+                agent = _mrkdwn_safe(obs.get("agent_name"))
                 redis_n = obs.get("redis_slot_count", "?")
                 sql_n = obs.get("sql_running_count", "?")
                 in_redis_only = obs.get("in_redis_only") or []
@@ -310,12 +368,12 @@ class CanaryAlerts:
                 diff_bits: List[str] = []
                 if in_redis_only:
                     diff_bits.append(
-                        f"redis-only: `{', '.join(in_redis_only[:3])}`"
+                        f"redis-only: `{', '.join(_mrkdwn_safe(x) for x in in_redis_only[:3])}`"
                         + (f" +{len(in_redis_only) - 3}" if len(in_redis_only) > 3 else "")
                     )
                 if in_sql_only:
                     diff_bits.append(
-                        f"sql-only: `{', '.join(in_sql_only[:3])}`"
+                        f"sql-only: `{', '.join(_mrkdwn_safe(x) for x in in_sql_only[:3])}`"
                         + (f" +{len(in_sql_only) - 3}" if len(in_sql_only) > 3 else "")
                     )
                 if diff_bits:
@@ -329,9 +387,9 @@ class CanaryAlerts:
             lines: List[str] = []
             for v in violations[:5]:
                 obs = v.observed_state or {}
-                eid = obs.get("execution_id", "?")
-                prev = obs.get("previous_status") or "unknown"
-                curr = obs.get("current_status", "?")
+                eid = _mrkdwn_safe(obs.get("execution_id"))
+                prev = _mrkdwn_safe(obs.get("previous_status"), fallback="unknown")
+                curr = _mrkdwn_safe(obs.get("current_status"))
                 lines.append(f"  • `{eid}`: *{prev}* → *{curr}*")
             if len(violations) > 5:
                 lines.append(f"  • _… +{len(violations) - 5} more_")
@@ -341,7 +399,7 @@ class CanaryAlerts:
             lines: List[str] = []
             for v in violations[:5]:
                 obs = v.observed_state or {}
-                agent = obs.get("agent_name", "?")
+                agent = _mrkdwn_safe(obs.get("agent_name"))
                 cap = obs.get("max_parallel_tasks", "?")
                 count = obs.get("slot_count", "?")
                 over = obs.get("overbooked_by", "?")
@@ -356,11 +414,11 @@ class CanaryAlerts:
             lines: List[str] = []
             for v in violations[:5]:
                 obs = v.observed_state or {}
-                agent = obs.get("agent_name", "?")
-                eid = obs.get("execution_id", "?")
+                agent = _mrkdwn_safe(obs.get("agent_name"))
+                eid = _mrkdwn_safe(obs.get("execution_id"))
                 ttl = obs.get("redis_ttl_seconds", "?")
                 floor = obs.get("floor_seconds", "?")
-                kind = obs.get("kind", "?")
+                kind = _mrkdwn_safe(obs.get("kind"))
                 lines.append(
                     f"  • *{agent}* `{eid}`: TTL={ttl}s ({kind}); floor={floor}s"
                 )
@@ -372,8 +430,8 @@ class CanaryAlerts:
             lines: List[str] = []
             for v in violations[:5]:
                 obs = v.observed_state or {}
-                agent = obs.get("agent_name", "?")
-                eid = obs.get("execution_id", "?")
+                agent = _mrkdwn_safe(obs.get("agent_name"))
+                eid = _mrkdwn_safe(obs.get("execution_id"))
                 age = obs.get("age_seconds", "?")
                 timeout = obs.get("execution_timeout_seconds", "?")
                 buffer = obs.get("slot_ttl_buffer_seconds", "?")
@@ -389,8 +447,8 @@ class CanaryAlerts:
             lines: List[str] = []
             for v in violations[:5]:
                 obs = v.observed_state or {}
-                agent = obs.get("agent_name", "?")
-                eid = obs.get("execution_id", "?")
+                agent = _mrkdwn_safe(obs.get("agent_name"))
+                eid = _mrkdwn_safe(obs.get("execution_id"))
                 age = obs.get("age_seconds", "?")
                 lines.append(
                     f"  • *{agent}* `{eid}`: age={age}s, no claude_session_id"
@@ -403,7 +461,7 @@ class CanaryAlerts:
             lines: List[str] = []
             for v in violations[:5]:
                 obs = v.observed_state or {}
-                agent = obs.get("agent_name", "?")
+                agent = _mrkdwn_safe(obs.get("agent_name"))
                 svc = obs.get("service_count", "?")
                 snap = obs.get("snapshot_count", "?")
                 lines.append(
@@ -418,7 +476,7 @@ class CanaryAlerts:
             lines: List[str] = []
             for v in violations[:5]:
                 obs = v.observed_state or {}
-                agent = obs.get("agent_name", "?")
+                agent = _mrkdwn_safe(obs.get("agent_name"))
                 q = obs.get("queued_count", "?")
                 free = obs.get("free_slots", "?")
                 age = obs.get("drain_tick_age_seconds")
@@ -435,13 +493,134 @@ class CanaryAlerts:
             lines: List[str] = []
             for v in violations[:5]:
                 obs = v.observed_state or {}
-                agent = obs.get("agent_name", "?")
+                agent = _mrkdwn_safe(obs.get("agent_name"))
                 count = obs.get("zombie_count", "?")
                 lines.append(f"  • *{agent}*: {count} zombie(s)")
             if len(violations) > 5:
                 lines.append(f"  • _… +{len(violations) - 5} more_")
             return "\n".join(lines) if lines else None
 
+        if invariant_id == "E-03":
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                agent = _mrkdwn_safe(obs.get("agent_name"))
+                eid = _mrkdwn_safe(obs.get("execution_id"))
+                status = _mrkdwn_safe(obs.get("status"))
+                started = _mrkdwn_safe(obs.get("started_at"))
+                # `completed_at` is NULL by definition on this path — that IS
+                # the violation. Say so; rendering the field would print the
+                # literal "None" (a `.get(k, "?")` default does NOT fire on an
+                # explicit None value).
+                lines.append(
+                    f"  • *{agent}* `{eid}`: status={status}, "
+                    f"started={started}, completed_at is NULL"
+                )
+            if len(violations) > 5:
+                lines.append(f"  • _… +{len(violations) - 5} more_")
+            return "\n".join(lines) if lines else None
+
+        if invariant_id == "E-04":
+            # SECURITY: reason code + row ids only. The raw `backlog_metadata`
+            # is deliberately absent from `observed_state`
+            # (e04_queued_rows_have_metadata.py) because it may carry live
+            # credentials and violations persist to `canary_violations`.
+            # Never reach past these keys.
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                agent = _mrkdwn_safe(obs.get("agent_name"))
+                eid = _mrkdwn_safe(obs.get("execution_id"))
+                reason = _mrkdwn_safe(obs.get("reason"))
+                lines.append(f"  • *{agent}* `{eid}`: {reason}")
+            if len(violations) > 5:
+                lines.append(f"  • _… +{len(violations) - 5} more_")
+            return "\n".join(lines) if lines else None
+
+        if invariant_id == "E-06":
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                agent = _mrkdwn_safe(obs.get("agent_name"))
+                sid = _mrkdwn_safe(obs.get("schedule_id"))
+                nxt = _mrkdwn_safe(obs.get("next_run_at"))
+                overdue = _format_duration(obs.get("overdue_seconds"))
+                lines.append(
+                    f"  • *{agent}* schedule `{sid}`: next_run_at={nxt} "
+                    f"({overdue} overdue)"
+                )
+            if len(violations) > 5:
+                lines.append(f"  • _… +{len(violations) - 5} more_")
+            return "\n".join(lines) if lines else None
+
+        if invariant_id == "G-03":
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                agent = _mrkdwn_safe(obs.get("agent_name"))
+                eid = _mrkdwn_safe(obs.get("execution_id"))
+                started = _mrkdwn_safe(obs.get("started_at"))
+                completed = _mrkdwn_safe(obs.get("completed_at"))
+                skew = obs.get("skew_seconds")
+                skew_str = "?" if skew is None else f"{skew}s"
+                lines.append(
+                    f"  • *{agent}* `{eid}`: started={started} > "
+                    f"completed={completed} (skew {skew_str})"
+                )
+            if len(violations) > 5:
+                lines.append(f"  • _… +{len(violations) - 5} more_")
+            return "\n".join(lines) if lines else None
+
+        if invariant_id == "G-04":
+            # SECURITY: matched pattern NAME + row ids only — never the secret,
+            # the surrounding bytes, or the raw `backlog_metadata`. The check
+            # (g04_no_creds_in_backlog_metadata.py) keeps all three out of
+            # `observed_state` on purpose and stops at the first match so even
+            # the match count stays undisclosed. Do not widen this branch.
+            lines: List[str] = []
+            for v in violations[:5]:
+                obs = v.observed_state or {}
+                agent = _mrkdwn_safe(obs.get("agent_name"))
+                eid = _mrkdwn_safe(obs.get("execution_id"))
+                pattern = _mrkdwn_safe(obs.get("matched_pattern"))
+                lines.append(f"  • *{agent}* `{eid}`: matched `{pattern}`")
+            if len(violations) > 5:
+                lines.append(f"  • _… +{len(violations) - 5} more_")
+            return "\n".join(lines) if lines else None
+
+        if invariant_id == "H-01":
+            # H-01 is fleet-wide: at most one violation, no `agent_name`. The
+            # forensic block carries the two things triage needs and the
+            # summary line cannot hold — WHICH corroborating source still
+            # answered (a roster read failing while docker is also down is a
+            # host problem, not a collector bug), and the evidence sample that
+            # makes "the fleet is provably alive" checkable rather than
+            # asserted. Already capped at 10 by the check.
+            obs = violations[0].observed_state or {}
+            lines: List[str] = [
+                f"*Reason:* `{_mrkdwn_safe(obs.get('reason'))}` "
+                f"({_mrkdwn_safe(obs.get('confirmation'), fallback='unconfirmed')})",
+                f"*Blind since:* {_mrkdwn_safe(obs.get('blind_since'), fallback='this cycle')}",
+                f"*Sources:* docker={'up' if obs.get('docker_available') else 'unavailable'} · "
+                f"redis={'up' if obs.get('redis_available') else 'unavailable'}",
+                f"*Roster vs evidence:* {_mrkdwn_safe(obs.get('known_agent_count'))} "
+                f"vs {_mrkdwn_safe(obs.get('evidence_agent_count'))} agent(s)",
+            ]
+            sample = obs.get("evidence_sample") or []
+            if sample:
+                lines.append(
+                    "*Agents seen by independent sources:* "
+                    f"`{', '.join(_mrkdwn_safe(a) for a in sample)}`"
+                )
+            return "\n".join(lines)
+
+        # Fallback is deliberately STATE-FREE — an un-rendered invariant emits
+        # no forensic block at all rather than a generic dump. Never replace
+        # this with something that iterates `observed_state`: E-04 and G-04
+        # rely on scrubbing happening at the *check*, and a generic dumper
+        # would silently opt every future invariant into echoing its full
+        # state to Slack. Pinned by the negative test in
+        # tests/unit/test_1880_canary_alert_parity.py.
         return None
 
     @staticmethod
@@ -505,13 +684,13 @@ class CanaryAlerts:
         would be redundant.
         """
         if invariant_id == "S-01":
-            agents = sorted({v.observed_state.get("agent_name") for v in violations})
+            agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
             return (
                 f"Slot–row bijection broke on {len(agents)} agent(s): "
                 f"{', '.join(agents)[:160]}."
             )
         if invariant_id == "S-02":
-            agents = sorted({v.observed_state.get("agent_name") for v in violations})
+            agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
             worst = max(violations, key=lambda v: v.observed_state.get("overbooked_by", 0))
             return (
                 f"{len(agents)} agent(s) overbooked "
@@ -519,15 +698,15 @@ class CanaryAlerts:
                 f"over cap): {', '.join(agents)[:160]}."
             )
         if invariant_id == "S-03":
-            agents = sorted({v.observed_state.get("agent_name") for v in violations})
-            kinds = sorted({v.observed_state.get("kind", "?") for v in violations})
+            agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
+            kinds = sorted({_mrkdwn_safe(v.observed_state.get("kind")) for v in violations})
             return (
                 f"{len(violations)} slot(s) with TTL below floor "
                 f"({'/'.join(kinds)}) on {len(agents)} agent(s): "
                 f"{', '.join(agents)[:160]}."
             )
         if invariant_id == "E-01":
-            agents = sorted({v.observed_state.get("agent_name") for v in violations})
+            agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
             return (
                 f"{len(violations)} execution(s) stuck in `running` past "
                 f"timeout+buffer across {len(agents)} agent(s)."
@@ -538,52 +717,197 @@ class CanaryAlerts:
                 f"to non-terminal status."
             )
         if invariant_id == "E-05":
-            agents = sorted({v.observed_state.get("agent_name") for v in violations})
+            agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
             return (
                 f"{len(violations)} dispatched execution(s) without "
                 f"`claude_session_id` across {len(agents)} agent(s)."
             )
         if invariant_id == "L-03":
             ghosts = sorted(
-                {v.observed_state.get("ghost_agent_name") for v in violations}
+                {_mrkdwn_safe(v.observed_state.get("ghost_agent_name")) for v in violations}
             )
             return (
                 f"{len(ghosts)} ghost agent(s) referenced by orphan rows: "
                 f"{', '.join(ghosts)[:160]}."
             )
         if invariant_id == "B-01":
-            agents = sorted({v.observed_state.get("agent_name") for v in violations})
+            agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
             return (
                 f"`db.get_queued_count` drifted from direct count on "
                 f"{len(agents)} agent(s): {', '.join(agents)[:160]}."
             )
         if invariant_id == "B-02":
-            agents = sorted({v.observed_state.get("agent_name") for v in violations})
+            agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
             return (
                 f"{len(agents)} agent(s) have queued work with free slots "
                 f"and a stale drain tick: {', '.join(agents)[:160]}."
             )
         if invariant_id == "R-01":
-            agents = sorted({v.observed_state.get("agent_name") for v in violations})
+            agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
             total = sum(v.observed_state.get("zombie_count", 0) for v in violations)
             return (
                 f"{total} zombie claude process(es) across {len(agents)} "
                 f"agent(s): {', '.join(agents)[:160]}."
+            )
+        # The five branches below coerce `agent_name` with `or "?"` before
+        # `sorted()`. This is NOT decoration: these are the first per-ROW
+        # invariants (E-03/G-03 are bounded by the 5000-row terminal cap,
+        # E-06 by schedule count), they read `agent_name` off a collector row
+        # mapping rather than an `AgentSnapshot`, and `sorted({None, "a"})`
+        # raises TypeError. That raise is swallowed by `canary_service`'s
+        # transition loop, which then records the transition anyway — so the
+        # alert is lost, the green→red cursor advances, and nothing retries.
+        # Truncation (`[:160]`) matters for the same reason: a payload over
+        # Slack's 3000-char section limit is rejected wholesale.
+        if invariant_id == "E-03":
+            agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
+            return (
+                f"{len(violations)} terminal row(s) with a NULL `completed_at` "
+                f"across {len(agents)} agent(s): {', '.join(agents)[:160]}."
+            )
+        if invariant_id == "E-04":
+            agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
+            reasons = sorted({_mrkdwn_safe(v.observed_state.get("reason")) for v in violations})
+            return (
+                f"{len(violations)} queued row(s) with unusable drain-replay "
+                f"metadata ({'/'.join(reasons)[:80]}) across {len(agents)} "
+                f"agent(s): {', '.join(agents)[:160]}."
+            )
+        if invariant_id == "E-06":
+            agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
+            worst = max(
+                violations,
+                key=lambda v: v.observed_state.get("overdue_seconds") or 0,
+            )
+            worst_str = _format_duration(worst.observed_state.get("overdue_seconds"))
+            return (
+                f"{len(violations)} enabled schedule(s) with an overdue "
+                f"`next_run_at` (worst: {worst_str}) across {len(agents)} "
+                f"agent(s): {', '.join(agents)[:160]}."
+            )
+        if invariant_id == "G-03":
+            agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
+            worst = max(
+                violations,
+                key=lambda v: v.observed_state.get("skew_seconds") or 0,
+            )
+            worst_skew = worst.observed_state.get("skew_seconds")
+            skew_str = "?" if worst_skew is None else f"{worst_skew}s"
+            return (
+                f"{len(violations)} terminal row(s) finished before they "
+                f"started (worst skew: {skew_str}) across {len(agents)} "
+                f"agent(s): {', '.join(agents)[:160]}."
+            )
+        if invariant_id == "G-04":
+            # SECURITY: pattern names only — see the G-04 note in
+            # `_render_forensic`. Nothing here may echo the metadata value.
+            agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
+            patterns = sorted(
+                {_mrkdwn_safe(v.observed_state.get("matched_pattern")) for v in violations}
+            )
+            return (
+                f"{len(violations)} queued row(s) matched a credential pattern "
+                f"({', '.join(patterns)[:80]}) across {len(agents)} agent(s): "
+                f"{', '.join(agents)[:160]}."
             )
         if invariant_id == "H-01":
             # H-01 is fleet-wide, so it emits at most one violation and carries
             # no `agent_name` — the generic "fired N violation(s)" line would be
             # useless for the one alarm whose entire job is to be legible.
             obs = violations[0].observed_state or {}
+            # `_mrkdwn_safe`, not `.get(k, default)`: the latter does not fire
+            # on a key present with value None (#1880). It tests `is None`, so
+            # `known_agent_count=0` still renders "0" — which is the whole
+            # point of this alert, not a value to swallow as "?".
             return (
-                f"Canary cannot see the fleet ({obs.get('reason', 'unknown')}): "
-                f"roster reported {obs.get('known_agent_count', '?')} agents "
+                f"Canary cannot see the fleet "
+                f"({_mrkdwn_safe(obs.get('reason'), fallback='unknown')}): "
+                f"roster reported {_mrkdwn_safe(obs.get('known_agent_count'))} agents "
                 f"while independent sources saw "
-                f"{obs.get('evidence_agent_count', '?')}. "
-                f"Blind since {obs.get('blind_since') or 'this cycle'}. "
+                f"{_mrkdwn_safe(obs.get('evidence_agent_count'))}. "
+                f"Blind since {_mrkdwn_safe(obs.get('blind_since'), fallback='this cycle')}. "
                 "Every other green this cycle is unreliable."
             )
+        # Fallback is deliberately COUNT-ONLY and state-free — same contract as
+        # `_render_forensic`'s terminal `return None`. Never widen it to render
+        # `observed_state`; see the note there.
         return f"{invariant_id} fired {len(violations)} violation(s)."
+
+
+def _mrkdwn_safe(value: Any, *, fallback: str = "?") -> str:
+    """Coerce an `observed_state` value for interpolation into a Slack block.
+
+    Does two jobs, deliberately fused so there is exactly ONE way a value
+    crosses the render boundary (the file previously carried two different
+    `?`-defaulting idioms, `get(k, "?")` and `get(k) or "?"`, neither of
+    which escaped anything):
+
+    1. **Absent/empty → `fallback`.** `.get(k, "?")` does NOT fire on a key
+       present with value `None`, so it renders the literal "None"; and a
+       `None` reaching `sorted()` raises `TypeError`, which `canary_service`
+       swallows — losing the whole alert with no retry.
+
+    2. **Escape `&`, `<`, `>`** — Slack's own documented escape set. These
+       three are the security-relevant ones: `<url|text>` is a live link and
+       `<!channel>` is a channel-wide mention, so an unescaped value can
+       phish or mass-ping everyone in the alert channel. Control characters
+       (newline, tab) collapse to a space so a value cannot forge an extra
+       bullet line and fake a violation that never happened.
+
+    Deliberately NOT escaped: `*`, `_`, `~`, and backtick. Slack defines no
+    escape for them, they can only produce cosmetic emphasis — they cannot
+    forge a link, a mention, or a block — and mangling them would corrupt
+    legitimate values. Note the header block is `plain_text`, where none of
+    this is parsed at all; this exists for the `section` blocks and the
+    `text` fallback.
+
+    Why at the render boundary and not only at write time: agent names are
+    sanitized on all ~8 creation/rename paths today, so nothing hostile can
+    reach here — but that is a transitive guarantee spread across eight
+    call sites, re-verified by hand each audit. `services/retention_guard.py`
+    already writes an `agent_name` (`_retention-guard`) that
+    `sanitize_agent_name` could never produce, precisely because it strips a
+    leading underscore, which shows the premise can break. Escaping here
+    makes the property structural and local.
+    """
+    if value is None:
+        return fallback
+    text = value if isinstance(value, str) else str(value)
+    if not text:
+        return fallback
+    text = "".join(ch if ch.isprintable() else " " for ch in text)
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return text.strip() or fallback
+
+
+def _format_duration(seconds: Optional[float]) -> str:
+    """Render a second count as a compact human duration ("3d", "4h", "12m").
+
+    Same granularity ladder as `CanaryAlerts._format_last_red`. An overdue
+    `next_run_at` (E-06) is routinely measured in days, and a raw second
+    count is unreadable at a glance in an alert. Returns "?" for a missing
+    or non-numeric value rather than raising — a render helper must never
+    be the reason an alert fails to send.
+    """
+    if seconds is None:
+        return "?"
+    try:
+        secs = int(seconds)
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError is not hypothetical padding: `int(float("inf"))` raises
+        # it, and neither TypeError nor ValueError catches that. Both current
+        # producers already `int()` at source so it is unreachable today — but
+        # the docstring above promises this helper can never be why an alert
+        # fails to send, and a promise the except clause doesn't keep is the
+        # kind of prose that outlives the assumption behind it.
+        return "?"
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m"
+    if secs < 86400:
+        return f"{secs // 3600}h"
+    return f"{secs // 86400}d"
 
 
 def severity_rank(severity: str) -> int:
