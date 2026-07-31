@@ -183,7 +183,7 @@ Dark mode classes follow Tailwind's `dark:` variant pattern:
 | Dashboard | `Dashboard.vue` | 43 |
 | Login | `Login.vue` | 28 |
 | Settings | `Settings.vue` | 78 |
-| Agents | `Agents.vue` | 41 |
+| Dashboard List (ex-Agents page, ent#260) | `components/AgentListPanel.vue` | — |
 | AgentDetail | `AgentDetail.vue` | 8 |
 | Credentials | `Credentials.vue` | 63 |
 | Templates | `Templates.vue` | 40 |

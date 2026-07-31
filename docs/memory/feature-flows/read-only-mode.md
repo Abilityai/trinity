@@ -11,7 +11,7 @@ As an agent owner, I want to enable read-only mode so that the agent cannot modi
 ## Entry Points
 
 - **UI (Agent Detail)**: `src/frontend/src/components/AgentHeader.vue:128-136` - ReadOnlyToggle component
-- **UI (Agents List)**: `src/frontend/src/views/Agents.vue:248-255` - ReadOnlyToggle in card toggles row (between Running and Autonomy)
+- **UI (Dashboard List)**: `src/frontend/src/components/AgentListPanel.vue` - ReadOnlyToggle in the row controls (ent#260 — replaces the retired Agents page; rows read `agent.read_only_enabled` off the fleet payload, the per-agent GET N+1 is gone)
 - **API**: `GET/PUT /api/agents/{name}/read-only`
 
 ---
@@ -631,11 +631,16 @@ PreToolUse hook triggered (registered in ~/.claude/settings.json, always active)
 
 ---
 
-## Agents Page Integration
+## Dashboard List Integration (ex-Agents page, ent#260)
 
 ### Entry Point
 
-`src/frontend/src/views/Agents.vue:248-255` - ReadOnlyToggle between Running and Autonomy toggles
+`src/frontend/src/components/AgentListPanel.vue` - ReadOnlyToggle in the row
+controls. State comes from the fleet payload (`agent.read_only_enabled`,
+backend truth even for stopped containers); the old page's per-agent GET loop
+(`fetchAllReadOnlyStates`) was deleted. The PUT toggle updates the row object
+in place on success. (Historical Agents.vue line references below describe the
+retired page.)
 
 ### Template Structure
 

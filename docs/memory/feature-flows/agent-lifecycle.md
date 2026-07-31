@@ -15,14 +15,14 @@ As a Trinity platform user, I want to create, start, stop, and delete agents so 
 ## Entry Points
 
 ### Create Agent
-- **UI**: `src/frontend/src/views/Agents.vue:34-39` - "Create Agent" button
+- **UI**: `src/frontend/src/views/Dashboard.vue` - chassis-header "Create Agent" button (all dashboard modes; the Agents page was retired into the Dashboard List mode in trinity-enterprise#260)
 - **API**: `POST /api/agents`
 
 ### Start/Stop Agent (Toggle)
 - **UI**: Unified toggle control across all pages (all use `size="sm"` as of 2026-02-18):
   - `src/frontend/src/components/AgentHeader.vue:38-43` - Detail page header
-  - `src/frontend/src/views/Agents.vue:242-247` - Agents list page
-  - `src/frontend/src/components/AgentNode.vue` - Dashboard network view
+  - `src/frontend/src/components/AgentListPanel.vue` - Dashboard List rows (hidden on system rows — grid-tile guard; ent#260)
+  - `src/frontend/src/components/AgentTile.vue` - Dashboard Grid tiles
 - **Component**: `src/frontend/src/components/RunningStateToggle.vue` - Reusable toggle (default size changed from 'md' to 'sm')
 - **API**: `POST /api/agents/{agent_name}/start` or `POST /api/agents/{agent_name}/stop`
 
@@ -49,10 +49,9 @@ As a Trinity platform user, I want to create, start, stop, and delete agents so 
 - Loading spinner overlay during API calls
 - **2026-02-18**: Default size changed from 'md' to 'sm' for consistency across all toggle locations
 
-**Agents List View** - `src/frontend/src/views/Agents.vue`
-- Line 34-39: Create Agent button opens modal
-- Lines 187-204: RunningStateToggle for each agent card
-- Line 391-405: `toggleAgentRunning()` method (unified toggle)
+**Dashboard List View** - `src/frontend/src/components/AgentListPanel.vue` (ent#260 — replaces the retired `views/Agents.vue`)
+- Create Agent button lives in the Dashboard chassis header (opens `CreateAgentModal`)
+- RunningStateToggle per row, rewired to `networkStore.toggleAgentRunning` (+ `isTogglingRunning` loading map; result-object toasts)
 
 **Agent Detail View** - `src/frontend/src/views/AgentDetail.vue`
 - Lines 28-59: AgentHeader with `@toggle="toggleRunning"` event

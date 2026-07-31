@@ -20,10 +20,12 @@ The Dashboard offers two views for monitoring the agent fleet:
 
 1. User navigates to Dashboard (`/`)
 2. **Timeline is the default view** for new users (no localStorage preference)
-3. Toggle buttons in header: `[Graph] [Timeline]`
-4. Click "Graph" to switch to Graph view if desired
-5. **Graph canvas is hidden** - only Timeline shows when active
-6. View preference persisted in localStorage (`trinity-dashboard-view`)
+3. Toggle buttons in header: `[Timeline] [Grid] [List]` (Grid: trinity-enterprise#47;
+   List: trinity-enterprise#260 — the retired Agents page; the legacy Graph mode
+   was decommissioned in #1689)
+4. Panes are `v-if`-exclusive — only the active mode's pane is mounted
+5. View preference persisted in localStorage (`trinity-dashboard-view`); a
+   `?view=` deep-link applies without persisting (ent#260)
 
 ### Timeline View Features
 
@@ -937,7 +939,7 @@ Dashboard filters are now persisted to localStorage and restored on page reload.
 |---------|------------------|---------|-------------|
 | Time Range | `trinity-dashboard-time-range` | `24` (hours) | Dropdown: 1h, 6h, 24h, 3d, 7d |
 | Quick Tags | `trinity-dashboard-quick-tags` | `[]` (empty array) | Tag filter dropdown selection |
-| View Mode | `trinity-dashboard-view` | `timeline` | Graph or Timeline toggle |
+| View Mode | `trinity-dashboard-view` | `timeline` | Timeline / Grid / List toggle (ent#47, ent#260) |
 | Tag Clouds | `trinity-show-tag-clouds` | `true` | Clouds visibility toggle |
 | Node Positions | `trinity-network-node-positions` | `{}` (empty object) | Dragged node positions |
 
