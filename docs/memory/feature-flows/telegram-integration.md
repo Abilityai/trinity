@@ -918,6 +918,130 @@ The `GeminiRuntime` and `AgentRuntime` ABC gained an `images` parameter (ignored
   uniformly; Slack inherits the Phase 2 hardening for free)
 - Web chat file upload (#364, separate flow)
 
+## In-Progress Status Indicator (ent#264)
+
+While a Telegram-triggered execution runs (up to hours under TIMEOUT-001), the
+user previously got zero feedback between sending a message and the reply.
+Three fail-soft layers now cover the gap, default ON with a per-binding toggle:
+
+1. **Immediate ack** — 👀 reaction on the triggering message
+   (`setMessageReaction`), set at router step 8. Persistent, zero message noise.
+2. **Typing garnish** — the pre-existing one-shot `sendChatAction typing`,
+   preserved verbatim (fires on every turn, including observe-mode).
+3. **Elapsed-time placeholder** — past a 30s threshold, a
+   "⏳ Working on it — N min elapsed · updated HH:MM UTC" message is sent
+   (`disable_notification: true`, explicit HTML parse mode) and edited in place
+   every 60s, then resolved at every terminal (deleted; fallback edited to a
+   neutral "✔ Done." / "⚠️ Finished with an error.").
+
+### Channel-agnostic seam (Invariant #9)
+
+The refresh driver is a **start/progress/resolve** seam — the router owns the
+ticker; adapters implement a default-no-op hook. Slack/WhatsApp/VoIP declare no
+threshold and behave byte-identically; ent#228 (Slack) later implements only
+the hook, not the loop.
+
+- `adapters/base.py` — `indicate_progress(message, elapsed_seconds)` default
+  no-op + capability attrs `progress_threshold_seconds` (None ⇒ never armed) /
+  `progress_interval_seconds`.
+- `adapters/message_router.py` — `_arm_progress_driver` (after step 8's
+  `indicate_processing`; both wrapped in try/except so a raising hook never
+  aborts the turn), `_progress_loop` (elapsed origin captured BEFORE the
+  threshold sleep; per-tick try/except), `_resolve_indicator` at all three
+  terminals (failed/cancelled, exception, success in `_finalize_response` —
+  BEFORE the `[NO_REPLY]` early-return), and an idempotent `try/finally`
+  `_cancel_progress_driver` backstop.
+- `adapters/telegram_adapter.py` — upgraded `indicate_processing` (single
+  binding read → per-turn `_progress_cfg` stash, typing, 👀 reaction; whole
+  body never raises), new `indicate_progress` / `indicate_done`, fail-soft
+  primitives `_set_message_reaction` / `_edit_message_text` /
+  `_delete_message` / `_send_placeholder_message` (mirror `_send_message`:
+  one 429 retry honoring `retry_after` capped 30s; never log the
+  token-bearing URL).
+
+**Race closures (by construction):**
+- *Tick-after-resolve*: `_resolve_indicator` cancels AND awaits the driver dead
+  before `indicate_done` — no edit can land after the delete.
+- *Resolve-vs-first-send*: the first placeholder send runs in its own shielded
+  future (`_send_and_record_placeholder` — the `message_id` write lives INSIDE
+  the shielded coroutine); the resolve path settles the in-flight future
+  (bounded 10s) before `indicate_done`, so the id is recorded and the delete
+  finds it — no stranded "working…".
+- *Singleton concurrency*: ALL per-turn state rides
+  `NormalizedMessage.metadata` (`_progress_cfg`, `_indicator_driver`,
+  `_indicator_inflight`, `_indicator_placeholder_id`, `_indicator_degraded`,
+  `progress_ack_eligible`) — the adapter instance holds nothing.
+
+### Gating matrix
+
+| Context | Reaction + placeholder | Typing |
+|---|---|---|
+| DM | ✅ (toggle ON) | ✅ |
+| Group, @mention / reply-to-bot | ✅ (toggle ON) | ✅ |
+| Group, `all` trigger mode, un-mentioned | ✅ (toggle ON — the bot replies to everything there; excluding it would recreate the zero-feedback problem) | ✅ |
+| Group, `observe` mode, un-mentioned | ❌ (a visible reaction would reveal a silently-observing bot) | ✅ |
+| Toggle OFF | ❌ | ✅ |
+
+Eligibility is computed once in `parse_message` (where the trigger facts are in
+hand) and stashed as `metadata["progress_ack_eligible"]`; toggle reads are
+per-turn, so flipping mid-run takes effect on the NEXT turn.
+
+### Toggle surface
+
+- Column `telegram_bindings.progress_indicator_enabled INTEGER DEFAULT 1` —
+  dual-track migration (SQLite `telegram_progress_indicator` + Alembic
+  `0031_telegram_progress_indicator`); no backfill (DEFAULT 1 populates
+  existing rows). Read predicate is Python-side `v is None or v != 0` (never
+  SQL — `NULL != 0` is NULL there).
+- `GET /api/agents/{name}/telegram` surfaces the flag — and was access-hardened
+  in this change from bare `get_current_user` to `AuthorizedAgentByName`
+  (the response embeds `webhook_url` ⊃ webhook secret).
+- `PUT /api/agents/{name}/telegram/progress-indicator` `{enabled}` —
+  `OwnedAgentByName` + `reject_agent_principal` (human-only; an agent-scoped
+  key resolves to the owner), 404 without a binding; dedicated route so
+  toggling never re-sends the bot token (mirrors `PUT /voip/enabled`).
+- UI: switch in `TelegramChannelPanel.vue` (Slack `allow_proactive` precedent).
+
+### Degradation ladder / Bot API constraints
+
+1. Reaction fails (reactions disabled per-chat, permissions, old chat → 400) →
+   swallowed; typing + placeholder still work. 👀 is in the allowed bot
+   reaction set; ⚙️/✅ are NOT (the Slack ⏳→✅ pattern does not port) — the
+   reaction is CLEARED at every terminal, no success-👍 swap.
+2. Placeholder send/edit failures (incl. timeouts) count toward a per-turn
+   degraded flag: 2 consecutive failures stop all further progress HTTP (a
+   fleet-wide Telegram outage quiesces instead of retrying per-turn-per-minute).
+3. Edit cadence 60s with one 429 retry honoring `retry_after` (cap 30s) —
+   well under the ≈1 msg/s per-chat / ≈20 msg/min group budget.
+4. Everything failing degrades to the pre-ent#264 typing-only behavior; the
+   turn itself is NEVER failed by indicator code.
+
+### Residuals & coupling
+
+- **Backend restart mid-run** strands the 👀/placeholder (accepted, same class
+  as Slack's stranded ⏳); the placeholder's `· updated HH:MM UTC` stamp makes
+  it self-dating rather than an unresolvable lie.
+- **Inline-sync coupling** (for #1081/#1083 pickers): the driver assumes
+  channel turns execute inline (`execute_task` awaited in `_run_agent_task`;
+  channel triggers are NOT in `ASYNC_DISPATCH_ELIGIBLE_TRIGGERS`). If channel
+  triggers ever move off the inline path, the in-process driver and
+  metadata-borne state silently never resolve — the successor is the durable
+  seam ent#265 rides (`source_channel*` columns + #1578 terminal events). The
+  adapter-hook API survives that migration; only the router ticker moves.
+
+### Testing
+
+`tests/unit/test_ent264_telegram_progress_indicator.py` (61 tests, no
+backend): primitive payload shapes + fail-soft, `indicate_processing`
+gating/never-raises, placeholder lifecycle + degraded quiesce +
+static-template-only egress (ent#224 class), `indicate_done` teardown +
+fallbacks, singleton metadata isolation, router driver arm/tick/resolve
+ordering at both terminal flavors, resolve-vs-first-send race, 429-backoff
+cancel promptness, `[NO_REPLY]`-still-resolves, step-8 wrap regression guard,
+live-select column test, real-DB facade round-trip, legacy-table SQLite
+migration, renumber-safe Alembic-twin existence, GET JSON field pinning +
+hardening pin, PUT guard matrix.
+
 ## Related Flows
 - [unified-channel-access-control.md](unified-channel-access-control.md) — Cross-channel access primitive (policy, router gate, access requests, group_auth_mode) (#311)
 - [agent-sharing.md](agent-sharing.md) — Allow-list / ownership model the gate consults
@@ -940,3 +1064,4 @@ The `GeminiRuntime` and `AgentRuntime` ABC gained an `images` parameter (ignored
 | 2026-04-25 | #487 Phase 2: workspace delivery hardened. New `_sanitize_filename` helper (NFKC + basename + safe-chars + 200-char truncation + collision dedup). Chat injection format `[File uploaded by {uploader}]: {name} ({size}) saved to {path}`. All-writes-failed now replies via channel and aborts execution. Audit entries include `uploader`. 16 new tests (27 total in `test_file_upload.py`). |
 | 2026-04-28 | #562: Vision delivery fixed. Replaced broken base64 data URI text embedding with proper `--input-format stream-json` vision content blocks delivered via Claude CLI stdin. `_handle_file_uploads` returns 4-tuple with `image_data`. `GeminiRuntime` and `AgentRuntime` ABC updated to accept `images` param. 17 new tests in `test_channel_image_vision.py`. |
 | 2026-06-10 | #1130: Transcription model no longer hardcoded. Google retired `gemini-2.0-flash` (404 on every voice message); `_transcribe_audio_gemini` now uses `GEMINI_TRANSCRIPTION_MODEL` from config.py (default `gemini-3.5-flash`, env-overridable, #1076 empty-string-safe wiring in both compose files). Explicit retired-model log hint on 404. |
+| 2026-07-31 | ent#264: In-progress status indicator — 👀 reaction ack + 30s-threshold elapsed-time placeholder via the new channel-agnostic start/progress/resolve seam (router-owned driver, `indicate_progress` hook). Default-ON per-binding toggle (`progress_indicator_enabled`, dual migration, dedicated human-only PUT); GET /telegram access-hardened to `AuthorizedAgentByName`. 61 unit tests. |
