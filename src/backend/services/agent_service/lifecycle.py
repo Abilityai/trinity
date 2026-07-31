@@ -466,6 +466,28 @@ async def start_agent_internal(agent_name: str) -> dict:
     }
 
 
+async def restart_agent_internal(agent_name: str, *, stop_timeout: int = 30) -> dict:
+    """The canonical cold restart: explicit stop, then the full start path (#1860).
+
+    The explicit stop is load-bearing — the #1809 image-drift predicate runs
+    only on a COLD start (``not was_already_running``), so a restart that
+    should adopt a rebuilt base image must stop first; ``start_agent_internal``
+    on a running agent is a deliberate idempotent no-op. This helper is the one
+    home for the stop→start shape (routers/system_agent.py, routers/systems.py
+    and subscription_auto_switch still carry inline copies — consolidating them
+    is #1817's business, together with the per-agent start lock, which belongs
+    in here once it exists).
+
+    A missing container falls through to ``start_agent_internal``, which either
+    rebuilds it from persisted config (#1559, live ownership row) or 404s.
+    Returns ``start_agent_internal``'s result dict unchanged.
+    """
+    container = get_agent_container(agent_name)
+    if container:
+        await container_stop(container, timeout=stop_timeout)
+    return await start_agent_internal(agent_name)
+
+
 async def recreate_container_with_updated_config(
     agent_name: str,
     old_container,
