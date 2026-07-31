@@ -205,8 +205,13 @@ class SkillService:
 
         try:
             sources = db.list_skill_sources(enabled_only=True)
-        except Exception as e:  # noqa: BLE001
-            return {"success": False, "error": f"could not load skill sources: {e}"}
+        except Exception:  # noqa: BLE001
+            # `error` is returned verbatim as an HTTP `detail` by both sync
+            # routes, so nothing derived from the exception object goes in it
+            # (CodeQL py/stack-trace-exposure, flagged on PR #1901). The full
+            # exception — the part an operator actually debugs from — is logged.
+            logger.exception("could not load skill sources")
+            return {"success": False, "error": "could not load skill sources"}
 
         if source_id is not None:
             sources = [s for s in sources if s.id == source_id]
@@ -232,18 +237,36 @@ class SkillService:
                 clone = SkillSourceClone(
                     src.id, src.url, src.ref, src.ref_type, self.library_root
                 )
-            except ValueError as e:
+            except ValueError:
+                # Same rule as above: the message is built from the stored row,
+                # not from the exception, because it reaches an HTTP response.
+                # SkillSourceClone rejects exactly three fields, and the third
+                # (source_id) is server-minted — so naming ref/ref_type names
+                # everything an operator can actually correct.
+                logger.warning(
+                    "unusable skill source configuration for %s", src.id, exc_info=True
+                )
+                msg = (
+                    f"unusable source configuration (ref={src.ref!r}, "
+                    f"ref_type={src.ref_type!r}) — check the source's branch or tag"
+                )
                 results.append({
                     "source_id": src.id, "name": src.name,
-                    "success": False, "error": str(e),
+                    "success": False, "error": msg,
                 })
-                db.record_skill_source_sync(src.id, success=False, error=str(e))
+                db.record_skill_source_sync(src.id, success=False, error=msg)
                 continue
 
             try:
                 url = validate_skills_library_url(src.url)
-            except ValueError as e:
-                msg = f"invalid source URL: {e}"
+            except ValueError:
+                logger.warning(
+                    "invalid skill source URL for %s: %s", src.id, src.url, exc_info=True
+                )
+                msg = (
+                    "invalid source URL — must be an https://github.com "
+                    "repository URL or owner/repo shorthand"
+                )
                 results.append({
                     "source_id": src.id, "name": src.name,
                     "success": False, "error": msg,
@@ -306,13 +329,23 @@ class SkillService:
 
         Shorthand (`owner/repo`, `github.com/owner/repo`) is normalised to an
         absolute https URL FIRST, so exactly one parsed host decides the splice.
+        Telling those two shorthands apart is itself done by parsing rather than
+        by `url.startswith("github.com/")`: a host prefix test is the same class
+        of check as the substring test above, and keeping ONE way to answer
+        "which host is this" is what stops the two answers from drifting apart.
         """
         if "://" in url:
             absolute = url
-        elif url.startswith("github.com/"):
-            absolute = f"https://{url}"
         else:
-            absolute = f"https://github.com/{url}"
+            # Scheme-less: either "<host>/owner/repo" or the bare "owner/repo".
+            # A first segment that PARSES to a known GitHub host is a host;
+            # anything else (including a lookalike) is treated as an owner name
+            # and lands under github.com, where the splice check below applies.
+            shorthand = urlparse(f"https://{url}")
+            if (shorthand.hostname or "").lower() in ALLOWED_SKILLS_LIBRARY_HOSTS:
+                absolute = f"https://{url}"
+            else:
+                absolute = f"https://github.com/{url}"
 
         if not github_pat:
             return absolute

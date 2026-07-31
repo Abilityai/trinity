@@ -22,6 +22,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -866,3 +867,89 @@ class TestPatSplicingHostCheck:
 
     def test_no_pat_configured_still_normalises(self):
         assert self._splice("owner/repo", pat=None) == "https://github.com/owner/repo"
+
+    @pytest.mark.parametrize("shorthand, expected", [
+        ("github.com/owner/repo", "https://github.com/owner/repo"),
+        ("www.github.com/owner/repo", "https://www.github.com/owner/repo"),
+        # A scheme-less lookalike is NOT a host — it becomes a repo path under
+        # github.com, so the PAT still only ever travels to GitHub.
+        ("github.com.evil.example/owner/repo",
+         "https://github.com/github.com.evil.example/owner/repo"),
+        ("evil.example/owner/repo", "https://github.com/evil.example/owner/repo"),
+    ])
+    def test_shorthand_host_is_decided_by_parsing(self, shorthand, expected):
+        """Which shorthand carries a host is answered the same way as the splice.
+
+        The prefix test this replaced (`url.startswith("github.com/")`) was the
+        same bypassable class of check as the substring test above, and a second
+        way of answering "which host is this" is a second thing to keep correct.
+        """
+        assert self._splice(shorthand, pat=None) == expected
+
+    def test_lookalike_shorthand_never_reaches_the_lookalike_host(self):
+        out = self._splice("github.com.evil.example/owner/repo")
+        assert urlparse(out).hostname == "github.com"
+
+
+class TestSyncErrorSurface:
+    """CodeQL py/stack-trace-exposure, PR #1901.
+
+    Both sync routes hand `sync_library()["error"]` to FastAPI verbatim as an
+    HTTP `detail`, so that string is an API surface, not a log line: nothing
+    derived from a caught exception may reach it. The full exception still goes
+    to the log, which is where an operator debugs from anyway.
+    """
+
+    _MARKER = "TRACEBACK-DETAIL-/data/trinity.db-0x7fbe"
+
+    def test_source_load_failure_carries_no_exception_text(self, service, monkeypatch):
+        import services.skill_service as ss
+
+        def _boom(*_a, **_kw):
+            raise RuntimeError(self._MARKER)
+
+        monkeypatch.setattr(ss.db, "list_skill_sources", _boom)
+
+        result = service.sync_library()
+
+        assert result["success"] is False
+        assert self._MARKER not in result["error"]
+
+    def test_unusable_source_config_carries_no_exception_text(
+        self, service, sources_db, tmp_path, monkeypatch
+    ):
+        import services.skill_service as ss
+
+        repo = _mkrepo(tmp_path / "repos", "good", {"research": "ok"})
+        sources_db.create_source(name="Good", url=str(repo), ref="main")
+
+        def _boom(*_a, **_kw):
+            raise ValueError(self._MARKER)
+
+        monkeypatch.setattr(ss, "SkillSourceClone", _boom)
+
+        result = service.sync_library()
+
+        assert result["success"] is False
+        assert self._MARKER not in result["error"]
+        # Still actionable: it names the fields an operator can correct.
+        assert "ref=" in result["error"]
+
+    def test_invalid_url_carries_no_exception_text(
+        self, service, sources_db, tmp_path, monkeypatch
+    ):
+        import services.skill_service as ss
+
+        repo = _mkrepo(tmp_path / "repos", "good", {"research": "ok"})
+        sources_db.create_source(name="Good", url=str(repo), ref="main")
+
+        def _boom(_url):
+            raise ValueError(self._MARKER)
+
+        monkeypatch.setattr(ss, "validate_skills_library_url", _boom)
+
+        result = service.sync_library()
+
+        assert result["success"] is False
+        assert self._MARKER not in result["error"]
+        assert "invalid source URL" in result["error"]
