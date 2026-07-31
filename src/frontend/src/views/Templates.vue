@@ -301,7 +301,9 @@ const onAgentCreated = (agent) => {
   if (agent?.name) {
     router.push(`/agents/${agent.name}`)
   } else {
-    router.push('/agents')
+    // ent#260: Agents page retired — fall back to the Dashboard (bare `/`;
+    // see useAgentLifecycle.js for the no-?view rationale).
+    router.push('/')
   }
 }
 

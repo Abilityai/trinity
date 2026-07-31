@@ -1,9 +1,16 @@
 import { defineStore } from 'pinia'
 import axios from 'axios'
 import { useAuthStore } from './auth'
-import { useNetworkStore } from './network'
 import { agentDisplayName } from '../utils/agentName'
 
+// ent#260 composition contract: with the Agents page retired, the Dashboard's
+// List panel (AgentListPanel.vue) runs on networkStore as its data spine and
+// composes THIS store in for exactly two members — `sortBy`/`setSortBy`
+// (session-lived sort state) and `syncHealth`/`fetchSyncHealth` (#389).
+// `agents` stays warm via networkStore.fetchAgents' write-through (the #1643
+// displayNameForSlug base fetch) plus the App.vue WS handlers that merge
+// agent_created / agent_label_changed rows in. The sort comparator itself
+// lives in utils/agentSort.js (pure function — no store access).
 export const useAgentsStore = defineStore('agents', {
   state: () => ({
     agents: [],
@@ -47,56 +54,11 @@ export const useAgentsStore = defineStore('agents', {
     },
     stoppedAgents() {
       return this.userAgents.filter(agent => agent.status === 'stopped')
-    },
-    // Sorted agents excluding system agent (for regular users)
-    sortedAgents() {
-      return this._getSortedAgents(false)
-    },
-    // Sorted agents including system agent pinned at top (for admins)
-    sortedAgentsWithSystem() {
-      return this._getSortedAgents(true)
-    },
-    // Internal getter for sorted agents with optional system agent inclusion
-    _getSortedAgents() {
-      return (includeSystem) => {
-        const sorted = [...this.userAgents]
-        switch (this.sortBy) {
-          case 'created_desc':
-            sorted.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0))
-            break
-          case 'created_asc':
-            sorted.sort((a, b) => new Date(a.created || 0) - new Date(b.created || 0))
-            break
-          // #1642: "Name (A-Z/Z-A)" sorts by what the user sees — the display
-          // name when set, else the slug (agentDisplayName). Sorting by the slug
-          // while the row renders the label would order the list by an invisible
-          // key. Actions still key on the slug elsewhere; only the sort comparator
-          // changes.
-          case 'name_asc':
-            sorted.sort((a, b) => agentDisplayName(a).localeCompare(agentDisplayName(b)))
-            break
-          case 'name_desc':
-            sorted.sort((a, b) => agentDisplayName(b).localeCompare(agentDisplayName(a)))
-            break
-          case 'status':
-            sorted.sort((a, b) => (b.status === 'running' ? 1 : 0) - (a.status === 'running' ? 1 : 0))
-            break
-          case 'success_desc':
-            sorted.sort((a, b) => {
-              const networkStore = useNetworkStore()
-              const aRate = networkStore.executionStats[a.name]?.successRate || 0
-              const bRate = networkStore.executionStats[b.name]?.successRate || 0
-              return bRate - aRate
-            })
-            break
-        }
-        // Pin system agent at top if requested and exists
-        if (includeSystem && this.systemAgent) {
-          return [this.systemAgent, ...sorted]
-        }
-        return sorted
-      }
     }
+    // ent#260: sortedAgents / sortedAgentsWithSystem / _getSortedAgents were
+    // deleted with their sole consumer (views/Agents.vue). The comparator
+    // moved to utils/agentSort.js (sortAgents), which the List panel calls
+    // with networkStore.executionStats as a parameter.
   },
 
   actions: {

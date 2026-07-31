@@ -42,11 +42,15 @@ const routes = [
     component: () => import('../views/Dashboard.vue'),
     meta: { requiresAuth: true, title: 'Dashboard' }
   },
+  // trinity-enterprise#260 — the standalone Agents page is retired; its list
+  // lives on as the Dashboard's List mode. Query-preserving function redirect
+  // (#1109 /operating-room precedent): `?view=list` is a one-shot,
+  // NON-persisting intent the Dashboard applies then strips — it never
+  // rewrites the user's saved view selection. Exact-segment matching leaves
+  // /agents/:name and deeper routes untouched.
   {
     path: '/agents',
-    name: 'Agents',
-    component: () => import('../views/Agents.vue'),
-    meta: { requiresAuth: true, title: 'Agents' }
+    redirect: to => ({ path: '/', query: { ...to.query, view: 'list' } })
   },
   // #1109 — Health consolidated into the Operations "Health" tab.
   // Redirect preserves bookmarks; the tab is admin-gated inside Operations.vue.
