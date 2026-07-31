@@ -102,6 +102,10 @@ test.describe('dashboard type-to-filter (trinity-enterprise#261)', () => {
     await expect(queryEmpty(page)).toBeVisible()
     // The onboarding CTA must be unreachable while a query is active.
     await expect(page.getByRole('button', { name: 'Get started' })).toHaveCount(0)
+    // The panel's OWN filtered-empty card must also stay hidden — the chassis
+    // overlay owns query-zero messaging; two contradicting CTAs must never
+    // render at once (review fix: panel card gated on a non-empty prop).
+    await expect(page.getByText('No matching agents')).toHaveCount(0)
 
     // Mouse parity: the pill × clears + closes.
     await page.getByTestId('filter-clear').click()
@@ -167,9 +171,11 @@ test.describe('dashboard type-to-filter (trinity-enterprise#261)', () => {
     await expect(pill(page)).toBeVisible()
     await expect(matchCount(page)).toHaveText(/^1 of \d+ match$/)
 
-    // Focus wanders out of the input (click empty pane space), then Esc:
-    // the document-level backstop must still clear (plan strategy F8 pin).
-    await page.locator('.timeline-scroll-container').click({ position: { x: 400, y: 250 } })
+    // Focus wanders out of the input, then Esc: the document-level backstop
+    // must still clear (plan strategy F8 pin). blur() is structural — a
+    // coordinate click on the pane could land on an agent row / toggle on
+    // seeded fleets (flake + side-effect hazard).
+    await pillInput(page).blur()
     await expect(pillInput(page)).not.toBeFocused()
     await page.keyboard.press('Escape')
     await expect(pill(page)).toBeHidden()

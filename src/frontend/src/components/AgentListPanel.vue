@@ -655,9 +655,13 @@
     </div>
 
     <!-- Filtered-empty state (the true-empty "no agents at all" state is
-         chassis-owned in Dashboard.vue — this panel only renders with a
-         non-empty visible fleet) -->
-    <div v-if="displayAgents.length === 0" class="text-center py-12 bg-white dark:bg-gray-800 rounded-xl shadow">
+         chassis-owned in Dashboard.vue). `agents.length > 0` (ent#261): since
+         the type-to-filter, the panel DOES mount with a zero-agent prop when
+         the chassis query matches nothing — the chassis query-empty overlay
+         owns that messaging, and rendering this card too would show two
+         contradicting CTAs at once. This card renders only when the panel's
+         OWN name/status filters narrowed a non-empty prop to zero. -->
+    <div v-if="displayAgents.length === 0 && agents.length > 0" class="text-center py-12 bg-white dark:bg-gray-800 rounded-xl shadow">
       <ServerIcon class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" />
       <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">No matching agents</h3>
       <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Try adjusting your filters.</p>

@@ -742,9 +742,14 @@ function handleDashboardKeydown(e) {
       showTagDropdown.value = false
       return
     }
-    // Don't nuke the filter while a native <select> dropdown is being closed
-    // (gemini G4).
-    if (document.activeElement?.tagName === 'SELECT') return
+    // Don't nuke the filter from inside ANOTHER editable field (gemini G4
+    // generalized): Esc in the list panel's search box, a chat widget
+    // textarea, or a native <select> being closed belongs to that control —
+    // clearing the chassis filter from there is surprising cross-layer
+    // destruction. The pill input never reaches here (its own Esc handler
+    // .stop.prevent's), so this can't block the pill's Esc.
+    const et = e.target
+    if (et && (et.tagName === 'INPUT' || et.tagName === 'TEXTAREA' || et.tagName === 'SELECT' || et.isContentEditable)) return
     clearFilter()
     return
   }
