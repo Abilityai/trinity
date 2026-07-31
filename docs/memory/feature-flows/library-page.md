@@ -117,7 +117,7 @@ Single desktop link: label **Library**, `to="/library"`, active check `$route.pa
 | `GET /api/skills/library` | any auth user | skill cards (`SkillInfo` contract, ent#183) |
 | `POST /api/skills/library/sync` | admin | Sync now button |
 
-Deep dives: [skills-library-sync.md](skills-library-sync.md), [skill-assignment.md](skill-assignment.md), [skill-injection.md](skill-injection.md), [skills-management.md](skills-management.md).
+Deep dives: [skills-library-sync.md](skills-library-sync.md), [skill-assignment.md](skill-assignment.md), [skill-injection.md](skill-injection.md).
 
 ---
 
@@ -163,6 +163,6 @@ CI runs admin-authenticated (`e2e/.auth/admin.json`), so the non-admin empty-sta
 - **Upstream**: [platform-settings.md](platform-settings.md) — TMPL-001 GitHub Templates configuration; skills library URL/branch config (rewritten by ent#237/PR #1901 into per-source management)
 - **Downstream**: [template-processing.md](template-processing.md) — template processing during agent creation
 - **Downstream**: [agent-lifecycle.md](agent-lifecycle.md) — agent creation and container initialization
-- **Related**: [skills-management.md](skills-management.md) — per-agent Skills tab (assignment surface)
+- **Related**: [skill-assignment.md](skill-assignment.md) — per-agent Skills tab (assignment surface)
 - **Related**: [skills-library-sync.md](skills-library-sync.md) — what Sync now actually runs
 - **Related**: [credential-injection.md](credential-injection.md) — how template credentials are injected
