@@ -50,9 +50,11 @@ agents:
     template: local:definitely-not-a-real-template-ent126
 `
 
-async function openSystemsTab (page) {
-  await page.goto('/templates?tab=systems')
-  await expect(page.getByTestId('tab-systems')).toBeVisible()
+// ent#263 renamed Templates -> Library and made it stacked sections rather than
+// tabs, so the install surface is a #systems section on /library. /templates
+// still redirects (query AND hash survive the hop), which the first test pins.
+async function openSystemsSection (page) {
+  await page.goto('/library#systems')
   await expect(page.getByTestId('manifest-textarea')).toBeVisible()
 }
 
@@ -62,23 +64,24 @@ async function pasteManifest (page, yaml) {
 }
 
 test.describe('System install surface', () => {
-  test('tab deep-links and exposes both catalog sections', async ({ page }) => {
-    await page.goto('/templates')
-    // Default tab is the pre-existing agent-template catalog.
-    await expect(page.getByTestId('tab-agents')).toBeVisible()
-    await expect(page.getByTestId('tab-systems')).toBeVisible()
-
-    // Switching writes ?tab= so the surface is linkable and survives a reload.
-    await page.getByTestId('tab-systems').click()
-    await expect(page).toHaveURL(/[?&]tab=systems/)
+  test('the Library stacks all three asset kinds and the legacy path redirects', async ({ page }) => {
+    await page.goto('/library')
+    // All three sections coexist on one page (ent#263's stacked model) rather
+    // than hiding behind tabs, so no click is needed to reach any of them.
+    await expect(page.locator('#agent-templates')).toBeVisible()
+    await expect(page.locator('#systems')).toBeVisible()
+    await expect(page.locator('#skills')).toBeVisible()
     await expect(page.getByTestId('manifest-textarea')).toBeVisible()
 
-    await page.reload()
+    // The legacy /templates path must keep working, hash included — that
+    // redirect is what any older link or bookmark lands on.
+    await page.goto('/templates#systems')
+    await expect(page).toHaveURL(/\/library#systems$/)
     await expect(page.getByTestId('manifest-textarea')).toBeVisible()
   })
 
   test('bundled manifests are offered and load into the editor', async ({ page }) => {
-    await openSystemsTab(page)
+    await openSystemsSection(page)
     // `default-system.yaml` ships in-repo and is mounted read-only, so at least
     // one card is expected on any standard stack.
     const load = page.getByTestId('bundled-load-default-system')
@@ -88,7 +91,7 @@ test.describe('System install surface', () => {
   })
 
   test('preview shows agents, permission topology and schedules', async ({ page }) => {
-    await openSystemsTab(page)
+    await openSystemsSection(page)
     await pasteManifest(page, VALID_MANIFEST)
     await page.getByTestId('dry-run').click()
 
@@ -117,7 +120,7 @@ test.describe('System install surface', () => {
   })
 
   test('a manifest with schedules gates Deploy behind an acknowledgement', async ({ page }) => {
-    await openSystemsTab(page)
+    await openSystemsSection(page)
     await pasteManifest(page, VALID_MANIFEST)
     await page.getByTestId('dry-run').click()
     await expect(page.getByText('No blockers found')).toBeVisible()
@@ -135,7 +138,7 @@ test.describe('System install surface', () => {
     // manifest A's schedules, edit the YAML, re-preview, and deploy manifest B's
     // consequences under A's consent — the deploy-what-you-didn't-look-at failure
     // the preview binding exists to prevent, one field over.
-    await openSystemsTab(page)
+    await openSystemsSection(page)
     await pasteManifest(page, VALID_MANIFEST)
     await page.getByTestId('dry-run').click()
     await expect(page.getByText('No blockers found')).toBeVisible()
@@ -155,7 +158,7 @@ test.describe('System install surface', () => {
   })
 
   test('editing after a preview disables Deploy until re-previewed', async ({ page }) => {
-    await openSystemsTab(page)
+    await openSystemsSection(page)
     // No schedules and no prompt -> no acknowledgement needed, so Deploy's state
     // isolates the preview-binding behaviour.
     await pasteManifest(page, `name: e2e-binding
@@ -181,7 +184,7 @@ agents:
   test('a validation error renders as a named message, not a raw blob', async ({ page }) => {
     // AC #4. The backend returns 400 with {detail: "<string>"}; the store must
     // surface that string rather than "[object Object]" or a stack.
-    await openSystemsTab(page)
+    await openSystemsSection(page)
     await pasteManifest(page, INVALID_NAME_MANIFEST)
     await page.getByTestId('dry-run').click()
 
@@ -193,7 +196,7 @@ agents:
   })
 
   test('malformed YAML renders as a named message', async ({ page }) => {
-    await openSystemsTab(page)
+    await openSystemsSection(page)
     await pasteManifest(page, 'name: [broken\n  ::::\n')
     await page.getByTestId('dry-run').click()
     await expect(page.getByTestId('install-error')).toContainText(/YAML|parse/i)
@@ -202,7 +205,7 @@ agents:
   test('an unresolvable template is a preview blocker at HTTP 200', async ({ page }) => {
     // Trap (a): `status: "invalid"` arrives with a 200, so a store that switched
     // on the HTTP code would render this as a clean, deployable preview.
-    await openSystemsTab(page)
+    await openSystemsSection(page)
     await pasteManifest(page, UNRESOLVABLE_MANIFEST)
     await page.getByTestId('dry-run').click()
 
@@ -214,7 +217,7 @@ agents:
   test('a manifest with a bad cpu is blocked before deploy', async ({ page }) => {
     // The regression that motivated the resource preflight: this previewed clean
     // and then failed 100% of its agents at create.
-    await openSystemsTab(page)
+    await openSystemsSection(page)
     await pasteManifest(page, `name: e2e-badcpu
 agents:
   alpha:
@@ -240,7 +243,7 @@ test.describe('System install — deploy path', () => {
     // Trap (b): `status: "failed"` arrives as HTTP 500 with the full report AS
     // THE BODY. A naive axios catch discards exactly the failed[] list AC #3
     // requires, so this asserts the per-agent failure is rendered.
-    await openSystemsTab(page)
+    await openSystemsSection(page)
     await pasteManifest(page, UNRESOLVABLE_MANIFEST)
     await page.getByTestId('dry-run').click()
     await expect(page.getByText('This manifest cannot deploy yet')).toBeVisible()

@@ -64,6 +64,31 @@
         Bot connected but webhook not registered. Set a <router-link to="/settings" class="underline font-medium hover:text-status-warning-800 dark:hover:text-status-warning-200">Public URL in Settings</router-link> for Telegram messages to reach this agent.
       </div>
 
+      <!-- In-progress indicator toggle (ent#264) -->
+      <div class="flex items-start justify-between gap-4 p-3 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-700">
+        <div>
+          <p class="text-sm font-medium text-gray-900 dark:text-white">In-progress indicator</p>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+            React with &#128064; when a task starts and post an elapsed-time status while long tasks run.
+            In groups, only @mention/reply-triggered turns (and "All messages" mode) are acknowledged.
+          </p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          :aria-checked="String(!!binding.progress_indicator_enabled)"
+          @click="toggleProgressIndicator"
+          :disabled="togglingProgress"
+          class="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          :class="binding.progress_indicator_enabled ? 'bg-action-primary-600' : 'bg-gray-300 dark:bg-gray-600'"
+        >
+          <span
+            class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform"
+            :class="binding.progress_indicator_enabled ? 'translate-x-6' : 'translate-x-1'"
+          />
+        </button>
+      </div>
+
       <!-- Group Chats Section -->
       <div v-if="groups.length > 0" class="mt-4">
         <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
@@ -152,6 +177,25 @@
                 <p class="mt-0.5 text-xs text-gray-400">Use {name} for the user's first name</p>
               </div>
             </div>
+
+            <!-- Completion reports (ent#265) — per-group opt-out mute for the
+                 delegated/background completion report-back. Label names ONLY
+                 what the flag governs today (D2/F2); rename if the proactive
+                 group-send coherence gate ships later. -->
+            <div class="mt-2">
+              <label class="flex items-center gap-1.5 cursor-pointer text-xs">
+                <input
+                  type="checkbox"
+                  :checked="group.allow_proactive"
+                  @change="updateGroup(group, { allow_proactive: !group.allow_proactive })"
+                  class="rounded text-action-primary-600 focus:ring-action-primary-500"
+                />
+                <span class="text-gray-600 dark:text-gray-400">Completion reports</span>
+              </label>
+              <p class="mt-0.5 text-xs text-gray-400">
+                Posts a completion notice for delegated or background tasks started from this group.
+              </p>
+            </div>
           </div>
         </div>
       </div>
@@ -222,6 +266,7 @@ const loading = ref(true)
 const connecting = ref(false)
 const disconnecting = ref(false)
 const verifying = ref(false)
+const togglingProgress = ref(false)
 const accessDenied = ref(false)
 const binding = ref({ configured: false })
 const groups = ref([])
@@ -311,6 +356,26 @@ async function verifyBot() {
     message.value = { type: 'error', text: detail }
   } finally {
     verifying.value = false
+  }
+}
+
+async function toggleProgressIndicator() {
+  // ent#264: optimistic flip with revert-on-error.
+  const prev = !!binding.value.progress_indicator_enabled
+  const next = !prev
+  binding.value.progress_indicator_enabled = next
+  togglingProgress.value = true
+  try {
+    await api.put(`/api/agents/${props.agentName}/telegram/progress-indicator`, {
+      enabled: next
+    })
+  } catch (e) {
+    binding.value.progress_indicator_enabled = prev
+    const detail = e.response?.data?.detail || 'Failed to update indicator setting'
+    message.value = { type: 'error', text: detail }
+    setTimeout(() => { message.value = null }, 3000)
+  } finally {
+    togglingProgress.value = false
   }
 }
 

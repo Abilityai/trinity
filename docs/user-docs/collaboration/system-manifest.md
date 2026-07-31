@@ -17,8 +17,9 @@ Recipe-based multi-agent deployment via YAML manifest files. Deploy entire agent
 
 ## Installing a system from the UI
 
-Go to **Templates → Install a system** (`/templates?tab=systems`). You need the
-**creator** role or above, because installing a system creates agents.
+Go to **Library → Systems** (`/library#systems`). You need the **creator** role or
+above, because installing a system creates agents — below that role the section is
+not shown at all.
 
 Pick one of three sources:
 

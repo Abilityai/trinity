@@ -12,6 +12,7 @@ These endpoints are admin-only and intended for platform operations.
 import os
 import logging
 import concurrent.futures
+import uuid
 from datetime import datetime, timedelta
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
@@ -19,16 +20,27 @@ import httpx
 
 from models import User
 from database import db
-from dependencies import get_current_user, assert_admin
+from dependencies import get_current_user, assert_admin, reject_agent_principal
 from services.docker_service import get_agent_container, docker_client, list_all_agents_fast
-from services.docker_utils import container_stop, container_start
+from services.docker_utils import container_stop
 from services.agent_client import get_agent_client
+from services.agent_service.lifecycle import restart_agent_internal
+from services.agent_service.stats import invalidate_context_stats_cache
 from db.agents import SYSTEM_AGENT_NAME
+from redis_breaker_util import get_breaker_redis
 from utils.helpers import utc_now_iso
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 router = APIRouter(prefix="/api/ops", tags=["operations"])
 logger = logging.getLogger(__name__)
+
+# #1860: one fleet restart at a time. A client timeout (nginx 60s / Cloudflare
+# ~100s) invites a retry while the first loop is still running server-side, and
+# two loops interleaving stop/start on the same agent is the #799/#1817
+# stop-racing-start wedge class. TTL bounds a crashed holder; the live loop
+# refreshes its own lease each iteration so a long fleet never loses the lock.
+_FLEET_RESTART_LOCK_KEY = "ops:fleet_restart"
+_FLEET_RESTART_LOCK_TTL_SECONDS = 900
 
 
 # ============================================================================
@@ -229,9 +241,40 @@ async def restart_fleet(
     """
     Restart all agents in the fleet.
 
-    Admin-only. Excludes the system agent.
+    Admin-only (human principals only). Excludes the system agent and
+    ephemeral ghosts. Each agent is stopped, then started through the
+    canonical lifecycle path (``restart_agent_internal``), so a fleet restart
+    applies pending config drift and adopts a rebuilt base image
+    (#1809/#1860) exactly like a manual stop → start.
+
+    The loop is sequential; a large fleet can outlast proxy timeouts. A
+    client timeout (504/524) does NOT mean the restart failed — the loop
+    keeps running server-side and the outcome lands in the audit log
+    (``fleet_restart`` entry). Use ``system_prefix`` / ``filter_status`` to
+    restart in chunks. 409 while another fleet restart is in flight.
     """
     assert_admin(current_user)
+    # #1860: this endpoint replaces containers, not just restarts them —
+    # operator-scale destructiveness re-prices principals (Invariant #8, the
+    # #1816 escalation rule). No-op for human/system principals.
+    reject_agent_principal(current_user)
+
+    # Single-flight lock (SETNX + TTL, fail-open when Redis is down).
+    lock_client = get_breaker_redis()
+    lock_token = uuid.uuid4().hex
+    lock_held = False
+    if lock_client is not None:
+        try:
+            lock_held = bool(lock_client.set(
+                _FLEET_RESTART_LOCK_KEY, lock_token,
+                nx=True, ex=_FLEET_RESTART_LOCK_TTL_SECONDS,
+            ))
+            if not lock_held:
+                raise HTTPException(status_code=409, detail="fleet_restart_in_progress")
+        except HTTPException:
+            raise
+        except Exception:
+            lock_client = None  # fail-open: proceed unlocked
 
     agents = list_all_agents_fast()
 
@@ -239,78 +282,194 @@ async def restart_fleet(
     successes = 0
     failures = 0
     skipped = 0
+    recreated_count = 0
+    recreated_map = {}
+    failed_agents = []
 
-    for agent in agents:
-        agent_name = agent.name
-        status = agent.status
+    try:
+        for agent in agents:
+            agent_name = agent.name
+            status = agent.status
 
-        # Skip system agent
-        owner = db.get_agent_owner(agent_name)
-        is_system = owner.get("is_system", False) if owner else False
-        if is_system:
-            results.append({
-                "agent": agent_name,
-                "result": "skipped",
-                "reason": "system agent"
-            })
-            skipped += 1
-            continue
+            # Refresh our own lease so a long fleet never loses the lock
+            # mid-run while a crashed holder still expires within the TTL.
+            if lock_held and lock_client is not None:
+                try:
+                    lock_client.expire(_FLEET_RESTART_LOCK_KEY, _FLEET_RESTART_LOCK_TTL_SECONDS)
+                except Exception:
+                    pass
 
-        # Apply filters
-        if filter_status and status != filter_status:
-            results.append({
-                "agent": agent_name,
-                "result": "skipped",
-                "reason": f"status is {status}, not {filter_status}"
-            })
-            skipped += 1
-            continue
-
-        if system_prefix and not agent_name.startswith(system_prefix + "-"):
-            results.append({
-                "agent": agent_name,
-                "result": "skipped",
-                "reason": f"doesn't match prefix {system_prefix}"
-            })
-            skipped += 1
-            continue
-
-        # Skip stopped agents
-        if status != "running":
-            results.append({
-                "agent": agent_name,
-                "result": "skipped",
-                "reason": "not running"
-            })
-            skipped += 1
-            continue
-
-        # Restart the agent
-        try:
-            container = get_agent_container(agent_name)
-            if container:
-                await container_stop(container, timeout=30)
-                await container_start(container)
+            # Skip system agent
+            owner = db.get_agent_owner(agent_name)
+            is_system = owner.get("is_system", False) if owner else False
+            if is_system:
                 results.append({
                     "agent": agent_name,
-                    "result": "success",
-                    "previous_status": status
+                    "result": "skipped",
+                    "reason": "system agent"
                 })
-                successes += 1
-            else:
+                skipped += 1
+                continue
+
+            # Skip ephemeral ghosts (#1860): the config-drift predicates are
+            # not ephemeral-gated, so a cold start could recreate a drifted
+            # ghost — destroying its volume-less workspace mid-budget
+            # (trinity-enterprise#69 "ghosts never recreate"). Restarting a
+            # disposable ghost has no adoption upside; GC owns its lifecycle.
+            try:
+                eph = db.get_agent_ephemeral_info(agent_name)
+            except Exception:
+                eph = None
+            if isinstance(eph, dict) and eph.get("is_ephemeral"):
+                results.append({
+                    "agent": agent_name,
+                    "result": "skipped",
+                    "reason": "ephemeral"
+                })
+                skipped += 1
+                continue
+
+            # Apply filters
+            if filter_status and status != filter_status:
+                results.append({
+                    "agent": agent_name,
+                    "result": "skipped",
+                    "reason": f"status is {status}, not {filter_status}"
+                })
+                skipped += 1
+                continue
+
+            if system_prefix and not agent_name.startswith(system_prefix + "-"):
+                results.append({
+                    "agent": agent_name,
+                    "result": "skipped",
+                    "reason": f"doesn't match prefix {system_prefix}"
+                })
+                skipped += 1
+                continue
+
+            # Skip stopped agents
+            if status != "running":
+                results.append({
+                    "agent": agent_name,
+                    "result": "skipped",
+                    "reason": "not running"
+                })
+                skipped += 1
+                continue
+
+            # Restart the agent through the canonical lifecycle path.
+            try:
+                container = get_agent_container(agent_name)
+                if container:
+                    start_result = await restart_agent_internal(agent_name)
+                    # Explicit field copy — this router builds its own result
+                    # dicts, so service fields do NOT flow through on their
+                    # own (#1809's allowlist learning, routers/agents.py).
+                    entry = {
+                        "agent": agent_name,
+                        "result": "success",
+                        "previous_status": status,
+                        "recreated": bool(start_result.get("recreated")),
+                        "recreate_reason": start_result.get("recreate_reason"),
+                        "credentials_injection": start_result.get("credentials_injection"),
+                        "skills_injection": start_result.get("skills_injection"),
+                    }
+                    if entry["recreated"]:
+                        recreated_count += 1
+                        recreated_map[agent_name] = entry["recreate_reason"] or "unknown"
+                    results.append(entry)
+                    successes += 1
+                    logger.info(
+                        f"Fleet restart: {agent_name} restarted "
+                        f"(recreated={entry['recreated']}, reason={entry['recreate_reason']})"
+                    )
+                else:
+                    results.append({
+                        "agent": agent_name,
+                        "result": "failed",
+                        "error": "container not found"
+                    })
+                    failed_agents.append(agent_name)
+                    failures += 1
+            except Exception as e:
+                if isinstance(e, HTTPException):
+                    # Platform-authored client text (FastAPI returns .detail
+                    # to callers by design) — not an exception-internals leak.
+                    error_text = f"{e.status_code}: {e.detail}"
+                else:
+                    # py/stack-trace-exposure (CodeQL, PR #1912): never flow
+                    # a raw exception message into the response — docker/OS
+                    # error strings can embed internals (the #1885 / git-PAT
+                    # stderr class). Class name only; the full message +
+                    # traceback go to the backend log line below.
+                    error_text = (
+                        f"restart failed ({e.__class__.__name__} — "
+                        f"details in backend logs)"
+                    )
+                # A recreate that failed after removing the old container
+                # leaves the agent with NO container — it vanishes from fleet
+                # listings (Docker-as-truth). Name the recovery path (#1559).
+                try:
+                    if get_agent_container(agent_name) is None:
+                        error_text += (
+                            f" (no container present — recover via "
+                            f"POST /api/agents/{agent_name}/start)"
+                        )
+                except Exception:
+                    pass
                 results.append({
                     "agent": agent_name,
                     "result": "failed",
-                    "error": "container not found"
+                    "error": error_text
                 })
+                failed_agents.append(agent_name)
                 failures += 1
-        except Exception as e:
-            results.append({
-                "agent": agent_name,
-                "result": "failed",
-                "error": str(e)
-            })
-            failures += 1
+                logger.warning(
+                    f"Fleet restart: {agent_name} failed: {e}", exc_info=True
+                )
+    finally:
+        # Sync cleanup FIRST, awaited audit LAST: a CancelledError raised at
+        # the audit await (backend shutdown mid-loop) is a BaseException the
+        # try below doesn't catch — anything after it in this block would be
+        # skipped, leaving the lock held for a full TTL after a deploy.
+        invalidate_context_stats_cache()
+        if lock_held and lock_client is not None:
+            try:
+                # Release only our own lock (compare-and-delete).
+                current = lock_client.get(_FLEET_RESTART_LOCK_KEY)
+                if current == lock_token.encode() or current == lock_token:
+                    lock_client.delete(_FLEET_RESTART_LOCK_KEY)
+            except Exception:
+                pass
+        # The audit row is the durable record — a client that timed out finds
+        # the outcome (incl. partial completion) here. Never fails the op.
+        # Restores the fleet_restart entry dropped in 0ec3a7fc; SYSTEM event
+        # type matches this router's emergency_stop precedent.
+        try:
+            await platform_audit_service.log(
+                event_type=AuditEventType.SYSTEM,
+                event_action="fleet_restart",
+                source="api",
+                actor_user=current_user,
+                actor_ip=request.client.host if request.client else None,
+                endpoint=str(request.url.path),
+                request_id=getattr(request.state, "request_id", None),
+                details={
+                    "total": len(agents),
+                    "successes": successes,
+                    "failures": failures,
+                    "skipped": skipped,
+                    # {agent: reason} for recreated agents only — preserves
+                    # #1809's changed-container-id traceability at fleet scale.
+                    "recreated": recreated_map or None,
+                    "failed_agents": failed_agents or None,
+                    "filter_status": filter_status,
+                    "system_prefix": system_prefix,
+                },
+            )
+        except Exception:
+            logger.warning("Fleet restart: audit write failed", exc_info=True)
 
     return {
         "timestamp": utc_now_iso(),
@@ -318,7 +477,8 @@ async def restart_fleet(
             "total": len(agents),
             "successes": successes,
             "failures": failures,
-            "skipped": skipped
+            "skipped": skipped,
+            "recreated": recreated_count
         },
         "results": results
     }

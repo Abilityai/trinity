@@ -15,6 +15,51 @@ As a platform administrator, I want to configure and sync a GitHub repository co
 | `src/frontend/src/views/Settings.vue:432-527` | `GET /api/skills/library/status` | Check library sync status |
 | `src/frontend/src/views/Settings.vue:501-512` | `POST /api/skills/library/sync` | Trigger library sync |
 | `src/frontend/src/views/Settings.vue:514-524` | `PUT /api/settings/{key}` | Save URL/branch settings |
+| Settings → Skills Library → Automation | `GET/PUT /api/settings/skills-library` | Auto-sync + fleet re-inject config, sync status, last fleet report (ent#236) |
+| — (background) | `services/skills_sync_service.py` | Scheduled sync loop (ent#236) |
+
+---
+
+## Scheduled Auto-Sync + Fleet Re-Inject (ent#236)
+
+Both default OFF; a zero-config install behaves exactly as before.
+
+```
+skills_sync_service loop (every worker, self-gating, config re-read per cycle)
+   │  skills:sync:leader  (SET NX, TTL 3×interval, own-lease refresh, fail-open)
+   ▼  leader only
+sync_library()  ── failure ─▶ persist last_status/last_error → Settings panel
+   │                            (no operator alarm: a repeating item for an
+   │                             unreachable GitHub is the muted-alert failure mode)
+   ├─ commit unchanged ─▶ stop.   A no-op pull must not sweep the fleet.
+   └─ commit changed + auto_reinject_enabled
+          ▼
+      run_fleet_reinject: running, non-ghost agents · force=False (tree-SHA skip
+      makes unchanged skills free) · Semaphore(SKILLS_FLEET_INJECT_CONCURRENCY=5)
+      · SkillInjectionBusy ⇒ skip-and-report, never wait
+          ▼
+      report → system_settings['skills_fleet_reinject_last_run'] (Settings panel)
+      + operator alarm on `_skills-sync` iff ≥1 agent failed
+```
+
+**Why the backend, not the standalone scheduler.** The scheduler container is on
+`trinity-platform` only and deliberately never talks to agents; the fleet sweep
+must. Splitting the timer from the sweep across two processes buys nothing, so
+both live in the backend behind a Redis leader lease.
+
+**Durable status.** `_last_sync` / `_last_commit_sha` are per-process fields and
+the backend runs `--workers 2`, so the worker answering `/status` was usually not
+the worker that synced — a stale timestamp, and a sync error that could never be
+displayed at all. Both are now mirrored into `system_settings`
+(`skills_library_last_sync` / `_last_status` / `_last_error` / `_last_commit`),
+written on **both** the success and failure branches. `_last_commit` is also what
+"did the commit change?" compares against: reading the in-memory field would make
+every backend restart look like a change and sweep the whole fleet.
+
+**Manual sync** (`POST /api/skills/library/sync`) spawns the same sweep in the
+background when the flag is on and the commit moved — the operator clicked "Sync
+Library", not "block until every agent is updated"; the sweep's own report is the
+honest surface.
 
 ---
 
@@ -636,11 +681,12 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 | Date | Changes |
 |------|---------|
+| 2026-07-29 | **ent#236 lifecycle automation**: scheduled leader-locked auto-sync, commit-gated fleet-wide re-inject with an honest per-agent report, durable sync status (`--workers 2` gap), and the dedicated range-validated `GET/PUT /api/settings/skills-library` route. Removal-on-unassign is documented in [skill-injection.md](skill-injection.md). |
 | 2026-07-19 | **ent#183 skill packages**: skills are full directory packages; list/get surface the frontmatter contract + package metadata (commit-SHA-cached); status adds `multi_file_count`; HEAD of the clone is the atomic injection source. |
 | 2026-03-27 | **SEC-179 SSRF prevention**: Added URL validation at write-time and sync-time. New `utils/url_validation.py` module. Updated error handling and security considerations. |
 | 2026-01-25 | **Initial document creation**: Complete vertical slice from Settings.vue through skill_service.py git operations. Documented URL formats, shallow clone, PAT handling, status endpoint, error cases. |
 
 ---
 
-**Last Updated**: 2026-03-27
-**Status**: Verified - Updated for SEC-179 SSRF prevention
+**Last Updated**: 2026-07-29
+**Status**: Verified - Updated for ent#236 lifecycle automation

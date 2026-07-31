@@ -20,7 +20,7 @@ As an agent owner, I want to toggle autonomous operation for my agent so that I 
 | Dashboard Graph | `AgentNode.vue` | 78-85 | Same row as RunningStateToggle |
 | Dashboard Timeline | `ReplayTimeline.vue` | 155-161 | No label (compact) |
 | Agent Detail Header | `AgentHeader.vue` | 120-125 | Medium size, owners only |
-| Agents List Page | `Agents.vue` | 116-122 | Same row as RunningStateToggle |
+| Dashboard List rows | `AgentListPanel.vue` | — | Controls column; rewired to `networkStore.toggleAutonomy` (ent#260 — replaces the retired Agents page) |
 
 ### Component
 - **Reusable Component**: `src/frontend/src/components/AutonomyToggle.vue` (151 lines)

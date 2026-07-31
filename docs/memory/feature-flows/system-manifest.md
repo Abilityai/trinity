@@ -159,7 +159,7 @@ permissions:
 
 ### UI
 - **Status**: ✅ Implemented (trinity-enterprise#126, 2026-07-30) — install surface only
-- **Where**: the `?tab=systems` tab of the Templates page (`/templates?tab=systems`)
+- **Where**: the `#systems` section of the Library page (`/library#systems`). `/templates` redirects, hash preserved.
 - **Not built**: a browser for *already-deployed* systems (see Frontend Layer below)
 
 ## Frontend Layer
@@ -167,9 +167,13 @@ permissions:
 **Status**: ✅ Install surface implemented (trinity-enterprise#126, 2026-07-30).
 
 Pick a bundled manifest / upload a file / paste YAML → preview → deploy. Home is a
-`?tab=`-driven catalog on the existing Templates page rather than a new NavBar entry
-(the bar already has six), so all "install something" paths share one hub — ent#15's
-agent-import wizard and ent#108's agent registry slot in as further tabs.
+stacked `#systems` section on the **Library** page rather than a new NavBar entry (the bar
+already has six). It first shipped as a `?tab=` strip on `Templates.vue`; ent#263 then
+renamed that page to Library and deliberately chose stacked sections + jump anchors over
+tabs, so this conforms to the page's model instead of reintroducing a competing one.
+Systems sits directly after Agent Templates because both **install agents** — one template
+makes one agent, one manifest makes a whole wired fleet — leaving Skills last as the kind
+that configures agents that already exist.
 
 **Components** (`src/frontend/src/components/systems/`):
 
@@ -185,10 +189,12 @@ set of agents sharing a name prefix; a *System View* is a saved tag filter over 
 Different domains that share a word. All calls go through the single `api` axios
 instance (Invariant #7).
 
-**Host**: `views/Templates.vue` gained the `?tab=agents|systems` strip (copying
-`Operations.vue`'s `resolveTab` + `router.replace` pattern). The Systems tab is gated on
-`hasMinRole('creator')`, mirroring `POST /api/systems/deploy`, with an explanatory empty
-state for lower roles. Note `hasMinRole` is a plain **function** — `composables/useRole.js`'s
+**Host**: `views/Library.vue` gained a third `<section id="systems">`, plus a "Systems"
+jump anchor in the header nav. It is gated on `hasMinRole('creator')`, mirroring
+`POST /api/systems/deploy`, and is **hidden outright** below that role rather than
+shown-and-disabled — a browse surface gains nothing from a dead panel, and the anchor is
+gated with it so the nav never points at a section that is not rendered. `/templates`
+still redirects to `/library` with query **and** hash preserved, so older links survive. Note `hasMinRole` is a plain **function** — `composables/useRole.js`'s
 own usage docstring says `hasMinRole.value(...)` and is stale.
 
 **Editor**: a plain `<textarea>`. The repo's orphaned monaco-based `components/YamlEditor.vue`
@@ -2214,7 +2220,7 @@ template existence — learnings 2026-07-23 blank-agent trap).
 
 | Date | Changes |
 |------|---------|
-| 2026-07-30 | **trinity-enterprise#126**: UI install surface (`?tab=systems` on the Templates page; `components/systems/*` over the new `stores/systems.js`) + the read-only bundled-manifest catalog `GET /manifests` / `/manifests/{id}`. Dry-run gains `permission_edges` / `schedules_preview` / `system_view_requested` from **pure resolvers shared with the writers** (`configure_permissions` / `create_schedules` now loop over them), pinned by characterization tests captured green before the refactor. `_preflight_template` now validates **merged** resources through the create path's own `normalize_cpu` / `normalize_memory` — a shipped bundled manifest carried `cpu: 1.0`, previewed `valid`, and failed 100% of its agents (that manifest, a broken duplicate of the live seed, is deleted). `status` becomes five-valued (`invalid` added). `parse_manifest` warns on unrecognised top-level keys (coercing them with `str()` — YAML 1.1 renders bare `on`/`off`/`yes`/`no` as booleans, so a mixed-type key set made `sorted` raise and turned the hygiene check into the unnamed 500 it existed to prevent). Catalog `reason`s exit through `_failure_reason`; symlinked manifests are refused for catalog/read parity. Merged with trinity#1884 (landed on `dev` mid-review), which moves the manifest size cap into `parse_manifest` alongside its alias-budget and duplicate-key guards — so ent#126's request-model cap is dropped and `MANIFEST_MAX_BYTES` stays a single definition in `models.py` that both modules import. |
+| 2026-07-31 | **trinity-enterprise#126**: UI install surface (a stacked `#systems` section on the Library page — rebased onto ent#263, which renamed Templates -> Library and chose stacked sections over the `?tab=` strip this originally shipped; `components/systems/*` over the new `stores/systems.js`) + the read-only bundled-manifest catalog `GET /manifests` / `/manifests/{id}`. Dry-run gains `permission_edges` / `schedules_preview` / `system_view_requested` from **pure resolvers shared with the writers** (`configure_permissions` / `create_schedules` now loop over them), pinned by characterization tests captured green before the refactor. `_preflight_template` now validates **merged** resources through the create path's own `normalize_cpu` / `normalize_memory` — a shipped bundled manifest carried `cpu: 1.0`, previewed `valid`, and failed 100% of its agents (that manifest, a broken duplicate of the live seed, is deleted). `status` becomes five-valued (`invalid` added). `parse_manifest` warns on unrecognised top-level keys (coercing them with `str()` — YAML 1.1 renders bare `on`/`off`/`yes`/`no` as booleans, so a mixed-type key set made `sorted` raise and turned the hygiene check into the unnamed 500 it existed to prevent). Catalog `reason`s exit through `_failure_reason`; symlinked manifests are refused for catalog/read parity. Merged with trinity#1884 (landed on `dev` mid-review), which moves the manifest size cap into `parse_manifest` alongside its alias-budget and duplicate-key guards — so ent#126's request-model cap is dropped and `MANIFEST_MAX_BYTES` stays a single definition in `models.py` that both modules import. |
 | 2026-07-24 | **trinity-enterprise#124**: deploy orchestration extracted to `system_service.deploy_manifest` (router now a thin HTTP wrapper; `create_agent_fn` seam defaults to the ws-broadcasting `routers/agents` facade); first-run default seed added (`system_seed_service.py`, persisted `first_run_fresh` verdict shared with the Cornelius seeder, bundled `config/manifests/default-system.yaml`, `TRINITY_DEFAULT_SYSTEM_MANIFEST` override/disable). Partial-deploy warning no longer points at #124 for converge support. |
 | 2026-02-17 | **ORG-001 Phase 4**: Added tags and System View integration - `default_tags`, `system_view`, per-agent `tags` in manifest. Updated models.py (221-273), system_service.py (configure_tags, create_system_view), routers/systems.py (steps 10-11 in deploy flow). Added response fields `tags_configured`, `system_view_created`. |
 | 2026-02-11 | Fixed Docker volume mount path - now mounts to `/home/developer` (not workspace subdirectory) |

@@ -7,7 +7,7 @@ Template processing enables agent creation from pre-configured templates, suppor
 As a platform user, I want to create agents from templates so that I can quickly deploy pre-configured agents with the correct MCP servers and credential requirements.
 
 ## Entry Points
-- **UI**: `src/frontend/src/views/Templates.vue` - Dedicated templates page (primary)
+- **UI**: `src/frontend/src/views/Library.vue` - Library page's Agent Templates section (primary; renamed from `Templates.vue` in trinity-enterprise#263 — see [library-page.md](library-page.md))
 - **UI**: `src/frontend/src/components/CreateAgentModal.vue` - Create agent form with template selection
 - **API**: `GET /api/templates` - List available templates
 - **API**: `GET /api/templates/{template_id}` - Get template details
@@ -17,9 +17,9 @@ As a platform user, I want to create agents from templates so that I can quickly
 
 ## Frontend Layer
 
-### Templates.vue (`src/frontend/src/views/Templates.vue`)
+### Library.vue (`src/frontend/src/views/Library.vue`)
 
-Dedicated templates page that dynamically loads templates from the API (previously static hardcoded cards).
+The Library page's Agent Templates section (formerly the standalone `Templates.vue` page, ent#263) dynamically loads templates from the API (previously static hardcoded cards).
 
 | Line | Element | Purpose |
 |------|---------|---------|
@@ -115,11 +115,12 @@ const selectedTemplate = computed(() => {
 
 ### Template Endpoints (`src/backend/routers/templates.py`)
 
-| Line | Endpoint | Purpose |
-|------|----------|---------|
-| 19-59 | `GET /api/templates` | List all templates (GitHub + local) |
-| 62-172 | `GET /api/templates/env-template` | Get .env template for bulk import |
-| 174-220 | `GET /api/templates/{template_id:path}` | Get template details |
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/templates` | List all templates (GitHub + local) |
+| `GET /api/templates/{template_id:path}` | Get template details |
+
+(`GET /api/templates/env-template` no longer exists — removed alongside `POST /api/templates/refresh`; the router carries exactly these two GET routes.)
 
 ### List Templates (`routers/templates.py:19-59`)
 ```python
@@ -672,10 +673,6 @@ curl http://localhost:8000/api/templates \
 
 # Get template details
 curl http://localhost:8000/api/templates/local:ruby-social-media-agent \
-  -H "Authorization: Bearer $TOKEN"
-
-# Get .env template for bulk import
-curl "http://localhost:8000/api/templates/env-template?template_id=github:abilityai/agent-ruby" \
   -H "Authorization: Bearer $TOKEN"
 
 # Create agent from GitHub template

@@ -685,31 +685,113 @@ _TaskDerivation = namedtuple(
 
 
 
-def _inherited_channel_context(request) -> tuple:
-    """ent#224: resolve the originating channel/thread from the CALLER's execution.
+_NO_INHERITED_CONTEXT = (None, None, None, None)
 
-    When agent A (answering in Slack) delegates to agent B, B's row would carry no
-    channel context and B's completion would have nowhere to go — that is exactly
-    the reported failure. If the caller passes its own ``parent_execution_id`` we
-    copy the destination down, so B's terminal can report into A's thread.
 
-    Fail-open: any miss returns (None, None, None) and behaviour is unchanged.
+def _inherited_channel_context(request, *, current_user=None, x_source_agent=None) -> tuple:
+    """ent#224/ent#265: resolve the originating channel/thread + binding agent
+    from the CALLER's execution — consumed at ROW CREATION time (D0).
+
+    When agent A (answering in Slack/Telegram) delegates to agent B, B's row
+    would carry no channel context and B's completion would have nowhere to go —
+    that is exactly the reported failure. If the caller passes its own
+    ``parent_execution_id`` we copy the destination down onto the CHILD ROW
+    ITSELF, so B's terminal can report into A's thread. (The former
+    ``run_async_task`` → ``execute_task(source_channel=…)`` threading was dead:
+    ``execute_task`` writes channel columns only in its no-``execution_id``
+    creation branch, and the /task path always pre-creates the row.)
+
+    The 4th element is ``source_channel_agent`` (ent#265 D1): the agent whose
+    channel binding owns the context — the parent's own binding agent when set,
+    else the parent's agent name. Transitive across A→B→C, so the completion
+    always delivers through the bot the user actually addressed. Returned only
+    when the parent actually HAS ``source_channel`` — never a dangling agent
+    pointer on a channel-less child.
+
+    Provenance guard (ent#265 security): ``db.get_execution(parent_id)`` is a
+    global lookup with no ownership check, and inheriting the context hands the
+    child's terminal an outbound destination (someone else's chat) plus the bot
+    token that reaches it — so the caller must own the parent context:
+      * **agent-scoped principal** (``current_user.agent_name``) must BE the
+        parent's executing agent;
+      * **human principal** must be the parent agent's OWNER (or an admin);
+      * **connector principal** (consumption-only, ent#46) never inherits.
+    A failed guard means NO inheritance (info log) — fail-open to no-context,
+    never to someone else's chat.
+
+    Two deliberate choices, both load-bearing:
+
+    * **The arm is selected by the AUTHENTICATED PRINCIPAL, never by the raw
+      ``X-Source-Agent`` header.** The SELF-EXEC-001 spoof guard in
+      ``derive_source_and_trigger`` only fires when ``current_user.agent_name``
+      is set, so for a human caller the header is unvalidated client input
+      (``routers/chat.py`` documents the identical trap for the resume-session
+      IDOR). Keying the agent arm off the header let any human satisfy it by
+      naming the parent's own agent — the row itself tells you that name — which
+      turned the human arm into a no-op. ``x_source_agent`` is therefore
+      logged, never trusted.
+    * **The human arm is owner-or-admin (``can_user_share_agent``), not any
+      accessor.** Posting into a channel chat is a proactive-send capability,
+      and every other proactive surface is owner-gated (`OwnedAgentByName` for
+      group sends) or per-recipient-consented (#321). A share recipient can
+      already read the owner's execution ids (`GET /api/executions` is
+      accessor-scoped), so an accessor arm would let them route a report into
+      the owner's Telegram DM or group.
+
+    Fail-open: any miss returns (None, None, None, None) and behaviour is
+    unchanged.
     """
     parent_id = getattr(request, "parent_execution_id", None)
     if not parent_id:
-        return (None, None, None)
+        return _NO_INHERITED_CONTEXT
     try:
         from database import db
         parent = db.get_execution(parent_id)
         if parent is None:
-            return (None, None, None)
+            return _NO_INHERITED_CONTEXT
+        parent_agent = getattr(parent, "agent_name", None)
+        # --- Provenance guard (principal-selected arms) -------------------
+        if current_user is None:
+            logger.info(
+                "[ent#265] channel-context inheritance refused: no caller "
+                "principal to evaluate against parent execution %s", parent_id,
+            )
+            return _NO_INHERITED_CONTEXT
+        if getattr(current_user, "connector_agent", None):
+            logger.info(
+                "[ent#265] channel-context inheritance refused: connector keys "
+                "are consumption-only (parent execution %s)", parent_id,
+            )
+            return _NO_INHERITED_CONTEXT
+        agent_principal = getattr(current_user, "agent_name", None)
+        if agent_principal:
+            if parent_agent != agent_principal:
+                logger.info(
+                    "[ent#265] channel-context inheritance refused: parent "
+                    "execution %s belongs to '%s', caller agent is '%s' "
+                    "(header claimed '%s')",
+                    parent_id, parent_agent, agent_principal, x_source_agent,
+                )
+                return _NO_INHERITED_CONTEXT
+        elif not db.can_user_share_agent(current_user.username, parent_agent):
+            logger.info(
+                "[ent#265] channel-context inheritance refused: caller "
+                "'%s' does not own parent agent '%s' (execution %s, header "
+                "claimed '%s')",
+                current_user.username, parent_agent, parent_id, x_source_agent,
+            )
+            return _NO_INHERITED_CONTEXT
+        src_channel = getattr(parent, "source_channel", None)
+        if not src_channel:
+            return _NO_INHERITED_CONTEXT
         return (
-            getattr(parent, "source_channel", None),
+            src_channel,
             getattr(parent, "source_channel_chat_id", None),
             getattr(parent, "source_channel_thread", None),
+            getattr(parent, "source_channel_agent", None) or parent_agent,
         )
     except Exception:  # noqa: BLE001 — never fail a dispatch over provenance
-        return (None, None, None)
+        return _NO_INHERITED_CONTEXT
 
 
 async def run_async_task(
@@ -751,15 +833,15 @@ async def run_async_task(
     # signaled even if the post-task side effects below raise.
     result = None
     chat_session_id = None
-    _src_ch, _src_chat, _src_thread = _inherited_channel_context(request)
+    # ent#265 (D0): inherited channel context is persisted at ROW CREATION
+    # (create_task_execution_and_activities) — threading it into execute_task
+    # here was dead code, because the pre-created execution_id skips the
+    # creation branch that writes the channel columns.
     try:
         result = await task_service.execute_task(
             agent_name=agent_name,
             message=request.message,
             triggered_by=triggered_by,
-            source_channel=_src_ch,
-            source_channel_chat_id=_src_chat,
-            source_channel_thread=_src_thread,
             source_user_id=user_id,
             source_user_email=user_email,
             source_agent_name=x_source_agent,
@@ -1008,6 +1090,15 @@ async def create_task_execution_and_activities(
     except Exception:
         subscription_id = None
 
+    # ent#224/ent#265 (D0): resolve inherited channel context HERE, at the
+    # single row-creation point both the async and sync /task branches route
+    # through, and persist it on the row itself. The provenance guard evaluates
+    # the AUTHENTICATED principal (current_user) — x_source_agent is passed for
+    # logging only, because for a human caller it is unvalidated client input.
+    src_channel, src_chat_id, src_thread, src_channel_agent = _inherited_channel_context(
+        request, current_user=current_user, x_source_agent=x_source_agent,
+    )
+
     execution = db.create_task_execution(
         agent_name=name,
         message=request.message,
@@ -1019,6 +1110,10 @@ async def create_task_execution_and_activities(
         source_mcp_key_name=x_mcp_key_name,
         model_used=request.model,
         subscription_id=subscription_id,
+        source_channel=src_channel,
+        source_channel_chat_id=src_chat_id,
+        source_channel_thread=src_thread,
+        source_channel_agent=src_channel_agent,
     )
     execution_id = execution.id if execution else None
     idempotency_service.attach_execution(idem, execution_id)

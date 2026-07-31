@@ -42,11 +42,15 @@ const routes = [
     component: () => import('../views/Dashboard.vue'),
     meta: { requiresAuth: true, title: 'Dashboard' }
   },
+  // trinity-enterprise#260 — the standalone Agents page is retired; its list
+  // lives on as the Dashboard's List mode. Query-preserving function redirect
+  // (#1109 /operating-room precedent): `?view=list` is a one-shot,
+  // NON-persisting intent the Dashboard applies then strips — it never
+  // rewrites the user's saved view selection. Exact-segment matching leaves
+  // /agents/:name and deeper routes untouched.
   {
     path: '/agents',
-    name: 'Agents',
-    component: () => import('../views/Agents.vue'),
-    meta: { requiresAuth: true, title: 'Agents' }
+    redirect: to => ({ path: '/', query: { ...to.query, view: 'list' } })
   },
   // #1109 — Health consolidated into the Operations "Health" tab.
   // Redirect preserves bookmarks; the tab is admin-gated inside Operations.vue.
@@ -110,11 +114,20 @@ const routes = [
   // REMOVED: /files route - file management is now per-agent via Files tab in AgentDetail
   // REMOVED: /credentials route - credentials are now managed per-agent only
   // Old global credential management is replaced by per-agent CredentialsPanel
+  // ent#263 — Templates page renamed to Library: one surface for installable
+  // assets (agent templates + the skills library).
+  {
+    path: '/library',
+    name: 'Library',
+    component: () => import('../views/Library.vue'),
+    meta: { requiresAuth: true, title: 'Library' }
+  },
+  // Legacy redirect — function form so query AND hash survive the hop (the
+  // #1109 precedent preserves query only; hash carry added here for the
+  // Library's in-page section anchors).
   {
     path: '/templates',
-    name: 'Templates',
-    component: () => import('../views/Templates.vue'),
-    meta: { requiresAuth: true, title: 'Templates' }
+    redirect: to => ({ path: '/library', query: to.query, hash: to.hash })
   },
   // Legacy redirect: Events consolidated into the Operations Notifications tab (#1109)
   {

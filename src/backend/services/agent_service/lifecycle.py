@@ -218,7 +218,12 @@ async def inject_assigned_skills(agent_name: str) -> dict:
 
     if not skill_names:
         logger.debug(f"No assigned skills for agent {agent_name}")
-        return {"status": "skipped", "reason": "no_skills"}
+        # ent#236: NOT an early return any more. "Zero assigned skills" is
+        # exactly the state left behind by unassigning the last skill while the
+        # agent was stopped — returning here would strand that package on the
+        # agent permanently, which is the precise gap this closes.
+        reconcile = await skill_service.reconcile_agent_skills(agent_name, [])
+        return {"status": "skipped", "reason": "no_skills", "reconcile": reconcile}
 
     logger.info(f"Injecting {len(skill_names)} skills into agent {agent_name}: {skill_names}")
 
@@ -231,6 +236,11 @@ async def inject_assigned_skills(agent_name: str) -> dict:
     except SkillInjectionBusy:
         return {"status": "skipped", "reason": "injection_already_running"}
 
+    # ent#236: reconcile AFTER injection, and outside the injection lock — both
+    # take the same per-agent lock, so reconciling first (or inside) would
+    # deadlock against the injection that just ran. Never raises.
+    reconcile = await skill_service.reconcile_agent_skills(agent_name, skill_names)
+
     warning_count = sum(
         len(r.get("warnings") or []) for r in result.get("results", {}).values()
     )
@@ -241,6 +251,7 @@ async def inject_assigned_skills(agent_name: str) -> dict:
             "skills_unchanged": result.get("skills_unchanged", 0),
             "skills_warnings": warning_count,
             "results": result.get("results", {}),
+            "reconcile": reconcile,
         }
     else:
         injected = result.get("skills_injected", 0) + result.get("skills_unchanged", 0)
@@ -250,7 +261,8 @@ async def inject_assigned_skills(agent_name: str) -> dict:
             "skills_unchanged": result.get("skills_unchanged", 0),
             "skills_failed": result.get("skills_failed", 0),
             "skills_warnings": warning_count,
-            "results": result.get("results", {})
+            "results": result.get("results", {}),
+            "reconcile": reconcile,
         }
 
 
@@ -464,6 +476,28 @@ async def start_agent_internal(agent_name: str) -> dict:
         # whitelist of keys (#1809's own learning), so this is surfaced there too.
         "recreate_deferred": recreate_deferred,
     }
+
+
+async def restart_agent_internal(agent_name: str, *, stop_timeout: int = 30) -> dict:
+    """The canonical cold restart: explicit stop, then the full start path (#1860).
+
+    The explicit stop is load-bearing — the #1809 image-drift predicate runs
+    only on a COLD start (``not was_already_running``), so a restart that
+    should adopt a rebuilt base image must stop first; ``start_agent_internal``
+    on a running agent is a deliberate idempotent no-op. This helper is the one
+    home for the stop→start shape (routers/system_agent.py, routers/systems.py
+    and subscription_auto_switch still carry inline copies — consolidating them
+    is #1817's business, together with the per-agent start lock, which belongs
+    in here once it exists).
+
+    A missing container falls through to ``start_agent_internal``, which either
+    rebuilds it from persisted config (#1559, live ownership row) or 404s.
+    Returns ``start_agent_internal``'s result dict unchanged.
+    """
+    container = get_agent_container(agent_name)
+    if container:
+        await container_stop(container, timeout=stop_timeout)
+    return await start_agent_internal(agent_name)
 
 
 async def recreate_container_with_updated_config(

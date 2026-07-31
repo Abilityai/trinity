@@ -267,7 +267,9 @@ the data-loss setup.
   - **green**: last sync < 24 h AND status success AND
     `behind_working === 0`.
 - `stores/agents.js::fetchSyncHealth()` calls `/api/agents/sync-health`
-  on mount; `views/Agents.vue` renders the dot next to each agent.
+  on mount; `components/AgentListPanel.vue` (the Dashboard List mode —
+  ent#260 retired the Agents page into it) renders the dot next to each
+  agent, with a 60s visibility-aware refresh while the mode is active.
 
 ## Files Touched
 
@@ -304,7 +306,7 @@ the data-loss setup.
 |------|---------|
 | `stores/agents.js` | `syncHealth` state + `fetchSyncHealth()` action |
 | `utils/syncHealth.js` | `classifySyncHealth`, `syncHealthColor`, `syncHealthLabel` |
-| `views/Agents.vue` | Renders the dot + imports helpers + fetches on mount |
+| `components/AgentListPanel.vue` | Renders the dot + imports helpers + fetches on mount + 60s visibility-aware refresh (ent#260 — replaces the retired `views/Agents.vue`) |
 
 ## Testing
 
