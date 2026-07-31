@@ -17,6 +17,7 @@ covered HERE, mocked, per the `test_1816_system_agent_adoption.py` pattern.
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -130,6 +131,7 @@ def test_drift_recreate_is_surfaced_per_agent_and_in_summary(ops, monkeypatch):
 
     assert out["summary"] == {
         "total": 2, "successes": 2, "failures": 0, "skipped": 0, "recreated": 2,
+        "processed": 2, "stopped_early": None,  # #1919 partial-run honesty keys
     }
     for entry, name in zip(out["results"], ("a1", "a2")):
         assert entry["agent"] == name
@@ -315,6 +317,9 @@ def _lock_client(set_result=True):
 
     client.set.side_effect = _set
     client.get.side_effect = lambda key: store.get(key)
+    # #1919: the backing dict, exposed so tests can simulate a takeover /
+    # expiry between iterations (store[key] = "foreign", store.pop(key)).
+    client.store = store
     return client
 
 
@@ -355,6 +360,265 @@ def test_redis_down_fails_open_and_still_restarts(ops, monkeypatch):
 
     assert out["summary"]["successes"] == 1
     client.delete.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# #1919 — ownership-checked lease refresh + loss detection
+# ---------------------------------------------------------------------------
+
+
+def _two_agents(ops, monkeypatch):
+    monkeypatch.setattr(
+        ops, "list_all_agents_fast", lambda: [_Agent("a1"), _Agent("a2")]
+    )
+
+
+def test_1919_two_agent_happy_path_refreshes_own_lease_each_iteration(
+    ops, monkeypatch
+):
+    """Baseline that makes a spurious break detectable: every prior lock test
+    ran a 1-agent fleet, so 'loop completed' and 'loop broke after agent 1'
+    were indistinguishable. An implementation classifying every GET as foreign
+    passes all loss tests — but not this one."""
+    _two_agents(ops, monkeypatch)
+    client = _lock_client(set_result=True)
+    monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
+
+    out = _call(ops)
+
+    assert out["summary"]["successes"] == 2
+    assert out["summary"]["processed"] == 2
+    assert out["summary"]["stopped_early"] is None
+    assert client.expire.call_count == 2  # ownership-checked refresh per agent
+    client.set.assert_called_once()       # no re-acquire on the happy path
+    client.delete.assert_called_once_with(ops._FLEET_RESTART_LOCK_KEY)
+
+
+def test_1919_foreign_token_stops_loop_and_release_leaves_it(ops, monkeypatch):
+    """A concurrent caller took the lock after our lease lapsed: the loop must
+    stop BEFORE the next destructive restart, report the partial run honestly,
+    and the compare-and-delete release must not touch the foreign token."""
+    _two_agents(ops, monkeypatch)
+    client = _lock_client(set_result=True)
+    monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
+
+    def _restart_then_takeover(name):
+        # Simulate TTL lapse + second caller acquiring while a1 restarts.
+        client.store[ops._FLEET_RESTART_LOCK_KEY] = "intruder-token"
+        return dict(_START_OK)
+
+    monkeypatch.setattr(
+        ops, "restart_agent_internal", AsyncMock(side_effect=_restart_then_takeover)
+    )
+
+    out = _call(ops)
+
+    assert out["summary"]["successes"] == 1          # a1 done, a2 never touched
+    assert out["summary"]["processed"] == 1
+    assert out["summary"]["total"] == 2
+    assert out["summary"]["stopped_early"] == "lease_lost_foreign"
+    assert [r["agent"] for r in out["results"]] == ["a1"]
+    ops.restart_agent_internal.assert_awaited_once()
+    client.delete.assert_not_called()                # foreign token untouched
+    details = ops.platform_audit_service.log.await_args.kwargs["details"]
+    assert details["stopped_early"] == "lease_lost_foreign"
+    assert details["processed"] == 1
+
+
+def test_1919_absent_token_reacquires_and_continues(ops, monkeypatch):
+    """Lease lapsed but NOBODY took it: nothing is racing us, so the run
+    re-acquires with its own token and completes instead of aborting a
+    half-done destructive operation."""
+    _two_agents(ops, monkeypatch)
+    client = _lock_client(set_result=True)
+    monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
+
+    def _restart_then_expiry(name):
+        if name == "a1":  # the lease lapses once, while a1 restarts
+            client.store.pop(ops._FLEET_RESTART_LOCK_KEY, None)
+        return dict(_START_OK)
+
+    monkeypatch.setattr(
+        ops, "restart_agent_internal", AsyncMock(side_effect=_restart_then_expiry)
+    )
+
+    out = _call(ops)
+
+    assert out["summary"]["successes"] == 2
+    assert out["summary"]["stopped_early"] is None
+    # initial acquire + one re-acquire, both SETNX
+    assert client.set.call_count == 2
+    assert all(c.kwargs.get("nx") is True for c in client.set.call_args_list)
+    details = ops.platform_audit_service.log.await_args.kwargs["details"]
+    assert details["lease_reacquired"] is True
+    client.delete.assert_called_once_with(ops._FLEET_RESTART_LOCK_KEY)
+
+
+def test_1919_absent_token_losing_the_reacquire_race_stops(ops, monkeypatch):
+    """Absent at GET, but a second caller wins the SETNX between our read and
+    our re-acquire: that is a foreign holder — stop."""
+    _two_agents(ops, monkeypatch)
+    client = _lock_client(set_result=True)
+    monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
+
+    set_calls = {"n": 0}
+
+    def _set_then_lose(key, val, nx=None, ex=None):
+        set_calls["n"] += 1
+        if set_calls["n"] == 1:      # initial acquire wins
+            client.store[key] = val
+            return True
+        return False                 # re-acquire loses the race
+
+    client.set.side_effect = _set_then_lose
+
+    def _restart_then_expiry(name):
+        client.store.pop(ops._FLEET_RESTART_LOCK_KEY, None)
+        return dict(_START_OK)
+
+    monkeypatch.setattr(
+        ops, "restart_agent_internal", AsyncMock(side_effect=_restart_then_expiry)
+    )
+
+    out = _call(ops)
+
+    assert out["summary"]["successes"] == 1
+    assert out["summary"]["stopped_early"] == "lease_lost_foreign"
+    client.delete.assert_not_called()
+
+
+def test_1919_refresh_redis_error_fails_open_and_release_still_runs(
+    ops, monkeypatch, caplog
+):
+    """A Redis blip during the refresh is NOT lease loss (fail-open, AC4) —
+    and the error must be scoped to the refresh: the release at the end still
+    sees Redis healthy and MUST delete, or a green test certifies a TTL-long
+    lock leak. Exactly one throttled warning for the whole run."""
+    _two_agents(ops, monkeypatch)
+    client = _lock_client(set_result=True)
+    monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
+
+    gate_gets = {"n": 0}
+
+    def _get_blipping(key):
+        gate_gets["n"] += 1
+        if gate_gets["n"] <= 2:      # the two in-loop gate reads fail
+            raise RuntimeError("redis blip")
+        return client.store.get(key)  # the release read succeeds
+
+    client.get.side_effect = _get_blipping
+
+    with caplog.at_level(logging.WARNING, logger="routers.ops"):
+        out = _call(ops)
+
+    assert out["summary"]["successes"] == 2
+    assert out["summary"]["stopped_early"] is None
+    client.delete.assert_called_once_with(ops._FLEET_RESTART_LOCK_KEY)
+    warns = [r for r in caplog.records if "failing open" in r.message]
+    assert len(warns) == 1  # throttled: one warning, not one per agent
+
+
+def test_1919_expire_returning_zero_is_treated_as_absent(ops, monkeypatch):
+    """Key vanished in the GET→EXPIRE sliver: EXPIRE returns 0 and creates
+    nothing — the gate must not sail on believing it holds a lock. Routed to
+    the absent path: re-acquire and continue."""
+    client = _lock_client(set_result=True)
+    monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
+    client.expire.return_value = 0
+
+    out = _call(ops)
+
+    assert out["summary"]["successes"] == 1
+    assert client.set.call_count == 2  # initial + re-acquire
+    details = ops.platform_audit_service.log.await_args.kwargs["details"]
+    assert details["lease_reacquired"] is True
+
+
+def test_1919_expire_raising_fails_open(ops, monkeypatch):
+    _two_agents(ops, monkeypatch)
+    client = _lock_client(set_result=True)
+    monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
+    client.expire.side_effect = RuntimeError("redis blip")
+
+    out = _call(ops)
+
+    assert out["summary"]["successes"] == 2
+    assert out["summary"]["stopped_early"] is None
+    client.delete.assert_called_once_with(ops._FLEET_RESTART_LOCK_KEY)
+
+
+def test_1919_foreign_token_on_first_iteration_processes_nothing(
+    ops, monkeypatch
+):
+    client = _lock_client(set_result=True)
+    monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
+    client.get.side_effect = lambda key: "intruder-token"
+
+    out = _call(ops)
+
+    assert out["results"] == []
+    assert out["summary"]["processed"] == 0
+    assert out["summary"]["total"] == 1
+    assert out["summary"]["stopped_early"] == "lease_lost_foreign"
+    ops.restart_agent_internal.assert_not_awaited()
+    client.delete.assert_not_called()
+
+
+def test_1919_bytes_token_from_an_undecoded_client_still_matches(
+    ops, monkeypatch
+):
+    """get_breaker_redis sets decode_responses=True, so bytes is not a live
+    path — but the shared helper keeps the shipped release comparison's
+    belt-and-braces bytes branch, and it must not be untested dead code."""
+    client = _lock_client(set_result=True)
+    monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
+    client.get.side_effect = lambda key: (
+        v.encode() if isinstance(v := client.store.get(key), str) else v
+    )
+
+    out = _call(ops)
+
+    assert out["summary"]["successes"] == 1
+    assert out["summary"]["stopped_early"] is None
+    client.expire.assert_called_once()
+    client.delete.assert_called_once_with(ops._FLEET_RESTART_LOCK_KEY)
+
+
+def test_1919_loss_warning_names_state_not_token_values(ops, monkeypatch, caplog):
+    client = _lock_client(set_result=True)
+    monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
+    client.get.side_effect = lambda key: "intruder-secret-value"
+
+    with caplog.at_level(logging.WARNING, logger="routers.ops"):
+        _call(ops)
+
+    loss_warns = [r for r in caplog.records if "lease lost" in r.message]
+    assert len(loss_warns) == 1
+    rendered = loss_warns[0].getMessage()
+    assert "token state: foreign" in rendered
+    assert "intruder-secret-value" not in rendered
+
+
+def test_1919_listing_failure_inside_try_still_releases_lock(ops, monkeypatch):
+    """list_all_agents_fast cannot raise today (it swallows to []) — this
+    guards the acquire-inside-try move: any future raise between acquire and
+    the loop must release the lock and write a distinguishable audit row, not
+    leak a TTL-long fleet lockout."""
+    client = _lock_client(set_result=True)
+    monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
+    monkeypatch.setattr(
+        ops, "list_all_agents_fast", MagicMock(side_effect=RuntimeError("boom"))
+    )
+
+    with pytest.raises(RuntimeError):
+        _call(ops)
+
+    client.delete.assert_called_once_with(ops._FLEET_RESTART_LOCK_KEY)
+    ops.invalidate_context_stats_cache.assert_called_once()
+    details = ops.platform_audit_service.log.await_args.kwargs["details"]
+    assert details["total"] == 0
+    assert details["stopped_early"] == "error"
+    assert details["error"] == "RuntimeError"
 
 
 # ---------------------------------------------------------------------------

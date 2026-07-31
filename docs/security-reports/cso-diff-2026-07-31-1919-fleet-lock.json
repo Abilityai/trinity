@@ -1,0 +1,56 @@
+{
+  "version": "1.1",
+  "date": "2026-07-31",
+  "mode": "daily",
+  "scope": "--diff (feature/1919-fleet-lock-hardening vs merge-base a4eac445 of dev)",
+  "phases_run": [0, 1, 2, 5, 6, 9, 10, 12, 13, 14],
+  "phases_no_surface": {
+    "3_dependencies": "no dependency-file changes in diff",
+    "4_cicd": "no workflow changes in diff",
+    "7_llm_ai": "no prompt/tool/frontend-render surface in diff",
+    "8_skills": "no .claude/skills changes in diff",
+    "11_data_classification": "no new data category introduced (lock token = server-minted uuid4 nonce, INTERNAL)"
+  },
+  "attack_surface": {
+    "endpoints_changed": 1,
+    "endpoints_new": 0,
+    "endpoint": "POST /api/ops/fleet/restart (admin + human-only; auth deps untouched by diff — 0 auth-gate lines in the 98 added ops.py lines)",
+    "new_inputs": 0,
+    "new_response_fields": ["summary.processed", "summary.stopped_early"],
+    "new_audit_fields": ["processed", "stopped_early", "error (exception class name only)", "lease_reacquired"],
+    "files_in_scope": [
+      "src/backend/routers/ops.py",
+      "src/backend/redis_breaker_util.py",
+      "tests/unit/test_1860_fleet_restart_adoption.py",
+      "docs/memory/architecture.md",
+      "docs/memory/feature-flows/agent-lifecycle.md",
+      "docs/memory/feature-flows/mobile-admin-pwa.md",
+      "docs/memory/learnings.md"
+    ]
+  },
+  "findings": [],
+  "checks_performed": [
+    "P2 secrets: pattern grep over all added diff lines (AKIA/sk-/ghp_/gho_/github_pat_/xox/whsec_/PRIVATE KEY/password=/secret=) — clean; only test-fixture placeholders ('intruder-token', 'intruder-secret-value') in tests/, excluded per FP rule 8",
+    "P2 enterprise-docs guard: diff touches neither seam file (main.py, entitlement_service.py); doc edits describe OSS lock mechanics only — no paid-module tokens",
+    "P2 backlog_metadata G-04 class: diff writes no persisted plaintext blobs (audit details carry counts/state/class-name only)",
+    "P5 Redis: new commands via get_breaker_redis (backend ACL user) are GET/SET-NX/EXPIRE/DEL data ops — inside the existing -@dangerous grant; lock key is a module constant (ops:fleet_restart), no user-controlled key material; fleet-scoped, platform-network-only reachability unchanged (#589 — agents cannot reach Redis)",
+    "P5 vendored parity: neither redis_breaker_util.py nor ops.py is a vendored base-image policy file — Invariant #5 not in play",
+    "P6 internal/webhook/agent-key surfaces: none in diff",
+    "P9 A01: assert_admin (ops.py:256) + reject_agent_principal (ops.py:265) untouched context — verified 0 auth lines in diff hunks; new fields flow only to the admin-only response and admin-only audit-log surfaces; no IDOR/enumeration surface (no agent-name differential changed)",
+    "P9 A02: lock token remains server-minted uuid4().hex (128-bit); lock_token_matches uses == (non-constant-time) — assessed NOT a finding: server-internal comparison of a non-authentication nonce guarding a 409, attacker neither controls nor observes per-byte timing",
+    "P9 A03: no SQL, no subprocess, no user input in new code paths; log format strings are fixed with int/literal args ('foreign'/'absent') — token values never interpolated (ops.py:343-350), regression-locked by test_1919_loss_warning_names_state_not_token_values",
+    "P9 A09: logging improved — loss/re-acquire warnings + audit honesty fields; exception exposure follows the #1912 rule: audit carries e.__class__.__name__ only (ops.py:497-498), HTTP response on abnormal exit is the framework 500 with no exception content",
+    "P10 STRIDE (lock, brief): spoof/tamper require Redis write access (platform network + ACL password); info disclosure limited to admin surfaces; DoS excluded per hard rule 1 (and forcing lease-loss aborts requires Redis access); no privilege elevation path",
+    "P12: zero findings survived — no verifier subagents required"
+  ],
+  "supply_chain_summary": "no dependency changes",
+  "filter_stats": {"candidates_considered": 2, "discarded": 2, "discard_reasons": ["non-constant-time nonce compare: no exploit path (server-internal, non-auth)", "lease-loss abort as DoS primitive: hard exclusion 1 + requires Redis access"]},
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+  "trend": {
+    "prior_report": "cso-diff-2026-07-31-1860-fleet-restart.json",
+    "prior_totals": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+    "resolved": 0, "persistent": 0, "new": 0,
+    "direction": "flat (0 → 0) — second consecutive clean diff audit on this endpoint family"
+  },
+  "verdict": "PASS"
+}
