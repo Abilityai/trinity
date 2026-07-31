@@ -508,8 +508,14 @@ function applyDeepLinkFilters() {
   const tags = tagsParam.split(',').map(t => t.trim().toLowerCase()).filter(Boolean)
   if (!tags.length) return
 
-  // An active system view owns the filter, so don't fight it.
-  if (systemViewsStore.activeViewId) return
+  // An explicit ?tags= wins over a PERSISTED view selection, exactly as picking a
+  // tag chip does (`toggleQuickTag` clears the selection for the same reason).
+  // Bailing out instead would silently no-op the post-deploy "View this fleet"
+  // link for anyone who happens to have a view selected from a previous session —
+  // `initialize()` above restores it from localStorage before this runs, and the
+  // `activeFilterTags` watcher would then overwrite these tags once the views
+  // load. That is a dead end for AC #5, not deference.
+  systemViewsStore.clearSelection()
 
   selectedQuickTags.value = tags
   networkStore.setFilterTags([...tags])

@@ -260,7 +260,8 @@ import { useSystemsStore } from '../../stores/systems'
 import ManifestPreview from './ManifestPreview.vue'
 import DeployResult from './DeployResult.vue'
 
-// Mirrors the server-side Field(max_length=...) on SystemDeployRequest.manifest.
+// Mirrors the server-side byte cap on SystemDeployRequest.manifest. `file.size`
+// is in bytes and so is the server's validator, so the two agree exactly.
 // Client-side this is only a courtesy — the server is the enforcement point.
 const MANIFEST_MAX_BYTES = 256 * 1024
 
@@ -287,7 +288,11 @@ const deployHint = computed(() => {
   if (store.isDeploying) return 'This can take a minute per agent — do not close the page.'
   if (!store.manifestText.trim()) return ''
   if (!store.previewIsCurrent) {
-    return store.preview
+    // `previewedText`, not `preview`: editing clears the preview PAYLOAD, so
+    // keying on it made this branch unreachable and told someone who had just
+    // previewed to "Preview first". The marker outlives the payload precisely so
+    // these two states stay distinguishable.
+    return store.previewedText
       ? 'The manifest changed — preview again before deploying.'
       : 'Preview first to see what this would create.'
   }

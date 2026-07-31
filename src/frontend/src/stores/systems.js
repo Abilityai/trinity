@@ -138,9 +138,16 @@ export const useSystemsStore = defineStore('systems', () => {
   )
 
   // --- internal ------------------------------------------------------------
+  // Clears the preview PAYLOAD only. `previewedText` deliberately survives: it is
+  // the "something has been previewed" marker that lets the UI tell "you have not
+  // previewed yet" apart from "your preview is stale". Clearing both made the
+  // stale-preview hint unreachable dead code, so an edit after a successful
+  // preview told the user to "Preview first" — as if they never had.
+  //
+  // It cannot re-enable Deploy on its own: `previewIsCurrent` requires a non-null
+  // `preview` too, and that IS cleared here.
   function invalidatePreview () {
     preview.value = null
-    previewedText.value = null
   }
 
   function setManifestText (text) {
@@ -155,6 +162,9 @@ export const useSystemsStore = defineStore('systems', () => {
   function reset () {
     manifestText.value = ''
     invalidatePreview()
+    // Start-over is the one path that also drops the marker: in the new context
+    // nothing has been previewed, so "Preview first" is the honest hint again.
+    previewedText.value = null
     deployResult.value = null
     outcomeUnknown.value = null
     error.value = null
@@ -231,12 +241,10 @@ export const useSystemsStore = defineStore('systems', () => {
         previewedText.value = text
         return normalized.data
       }
-      if (normalized.kind === 'unknown-outcome') {
-        // A dry run has no side effects, so this is just a failure.
-        error.value = normalized.message
-      } else {
-        error.value = normalized.message
-      }
+      // Every remaining kind is just a failure here, `unknown-outcome` included:
+      // a dry run creates nothing, so there is no in-flight work to warn about
+      // and nothing to make a retry unsafe. Only `deploy` needs that distinction.
+      error.value = normalized.message
       return null
     } finally {
       isLoading.value = false

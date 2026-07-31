@@ -95,8 +95,16 @@ test.describe('System install surface', () => {
     await expect(page.getByText('No blockers found')).toBeVisible()
 
     // Resolved agent names (AC #2) — from the backend, not a client-side parse.
-    await expect(page.getByText('e2e-preview-only-alpha')).toBeVisible()
-    await expect(page.getByText('e2e-preview-only-beta')).toBeVisible()
+    // Scoped to the agents section: a full-mesh manifest with schedules renders
+    // each name in four places (agents table, both topology columns, schedules
+    // table), so an unscoped getByText is a strict-mode violation. Scoping also
+    // makes this assert the name is in the AGENTS table specifically, rather than
+    // `.first()`, which would pass on whichever element happened to come first.
+    const agentsSection = page.locator('section').filter({
+      has: page.getByRole('heading', { name: /Agents to create/ }),
+    })
+    await expect(agentsSection.getByText('e2e-preview-only-alpha')).toBeVisible()
+    await expect(agentsSection.getByText('e2e-preview-only-beta')).toBeVisible()
 
     // full-mesh topology.
     await expect(page.getByRole('heading', { name: /Permissions/ })).toBeVisible()
@@ -258,5 +266,58 @@ test.describe('System install — deploy path', () => {
     expect(outcome.body.agents_created).toEqual([])
     expect(outcome.body.failed.length).toBeGreaterThan(0)
     expect(outcome.body.failed[0].reason).toBeTruthy()
+  })
+})
+
+/**
+ * AC #5 — the post-deploy "View this fleet" link lands the Dashboard filtered to
+ * the new system's tag.
+ *
+ * The trap is a PERSISTED view selection. `systemViewsStore.initialize()` restores
+ * `trinity-active-view` from localStorage on mount, BEFORE the deep link is read,
+ * so an early return that deferred to an active view made the link a silent no-op
+ * for anyone who had ever selected a view — the failure is invisible on a fresh
+ * profile and permanent on a real one. An explicit `?tags=` must win, exactly as
+ * clicking a tag chip does (`toggleQuickTag` clears the selection for the same
+ * reason). Asserted on localStorage rather than on tiles so it holds on a stack
+ * with no agents.
+ */
+test.describe('Dashboard system deep link', () => {
+  const VIEW_KEY = 'trinity-active-view'
+  const TAGS_KEY = 'trinity-dashboard-quick-tags'
+
+  async function seedPersistedView (page) {
+    // Must be on the app origin before localStorage is reachable.
+    await page.goto('/')
+    await page.evaluate(([viewKey, tagsKey]) => {
+      localStorage.setItem(viewKey, 'a-view-from-a-previous-session')
+      localStorage.removeItem(tagsKey)
+    }, [VIEW_KEY, TAGS_KEY])
+  }
+
+  test('?tags= wins over a view selection restored from localStorage', async ({ page }) => {
+    await seedPersistedView(page)
+    await page.goto('/?tags=e2e-deep-link')
+
+    // The stale selection is cleared rather than deferred to...
+    await expect
+      .poll(() => page.evaluate(k => localStorage.getItem(k), VIEW_KEY))
+      .toBeNull()
+    // ...and the link's tags are the filter that actually took effect.
+    await expect
+      .poll(() => page.evaluate(k => localStorage.getItem(k), TAGS_KEY))
+      .toBe(JSON.stringify(['e2e-deep-link']))
+  })
+
+  test('a restored view selection survives when there is no ?tags=', async ({ page }) => {
+    // The control. Without it the test above is also satisfied by clearing the
+    // selection unconditionally on every Dashboard mount, which would break the
+    // view sidebar's own persistence.
+    await seedPersistedView(page)
+    await page.goto('/')
+
+    await expect
+      .poll(() => page.evaluate(k => localStorage.getItem(k), VIEW_KEY))
+      .toBe('a-view-from-a-previous-session')
   })
 })
