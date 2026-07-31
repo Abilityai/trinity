@@ -419,7 +419,7 @@ Templates stored as JSON in `system_settings` table under key `github_templates`
 
 - **Upstream**: [first-time-setup.md](first-time-setup.md) - Initial admin password and API key configuration
 - **Downstream**: [template-processing.md](template-processing.md) - Uses GitHub PAT for private repo cloning
-- **Downstream**: [templates-page.md](templates-page.md) - Templates page uses configured list
+- **Downstream**: [library-page.md](library-page.md) - Library page (formerly Templates, ent#263) uses configured list
 - **Related**: [internal-system-agent.md](internal-system-agent.md) - Ops settings affect fleet health checks
 - **Related**: [ssh-access.md](ssh-access.md) - `ssh_access_enabled` setting controls MCP tool availability
 - **Related**: [agent-avatars.md](agent-avatars.md) - Default avatar generation endpoint and image generation pipeline (AVATAR-003)

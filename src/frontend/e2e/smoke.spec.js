@@ -12,12 +12,14 @@ import { test, expect } from '@playwright/test'
 test.describe('smoke', () => {
   test('@smoke dashboard renders for authenticated admin', async ({ page }) => {
     await page.goto('/')
-    // Top nav has Dashboard, Templates, Operations, Settings (+ entitled-only
-    // links on enterprise builds). The Agents entry was retired in
-    // trinity-enterprise#260 — the page is now the Dashboard's List mode.
-    // (Keys link removed in #302 — MCP keys now live in Settings → MCP Keys tab.)
+    // Top nav has Dashboard, Library, Operations, Settings (+ gated
+    // Enterprise/Sessions). The Agents entry was retired in
+    // trinity-enterprise#260 (now the Dashboard's List mode); Templates was
+    // renamed to Library in ent#263; Health/Ops/Executions merged into
+    // Operations (#1109); Keys link removed in #302 — MCP keys now live in
+    // Settings → MCP Keys tab.
     await expect(page.getByRole('link', { name: 'Dashboard', exact: true })).toBeVisible({ timeout: 10000 })
-    await expect(page.getByRole('link', { name: 'Templates', exact: true })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Library', exact: true })).toBeVisible()
     await expect(page.getByRole('link', { name: 'Settings', exact: true })).toBeVisible()
   })
 
@@ -41,9 +43,21 @@ test.describe('smoke', () => {
     await expect(page.getByRole('button', { name: 'Needs Response' })).toBeVisible()
   })
 
-  test('@smoke templates page loads', async ({ page }) => {
+  test('@smoke library page loads', async ({ page }) => {
+    // ent#263 — chrome-only anchors (page h1 + both section headings): the CI
+    // stack has no configured skills library, so never assert on skill/library
+    // DATA (the unconfigured empty state is the expected render), and never
+    // getByText(/library/i) (the nav link matches everywhere).
+    await page.goto('/library')
+    await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible({ timeout: 10000 })
+    await expect(page.getByRole('heading', { name: 'Agent Templates', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Skills', exact: true })).toBeVisible()
+  })
+
+  test('@smoke templates path redirects to library', async ({ page }) => {
+    // ent#263 — /templates is a legacy redirect (query+hash preserving).
     await page.goto('/templates')
-    await expect(page.getByText(/template/i).first()).toBeVisible({ timeout: 10000 })
+    await expect(page).toHaveURL(/\/library/, { timeout: 10000 })
   })
 
   test('@smoke monitoring page loads', async ({ page }) => {

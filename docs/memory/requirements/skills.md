@@ -33,7 +33,7 @@
 - **Key Features**:
   - Database stores assignments only (`agent_skills` table)
   - Bulk save via PUT `/api/agents/{name}/skills`; single assign/unassign via POST/DELETE `/api/agents/{name}/skills/{skill}` (owner-only)
-- **Note**: the Skills tab is hidden from Agent Detail (§22.2) — assignment is via REST/MCP only
+- **Note**: assignment surfaces — the Agent Detail **Skills tab** (visible since trinity-enterprise#235 / PR #1877, 2026-07-29; §22.2) plus REST/MCP. The Library page's skills section is browse-only, never a second assignment path (§22.3)
 
 ### 21.4 Skill Injection (Full Directory Packages)
 - **Status**: ✅ Implemented (trinity-enterprise#183, 2026-07-19; OSS-core by decision)
@@ -88,9 +88,22 @@
 - **Backend Proxy**: `GET /api/agents/{name}/playbooks`
 - **Frontend**: `PlaybooksPanel.vue` component
 
-### 22.2 Skills Tab (Platform Library) - Hidden
-- **Status**: ✅ Implemented (hidden)
-- **Description**: Platform-level skill library assignment (existing feature)
-- **Change**: Tab hidden from visibleTabs but component preserved for potential admin-only access
+### 22.2 Skills Tab (Platform Library)
+- **Status**: ✅ Implemented (visible — unhidden & rebuilt, trinity-enterprise#235 / PR #1877, 2026-07-29)
+- **Description**: Per-agent skill assignment from the platform library, on Agent Detail
+- **Key Features**: assigned-skills list with honest per-skill injection status (§21.4 results incl. warnings), assign/unassign against the library list, manual re-inject; agent-scoped store `stores/skills.js` (its `emptyReason` discriminator is agent-scoped — do not reuse it on fleet surfaces)
+- **History**: originally shipped hidden from `visibleTabs`; ent#235 rebuilt it and made it visible
+
+### 22.3 Library Page — Fleet Skills Browse (trinity-enterprise#263)
+- **Status**: ✅ Implemented (2026-07-31)
+- **Description**: The Library page (`/library`, core-agent.md §4.5) carries a fleet-level **browse** section over the shared skills library — read-only discovery, NOT a second assignment path (strategy epic trinity-enterprise#182: one skill model, no parallel mechanisms). Assignment stays on each agent's Skills tab (§22.2); cards link there via the agents list.
+- **Key Features**:
+  - Reads ONLY the existing surfaces: `GET /api/skills/library/status` + `GET /api/skills/library` (list fetched only when `configured` — the no-swallow rule: a fetch error renders as an error with retry, never a confident wrong "empty"); zero new endpoints
+  - Own Pinia store `stores/skillsLibrary.js`, deliberately separate from the agent-scoped `stores/skills.js`: `App.vue` KeepAlives AgentDetail, so `SkillsPanel`'s unmount-clear never fires on nav-away — shared refs would render the Library page's state (including fetch errors) inside the cached per-agent Skills tab
+  - Fleet-scoped 4-state empty discriminator: `unconfigured` (admin → Settings CTA; non-admin → "ask your admin"), `not_cloned` (configured, never synced → Sync CTA), `empty` (cloned, zero skills → "add a skill directory, then Sync"), plus error-carried-separately
+  - Sync-state header leads with disk-derived truth (`commit_sha` short + `skill_count` + branch); `last_sync` rendered only when truthy (it is per-worker in-memory state and reads null on the other uvicorn worker / after restart); admin-only **Sync now** with a 180s client timeout and ECONNABORTED → status re-fetch (client timeout ≠ server failure on a long first clone)
+  - Repo URL shown admin-only, **userinfo-stripped** (the clone path accepts and stores `https://user:token@host/...` verbatim), labeled "Primary source", and hidden when `status.sources` reports >1 source (ent#237 / PR #1901 forward-compat); dormant `source_name`/`shadowed_by` render slots light up when #1901 lands
+  - Per-skill cards render the §21.6 contract via the shared chips seam `components/skills/{SkillContractChips.vue, contract.js}` (extracted from `SkillsPanel.vue` so both surfaces render package facts from ONE seam); interpolation only — no `v-html`, no `:href` bound to library-derived strings (skills come from a synced repo — semi-trusted)
+- **Not Built**: fleet assignment read ("assigned to N agents" per skill — needs a `GET /api/skills/assignments` aggregate); per-source display (post-#1901)
 
 ---

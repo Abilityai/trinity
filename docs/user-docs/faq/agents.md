@@ -16,7 +16,7 @@ Yes. A `github:owner/repo` template that points at a **public** repository clone
 
 ## Do I need to write my own template to create an agent?
 
-No. The Templates page ships a curated **Starter Templates** section (recommended starters: `scout`, `sage`, `scribe`) auto-discovered from the platform's `config/agent-templates/` directory, plus any GitHub templates an admin has configured as cards. If you want a blank slate, choose **From Scratch** — it creates a minimal agent with a default `CLAUDE.md` you can build on. See [Creating Agents](../agents/creating-agents.md).
+No. The **Library** page (formerly Templates -- the old `/templates` path redirects to `/library`) ships a curated **Starter Templates** section (recommended starters: `scout`, `sage`, `scribe`) auto-discovered from the platform's `config/agent-templates/` directory, plus any GitHub templates an admin has configured as cards. If you want a blank slate, choose **From Scratch** — it creates a minimal agent with a default `CLAUDE.md` you can build on. See [Creating Agents](../agents/creating-agents.md).
 
 ## What goes in template.yaml?
 

@@ -329,8 +329,7 @@
 <script setup>
 import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
 import { useAgentsStore } from '../stores/agents'
-import axios from 'axios'
-import { useAuthStore } from '../stores/auth'
+import api from '../api'
 
 const props = defineProps({
   initialTemplate: {
@@ -341,7 +340,6 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'created'])
 const agentsStore = useAgentsStore()
-const authStore = useAuthStore()
 
 const form = reactive({
   name: '',
@@ -436,9 +434,9 @@ const fetchTemplates = async () => {
   templatesLoading.value = true
   templatesError.value = ''
   try {
-    const response = await axios.get('/api/templates', {
-      headers: authStore.authHeader
-    })
+    // Invariant #7 — shared api client (was the last raw-axios /api/templates
+    // consumer alongside the Library page, migrated together in ent#263).
+    const response = await api.get('/api/templates')
     templates.value = response.data
     // If a caller injected an initialTemplate that doesn't exist in this
     // deploy (e.g. the onboarding wizard prefilling `local:scout` on an

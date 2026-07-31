@@ -43,7 +43,10 @@
         <p class="font-medium text-gray-900 dark:text-gray-100">The library is configured but has no skills yet</p>
         <p class="mt-1 text-gray-500 dark:text-gray-400">
           Add a skill directory to the repository, then re-sync the library.
-          <span v-if="store.libraryStatus?.url" class="block mt-1 font-mono text-xs break-all">{{ store.libraryStatus.url }}</span>
+          <!-- ent#263 review: userinfo-stripped — this state renders to ANY
+               agent accessor and the clone path stores credentialed URLs
+               (https://user:token@host) verbatim. -->
+          <span v-if="store.libraryStatus?.url" class="block mt-1 font-mono text-xs break-all">{{ stripUserinfo(store.libraryStatus.url) }}</span>
         </p>
       </div>
     </template>
@@ -92,7 +95,7 @@
                   {{ resultFor(s.name).error }}
                 </p>
               </div>
-              <SkillMeta :skill="s" />
+              <SkillContractChips :skill="s" class="shrink-0" />
             </div>
           </li>
         </ul>
@@ -122,11 +125,9 @@
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2 flex-wrap">
                   <span class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ s.name }}</span>
-                  <span v-if="s.automation" class="text-[11px] px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300">{{ s.automation }}</span>
-                  <span v-if="!s.user_invocable" class="text-[11px] px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400" title="Runs automatically; a user cannot invoke it directly">not user-invocable</span>
+                  <SkillContractChips :skill="s" />
                 </div>
                 <p v-if="s.description" class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ s.description }}</p>
-                <SkillMeta :skill="s" class="mt-1" />
                 <!-- Declared dependencies, surfaced BEFORE assignment: this is
                      what turns into a missing_binary/missing_env warning later. -->
                 <p v-if="deps(s)" class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
@@ -152,9 +153,13 @@
 </template>
 
 <script setup>
-import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useSkillsStore } from '../stores/skills'
 import { useRole } from '../composables/useRole'
+// ent#263 shared contract seam — one rendering of the #183 package facts
+// consumed by BOTH this per-agent tab and the Library page's fleet browse.
+import SkillContractChips from './skills/SkillContractChips.vue'
+import { deps, stripUserinfo } from './skills/contract'
 
 const props = defineProps({
   agentName: { type: String, required: true },
@@ -167,31 +172,6 @@ const { isAdmin } = useRole()
 
 const draft = ref([])
 const savedNote = ref('')
-
-/** Small inline renderer for the package facts — same markup in both lists. */
-const SkillMeta = (p) => {
-  const s = p.skill
-  const bits = []
-  if (s.multi_file) bits.push(`${s.file_count} files`)
-  if (s.size_bytes) bits.push(formatBytes(s.size_bytes))
-  if (!bits.length) return null
-  return h('p', { class: 'text-[11px] text-gray-400 whitespace-nowrap' }, bits.join(' · '))
-}
-
-function formatBytes(n) {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / 1024 / 1024).toFixed(1)} MB`
-}
-
-function deps(s) {
-  const r = s.requires || {}
-  const parts = []
-  if (r.binaries?.length) parts.push(r.binaries.join(', '))
-  if (r.packages?.length) parts.push(r.packages.join(', '))
-  if (r.env?.length) parts.push(r.env.join(', '))
-  return parts.join(' · ') || null
-}
 
 function resultFor(name) {
   return store.injectionResults?.[name] || null
