@@ -254,6 +254,8 @@ Channel DB modules: `db/slack_channels.py` (workspace connections, channel-agent
 
 **Top-nav IA — Operations (#1109):** former Health/Ops/Executions nav entries are one **Operations** entry (`views/Operations.vue`, `/operations`) — a `?tab=`-driven view: Needs Response · Notifications · Health · Executions · Resolved. Tab content in embeddable `components/MonitoringPanel.vue` / `ExecutionsPanel.vue`; tabs toggle by `v-if` so store-owned polling tears down on leave. Health tab admin-gated. NavBar carries one unified badge (pending operator-queue + notifications, critical-pulse). Legacy `/monitoring`, `/executions`, `/operating-room`, `/events` redirect (query-preserving) to the matching tab.
 
+**Top-nav IA — Library (trinity-enterprise#263):** the former Templates nav entry is one **Library** entry (`views/Library.vue`, `/library`) — a single surface for installable assets: an **Agent Templates** section (the existing Starter/GitHub/Custom card grids) and a **Skills** section (`components/LibrarySkillsSection.vue` — fleet-level browse over the shared skills library, backed by the fleet-scoped `stores/skillsLibrary.js`, deliberately separate from the agent-scoped `stores/skills.js` whose KeepAlive'd Skills-tab consumer never unmounts on nav-away). Stacked sections with in-page jump anchors (no `?kind=` machinery); per-section failure isolation; per-kind empty states. The skills half reads only the existing `GET /api/skills/library` (+`/status`) surfaces and renders the #183 contract via the shared `components/skills/` chips seam consumed by both the Library and the per-agent Skills tab; assignment stays on Agent Detail (ent#182: one skill model). **No new backend endpoints.** Legacy `/templates` redirects (query+hash-preserving). See [library-page.md](feature-flows/library-page.md).
+
 **Tab overflow — `components/OverflowTabs.vue` (#1114):** reusable "priority+" tab strip for Agent Detail: a hidden mirror row measures each tab's width plus a worst-case "More" button; the visible row renders what fits and collapses the rest into a "More ▾" menu. Re-measures on resize + `document.fonts.ready`; all-inline before first measure (no first-paint snap). The trigger reflects an overflowed active tab. Keyboard/touch accessible, dark-mode aware; `v-model` over `activeTab` so `?tab=` deep-linking is unaffected.
 
 **Agent Detail Overview tab (#1107):** `components/OverviewPanel.vue` is the default landing tab — owns "trend over the last few days" while the persistent `AgentHeader` owns "now + cost" (no duplicate live gauges). Sections: About lead, needs-attention count + Operations link (hidden at zero), trend charts, health panel (uptime/latency clamped ≤7d by `agent_health_checks` retention), recent-activity drill-in, footprint chips. Charts: `StackedBarChart.vue` (CSS/flexbox) for executions-by-type; `TrendLineChart.vue` (uPlot) for line series. `InfoPanel.vue` leads with About + "What You Can Ask", `template.yaml` metadata behind a `<details>`.
@@ -918,12 +920,10 @@ The per-agent VoIP config + voice-picker UI lives in the agent Settings/Sharing 
 | POST | `/api/agents/{name}/git/reset-to-main-preserve-state` | Recovery reset — see [Git Sync Health](#git-sync-health-389390) |
 | GET | `/api/fleet/sync-audit` | Aggregate per-agent sync state + `duplicate_binding` flag (admins all; others accessible agents) |
 
-### Templates (4 endpoints)
+### Templates (2 endpoints)
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/templates` / `/api/templates/{id}` | List templates / template details |
-| GET | `/api/templates/env-template` | Env template |
-| POST | `/api/templates/refresh` | Refresh cache |
 
 ### Sharing & Access Control (#311, #951)
 | Method | Path | Description |

@@ -291,7 +291,7 @@
 | Flow | Document | Description |
 |------|----------|-------------|
 | Template Processing | [template-processing.md](feature-flows/template-processing.md) | GitHub and local template handling |
-| Templates Page | [templates-page.md](feature-flows/templates-page.md) | `/templates` route for browsing |
+| Library Page | [library-page.md](feature-flows/library-page.md) | `/library` — agent templates + fleet skills browse; legacy `/templates` redirects (trinity-enterprise#263) |
 | API Keys Page | [api-keys-page.md](feature-flows/api-keys-page.md) | `/api-keys` page UI flow |
 | Agents Page UI | [agents-page-ui-improvements.md](feature-flows/agents-page-ui-improvements.md) | Horizontal row tiles with success rate bars, filtering, responsive breakpoints |
 | Alerts Page | [alerts-page.md](feature-flows/alerts-page.md) | Removed in #430 (process engine deletion; cost alerts were PE-only) |

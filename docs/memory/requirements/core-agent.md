@@ -149,6 +149,17 @@
   - Create Agent modal renders templates carrying `fork_to_own` as **featured cards** (tagline surfaced from template.yaml) with destination/PAT/visibility fields.
 - **Out of scope (v1)**: MCP `create_agent` tool does not accept `fork_to_own` (tool args are audit-logged — a PAT arg would persist in plaintext); PAT expiry/rotation UX (sync-health alerts detect push failures); upstream-update UI affordance.
 
+### 4.5 Library Page (trinity-enterprise#263)
+- **Status**: ✅ Implemented (2026-07-31)
+- **Description**: The Templates page is renamed **Library** (`/library`) — one surface for installable assets: an **Agent Templates** section (the existing Starter/GitHub/Custom card grids) and a **Skills** section (fleet-level browse over the shared skills library — see skills.md §22.3). `/templates` redirects (function-form, query **and** hash preserved) so old bookmarks and deep links keep working.
+- **Key Features**:
+  - Stacked sections with in-page jump anchors ("Agent templates · Skills") — deliberately NO kind-filter pills and no `?kind=` query machinery (two disjoint section shapes)
+  - Per-section failure isolation: a templates fetch error never blanks the skills section and vice versa; each section owns its loading/error/empty states
+  - Per-kind empty states teach the next action (templates: config hint; skills: the 4-state discriminator in skills.md §22.3)
+  - Naming rule (AC#4 reading): page **identity** is Library — nav label, route path/name, `meta.title`, h1, e2e title assertions. The word "template" survives as the asset-kind noun (Starter/GitHub Templates section headers, Use Template buttons, `GET /api/templates` untouched)
+  - Zero backend change — the skills half is a *view over* the skills.md §21 machinery (`GET /api/skills/library` + `/status`, admin `POST .../sync`); no new endpoints, no schema change
+- **Not Built**: fleet-level assignment visibility (which agents carry each skill) — needs an aggregate read (e.g. `GET /api/skills/assignments`); cards link to the per-agent Skills tab via the agents list instead
+
 ---
 
 ## 5. Agent Chat & Terminal
