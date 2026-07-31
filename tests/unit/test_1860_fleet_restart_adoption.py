@@ -188,7 +188,12 @@ def test_one_agent_failing_never_aborts_the_loop_and_errors_are_legible(
     assert out["summary"]["successes"] == 1
     r1, r2, r3 = out["results"]
     assert r1["result"] == "failed" and r1["error"] == "404: Agent not found"
-    assert r2["result"] == "failed" and r2["error"] == "docker exploded"
+    # py/stack-trace-exposure (CodeQL, PR #1912): an unexpected exception's
+    # raw message must NEVER reach the response — class name only, full
+    # detail goes to the server log.
+    assert r2["result"] == "failed"
+    assert "RuntimeError" in r2["error"]
+    assert "docker exploded" not in r2["error"]
     assert r3["result"] == "success", "the loop must continue past failures"
 
 
@@ -208,7 +213,10 @@ def test_containerless_failure_names_the_1559_recovery_path(ops, monkeypatch):
 
     (entry,) = out["results"]
     assert entry["result"] == "failed"
-    assert "containers_run failed" in entry["error"]
+    # Class name + recovery hint surface; the raw exception message does not
+    # (py/stack-trace-exposure — see the failure-isolation test above).
+    assert "RuntimeError" in entry["error"]
+    assert "containers_run failed" not in entry["error"]
     assert "POST /api/agents/a1/start" in entry["error"]
 
 

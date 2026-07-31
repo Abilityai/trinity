@@ -394,9 +394,19 @@ async def restart_fleet(
                     failures += 1
             except Exception as e:
                 if isinstance(e, HTTPException):
+                    # Platform-authored client text (FastAPI returns .detail
+                    # to callers by design) — not an exception-internals leak.
                     error_text = f"{e.status_code}: {e.detail}"
                 else:
-                    error_text = str(e) or e.__class__.__name__
+                    # py/stack-trace-exposure (CodeQL, PR #1912): never flow
+                    # a raw exception message into the response — docker/OS
+                    # error strings can embed internals (the #1885 / git-PAT
+                    # stderr class). Class name only; the full message +
+                    # traceback go to the backend log line below.
+                    error_text = (
+                        f"restart failed ({e.__class__.__name__} — "
+                        f"details in backend logs)"
+                    )
                 # A recreate that failed after removing the old container
                 # leaves the agent with NO container — it vanishes from fleet
                 # listings (Docker-as-truth). Name the recovery path (#1559).
@@ -415,7 +425,9 @@ async def restart_fleet(
                 })
                 failed_agents.append(agent_name)
                 failures += 1
-                logger.warning(f"Fleet restart: {agent_name} failed: {error_text}")
+                logger.warning(
+                    f"Fleet restart: {agent_name} failed: {e}", exc_info=True
+                )
     finally:
         # Sync cleanup FIRST, awaited audit LAST: a CancelledError raised at
         # the audit await (backend shutdown mid-loop) is a BaseException the
