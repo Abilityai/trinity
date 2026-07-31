@@ -2702,6 +2702,8 @@ class TelegramBindingResponse(BaseModel):
     configured: bool = False
     group_count: int = 0
     warning: Optional[str] = None
+    # ent#264: in-progress indicator toggle (default ON); None when unconfigured.
+    progress_indicator_enabled: Optional[bool] = None
 
 
 class TelegramConfigureRequest(BaseModel):
@@ -2722,17 +2724,27 @@ class TelegramGroupConfigResponse(BaseModel):
     welcome_enabled: bool = False
     welcome_text: Optional[str] = None
     is_active: bool = True
+    # ent#265: per-group consent for completion reports (default allow; the
+    # model IS the field allowlist for the GET's `Response(**row)` build).
+    allow_proactive: bool = True
 
 
 class TelegramGroupConfigUpdateRequest(BaseModel):
     trigger_mode: Optional[str] = None
     welcome_enabled: Optional[bool] = None
     welcome_text: Optional[str] = None
+    # ent#265: human-only arm — the router calls reject_agent_principal when set.
+    allow_proactive: Optional[bool] = None
 
 
 class TelegramGroupMessageRequest(BaseModel):
     """Request model for proactive group messaging (Issue #349)."""
     message: str
+
+
+class TelegramProgressIndicatorRequest(BaseModel):
+    """ent#264 — toggle the in-progress status indicator on a Telegram binding."""
+    enabled: bool
 
 
 class SlackChannelProactiveRequest(BaseModel):

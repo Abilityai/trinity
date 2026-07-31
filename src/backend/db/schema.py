@@ -274,6 +274,7 @@ TABLES = {
             source_channel TEXT,
             source_channel_chat_id TEXT,
             source_channel_thread TEXT,
+            source_channel_agent TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -963,6 +964,7 @@ TABLES = {
             webhook_url TEXT,
             telegram_secret_token TEXT,
             last_update_id INTEGER DEFAULT 0,
+            progress_indicator_enabled INTEGER DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT
         )
@@ -1000,7 +1002,8 @@ TABLES = {
             created_at TEXT NOT NULL,
             updated_at TEXT,
             verified_by_email TEXT,
-            verified_at TEXT
+            verified_at TEXT,
+            allow_proactive INTEGER DEFAULT 1
         )
     """,
 
