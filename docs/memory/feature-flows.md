@@ -332,7 +332,7 @@ Preserved in `feature-flows/archive/` for historical reference.
 | Agent Vector Memory | REMOVED | [archive/vector-memory.md](feature-flows/archive/vector-memory.md) | Templates should define their own |
 | Agent Network Replay | SUPERSEDED | [archive/agent-network-replay-mode.md](feature-flows/archive/agent-network-replay-mode.md) | Replaced by Dashboard Timeline |
 | System Agent UI | CONSOLIDATED | [archive/system-agent-ui.md](feature-flows/archive/system-agent-ui.md) | Uses regular AgentDetail.vue |
-| Skills Management | SPLIT | [archive/skills-management.md](feature-flows/archive/skills-management.md) | Split into dedicated flows |
+| Skills Management | SPLIT | — (document not preserved) | Split into the dedicated skills flows above (skill-assignment, skill-injection, skills-library-sync) |
 
 ---
 
