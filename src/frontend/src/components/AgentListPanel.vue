@@ -67,9 +67,12 @@
       </button>
 
       <!-- Agent count — Y is the FULL fleet count, honest about chassis
-           (tag/owner) narrowing on top of the local filters -->
+           (tag/owner) narrowing on top of the local filters. Suppressed while
+           the chassis type-to-filter query is active (ent#261 D9): the filter
+           pill already shows "X of Y match" against a different denominator —
+           two disagreeing counters must never render simultaneously. -->
       <span
-        v-if="hasActiveFilters"
+        v-if="hasActiveFilters && !chassisQueryActive"
         class="text-xs text-gray-500 dark:text-gray-400"
       >
         {{ displayAgents.length }}/{{ totalAgentCount }}
@@ -757,6 +760,10 @@ watch(filterStatus, (val) => {
 const hasActiveFilters = computed(() => {
   return filterName.value.trim() !== '' || filterStatus.value !== 'all'
 })
+
+// ent#261 D9: the chassis type-to-filter query state — read to suppress the
+// local "N/M" badge while the chassis pill shows its own "X of Y match".
+const chassisQueryActive = computed(() => networkStore.filterQuery.trim() !== '')
 
 function clearAllFilters() {
   // Clears BOTH layers (ent#260 strategy F6): the local name/status filters

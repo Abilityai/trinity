@@ -9,7 +9,10 @@
         @edit="openEditModal"
       />
 
-      <div class="flex flex-col flex-1 overflow-hidden">
+      <!-- relative: anchor for the type-to-filter pill + query-empty overlay
+           (ent#261) — this column does NOT scroll (panes scroll internally),
+           so absolutely-positioned chrome here never scrolls away. -->
+      <div class="relative flex flex-col flex-1 overflow-hidden">
         <!-- Compact Header -->
         <div class="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-4 py-2">
           <div class="flex items-center justify-between">
@@ -122,6 +125,22 @@
 
               <span v-if="availableTags.length > 0 || availableOwners.length > 1" class="text-gray-300 dark:text-gray-600">|</span>
 
+              <!-- Type-to-filter hint (ent#261) — mouse/touch parity for the
+                   `/` hotkey. TOGGLES: opens the pill when closed,
+                   clears+closes when the filter is open/active. -->
+              <button
+                @click="toggleFilterPill"
+                :class="[
+                  'px-2 py-1 rounded text-xs font-mono font-medium transition-all',
+                  (filterOpen || filterActive)
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
+                ]"
+                title="Filter agents (press /)"
+                aria-label="Filter agents"
+                data-testid="filter-kbd-hint"
+              >/</button>
+
               <!-- Mode Toggle (Timeline / Grid / List — trinity-enterprise#47 grid,
                    trinity-enterprise#260 list; Graph decommissioned #1689). This
                    v-for is the second home of the mode list — keep in sync with
@@ -221,9 +240,13 @@
           class="mt-2 text-sm font-medium text-blue-600 dark:text-blue-400 hover:underline"
         >Retry</button>
       </div>
+      <!-- :agents is the visibleAgents seam (ent#261): rows, communication
+           arrows, and schedule markers all derive from this prop, so the
+           type-to-filter query AND the owner filter now apply to the timeline
+           (owner previously applied to grid/list only — deliberate change). -->
       <ReplayTimeline
         v-else
-        :agents="agents"
+        :agents="visibleAgents"
         :nodes="nodes"
         :events="historicalCollaborations"
         :timeline-start="timelineStart"
@@ -272,9 +295,11 @@
           >Retry</button>
         </div>
       </div>
-      <!-- Empty state -->
+      <!-- True-empty state. `!filterActive` (ent#261): under an active query a
+           zero-match must show the chassis query-empty overlay, never the
+           onboarding CTA — and the grid must stay MOUNTED (v-else below). -->
       <div
-        v-else-if="visibleAgents.length === 0"
+        v-else-if="visibleAgents.length === 0 && !filterActive"
         class="absolute inset-0 flex items-center justify-center"
       >
         <div class="text-center">
@@ -318,9 +343,11 @@
           >Retry</button>
         </div>
       </div>
-      <!-- True-empty state (grid-identical teach — chassis-owned, D7) -->
+      <!-- True-empty state (grid-identical teach — chassis-owned, D7).
+           `!filterActive` (ent#261): same guard as the grid pane — a query
+           zero-match falls through to the mounted panel + chassis overlay. -->
       <div
-        v-else-if="visibleAgents.length === 0"
+        v-else-if="visibleAgents.length === 0 && !filterActive"
         class="h-full flex items-center justify-center"
       >
         <div class="text-center">
@@ -342,6 +369,74 @@
         @tags-changed="fetchAvailableTags"
         @clear-chassis-filters="clearChassisFilters"
       />
+    </div>
+
+    <!-- Query-empty overlay (ent#261 D8) — ONE chassis-level element covering
+         whichever pane is active; the pane stays MOUNTED underneath (a
+         transient zero-match while typing must never unmount ReplayTimeline /
+         FleetGrid — zoom/scroll/layout state would reset). pointer-events pass
+         through everywhere except the card, so header controls stay usable. -->
+    <div
+      v-if="queryEmpty"
+      class="absolute inset-0 z-20 flex items-center justify-center pointer-events-none"
+      data-testid="filter-query-empty"
+    >
+      <div class="pointer-events-auto text-center px-6 py-5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg">
+        <p class="text-sm text-gray-700 dark:text-gray-200">
+          No agents match "{{ filterQueryTrimmed }}" — Esc to clear
+        </p>
+        <button
+          @click="clearFilter"
+          class="mt-3 inline-flex items-center px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600"
+        >
+          Clear filter
+        </button>
+      </div>
+    </div>
+
+    <!-- Type-to-filter pill (ent#261 D6) — floating overlay anchored to this
+         non-scrolling column. Renders whenever open OR a query is applied (an
+         applied-but-hidden filter is the dishonest state AC-5 prevents).
+         top-28 clears the chassis header (~41px) + every pane-internal control
+         strip (timeline zoom bar ends ~82px + 24px time scale; list toolbar
+         ends ~97px). z-30: above panes + the query-empty overlay, below modals. -->
+    <div
+      v-if="filterOpen || filterActive"
+      role="search"
+      class="absolute top-28 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 px-3 py-1.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-full shadow-lg"
+      data-testid="filter-pill"
+    >
+      <svg class="w-4 h-4 text-gray-400 dark:text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+      </svg>
+      <input
+        ref="filterInputRef"
+        v-model="filterQueryModel"
+        type="text"
+        placeholder="Filter agents…"
+        aria-label="Filter agents"
+        autofocus
+        class="w-44 bg-transparent text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none"
+        @keydown.esc.stop.prevent="clearFilter"
+        @keydown.enter.prevent="filterInputRef?.blur()"
+      />
+      <span
+        v-if="filterActive"
+        class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap"
+        aria-live="polite"
+        data-testid="filter-match-count"
+      >{{ visibleAgents.length }} of {{ ownerFilteredAgents.length }} match</span>
+      <kbd class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-[10px] font-mono text-gray-500 dark:text-gray-400">Esc</kbd>
+      <button
+        @click="clearFilter"
+        class="p-0.5 rounded text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+        aria-label="Clear filter"
+        data-testid="filter-clear"
+      >
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
     </div>
 
       </div>
@@ -380,7 +475,7 @@ import SystemViewEditor from '@/components/SystemViewEditor.vue'
 import OnboardingWizard from '@/components/OnboardingWizard.vue'
 import { useSessionsStore } from '@/stores/sessions'
 import axios from 'axios'
-import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useNetworkStore } from '@/stores/network'
 import { useSystemViewsStore } from '@/stores/systemViews'
@@ -471,6 +566,8 @@ async function onViewSaved() {
 const {
   agents,
   visibleAgents,
+  ownerFilteredAgents,
+  filterQuery,
   nodes,
   edges,
   collaborationHistory,
@@ -585,6 +682,90 @@ function clearChassisFilters() {
   }
 }
 
+// --- Type-to-filter (ent#261) ---
+// `filterOpen` is Dashboard-LOCAL (eng F8): pill visibility survives mode
+// switches (panes are inner v-ifs) and dies with the page — a store-level
+// open flag would resurrect an open empty pill on remount. The store carries
+// only `filterQuery` (never persisted; cleared on unmount below).
+const filterOpen = ref(false)
+const filterInputRef = ref(null)
+
+// One mutation path: the input writes through the store setter.
+const filterQueryModel = computed({
+  get: () => filterQuery.value,
+  set: (v) => networkStore.setFilterQuery(v)
+})
+const filterActive = computed(() => filterQuery.value.trim() !== '')
+const filterQueryTrimmed = computed(() => filterQuery.value.trim())
+// Query-empty (D8): only while a query is active — loading/error keep their
+// own ladder states.
+const queryEmpty = computed(() =>
+  filterActive.value && visibleAgents.value.length === 0 &&
+  !isFleetLoading.value && !fleetLoadError.value
+)
+
+function openFilterPill() {
+  filterOpen.value = true
+  // autofocus on the input is belt-and-braces for first render; nextTick
+  // covers reopening an already-rendered pill (autofocus fires only on mount).
+  nextTick(() => filterInputRef.value?.focus())
+}
+
+function clearFilter() {
+  networkStore.setFilterQuery('')
+  filterOpen.value = false
+  filterInputRef.value?.blur()
+}
+
+// Header kbd hint (D7): TOGGLES — opens when closed, clears+closes when
+// open/active (mouse/touch parity with `/` + Esc).
+function toggleFilterPill() {
+  if (filterOpen.value || filterActive.value) clearFilter()
+  else openFilterPill()
+}
+
+// Document keydown: `/` opens (guards 0-5), Esc is the clear backstop so
+// "Esc to clear" stays true after focus wanders out of the pill input.
+function handleDashboardKeydown(e) {
+  // Guard 0: respect consumers + ignore key-hold repeat.
+  if (e.defaultPrevented || e.repeat) return
+
+  if (e.key === 'Escape') {
+    // Backstop only while the filter exists; the pill input's own Esc handler
+    // .stop's before reaching here.
+    if (!(filterOpen.value || filterActive.value)) return
+    // Never race a modal's own Esc handling.
+    if (showOnboarding.value || isEditorOpen.value || showCreateModal.value) return
+    // Layered dismissal (strategy F5): an open tag dropdown consumes this
+    // Esc; the filter survives — the second Esc clears.
+    if (showTagDropdown.value) {
+      showTagDropdown.value = false
+      return
+    }
+    // Don't nuke the filter while a native <select> dropdown is being closed
+    // (gemini G4).
+    if (document.activeElement?.tagName === 'SELECT') return
+    clearFilter()
+    return
+  }
+
+  // Guard 1: layout-produced `/` only (fires for Shift+7 on de-DE — do NOT
+  // exclude shiftKey).
+  if (e.key !== '/') return
+  // Guard 2: don't shadow browser/OS chords.
+  if (e.ctrlKey || e.metaKey || e.altKey) return
+  // Guard 3: IME composition.
+  if (e.isComposing) return
+  // Guard 4: editable targets (isContentEditable inherits — no .closest()).
+  const t = e.target
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
+  // Guard 5: open modals.
+  if (showOnboarding.value || isEditorOpen.value || showCreateModal.value) return
+
+  e.preventDefault() // blocks Firefox quick-find
+  openFilterPill()
+}
+
 // Agents executing right now: WS-observed in-flight work unioned with the
 // polled context-stats activity state.
 const workingNowCount = computed(() => {
@@ -640,6 +821,8 @@ onMounted(async () => {
 
   // Add click outside listener for tag dropdown
   document.addEventListener('click', handleClickOutside)
+  // Type-to-filter hotkey + Esc backstop (ent#261) — Dashboard-scoped.
+  document.addEventListener('keydown', handleDashboardKeydown)
 })
 
 onUnmounted(() => {
@@ -648,6 +831,10 @@ onUnmounted(() => {
   networkStore.stopAgentRefresh()
   networkStore.stopActivityRefresh()
   document.removeEventListener('click', handleClickOutside)
+  document.removeEventListener('keydown', handleDashboardKeydown)
+  // Store state outlives the page — a lingering invisible filter after a
+  // remount would lie (ent#261 honest-state AC).
+  networkStore.setFilterQuery('')
 })
 
 async function refreshAll() {
