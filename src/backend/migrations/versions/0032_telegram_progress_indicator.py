@@ -10,16 +10,16 @@ not the backfill mechanism.
 Identical to the SQLite track in ``db/migrations.py``
 (``telegram_progress_indicator``).
 
-Revision ID: 0031_telegram_progress_indicator
-Revises: 0030_slack_channel_allow_proactive
+Revision ID: 0032_telegram_progress_indicator
+Revises: 0031_channel_report_back
 Create Date: 2026-07-31
 """
 from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
-revision = "0031_telegram_progress_indicator"
-down_revision = "0030_slack_channel_allow_proactive"
+revision = "0032_telegram_progress_indicator"
+down_revision = "0031_channel_report_back"
 branch_labels = None
 depends_on = None
 

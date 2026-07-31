@@ -1204,6 +1204,7 @@ class DatabaseManager:
         source_channel: str = None,
         source_channel_chat_id: str = None,
         source_channel_thread: str = None,
+        source_channel_agent: str = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule)."""
         return self._schedule_ops.create_task_execution(
@@ -1220,6 +1221,9 @@ class DatabaseManager:
             source_channel=source_channel,
             source_channel_chat_id=source_channel_chat_id,
             source_channel_thread=source_channel_thread,
+            # ent#265: binding-agent for channel report-back (set only at the
+            # /task inheritance point; None for direct rows).
+            source_channel_agent=source_channel_agent,
         )
 
     def create_schedule_execution(
@@ -2402,6 +2406,11 @@ class DatabaseManager:
     def clear_telegram_verified_email(self, binding_id, telegram_user_id):
         return self._telegram_channel_ops.clear_verified_email(binding_id, telegram_user_id)
 
+    def get_telegram_chat_link(self, binding_id, telegram_user_id):
+        # ent#265: DM destination check for the completion reporter (a chat link
+        # proves the user cold-started this bot — consent-by-construction).
+        return self._telegram_channel_ops.get_chat_link(binding_id, telegram_user_id)
+
     def get_telegram_chat_link_by_verified_email(self, binding_id, email):
         """Reverse lookup: find chat link by verified email for proactive messaging (#321)."""
         return self._telegram_channel_ops.get_chat_link_by_verified_email(binding_id, email)
@@ -2417,8 +2426,19 @@ class DatabaseManager:
     def get_telegram_groups_for_agent(self, agent_name):
         return self._telegram_channel_ops.get_groups_for_agent(agent_name)
 
-    def update_telegram_group_config(self, group_config_id, trigger_mode=None, welcome_enabled=None, welcome_text=None):
-        return self._telegram_channel_ops.update_group_config(group_config_id, trigger_mode, welcome_enabled, welcome_text)
+    def update_telegram_group_config(
+        self, group_config_id, trigger_mode=None, welcome_enabled=None,
+        welcome_text=None, allow_proactive=None,
+    ):
+        # Keyword passthrough (ent#265 / eng M3): a positional append here risks a
+        # silent allow_proactive→welcome_text swap if the ops signature ever moves.
+        return self._telegram_channel_ops.update_group_config(
+            group_config_id,
+            trigger_mode=trigger_mode,
+            welcome_enabled=welcome_enabled,
+            welcome_text=welcome_text,
+            allow_proactive=allow_proactive,
+        )
 
     def deactivate_telegram_group_config(self, binding_id, chat_id):
         return self._telegram_channel_ops.deactivate_group_config(binding_id, chat_id)

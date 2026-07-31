@@ -1050,8 +1050,31 @@ cancel promptness, `[NO_REPLY]`-still-resolves, step-8 wrap regression guard,
 live-select column test, real-DB facade round-trip, legacy-table SQLite
 migration, renumber-safe Alembic-twin existence, GET JSON field pinning +
 hardening pin, PUT guard matrix.
+## Completion Report-Back (ent#265)
+
+A **delegated or background** execution whose channel context was inherited
+from a Telegram-triggered turn reports its terminal (✅/⚠️) back into the
+originating chat, threaded to the triggering message — see
+[channel-completion-report.md](channel-completion-report.md) for the full
+mechanism (binding-agent identity, D0 inheritance persistence, chokepoints,
+rendering). Telegram-side surface added here:
+
+- **Column**: `telegram_group_configs.allow_proactive INTEGER DEFAULT 1` —
+  per-group consent for completion reports (default ALLOW for existing and new
+  groups; opt-out mute). DMs need no flag — a chat link is
+  consent-by-construction.
+- **Toggle**: per-group **"Completion reports"** checkbox in
+  `TelegramChannelPanel.vue` (via the existing `updateGroup` PUT). The
+  `allow_proactive` arm of `PUT /api/agents/{name}/telegram/groups/{id}` is
+  human-only (`reject_agent_principal`); `trigger_mode`/welcome arms stay
+  agent-callable.
+- Inline turns (`triggered_by="telegram"`) NEVER report — the adapter already
+  replied (the no-double-post rule).
+- The proactive group-send endpoint is deliberately NOT gated on this flag
+  (follow-up: coherence gate with ent#223's Slack shape).
 
 ## Related Flows
+- [channel-completion-report.md](channel-completion-report.md) — Delegated/background terminals report into the originating chat (ent#224/ent#265)
 - [unified-channel-access-control.md](unified-channel-access-control.md) — Cross-channel access primitive (policy, router gate, access requests, group_auth_mode) (#311)
 - [agent-sharing.md](agent-sharing.md) — Allow-list / ownership model the gate consults
 - [email-authentication.md](email-authentication.md) — Shared `email_login_codes` infrastructure and `EmailService.send_verification_code`
@@ -1074,3 +1097,4 @@ hardening pin, PUT guard matrix.
 | 2026-04-28 | #562: Vision delivery fixed. Replaced broken base64 data URI text embedding with proper `--input-format stream-json` vision content blocks delivered via Claude CLI stdin. `_handle_file_uploads` returns 4-tuple with `image_data`. `GeminiRuntime` and `AgentRuntime` ABC updated to accept `images` param. 17 new tests in `test_channel_image_vision.py`. |
 | 2026-06-10 | #1130: Transcription model no longer hardcoded. Google retired `gemini-2.0-flash` (404 on every voice message); `_transcribe_audio_gemini` now uses `GEMINI_TRANSCRIPTION_MODEL` from config.py (default `gemini-3.5-flash`, env-overridable, #1076 empty-string-safe wiring in both compose files). Explicit retired-model log hint on 404. |
 | 2026-07-31 | ent#264: In-progress status indicator — 👀 reaction ack + 30s-threshold elapsed-time placeholder via the new channel-agnostic start/progress/resolve seam (router-owned driver, `indicate_progress` hook). Default-ON per-binding toggle (`progress_indicator_enabled`, dual migration, dedicated human-only PUT); GET /telegram access-hardened to `AuthorizedAgentByName`. 61 unit tests. |
+| 2026-07-31 | ent#265: Completion report-back — `telegram_group_configs.allow_proactive` (default allow), per-group "Completion reports" toggle, human-only PUT arm. Mechanism in [channel-completion-report.md](channel-completion-report.md). |

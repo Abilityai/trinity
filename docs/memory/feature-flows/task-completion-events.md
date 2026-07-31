@@ -63,6 +63,17 @@ so both are covered there. The async-callback replay-ACK (`_AUTHORITATIVE_TERMIN
 `routers/agents.py`) + the CAS block guarantee no double-emit **for a replayed or
 CAS-lost terminal** (AC #2).
 
+**Sibling spawn at the same chokepoints (ent#224/ent#265).**
+`channel_completion_report.spawn_completion_report` now rides beside
+`spawn_task_terminal_event` at the CAS-won `apply_result` success branch, the
+`apply_result` **failure/cancel branch** (added by ent#265 D3 — it previously
+emitted the event but never the channel report), and `_write_terminal_and_gate`
+— reporting a delegated/background terminal back into its originating
+Slack/Telegram chat. Same discipline: won-only, fire-and-forget, fail-open,
+its own at-most-once via `effect_guard` (#1084). The lease-reaper, bulk
+sweeps, and pull sink emit the #1578 event but do NOT spawn the channel report
+(v1 boundary). See [channel-completion-report.md](channel-completion-report.md).
+
 **Known second-terminal correction (not a replay double-fire).** `_AUTHORITATIVE_TERMINALS`
 is `{SUCCESS, CANCELLED, SKIPPED}` — deliberately **excluding FAILED** so the #1083
 "late SUCCESS corrects a reaper `LEASE_EXPIRED`" path stays open. In that narrow race the
