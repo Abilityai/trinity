@@ -264,6 +264,9 @@ schedule_executions = Table(
     Column("source_channel", Text),           # ent#117: originating channel for voice-reply delivery
     Column("source_channel_chat_id", Text),   # ent#117: channel destination (chat/channel id)
     Column("source_channel_thread", Text),    # ent#117: channel thread id (nullable)
+    # ent#265: binding-agent for channel report-back — the agent whose channel
+    # binding owns this execution's INHERITED context (NULL = executing agent).
+    Column("source_channel_agent", Text),
 )
 
 agent_loops = Table(
@@ -870,6 +873,8 @@ telegram_group_configs = Table(
     Column("updated_at", Text),
     Column("verified_by_email", Text),
     Column("verified_at", Text),
+    # ent#265: per-group consent for completion reports (default allow, opt-out mute)
+    Column("allow_proactive", Integer),
 )
 
 whatsapp_bindings = Table(

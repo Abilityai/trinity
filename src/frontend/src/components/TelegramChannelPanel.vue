@@ -152,6 +152,25 @@
                 <p class="mt-0.5 text-xs text-gray-400">Use {name} for the user's first name</p>
               </div>
             </div>
+
+            <!-- Completion reports (ent#265) — per-group opt-out mute for the
+                 delegated/background completion report-back. Label names ONLY
+                 what the flag governs today (D2/F2); rename if the proactive
+                 group-send coherence gate ships later. -->
+            <div class="mt-2">
+              <label class="flex items-center gap-1.5 cursor-pointer text-xs">
+                <input
+                  type="checkbox"
+                  :checked="group.allow_proactive"
+                  @change="updateGroup(group, { allow_proactive: !group.allow_proactive })"
+                  class="rounded text-action-primary-600 focus:ring-action-primary-500"
+                />
+                <span class="text-gray-600 dark:text-gray-400">Completion reports</span>
+              </label>
+              <p class="mt-0.5 text-xs text-gray-400">
+                Posts a completion notice for delegated or background tasks started from this group.
+              </p>
+            </div>
           </div>
         </div>
       </div>

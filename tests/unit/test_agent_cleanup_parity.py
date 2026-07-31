@@ -90,7 +90,16 @@ _cleanup = _load("trinity_db_agent_cleanup", "db/agent_cleanup.py")
 # Columns that name an agent identifier. Matches the set the registry
 # tracks; a new agent-id column name would need adding here AND in
 # AGENT_REFS (the test makes the second omission loud).
-_AGENT_ID_COLUMNS = ("agent_name", "source_agent", "target_agent", "subscriber_agent")
+# `source_channel_agent` (ent#265) is the channel report-back binding agent —
+# a real agent identifier that must re-key on rename (unlike the audit-only
+# `source_agent_name`, which the regex deliberately does not match).
+_AGENT_ID_COLUMNS = (
+    "agent_name",
+    "source_agent",
+    "target_agent",
+    "subscriber_agent",
+    "source_channel_agent",
+)
 
 _COL_RE = re.compile(
     r"^\s*(" + "|".join(_AGENT_ID_COLUMNS) + r")\b", re.MULTILINE
@@ -174,6 +183,9 @@ def test_keep_policy_tables_have_retention_discipline():
     }
     assert keep == {
         ("schedule_executions", "agent_name"),   # #772 90d terminal-row sweep
+        # ent#265 binding-agent column rides the same rows as agent_name above,
+        # so the SAME #772 90-day terminal-row sweep is its retention discipline.
+        ("schedule_executions", "source_channel_agent"),
         ("nevermined_payment_log", "agent_name"),  # forever financial record
     }, (
         f"KEEP-policy set changed: {sorted(keep)}. A KEEP table with no "

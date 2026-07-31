@@ -200,6 +200,7 @@
 - `slack_service.py` - Slack API client (OAuth, messaging, verification) (SLACK-001)
 - `nevermined_payment_service.py` - x402 payment verification and settlement (NVM-001)
 - `proactive_message_service.py` - Agent-to-user proactive messaging with rate limiting and audit (#321)
+- `channel_completion_report.py` - Reports a delegated/background execution's terminal back to its originating channel chat/thread (ent#224 Slack, ent#265 Telegram): inherited-context-only (never inline turns), binding-agent consent + delivery, effect-guarded at-most-once — see [channel-completion-report.md](feature-flows/channel-completion-report.md)
 - `channel_history.py` - Persists a delivered proactive **group/channel** broadcast into the channel session (#1649), so the agent has a record of its own outreach. Session keys are derived by driving the channel adapter's own `get_session_identifier()` (never re-implemented — that drifts). **Slack = real recall**: channel sessions are thread-scoped, so a broadcast filed at its own `ts` IS the session an in-thread reply resolves to (needs `slack_service.send_message_detailed()` to return the ts). **Telegram = bookkeeping only**: group sessions are per-(sender, chat) with no group branch, so a broadcast uses a synthetic agent-sender key nothing else writes to — recorded but NOT recalled; real recall needs a per-chat group session (a behaviour change for existing inbound groups). `#903` shared-thread attribution (`sender_email=None`); persist on confirmed delivery only; fail-soft
 - `tts_service.py` - Shared outbound-voice TTS layer (epic #24): ElevenLabs synth → ffmpeg OGG/Opus transcode; shared char cost-cap; fail-soft (any error → text fallback). Key resolved at call time via `settings_service.get_elevenlabs_api_key()` (stored setting → env, ent#117), not the frozen config value. Consumed by `voice_reply_service` (ent#117) and the STT path
 - `voice_reply_service.py` - Per-message voice-reply delivery (ent#117): backs the `send_voice_reply` MCP tool. Given an agent + resolved channel destination (channel/chat id/thread from the execution) + text, gates on TTS availability + agent-level enable + the per-channel flag, wraps delivery in `effect_guard("voice_reply", …)` (#1084), synthesizes, and delivers via each channel's send primitive (Telegram `_send_voice`, Slack `slack_service.upload_file`, WhatsApp `create_share_from_bytes` + Twilio `MediaUrl`). Fail-soft → not-delivered so the agent falls back to text. Replaces the old always-voice adapter path (`_maybe_send_voice` removed) — replies are TEXT by default, voice is a per-message agent choice
@@ -236,7 +237,7 @@
 - `transports/twilio_webhook.py` - Twilio webhook: HMAC-SHA1 signature validation, MessageSid dedup, form-encoded body
 - `transports/twilio_media_stream.py` + `transports/voip_audio.py` - VoIP Media Streams bridge (a voice transport, NOT a text `ChannelAdapter`) — see [VoIP](#voip-telephony-voip-001-1056)
 
-Channel DB modules: `db/slack_channels.py` (workspace connections, channel-agent bindings, active threads), `db/telegram_channels.py` (bindings, group configs, chat links), `db/whatsapp_channels.py` (bindings, chat links, verified-email lookup), `db/voip.py` (voice bindings, call logs, daily-cap window). All persisted tokens AES-256-GCM encrypted (Invariant #12).
+Channel DB modules: `db/slack_channels.py` (workspace connections, channel-agent bindings, active threads), `db/telegram_channels.py` (bindings, group configs incl. the per-group `allow_proactive` completion-report consent ent#265, chat links), `db/whatsapp_channels.py` (bindings, chat links, verified-email lookup), `db/voip.py` (voice bindings, call logs, daily-cap window). All persisted tokens AES-256-GCM encrypted (Invariant #12).
 
 ### Frontend (`src/frontend/`)
 
@@ -1344,6 +1345,7 @@ CREATE TABLE schedule_executions (
     source_channel TEXT,                         -- ent#117: originating channel (telegram|slack|whatsapp) for voice-reply delivery
     source_channel_chat_id TEXT,                 -- ent#117: channel destination (chat/channel id)
     source_channel_thread TEXT,                  -- ent#117: channel thread id (nullable)
+    source_channel_agent TEXT,                   -- ent#265: binding-agent for channel report-back (NULL = executing agent)
     FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
 );
 

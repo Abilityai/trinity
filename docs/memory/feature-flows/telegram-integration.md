@@ -918,7 +918,31 @@ The `GeminiRuntime` and `AgentRuntime` ABC gained an `images` parameter (ignored
   uniformly; Slack inherits the Phase 2 hardening for free)
 - Web chat file upload (#364, separate flow)
 
+## Completion Report-Back (ent#265)
+
+A **delegated or background** execution whose channel context was inherited
+from a Telegram-triggered turn reports its terminal (✅/⚠️) back into the
+originating chat, threaded to the triggering message — see
+[channel-completion-report.md](channel-completion-report.md) for the full
+mechanism (binding-agent identity, D0 inheritance persistence, chokepoints,
+rendering). Telegram-side surface added here:
+
+- **Column**: `telegram_group_configs.allow_proactive INTEGER DEFAULT 1` —
+  per-group consent for completion reports (default ALLOW for existing and new
+  groups; opt-out mute). DMs need no flag — a chat link is
+  consent-by-construction.
+- **Toggle**: per-group **"Completion reports"** checkbox in
+  `TelegramChannelPanel.vue` (via the existing `updateGroup` PUT). The
+  `allow_proactive` arm of `PUT /api/agents/{name}/telegram/groups/{id}` is
+  human-only (`reject_agent_principal`); `trigger_mode`/welcome arms stay
+  agent-callable.
+- Inline turns (`triggered_by="telegram"`) NEVER report — the adapter already
+  replied (the no-double-post rule).
+- The proactive group-send endpoint is deliberately NOT gated on this flag
+  (follow-up: coherence gate with ent#223's Slack shape).
+
 ## Related Flows
+- [channel-completion-report.md](channel-completion-report.md) — Delegated/background terminals report into the originating chat (ent#224/ent#265)
 - [unified-channel-access-control.md](unified-channel-access-control.md) — Cross-channel access primitive (policy, router gate, access requests, group_auth_mode) (#311)
 - [agent-sharing.md](agent-sharing.md) — Allow-list / ownership model the gate consults
 - [email-authentication.md](email-authentication.md) — Shared `email_login_codes` infrastructure and `EmailService.send_verification_code`
@@ -940,3 +964,4 @@ The `GeminiRuntime` and `AgentRuntime` ABC gained an `images` parameter (ignored
 | 2026-04-25 | #487 Phase 2: workspace delivery hardened. New `_sanitize_filename` helper (NFKC + basename + safe-chars + 200-char truncation + collision dedup). Chat injection format `[File uploaded by {uploader}]: {name} ({size}) saved to {path}`. All-writes-failed now replies via channel and aborts execution. Audit entries include `uploader`. 16 new tests (27 total in `test_file_upload.py`). |
 | 2026-04-28 | #562: Vision delivery fixed. Replaced broken base64 data URI text embedding with proper `--input-format stream-json` vision content blocks delivered via Claude CLI stdin. `_handle_file_uploads` returns 4-tuple with `image_data`. `GeminiRuntime` and `AgentRuntime` ABC updated to accept `images` param. 17 new tests in `test_channel_image_vision.py`. |
 | 2026-06-10 | #1130: Transcription model no longer hardcoded. Google retired `gemini-2.0-flash` (404 on every voice message); `_transcribe_audio_gemini` now uses `GEMINI_TRANSCRIPTION_MODEL` from config.py (default `gemini-3.5-flash`, env-overridable, #1076 empty-string-safe wiring in both compose files). Explicit retired-model log hint on 404. |
+| 2026-07-31 | ent#265: Completion report-back — `telegram_group_configs.allow_proactive` (default allow), per-group "Completion reports" toggle, human-only PUT arm. Mechanism in [channel-completion-report.md](channel-completion-report.md). |
