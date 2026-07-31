@@ -89,7 +89,7 @@ Fleet-scoped Pinia store, **deliberately separate** from the agent-scoped `store
 ### Shared contract-chips seam (`src/frontend/src/components/skills/`)
 Extracted from `SkillsPanel.vue` (ent#263) so the per-agent Skills tab and the Library browse render the ent#183 package facts from **one** seam and can't drift:
 - `SkillContractChips.vue` — automation chip, "not user-invocable" chip, `file_count`/`size_bytes`, opt-in `showVersion` short-SHA
-- `contract.js` — `formatBytes()`, `deps()` (declared binaries/packages/env as one display line)
+- `contract.js` — `formatBytes()`, `deps()` (declared binaries/packages/env as one display line), `stripUserinfo()` (credential scrub for rendered library URLs — adversarially tested against non-parseable shapes; used by both this section's Primary-source line and SkillsPanel's empty-state URL)
 
 `SkillsPanel.vue` now consumes the seam (its local `SkillMeta`/`formatBytes`/`deps` removed); `stores/skills.js` untouched.
 

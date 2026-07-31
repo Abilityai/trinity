@@ -132,7 +132,7 @@ import { computed, onMounted } from 'vue'
 import { useSkillsLibraryStore } from '../stores/skillsLibrary'
 import { useRole } from '../composables/useRole'
 import SkillContractChips from './skills/SkillContractChips.vue'
-import { deps } from './skills/contract'
+import { deps, stripUserinfo } from './skills/contract'
 
 const store = useSkillsLibraryStore()
 const { isAdmin } = useRole()
@@ -144,8 +144,10 @@ const shortSha = computed(() =>
 /**
  * The flat `url` is the PRIMARY source post-#1901 (first in resolution
  * order) — hide the single-source presentation once status reports multiple
- * sources, and strip any embedded userinfo (user:token@host) before display:
- * the clone path accepts credentialed URLs and stores them verbatim.
+ * sources, and strip any embedded userinfo (user:token@host) before display
+ * via the shared, adversarially-tested `stripUserinfo` in
+ * `components/skills/contract.js`: the clone path accepts credentialed URLs
+ * and stores them verbatim.
  */
 const primarySourceUrl = computed(() => {
   const st = store.status
@@ -153,19 +155,6 @@ const primarySourceUrl = computed(() => {
   if (Array.isArray(st.sources) && st.sources.length > 1) return null
   return stripUserinfo(st.url)
 })
-
-function stripUserinfo(u) {
-  try {
-    const parsed = new URL(u)
-    parsed.username = ''
-    parsed.password = ''
-    return parsed.toString()
-  } catch {
-    // Not URL-parseable (e.g. scp-style git@host:path) — regex fallback for
-    // scheme://userinfo@host shapes; scp-style ssh users are not secrets.
-    return String(u).replace(/^(\w+:\/\/)[^@/]+@/, '$1')
-  }
-}
 
 async function onSync() {
   await store.sync()
