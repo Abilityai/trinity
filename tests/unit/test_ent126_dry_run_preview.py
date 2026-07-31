@@ -427,6 +427,35 @@ def test_unknown_top_level_keys_warn_without_failing(env):
     assert body["prompt_updated"] is False
 
 
+@pytest.mark.parametrize("extra,expected", [
+    # YAML 1.1: bare `on`/`off`/`yes`/`no`/`y`/`n` are BOOLEANS, not strings, so
+    # these arrive as `True`/`False` keys. The classic hand-edited-YAML footgun,
+    # and the one most likely to reach this surface from a paste box.
+    ("on: whatever\n", ["True"]),
+    ("no: whatever\n", ["False"]),
+    # A bare numeric key.
+    ("2: whatever\n", ["2"]),
+    # The mixed-type set is the crashing shape: `sorted` cannot order str vs
+    # bool/int, so this raised TypeError -> a raw 500 "Deployment failed: '<' not
+    # supported between instances of 'str' and 'bool'", for a manifest that
+    # deployed fine before the unknown-key check existed. A single non-string key
+    # instead failed the List[str] field with a raw Pydantic dump at 400.
+    ("on: whatever\nnotes: hi\n", ["True", "notes"]),
+    ("yes: a\nno: b\n", ["True", "False"]),
+])
+def test_non_string_unknown_keys_warn_instead_of_500(env, extra, expected):
+    """Unknown top-level keys must WARN whatever their YAML type (AC #4).
+
+    Regression: the warning must never be the thing that turns a deployable
+    manifest into an unnamed 500 — the exact failure mode it exists to prevent.
+    """
+    body = _dry_run(env, _manifest(agents=TWO_PLAIN, extra=extra))
+    assert body["status"] == "valid"
+    warning = next(w for w in body["warnings"] if "unknown top-level" in w)
+    for key in expected:
+        assert key in warning
+
+
 # ------------------------------------------------------------ error mapping
 
 def test_unparseable_manifest_is_400_with_a_string_detail(env):
@@ -434,6 +463,25 @@ def test_unparseable_manifest_is_400_with_a_string_detail(env):
                  json={"manifest": "name: [bad\n  ::::\n", "dry_run": True})
     assert r.status_code == 400
     assert isinstance(r.json()["detail"], str)
+
+
+def test_manifest_over_the_byte_cap_is_rejected(env):
+    """The cap is stated in BYTES, so it must be measured in bytes.
+
+    `Field(max_length=...)` counts characters, so a multibyte manifest passed it at
+    up to ~4x the stated limit. 200k 3-byte characters = 600k bytes but only 200k
+    characters — under the char limit, three times over the byte limit. Matches how
+    the bundled reader measures (`st.st_size`) and how the upload path measures
+    (`file.size`).
+    """
+    from models import MANIFEST_MAX_BYTES
+
+    body = "\u540d" * 200_000
+    assert len(body) < MANIFEST_MAX_BYTES < len(body.encode("utf-8"))
+    r = env.post("/api/systems/deploy", json={"manifest": body, "dry_run": True})
+    assert r.status_code == 422, r.status_code
+    # FastAPI renders a validator error as a LIST detail; the store joins the msgs.
+    assert any("byte" in str(e.get("msg", "")) for e in r.json()["detail"])
 
 
 def test_validation_error_is_400_with_a_string_detail(env):

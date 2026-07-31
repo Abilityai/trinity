@@ -254,6 +254,86 @@ def test_oversized_manifest_is_invalid_not_a_500(env):
     assert "larger than" in entry["reason"]
 
 
+# --------------------------------------------------- reason hygiene (exit point)
+
+# Every `reason` leaves `_assess_manifest` through `_failure_reason` — the same
+# exit point the deploy report's `failed[].reason` uses. Both inputs it reports on
+# are hostile-shaped: PyYAML parse errors ECHO the offending source line, and
+# `validate_manifest` interpolates manifest-supplied values into its message. A
+# `creator` can already read the raw YAML via `GET /manifests/{id}`, so this is not
+# a disclosure fix today; it is a hygiene invariant on the field a reader trusts,
+# on the surface most likely to be widened to a looser role later.
+
+# Deliberately SHORT. A 40-char `ghp_` PAT "passes" these assertions for the wrong
+# reason: PyYAML truncates its own echoed context line, chopping the PAT below the
+# pattern's 36-char floor, so nothing has to redact anything. AKIA+16 survives it.
+_SHORT_SECRET = "AKIA" + "B" * 16
+
+
+def test_parse_error_reason_is_credential_sanitized(env):
+    """The parse error quotes the offending line back — secrets included."""
+    env.write("leaky.yaml", f"name: [unclosed\n  k: {_SHORT_SECRET}\n  x: ::::\n")
+    (entry,) = env.client.get("/api/systems/manifests").json()
+    assert entry["valid"] is False
+    assert _SHORT_SECRET not in entry["reason"]
+    assert "REDACTED" in entry["reason"]
+
+
+def test_validation_error_reason_is_credential_sanitized(env):
+    """`validate_manifest` interpolates the manifest's own value into the message."""
+    env.write(
+        "leaky.yaml",
+        f"name: BAD_{_SHORT_SECRET}\nagents:\n  s:\n    template: local:default\n",
+    )
+    (entry,) = env.client.get("/api/systems/manifests").json()
+    assert entry["valid"] is False
+    assert _SHORT_SECRET not in entry["reason"]
+    assert "REDACTED" in entry["reason"]
+
+
+def test_validation_error_reason_redacts_url_userinfo(env):
+    """PAT-bearing remote URLs are the git/GitHub shape (learnings 2026-07-14)."""
+    env.write(
+        "leaky.yaml",
+        "name: https://user:p4ssw0rd@example.com/x\n"
+        "agents:\n  s:\n    template: local:default\n",
+    )
+    (entry,) = env.client.get("/api/systems/manifests").json()
+    assert "p4ssw0rd" not in entry["reason"]
+    assert "***@example.com" in entry["reason"]
+
+
+_MANY_BAD_AGENTS = "name: many\nagents:\n" + "".join(
+    f"  agent{i}:\n    template: local:default\n    resources:\n      cpu: 1.0\n"
+    for i in range(40)
+)
+
+
+@pytest.mark.parametrize("body", [
+    # The validate branch interpolates an unbounded manifest-supplied value.
+    pytest.param(
+        "name: " + "X" * 4000 + "\nagents:\n  s:\n    template: local:default\n",
+        id="validate",
+    ),
+    # The blockers branch: each `failure.reason` is already capped, but the JOIN
+    # of N of them was not — this manifest yields one blocker per agent.
+    pytest.param(_MANY_BAD_AGENTS, id="blockers"),
+])
+def test_a_reason_that_grows_with_the_manifest_is_capped(env, body):
+    """`reason` is a response field, so it must not scale with the input file.
+
+    Asserted as `== _REASON_MAX_LEN` rather than `<=`: both bodies are built to
+    overflow, so an exact match is what proves the cap actually fired — `<=` would
+    keep passing if the underlying message ever shrank enough to make the case
+    vacuous. The parse branch is deliberately absent: PyYAML truncates its own
+    context line, so that reason lands around 252 chars and could never test this.
+    """
+    env.write("big.yaml", body)
+    (entry,) = env.client.get("/api/systems/manifests").json()
+    assert entry["valid"] is False
+    assert len(entry["reason"]) == system_service._REASON_MAX_LEN
+
+
 # ------------------------------------------------------------- file selection
 
 def test_non_yaml_files_are_ignored(env):
@@ -386,6 +466,28 @@ def test_symlink_escape_is_refused(env, tmp_path):
     r = env.client.get("/api/systems/manifests/escape")
     # Refused as a symlink (O_NOFOLLOW) or as escaping confinement — never 200.
     assert r.status_code != 200, r.text[:200]
+
+
+def test_read_refuses_a_symlink_pointing_INSIDE_the_directory(env, tmp_path):
+    """Parity with the listing, which skips symlinks outright.
+
+    Confinement is not the issue here — the target is inside the directory. The
+    issue is that the two routes must agree on what the catalog contains: a
+    manifest absent from `GET /manifests` must not be readable via
+    `GET /manifests/{id}`, or "not listed" stops meaning "not served".
+    """
+    env.write("real-target.yaml", GOOD_MANIFEST)
+    (tmp_path / "inside-link.yaml").symlink_to(tmp_path / "real-target.yaml")
+
+    ids = [e["id"] for e in env.client.get("/api/systems/manifests").json()]
+    assert "inside-link" not in ids
+    assert "real-target" in ids
+
+    r = env.client.get("/api/systems/manifests/inside-link")
+    assert r.status_code == 400, r.text[:200]
+    assert "symlink" in r.json()["detail"].lower()
+    # The real file is still addressable by its own id.
+    assert env.client.get("/api/systems/manifests/real-target").status_code == 200
 
 
 def test_absolute_path_id_does_not_escape(env, tmp_path):

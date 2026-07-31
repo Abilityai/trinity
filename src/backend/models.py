@@ -651,12 +651,31 @@ class SystemDeployRequest(BaseModel):
     # place the limit is actually enforced. NOT a YAML-bomb defence: safe_load
     # still expands anchors/aliases, so a few-hundred-byte manifest can pin a
     # worker. That needs the alias + duplicate-key guard `pipelines.ts` (#919)
-    # already implements, tracked as a follow-up.
+    # already implements — tracked as trinity#1884.
+    #
+    # `max_length` is a cheap NECESSARY pre-check only: it counts CHARACTERS, and
+    # the limit is in bytes. len(chars) > N does imply len(bytes) > N, so it safely
+    # rejects the pathological multi-megabyte body before anything encodes it — but
+    # it is not sufficient, since a multibyte manifest is up to 4 bytes per
+    # character. The validator below is the one that actually enforces the stated
+    # limit, matching how the bundled-manifest reader measures (`st.st_size`) and
+    # how the UI's upload path measures (`file.size`).
     manifest: str = Field(..., max_length=MANIFEST_MAX_BYTES)
     dry_run: bool = False
     # trinity-enterprise#125: abort on the first agent-create failure (legacy
     # behavior) instead of the default best-effort continue-and-report.
     strict: bool = False
+
+    @field_validator("manifest")
+    @classmethod
+    def _manifest_within_byte_cap(cls, v: str) -> str:
+        size = len(v.encode("utf-8"))
+        if size > MANIFEST_MAX_BYTES:
+            raise ValueError(
+                f"Manifest is {size} bytes, larger than the "
+                f"{MANIFEST_MAX_BYTES}-byte limit"
+            )
+        return v
 
 
 class SystemDeployFailure(BaseModel):

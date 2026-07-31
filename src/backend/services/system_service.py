@@ -123,7 +123,13 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
         # `prompt:`) and `auto_start:` sat in a shipped manifest doing nothing.
         # Recorded, not rejected — `validate_manifest` turns these into warnings,
         # because rejecting would 400 manifests that deploy successfully today.
-        unknown_keys=sorted(set(data.keys()) - _KNOWN_MANIFEST_KEYS),
+        # `str(k)` because YAML keys are not necessarily strings: YAML 1.1
+        # renders bare `on`/`off`/`yes`/`no` as BOOLEANS and `2:` as an int, so
+        # a mixed-type set makes `sorted` raise TypeError -> a raw 500 from a
+        # manifest that deployed fine before this key check existed, and a
+        # single non-string key fails the List[str] field with a raw Pydantic
+        # dump. Both are exactly the unnamed-500 this warning exists to prevent.
+        unknown_keys=sorted(str(k) for k in set(data.keys()) - _KNOWN_MANIFEST_KEYS),
     )
 
 
@@ -1000,10 +1006,19 @@ def _resolve_manifest_path(manifest_id: str) -> Path:
 
     base = _manifests_dir().resolve()
     for suffix in _MANIFEST_SUFFIXES:
-        candidate = (base / f"{raw}{suffix}").resolve()
+        entry = base / f"{raw}{suffix}"
+        candidate = entry.resolve()
         if not candidate.is_relative_to(base):
             # A symlink inside the directory pointing outside it.
             raise ValueError("Invalid manifest id: resolves outside the manifests directory")
+        # Parity with `list_bundled_manifests`, which skips symlinks outright.
+        # Checked on the UNRESOLVED entry, because `.resolve()` has already erased
+        # the link. Without this, a symlink whose target happens to be inside the
+        # directory is invisible in the catalog yet readable by id — the two routes
+        # would disagree about what the catalog contains, and "not listed" would
+        # stop meaning "not served".
+        if entry.is_symlink():
+            raise ValueError("Invalid manifest id: symlinked manifests are not served")
         if candidate.exists():
             return candidate
     raise FileNotFoundError(f"No bundled manifest '{manifest_id}'")
@@ -1055,16 +1070,25 @@ def _assess_manifest(yaml_text: str) -> Tuple[Optional[SystemManifest], bool, Op
     template/resource preflight the dry-run uses — and the field is called `valid`
     only because all three ran. If this is ever reduced to parsing, rename it
     `parseable`.
+
+    Every `reason` leaves here through `_failure_reason`, the same exit point the
+    deploy report's `failed[].reason` uses — credential-sanitized, URL-userinfo
+    redacted and length-capped. A raw `str(e)` would be neither: PyYAML's parse
+    errors ECHO the offending source line (verified), and `validate_manifest`
+    interpolates manifest-supplied values, so an uncapped reason grows with the
+    file. Nothing a `creator` cannot already read via `GET /manifests/{id}`, which
+    returns the raw YAML — but the catalog is the surface most likely to be widened
+    to a looser role later, and this is the field a reader would trust.
     """
     try:
         manifest = parse_manifest(yaml_text)
     except Exception as e:  # noqa: BLE001 — incl. the AttributeError shape above
-        return None, False, str(e)
+        return None, False, _failure_reason(e)[0]
 
     try:
         validate_manifest(manifest)
     except Exception as e:  # noqa: BLE001
-        return manifest, False, str(e)
+        return manifest, False, _failure_reason(e)[0]
 
     # Base names, not `_N`-resolved ones: suffixing is a deploy-time concern and
     # resolving it here would mean a DB round trip per agent per card.
@@ -1082,7 +1106,8 @@ def _assess_manifest(yaml_text: str) -> Tuple[Optional[SystemManifest], bool, Op
         if failure is not None
     ]
     if blockers:
-        return manifest, False, "; ".join(blockers)
+        # Each `failure.reason` is already capped; the JOIN of N of them is not.
+        return manifest, False, "; ".join(blockers)[:_REASON_MAX_LEN]
 
     return manifest, True, None
 
@@ -1168,7 +1193,8 @@ def list_bundled_manifests() -> List[BundledManifestSummary]:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Could not read bundled manifest '{path.name}': {e}")
             summaries.append(BundledManifestSummary(
-                id=path.stem, filename=path.name, valid=False, reason=str(e)
+                id=path.stem, filename=path.name, valid=False,
+                reason=_failure_reason(e)[0],
             ))
             continue
         summaries.append(_summarize_manifest(path, text))
