@@ -25,6 +25,78 @@ logger = logging.getLogger(__name__)
 # rotate SECRET_KEY (invalidating every token).
 _JWT_REVOKED_PREFIX = "jwt:revoked:"
 
+# Bulk portal-session revocation (trinity-enterprise#281): "log this client out
+# everywhere, now". A per-`jti` blacklist cannot express it — `jti` is random per
+# token and nothing indexes email → issued jtis, so answering "which tokens does
+# this email hold?" would need a write-side index maintained at every mint.
+#
+# Instead store ONE cutoff timestamp per email and reject any portal token issued
+# at or before it. O(1) to write, O(1) to check, nothing to enumerate, and it
+# covers every mint path by construction — interactive email-OTP sign-in and the
+# ent#163 delegated exchange both go through `create_portal_session_token`, so
+# neither can be forgotten here (the failure mode a hand-maintained index has).
+#
+# The TTL is the max session lifetime: a token older than that is expired anyway,
+# so the key self-expires exactly when it stops mattering — same bounded-growth
+# property as the `jti` blacklist above, no sweep.
+#
+# Fail-open on Redis, matching #187 and the platform posture. This is deliberate
+# and is why revocation is NOT the whole feature: a *blocked* client is refused
+# from a durable DB row on the enterprise side, which keeps working with Redis
+# down. Revocation is the fast path; the block is the load-bearing one.
+_PORTAL_REVOKED_PREFIX = "portal:revoked_before:"
+
+
+def _portal_revoked_key(email: str) -> str:
+    return f"{_PORTAL_REVOKED_PREFIX}{email.strip().lower()}"
+
+
+def revoke_portal_sessions_for_email(email: str) -> bool:
+    """Invalidate every portal session token already issued to ``email``.
+
+    Edition-agnostic primitive: OSS owns the mint, the decode, and this bulk
+    revoke; the entitled module decides *when* to call it (same split as the
+    ent#163 mint). Returns True when the cutoff was durably written — the caller
+    reports an honest outcome rather than claiming success on a Redis outage.
+    """
+    if not email:
+        return False
+    r = get_breaker_redis()
+    if r is None:
+        logger.warning("[auth] portal session revoke skipped — Redis unavailable")
+        return False
+    # Cutoff is `now`, and the check below rejects `iat <= cutoff`, so a token
+    # minted in the same second as the revoke is killed too. For a kill switch,
+    # rounding toward revoking is the only safe direction.
+    now = int(datetime.now(timezone.utc).timestamp())
+    ttl = PORTAL_SESSION_EXPIRE_HOURS * 3600 + 60  # + slack for clock skew
+    try:
+        r.setex(_portal_revoked_key(email), ttl, str(now))
+        return True
+    except Exception as exc:  # pragma: no cover — fail-open
+        logger.warning(f"[auth] revoke_portal_sessions_for_email failed: {exc}")
+        return False
+
+
+def portal_sessions_revoked_at(email: str) -> Optional[int]:
+    """The active revocation cutoff for ``email``, or None. Fail-open → None."""
+    if not email:
+        return None
+    r = get_breaker_redis()
+    if r is None:
+        return None
+    try:
+        raw = r.get(_portal_revoked_key(email))
+    except Exception as exc:  # pragma: no cover — fail-open
+        logger.warning(f"[auth] portal_sessions_revoked_at failed: {exc}")
+        return None
+    if raw is None:
+        return None
+    try:
+        return int(raw.decode() if isinstance(raw, (bytes, bytearray)) else raw)
+    except (ValueError, AttributeError):
+        return None
+
 
 def revoke_token_jti(jti: str, exp_ts: Optional[int]) -> None:
     """Blacklist a token's `jti` until its own expiry (best-effort, fail-open).
@@ -218,9 +290,18 @@ PORTAL_DELEGATE_ALLOWED_ROUTES = {
 
 def create_portal_session_token(email: str, mode: str = "prod") -> str:
     """Mint a Client Portal session token for a verified email. Carries no
-    ``sub`` (no platform identity) — only the email + the portal scope."""
+    ``sub`` (no platform identity) — only the email + the portal scope.
+
+    Carries an explicit ``iat`` so bulk revocation (ent#281) can date the token
+    against the per-email cutoff. Set here rather than in ``create_access_token``
+    to keep the claim set of every other token type unchanged.
+    """
     return create_access_token(
-        data={"scope": PORTAL_SESSION_SCOPE, "email": email.lower()},
+        data={
+            "scope": PORTAL_SESSION_SCOPE,
+            "email": email.lower(),
+            "iat": int(datetime.now(timezone.utc).timestamp()),
+        },
         expires_delta=timedelta(hours=PORTAL_SESSION_EXPIRE_HOURS),
         mode=mode,
     )
@@ -239,7 +320,29 @@ def decode_portal_session(token: str) -> Optional[str]:
     if is_token_revoked(payload.get("jti")):
         return None
     email = payload.get("email")
-    return email.lower() if email else None
+    if not email:
+        return None
+    email = email.lower()
+
+    # ent#281 bulk revoke: reject anything issued at or before the cutoff.
+    cutoff = portal_sessions_revoked_at(email)
+    if cutoff is not None:
+        iat = payload.get("iat")
+        # A token with no `iat` cannot be dated, so it cannot be shown to
+        # post-date the revoke — treat it as revoked. Fail CLOSED here, unlike
+        # the Redis read above: the only tokens this affects are ones minted
+        # before ent#281 shipped (all expired within
+        # PORTAL_SESSION_EXPIRE_HOURS of the upgrade), and only for an email an
+        # operator has actively revoked. Letting an undatable token survive an
+        # explicit kill switch is the worse failure.
+        if iat is None:
+            return None
+        try:
+            if int(iat) <= cutoff:
+                return None
+        except (TypeError, ValueError):
+            return None  # malformed `iat` — same reasoning as missing
+    return email
 
 
 def decode_token(token: str) -> Optional[dict]:
