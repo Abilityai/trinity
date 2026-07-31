@@ -48,11 +48,14 @@ export const useNetworkStore = defineStore('network', () => {
   // a network blip replays missed events instead of dropping them.
   const lastEventId = ref(null)
 
-  // View mode state (grid | timeline) — default timeline, persisted.
-  // trinity-enterprise#47 added 'grid'; the legacy 'graph' Vue Flow canvas was
-  // decommissioned (#1689). A persisted 'graph' preference degrades to the
-  // default (timeline) via the VIEW_MODES.includes() guard below.
-  const VIEW_MODES = ['grid', 'timeline']
+  // View mode state (grid | timeline | list) — default timeline, persisted.
+  // trinity-enterprise#47 added 'grid'; trinity-enterprise#260 added 'list'
+  // (the Agents page consolidated into the dashboard); the legacy 'graph' Vue
+  // Flow canvas was decommissioned (#1689). A persisted stale mode (e.g.
+  // 'graph', or 'list' on an older bundle) degrades to the default (timeline)
+  // via the VIEW_MODES.includes() guard below. NOTE: the Dashboard's mode
+  // toggle v-for is the second home of this list — keep them in sync.
+  const VIEW_MODES = ['grid', 'timeline', 'list']
   const savedViewMode = localStorage.getItem('trinity-dashboard-view')
   const viewMode = ref(VIEW_MODES.includes(savedViewMode) ? savedViewMode : 'timeline')
   const isTimelineMode = computed(() => viewMode.value === 'timeline')
@@ -124,6 +127,18 @@ export const useNetworkStore = defineStore('network', () => {
   // Filter by owner
   const filterOwner = ref(localStorage.getItem('trinity-dashboard-filter-owner') || '')
 
+  // ent#261 seam: the canonical "visible agents" set — `agents` is already
+  // server-side tag-filtered by fetchAgents; this composes the client-side
+  // owner filter on top. Feeds the GRID and LIST panes ONLY (the Dashboard
+  // passes it as their :agents prop). The timeline/node paths deliberately do
+  // NOT read it — sibling ent#261 switches ReplayTimeline's :agents prop to
+  // this computed itself; do not wire convertAgentsToNodes through it here.
+  const visibleAgents = computed(() => {
+    if (!filterOwner.value) return agents.value
+    const owner = filterOwner.value === '__unassigned__' ? null : filterOwner.value
+    return agents.value.filter(a => (a.owner || null) === owner)
+  })
+
   // Actions
   function setFilterTags(tags) {
     filterTags.value = tags || []
@@ -154,6 +169,12 @@ export const useNetworkStore = defineStore('network', () => {
       }
       const response = await axios.get('/api/agents', { params })
       agents.value = response.data
+      // Write-through (ent#260 / #1643): keep agentsStore.agents warm from the
+      // same response — with the Agents page gone this is the base fetch that
+      // backs displayNameForSlug (browser-tab titles on Dashboard → AgentDetail
+      // nav) and the WS agent_created/label handlers' merge target. One line,
+      // zero extra HTTP; cycle-free since agents.js no longer imports this store.
+      useAgentsStore().agents = response.data
       // Apply client-side owner filter before converting to nodes
       const filtered = filterOwner.value
         ? response.data.filter(a => (a.owner || null) === (filterOwner.value === '__unassigned__' ? null : filterOwner.value))
@@ -1304,12 +1325,17 @@ export const useNetworkStore = defineStore('network', () => {
     }
   }
 
-  // View Mode Functions (grid | timeline). A stale 'graph' preference (#1689)
-  // falls through the includes() guard to the timeline default.
-  function setViewMode(mode) {
+  // View Mode Functions (grid | timeline | list). A stale preference (#1689
+  // 'graph', or 'list' on an older bundle) falls through the includes() guard
+  // to the timeline default. `persist: false` skips ONLY the localStorage
+  // write — used by the `?view=` deep-link/redirect (ent#260), which is a
+  // one-shot intent that must not rewrite the user's saved view selection.
+  function setViewMode(mode, { persist = true } = {}) {
     if (!VIEW_MODES.includes(mode)) mode = 'timeline'
     viewMode.value = mode
-    localStorage.setItem('trinity-dashboard-view', mode)
+    if (persist) {
+      localStorage.setItem('trinity-dashboard-view', mode)
+    }
 
     // Keep WebSocket and shared stats polling active in ALL views for live
     // updates; only the timeline's activity-refresh fallback is mode-scoped.
@@ -1319,7 +1345,7 @@ export const useNetworkStore = defineStore('network', () => {
       console.log('[Collaboration] Switched to Timeline view (live mode)')
     } else {
       stopActivityRefresh()
-      console.log('[Collaboration] Switched to Grid view')
+      console.log(`[Collaboration] Switched to ${mode === 'grid' ? 'Grid' : 'List'} view`)
     }
   }
 
@@ -1759,6 +1785,7 @@ export const useNetworkStore = defineStore('network', () => {
     schedules,
     filterTags,
     filterOwner,
+    visibleAgents, // ent#261 seam — the canonical filtered fleet all views consume
     // View mode / Replay state
     viewMode,
     isTimelineMode,

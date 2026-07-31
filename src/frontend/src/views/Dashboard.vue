@@ -43,8 +43,20 @@
 
             <!-- Right: Controls -->
             <div class="flex items-center space-x-2 flex-shrink-0">
+              <!-- Create Agent (trinity-enterprise#260) — chassis-level so agent
+                   creation is reachable from every mode, not just the List tab -->
+              <button
+                @click="showCreateModal = true"
+                class="flex items-center space-x-1 px-2 py-1 rounded text-xs font-medium bg-action-primary-600 hover:bg-action-primary-700 text-white whitespace-nowrap transition-colors"
+              >
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                </svg>
+                <span>Create Agent</span>
+              </button>
+
               <!-- Quick Tag Filter Dropdown -->
-              <div v-if="availableTags.length > 0" class="relative">
+              <div v-if="availableTags.length > 0" ref="tagDropdownRef" class="relative">
                 <button
                   @click="showTagDropdown = !showTagDropdown"
                   :class="[
@@ -103,10 +115,13 @@
 
               <span v-if="availableTags.length > 0 || availableOwners.length > 1" class="text-gray-300 dark:text-gray-600">|</span>
 
-              <!-- Mode Toggle (Grid / Timeline — trinity-enterprise#47; Graph decommissioned #1689) -->
+              <!-- Mode Toggle (Timeline / Grid / List — trinity-enterprise#47 grid,
+                   trinity-enterprise#260 list; Graph decommissioned #1689). This
+                   v-for is the second home of the mode list — keep in sync with
+                   VIEW_MODES in stores/network.js. -->
               <div class="flex rounded-md border border-gray-300 dark:border-gray-600 p-0.5 bg-gray-50 dark:bg-gray-700">
                 <button
-                  v-for="mode in ['grid', 'timeline']"
+                  v-for="mode in ['timeline', 'grid', 'list']"
                   :key="mode"
                   @click="toggleMode(mode)"
                   :class="[
@@ -252,7 +267,7 @@
       </div>
       <!-- Empty state -->
       <div
-        v-else-if="gridAgents.length === 0"
+        v-else-if="visibleAgents.length === 0"
         class="absolute inset-0 flex items-center justify-center"
       >
         <div class="text-center">
@@ -266,11 +281,69 @@
           </button>
         </div>
       </div>
-      <FleetGrid v-else ref="fleetGridRef" :agents="gridAgents" />
+      <FleetGrid v-else ref="fleetGridRef" :agents="visibleAgents" />
+    </div>
+
+    <!-- List View (trinity-enterprise#260) — the Agents page consolidated into
+         a dashboard mode. v-if so the panel's sync-health interval tears down
+         whenever the mode is not active. The wrapper is the flex slot
+         (min-h-0 so it can shrink inside the overflow-hidden column); the
+         panel root owns the scroll + horizontal padding. -->
+    <div v-if="viewMode === 'list'" class="flex-1 min-h-0 overflow-hidden bg-gray-100 dark:bg-gray-900">
+      <!-- Loading skeleton (#1266): immediate feedback while the fleet list loads -->
+      <div
+        v-if="isFleetLoading && agents.length === 0"
+        class="h-full px-4 sm:px-6 lg:px-8 py-4"
+      >
+        <SkeletonLoader variant="rows" :count="8" height="4rem" gap="0.75rem" />
+      </div>
+      <!-- Error state -->
+      <div
+        v-else-if="fleetLoadError && agents.length === 0"
+        class="h-full flex items-center justify-center"
+      >
+        <div class="text-center">
+          <h3 class="text-sm font-medium text-gray-900 dark:text-gray-100">Couldn't load agents</h3>
+          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Something went wrong fetching the fleet.</p>
+          <button
+            @click="refreshAll"
+            class="mt-4 inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
+          >Retry</button>
+        </div>
+      </div>
+      <!-- True-empty state (grid-identical teach — chassis-owned, D7) -->
+      <div
+        v-else-if="visibleAgents.length === 0"
+        class="h-full flex items-center justify-center"
+      >
+        <div class="text-center">
+          <h3 class="text-sm font-medium text-gray-900 dark:text-gray-100">No agents yet</h3>
+          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Launch your first agent in a couple of clicks.</p>
+          <button
+            @click="openOnboarding"
+            class="mt-4 inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
+          >
+            Get started
+          </button>
+        </div>
+      </div>
+      <AgentListPanel
+        v-else
+        ref="listPanelRef"
+        :agents="visibleAgents"
+        :available-tags="availableTags"
+        @tags-changed="fetchAvailableTags"
+        @clear-chassis-filters="clearChassisFilters"
+      />
     </div>
 
       </div>
     </main>
+
+    <!-- Create Agent Modal (trinity-enterprise#260 — chassis-level, all modes).
+         On close, refresh the fleet: the WS agent_created event can lag while
+         the container spins up. -->
+    <CreateAgentModal v-if="showCreateModal" @close="onCreateModalClose" />
 
     <!-- System View Editor Modal -->
     <SystemViewEditor
@@ -301,17 +374,33 @@ import OnboardingWizard from '@/components/OnboardingWizard.vue'
 import { useSessionsStore } from '@/stores/sessions'
 import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useNetworkStore } from '@/stores/network'
 import { useSystemViewsStore } from '@/stores/systemViews'
 import { storeToRefs } from 'pinia'
 import FleetGrid from '@/components/FleetGrid.vue'
+import AgentListPanel from '@/components/AgentListPanel.vue'
+import CreateAgentModal from '@/components/CreateAgentModal.vue'
 import { useNotification } from '@/composables/useNotification'
 
 const networkStore = useNetworkStore()
 const systemViewsStore = useSystemViewsStore()
 const sessionsStore = useSessionsStore()
 const route = useRoute()
+const router = useRouter()
+
+// ?view= deep-link intent (trinity-enterprise#260 D2) — a route WATCH, not an
+// onMounted read, so navigating to `/?view=list` while the Dashboard is already
+// mounted still applies. Non-persisting (a redirect/bookmark is not a
+// preference statement — AC-4 protects the *selected* view), and the param is
+// stripped after applying so a reload doesn't re-apply it. setViewMode itself
+// whitelists against VIEW_MODES (invalid values degrade to timeline).
+watch(() => route.query.view, (view) => {
+  if (!view) return
+  networkStore.setViewMode(view, { persist: false })
+  const { view: _stripped, ...rest } = route.query
+  router.replace({ query: rest }).catch(() => {})
+}, { immediate: true })
 
 // First-run onboarding (trinity-enterprise#52). Auto-opens once for a fresh
 // install with zero agents; dismissal is remembered so it never nags.
@@ -374,6 +463,7 @@ async function onViewSaved() {
 
 const {
   agents,
+  visibleAgents,
   nodes,
   edges,
   collaborationHistory,
@@ -465,13 +555,28 @@ const runningCount = computed(() => {
 // Grid view (trinity-enterprise#47)
 const fleetGridRef = ref(null)
 
-// Agents shown on the grid: same owner filter the graph applies to nodes
-// (the tag filter is already applied server-side by fetchAgents).
-const gridAgents = computed(() => {
-  if (!selectedOwner.value) return agents.value
-  const owner = selectedOwner.value === '__unassigned__' ? null : selectedOwner.value
-  return agents.value.filter(a => (a.owner || null) === owner)
-})
+// List view (trinity-enterprise#260). Both grid and list render the store's
+// `visibleAgents` computed (the ent#261 seam — server-side tag filter ∘ owner
+// filter) instead of a local copy of the owner-filter expression.
+const listPanelRef = ref(null)
+
+// Create Agent modal (chassis-level — reachable from every mode, ent#260)
+const showCreateModal = ref(false)
+function onCreateModalClose() {
+  showCreateModal.value = false
+  networkStore.fetchAgents()
+}
+
+// clear-chassis-filters (ent#260 strategy F6): the list panel's "Clear all
+// filters" clears its local name/status filters AND asks the chassis to clear
+// the quick-tag + owner layers — the retired page's button cleared all four.
+function clearChassisFilters() {
+  clearQuickTags()
+  if (selectedOwner.value) {
+    selectedOwner.value = ''
+    networkStore.setFilterOwner('')
+  }
+}
 
 // Agents executing right now: WS-observed in-flight work unioned with the
 // polled context-stats activity state.
@@ -544,6 +649,10 @@ async function refreshAll() {
   if (networkStore.viewMode === 'grid') {
     // Grid mode: re-pull chip batch data + re-hydrate visible tiles.
     fleetGridRef.value?.refresh()
+  } else if (networkStore.viewMode === 'list') {
+    // List mode: re-fetch sync health (the panel's only own data source —
+    // fleet rows + tags are already refreshed by the fetches above).
+    listPanelRef.value?.refresh()
   }
   // Timeline mode needs nothing extra — the two fetches above feed it.
 }
@@ -664,9 +773,13 @@ function clearQuickTags() {
   localStorage.removeItem('trinity-dashboard-quick-tags')
 }
 
-// Close dropdown when clicking outside
+// Close dropdown when clicking outside — scoped to the dropdown's own element
+// ref (ent#260 eng F10): the old `.closest('.relative')` heuristic kept the
+// dropdown open on ANY click inside ANY `relative`-positioned element, which
+// breaks once the list rows (position: relative) mount inside the chassis.
+const tagDropdownRef = ref(null)
 function handleClickOutside(event) {
-  if (showTagDropdown.value && !event.target.closest('.relative')) {
+  if (showTagDropdown.value && !tagDropdownRef.value?.contains(event.target)) {
     showTagDropdown.value = false
   }
 }
