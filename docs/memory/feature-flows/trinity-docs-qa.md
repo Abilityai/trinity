@@ -43,7 +43,7 @@ Public conversational Q&A system for Trinity documentation, powered by Vertex AI
 
 Consumers: `scripts/ask-trinity.sh`, raw REST, the docs-site assistant, the
 in-app Help widget (#391), and the standalone `trinity-docs-mcp` MCP server
-(#1459 — see [MCP Distribution](#mcp-distribution--abilityaitrinity-docs-mcp-1459)).
+(#1459 — see [MCP Distribution](#mcp-distribution--trinity-docs-mcp-1459)).
 
 ## Components
 
