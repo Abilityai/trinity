@@ -18,10 +18,15 @@ The five load-bearing behaviours, each with a named test:
      `configure_push_remote` then clears the push blackhole, and a tokenless
      agent (Cornelius) can push a private knowledge base to the shared public
      upstream.
-  2. **`GIT_SYNC_AUTO` is `DB flag OR baked env`, plus a convergence backfill.**
-     The two writers in `crud.py` genuinely disagree (`and not config.ephemeral`
-     inside a swallowing try/except on the DB side only, column default 0), so
-     DB-only derivation silently stops auto-push fleet-wide.
+  2. **`GIT_SYNC_AUTO` is `DB flag OR baked env`, derive-only.** The two
+     writers in `crud.py` genuinely disagree (`and not config.ephemeral` inside
+     a swallowing try/except on the DB side only, column default 0), so DB-only
+     derivation silently stops auto-push fleet-wide. The column is never
+     written back: "baked true / DB 0" is ALSO exactly an owner's explicit
+     `PUT /{agent}/git/auto-sync {enabled: false}`, so a convergence backfill
+     would erase that intent — and cross a privilege boundary doing it
+     (`PUT .../auto-sync` is `OwnedAgentByName`, `POST .../start` is
+     `AuthorizedAgentByName`). The disagreement is logged, not resolved.
   3. **Correct, never introduce** (config-drift path only). The repo half is
      repo-gated (ent#123) while the PAT half keeps #211's narrower per-agent
      gate, and those two disagree for a real row shape — an agent bound via
@@ -47,8 +52,8 @@ Target: src/backend/services/agent_service/lifecycle.py
 """
 from __future__ import annotations
 
+import ast
 import os
-import re
 import sys
 import tempfile
 from pathlib import Path
@@ -74,6 +79,44 @@ if _BACKEND not in sys.path:
 _LIFECYCLE_SRC = (
     _PROJECT_ROOT / "src" / "backend" / "services" / "agent_service" / "lifecycle.py"
 )
+
+_GATE_FN = "_apply_git_env_from_db"
+
+
+def _gate_call_sites() -> dict:
+    """Every call to `_apply_git_env_from_db` in lifecycle.py, as
+    `{enclosing function name: pat_gate literal}`.
+
+    Walks the AST rather than grepping: the module names the helper in two
+    comments, and a mention is not a call site. Fails LOUD on anything a
+    static gate check cannot reason about — a non-literal `pat_gate`, a missing
+    one, or a duplicate call inside one function — because each of those makes
+    the guard silently vacuous, which is worse than the leak it guards.
+    """
+    tree = ast.parse(_LIFECYCLE_SRC.read_text())
+    found: dict = {}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == _GATE_FN):
+                continue
+            gate = next(
+                (kw.value for kw in node.keywords if kw.arg == "pat_gate"), None
+            )
+            assert isinstance(gate, ast.Constant) and isinstance(gate.value, str), (
+                f"{fn.name} passes pat_gate as a non-literal (or omits it). The "
+                "gate is a REQUIRED per-call-site parameter precisely so it is "
+                "statically reviewable; a computed value defeats this guard."
+            )
+            assert fn.name not in found, (
+                f"{fn.name} calls {_GATE_FN} more than once; the gate mapping "
+                "is ambiguous and this guard would only see one of them."
+            )
+            found[fn.name] = gate.value
+    return found
 
 
 def _purge_real_services(monkeypatch, mocks):
@@ -252,32 +295,36 @@ class TestPatGate:
             lc._apply_git_env_from_db("a1", {}, pat_gate="whatever")
 
     def test_call_sites_pass_the_gate_they_need(self):
-        """Static guard (the `test_agent_auth_header_guard.py` idiom): the two
-        call sites must keep their own gates. Flipping the config-drift recreate
-        to `effective` is the exact ent#162 credential leak, and no behavioural
-        test of the helper alone would catch it."""
-        src = _LIFECYCLE_SRC.read_text()
+        """Static guard: the writers must keep their own gates, and there must
+        be exactly TWO of them. Flipping the config-drift recreate to
+        `effective` is the exact ent#162 credential leak, and no behavioural
+        test of the helper alone would catch it.
 
-        def _body(header: str) -> str:
-            start = src.index(header)
-            rest = src[start + len(header):]
-            end = re.search(r"^(async def |def )", rest, re.M)
-            return rest[: end.start()] if end else rest
+        AST, not a source grep: `lifecycle.py` mentions the helper by name in
+        two comments, so a substring count would read 5 writers where there are
+        2 (the `#1871` guard's own first blind spot), and a `black` reflow that
+        split a call across lines would break a single-line literal assertion.
+        """
+        calls = _gate_call_sites()
 
-        recreate = _body("async def recreate_container_with_updated_config(")
-        rebuild = _body("def _apply_persisted_auth_env(")
-
-        assert recreate.count(
-            '_apply_git_env_from_db(agent_name, env_vars, pat_gate="per_agent_only")'
-        ) == 1, "the config-drift recreate must keep the #211 per-agent gate"
-        assert (
-            '_apply_git_env_from_db(agent_name, env_vars, pat_gate="effective")'
-            in rebuild
-        ), "the rebuild-from-nothing path resolves the effective PAT"
+        # The count is load-bearing, not decoration. The bug ent#109 fixes was
+        # that git env had TWO writers and one of them was wrong; a third
+        # writer added later — on any path that seeds env from an existing
+        # container — re-opens exactly that hole, and pinning only the two
+        # known sites would stay green through it.
+        assert calls == {
+            "recreate_container_with_updated_config": "per_agent_only",
+            "_apply_persisted_auth_env": "effective",
+        }, (
+            "the git-env writer set changed. A config-drift-shaped path must "
+            "pass 'per_agent_only' (#211 / ent#162: 'effective' resolves the "
+            "GLOBAL platform PAT and bakes it into tokenless containers); only "
+            f"a rebuild-from-nothing may pass 'effective'. Found: {calls}"
+        )
 
 
 # ---------------------------------------------------------------------------
-# 2. GIT_SYNC_AUTO — DB flag OR baked env, plus the convergence backfill
+# 2. GIT_SYNC_AUTO — DB flag OR baked env, derive-only (never written back)
 # ---------------------------------------------------------------------------
 class TestGitSyncAuto:
     def test_baked_true_db_zero_keeps_auto_push(self, lc_env):
