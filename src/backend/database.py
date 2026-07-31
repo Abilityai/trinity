@@ -2370,6 +2370,15 @@ class DatabaseManager:
     def get_telegram_bot_token(self, agent_name):
         return self._telegram_channel_ops.get_decrypted_bot_token(agent_name)
 
+    def decrypt_telegram_bot_token(self, encrypted):
+        # ent#264: decrypt from a binding row already in hand (single binding
+        # read per turn in the adapter's indicate_processing).
+        return self._telegram_channel_ops.decrypt_bot_token(encrypted)
+
+    def set_telegram_progress_indicator(self, agent_name, enabled):
+        # ent#264: per-binding in-progress indicator toggle (default ON).
+        return self._telegram_channel_ops.set_progress_indicator_enabled(agent_name, enabled)
+
     def get_all_telegram_bindings(self):
         return self._telegram_channel_ops.get_all_bindings()
 

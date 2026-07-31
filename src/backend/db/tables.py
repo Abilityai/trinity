@@ -838,6 +838,7 @@ telegram_bindings = Table(
     Column("webhook_url", Text),
     Column("telegram_secret_token", Text),
     Column("last_update_id", Integer),
+    Column("progress_indicator_enabled", Integer),  # ent#264: default ON (1)
     Column("created_at", Text),
     Column("updated_at", Text),
 )

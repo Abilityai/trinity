@@ -3151,6 +3151,27 @@ def _migrate_slack_channel_allow_proactive(cursor, conn):
         )
 
 
+def _migrate_telegram_progress_indicator(cursor, conn):
+    """ent#264 — per-binding toggle for the Telegram in-progress indicator.
+
+    Adds ``progress_indicator_enabled INTEGER DEFAULT 1`` to
+    ``telegram_bindings``. Default ON for EVERYONE (the AC), unlike ent#223's
+    deny-for-new posture: no backfill UPDATE is needed because SQLite's
+    ``ALTER TABLE ADD COLUMN ... DEFAULT 1`` physically populates existing
+    rows with 1 (no NULLs arise from the migration itself). The Python-side
+    ``v is None or v != 0`` read predicate is defense-in-depth for edge
+    writes, not the backfill mechanism.
+
+    Mirrored by Alembic 0032_telegram_progress_indicator.
+    """
+    _safe_add_column(
+        cursor,
+        "telegram_bindings",
+        "progress_indicator_enabled",
+        "ALTER TABLE telegram_bindings ADD COLUMN progress_indicator_enabled INTEGER DEFAULT 1",
+    )
+
+
 def _migrate_channel_report_back_columns(cursor, conn):
     """ent#265 — channel completion report-back: Telegram leg + binding identity.
 
@@ -3290,4 +3311,5 @@ MIGRATIONS = [
     ("slack_channel_allow_proactive", _migrate_slack_channel_allow_proactive),
     ("product_events_table", _migrate_product_events_table),
     ("channel_report_back_columns", _migrate_channel_report_back_columns),
+    ("telegram_progress_indicator", _migrate_telegram_progress_indicator),
 ]

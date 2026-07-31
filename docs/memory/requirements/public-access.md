@@ -146,16 +146,18 @@
   - No new Python dependencies (httpx only)
   - Router generalization: `ChannelMessageRouter` now uses adapter methods instead of Slack-specific hardcodings
 - **Database Tables**:
-  - `telegram_bindings` — Maps bots to agents (bot_id UNIQUE, bot_username, webhook_secret, telegram_secret_token, encrypted bot token)
+  - `telegram_bindings` — Maps bots to agents (bot_id UNIQUE, bot_username, webhook_secret, telegram_secret_token, encrypted bot token, `progress_indicator_enabled` — ent#264, see §15.1h)
   - `telegram_chat_links` — Maps Telegram users to sessions (binding_id, telegram_user_id, message_count)
 - **API Endpoints**:
   - `POST /api/telegram/webhook/{webhook_secret}` — Receive Telegram updates (validated by X-Telegram-Bot-Api-Secret-Token header)
-  - `GET /api/agents/{name}/telegram` — Bot binding status
+  - `GET /api/agents/{name}/telegram` — Bot binding status (`AuthorizedAgentByName` since ent#264 — see Security below; response carries `progress_indicator_enabled`)
   - `PUT /api/agents/{name}/telegram` — Configure bot token (validates via getMe)
   - `DELETE /api/agents/{name}/telegram` — Remove bot binding + delete webhook
   - `POST /api/agents/{name}/telegram/test` — Test bot connectivity / send test message
+  - `PUT /api/agents/{name}/telegram/progress-indicator` — Toggle the in-progress status indicator (ent#264, see §15.1h)
 - **Security**:
   - Bot tokens AES-256-GCM encrypted at rest (same `CredentialEncryptionService` as Slack)
+  - Binding-status GET hardened to `AuthorizedAgentByName` (ent#264): binding status — including `webhook_url`, which embeds the `webhook_secret` — is no longer readable by arbitrary authenticated users (uniform-404 accessor; owner/shared/admin still pass). The sibling `GET .../telegram/groups` (group chat ids/titles/welcome text — tenant data) carries the same accessor; the group-message POST was already owner-gated
   - Webhook auth via `X-Telegram-Bot-Api-Secret-Token` header (set during setWebhook)
   - SSRF prevention: media downloads restricted to `api.telegram.org` domain
   - Restricted tools for Telegram users (WebSearch, WebFetch — same as Slack)
@@ -185,6 +187,7 @@
   - Mention text stripped from agent input for cleaner prompts
   - Commands support @botname suffix in groups (e.g., `/help@mybot`)
   - Uses modern Telegram `reply_parameters` API for threaded replies
+  - In-flight status indicator (ent#264, §15.1h) acks only @mention/reply-triggered turns and `all`-trigger-mode groups; observe-mode un-mentioned turns get typing only (a visible reaction would reveal a silently-observing bot and spam the group)
 - **Database Tables**:
   - `telegram_group_configs` — Per-group settings (binding_id, chat_id, trigger_mode, welcome_enabled, welcome_text, is_active)
 - **API Endpoints**:
@@ -227,6 +230,36 @@
 - **Known limits (v1)**: lease-reaper/bulk-sweep/pull-sink and operator-terminate (Path B) terminals don't report; a restart mid-inline-turn loses the inline reply and reports nothing (F7); a late token-gated FAILED→SUCCESS resurrection replays the guard — no corrective ✅ (correct at-most-once); fan-out = one report per child execution (per-execution identity — no persisted parent key); pre-migration rows with NULL chat context suppress; Telegram forum topics not threaded (inbound never captures `message_thread_id`); no channel-history persistence of the report.
 - **Deliberate scope cut**: the proactive group-send endpoint (`POST …/telegram/groups/{chat_id}/messages`) is NOT gated on `allow_proactive` here (ent#223 did gate Slack's) — with default 1 the eventual coherence gate is a no-op for un-toggled groups; follow-up issue filed at ship time.
 - **Flow**: `docs/memory/feature-flows/channel-completion-report.md`
+
+### 15.1i Telegram In-Progress Status Indicator (TGRAM-PROGRESS)
+- **Status**: ✅ Implemented (2026-07-30)
+- **Requirement ID**: TGRAM-PROGRESS
+- **Priority**: P2
+- **Issue**: trinity-enterprise#264
+- **Description**: While a Telegram-triggered execution runs (minutes to hours under TIMEOUT-001), the user gets live feedback instead of silence: an immediate 👀 reaction ack on the triggering message at dispatch, the existing one-shot typing garnish, and — once the run crosses a 30s threshold — an elapsed-time placeholder message ("⏳ Working on it — N min elapsed · updated HH:MM UTC") maintained via `editMessageText` on a 60s cadence and resolved (deleted; fallback edited to a neutral terminal line) at every terminal.
+- **Key Features**:
+  - Channel-agnostic start/progress/resolve seam: the router owns a per-turn driver task ticking a new default-no-op `ChannelAdapter.indicate_progress(message, elapsed_seconds)` hook; adapters declare capability via `progress_threshold_seconds` (`None` ⇒ driver never armed — Slack/WhatsApp/VoIP behave byte-identically; ent#228 later implements only the hook, not the loop)
+  - All per-turn indicator state rides `NormalizedMessage.metadata` (the adapter is a long-lived shared singleton handling concurrent turns — no unkeyed adapter state, no cleanup protocol; state dies with the turn)
+  - Honest status (dispatch/terminal-hook driven, never a lying timer): the driver is cancelled AND awaited-dead before `indicate_done` at all three router terminals (success / failed-or-cancelled / exception — timeout surfaces as `failed`), so a tick can never edit the placeholder after it is deleted; a `finally` backstop cancels a still-armed driver on unexpected raises outside the terminals
+  - Resolve-vs-first-send race closed by construction: the first placeholder send runs as a shielded future that records the Telegram `message_id` into metadata **inside the future itself**; the resolve path awaits the in-flight send (bounded) before `indicate_done`, so the delete always sees the id
+  - Group gating: reaction + placeholder only for @mention/reply-triggered turns and `all`-trigger-mode groups (the bot replies to everything there — excluding them would recreate the zero-feedback problem); observe-mode turns get typing only, so the indicator never reveals a silently-observing bot
+  - Self-dating placeholder text (`· updated HH:MM UTC`) — a restart-stranded placeholder dates itself instead of lying forever
+  - Static template text only: the placeholder/edit text is built solely from the elapsed-time template — no agent response or error content at this egress (no sanitizer needed; ent#224 class closed by construction)
+  - Degradation ladder: reaction fails (per-chat disabled / permissions / old chats → 400) → typing + placeholder still work; two consecutive failed progress HTTP attempts (placeholder sends, edits, timeouts alike) set a per-turn degraded flag that stops all further progress HTTP; the turn itself is NEVER failed by indicator code (every hook body fail-soft at its boundary)
+  - Rate-limit aware: one 429 retry honoring `retry_after` (capped 30s) on placeholder send/edit; "message is not modified" treated as success; 👀 reaction is single-attempt (a missed reaction is cosmetic); edit cadence 60s is well under the ≈1 msg/s per-chat budget
+  - Terminal reaction is CLEARED at every terminal — no success-👍 swap (✅ is not in Telegram's allowed bot reaction set; a split success/failure emoji semantics lies on edge cases; the reply itself is the completion signal)
+  - Per-binding toggle, default ON including existing bindings (migration column default): NULL/missing reads as **enabled** via the Python-side `v is None or v != 0` predicate (never SQL — `NULL != 0` is NULL); only an explicit `0` disables; toggle reads are per-turn, so a flip takes effect on the NEXT turn (documented behavior)
+- **Database Changes**:
+  - `telegram_bindings.progress_indicator_enabled INTEGER DEFAULT 1` — dual-track migration (SQLite `telegram_progress_indicator` in `db/migrations.py` + Alembic `0031_telegram_progress_indicator`), plus `db/schema.py` / `db/tables.py` DDL parity
+- **API Endpoints**:
+  - `PUT /api/agents/{name}/telegram/progress-indicator` — owner-only (`OwnedAgentByName`) **+ `reject_agent_principal`** (human-only: an agent-scoped key resolves to the owner and could otherwise flip its own toggle — ent#223 lesson); body `{enabled: bool}`; 404 when no binding exists (mirrors `PUT /voip/enabled` — toggling never requires re-entering the bot token)
+  - `GET /api/agents/{name}/telegram` — response gains `progress_indicator_enabled` (null when unconfigured); endpoint hardened to `AuthorizedAgentByName` (see §15.1c Security)
+- **Frontend**: `TelegramChannelPanel.vue` — "In-progress status indicator" switch in the configured-state block (optimistic flip, revert on error, dark-mode aware)
+- **Known residuals**:
+  - Backend restart mid-run strands the reaction/placeholder (same accepted class as Slack's stranded ⏳; the UTC stamp self-dates the stale placeholder) — no persistence engineering
+  - The resolve-path settle of an in-flight first placeholder send is **bounded at 10s** — a first send that exceeds it (e.g. a 429 `retry_after` ≥ 10s on that exact send) is abandoned and can still strand a placeholder (same accepted class; the UTC stamp self-dates it)
+  - The driver is bound to the inline channel execution path (`execute_task` awaited in-process; channel triggers are not in `ASYNC_DISPATCH_ELIGIBLE_TRIGGERS`). If #1081 pull-mode / #1083 async dispatch ever move channel triggers off the inline path, the in-process driver silently never resolves — the successor is the durable terminal-event seam (`source_channel*` columns + #1578 completion events, the ent#265 rails); the `indicate_progress` hook API survives that migration, only the router ticker moves
+- **Flow**: `docs/memory/feature-flows/telegram-integration.md`
 
 ### 15.1g Webhook Triggers for Agent Schedules (WEBHOOK-001)
 - **Status**: ✅ Implemented (2026-04-24)

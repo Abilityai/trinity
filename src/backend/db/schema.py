@@ -964,6 +964,7 @@ TABLES = {
             webhook_url TEXT,
             telegram_secret_token TEXT,
             last_update_id INTEGER DEFAULT 0,
+            progress_indicator_enabled INTEGER DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT
         )
