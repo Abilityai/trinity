@@ -1204,6 +1204,7 @@ class DatabaseManager:
         source_channel: str = None,
         source_channel_chat_id: str = None,
         source_channel_thread: str = None,
+        source_channel_agent: str = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule)."""
         return self._schedule_ops.create_task_execution(
@@ -1220,6 +1221,9 @@ class DatabaseManager:
             source_channel=source_channel,
             source_channel_chat_id=source_channel_chat_id,
             source_channel_thread=source_channel_thread,
+            # ent#265: binding-agent for channel report-back (set only at the
+            # /task inheritance point; None for direct rows).
+            source_channel_agent=source_channel_agent,
         )
 
     def create_schedule_execution(
