@@ -152,6 +152,14 @@ class TelegramChannelOperations:
             return None
         return self._decrypt_token(binding["bot_token_encrypted"])
 
+    def decrypt_bot_token(self, encrypted: str) -> Optional[str]:
+        """Decrypt a bot token from a binding row already in hand (ent#264 —
+        lets callers that hold the binding avoid a second read via
+        ``get_decrypted_bot_token``). Fail-soft: None on any decrypt error."""
+        if not encrypted:
+            return None
+        return self._decrypt_token(encrypted)
+
     def get_all_bindings(self) -> List[dict]:
         """Get all Telegram bindings (for webhook reconciliation on startup)."""
         stmt = select(*self._BINDING_COLUMNS)
