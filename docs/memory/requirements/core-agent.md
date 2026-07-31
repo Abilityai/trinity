@@ -288,6 +288,16 @@
 - **Out of scope (follow-ups)**: fleet KPI strip; "Needs your attention" + live-activity right rail.
 - **Flow**: `docs/memory/feature-flows/dashboard-grid-view.md`
 
+### Grid Org Overlay — Department Zones + Reporting Lines (trinity-enterprise#305)
+- **Status**: ✅ Implemented (2026-07-31) · OSS-core (explicit decision — no entitlement gate)
+- **Description**: Organizational layer over the Grid view. **Departments** are `dept-<name>` tags rendered as derived hull frames ("zones") around member tiles wherever they sit — membership is the tag, geometry is computed, nothing is persisted per zone. **Reporting lines** are `reports-to-<agent>` tags stored on the REPORT agent (direction = which row carries the tag), rendered as manager→report arrows. Storage is namespaced tags — no schema change; a dedicated field can supersede losslessly.
+- **Key Features**: zones with live rollups (count/running, viewer-scoped) + per-tile dept ribbons (stable hash → 8 themed palette slots); bottom connect port (drag from manager onto report; live "X will report to Y" pill; undo toast); click-line removal with undo; hover chain/line highlighting; drop-into-zone reassigns dept (re-validated at drop, undo toast); zone-header block move with per-tile target sockets and invalid-spring-back; "Group by dept" dense arrange + zone-aware Tidy (`tidyByDept`); zone-aware newcomer placement; "New department" affordance (named validation + click-to-assign mode); Zones/Lines toggles persisted per user.
+- **Bootstrap fallback**: while NO agent carries a `dept-*` tag, an agent's first plain tag counts as its department (day-one zones on tag-organized fleets) — those zones are READ-ONLY (never drop-assigned) and the fallback switches off fleet-wide at the first explicit `dept-*`.
+- **Guardrails / integrity**: org namespaces are **human-only** — the tags router rejects agent-principal writes to `dept-*`/`reports-to-*` (mirrors the #1578 reserved event namespace); tag edits broadcast `agent_tags_changed` (WS) so all browsers converge; dept assignment is an atomic set-list PUT; agent **rename** rewrites `reports-to-<old>` values fleet-wide inside the rename transaction (PK-collision-safe); hard **purge** deletes dangling `reports-to-<name>` values (soft-delete keeps them; render skips missing agents). Generic tag surfaces (Dashboard quick-tags, Agents list chips/filter, SystemViewEditor, network-store grouping) hide org namespaces via `isOrgTag`; the AgentDetail tag editor shows all.
+- **Spacing contract**: lattice gaps (GAP_X 40 / GAP_Y 50) absorb the zone frame chrome (22/10/34/10), so adjacent-row/column departments never collide and the arrange needs no spacer cells — pinned by a unit test.
+- **Out of scope (follow-ups)**: line routing around tiles; live re-anchor mid-drag; drag-out-of-zone to clear dept; touch port affordance; suggestions from `agent_permissions`/spawn provenance; behavioral consumers of reporting lines (escalation routing).
+- **Flow**: `docs/memory/feature-flows/dashboard-grid-view.md` (§ Org overlay)
+
 ---
 
 ---

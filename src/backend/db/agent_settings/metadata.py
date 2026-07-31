@@ -285,12 +285,22 @@ class MetadataMixin:
                     .values(agent_name=new_name)
                 )
 
-                # Tags
+                # Tags (this agent's own rows)
                 conn.execute(
                     update(agent_tags)
                     .where(agent_tags.c.agent_name == old_name)
                     .values(agent_name=new_name)
                 )
+
+                # Org-overlay reporting refs (trinity-enterprise#305): tags on
+                # OTHER agents' rows whose VALUE names this agent
+                # (`reports-to-<old_name>`). Same transaction as the rename —
+                # a crash can never leave half the org chart pointing at a
+                # name that no longer exists. Cross-tenant by design (a report
+                # may belong to another owner) — covered by the rename's own
+                # audit row at the router.
+                from ..tags import rename_reports_to_refs
+                rename_reports_to_refs(conn, old_name, new_name)
 
                 # Public links
                 conn.execute(

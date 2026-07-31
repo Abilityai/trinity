@@ -710,6 +710,7 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { formatCostCompact } from '../composables/useFormatters'
 import { useAgentsStore } from '../stores/agents'
 import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
+import { isOrgTag } from '../utils/gridOrg'
 import { useNetworkStore } from '../stores/network'
 import NavBar from '../components/NavBar.vue'
 import CreateAgentModal from '../components/CreateAgentModal.vue'
@@ -1163,7 +1164,10 @@ async function fetchAllAgentTags() {
 }
 
 function getAgentTags(agentName) {
-  return agentTags.value[agentName] || []
+  // Org-overlay namespaces (dept-*/reports-to-*) render as zones/lines on the
+  // Grid, not as browse chips here; the AgentDetail tag editor shows all
+  // (trinity-enterprise#305).
+  return (agentTags.value[agentName] || []).filter((t) => !isOrgTag(t))
 }
 
 function toggleSelection(agentName) {

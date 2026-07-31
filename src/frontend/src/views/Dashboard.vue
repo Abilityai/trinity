@@ -303,6 +303,7 @@ import { useNetworkStore } from '@/stores/network'
 import { useSystemViewsStore } from '@/stores/systemViews'
 import { storeToRefs } from 'pinia'
 import FleetGrid from '@/components/FleetGrid.vue'
+import { isOrgTag } from '@/utils/gridOrg'
 import { useNotification } from '@/composables/useNotification'
 
 const networkStore = useNetworkStore()
@@ -632,7 +633,10 @@ function formatTimestamp(timestamp) {
 async function fetchAvailableTags() {
   try {
     const response = await axios.get('/api/tags')
-    availableTags.value = response.data.tags || []
+    // Org-overlay namespaces (dept-*/reports-to-*) are structural facts, not
+    // browse filters — hidden here; the Grid renders them as zones/lines and
+    // the AgentDetail tag editor still shows them (trinity-enterprise#305).
+    availableTags.value = (response.data.tags || []).filter((t) => !isOrgTag(t.tag))
   } catch (err) {
     console.error('Failed to fetch tags:', err)
     availableTags.value = []

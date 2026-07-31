@@ -102,12 +102,15 @@ export function defaultLayout(agentNames, systemNames = new Set()) {
 /**
  * Self-healing pass (#47 AC): reconcile a saved layout against the live
  * agent list.
- *   - new agents take the first free cell near the origin
+ *   - new agents take the first free cell near the origin — or, when the
+ *     caller provides `originFor(name)`, near that agent-specific origin
+ *     (the org overlay uses this to place a newcomer beside its department's
+ *     zone hull instead of at the board origin)
  *   - deleted agents leave their gap (their entries are dropped)
  *   - an invalid or colliding saved position resolves to the nearest free cell
  * Returns `{ layout, changed }` — `changed` signals the caller to re-persist.
  */
-export function normalizeLayout(saved, agentNames) {
+export function normalizeLayout(saved, agentNames, originFor = null) {
   const layout = {}
   let changed = false
   const names = [...agentNames]
@@ -128,9 +131,11 @@ export function normalizeLayout(saved, agentNames) {
     }
   }
 
-  // Second pass: place newcomers / evicted entries near the origin.
+  // Second pass: place newcomers / evicted entries near their origin.
   for (const name of pending) {
-    layout[name] = nearestFreeCell(layout, 0, 0)
+    const origin = (originFor && originFor(name, layout)) || { c: 0, r: 0 }
+    const o = isValidPos(origin) ? origin : { c: 0, r: 0 }
+    layout[name] = nearestFreeCell(layout, o.c, o.r)
     changed = true
   }
   return { layout, changed }

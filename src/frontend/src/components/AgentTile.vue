@@ -1,10 +1,12 @@
 <template>
   <div class="gtile" :class="{ system: isSystemAgent, runner: isSkillRunner }">
-    <!-- PROTOTYPE org overlay: department ribbon (dept:* tag / plain-tag fallback) -->
+    <!-- Org overlay: department ribbon (dept-* tag / bootstrap fallback).
+         Color comes from the themed --gv-dept-N slot vars in FleetGrid.vue;
+         the tooltip names the department so identity never rides on hue. -->
     <span
       v-if="dept"
       class="dept-ribbon"
-      :style="{ background: dept.color }"
+      :style="{ background: `var(--gv-dept-${dept.slot})` }"
       :title="'Department: ' + dept.name"
     ></span>
     <!-- Avatar half-out on the left edge -->

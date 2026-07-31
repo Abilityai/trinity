@@ -6,6 +6,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "check:tokens": "node scripts/check-design-tokens.mjs",
+    "test:unit": "vitest run",
     "test:e2e": "playwright test",
     "test:e2e:smoke": "playwright test --grep @smoke",
     "test:e2e:ui": "playwright test --ui",
@@ -41,7 +42,8 @@
     "autoprefixer": "^10.5.4",
     "postcss": "^8.5.21",
     "tailwindcss": "^3.4.19",
-    "vite": "^8.1.5"
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10"
   },
   "optionalDependencies": {
     "@rollup/rollup-darwin-arm64": "^4.62.2",

@@ -128,3 +128,49 @@ layout persistence, tidy/reset, and Timeline coexistence (@smoke; Graph mode dec
 
 Fleet KPI strip; "Needs your attention" + live-activity right rail;
 server-side per-user layout storage.
+
+## Org overlay — department zones + reporting lines (trinity-enterprise#305)
+
+Organizational layer over the same lattice; OSS-core. Full requirement:
+`docs/memory/requirements/core-agent.md` § Grid Org Overlay.
+
+**Data model (namespaced tags, no schema change).** Department =
+`dept-<name>` tag; reporting line = `reports-to-<agent>` tag on the REPORT
+agent (direction = which row carries the tag). Prefix constants live twice by
+contract: `src/backend/db/tags.py` (`ORG_TAG_PREFIXES`) and
+`src/frontend/src/utils/gridOrg.js` — keep in sync.
+
+**Frontend flow.** `utils/gridOrg.js` (pure: parsing, `orgMeta` bootstrap
+gate, `computeZones` hulls + `ZONE_CHROME` budget, `computeEdges` with
+arrowheads, `arrangeByDept`, `tidyByDept`, `newcomerOrigin`, `deptSlot` hash
+palette, `isOrgTag`) → `composables/useOrgOverlay.js` (all org state +
+gestures: connect-port drag with live pill, drop-to-assign re-validated at
+drop, zone-header block move with rAF throttling + drop-time re-validation,
+canvas toast with Undo, New-department assign mode) → `FleetGrid.vue`
+(template layers: zones under wires under tiles; canvas-space panels) +
+`AgentTile.vue` (dept ribbon via `--gv-dept-N` slot vars, light 600 / dark
+400). Tag writes go through the **network store** (atomic `PUT /tags`
+set-list; refetch-on-failure; `{previous, next}` returned for Undo).
+
+**Backend flow.** `routers/tags.py`: org namespaces are human-only
+(`_guard_org_namespace` rejects agent principals — #1578 pattern; the
+set-list guard checks the DELTA) and every mutation broadcasts
+`agent_tags_changed` (network store patches by name — cross-browser
+convergence without a roster poll). Rename: `metadata.py:rename_agent` calls
+`db/tags.py:rename_reports_to_refs` in the SAME transaction
+(delete-colliding-then-update; the `(agent_name, tag)` PK would otherwise
+abort the whole rename). Hard purge: `agent_cleanup.py:cascade_delete` calls
+`delete_reports_to_refs` (dangling refs must not re-attach to a reused name).
+Soft delete keeps refs; `computeEdges` skips unplaced endpoints.
+
+**Guardrails.** Zones derived (hull model) — never constrain the lattice;
+bootstrap fallback (first plain tag = dept while zero `dept-*` exist
+fleet-wide) renders READ-ONLY zones; `zoneAt` resolves overlap by smallest
+hull; roster changes cancel all in-flight org gestures; spacing contract
+(chrome 22/10/34/10 ≤ gaps 40/50) pinned by unit test.
+
+**Testing.** `src/frontend/tests/unit/gridOrg.spec.js` +
+`gridLayout.spec.js` (vitest, `npm run test:unit`, wired into
+frontend-build.yml); `tests/unit/test_305_org_tag_integrity.py` (rename
+collision, purge sweep, namespace guard); e2e smoke in
+`src/frontend/e2e/grid-org-overlay.spec.js`.

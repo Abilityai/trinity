@@ -348,6 +348,17 @@ def cascade_delete(conn, agent_name: str) -> Dict[str, int]:
         if result.rowcount and result.rowcount > 0:
             deleted[table] = deleted.get(table, 0) + result.rowcount
 
+    # Org-overlay reporting refs (trinity-enterprise#305): `reports-to-<name>`
+    # tag VALUES on OTHER agents' rows. The AGENT_REFS row cascade above only
+    # removes this agent's own tag rows; without this sweep a dangling ref
+    # would silently re-attach to an unrelated agent that reuses the name
+    # after the retention window frees it.
+    from .tags import delete_reports_to_refs
+
+    refs = delete_reports_to_refs(conn, agent_name)
+    if refs:
+        deleted["agent_tags:reports_to_refs"] = refs
+
     return deleted
 
 

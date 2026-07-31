@@ -10,7 +10,6 @@ import {
   tidyLayout,
   occupantAt,
 } from '@/utils/gridLayout'
-import { DEPT_PREFIX, REPORTS_PREFIX } from '@/utils/gridOrg'
 
 /**
  * Fleet Grid store (trinity-enterprise#47) — owns the Dashboard Grid view's
@@ -76,14 +75,14 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
    * nearest free cell. Falls back to the deterministic default layout when
    * nothing usable is saved.
    */
-  function syncLayout(agentNames, systemNames = new Set()) {
+  function syncLayout(agentNames, systemNames = new Set(), originFor = null) {
     const saved = { ..._loadSavedRaw(), ...layout.value }
     if (Object.keys(saved).length === 0) {
       layout.value = defaultLayout(agentNames, systemNames)
       _persist()
       return
     }
-    const { layout: healed, changed } = normalizeLayout(saved, agentNames)
+    const { layout: healed, changed } = normalizeLayout(saved, agentNames, originFor)
     layout.value = healed
     if (changed) _persist()
   }
@@ -138,59 +137,6 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     }
     layout.value = next
     _persist()
-  }
-
-  // --- PROTOTYPE: org-overlay tag writes (departments + reporting lines) ---
-  // Departments and reporting lines are plain agent tags (`dept:*`,
-  // `reports-to:*`), written through the existing tags API. On success the
-  // passed agent object's tags are patched in place so zones/lines/ribbons
-  // re-derive without a fleet refetch.
-
-  async function _addTag(agent, tag) {
-    const res = await axios.post(
-      `/api/agents/${encodeURIComponent(agent.name)}/tags/${encodeURIComponent(tag)}`,
-      null,
-      { headers: authStore.authHeader }
-    )
-    agent.tags = res.data.tags || []
-  }
-
-  async function _removeTag(agent, tag) {
-    const res = await axios.delete(
-      `/api/agents/${encodeURIComponent(agent.name)}/tags/${encodeURIComponent(tag)}`,
-      { headers: authStore.authHeader }
-    )
-    agent.tags = res.data.tags || []
-  }
-
-  /** Drop-into-zone: set `dept-<dept>`, clearing any other dept-* tag. Plain
-   *  tags (the legacy department fallback) are never touched. */
-  async function assignDept(agent, dept) {
-    try {
-      const stale = (agent.tags || []).filter(
-        (t) => t.startsWith(DEPT_PREFIX) && t !== `${DEPT_PREFIX}${dept}`
-      )
-      await _addTag(agent, `${DEPT_PREFIX}${dept}`)
-      for (const t of stale) await _removeTag(agent, t)
-    } catch (e) {
-      console.error('assignDept failed', e)
-    }
-  }
-
-  async function addReportsTo(agent, manager) {
-    try {
-      await _addTag(agent, `${REPORTS_PREFIX}${manager}`)
-    } catch (e) {
-      console.error('addReportsTo failed', e)
-    }
-  }
-
-  async function removeReportsTo(agent, manager) {
-    try {
-      await _removeTag(agent, `${REPORTS_PREFIX}${manager}`)
-    } catch (e) {
-      console.error('removeReportsTo failed', e)
-    }
   }
 
   // --- per-tile analytics hydration (lazy, capped, stale-while-revalidate) ---
@@ -359,9 +305,6 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     ensurePlaced,
     applyLayout,
     moveTiles,
-    assignDept,
-    addReportsTo,
-    removeReportsTo,
     analyticsState,
     analyticsFor,
     hydrate,

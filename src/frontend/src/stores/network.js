@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import axios from 'axios'
 import { useAgentsStore } from './agents'
 import { parseUTC, getTimestampMs } from '@/utils/timestamps'
+import { isOrgTag } from '@/utils/gridOrg'
 
 export const useNetworkStore = defineStore('network', () => {
   // State
@@ -420,9 +421,9 @@ export const useNetworkStore = defineStore('network', () => {
     const untaggedAgents = []
 
     regularAgents.forEach(agent => {
-      const tags = agent.tags || []
+      const tags = (agent.tags || []).filter(t => !isOrgTag(t))
       if (tags.length > 0) {
-        const primaryTag = tags[0] // Use first tag for grouping
+        const primaryTag = tags[0] // Use first non-org tag for grouping (#305)
         if (!tagGroups.has(primaryTag)) {
           tagGroups.set(primaryTag, [])
         }
@@ -641,6 +642,8 @@ export const useNetworkStore = defineStore('network', () => {
               agent_name: data.name,
               status: data.type === 'agent_started' ? 'running' : 'stopped'
             })
+          } else if (data.type === 'agent_tags_changed') {
+            handleAgentTagsChanged(data)
           } else if (data.type === 'agent_label_changed') {
             // ent#181/#1643: fields are nested under data.data (agent_* shape)
             handleAgentLabelChanged({
@@ -745,6 +748,85 @@ export const useNetworkStore = defineStore('network', () => {
     if (agent) {
       agent.display_label = event.display_label || null
     }
+  }
+
+  function handleAgentTagsChanged(event) {
+    // trinity-enterprise#305: tags drive the Grid org overlay (dept-* zones,
+    // reports-to-* lines). Patch by name so every open browser converges on a
+    // tag edit without waiting for a roster poll (which only fires on name
+    // changes and would replace the objects wholesale).
+    const agent = agents.value.find(a => a.name === event.agent_name)
+    if (agent) {
+      agent.tags = event.tags || []
+    }
+  }
+
+  // --- org-overlay tag writes (trinity-enterprise#305) ---
+  // Atomic set-list PUT (never add-then-remove — a mid-sequence failure would
+  // leave dual dept-* membership). On any failure the agent's tags are
+  // refetched so the UI never renders a state the server doesn't hold; the
+  // error is re-thrown for the caller to surface as a named notification.
+
+  function _authHeaders() {
+    return { Authorization: `Bearer ${localStorage.getItem('token')}` }
+  }
+
+  async function _refetchAgentTags(agentName) {
+    try {
+      const res = await axios.get(
+        `/api/agents/${encodeURIComponent(agentName)}/tags`,
+        { headers: _authHeaders() }
+      )
+      const agent = agents.value.find(a => a.name === agentName)
+      if (agent) agent.tags = res.data.tags || []
+    } catch {
+      /* next roster refresh heals */
+    }
+  }
+
+  /** Replace an agent's full tag list. Returns {previous, next} for undo. */
+  async function setAgentTags(agentName, tags) {
+    const agent = agents.value.find(a => a.name === agentName)
+    const previous = agent ? [...(agent.tags || [])] : []
+    try {
+      const res = await axios.put(
+        `/api/agents/${encodeURIComponent(agentName)}/tags`,
+        { tags },
+        { headers: _authHeaders() }
+      )
+      const next = res.data.tags || []
+      if (agent) agent.tags = next
+      return { previous, next }
+    } catch (e) {
+      await _refetchAgentTags(agentName)
+      throw e
+    }
+  }
+
+  /** Set the department: one dept-* tag, replacing any other dept-*. */
+  function assignDept(agentName, dept) {
+    const agent = agents.value.find(a => a.name === agentName)
+    const current = agent ? agent.tags || [] : []
+    const next = [
+      ...current.filter(t => !t.startsWith('dept-')),
+      `dept-${dept}`,
+    ]
+    return setAgentTags(agentName, next)
+  }
+
+  /** Record "report reports to manager" on the report agent's row. */
+  function addReportsTo(reportName, managerName) {
+    const agent = agents.value.find(a => a.name === reportName)
+    const current = agent ? agent.tags || [] : []
+    const tag = `reports-to-${managerName}`
+    if (current.includes(tag)) return Promise.resolve({ previous: current, next: current })
+    return setAgentTags(reportName, [...current, tag])
+  }
+
+  function removeReportsTo(reportName, managerName) {
+    const agent = agents.value.find(a => a.name === reportName)
+    const current = agent ? agent.tags || [] : []
+    return setAgentTags(reportName, current.filter(t => t !== `reports-to-${managerName}`))
   }
 
   function handleAgentDeleted(event) {
@@ -1741,6 +1823,11 @@ export const useNetworkStore = defineStore('network', () => {
     loading,        // #1266 initial-load flag (drives Dashboard/timeline skeletons)
     loadError,      // #1266 distinct failed-load state
     agents,
+    // org-overlay tag writes (trinity-enterprise#305)
+    setAgentTags,
+    assignDept,
+    addReportsTo,
+    removeReportsTo,
     nodes,
     edges,
     collaborationHistory,
