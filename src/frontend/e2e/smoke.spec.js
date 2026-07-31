@@ -12,16 +12,23 @@ import { test, expect } from '@playwright/test'
 test.describe('smoke', () => {
   test('@smoke dashboard renders for authenticated admin', async ({ page }) => {
     await page.goto('/')
-    // Top nav has Dashboard, Agents, Templates, Health, Ops, Settings.
+    // Top nav has Dashboard, Templates, Operations, Settings (+ entitled-only
+    // links on enterprise builds). The Agents entry was retired in
+    // trinity-enterprise#260 — the page is now the Dashboard's List mode.
     // (Keys link removed in #302 — MCP keys now live in Settings → MCP Keys tab.)
     await expect(page.getByRole('link', { name: 'Dashboard', exact: true })).toBeVisible({ timeout: 10000 })
-    await expect(page.getByRole('link', { name: 'Agents', exact: true })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Templates', exact: true })).toBeVisible()
     await expect(page.getByRole('link', { name: 'Settings', exact: true })).toBeVisible()
   })
 
-  test('@smoke agents page loads', async ({ page }) => {
+  test('@smoke /agents redirects to the Dashboard List mode', async ({ page }) => {
+    // trinity-enterprise#260: the standalone Agents page is retired; the old
+    // URL redirects to /?view=list, which the Dashboard applies (one-shot,
+    // non-persisting) and then strips from the URL.
     await page.goto('/agents')
-    await expect(page.getByText(/agent|create/i).first()).toBeVisible({ timeout: 10000 })
+    // Bare root — the ?view=list intent param is stripped after being applied.
+    await expect(page).toHaveURL(/^https?:\/\/[^/]+\/$/, { timeout: 10000 })
+    await expect(page.locator('[data-agent="trinity-system"]')).toBeVisible({ timeout: 15000 })
   })
 
   test('@smoke operating room page loads', async ({ page }) => {
