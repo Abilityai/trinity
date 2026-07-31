@@ -98,6 +98,10 @@ AGENT_REFS: List[AgentRef] = [
     AgentRef("agent_sharing",                "agent_name",        Policy.CASCADE),
     AgentRef("agent_schedules",              "agent_name",        Policy.CASCADE),
     AgentRef("schedule_executions",          "agent_name",        Policy.KEEP),
+    # ent#265: binding-agent for channel report-back. KEEP mirrors the row it
+    # rides on (same #772 90-day terminal-row sweep); cascade_rename touches ALL
+    # refs regardless of policy, so a renamed binding agent keeps delivering.
+    AgentRef("schedule_executions",          "source_channel_agent", Policy.KEEP),
 
     # --- Agent loops (#740 Phase 1) ----------------------------------------
     # Loop ownership lives on the TARGET agent. `agent_loops` carries a
