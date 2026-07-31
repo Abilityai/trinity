@@ -181,13 +181,38 @@ def test_allowlist_entries_still_exist() -> None:
 # different environment than production, just via a package instead of a
 # minor version.
 
+# Matches a PEP 508 environment marker in BOTH forms the repo uses:
+#   Dockerfile (shell, so the spec must be quoted):
+#       "audioop-lts; python_version >= '3.13'"
+#   requirements.txt (no shell, so no outer quotes and the version may be bare):
+#       audioop-lts; python_version >= "3.13"
+# The outer quotes are optional here on purpose — requiring them is what made an
+# earlier draft blind to `docker/scheduler/requirements.txt` entirely.
 _MARKER_RE = re.compile(
-    r"""["']([A-Za-z0-9._-]+)\s*;\s*python_version\s*>=?\s*['"](\d+\.\d+)['"]["']"""
+    r"""["']?([A-Za-z0-9._-]+)["']?\s*;\s*python_version\s*(?:>=?|==)\s*["']?(\d+\.\d+)["']?"""
 )
 
 _TEST_REQUIREMENTS = _ROOT / "tests" / "requirements-test.txt"
 
-# Deps the image needs that the unit suite provably does not exercise. Add here
+# EVERY place an image installs backend-side Python from. Enumerating the
+# SURFACE, not one file: `learnings.md` 2026-07-29 (#1871) is the entry about a
+# guard that watched one of two creation APIs while claiming to close the class,
+# and rule 1 above already enumerates all three Dockerfiles — rule 3 scanning
+# only the backend Dockerfile would be the same mistake inside the same file.
+# The scheduler installs from a requirements FILE, not an inline pip line, which
+# is also why the regex above cannot demand shell quoting.
+_IMAGE_DEP_SOURCES = (
+    "docker/backend/Dockerfile",
+    "docker/scheduler/requirements.txt",
+)
+
+# docker/base-image/Dockerfile is deliberately NOT scanned: those packages are the
+# AGENT container's runtime, and the backend unit suite never imports them. The
+# agent-side modules it does import (`model_context`, `credential_paths`) are
+# vendored byte-identically and stdlib-only by contract (Invariant #5), so they
+# bring no third-party dependency into CI.
+
+# Deps an image needs that the unit suite provably does not exercise. Add here
 # ONLY with a reason — the default must be "CI installs what the image has".
 _CI_EXEMPT_CONDITIONAL_DEPS: dict[str, str] = {}
 
@@ -216,10 +241,17 @@ def _declared_test_requirements() -> set[str]:
     return names
 
 
-def _conditional_deps() -> dict[str, str]:
-    """Map dep name -> required python_version, from the backend Dockerfile."""
-    text = (_ROOT / "docker" / "backend" / "Dockerfile").read_text(encoding="utf-8")
-    return {m.group(1).lower(): m.group(2) for m in _MARKER_RE.finditer(text)}
+def _conditional_deps() -> dict[str, tuple[str, str]]:
+    """Map dep name -> (required python_version, source file) across every image."""
+    found: dict[str, tuple[str, str]] = {}
+    for rel in _IMAGE_DEP_SOURCES:
+        path = _ROOT / rel
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            for m in _MARKER_RE.finditer(line):
+                found[m.group(1).lower()] = (m.group(2), rel)
+    return found
 
 
 def test_version_conditional_deps_are_installed_in_ci() -> None:
@@ -231,14 +263,14 @@ def test_version_conditional_deps_are_installed_in_ci() -> None:
     """
     conditional = _conditional_deps()
     assert conditional, (
-        "no `pkg; python_version >= ...` markers found in docker/backend/Dockerfile — "
-        "the regex has drifted and this guard is now vacuous"
+        f"no `pkg; python_version >= ...` markers found in any of {_IMAGE_DEP_SOURCES} — "
+        "the regex has drifted from the files and this guard is now vacuous"
     )
 
     declared = _declared_test_requirements()
     missing = [
-        f"{dep} (image pins it for python >= {ver})"
-        for dep, ver in sorted(conditional.items())
+        f"{dep} ({src} pins it for python >= {ver})"
+        for dep, (ver, src) in sorted(conditional.items())
         if dep not in _CI_EXEMPT_CONDITIONAL_DEPS and dep not in declared
     ]
 
@@ -248,4 +280,28 @@ def test_version_conditional_deps_are_installed_in_ci() -> None:
         "(#1891):\n  " + "\n  ".join(missing)
         + f"\n\nFix: add the same marker to {_TEST_REQUIREMENTS.relative_to(_ROOT)}, "
         "or exempt it in _CI_EXEMPT_CONDITIONAL_DEPS with a reason."
+    )
+
+
+def test_every_image_dep_source_still_exists() -> None:
+    """A renamed or deleted dep source must fail loudly, not shrink coverage.
+
+    Same reasoning as ``test_allowlist_entries_still_exist``: the dangerous
+    failure for a guard is not going red, it is quietly watching less than it
+    claims to.
+    """
+    missing = [rel for rel in _IMAGE_DEP_SOURCES if not (_ROOT / rel).is_file()]
+    assert not missing, (
+        f"_IMAGE_DEP_SOURCES points at files that no longer exist: {missing}. "
+        "Repoint it — do not just delete the entry, or the deps installed there "
+        "stop being checked."
+    )
+
+
+def test_conditional_dep_exemptions_are_still_real() -> None:
+    """A stale exemption silently whitelists a dep nobody is installing."""
+    conditional = _conditional_deps()
+    stale = [dep for dep in _CI_EXEMPT_CONDITIONAL_DEPS if dep not in conditional]
+    assert not stale, (
+        f"_CI_EXEMPT_CONDITIONAL_DEPS exempts deps no image pins any more: {stale}"
     )
