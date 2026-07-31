@@ -7,17 +7,21 @@
 
 ## Overview
 
-One of the Dashboard's two view modes alongside **Timeline** (waterfall
-activity). The legacy **Graph** mode (Vue Flow topology) was decommissioned in
-#1689. Grid is a **magnetic tile canvas**: richer 384×216 landscape agent tiles
+One of the Dashboard's three view modes alongside **Timeline** (waterfall
+activity) and **List** (the retired Agents page consolidated in
+trinity-enterprise#260 — see
+[dashboard-list-view.md](dashboard-list-view.md)). The legacy **Graph** mode
+(Vue Flow topology) was decommissioned in #1689. Grid is a **magnetic tile
+canvas**: richer 384×216 landscape agent tiles
 that snap to a sparse, **unbounded** integer lattice (negative coordinates
 included) the operator arranges freely — islands, gaps, parked loners — with
 iPhone-style drag and live snap preview, on a pan/zoom dotted-canvas.
 
-- Mode toggle: `Grid / Timeline` in the Dashboard header; selection persists to
-  `localStorage['trinity-dashboard-view']`. **Timeline stays the default** for
-  users with no saved preference (and a stale `'graph'` preference degrades to
-  it via the `VIEW_MODES.includes()` guard).
+- Mode toggle: `Timeline / Grid / List` in the Dashboard header; selection
+  persists to `localStorage['trinity-dashboard-view']`. **Timeline stays the
+  default** for users with no saved preference (and a stale mode — `'graph'`,
+  or `'list'` on an older bundle — degrades to it via the
+  `VIEW_MODES.includes()` guard).
 - **No Vue Flow dependency** in this mode, and **no new backend endpoints**.
 
 ## Components & Data Flow
