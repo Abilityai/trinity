@@ -1,0 +1,130 @@
+{
+  "version": "1.1",
+  "date": "2026-07-30",
+  "mode": "diff",
+  "scope": "feature/1880-canary-alert-names vs origin/dev @39f29c64 (#1880 canary alert-surface parity)",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "subject": {
+    "files": 7,
+    "additions": 997,
+    "deletions": 18,
+    "source_files": [
+      "src/backend/services/canary_alerts.py"
+    ],
+    "test_files": [
+      "tests/unit/test_1880_canary_alert_parity.py",
+      "tests/unit/test_1880_canary_alert_rendering.py"
+    ],
+    "doc_files": [
+      "docs/memory/architecture.md",
+      "docs/memory/learnings.md",
+      "docs/memory/requirements/infrastructure.md",
+      "docs/testing/orchestration-invariant-catalog.md"
+    ]
+  },
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_auth_dependencies": 0,
+    "new_websocket_channels": 0,
+    "new_subprocess_calls": 0,
+    "new_file_io": 0,
+    "new_outbound_calls": 0,
+    "dependency_delta": 0,
+    "trust_boundaries_touched": [
+      "outbound Slack webhook payload (content widened)"
+    ]
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "MEDIUM",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "verifier": "independent fresh-context agent, instructed to refute; executed real code with planted sentinels",
+      "category": "Information Disclosure",
+      "phase": 11,
+      "file": "src/backend/services/canary_alerts.py",
+      "line": null,
+      "title": "Canary alerts now disclose credential-incident location to a non-admin audience",
+      "description": "G-04 alerts previously rendered a count-only fallback. They now carry which agent and execution row hold a credential-shaped value, the matched credential family, and that the value is stored plaintext. The secret value itself is never sent and that property is regression-pinned.",
+      "exploit_scenario": "An observer with Slack access to the channel behind CANARY_SLACK_WEBHOOK_URL - membership unrelated to the Trinity admin role - learns agent, execution id, credential family, and persistence from a fired G-04 alert, including via the text fallback that drives mobile push. Before #1880 the same reconnaissance required an admin query against canary_violations.",
+      "impact": "Risk transfer, not a new leak. Bounded: no secret value, no user content, no PII.",
+      "recommendation": "APPLIED IN-DIFF: architecture.md canary Alert-sink section now states what a rendered alert carries and requires CANARY_SLACK_WEBHOOK_URL to point at a restricted channel. Documentation control; no code change - the disclosure is the feature's intent."
+    }
+  ],
+  "notes_below_bar": [
+    {
+      "id": "N1",
+      "title": "Render boundary performed no escaping (defense-in-depth)",
+      "detail": "Injection safety is transitive across ~8 sanitize-at-write paths, all verified. Hard exclusion #5 (hardening without concrete vulnerability). A ~3-line render-boundary scrub would make it structural; this diff grew render sites from 10 to 15.",
+      "precedent": "services/retention_guard.py writes a leading-underscore alarm sentinel the sanitizer could never produce; excluded from L-03's scan so unreachable today.",
+      "status": "FIXED IN-DIFF",
+      "resolution": "_mrkdwn_safe() added at the render boundary and applied to every string field interpolated from observed_state (56 call sites), collapsing the two inconsistent ?-defaulting idioms into one. Escapes &, <, > (Slack's documented set - the three that make a link or mention parse) and collapses control chars so a value cannot forge a bullet line. *, _, ~, backtick left alone: no Slack escape exists, cosmetic only, and mangling them corrupts legitimate values. Covered by test_hostile_identity_field_cannot_forge_slack_markup (6 payloads x 4 invariants) + test_mrkdwn_safe_contract; mutation-verified (removing the escape line fails 17 tests)."
+    },
+    {
+      "id": "N2",
+      "title": "Behaviour change wider than the diff's framing",
+      "detail": "Nine pre-existing _render_message branches now coerce a NULL agent_name to '?'. Previously TypeError in sorted() was swallowed and the alert silently dropped while the green-to-red cursor advanced. Those alerts now send - affects all 15 invariants, not only the 5 named."
+    },
+    {
+      "id": "N3",
+      "title": "_format_duration over-claimed its own guarantee",
+      "status": "FIXED IN-DIFF",
+      "detail": "Caught (TypeError, ValueError) while int(float('inf')) raises OverflowError, contradicting a docstring promising the helper can never be why an alert fails to send. Unreachable today; now caught."
+    }
+  ],
+  "verified_safe": [
+    {
+      "claim": "No credential material can reach the Slack payload",
+      "verdict": "UPHELD",
+      "confidence": 9,
+      "evidence": "All 15 ViolationReport constructions read; no rendered field is backlog_metadata. reason/matched_pattern are module constants. No signal_query carries a secret either. Sentinels planted in observed_state reached neither text nor blocks."
+    },
+    {
+      "claim": "Slack mrkdwn/markup injection is impossible",
+      "verdict": "UPHELD",
+      "confidence": 9,
+      "evidence": "JSON break-out structurally impossible (dict + httpx serialization). Eight agent-name write paths traced, all sanitized; rename is stricter. All other rendered fields server-generated. Confidence 8 not 9: guarantee is transitive, zero escaping at the render boundary (see N1). POST-FIX: confidence raised 8 -> 9 - N1 resolved, so the guarantee is no longer transitive across ~8 write paths; escaping is now local to the render boundary."
+    }
+  ],
+  "coverage_gaps": [
+    "src/backend/enterprise submodule not checked out (update = none); enterprise agent-creation paths unaudited for unsanitized agent_name writes. Relevant only to N1.",
+    "Slack rendering not exercised against a live workspace; Block Kit limits asserted against documented caps at 5000 violations x 500 agents."
+  ],
+  "clean_phases": [
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 1,
+    "low": 0,
+    "notes_below_bar": 3,
+    "notes_below_bar_fixed": 2
+  },
+  "trend": "Not comparable by fingerprint - every prior cso-diff report audited a different branch and scope. F1 is new because no prior report covered the canary alert path.",
+  "verdict": "No CRITICAL or HIGH. Safe to merge. One MEDIUM remediated in-diff via a documentation control (restricted-channel deployment note); N1 and N3 also fixed in-diff."
+}

@@ -366,7 +366,12 @@ class ScheduleExecutionsMixin:
 
             started_at = parse_iso_timestamp(row["started_at"])
             completed_at = parse_iso_timestamp(utc_now_iso())
-            duration_ms = int((completed_at - started_at).total_seconds() * 1000)
+            # started_at and completed_at are written by different processes
+            # (backend --workers 2, and the standalone scheduler container), so
+            # clock skew can make this subtraction negative. Clamp at the write
+            # rather than at every reader — get_agent_analytics consumes
+            # duration_ms unguarded (#1832).
+            duration_ms = max(0, int((completed_at - started_at).total_seconds() * 1000))
 
             values = {
                 "status": status,

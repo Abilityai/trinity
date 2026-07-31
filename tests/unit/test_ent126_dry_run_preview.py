@@ -468,20 +468,21 @@ def test_unparseable_manifest_is_400_with_a_string_detail(env):
 def test_manifest_over_the_byte_cap_is_rejected(env):
     """The cap is stated in BYTES, so it must be measured in bytes.
 
-    `Field(max_length=...)` counts characters, so a multibyte manifest passed it at
-    up to ~4x the stated limit. 200k 3-byte characters = 600k bytes but only 200k
-    characters — under the char limit, three times over the byte limit. Matches how
-    the bundled reader measures (`st.st_size`) and how the upload path measures
-    (`file.size`).
+    A character-counting cap (`Field(max_length=...)`) admits a multibyte manifest
+    at up to ~4x the stated limit: 200k 3-byte characters = 600k bytes but only
+    200k characters — under any char limit, three times over the byte limit. The
+    cap lives in `parse_manifest` (#1884) and measures `len(encode("utf-8"))`, so
+    it agrees with how the bundled reader measures (`st.st_size`) and how the
+    upload path measures (`file.size`). All three must stay byte-denominated or
+    they disagree about the same file.
     """
     from models import MANIFEST_MAX_BYTES
 
     body = "\u540d" * 200_000
     assert len(body) < MANIFEST_MAX_BYTES < len(body.encode("utf-8"))
     r = env.post("/api/systems/deploy", json={"manifest": body, "dry_run": True})
-    assert r.status_code == 422, r.status_code
-    # FastAPI renders a validator error as a LIST detail; the store joins the msgs.
-    assert any("byte" in str(e.get("msg", "")) for e in r.json()["detail"])
+    assert r.status_code == 400, r.status_code
+    assert "byte" in r.json()["detail"]
 
 
 def test_validation_error_is_400_with_a_string_detail(env):
@@ -493,11 +494,27 @@ def test_validation_error_is_400_with_a_string_detail(env):
     assert "Invalid system name" in r.json()["detail"]
 
 
-def test_oversized_manifest_is_422_with_a_list_detail(env):
-    """The Field(max_length=...) cap. FastAPI reports request-model violations as
-    a LIST of errors, which is a distinct shape the frontend normalizer handles."""
+def test_oversized_manifest_is_400_with_a_string_detail(env):
+    """Oversize is caught by `parse_manifest`'s byte cap (#1884), not by the
+    request model, so it lands as a 400 string like every other parse failure."""
     from models import MANIFEST_MAX_BYTES
     r = env.post("/api/systems/deploy",
                  json={"manifest": "x" * (MANIFEST_MAX_BYTES + 1), "dry_run": True})
+    assert r.status_code == 400
+    assert isinstance(r.json()["detail"], str)
+
+
+def test_request_model_violation_is_422_with_a_list_detail(env):
+    """FastAPI reports request-model violations as a LIST of errors — a distinct
+    shape the frontend normalizer joins on `msg`.
+
+    Kept pointed at a *live* 422 producer: the manifest size cap used to be the
+    one on this route, and moving it into `parse_manifest` (#1884) turned it into
+    a 400. Had this test simply been retargeted at that 400, the store's
+    `Array.isArray(detail)` branch would have silently lost its only coverage
+    while the suite stayed green.
+    """
+    r = env.post("/api/systems/deploy",
+                 json={"manifest": "name: X\n", "dry_run": "maybe-later"})
     assert r.status_code == 422
     assert isinstance(r.json()["detail"], list)

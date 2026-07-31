@@ -30,6 +30,7 @@ from services.docker_utils import (
 )
 from services.agent_runtime_state import clear_agent_breakers
 from services.template_service import (
+    CredentialDeclarationError,
     get_github_template,
     generate_credential_files,
 )
@@ -59,6 +60,12 @@ logger = logging.getLogger(__name__)
 # directory join in `create_agent_internal` can't escape into arbitrary
 # filesystem reads (CodeQL py/path-injection on #950 PR).
 _LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+
+# Allowed chars in a template-declared credential-file path. Unlike
+# `_LOCAL_TEMPLATE_NAME_RE` this is a *relative path*, so `/` is permitted —
+# but nothing that could start an absolute path or a traversal.
+# (trinity-enterprise#128)
+_CRED_FILE_PATH_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]*$")
 
 _CONTAINER_CURATED_TEMPLATES = Path("/agent-configs/templates")
 
@@ -174,6 +181,65 @@ def _safe_local_template_path(template_name: str, root: Path) -> Path:
                     f"Resolved template path {candidate} escaped expected root {root}."
                 ),
                 "code": "INVALID_LOCAL_TEMPLATE_NAME",
+            },
+        )
+    return candidate
+
+
+def _safe_cred_file_path(relative_path: str, root: Path) -> Path:
+    """Join a template-declared credential-file path onto `root`, proving it stays inside.
+
+    `credentials.config_files[].path` is an author-controlled string that ends
+    up as `open(root / path, "w")`, and a template is untrusted input — any
+    authenticated user can upload one through `deploy_local_agent_logic`. An
+    absolute path silently wins the join (`Path("/a") / "/etc/x"` is `/etc/x`)
+    and `..` walks out of it, so without this the declaration is an
+    arbitrary-file-write primitive. (trinity-enterprise#128)
+
+    `template_service.credential_shape_errors` already rejects both shapes at
+    the parse boundary; this is the barrier at the sink. Two steps, mirroring
+    `_safe_local_template_path`:
+
+    1. Allowlist the raw string — reject empty, absolute, `..`-bearing and
+       anything outside `[A-Za-z0-9._/-]`, BEFORE it reaches the join.
+    2. Resolve the joined path and assert `is_relative_to(root)`.
+
+    Step 1 is not redundant: it is what makes the guard legible to a reader
+    *and* to CodeQL, which does not treat resolve + `is_relative_to` alone as a
+    `py/path-injection` barrier (this helper was flagged high-severity twice
+    when it had only step 2).
+
+    Raises `HTTPException(400)` with code `INVALID_CREDENTIAL_FILE_PATH`.
+    """
+    if (
+        not relative_path
+        or relative_path.startswith("/")
+        or ".." in relative_path
+        or not _CRED_FILE_PATH_RE.match(relative_path)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"Template credential file path {relative_path!r} is not a "
+                    f"plain relative path inside the agent's credential "
+                    f"directory."
+                ),
+                "code": "INVALID_CREDENTIAL_FILE_PATH",
+            },
+        )
+
+    root = root.resolve()
+    candidate = (root / relative_path).resolve()
+    if not candidate.is_relative_to(root):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    f"Template credential file path {relative_path!r} escapes "
+                    f"the agent's credential directory."
+                ),
+                "code": "INVALID_CREDENTIAL_FILE_PATH",
             },
         )
     return candidate
@@ -985,17 +1051,30 @@ def _stage_config_files(
     generated_files = {}
     if template_data:
         # Generate empty credential files structure from template
-        generated_files = generate_credential_files(
-            template_data, {}, config.name,
-            template_base_path=github_template_path
-        )
+        try:
+            generated_files = generate_credential_files(
+                template_data, {}, config.name,
+                template_base_path=github_template_path
+            )
+        except CredentialDeclarationError as e:
+            # Invariant #1: the service raises an HTTP-free domain error and
+            # this, its only caller, maps it 1:1. A named 400 beats both of the
+            # alternatives it replaces — an uncaught TypeError (500) and a
+            # silently corrupt `.env`. (trinity-enterprise#128)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": str(e),
+                    "code": "INVALID_CREDENTIAL_DECLARATION",
+                },
+            )
 
     cred_files_dir = Path(f"/tmp/agent-{config.name}-creds")
     cred_files_dir.mkdir(exist_ok=True)
 
     # Write template-generated files (.env, .mcp.json, etc.)
     for filepath, content in generated_files.items():
-        file_path = cred_files_dir / filepath
+        file_path = _safe_cred_file_path(filepath, cred_files_dir)
         file_path.parent.mkdir(parents=True, exist_ok=True)
         with open(file_path, "w") as f:
             f.write(content)

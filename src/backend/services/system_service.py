@@ -46,17 +46,145 @@ _KNOWN_MANIFEST_KEYS = frozenset({
 })
 
 
+# --- Manifest YAML hardening (#1884) -------------------------------------
+#
+# `yaml.safe_load` blocks arbitrary object construction but not two other
+# things, and the MCP pipeline reader (#919) already set the house standard for
+# this class — "size cap + duplicate-key guard + alias guard". This mirrors that
+# rather than inventing a second approach; PyYAML simply has no equivalent of
+# the JS `yaml` library's `uniqueKeys` / `maxAliasCount` options, so both are
+# implemented here.
+
+# Bounds the INPUT. Deliberately not sufficient on its own: alias expansion is
+# bounded by the budget below, because a few hundred bytes can expand to
+# gigabytes ("billion laughs") while sitting comfortably under any size cap.
+#
+# Defined ONCE, in `models.py`, and imported above (ent#126 + #1884 merge): the
+# same number bounds the wire request, this parse cap, and the bundled-catalog
+# file read. A second local definition here would shadow the import silently and
+# let the three drift apart — which is precisely the failure the shared constant
+# exists to prevent.
+
+# Bounds the EXPANSION COST, not the alias count.
+#
+# A naive `maxAliasCount` is the wrong shape for a bomb: the classic
+# billion-laughs uses ~45 aliases across a few levels and would sail under any
+# count-based budget, because the blow-up is MULTIPLICATIVE per level, not
+# linear in aliases. So this budget is the total number of logical nodes the
+# document would have if every alias were written out — which is exactly the
+# quantity that explodes.
+#
+# Measured, not assumed: PyYAML itself does NOT expand aliases into copies (it
+# memoises constructed objects per node, so a bomb yields a shared-reference
+# DAG at ~20 KB, not gigabytes). The DoS the issue describes is therefore not
+# reachable through `safe_load` alone. The guard stays because the DAG re-expands
+# the moment anything walks or serialises it — `json.dumps`, a deep copy, or an
+# echo of the manifest back to a client — and a parser that gains this guard is
+# cheaper than auditing every future consumer.
+MANIFEST_MAX_EXPANDED_NODES = 100_000
+
+
+class ManifestError(ValueError):
+    """A manifest the platform refuses to parse.
+
+    A distinct type so the router can answer a NAMED 400 instead of letting a
+    bomb surface as a request timeout or an unnamed 500 — which is the
+    difference between "your manifest is malformed" and "Trinity is broken".
+    """
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
+
+
+class _HardenedManifestLoader(yaml.SafeLoader):
+    """SafeLoader + an expansion-cost budget + duplicate-key rejection."""
+
+    def __init__(self, stream):
+        super().__init__(stream)
+        self._expanded_nodes = 0
+        self._anchor_cost: dict = {}
+
+    def compose_node(self, parent, index):
+        # An alias contributes the FULL logical size of what it points at, so a
+        # pyramid of anchors costs what it would cost written out.
+        if self.check_event(yaml.events.AliasEvent):
+            anchor = self.peek_event().anchor
+            cost = self._anchor_cost.get(anchor, 1)
+            self._expanded_nodes += cost
+            if self._expanded_nodes > MANIFEST_MAX_EXPANDED_NODES:
+                raise ManifestError(
+                    "manifest_alias_budget_exceeded",
+                    f"Manifest expands to more than {MANIFEST_MAX_EXPANDED_NODES:,} "
+                    "nodes once its YAML aliases are resolved. This is the shape of "
+                    "an expansion bomb; if the manifest is genuine, write the "
+                    "repeated block out instead of anchoring it.",
+                )
+            return super().compose_node(parent, index)
+
+        before = self._expanded_nodes
+        self._expanded_nodes += 1
+        event = self.peek_event()
+        anchor = getattr(event, "anchor", None)
+        node = super().compose_node(parent, index)
+        if anchor:
+            # Cost of this subtree = everything composed while inside it.
+            self._anchor_cost[anchor] = self._expanded_nodes - before
+        return node
+
+    def construct_mapping(self, node, deep=False):
+        # `safe_load` silently keeps the LAST duplicate, so a manifest with two
+        # `agents:` blocks deploys only the second one with no signal at all —
+        # the real footgun now that the manifest is hand-editable in a textarea.
+        # Applied at EVERY mapping depth, so a duplicate inside one agent's
+        # config is caught too, not just the two levels the issue names.
+        seen = set()
+        for key_node, _ in node.value:
+            try:
+                key = self.construct_object(key_node, deep=deep)
+            except yaml.constructor.ConstructorError:
+                continue
+            try:
+                if key in seen:
+                    raise ManifestError(
+                        "manifest_duplicate_key",
+                        f"Duplicate key {key!r} at line {key_node.start_mark.line + 1}. "
+                        "YAML would silently keep only the last one.",
+                    )
+                seen.add(key)
+            except TypeError:
+                # Unhashable key — malformed, but not this guard's business.
+                continue
+        return super().construct_mapping(node, deep=deep)
+
+
+def _load_manifest_yaml(yaml_str: str):
+    """Parse manifest YAML with the three guards applied."""
+    if len(yaml_str.encode("utf-8")) > MANIFEST_MAX_BYTES:
+        raise ManifestError(
+            "manifest_too_large",
+            f"Manifest exceeds the {MANIFEST_MAX_BYTES}-byte parse cap.",
+        )
+    try:
+        return yaml.load(yaml_str, Loader=_HardenedManifestLoader)
+    except ManifestError:
+        raise
+    except yaml.YAMLError as e:
+        raise ManifestError("manifest_yaml_invalid", f"YAML parse error: {e}")
+
+
 def parse_manifest(yaml_str: str) -> SystemManifest:
     """
     Parse YAML string into SystemManifest.
 
     Raises:
-        ValueError: If YAML is invalid or missing required fields
+        ManifestError: If the manifest is oversized, uses more aliases than the
+            expansion budget allows, or carries a duplicate key (#1884). A
+            subclass of ValueError, so existing callers catching ValueError are
+            unaffected.
+        ValueError: If required fields are missing.
     """
-    try:
-        data = yaml.safe_load(yaml_str)
-    except yaml.YAMLError as e:
-        raise ValueError(f"YAML parse error: {str(e)}")
+    data = _load_manifest_yaml(yaml_str)
 
     if not data:
         raise ValueError("Empty manifest")
@@ -1363,6 +1491,11 @@ async def deploy_manifest(
         # 1. Parse YAML
         try:
             manifest = parse_manifest(manifest_yaml)
+        except ManifestError as e:
+            # #1884: a NAMED 400. The refusal must be distinguishable from a
+            # generic parse error — "manifest_alias_budget_exceeded" tells an
+            # operator what to change; a bare stack trace or a timeout does not.
+            raise HTTPException(status_code=400, detail=f"{e.code}: {e}")
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
