@@ -1,5 +1,5 @@
 <template>
-  <div class="space-y-5">
+  <div class="space-y-5 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
     <div class="flex items-start justify-between gap-4">
       <div>
         <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100">Skills</h2>
@@ -13,7 +13,12 @@
         @click="onSync"
         :disabled="store.injecting || !agentRunning"
         :title="agentRunning ? 'Re-copy every assigned skill into the agent' : 'The agent is stopped — start it to sync skills'"
-        class="shrink-0 px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
+        :class="[
+          'shrink-0 px-3 py-1.5 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed',
+          syncNeedsAttention
+            ? 'bg-action-primary-600 hover:bg-action-primary-700 text-white font-medium ring-2 ring-action-primary-300 dark:ring-action-primary-700'
+            : 'border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800'
+        ]"
       >{{ store.injecting ? 'Syncing…' : 'Sync now' }}</button>
     </div>
 
@@ -237,17 +242,44 @@ function resetDraft() {
   draft.value = [...store.assignedNames]
 }
 
+/**
+ * "Saved, but not yet inside the agent."
+ *
+ * Saving writes the assignment rows; the files only reach the container on a
+ * sync or the next agent start. The panel said so in muted text, which is easy
+ * to miss — an operator can save, message the agent, and be told the skill does
+ * not exist, because it genuinely isn't there yet. Carry that gap on the button
+ * that closes it.
+ *
+ * Deliberately session-scoped: it means "you changed assignments and haven't
+ * synced since". It is NOT derived from `injectionResults` being empty, which is
+ * also true on a fresh page load of an already-synced agent — that would cry
+ * wolf on every visit and train people to ignore it.
+ */
+const pendingSync = ref(false)
+
+// Loud only when the button can actually act. On a stopped agent sync is
+// disabled and the files land at next start anyway, so shouting there would be
+// noise pointing at a control the operator cannot press.
+const syncNeedsAttention = computed(
+  () => pendingSync.value && props.agentRunning && !store.injecting
+)
+
 async function onSave() {
   savedNote.value = ''
   if (await store.saveAssignments([...draft.value])) {
     resetDraft()
+    pendingSync.value = true
     savedNote.value = 'Saved. Sync now, or the agent picks them up on next start.'
   }
 }
 
 async function onSync() {
   savedNote.value = ''
-  await store.inject()
+  const result = await store.inject()
+  // Only clear on a real success — a failed or 409-busy sync leaves the gap
+  // open, so the button must keep pointing at it.
+  if (result && !store.error) pendingSync.value = false
 }
 
 watch(() => store.assigned, resetDraft, { deep: true })

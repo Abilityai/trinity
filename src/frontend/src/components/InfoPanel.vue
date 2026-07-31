@@ -22,7 +22,7 @@
     </div>
 
     <!-- Template Info Display -->
-    <div v-else>
+    <div v-else class="space-y-6">
       <!-- Header Section -->
       <div class="bg-gradient-to-r from-action-primary-50 to-accent-purple-50 dark:from-action-primary-900/30 dark:to-accent-purple-900/30 rounded-lg p-6 border border-action-primary-100 dark:border-action-primary-800">
         <div class="flex items-start justify-between">
