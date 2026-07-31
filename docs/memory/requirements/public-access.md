@@ -157,7 +157,7 @@
   - `PUT /api/agents/{name}/telegram/progress-indicator` — Toggle the in-progress status indicator (ent#264, see §15.1h)
 - **Security**:
   - Bot tokens AES-256-GCM encrypted at rest (same `CredentialEncryptionService` as Slack)
-  - Binding-status GET hardened to `AuthorizedAgentByName` (ent#264): binding status — including `webhook_url`, which embeds the `webhook_secret` — is no longer readable by arbitrary authenticated users (uniform-404 accessor; owner/shared/admin still pass)
+  - Binding-status GET hardened to `AuthorizedAgentByName` (ent#264): binding status — including `webhook_url`, which embeds the `webhook_secret` — is no longer readable by arbitrary authenticated users (uniform-404 accessor; owner/shared/admin still pass). The sibling `GET .../telegram/groups` (group chat ids/titles/welcome text — tenant data) carries the same accessor; the group-message POST was already owner-gated
   - Webhook auth via `X-Telegram-Bot-Api-Secret-Token` header (set during setWebhook)
   - SSRF prevention: media downloads restricted to `api.telegram.org` domain
   - Restricted tools for Telegram users (WebSearch, WebFetch — same as Slack)
@@ -233,6 +233,7 @@
 - **Frontend**: `TelegramChannelPanel.vue` — "In-progress status indicator" switch in the configured-state block (optimistic flip, revert on error, dark-mode aware)
 - **Known residuals**:
   - Backend restart mid-run strands the reaction/placeholder (same accepted class as Slack's stranded ⏳; the UTC stamp self-dates the stale placeholder) — no persistence engineering
+  - The resolve-path settle of an in-flight first placeholder send is **bounded at 10s** — a first send that exceeds it (e.g. a 429 `retry_after` ≥ 10s on that exact send) is abandoned and can still strand a placeholder (same accepted class; the UTC stamp self-dates it)
   - The driver is bound to the inline channel execution path (`execute_task` awaited in-process; channel triggers are not in `ASYNC_DISPATCH_ELIGIBLE_TRIGGERS`). If #1081 pull-mode / #1083 async dispatch ever move channel triggers off the inline path, the in-process driver silently never resolves — the successor is the durable terminal-event seam (`source_channel*` columns + #1578 completion events, the ent#265 rails); the `indicate_progress` hook API survives that migration, only the router ticker moves
 - **Flow**: `docs/memory/feature-flows/telegram-integration.md`
 

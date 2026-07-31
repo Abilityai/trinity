@@ -995,7 +995,10 @@ per-turn, so flipping mid-run takes effect on the NEXT turn.
   SQL — `NULL != 0` is NULL there).
 - `GET /api/agents/{name}/telegram` surfaces the flag — and was access-hardened
   in this change from bare `get_current_user` to `AuthorizedAgentByName`
-  (the response embeds `webhook_url` ⊃ webhook secret).
+  (the response embeds `webhook_url` ⊃ webhook secret). The sibling
+  `GET .../telegram/groups` (group chat ids/titles — tenant data, read by the
+  same panel flow) got the same accessor; the group-message POST was already
+  owner-gated, so no usable flow narrows.
 - `PUT /api/agents/{name}/telegram/progress-indicator` `{enabled}` —
   `OwnedAgentByName` + `reject_agent_principal` (human-only; an agent-scoped
   key resolves to the owner), 404 without a binding; dedicated route so
@@ -1021,6 +1024,12 @@ per-turn, so flipping mid-run takes effect on the NEXT turn.
 - **Backend restart mid-run** strands the 👀/placeholder (accepted, same class
   as Slack's stranded ⏳); the placeholder's `· updated HH:MM UTC` stamp makes
   it self-dating rather than an unresolvable lie.
+- **Bounded in-flight settle**: the resolve path waits at most **10s** for an
+  in-flight first placeholder send before proceeding to `indicate_done` — a
+  first send slower than that (e.g. a 429 `retry_after` ≥ 10s on that exact
+  send) is abandoned and can strand its placeholder (same accepted class;
+  self-dating text applies). The terminal path is never blocked longer than
+  the bound.
 - **Inline-sync coupling** (for #1081/#1083 pickers): the driver assumes
   channel turns execute inline (`execute_task` awaited in `_run_agent_task`;
   channel triggers are NOT in `ASYNC_DISPATCH_ELIGIBLE_TRIGGERS`). If channel

@@ -332,10 +332,16 @@ async def test_telegram_bot(
     response_model=List[TelegramGroupConfigResponse],
 )
 async def list_telegram_groups(
-    agent_name: str,
-    current_user: User = Depends(get_current_user),
+    agent_name: AuthorizedAgentByName,
 ):
-    """List all Telegram groups this agent's bot is in."""
+    """List all Telegram groups this agent's bot is in.
+
+    Access hardened alongside the binding-status GET (ent#264): group chat
+    ids/titles/welcome text are tenant data — owner/shared/admin only,
+    uniform-404 accessor (Invariant #8). The only follow-up action (the
+    group-message POST) is already ``OwnedAgentByName``, so the read tier
+    here is strictly broader than every usable consumer.
+    """
     groups = db.get_telegram_groups_for_agent(agent_name)
     return [TelegramGroupConfigResponse(**g) for g in groups]
 

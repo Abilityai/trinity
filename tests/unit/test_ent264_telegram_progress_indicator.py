@@ -976,6 +976,26 @@ class TestTelegramEndpoints:
         ]
         assert "get_authorized_agent_by_name" in dep_names + flat
 
+    def test_groups_route_is_access_hardened(self):
+        """Sibling read of the same panel flow (review fix): GET
+        /telegram/groups discloses group chat ids/titles/welcome text — it
+        must carry the same uniform-404 accessor as the binding GET, not bare
+        get_current_user."""
+        from routers import telegram as tg
+
+        route = next(
+            r for r in tg.auth_router.routes
+            if getattr(r, "path", "") == "/api/agents/{agent_name}/telegram/groups"
+            and "GET" in getattr(r, "methods", set())
+        )
+        dep_names = [d.call.__name__ for d in route.dependant.dependencies]
+        flat = dep_names + [
+            d2.call.__name__
+            for d in route.dependant.dependencies
+            for d2 in d.dependencies
+        ]
+        assert "get_authorized_agent_by_name" in dep_names + flat
+
     def test_put_round_trip(self, monkeypatch):
         from models import TelegramProgressIndicatorRequest, User
 
