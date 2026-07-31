@@ -281,7 +281,7 @@ The dedicated `SystemAgent.vue` has been removed. The system agent now uses the 
 |----------|--------|-------------|
 | `/api/ops/fleet/status` | GET | All agents with status, context, activity |
 | `/api/ops/fleet/health` | GET | Health summary with critical/warning issues |
-| `/api/ops/fleet/restart` | POST | Restart all/filtered agents |
+| `/api/ops/fleet/restart` | POST | Restart all/filtered running agents through the canonical stop→`start_agent_internal` path — applies pending config drift and adopts a rebuilt base image (#1860). Skips system + ephemeral agents; agent-scoped keys 403 (`reject_agent_principal` — system-scoped keys unaffected); 409 while another fleet restart is in flight; outcome durably recorded in the audit log (`fleet_restart`) even if the client times out |
 | `/api/ops/fleet/stop` | POST | Stop all/filtered agents |
 
 ### Schedule Control
