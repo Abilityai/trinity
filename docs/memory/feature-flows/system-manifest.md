@@ -140,6 +140,16 @@ permissions:
 - **Details**: `GET /api/systems/{name}` - Get system details
 - **Restart**: `POST /api/systems/{name}/restart` - Restart all system agents
 - **Export**: `GET /api/systems/{name}/manifest` - Export system as YAML
+- **Bundled catalog** (ent#126): `GET /api/systems/manifests` - List the manifests
+  shipped in `config/manifests/`
+- **Bundled manifest** (ent#126): `GET /api/systems/manifests/{manifest_id}` - The same
+  summary plus the raw YAML, for loading into the install editor
+
+> **Naming adjacency**: `/api/systems/manifests` (the bundled *catalog*) and
+> `/api/systems/{name}/manifest` (export an *already-deployed* system) read alike and are
+> unrelated. Both catalog routes must stay declared **above** the parameterized routes —
+> Invariant #4 applies **twice** here: `/manifests` collides with `GET /{system_name}`, and
+> `/manifests/manifest` collides with `GET /{system_name}/manifest`.
 
 ### MCP Tools
 - `deploy_system` - Deploy from YAML manifest
@@ -922,6 +932,53 @@ prompt: |
 - Lines 405-415: Filter agents by prefix, return 404 if none
 - Line 418: Call `export_manifest(system_name, system_agents)` from service
 - Line 420: Return YAML content as PlainTextResponse
+
+#### GET /api/systems/manifests + /manifests/{manifest_id} (ent#126)
+
+The read-only bundled-manifest catalog backing the install surface's "pick a bundled
+manifest" source. Both are `require_role("creator")` — mirroring `POST /deploy`, since the
+catalog exists only to feed it — and both reject connector principals. Thin routers over
+`system_service.list_bundled_manifests()` / `read_bundled_manifest(id)`; **not** exported
+over MCP (Invariant #13): this is a UI affordance, and `deploy_system` already exists there.
+
+```
+GET /api/systems/manifests        → [BundledManifestSummary]   (200 always; see fail-soft)
+GET /api/systems/manifests/{id}   → BundledManifestDetail      (400 malformed id, 404 unknown)
+```
+
+**Root**: `TRINITY_MANIFESTS_DIR`, read **at call time**, defaulting to the bundled
+`config/manifests/` — already bind-mounted `:ro` into the backend in both compose files. The
+var is wired into `docker-compose.yml`, `docker-compose.prod.yml` and `.env.example` (prod
+compose launches standalone, so dev-only wiring would not carry over — the #1056 packaging
+class).
+
+**`valid` = parse + validate + the dry-run's own template/resource preflight.** Not
+parse-only: `parse_manifest` alone accepts invalid agent names, unsupported template prefixes
+and bogus presets, so a parse-only check would advertise an undeployable manifest as valid.
+The field is named `valid` only because all three ran; if it is ever reduced to parsing,
+rename it `parseable`.
+
+**Fail-soft per file.** An unreadable / oversized / invalid manifest is listed with
+`valid: false` and a short `reason` — never a 500 for the whole catalog, because one bad file
+must not hide the others. Every `reason` leaves through `_failure_reason`, the same exit point
+the deploy report's `failed[].reason` uses (credential-sanitized, URL-userinfo redacted,
+length-capped) — PyYAML parse errors **echo the offending source line**, and a joined list of
+blockers grows with the manifest, so both the individual reasons and their join are capped.
+
+**Path confinement on `{manifest_id}` is layered** — no single check is load-bearing:
+
+| Layer | Guards against |
+|-------|----------------|
+| Character allowlist | Separators, NUL, control bytes |
+| **Explicit** reject of `""` / `.` / `..` / embedded `..` | Traversal — the regex does **not** reject these; `.` is inside its character class |
+| Length cap | Overlong ids |
+| Suffix appended by us | Reading arbitrary file types |
+| `resolve()` + `is_relative_to(base)` | A symlink whose target escapes the directory |
+| `entry.is_symlink()` on the **unresolved** entry | A symlink whose target stays *inside* the directory — checked pre-`resolve()`, because `resolve()` has already erased the link. Parity with `list_bundled_manifests`, which skips symlinks outright; without it a symlink is invisible in the catalog yet readable by id, and "not listed" stops meaning "not served" |
+
+**Reads open once**, with `O_NOFOLLOW`, and `fstat` **that descriptor**, capping at
+`MANIFEST_MAX_BYTES + 1`. `config/manifests` is a host bind mount, so a stat-then-read
+sequence has a real swap window.
 
 ### Agent Creation Integration
 
@@ -2157,6 +2214,7 @@ template existence — learnings 2026-07-23 blank-agent trap).
 
 | Date | Changes |
 |------|---------|
+| 2026-07-30 | **trinity-enterprise#126**: UI install surface (`?tab=systems` on the Templates page; `components/systems/*` over the new `stores/systems.js`) + the read-only bundled-manifest catalog `GET /manifests` / `/manifests/{id}`. Dry-run gains `permission_edges` / `schedules_preview` / `system_view_requested` from **pure resolvers shared with the writers** (`configure_permissions` / `create_schedules` now loop over them), pinned by characterization tests captured green before the refactor. `_preflight_template` now validates **merged** resources through the create path's own `normalize_cpu` / `normalize_memory` — a shipped bundled manifest carried `cpu: 1.0`, previewed `valid`, and failed 100% of its agents (that manifest, a broken duplicate of the live seed, is deleted). `status` becomes five-valued (`invalid` added). `SystemDeployRequest.manifest` gains a byte-exact cap; `parse_manifest` warns on unrecognised top-level keys (coercing them with `str()` — YAML 1.1 renders bare `on`/`off`/`yes`/`no` as booleans, so a mixed-type key set made `sorted` raise and turned the hygiene check into the unnamed 500 it existed to prevent). Catalog `reason`s exit through `_failure_reason`; symlinked manifests are refused for catalog/read parity. |
 | 2026-07-24 | **trinity-enterprise#124**: deploy orchestration extracted to `system_service.deploy_manifest` (router now a thin HTTP wrapper; `create_agent_fn` seam defaults to the ws-broadcasting `routers/agents` facade); first-run default seed added (`system_seed_service.py`, persisted `first_run_fresh` verdict shared with the Cornelius seeder, bundled `config/manifests/default-system.yaml`, `TRINITY_DEFAULT_SYSTEM_MANIFEST` override/disable). Partial-deploy warning no longer points at #124 for converge support. |
 | 2026-02-17 | **ORG-001 Phase 4**: Added tags and System View integration - `default_tags`, `system_view`, per-agent `tags` in manifest. Updated models.py (221-273), system_service.py (configure_tags, create_system_view), routers/systems.py (steps 10-11 in deploy flow). Added response fields `tags_configured`, `system_view_created`. |
 | 2026-02-11 | Fixed Docker volume mount path - now mounts to `/home/developer` (not workspace subdirectory) |
