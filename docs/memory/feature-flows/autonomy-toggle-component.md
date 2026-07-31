@@ -23,7 +23,7 @@ The component is used in 4 locations:
 | Dashboard Graph | `src/frontend/src/components/AgentNode.vue` | 78-85 | Agent card in network graph |
 | Dashboard Timeline | `src/frontend/src/components/ReplayTimeline.vue` | 155-161 | Agent row in timeline view |
 | Agent Detail Header | `src/frontend/src/components/AgentHeader.vue` | 120-125 | Agent detail page header |
-| Agents List Page | `src/frontend/src/views/Agents.vue` | 116-122 | Agent grid cards |
+| Dashboard List rows | `src/frontend/src/components/AgentListPanel.vue` | — | List rows (ent#260 — the Agents page retired into the Dashboard List mode) |
 
 ---
 
@@ -206,26 +206,24 @@ function toggle() {
 - Separated with vertical divider
 - Only shown for owners (not shared users or system agent)
 
-### Agents.vue (Agents List Page)
+### AgentListPanel.vue (Dashboard List mode — ent#260, replaces the retired Agents page)
 
 ```vue
-<!-- Running and Autonomy toggles (same row) -->
-<div class="flex items-center justify-between mb-2">
-  <RunningStateToggle ... />
-  <AutonomyToggle
-    v-if="!agent.is_system"
-    :model-value="agent.autonomy_enabled"
-    :loading="autonomyLoading === agent.name"
-    size="sm"
-    @toggle="handleAutonomyToggle(agent)"
-  />
-</div>
+<AutonomyToggle
+  :model-value="agent.autonomy_enabled"
+  :loading="autonomyLoading === agent.name"
+  size="sm"
+  :class="agent.is_system ? 'invisible' : ''"
+  @toggle="handleAutonomyToggle(agent)"
+/>
 ```
 
 **Notes**:
-- Same row as RunningStateToggle for visual consistency
+- Controls column beside RunningStateToggle / ReadOnlyToggle
 - Loading state tracked per-agent via `autonomyLoading` ref
-- Hidden for system agents
+- `invisible` (column-preserving) for system agents
+- Handler calls `networkStore.toggleAutonomy` and toasts off the returned
+  `{success, error}` — the network store returns, never throws
 
 ---
 
@@ -238,7 +236,7 @@ As of 2026-02-12, the Running and Autonomy toggles are positioned on the **same 
    [ RunningStateToggle ]  [ AutonomyToggle ]
    ```
 
-2. **Agents Page** (`Agents.vue:108-123`):
+2. **Agents Page** (`Agents.vue:108-123` — historical; page retired into the Dashboard List mode, ent#260):
    ```
    [ RunningStateToggle ]  [ AutonomyToggle ]
    ```

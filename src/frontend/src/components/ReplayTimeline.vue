@@ -122,10 +122,13 @@
             :style="{ height: headerHeight + 'px' }"
           ></div>
 
-          <!-- Agent tiles (compact) -->
+          <!-- Agent tiles (compact). data-agent: test hook only (ent#261) —
+               mirrors the grid's `.gv-tile[data-agent]` idiom so e2e specs
+               locate rows by slug, never by display-name text. -->
           <div
             v-for="(row, i) in filteredAgentRows"
             :key="'label-' + i"
+            :data-agent="row.name"
             :class="[
               'px-2 py-1.5 border-b border-r border-gray-200 dark:border-gray-700',
               'flex',

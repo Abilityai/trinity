@@ -1,5 +1,9 @@
 <template>
-  <div class="fixed z-10 inset-0 overflow-y-auto">
+  <!-- z-50: the house modal tier (SystemViewEditor / OnboardingWizard). Was
+       z-10, which sat UNDER the Dashboard's z-30 filter pill + z-20
+       query-empty overlay (ent#261) — chassis chrome floated above the open
+       modal. All full-screen modals must outrank page-level overlay chrome. -->
+  <div class="fixed z-50 inset-0 overflow-y-auto">
     <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
       <div class="fixed inset-0 bg-gray-500 dark:bg-gray-900 bg-opacity-75 dark:bg-opacity-75 transition-opacity"></div>
 

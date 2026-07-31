@@ -24,8 +24,10 @@ import { test, expect } from '@playwright/test'
  *
  * Widths ≥1280 are the entitled-build regression (the container is capped at
  * `max-w-7xl`, so "just use a wider monitor" never fixed it); the narrow
- * widths keep the spec meaningful on an OSS build too, where 5 links only
- * exhaust the bar once the viewport is small.
+ * widths keep the spec meaningful on an OSS build too, where the (post-ent#260
+ * 4-link) bar only exhausts the bar once the viewport is small — test 3's
+ * squeeze branch is conditional on the measured overflow for exactly that
+ * reason.
  */
 
 // Viewports: the two laptop widths where the bug was worst, the cap boundary,
@@ -137,14 +139,25 @@ test.describe('NavBar overflow (#1789)', () => {
     const wide = await navGeometry(page)
     expect(wide.linkRowOverflowX).toBe('auto')
 
-    // Squeeze until the row must overflow, then prove the last link can be
-    // brought into view — clipped-but-scrollable, not clipped-dead.
+    // Squeeze to the `sm` floor (below it the link row hides entirely) and
+    // check both regimes. ent#260 removed the Agents link, so the 4-link OSS
+    // bar may now FIT at 640px where the 5-link bar overflowed — a fitting row
+    // can't exhibit the clipped-dead failure mode, so the honest assertion is
+    // conditional on the measured geometry (an entitled 6-7-link build still
+    // exercises the overflow branch):
+    //   overflowing → the last link must be recoverable via scroll,
+    //   fitting     → every link must already be fully in view.
     await page.setViewportSize({ width: 640, height: 900 })
     const narrow = await navGeometry(page)
-    expect(narrow.linkRowScrollWidth).toBeGreaterThan(narrow.linkRowClientWidth)
 
     const lastLink = page.locator('nav .flex.justify-between > div:first-child > div:last-child a').last()
-    await lastLink.scrollIntoViewIfNeeded()
-    await expect(lastLink).toBeInViewport()
+    if (narrow.linkRowScrollWidth > narrow.linkRowClientWidth) {
+      // Overflow: clipped-but-scrollable, not clipped-dead.
+      await lastLink.scrollIntoViewIfNeeded()
+      await expect(lastLink).toBeInViewport()
+    } else {
+      // No overflow: the whole link set is on-screen without scrolling.
+      await expect(lastLink).toBeInViewport()
+    }
   })
 })

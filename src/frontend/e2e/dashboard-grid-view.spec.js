@@ -3,11 +3,14 @@ import { test, expect } from '@playwright/test'
 /**
  * Dashboard Grid view e2e (trinity-enterprise#47).
  *
- * The Grid is a dashboard mode alongside Timeline (the legacy Graph / Vue Flow
- * canvas was decommissioned in #1689): a magnetic tile canvas on an unbounded
- * pan/zoom lattice. These specs cover the mode toggle + persistence, tile
- * rendering, drag-to-cell with swap, tidy/reset, and that the Timeline mode is
- * untouched.
+ * The Grid is a dashboard mode alongside Timeline and List (List consolidated
+ * the retired Agents page in trinity-enterprise#260; the legacy Graph / Vue
+ * Flow canvas was decommissioned in #1689): a magnetic tile canvas on an
+ * unbounded pan/zoom lattice. These specs cover the mode toggle + persistence,
+ * tile rendering, drag-to-cell with swap, tidy/reset, and that the Timeline
+ * mode is untouched. Toggle clicks use exact-name selectors, so the third
+ * mode button doesn't affect them; List-mode behaviour lives in
+ * dashboard-list-view.spec.js.
  *
  * Runs against a live stack — every install has at least `trinity-system`,
  * so no fixtures are needed. Layout state is reset per test via
