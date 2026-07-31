@@ -105,6 +105,7 @@ class TelegramChannelOperations:
         telegram_bindings.c.webhook_url,
         telegram_bindings.c.telegram_secret_token,
         telegram_bindings.c.last_update_id,
+        telegram_bindings.c.progress_indicator_enabled,  # ent#264
         telegram_bindings.c.created_at,
         telegram_bindings.c.updated_at,
     )
@@ -159,6 +160,22 @@ class TelegramChannelOperations:
         if not encrypted:
             return None
         return self._decrypt_token(encrypted)
+
+    def set_progress_indicator_enabled(self, agent_name: str, enabled: bool) -> bool:
+        """ent#264 — toggle the in-progress indicator for this binding.
+
+        Returns False when no binding exists for the agent."""
+        stmt = (
+            update(telegram_bindings)
+            .where(telegram_bindings.c.agent_name == agent_name)
+            .values(
+                progress_indicator_enabled=1 if enabled else 0,
+                updated_at=utc_now_iso(),
+            )
+        )
+        with get_engine().begin() as conn:
+            result = conn.execute(stmt)
+        return result.rowcount > 0
 
     def get_all_bindings(self) -> List[dict]:
         """Get all Telegram bindings (for webhook reconciliation on startup)."""
@@ -715,6 +732,9 @@ class TelegramChannelOperations:
             "webhook_url": row["webhook_url"],
             "telegram_secret_token": row["telegram_secret_token"],
             "last_update_id": row["last_update_id"],
+            # ent#264: raw value (may be NULL on edge writes) — readers apply
+            # the Python-side default-ON predicate `v is None or v != 0`.
+            "progress_indicator_enabled": row["progress_indicator_enabled"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }

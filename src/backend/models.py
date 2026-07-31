@@ -2702,6 +2702,8 @@ class TelegramBindingResponse(BaseModel):
     configured: bool = False
     group_count: int = 0
     warning: Optional[str] = None
+    # ent#264: in-progress indicator toggle (default ON); None when unconfigured.
+    progress_indicator_enabled: Optional[bool] = None
 
 
 class TelegramConfigureRequest(BaseModel):
@@ -2733,6 +2735,11 @@ class TelegramGroupConfigUpdateRequest(BaseModel):
 class TelegramGroupMessageRequest(BaseModel):
     """Request model for proactive group messaging (Issue #349)."""
     message: str
+
+
+class TelegramProgressIndicatorRequest(BaseModel):
+    """ent#264 — toggle the in-progress status indicator on a Telegram binding."""
+    enabled: bool
 
 
 class SlackChannelProactiveRequest(BaseModel):

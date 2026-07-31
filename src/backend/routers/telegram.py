@@ -25,13 +25,19 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from database import db
 from services import channel_history, rate_limiter
 from services.settings_service import get_proactive_rate_limit
-from dependencies import get_current_user, OwnedAgentByName
+from dependencies import (
+    AuthorizedAgentByName,
+    OwnedAgentByName,
+    get_current_user,
+    reject_agent_principal,
+)
 from models import (
     TelegramBindingResponse,
     TelegramConfigureRequest,
     TelegramGroupConfigResponse,
     TelegramGroupConfigUpdateRequest,
     TelegramGroupMessageRequest,
+    TelegramProgressIndicatorRequest,
     TelegramTestRequest,
     TelegramWebhookResponse,
     User,
@@ -83,12 +89,23 @@ async def handle_telegram_webhook(webhook_secret: str, request: Request):
 auth_router = APIRouter(prefix="/api/agents", tags=["telegram"])
 
 
+def _progress_indicator_enabled(binding: dict) -> bool:
+    """ent#264 default-ON read predicate, evaluated in Python (never SQL —
+    ``NULL != 0`` is NULL there): only an explicit 0 disables."""
+    v = binding.get("progress_indicator_enabled")
+    return v is None or v != 0
+
+
 @auth_router.get("/{agent_name}/telegram", response_model=TelegramBindingResponse)
 async def get_telegram_binding(
-    agent_name: str,
-    current_user: User = Depends(get_current_user)
+    agent_name: AuthorizedAgentByName,
 ):
-    """Get Telegram bot binding status for an agent."""
+    """Get Telegram bot binding status for an agent.
+
+    Access hardened in ent#264 (previously any authenticated user): the
+    response includes ``webhook_url``, which embeds the webhook secret —
+    owner/shared/admin only, uniform-404 accessor (Invariant #8).
+    """
     binding = db.get_telegram_binding(agent_name)
     if not binding:
         return TelegramBindingResponse(agent_name=agent_name, configured=False)
@@ -103,6 +120,47 @@ async def get_telegram_binding(
         bot_link=f"https://t.me/{bot_username}" if bot_username else None,
         configured=True,
         group_count=len(groups),
+        progress_indicator_enabled=_progress_indicator_enabled(binding),
+    )
+
+
+@auth_router.put(
+    "/{agent_name}/telegram/progress-indicator",
+    response_model=TelegramBindingResponse,
+)
+async def set_telegram_progress_indicator(
+    agent_name: OwnedAgentByName,
+    request: TelegramProgressIndicatorRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """ent#264 — toggle the in-progress status indicator for this binding.
+
+    Dedicated route (mirrors ``PUT /voip/enabled``) so toggling never requires
+    re-entering the bot token. Human-only: an agent-scoped key resolves to the
+    OWNER on REST, so ownership checks alone would let an agent flip its own
+    user-facing behavior toggle (ent#223 lesson).
+    """
+    reject_agent_principal(current_user)
+
+    binding = db.get_telegram_binding(agent_name)
+    if not binding:
+        raise HTTPException(status_code=404, detail="No Telegram binding found")
+
+    updated = db.set_telegram_progress_indicator(agent_name, request.enabled)
+    if not updated:
+        raise HTTPException(status_code=404, detail="No Telegram binding found")
+
+    bot_username = binding.get("bot_username")
+    groups = db.get_telegram_groups_for_agent(agent_name)
+    return TelegramBindingResponse(
+        agent_name=agent_name,
+        bot_username=bot_username,
+        bot_id=binding.get("bot_id"),
+        webhook_url=binding.get("webhook_url"),
+        bot_link=f"https://t.me/{bot_username}" if bot_username else None,
+        configured=True,
+        group_count=len(groups),
+        progress_indicator_enabled=request.enabled,
     )
 
 
@@ -189,6 +247,10 @@ async def configure_telegram_bot(
         configured=True,
         group_count=0,
         warning=warning,
+        # ent#264: fresh bindings default ON (column DEFAULT 1).
+        progress_indicator_enabled=(
+            _progress_indicator_enabled(binding) if binding else True
+        ),
     )
 
 
