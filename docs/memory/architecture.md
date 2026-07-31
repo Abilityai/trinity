@@ -40,9 +40,11 @@
 | Layer | Technologies |
 |-------|-------------|
 | Frontend | Vue.js 3 (Composition API), Tailwind CSS 3, Pinia 2, Vite 5 |
-| Backend | FastAPI 0.100+, Python 3.11, Docker SDK 7.x, SQLite 3, Redis 7, httpx 0.24+ |
-| Agent runtime | Python 3.11, Node.js 20, Go 1.21, Claude Code (latest) |
+| Backend | FastAPI 0.100+, Python 3.13, Docker SDK 7.x, SQLite 3, Redis 7, httpx 0.24+ |
+| Agent runtime | Python 3.13, Node.js 20, Go 1.21, Claude Code (latest) |
 | Infrastructure | Docker, nginx (prod reverse proxy), Cloudflare Tunnel (public endpoints), Tailscale (private VPN), GCP, Vertex AI Search (docs Q&A) |
+
+**Python version is a single declaration, guarded (#1891).** The three image Dockerfiles (`docker/{backend,scheduler,base-image}/Dockerfile`) are the source of truth; every `python-version:` in `.github/workflows/` must equal that pin, enforced by `tests/unit/test_1891_python_version_parity.py` (scans *all* workflows, so a new one with a stale pin fails too; `publish-cli.yml` is allowlisted — PyPI packaging is governed by CLI consumers, not the image runtime). CI previously ran 3.11 against 3.13 images, which by construction cannot catch the stdlib-removal class that had already shipped twice (`crypt` → #1615, `audioop` → the `audioop-lts` VoIP pin).
 
 ---
 
@@ -304,7 +306,7 @@ Vector 0.43.1 (`timberio/vector:0.43.1-alpine`). Captures all container stdout/s
 
 ### Agent Containers
 
-**Base image** `trinity-agent-base:latest`: Python 3.11, Node.js 20, Go 1.21, Claude Code (latest), common Python packages.
+**Base image** `trinity-agent-base:latest`: Python 3.13, Node.js 20, Go 1.21, Claude Code (latest), common Python packages.
 
 **Internal server** `agent-server.py` (FastAPI, port 8000):
 - `/api/chat` - Claude Code execution (messages persisted to database)

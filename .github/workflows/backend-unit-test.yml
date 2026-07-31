@@ -47,7 +47,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.11'
+          python-version: '3.13'
       - name: Run sys.modules lint
         run: python tests/lint_sys_modules.py
 
@@ -85,7 +85,7 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.11'
+          python-version: '3.13'
           cache: 'pip'
           cache-dependency-path: tests/requirements-test.txt
 
@@ -144,7 +144,7 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.11'
+          python-version: '3.13'
 
       - name: Download all JUnit artifacts
         uses: actions/download-artifact@v8

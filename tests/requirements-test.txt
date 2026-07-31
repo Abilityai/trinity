@@ -88,6 +88,18 @@ payments-py>=1.0.0
 # hazard for any future test that does assert real-world DST behaviour.
 # `hypothesis[zoneinfo]` declares tzdata as a floor for the same reason.
 tzdata>=2024.1
+# Python 3.13 removed the `audioop` stdlib module. The backend image pins the
+# replacement (docker/backend/Dockerfile: "audioop-lts; python_version >= '3.13'"),
+# so VoIP mu-law transcoding works in production — but CI installs THIS file, not
+# the image, so without the same pin `tests/unit/test_voip_audio.py` skips at
+# collection on 3.13 and 7 codec tests silently stop running.
+#
+# That is the exact failure this repo has already paid for twice (`crypt`,
+# `audioop`) and the reason #1891 moved CI onto the shipped interpreter. Note the
+# regression-diff job compares FAILURES, not test counts, so a vanished module is
+# invisible to it — the pin is what keeps the coverage, not the diff.
+audioop-lts; python_version >= '3.13'
+
 # NOTE: trinity-cli (needed by test_cli_*.py) is intentionally NOT listed here.
 # An editable local path (`-e ./src/cli`) breaks GitHub's dependency-graph
 # updater — it resolves `-e` targets relative to THIS file's dir (tests/src/cli,
