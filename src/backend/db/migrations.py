@@ -3151,6 +3151,42 @@ def _migrate_slack_channel_allow_proactive(cursor, conn):
         )
 
 
+def _migrate_channel_report_back_columns(cursor, conn):
+    """ent#265 — channel completion report-back: Telegram leg + binding identity.
+
+    Two ADD COLUMNs in one entry (multi-table precedent: ``_migrate_access_control``):
+
+    * ``schedule_executions.source_channel_agent`` (nullable TEXT) — "the agent
+      whose channel binding owns this execution's inherited context". Written
+      ONLY at the /task row-creation point when channel context is inherited
+      from a parent execution (parent's own ``source_channel_agent``, else the
+      parent's agent name — transitive across A→B→C). NULL for direct rows;
+      the completion reporter falls back to the executing agent, which is
+      byte-identical legacy behavior.
+    * ``telegram_group_configs.allow_proactive INTEGER DEFAULT 1`` — per-group
+      consent for completion reports (the Telegram analog of ent#223's Slack
+      channel-binding flag). DEFAULT 1 fills existing rows on read AND covers
+      new inserts, so no backfill UPDATE is needed. Allow is the deliberate
+      default (unlike Slack's new-deny split): the reporter posts only into
+      chats that initiated the work — the group-scale analog of DM
+      consent-by-construction — and the toggle is an opt-out mute.
+
+    Mirrored by Alembic 0031_channel_report_back for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "source_channel_agent",
+        "ALTER TABLE schedule_executions ADD COLUMN source_channel_agent TEXT",
+    )
+    _safe_add_column(
+        cursor,
+        "telegram_group_configs",
+        "allow_proactive",
+        "ALTER TABLE telegram_group_configs ADD COLUMN allow_proactive INTEGER DEFAULT 1",
+    )
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -3253,4 +3289,5 @@ MIGRATIONS = [
     ("agent_reminders_table", _migrate_agent_reminders_table),
     ("slack_channel_allow_proactive", _migrate_slack_channel_allow_proactive),
     ("product_events_table", _migrate_product_events_table),
+    ("channel_report_back_columns", _migrate_channel_report_back_columns),
 ]
