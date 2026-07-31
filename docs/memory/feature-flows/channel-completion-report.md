@@ -68,13 +68,35 @@ async and sync /task branches route through (the `_dispatch_async`/
 `message_router` uses them for direct turns; that creation branch passes
 `source_channel_agent=None`, so direct rows stay NULL by design).
 
-**Provenance guard (security, two arms):** `db.get_execution(parent_id)` is a
-global lookup, and the inherited identity now also resolves a bot token — so
-the caller must own the parent context. Agent caller (`x_source_agent`, already
-authenticated by the SELF-EXEC-001 spoof guard in `derive_source_and_trigger`)
-must BE the parent's executing agent; human caller must pass
-`can_user_access_agent` on the parent's agent. Failure → no inheritance, info
-log — fail-open to no-context, never to someone else's chat.
+**Provenance guard (security):** `db.get_execution(parent_id)` is a global
+lookup, and inheriting hands the child's terminal an outbound destination
+(someone else's chat) plus the bot token that reaches it — so the caller must
+own the parent context. Arms, selected by the **authenticated principal**:
+
+| Principal | Requirement |
+|-----------|-------------|
+| agent-scoped key (`current_user.agent_name`) | must BE the parent's executing agent |
+| human (JWT / user-scoped key) | must be the parent agent's OWNER (`can_user_share_agent`) or admin |
+| connector key (`connector_agent`) | never inherits (consumption-only, ent#46) |
+
+Failure → no inheritance, info log — fail-open to no-context, never to someone
+else's chat.
+
+Two properties are load-bearing and must survive refactors:
+
+1. **Arm selection is on the principal, never the raw `X-Source-Agent`
+   header.** The SELF-EXEC-001 spoof guard in `derive_source_and_trigger` only
+   fires when `current_user.agent_name` is set, so for a human caller that
+   header is unvalidated client input (`routers/chat.py` documents the same trap
+   for the resume-session IDOR). A header-selected agent arm is satisfiable by
+   naming the parent's own agent — which the row itself tells you — collapsing
+   the human arm to a no-op. The header is logged, never trusted.
+2. **The human arm is owner-or-admin, not any accessor.** Posting into a channel
+   chat is a proactive-send capability; every other proactive surface is
+   owner-gated (`OwnedAgentByName` for group sends) or per-recipient-consented
+   (#321). A share recipient can already read the owner's execution ids
+   (`GET /api/executions` is accessor-scoped), so an accessor arm would let them
+   push a report into the owner's Telegram DM or group.
 
 ## Identity — the binding agent (D1, Option A)
 

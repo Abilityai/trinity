@@ -430,10 +430,16 @@ def _decision():
     return IdempotencyDecision(enabled=False, replay=False, in_flight=False)
 
 
-def _user(user_id=1, username="owner", role="user"):
+def _user(user_id=1, username="owner", role="user", agent_name=None,
+          connector_agent=None):
+    """A principal. ``agent_name`` set ⇒ an AGENT-scoped MCP key (scope='agent'),
+    which is what the provenance guard's agent arm keys on — NOT the
+    X-Source-Agent header (unvalidated client input for a human caller)."""
     from models import User
 
-    return User(id=user_id, username=username, role=role, email=f"{username}@example.com")
+    return User(id=user_id, username=username, role=role,
+                email=f"{username}@example.com", agent_name=agent_name,
+                connector_agent=connector_agent)
 
 
 def _request(message="do the thing", parent_execution_id=None):
@@ -520,9 +526,9 @@ class TestInheritedContextPersistence:
         assert child.source_channel_agent is None
 
     def test_agent_caller_must_be_parents_executing_agent(self, db_backend):
-        """Provenance guard, agent arm: a caller agent naming someone ELSE's
-        execution id gets no inheritance — its terminal cannot be routed into
-        an unrelated chat."""
+        """Provenance guard, agent arm: an agent-scoped key naming someone
+        ELSE's execution id gets no inheritance — its terminal cannot be routed
+        into an unrelated chat."""
         from database import db
 
         seed_user(1, "owner", role="admin")
@@ -531,7 +537,8 @@ class TestInheritedContextPersistence:
         parent_id = _seed_parent("agent-a")
 
         child_id = _run(_create_child(
-            name="agent-evil", current_user=_user(role="admin"),
+            name="agent-evil",
+            current_user=_user(role="admin", agent_name="agent-evil"),
             x_source_agent="agent-evil", parent_id=parent_id))
 
         child = db.get_execution(child_id)
@@ -549,7 +556,8 @@ class TestInheritedContextPersistence:
         parent_id = _seed_parent("agent-a")
 
         child_id = _run(_create_child(
-            name="worker-b", current_user=_user(role="admin"),
+            name="worker-b",
+            current_user=_user(role="admin", agent_name="agent-a"),
             x_source_agent="agent-a", parent_id=parent_id))
 
         child = db.get_execution(child_id)
@@ -573,6 +581,92 @@ class TestInheritedContextPersistence:
         assert child.source_channel is None
         assert child.source_channel_agent is None
 
+    def test_spoofed_source_agent_header_does_not_bypass_the_human_arm(
+            self, db_backend):
+        """The arm is chosen by the AUTHENTICATED PRINCIPAL, never the raw
+        X-Source-Agent header. The SELF-EXEC-001 spoof guard only fires when
+        ``current_user.agent_name`` is set (routers/chat.py documents the same
+        trap for the resume IDOR), so a human caller can put ANY value in that
+        header. Selecting the agent arm on it made the human arm a no-op: name
+        the parent's own agent — which the row itself tells you — and the check
+        passes trivially, routing this task's terminal into that agent's chat."""
+        from database import db
+
+        seed_user(1, "owner", role="user")
+        seed_user(2, "stranger", role="user")
+        seed_agent("agent-a", 1)
+        seed_agent("agent-x", 2)
+        parent_id = _seed_parent("agent-a")
+
+        child_id = _run(_create_child(
+            name="agent-x", current_user=_user(2, "stranger"),
+            x_source_agent="agent-a",          # spoofed: == the parent's agent
+            parent_id=parent_id))
+
+        child = db.get_execution(child_id)
+        assert child.source_channel is None, (
+            "a human caller satisfied the AGENT arm with a forged header — the "
+            "provenance guard must key on the principal, not the header"
+        )
+        assert child.source_channel_agent is None
+
+    def test_shared_accessor_cannot_route_a_report_into_the_owners_chat(
+            self, db_backend):
+        """The human arm is OWNER-or-admin, not any accessor. Posting into a
+        channel chat is a proactive-send capability and every other proactive
+        surface is owner-gated (`OwnedAgentByName`) or per-recipient-consented
+        (#321); a share recipient can already read the owner's execution ids
+        (`GET /api/executions` is accessor-scoped), so an accessor arm would let
+        them push a report into the owner's Telegram DM or group."""
+        from sqlalchemy import text
+
+        from database import db
+        from db.engine import get_engine
+
+        seed_user(1, "owner", role="user")
+        seed_user(2, "colleague", role="user")
+        seed_agent("agent-a", 1)
+        with get_engine().begin() as conn:
+            conn.execute(text("UPDATE users SET email = :e WHERE id = 2"),
+                         {"e": "colleague@example.com"})
+            conn.execute(text(
+                "INSERT INTO agent_sharing "
+                "(agent_name, shared_with_email, shared_by_id, created_at) "
+                "VALUES ('agent-a', 'colleague@example.com', 1, :n)"),
+                {"n": "2026-01-01T00:00:00Z"})
+        parent_id = _seed_parent("agent-a")
+
+        # Precondition: the colleague genuinely HAS access (so this pins the
+        # accessor→owner narrowing, not a plain no-access refusal).
+        assert db.can_user_access_agent("colleague", "agent-a") is True
+
+        child_id = _run(_create_child(
+            name="agent-a", current_user=_user(2, "colleague"),
+            parent_id=parent_id))
+
+        child = db.get_execution(child_id)
+        assert child.source_channel is None
+        assert child.source_channel_agent is None
+
+    def test_connector_principal_gets_no_inheritance(self, db_backend):
+        """A connector key is consumption-only (ent#46) but resolves to the
+        OWNER, so the owner arm would otherwise make it owner-equivalent for
+        this capability — the exact thing `_enforce_connector_scope` exists to
+        prevent."""
+        from database import db
+
+        seed_user(1, "owner", role="admin")
+        seed_agent("agent-a", 1)
+        parent_id = _seed_parent("agent-a")
+
+        child_id = _run(_create_child(
+            name="agent-a",
+            current_user=_user(role="admin", connector_agent="agent-a"),
+            parent_id=parent_id))
+
+        child = db.get_execution(child_id)
+        assert child.source_channel is None
+
     def test_two_hop_inheritance_carries_root_binding_agent(self, db_backend):
         """Transitive A→B→C: C's row carries the ROOT binding agent A, not the
         middle hop — the bot the user actually addressed delivers."""
@@ -584,10 +678,10 @@ class TestInheritedContextPersistence:
         root_id = _seed_parent("agent-a")
 
         mid_id = _run(_create_child(
-            name="worker-b", current_user=_user(role="admin"),
+            name="worker-b", current_user=_user(role="admin", agent_name="agent-a"),
             x_source_agent="agent-a", parent_id=root_id))
         leaf_id = _run(_create_child(
-            name="worker-c", current_user=_user(role="admin"),
+            name="worker-c", current_user=_user(role="admin", agent_name="worker-b"),
             x_source_agent="worker-b", parent_id=mid_id))
 
         leaf = db.get_execution(leaf_id)

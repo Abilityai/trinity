@@ -709,15 +709,34 @@ def _inherited_channel_context(request, *, current_user=None, x_source_agent=Non
     pointer on a channel-less child.
 
     Provenance guard (ent#265 security): ``db.get_execution(parent_id)`` is a
-    global lookup with no ownership check, and the inherited identity now also
-    resolves a bot token at report time — so the caller must own the parent
-    context:
-      * agent-scoped caller (``x_source_agent`` — already authenticated by the
-        SELF-EXEC-001 spoof guard in ``derive_source_and_trigger``, which runs
-        before row creation) must BE the parent's executing agent;
-      * human caller must have access to the parent's agent.
+    global lookup with no ownership check, and inheriting the context hands the
+    child's terminal an outbound destination (someone else's chat) plus the bot
+    token that reaches it — so the caller must own the parent context:
+      * **agent-scoped principal** (``current_user.agent_name``) must BE the
+        parent's executing agent;
+      * **human principal** must be the parent agent's OWNER (or an admin);
+      * **connector principal** (consumption-only, ent#46) never inherits.
     A failed guard means NO inheritance (info log) — fail-open to no-context,
     never to someone else's chat.
+
+    Two deliberate choices, both load-bearing:
+
+    * **The arm is selected by the AUTHENTICATED PRINCIPAL, never by the raw
+      ``X-Source-Agent`` header.** The SELF-EXEC-001 spoof guard in
+      ``derive_source_and_trigger`` only fires when ``current_user.agent_name``
+      is set, so for a human caller the header is unvalidated client input
+      (``routers/chat.py`` documents the identical trap for the resume-session
+      IDOR). Keying the agent arm off the header let any human satisfy it by
+      naming the parent's own agent — the row itself tells you that name — which
+      turned the human arm into a no-op. ``x_source_agent`` is therefore
+      logged, never trusted.
+    * **The human arm is owner-or-admin (``can_user_share_agent``), not any
+      accessor.** Posting into a channel chat is a proactive-send capability,
+      and every other proactive surface is owner-gated (`OwnedAgentByName` for
+      group sends) or per-recipient-consented (#321). A share recipient can
+      already read the owner's execution ids (`GET /api/executions` is
+      accessor-scoped), so an accessor arm would let them route a report into
+      the owner's Telegram DM or group.
 
     Fail-open: any miss returns (None, None, None, None) and behaviour is
     unchanged.
@@ -731,23 +750,37 @@ def _inherited_channel_context(request, *, current_user=None, x_source_agent=Non
         if parent is None:
             return _NO_INHERITED_CONTEXT
         parent_agent = getattr(parent, "agent_name", None)
-        # --- Provenance guard (two arms) ---------------------------------
-        if x_source_agent:
-            if parent_agent != x_source_agent:
+        # --- Provenance guard (principal-selected arms) -------------------
+        if current_user is None:
+            logger.info(
+                "[ent#265] channel-context inheritance refused: no caller "
+                "principal to evaluate against parent execution %s", parent_id,
+            )
+            return _NO_INHERITED_CONTEXT
+        if getattr(current_user, "connector_agent", None):
+            logger.info(
+                "[ent#265] channel-context inheritance refused: connector keys "
+                "are consumption-only (parent execution %s)", parent_id,
+            )
+            return _NO_INHERITED_CONTEXT
+        agent_principal = getattr(current_user, "agent_name", None)
+        if agent_principal:
+            if parent_agent != agent_principal:
                 logger.info(
                     "[ent#265] channel-context inheritance refused: parent "
-                    "execution %s belongs to '%s', caller agent is '%s'",
-                    parent_id, parent_agent, x_source_agent,
+                    "execution %s belongs to '%s', caller agent is '%s' "
+                    "(header claimed '%s')",
+                    parent_id, parent_agent, agent_principal, x_source_agent,
                 )
                 return _NO_INHERITED_CONTEXT
-        elif current_user is not None:
-            if not db.can_user_access_agent(current_user.username, parent_agent):
-                logger.info(
-                    "[ent#265] channel-context inheritance refused: caller "
-                    "'%s' has no access to parent agent '%s' (execution %s)",
-                    current_user.username, parent_agent, parent_id,
-                )
-                return _NO_INHERITED_CONTEXT
+        elif not db.can_user_share_agent(current_user.username, parent_agent):
+            logger.info(
+                "[ent#265] channel-context inheritance refused: caller "
+                "'%s' does not own parent agent '%s' (execution %s, header "
+                "claimed '%s')",
+                current_user.username, parent_agent, parent_id, x_source_agent,
+            )
+            return _NO_INHERITED_CONTEXT
         src_channel = getattr(parent, "source_channel", None)
         if not src_channel:
             return _NO_INHERITED_CONTEXT
@@ -1059,9 +1092,9 @@ async def create_task_execution_and_activities(
 
     # ent#224/ent#265 (D0): resolve inherited channel context HERE, at the
     # single row-creation point both the async and sync /task branches route
-    # through, and persist it on the row itself. current_user/x_source_agent
-    # are in scope for the provenance guard (x_source_agent has already passed
-    # the SELF-EXEC-001 spoof guard in derive_source_and_trigger).
+    # through, and persist it on the row itself. The provenance guard evaluates
+    # the AUTHENTICATED principal (current_user) — x_source_agent is passed for
+    # logging only, because for a human caller it is unvalidated client input.
     src_channel, src_chat_id, src_thread, src_channel_agent = _inherited_channel_context(
         request, current_user=current_user, x_source_agent=x_source_agent,
     )
