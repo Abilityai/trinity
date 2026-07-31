@@ -870,6 +870,19 @@ class AgentDefaultAccessPolicyUpdate(BaseModel):
     require_email: Optional[bool] = None
 
 
+class SkillsLibraryAutomationUpdate(BaseModel):
+    """Body for PUT /api/settings/skills-library (trinity-enterprise#236).
+
+    Partial update — every field optional, an omitted field is left untouched,
+    so toggling one flag can never silently reset the interval. The interval's
+    range (300–86400) is enforced in the router so an out-of-range value returns
+    a descriptive 400 rather than a generic 422.
+    """
+    auto_sync_enabled: Optional[bool] = None
+    auto_sync_interval_seconds: Optional[int] = None
+    auto_reinject_enabled: Optional[bool] = None
+
+
 class MaxParallelTasksCeilingUpdate(BaseModel):
     """Body for PUT /api/settings/max-parallel-tasks-ceiling (#506).
 

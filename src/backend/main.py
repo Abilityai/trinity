@@ -511,6 +511,20 @@ async def lifespan(app: FastAPI):
             logger.error(f"Error starting sync health service: {e}")
     asyncio.create_task(_start_sync_health_delayed())
 
+    # trinity-enterprise#236: skills-library auto-sync + fleet re-inject.
+    # The loop always runs; it self-gates on the (default-OFF) setting each
+    # cycle and only the Redis leader performs a cycle, so starting it in every
+    # worker is safe. Staggered +11s to stay clear of the other boot loops.
+    async def _start_skills_sync_delayed():
+        await asyncio.sleep(11)
+        try:
+            from services.skills_sync_service import skills_sync_service
+            skills_sync_service.start()
+            logger.info("Skills library sync service started (staggered +11s)")
+        except Exception as e:
+            logger.error(f"Error starting skills library sync service: {e}")
+    asyncio.create_task(_start_skills_sync_delayed())
+
     # CANARY-001 / Issue #411: Canary watcher — 5-min cycle. Disabled by
     # default (CANARY_ENABLED=1 to enable on staging/dev). Service self-
     # gates internally; the start() call is a no-op when not enabled.
@@ -804,6 +818,14 @@ async def lifespan(app: FastAPI):
         logger.info("Sync health service stopped")
     except Exception as e:
         logger.error(f"Error stopping sync health service: {e}")
+
+    # Shutdown skills library sync service (trinity-enterprise#236)
+    try:
+        from services.skills_sync_service import skills_sync_service
+        skills_sync_service.stop()
+        logger.info("Skills library sync service stopped")
+    except Exception as e:
+        logger.error(f"Error stopping skills library sync service: {e}")
 
     # Shutdown canary service (CANARY-001 / Issue #411)
     try:

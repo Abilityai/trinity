@@ -230,7 +230,7 @@
             </div>
 
             <!-- Skills Tab Content -->
-            <div v-if="activeTab === 'skills'">
+            <div v-if="activeTab === 'skills'" class="p-6">
               <SkillsPanel
                 :agent-name="agent.name"
                 :can-manage="!!agent.can_share"
@@ -245,7 +245,7 @@
 
             <!-- Settings Tab Content (#1108) — sectioned home for per-agent
                  config; Guardrails (GUARD-001 UI, #967) is section #1 -->
-            <div v-if="activeTab === 'settings' && agent.can_share" class="space-y-6">
+            <div v-if="activeTab === 'settings' && agent.can_share" class="p-6 space-y-6">
               <SettingsPanel :agent-name="agent.name" :notify="showNotification" />
               <!-- ent#277: renders only when the entitlement is present. -->
               <CrossModelValidationPanel :agent-name="agent.name" />
