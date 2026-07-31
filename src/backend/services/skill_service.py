@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -260,11 +261,22 @@ class SkillService:
         logger.info(f"Syncing skills library from {safe_url} (branch: {branch})")
 
         try:
-            if self.library_path.exists():
+            # Test for a REPOSITORY, not merely a directory. A path that exists
+            # but holds no `.git` — a clone interrupted by a full disk or a
+            # crash, a stray `mkdir`, a restored backup — makes `git pull` fail
+            # with "not a git repository" on every attempt, forever: nothing in
+            # this path ever re-clones, so the only recovery is shell access to
+            # delete the directory. That was survivable while sync was a button
+            # a human clicked and immediately saw fail. ent#236 puts it on an
+            # unattended timer, where it means every scheduled sync fails and
+            # the fleet re-inject silently never runs — the exact silent-failure
+            # mode this feature exists to remove. Treat a non-repo directory as
+            # "not cloned yet" and let the clone path re-establish it.
+            if (self.library_path / ".git").is_dir():
                 # Pull latest changes
                 result = self._git_pull(branch)
             else:
-                # Clone repository
+                # Clone repository (also re-clones over a non-repo directory)
                 result = self._git_clone(auth_url, branch)
 
             if result["success"]:
@@ -344,9 +356,42 @@ class SkillService:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"could not persist skills library sync status: {e}")
 
+    def _quarantine_non_repo_dir(self) -> None:
+        """Move a non-repository library directory aside so a clone can proceed.
+
+        `git clone` refuses a destination that exists and is non-empty, so
+        detecting "directory but not a repo" is only half a fix — without this
+        the sync would just fail on a different message, equally forever.
+
+        Renamed, never deleted. The platform owns this path exclusively (it is
+        only ever a clone of the configured remote, and nothing else writes
+        here), so removal would probably be safe — but "probably safe" is not
+        the standard for an unattended timer deleting a directory derived from
+        an operator-supplied setting (#1638/#1644). A rename is recoverable,
+        auditable, and costs one inode. Only one quarantine is kept; a repeat
+        replaces it, so this cannot grow without bound.
+        """
+        quarantine = self.library_path.with_name(self.library_path.name + ".broken")
+        try:
+            if quarantine.exists():
+                shutil.rmtree(quarantine, ignore_errors=True)
+            self.library_path.rename(quarantine)
+            logger.warning(
+                "Skills library path %s was not a git repository — moved to %s "
+                "and re-cloning.", self.library_path, quarantine,
+            )
+        except OSError as e:  # noqa: BLE001 — fall through and let clone report
+            logger.error(
+                "Could not move aside non-repo skills library at %s: %s",
+                self.library_path, e,
+            )
+
     def _git_clone(self, url: str, branch: str) -> Dict[str, Any]:
         """Clone the skills library repository."""
         self.library_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.library_path.exists():
+            # Reached only via the `.git`-absent branch in sync_library.
+            self._quarantine_non_repo_dir()
 
         cmd = [
             "git", *_GIT_HTTP_UA_ARGS,

@@ -2133,6 +2133,10 @@ Example:
                 <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                   Use format: <code>github.com/owner/repo</code> or <code>https://github.com/owner/repo</code>
                 </p>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  Public repositories need no credentials. A <strong>private</strong> repository
+                  requires a GitHub PAT — set one in the GitHub PAT section above.
+                </p>
               </div>
 
               <!-- Branch -->
@@ -4035,6 +4039,11 @@ async function syncSkillsLibrary() {
       showSuccess.value = false
     }, 3000)
   } catch (e) {
+    // The settings save above already set showSuccess; a failed sync must clear
+    // it, or the panel shows "Settings saved successfully!" and "Clone failed"
+    // at the same time. Both are individually true, which is exactly why the
+    // pair is untrustworthy to read.
+    showSuccess.value = false
     error.value = e.response?.data?.detail || 'Failed to sync skills library'
   } finally {
     syncingSkillsLibrary.value = false

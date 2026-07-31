@@ -57,6 +57,18 @@ def _load(path: str, name: str):
 pkg = _load("src/backend/services/skill_packaging.py", "_ent236_pkg")
 
 
+def _as_cloned_repo(service):
+    """Put the library path in the state 'already cloned' means on disk.
+
+    `sync_library` selects pull-vs-clone on `.git` being a directory, not on the
+    path merely existing — a path without `.git` is a broken clone and must be
+    re-cloned, not pulled into. Tests that mean "the library is already here"
+    therefore have to create `.git`, or they silently exercise the clone path
+    (and, with `_git_clone` unmocked, reach for the network).
+    """
+    (service.library_path / ".git").mkdir(parents=True, exist_ok=True)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Part A — compute_removal (pure)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -595,7 +607,7 @@ class TestSyncStatusPersistence:
         return data
 
     def test_success_persists_status_and_commit(self, service, store):
-        service.library_path.mkdir(parents=True, exist_ok=True)
+        _as_cloned_repo(service)
         service._git_pull = MagicMock(return_value={"success": True, "action": "pulled"})
         service._get_current_commit = MagicMock(return_value="deadbeef1234")
         service.list_skills = MagicMock(return_value=[])
@@ -610,7 +622,7 @@ class TestSyncStatusPersistence:
     def test_failure_persists_the_error(self, service, store):
         """The AC's 'never silent' half — a failure path that skipped this write
         would leave the last SUCCESS on screen."""
-        service.library_path.mkdir(parents=True, exist_ok=True)
+        _as_cloned_repo(service)
         service._git_pull = MagicMock(
             return_value={"success": False, "error": "Pull failed: boom"}
         )
@@ -622,7 +634,7 @@ class TestSyncStatusPersistence:
         assert "boom" in store[skill_service_module.SKILLS_LAST_ERROR_KEY]
 
     def test_error_is_length_capped(self, service, store):
-        service.library_path.mkdir(parents=True, exist_ok=True)
+        _as_cloned_repo(service)
         service._git_pull = MagicMock(
             return_value={"success": False, "error": "x" * 5000}
         )
@@ -633,7 +645,7 @@ class TestSyncStatusPersistence:
         """Not `self._last_commit_sha`: an in-memory None on a fresh process
         would read as 'changed' and sweep the whole fleet on every restart."""
         store[skill_service_module.SKILLS_LAST_COMMIT_KEY] = "deadbeef1234"
-        service.library_path.mkdir(parents=True, exist_ok=True)
+        _as_cloned_repo(service)
         service._git_pull = MagicMock(return_value={"success": True, "action": "pulled"})
         service._get_current_commit = MagicMock(return_value="deadbeef1234")
         service.list_skills = MagicMock(return_value=[])
@@ -648,7 +660,7 @@ class TestSyncStatusPersistence:
         and the authenticated remote URL is an argument in the subprocess
         command list — so an unexpected OSError can carry the token into
         `system_settings` and the admin Settings panel (G-04's class)."""
-        service.library_path.mkdir(parents=True, exist_ok=True)
+        _as_cloned_repo(service)
         service._git_pull = MagicMock(
             side_effect=OSError(
                 "failed running ['git', 'clone', "
@@ -666,7 +678,7 @@ class TestSyncStatusPersistence:
         """Scheduled + manual sync now overlap routinely; both run
         `git reset --hard` on the SAME clone. A contended click must not
         overwrite the panel with "Last sync failed" — nothing failed."""
-        service.library_path.mkdir(parents=True, exist_ok=True)
+        _as_cloned_repo(service)
         service._acquire_sync_lock = MagicMock(return_value=False)
         service._git_pull = MagicMock()
 
@@ -679,7 +691,7 @@ class TestSyncStatusPersistence:
         assert skill_service_module.SKILLS_LAST_STATUS_KEY not in store
 
     def test_sync_lock_is_released_even_when_git_raises(self, service, store):
-        service.library_path.mkdir(parents=True, exist_ok=True)
+        _as_cloned_repo(service)
         service._acquire_sync_lock = MagicMock(return_value="tok")
         service._release_sync_lock = MagicMock()
         service._git_pull = MagicMock(side_effect=RuntimeError("boom"))
@@ -703,6 +715,104 @@ class TestSyncStatusPersistence:
         assert status["last_sync"] == "2026-07-29T10:00:00Z"
         assert status["last_sync_status"] == "failed"
         assert status["last_sync_error"] == "auth failed"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Part D2 — a directory is not a repository
+#
+# `sync_library` used to branch on `library_path.exists()`. A path that exists
+# but holds no `.git` (clone interrupted by a full disk, a stray mkdir, a
+# restored backup) made `git pull` fail with "not a git repository" on every
+# attempt, with nothing in the code path able to re-clone — permanent, and
+# fixable only by shell access. Survivable while sync was a button someone
+# clicked and watched; ent#236 puts it on an unattended timer, where it means
+# every scheduled sync fails and fleet re-inject never runs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestNonRepoDirectoryRecovers:
+    @pytest.fixture(autouse=True)
+    def _library_configured(self, monkeypatch):
+        for name, value in (
+            ("get_skills_library_url", lambda: "https://github.com/owner/repo"),
+            ("get_skills_library_branch", lambda: "main"),
+            ("get_github_pat", lambda: None),
+            ("validate_skills_library_url", lambda url: url),
+        ):
+            monkeypatch.setattr(skill_service_module, name, value, raising=False)
+
+    @pytest.fixture()
+    def store(self, monkeypatch):
+        data: dict = {}
+        db = skill_service_module.db
+        monkeypatch.setattr(db, "set_setting",
+                            MagicMock(side_effect=lambda k, v: data.__setitem__(k, v)),
+                            raising=False)
+        monkeypatch.setattr(db, "get_setting_value",
+                            MagicMock(side_effect=lambda k, default=None: data.get(k, default)),
+                            raising=False)
+        return data
+
+    def test_directory_without_git_clones_instead_of_pulling(self, service, store):
+        """The core regression: the bug was choosing pull for this state."""
+        service.library_path.mkdir(parents=True, exist_ok=True)   # exists, no .git
+        service._git_pull = MagicMock(return_value={"success": True, "action": "pulled"})
+        service._git_clone = MagicMock(return_value={"success": True, "action": "cloned"})
+        service._get_current_commit = MagicMock(return_value="abc123")
+        service.list_skills = MagicMock(return_value=[])
+
+        result = service.sync_library()
+
+        service._git_pull.assert_not_called()
+        service._git_clone.assert_called_once()
+        assert result["action"] == "cloned"
+
+    def test_real_repo_still_pulls(self, service, store):
+        """The fix must not turn every sync into a re-clone."""
+        _as_cloned_repo(service)
+        service._git_pull = MagicMock(return_value={"success": True, "action": "pulled"})
+        service._git_clone = MagicMock(return_value={"success": True, "action": "cloned"})
+        service._get_current_commit = MagicMock(return_value="abc123")
+        service.list_skills = MagicMock(return_value=[])
+
+        assert service.sync_library()["action"] == "pulled"
+        service._git_clone.assert_not_called()
+
+    def test_non_empty_non_repo_dir_is_moved_aside_not_deleted(self, service):
+        """`git clone` refuses a non-empty destination, so detecting the broken
+        state is only half a fix. Quarantine by rename — the operator's bytes
+        survive, and an unattended timer never deletes a directory."""
+        service.library_path.mkdir(parents=True, exist_ok=True)
+        stray = service.library_path / "leftover.txt"
+        stray.write_text("partial clone debris")
+
+        service._quarantine_non_repo_dir()
+
+        assert not service.library_path.exists()
+        quarantine = service.library_path.with_name(service.library_path.name + ".broken")
+        assert (quarantine / "leftover.txt").read_text() == "partial clone debris"
+
+    def test_repeat_quarantine_replaces_the_previous_one(self, service):
+        """Bounded: a recurring fault cannot fill the disk with quarantines."""
+        quarantine = service.library_path.with_name(service.library_path.name + ".broken")
+        quarantine.mkdir(parents=True, exist_ok=True)
+        (quarantine / "old.txt").write_text("first failure")
+        service.library_path.mkdir(parents=True, exist_ok=True)
+        (service.library_path / "new.txt").write_text("second failure")
+
+        service._quarantine_non_repo_dir()
+
+        assert (quarantine / "new.txt").exists()
+        assert not (quarantine / "old.txt").exists()
+
+    def test_quarantine_failure_never_raises(self, service, monkeypatch):
+        """Runs inside sync; an OSError here must not become a 500 — the clone
+        that follows reports the real problem."""
+        service.library_path.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(
+            type(service.library_path), "rename",
+            MagicMock(side_effect=OSError("read-only fs")), raising=False,
+        )
+        service._quarantine_non_repo_dir()   # must not raise
 
 
 # ─────────────────────────────────────────────────────────────────────────────
