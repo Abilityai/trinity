@@ -412,7 +412,13 @@ _STUBS = {
         "AgentRequestError": type("AgentRequestError", (Exception,), {}),
         "get_all_circuit_states": MagicMock(return_value={}),
     },
-    "utils.url_validation": {"validate_skills_library_url": lambda url: url},
+    # The stub must mirror EVERY name skill_service imports from the real
+    # module — a missing constant is an ImportError at collection, not a
+    # graceful degradation (see abilityai/trinity#1898 for the wider fragility).
+    "utils.url_validation": {
+        "validate_skills_library_url": lambda url: url,
+        "ALLOWED_SKILLS_LIBRARY_HOSTS": {"github.com", "www.github.com"},
+    },
 }
 for _name, _attrs in _STUBS.items():
     if _name not in sys.modules:

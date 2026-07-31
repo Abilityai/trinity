@@ -36,6 +36,34 @@ pytestmark = pytest.mark.unit
 # Fixtures
 # =============================================================================
 
+@pytest.fixture(autouse=True)
+def _real_modules_not_stubs(monkeypatch):
+    """Undo another module's import-time `sys.modules` stubs for this file.
+
+    `test_ent183_skill_packages` installs fake modules at IMPORT time (see
+    abilityai/trinity#1898). A stub has no `__file__`, so it is trivially
+    detectable — evict it and let the next import load the real module. Without
+    this, whether these tests pass depends on which file pytest happens to run
+    first, which is the failure mode #1898 describes.
+
+    Uses `monkeypatch.delitem`, not a bare `del sys.modules[...]`: the eviction
+    is undone at teardown, so this file cannot itself become the next source of
+    the very pollution it is working around (`tests/lint_sys_modules.py`
+    enforces this).
+    """
+    import importlib
+
+    for name in ("utils.url_validation", "services.skill_service"):
+        mod = sys.modules.get(name)
+        if mod is not None and getattr(mod, "__file__", None) is None:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+    try:
+        importlib.import_module("utils.url_validation")
+    except Exception:  # noqa: BLE001 — a genuinely broken import fails in the test
+        pass
+    yield
+
+
 @pytest.fixture
 def upstream(tmp_path: Path) -> Path:
     """A real git repo laid out like a skills library."""
@@ -783,14 +811,14 @@ class TestEmbeddedCredentialRejection:
         "tok_placeholder@github.com/owner/repo",
     ])
     def test_rejected(self, url):
-        import fastapi
-        from routers.skills import _reject_embedded_credentials
+        from utils.url_validation import (
+            EmbeddedCredentialError, reject_embedded_credentials,
+        )
 
-        with pytest.raises(fastapi.HTTPException) as exc:
-            _reject_embedded_credentials(url)
-        assert exc.value.status_code == 400
+        with pytest.raises(EmbeddedCredentialError) as exc:
+            reject_embedded_credentials(url)
         # Names the supported mechanism instead of a generic rejection.
-        assert "PAT" in exc.value.detail
+        assert "PAT" in str(exc.value)
 
     @pytest.mark.parametrize("url", [
         "https://github.com/owner/repo",
@@ -798,6 +826,43 @@ class TestEmbeddedCredentialRejection:
         "owner/repo",
     ])
     def test_normal_urls_still_accepted(self, url):
-        from routers.skills import _reject_embedded_credentials
+        from utils.url_validation import reject_embedded_credentials
 
-        _reject_embedded_credentials(url)   # no raise
+        reject_embedded_credentials(url)   # no raise
+
+
+class TestPatSplicingHostCheck:
+    """CodeQL py/incomplete-url-substring-sanitization, PR #1901.
+
+    `"github.com" in url` is satisfied by a URL merely *containing* the string,
+    and the splice that followed used `str.replace("https://", ...)`. Together
+    that sends the platform PAT to an attacker host. Guarded by parsing.
+    """
+
+    @staticmethod
+    def _splice(url, pat="ghp_placeholder"):
+        import services.skill_service as ss
+        return ss.SkillService._authenticated_url(url, pat)
+
+    @pytest.mark.parametrize("hostile", [
+        "https://evil.example/?x=github.com",
+        "https://evil.example/github.com/owner/repo",
+        "https://github.com.evil.example/owner/repo",
+        "http://github.com/owner/repo",          # wrong scheme
+    ])
+    def test_pat_is_never_spliced_into_a_non_github_host(self, hostile):
+        out = self._splice(hostile)
+        assert "ghp_placeholder" not in out, f"PAT leaked into {out!r}"
+
+    @pytest.mark.parametrize("url", [
+        "https://github.com/owner/repo",
+        "github.com/owner/repo",
+        "owner/repo",
+    ])
+    def test_pat_is_spliced_for_real_github_urls(self, url):
+        """The guard must not be so tight it breaks private-repo access."""
+        out = self._splice(url)
+        assert out.startswith("https://ghp_placeholder@github.com/")
+
+    def test_no_pat_configured_still_normalises(self):
+        assert self._splice("owner/repo", pat=None) == "https://github.com/owner/repo"

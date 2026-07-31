@@ -35,7 +35,12 @@ from services.settings_service import get_skills_library_url, get_skills_library
 from services.agent_client import get_agent_client, AgentClientError
 from services import skill_packaging as pkg
 from services.skill_source_clone import SkillSourceClone
-from utils.url_validation import validate_skills_library_url
+from urllib.parse import urlparse, urlunparse
+
+from utils.url_validation import (
+    ALLOWED_SKILLS_LIBRARY_HOSTS,
+    validate_skills_library_url,
+)
 
 try:  # Redis is optional here: the injection lock fails open without it.
     import redis as _redis_lib
@@ -288,16 +293,39 @@ class SkillService:
 
     @staticmethod
     def _authenticated_url(url: str, github_pat: Optional[str]) -> str:
-        """Splice a PAT into the clone URL for a private source."""
-        if github_pat and "github.com" in url:
-            if url.startswith("https://"):
-                return url.replace("https://", f"https://{github_pat}@")
-            if url.startswith("github.com"):
-                return f"https://{github_pat}@{url}"
-            return f"https://{github_pat}@github.com/{url}"
-        if not url.startswith("https://"):
-            return f"https://github.com/{url}"
-        return url
+        """Splice a PAT into the clone URL for a private source.
+
+        The host is decided by PARSING, never by `"github.com" in url`
+        (CodeQL py/incomplete-url-substring-sanitization, flagged on PR #1901).
+        A substring test is satisfied by `https://evil.com/?x=github.com`, and
+        the old `.replace("https://", ...)` would then have sent the platform
+        PAT to evil.com. Not reachable today — `sync_library` validates every
+        source URL first — but "safe only because a caller three frames up
+        validates" is precisely the property that breaks when a caller is added,
+        and the blast radius here is a live GitHub credential.
+
+        Shorthand (`owner/repo`, `github.com/owner/repo`) is normalised to an
+        absolute https URL FIRST, so exactly one parsed host decides the splice.
+        """
+        if "://" in url:
+            absolute = url
+        elif url.startswith("github.com/"):
+            absolute = f"https://{url}"
+        else:
+            absolute = f"https://github.com/{url}"
+
+        if not github_pat:
+            return absolute
+
+        parsed = urlparse(absolute)
+        # Exact host match against the same allowlist the SSRF guard uses — a
+        # PAT is only ever spliced for a host we know is GitHub.
+        if parsed.scheme != "https" or (parsed.hostname or "").lower() not in ALLOWED_SKILLS_LIBRARY_HOSTS:
+            return absolute
+        # Rebuild rather than string-replace: replace() would also rewrite a
+        # second "https://" occurrence inside a path or query.
+        netloc = f"{github_pat}@{parsed.netloc}"
+        return urlunparse(parsed._replace(netloc=netloc))
 
     def _adopt_legacy_clone(self) -> Optional[str]:
         """Migrate a pre-ent#237 single-repo install into the source model.
