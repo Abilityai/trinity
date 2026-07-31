@@ -104,9 +104,22 @@ NavBar: Agents entry removed; Dashboard active on '/' || isAgentSection
   (no false "No agents yet" during a cold 20s fleet fetch); filtered-empty
   ("No matching agents" + Clear all) lives inside the panel.
 - **D8 — ent#261 seam**: the visible-set predicate lives in ONE place
-  (`visibleAgents` in network.js) consumed by grid + list; ent#261 adds the
-  type-to-filter predicate there and switches the timeline's `:agents` prop
-  itself. No node-rebuild wiring through the seam in this PR.
+  (`visibleAgents` in network.js), now consumed by ALL THREE panes — ent#261
+  layered the type-to-filter query into the seam (split as
+  `ownerFilteredAgents` ∘ query) and switched the timeline's `:agents` prop
+  onto it. Node rebuilds read the pre-query `ownerFilteredAgents`, never the
+  seam.
+- **ent#261 composition (chassis query ∘ panel filters)**: the chassis `/`
+  type-to-filter AND-stacks on top of the panel's own persisted name/status
+  filters (`displayAgents` filters the already-query-narrowed `:agents`
+  prop). Honesty rules: the panel's "N/M" count badge is **suppressed while
+  the chassis query is active** (the pill already shows "X of Y match"
+  against a different denominator — two disagreeing counters must never
+  render simultaneously); the chassis query-empty overlay *precedes* the
+  panel (zero query matches → panel mounts with zero rows under the overlay,
+  never the onboarding CTA — `!filterActive` guard on the true-empty branch);
+  the panel's own filtered-empty ("No matching agents") handles its own layer
+  when the panel filters, not the query, narrow to zero.
 - **D11 — fresh filter keys**: `trinity-dashboard-list-filter-name`/`-status`
   are a clean break from `trinity-agents-filter-*` — a filter persisted on
   the dead page can never silently narrow the new tab. Old keys (incl. the

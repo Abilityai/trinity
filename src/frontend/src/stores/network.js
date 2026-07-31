@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import axios from 'axios'
 import { useAgentsStore } from './agents'
 import { parseUTC, getTimestampMs } from '@/utils/timestamps'
+import { agentDisplayName } from '@/utils/agentName'
 
 export const useNetworkStore = defineStore('network', () => {
   // State
@@ -126,23 +127,49 @@ export const useNetworkStore = defineStore('network', () => {
   const filterTags = ref([])
   // Filter by owner
   const filterOwner = ref(localStorage.getItem('trinity-dashboard-filter-owner') || '')
+  // ent#261: hotkey type-to-filter query. NEVER persisted (accelerator, not a
+  // takeover — a reload always starts unfiltered; no localStorage key) and
+  // cleared by the Dashboard on unmount so it can't outlive the page as an
+  // invisible filter.
+  const filterQuery = ref('')
 
-  // ent#261 seam: the canonical "visible agents" set — `agents` is already
-  // server-side tag-filtered by fetchAgents; this composes the client-side
-  // owner filter on top. Feeds the GRID and LIST panes ONLY (the Dashboard
-  // passes it as their :agents prop). The timeline/node paths deliberately do
-  // NOT read it — sibling ent#261 switches ReplayTimeline's :agents prop to
-  // this computed itself; do not wire convertAgentsToNodes through it here.
-  const visibleAgents = computed(() => {
+  // Pre-query fleet: `agents` is already server-side tag-filtered by
+  // fetchAgents; this composes the client-side owner filter on top. This is
+  // the collection EVERY convertAgentsToNodes call site consumes (ent#261
+  // invariant): node data enriches timeline rows (isSystemAgent → system-first
+  // sort + purple treatment), so nodes must stay PRE-query — a query-filtered
+  // rebuild followed by Esc would render degraded rows until the next rebuild.
+  const ownerFilteredAgents = computed(() => {
     if (!filterOwner.value) return agents.value
     const owner = filterOwner.value === '__unassigned__' ? null : filterOwner.value
     return agents.value.filter(a => (a.owner || null) === owner)
+  })
+
+  // ent#261 seam: the canonical "visible agents" set — pre-query fleet ∘ the
+  // type-to-filter query (case-insensitive substring over slug AND display
+  // label via agentDisplayName, #1642 house rule). Feeds ALL THREE panes (the
+  // Dashboard passes it as the :agents prop of ReplayTimeline, FleetGrid, and
+  // AgentListPanel). Do NOT wire convertAgentsToNodes through it — nodes read
+  // ownerFilteredAgents above (pre-query invariant).
+  const visibleAgents = computed(() => {
+    const q = filterQuery.value.trim().toLowerCase()
+    if (!q) return ownerFilteredAgents.value
+    return ownerFilteredAgents.value.filter(a =>
+      a.name.toLowerCase().includes(q) ||
+      agentDisplayName(a).toLowerCase().includes(q)
+    )
   })
 
   // Actions
   function setFilterTags(tags) {
     filterTags.value = tags || []
     fetchAgents() // Refetch when filter changes
+  }
+
+  function setFilterQuery(q) {
+    // Pure client-side (ent#261): no refetch, no node rebuild — the owner
+    // filter is the model here, NOT the tag filter's refetch.
+    filterQuery.value = q ?? ''
   }
 
   function setFilterOwner(owner) {
@@ -152,11 +179,8 @@ export const useNetworkStore = defineStore('network', () => {
     } else {
       localStorage.removeItem('trinity-dashboard-filter-owner')
     }
-    // Re-convert agents to nodes with owner filter applied
-    const filtered = filterOwner.value
-      ? agents.value.filter(a => (a.owner || null) === (filterOwner.value === '__unassigned__' ? null : filterOwner.value))
-      : agents.value
-    convertAgentsToNodes(filtered)
+    // Re-convert agents to nodes with owner filter applied (pre-query, ent#261)
+    convertAgentsToNodes(ownerFilteredAgents.value)
   }
 
   async function fetchAgents() {
@@ -184,10 +208,9 @@ export const useNetworkStore = defineStore('network', () => {
         useAgentsStore().agents = [...response.data]
       }
       // Apply client-side owner filter before converting to nodes
-      const filtered = filterOwner.value
-        ? response.data.filter(a => (a.owner || null) === (filterOwner.value === '__unassigned__' ? null : filterOwner.value))
-        : response.data
-      convertAgentsToNodes(filtered)
+      // (ownerFilteredAgents recomputes from the fresh agents.value above;
+      // pre-query by design — ent#261)
+      convertAgentsToNodes(ownerFilteredAgents.value)
       await fetchPermissionEdges()
     } catch (error) {
       console.error('Failed to fetch agents:', error)
@@ -1286,7 +1309,9 @@ export const useNetworkStore = defineStore('network', () => {
         if (hasChanges) {
           console.log('[Collaboration] Agent list changed, refreshing...')
           agents.value = newAgents
-          convertAgentsToNodes(newAgents)
+          // Pre-query, owner-filtered rebuild (ent#261) — this poll previously
+          // rebuilt nodes from the RAW list, ignoring even the owner filter.
+          convertAgentsToNodes(ownerFilteredAgents.value)
         }
       } catch (error) {
         console.error('[Collaboration] Failed to refresh agents:', error)
@@ -1793,7 +1818,9 @@ export const useNetworkStore = defineStore('network', () => {
     schedules,
     filterTags,
     filterOwner,
-    visibleAgents, // ent#261 seam — the canonical filtered fleet all views consume
+    filterQuery, // ent#261 — type-to-filter query (never persisted)
+    ownerFilteredAgents, // ent#261 — pre-query fleet (the "Y" in "X of Y match"; feeds nodes)
+    visibleAgents, // ent#261 seam — the canonical filtered fleet all three panes consume
     // View mode / Replay state
     viewMode,
     isTimelineMode,
@@ -1817,6 +1844,7 @@ export const useNetworkStore = defineStore('network', () => {
     fetchAgents,
     fetchPermissionEdges,
     setFilterTags,
+    setFilterQuery,
     setFilterOwner,
     fetchHistoricalCollaborations,
     fetchHistoricalCommunications: fetchHistoricalCollaborations, // Alias for new terminology

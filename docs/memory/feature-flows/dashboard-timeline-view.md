@@ -942,8 +942,32 @@ Dashboard filters are now persisted to localStorage and restored on page reload.
 | View Mode | `trinity-dashboard-view` | `timeline` | Timeline / Grid / List toggle (ent#47, ent#260) |
 | Tag Clouds | `trinity-show-tag-clouds` | `true` | Clouds visibility toggle |
 | Node Positions | `trinity-network-node-positions` | `{}` (empty object) | Dragged node positions |
+| Type-to-filter query | — **deliberately NOT persisted** (ent#261) | `''` | The `/` filter pill query is an ephemeral accelerator: no localStorage key, cleared on Dashboard unmount — a reload always starts unfiltered |
 
 **Note**: System View selection is persisted via `systemViewsStore.initialize()` and has its own localStorage key.
+
+### Timeline consumes the `visibleAgents` seam (ent#261)
+
+The Dashboard passes `<ReplayTimeline :agents="visibleAgents">` (previously the
+raw `agents` list). `agentRows` is a computed over `props.agents`, and
+communication arrows + schedule markers derive from the rows, so hidden agents
+drop their arrows/markers for free. Two consequences:
+
+- The `/` type-to-filter query hides timeline rows live (composes AND with the
+  pane's own "Active only" `hideInactiveAgents` toggle — which can blank all
+  lanes while the pill still claims X>0 matches; the pill claims *matching*,
+  not *rendering*, by design).
+- **Behavior change (deliberate, release-noted in ent#261)**: the persisted
+  **owner filter** now applies to timeline rows too (previously grid/list
+  only). A user carrying a stale `trinity-dashboard-filter-owner` will see
+  timeline rows narrow on upgrade day.
+
+Node rebuilds (`convertAgentsToNodes`) stay on the **pre-query**
+`ownerFilteredAgents` at all three call sites (`setFilterOwner`, `fetchAgents`,
+the 30s refresh poll) — row *visibility* comes from the prop; nodes only
+*enrich* rows (`isSystemAgent` system-first sort + purple treatment), so a
+query-filtered rebuild followed by Esc would render degraded rows until the
+next rebuild.
 
 ### Implementation Details
 

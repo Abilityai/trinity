@@ -67,9 +67,12 @@
       </button>
 
       <!-- Agent count — Y is the FULL fleet count, honest about chassis
-           (tag/owner) narrowing on top of the local filters -->
+           (tag/owner) narrowing on top of the local filters. Suppressed while
+           the chassis type-to-filter query is active (ent#261 D9): the filter
+           pill already shows "X of Y match" against a different denominator —
+           two disagreeing counters must never render simultaneously. -->
       <span
-        v-if="hasActiveFilters"
+        v-if="hasActiveFilters && !chassisQueryActive"
         class="text-xs text-gray-500 dark:text-gray-400"
       >
         {{ displayAgents.length }}/{{ totalAgentCount }}
@@ -652,9 +655,13 @@
     </div>
 
     <!-- Filtered-empty state (the true-empty "no agents at all" state is
-         chassis-owned in Dashboard.vue — this panel only renders with a
-         non-empty visible fleet) -->
-    <div v-if="displayAgents.length === 0" class="text-center py-12 bg-white dark:bg-gray-800 rounded-xl shadow">
+         chassis-owned in Dashboard.vue). `agents.length > 0` (ent#261): since
+         the type-to-filter, the panel DOES mount with a zero-agent prop when
+         the chassis query matches nothing — the chassis query-empty overlay
+         owns that messaging, and rendering this card too would show two
+         contradicting CTAs at once. This card renders only when the panel's
+         OWN name/status filters narrowed a non-empty prop to zero. -->
+    <div v-if="displayAgents.length === 0 && agents.length > 0" class="text-center py-12 bg-white dark:bg-gray-800 rounded-xl shadow">
       <ServerIcon class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" />
       <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">No matching agents</h3>
       <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Try adjusting your filters.</p>
@@ -757,6 +764,10 @@ watch(filterStatus, (val) => {
 const hasActiveFilters = computed(() => {
   return filterName.value.trim() !== '' || filterStatus.value !== 'all'
 })
+
+// ent#261 D9: the chassis type-to-filter query state — read to suppress the
+// local "N/M" badge while the chassis pill shows its own "X of Y match".
+const chassisQueryActive = computed(() => networkStore.filterQuery.trim() !== '')
 
 function clearAllFilters() {
   // Clears BOTH layers (ent#260 strategy F6): the local name/status filters
