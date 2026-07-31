@@ -27,7 +27,7 @@ from services.agent_client import get_agent_client
 from services.agent_service.lifecycle import restart_agent_internal
 from services.agent_service.stats import invalidate_context_stats_cache
 from db.agents import SYSTEM_AGENT_NAME
-from redis_breaker_util import get_breaker_redis
+from redis_breaker_util import get_breaker_redis, lock_token_matches
 from utils.helpers import utc_now_iso
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
@@ -38,9 +38,14 @@ logger = logging.getLogger(__name__)
 # ~100s) invites a retry while the first loop is still running server-side, and
 # two loops interleaving stop/start on the same agent is the #799/#1817
 # stop-racing-start wedge class. TTL bounds a crashed holder; the live loop
-# refreshes its own lease each iteration so a long fleet never loses the lock.
+# refreshes its own lease each iteration, ownership-checked (#1919).
 _FLEET_RESTART_LOCK_KEY = "ops:fleet_restart"
-_FLEET_RESTART_LOCK_TTL_SECONDS = 900
+# #1919: the TTL must outlive the slowest SINGLE agent, or a mid-agent lapse is
+# arithmetically guaranteed on the slow path — the refresh is per-iteration, and
+# start_agent_internal runs skill injection, itself sized at
+# skill_service._INJECT_LOCK_TTL_SECONDS (1800s worst case) + container-stop
+# margin. Keep the two constants linked when either side changes.
+_FLEET_RESTART_LOCK_TTL_SECONDS = 2100
 
 
 # ============================================================================
@@ -276,8 +281,10 @@ async def restart_fleet(
         except Exception:
             lock_client = None  # fail-open: proceed unlocked
 
-    agents = list_all_agents_fast()
-
+    # Pre-initialized: the audit in `finally` reads len(agents) — inside the
+    # audit's own try/except, so an unbound name there would not propagate but
+    # WOULD silently lose the audit row under a lying "audit write failed" log.
+    agents = []
     results = []
     successes = 0
     failures = 0
@@ -285,19 +292,74 @@ async def restart_fleet(
     recreated_count = 0
     recreated_map = {}
     failed_agents = []
+    lease_reacquired = False  # lapsed-but-unclaimed lease re-taken (audited)
+    refresh_warned = False    # one refresh-failure warning per run, not per agent
+    stopped_early = None      # None | "lease_lost_foreign" | "error"
+    error_class = None
 
     try:
+        # Inside the try/finally so nothing can ever sit between lock acquire
+        # and the release (#1919) — today this helper swallows errors and
+        # returns [], but the next statement added here may not be so polite.
+        agents = list_all_agents_fast()
+
         for agent in agents:
             agent_name = agent.name
             status = agent.status
 
-            # Refresh our own lease so a long fleet never loses the lock
-            # mid-run while a crashed holder still expires within the TTL.
+            # Pre-action ownership gate (#1919): refresh our own lease ONLY
+            # while the stored token is still ours, immediately before each
+            # destructive restart. Foreign token ⇒ our lease lapsed and a
+            # concurrent fleet restart now holds the lock — stop (continuing
+            # would interleave stop/start with the new holder, and a bare
+            # EXPIRE would extend THEIR lease). Absent token ⇒ the lease
+            # lapsed with nobody racing us — re-acquire and continue; abort
+            # only if the re-acquire loses. Detection latency is one in-flight
+            # agent restart: this shrinks the dual-run window, it cannot
+            # eliminate it (per-agent start locks are #1817).
             if lock_held and lock_client is not None:
                 try:
-                    lock_client.expire(_FLEET_RESTART_LOCK_KEY, _FLEET_RESTART_LOCK_TTL_SECONDS)
+                    current = lock_client.get(_FLEET_RESTART_LOCK_KEY)
+                    owned = lock_token_matches(current, lock_token)
+                    if owned and not lock_client.expire(
+                        _FLEET_RESTART_LOCK_KEY, _FLEET_RESTART_LOCK_TTL_SECONDS
+                    ):
+                        # Key vanished in the GET→EXPIRE sliver: same as absent.
+                        current, owned = None, False
+                    if not owned:
+                        if current is None and lock_client.set(
+                            _FLEET_RESTART_LOCK_KEY, lock_token,
+                            nx=True, ex=_FLEET_RESTART_LOCK_TTL_SECONDS,
+                        ):
+                            lease_reacquired = True
+                            logger.warning(
+                                "Fleet restart: lock lease lapsed unclaimed and "
+                                "was re-acquired after %d of %d agents — if this "
+                                "recurs, the TTL no longer covers the slowest "
+                                "agent", len(results), len(agents),
+                            )
+                        else:
+                            stopped_early = "lease_lost_foreign"
+                            logger.warning(
+                                "Fleet restart: lock lease lost to a concurrent "
+                                "caller after %d of %d agents (token state: %s) "
+                                "— stopping this run; already-completed restarts "
+                                "stand and are audited",
+                                len(results), len(agents),
+                                "foreign" if current is not None else "absent",
+                            )
+                            break
                 except Exception:
-                    pass
+                    # Fail-open: a Redis blip is not lease loss — but say so
+                    # once, or a full-run outage is invisible while the lease
+                    # quietly expires.
+                    if not refresh_warned:
+                        refresh_warned = True
+                        logger.warning(
+                            "Fleet restart: lease refresh failing open (Redis "
+                            "error) — continuing; single-flight is best-effort "
+                            "until Redis recovers", exc_info=True,
+                        )
 
             # Skip system agent
             owner = db.get_agent_owner(agent_name)
@@ -428,6 +490,13 @@ async def restart_fleet(
                 logger.warning(
                     f"Fleet restart: {agent_name} failed: {e}", exc_info=True
                 )
+    except Exception as e:
+        # Abnormal exit — NOT per-agent failures (those are handled in-loop).
+        # Mark the audit row so an aborted run is distinguishable from a
+        # legitimately empty fleet; class name only (#1912 exposure rule).
+        stopped_early = "error"
+        error_class = e.__class__.__name__
+        raise
     finally:
         # Sync cleanup FIRST, awaited audit LAST: a CancelledError raised at
         # the audit await (backend shutdown mid-loop) is a BaseException the
@@ -436,9 +505,12 @@ async def restart_fleet(
         invalidate_context_stats_cache()
         if lock_held and lock_client is not None:
             try:
-                # Release only our own lock (compare-and-delete).
+                # Release only our own lock (compare-and-delete). Runs even
+                # after a detected lease loss: it is foreign-safe by
+                # construction, and skipping it on a false "absent" (a stale
+                # replica read) would abandon OUR live lock for the full TTL.
                 current = lock_client.get(_FLEET_RESTART_LOCK_KEY)
-                if current == lock_token.encode() or current == lock_token:
+                if lock_token_matches(current, lock_token):
                     lock_client.delete(_FLEET_RESTART_LOCK_KEY)
             except Exception:
                 pass
@@ -460,6 +532,14 @@ async def restart_fleet(
                     "successes": successes,
                     "failures": failures,
                     "skipped": skipped,
+                    # #1919 partial-run honesty: processed vs total makes a
+                    # stopped run arithmetically visible; stopped_early names
+                    # why (lease_lost_foreign = a concurrent operator took the
+                    # lock; error = abnormal exit, class name in "error").
+                    "processed": len(results),
+                    "stopped_early": stopped_early,
+                    "error": error_class,
+                    "lease_reacquired": lease_reacquired or None,
                     # {agent: reason} for recreated agents only — preserves
                     # #1809's changed-container-id traceability at fleet scale.
                     "recreated": recreated_map or None,
@@ -478,7 +558,12 @@ async def restart_fleet(
             "successes": successes,
             "failures": failures,
             "skipped": skipped,
-            "recreated": recreated_count
+            "recreated": recreated_count,
+            # #1919: a lease-loss stop returns 200 with a PARTIAL fleet —
+            # processed vs total + stopped_early let callers tell the
+            # difference instead of reading silence as completion.
+            "processed": len(results),
+            "stopped_early": stopped_early,
         },
         "results": results
     }

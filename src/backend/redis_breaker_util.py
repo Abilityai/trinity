@@ -105,6 +105,18 @@ def decode_pair(result: Any) -> Tuple[str, str]:
     return (decode_str(prior), decode_str(new))
 
 
+def lock_token_matches(current: Any, token: str) -> bool:
+    """True when a GET on a SETNX-token lock key returned OUR token (#1919).
+
+    The single ownership comparison for hand-rolled single-flight locks
+    (refresh and compare-and-delete release must use the same predicate or
+    they drift). `get_breaker_redis` sets decode_responses=True, so a live
+    read is always `str` — the bytes branch is belt-and-braces for a client
+    configured without decoding, not a live path.
+    """
+    return current == token or current == token.encode()
+
+
 # ----- Lua script cache -----------------------------------------------------
 
 
