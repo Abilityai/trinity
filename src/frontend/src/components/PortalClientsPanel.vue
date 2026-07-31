@@ -19,7 +19,7 @@
       </button>
     </div>
 
-    <p v-if="error" class="mt-3 text-xs text-status-error-700 dark:text-status-error-300">
+    <p v-if="error" class="mt-3 text-xs text-status-danger-700 dark:text-status-danger-300">
       {{ error }}
     </p>
 
@@ -42,7 +42,7 @@
               <span class="truncate">{{ c.email }}</span>
               <span
                 v-if="c.blocked"
-                class="shrink-0 inline-flex items-center text-xs font-medium rounded px-2 py-0.5 text-status-error-700 dark:text-status-error-300 bg-status-error-50 dark:bg-status-error-900/30"
+                class="shrink-0 inline-flex items-center text-xs font-medium rounded px-2 py-0.5 text-status-danger-700 dark:text-status-danger-300 bg-status-danger-50 dark:bg-status-danger-900/30"
               >Blocked</span>
             </p>
             <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
@@ -77,7 +77,7 @@
               v-if="isAdmin && !c.blocked"
               @click="block(c)"
               :disabled="busy === c.email"
-              class="text-xs px-2 py-1 rounded border border-status-error-300 dark:border-status-error-800 text-status-error-700 dark:text-status-error-300 hover:bg-status-error-50 dark:hover:bg-status-error-900/20 disabled:opacity-50"
+              class="text-xs px-2 py-1 rounded border border-status-danger-300 dark:border-status-danger-800 text-status-danger-700 dark:text-status-danger-300 hover:bg-status-danger-50 dark:hover:bg-status-danger-900/20 disabled:opacity-50"
               title="Stop this person signing in again, on any agent"
             >Block</button>
 
@@ -92,7 +92,7 @@
 
         <p v-if="notes[c.email]" class="mt-2 text-xs" :class="notes[c.email].ok
           ? 'text-status-success-700 dark:text-status-success-300'
-          : 'text-status-error-700 dark:text-status-error-300'">
+          : 'text-status-danger-700 dark:text-status-danger-300'">
           {{ notes[c.email].text }}
         </p>
       </li>
