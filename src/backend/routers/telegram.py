@@ -25,7 +25,7 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from database import db
 from services import channel_history, rate_limiter
 from services.settings_service import get_proactive_rate_limit
-from dependencies import get_current_user, OwnedAgentByName
+from dependencies import get_current_user, reject_agent_principal, OwnedAgentByName
 from models import (
     TelegramBindingResponse,
     TelegramConfigureRequest,
@@ -283,8 +283,19 @@ async def update_telegram_group(
     agent_name: OwnedAgentByName,
     group_config_id: int,
     config: TelegramGroupConfigUpdateRequest,
+    current_user: User = Depends(get_current_user),
 ):
-    """Update a group's trigger mode or welcome message settings."""
+    """Update a group's trigger mode, welcome message, or completion-report
+    consent settings."""
+    # ent#265: the allow_proactive arm ONLY is human-only. An agent-scoped key
+    # resolves to the OWNER on REST, so the owner gate alone would let an agent
+    # flip its own consent on — self-granting the very control this adds
+    # (ent#223's own post-ship pitfall, learnings 2026-07-24). Granting consent
+    # is a human decision; existing agent-callable trigger_mode / welcome
+    # updates keep working, and REPORTING under the consent stays automatic.
+    if config.allow_proactive is not None:
+        reject_agent_principal(current_user)
+
     # Validate trigger_mode if provided
     # Issue #349: Added 'observe' mode - agent sees all messages but can return [NO_REPLY]
     if config.trigger_mode is not None and config.trigger_mode not in ("mention", "all", "observe"):
@@ -309,6 +320,7 @@ async def update_telegram_group(
         trigger_mode=config.trigger_mode,
         welcome_enabled=config.welcome_enabled,
         welcome_text=config.welcome_text,
+        allow_proactive=config.allow_proactive,   # ent#265: completion-report consent
     )
     if not updated:
         raise HTTPException(status_code=404, detail="Group config not found")
