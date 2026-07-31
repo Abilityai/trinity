@@ -78,7 +78,11 @@ explains the colors once — never repeated per tile.
 - **Filters never destroy layout**: persisting merges the active layout over
   the full saved map, so agents hidden by an owner/tag filter keep their
   saved cells (filtering is indistinguishable from deletion client-side, so
-  absence is never treated as deletion).
+  absence is never treated as deletion). The `/` type-to-filter (ent#261)
+  rides this same absence-as-filtering path: matching tiles stay at their
+  lattice cells (gaps preserved — no tidy/re-layout on filter), and a
+  zero-match keeps FleetGrid mounted under the chassis query-empty overlay,
+  so pan/zoom and layout state survive transient zero-matches while typing.
 - **Tidy up** compacts row-by-row (3 columns) preserving reading order,
   anchored at the layout's own top-left, clamped to the coordinate bound.
   **Reset** restores the deterministic default (system agent first,
