@@ -303,7 +303,7 @@
   - **Redirect**: `/agents` → `/?view=list` (query-preserving function redirect; `/agents/:name` and deeper untouched). The `?view=` intent is applied via a route watch as a one-shot, NON-persisting mode change, then stripped from the URL — a stale bookmark never rewrites the user's saved view selection. `?view=` doubles as a general non-persisting deep-link for all modes.
   - **NavBar consolidation**: the Agents entry is removed; the Dashboard link highlights on `/` and on `/agents/:name` pages (successor to the old `isAgentSection` highlight).
 - **Performance**: zero per-row HTTP — `tags` and `read_only_enabled` ride every `GET /api/agents` row, so both Agents-page N+1 mount loops (per-agent tags + read-only fetches) are deleted (also more correct: the per-agent read-only GET 404'd on stopped containers and was coerced to `false`). One mounted-only loop: 60s visibility-aware sync-health refresh while List is active. **No new backend endpoints, zero backend changes.**
-- **Seam (ent#261)**: the store-level `visibleAgents` computed in `stores/network.js` (server-side tag filter ∘ client-side owner filter) feeds Grid + List props and both node-rebuild call sites — the future type-to-filter predicate lands in that one place.
+- **Seam (ent#261)**: the store-level `visibleAgents` computed in `stores/network.js` (server-side tag filter ∘ client-side owner filter) feeds the Grid + List `:agents` props — the future type-to-filter predicate lands in that one place. The timeline/node paths deliberately do NOT read it yet: ent#261 switches ReplayTimeline's `:agents` prop to the same computed itself (rewiring `convertAgentsToNodes` was rejected as timeline-mutation risk).
 - **Flow**: `docs/memory/feature-flows/dashboard-list-view.md`
 
 ---
