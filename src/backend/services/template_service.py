@@ -428,6 +428,69 @@ def _local_templates_dir() -> Path:
     return Path(__file__).resolve().parent.parent.parent.parent / "config" / "agent-templates"
 
 
+#: Allowed shape for a local-template directory name — the `<name>` in a
+#: `local:<name>` id, and the `name:` a template.yaml declares. A curated or
+#: deploy-local template is always a single directory DIRECTLY under its root,
+#: so one plain path segment is the entire legitimate space.
+#:
+#: Duplicated verbatim from `agent_service.crud._LOCAL_TEMPLATE_NAME_RE` (#950)
+#: rather than imported, in BOTH directions:
+#:   * crud → template_service is forbidden: the #1484 characterization harness
+#:     MagicMocks `services.template_service`, so a gate calling into it would
+#:     be satisfied by a truthy mock and those tests would stay green on the OLD
+#:     behaviour (the same reason `crud._repo_local_templates_dir` is
+#:     hand-rolled, crud.py:73-87);
+#:   * template_service → crud would close an import cycle (crud imports this
+#:     module).
+#: `tests/unit/test_1759_template_root_parity.py` pins the two patterns equal.
+_LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+
+
+def contained_template_dir(name, root: Path) -> Optional[Path]:
+    """Resolve `name` as a direct child of `root`, or `None` if it escapes.
+
+    The two-step barrier the CREATE path has had since #950
+    (`crud._safe_local_template_path`), brought to the READ path (#1900). It is
+    two steps on purpose:
+
+    1. **Name allowlist.** Rejects `..`, `/`, `\\`, a leading dot, an absolute
+       path, an empty string and a non-string outright — before any path math.
+       This is also what CodeQL recognises as a `py/path-injection` barrier;
+       resolve + `is_relative_to` ALONE was flagged high-severity twice on this
+       codebase (crud.py:206-210).
+    2. **Containment.** `resolve()` BOTH sides, then `is_relative_to`. A plain
+       `str(candidate).startswith(str(root))` is NOT equivalent — it passes the
+       sibling escape `<root>-evil`. Resolving also closes the symlink escape,
+       which step 1 cannot see.
+
+    Both sides are resolved because a mismatched pair is wrong in *both*
+    directions: an unresolved root with a resolved candidate rejects every
+    LEGITIMATE name whenever the root sits under a symlinked prefix, and neither
+    the prod bind mount nor the repo path is guaranteed symlink-free. Callers
+    pass whatever `_local_templates_dir()` returns — unresolved. Defence in
+    depth, and `crud._safe_cred_file_path` already resolves its root for the
+    same reason.
+
+    Returns the RESOLVED path, so the value used downstream is the value that
+    was checked. Step 1 guarantees a single component, so the basename
+    `_build_local_template` turns back into the `local:<name>` id is unchanged.
+
+    This is deliberately PUBLIC: it is the one containment primitive for
+    `local:` names in this module, and the remote-template-registry work
+    (trinity-enterprise#14) edits this same resolver family — it should import
+    this rather than copy it.
+    """
+    if not isinstance(name, str) or not name or ".." in name:
+        return None
+    if not _LOCAL_TEMPLATE_NAME_RE.match(name):
+        return None
+    root = root.resolve()
+    candidate = (root / name).resolve()
+    if not candidate.is_relative_to(root):
+        return None
+    return candidate
+
+
 def _build_local_template(template_dir: Path) -> Optional[dict]:
     """Build a template-list entry from a local-template directory.
 
@@ -532,11 +595,34 @@ def get_local_templates() -> List[dict]:
 
 
 def get_local_template(template_id: str) -> Optional[dict]:
-    """Get a single local template by `local:<name>` id."""
+    """Get a single local template by `local:<name>` id.
+
+    `<name>` is caller-controlled and arrives from
+    `GET /api/templates/{template_id:path}`, whose `:path` converter permits
+    `/`. Unvalidated, the join escaped the templates root and disclosed any
+    parseable `template.yaml` on the backend filesystem to any authenticated
+    caller (#1900) — including other tenants' uploads under
+    `/data/deployed-templates`.
+
+    An invalid or escaping id returns `None`, so the router's 404 stays
+    byte-identical to an unknown template: no error code, no path, no root name
+    (the #1759 non-disclosure rule — this endpoint is the same enumeration
+    oracle that rule exists to close).
+    """
     if not template_id.startswith("local:"):
         return None
     name = template_id[len("local:"):]
-    template_dir = _local_templates_dir() / name
+    template_dir = contained_template_dir(name, _local_templates_dir())
+    if template_dir is None:
+        # DEBUG, not WARNING: this endpoint carries no rate limit, so a
+        # per-rejection warning is an authenticated log-flood primitive, and the
+        # id is attacker-supplied text landing in `platform.json`. Louder
+        # security telemetry belongs in the audit log or behind a rate limit.
+        logger.debug(
+            "Rejected out-of-root local template id %s",
+            _sanitize_for_warning(template_id),
+        )
+        return None
     if not template_dir.is_dir():
         return None
     return _build_local_template(template_dir)
