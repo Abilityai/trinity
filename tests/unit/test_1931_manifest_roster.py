@@ -117,7 +117,7 @@ def test_manifest_resolved_names_satisfy_hardcoded_rosters():
     breakable — in a slash command as in `CLAUDE.md`, and the sibling ent#239
     check in `test_ent124_default_system_seed.py` already treats
     `.claude/commands/` as a first-class shipped surface. Restricting the walk
-    to `CLAUDE.md` left four real literals unguarded in the bundled corpus
+    to `CLAUDE.md` left three real literals unguarded in the bundled corpus
     (`sage/.claude/commands/request-research.md` -> `acme-scout`;
     `demo-analyst/.claude/commands/{briefing,request-research}.md` ->
     `research-network-researcher`). Verified over the whole bundled corpus: 28
