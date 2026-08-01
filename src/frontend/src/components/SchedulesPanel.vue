@@ -1123,18 +1123,28 @@ function toggleAllTools() {
   }
 }
 
+// #1634: a superseded load must not paint over a newer one. Clearing the list in
+// the agent-name watcher cannot stop a LATE response: switching A→B while A's GET
+// is in flight lands A's rows under B's header (and clears the spinner early)
+// whenever A resolves last. Also covers two same-agent refreshes racing (AC #3).
+// Per-instance: `let` inside <script setup>.
+let loadSeq = 0
+
 // Load schedules
 async function loadSchedules() {
+  const seq = ++loadSeq
   loading.value = true
   try {
     const response = await axios.get(`/api/agents/${props.agentName}/schedules`, {
       headers: authStore.authHeader
     })
+    if (seq !== loadSeq) return
     schedules.value = response.data
   } catch (error) {
+    if (seq !== loadSeq) return
     console.error('Failed to load schedules:', error)
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
   loadPerf()
 }
@@ -1143,8 +1153,10 @@ async function loadSchedules() {
 // by schedule_id for inline row stats. Best-effort — failure leaves rows
 // without stats, never blocks the list.
 async function loadPerf() {
+  const seq = loadSeq          // #1634: the load that owns this refresh
   try {
     const summary = await executionsStore.fetchSchedulesSummary(props.agentName, PERF_WINDOW)
+    if (seq !== loadSeq) return
     const map = {}
     for (const row of summary?.schedules || []) map[row.schedule_id] = row
     perfBySchedule.value = map
