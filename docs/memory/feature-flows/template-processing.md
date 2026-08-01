@@ -406,13 +406,31 @@ of a public function: it resolves through `contained_template_dir`, which also
 absorbs a non-string `name:` that previously raised `TypeError` out of agent
 creation as an uncaught 500.
 
-*Behaviour delta:* a **deploy-local** template that both declares
-`credentials.mcp_servers` and ships a `.mcp.json` now gets `${VAR}` substitution,
-where the old curated-root lookup always missed. The substituted file wins over
-the archive's raw copy — `startup.sh` copies `/generated-creds/.mcp.json`
-unconditionally and *after* the template-copy block (which is gated on
-`.trinity-initialized`). No curated template ships a `.mcp.json`, so those rows
-are unchanged.
+*Behaviour delta — measured, not the flattering version.* A **deploy-local**
+template that both declares `credentials.mcp_servers` and ships a `.mcp.json`
+now has that file staged at all, where the old curated-root lookup always
+missed. Two consequences, and the second is a loss, not a gain:
+
+* the staged file **wins** over the archive's raw copy, because `startup.sh`
+  copies `/generated-creds/.mcp.json` unconditionally and *after* the
+  template-copy block (which is gated on `.trinity-initialized`);
+* the sole production caller — `crud._stage_config_files` — passes an **empty**
+  `agent_credentials` map (CRED-002: real values are injected after creation,
+  not at staging), so `agent_credentials.get(var_name, "")` rewrites every
+  `${VAR}` to `""`. The agent's `.mcp.json` therefore lands with blank env
+  values / blank `args` entries instead of the archive's placeholders.
+  Hardcoded (non-`${VAR}`) entries are preserved verbatim. This mirrors what
+  the `.env` arm of this same function has always done for a template
+  declaring `credentials.env_file`; it is the platform's staging model, not a
+  new one. The durable record of which variables a server needs is
+  `.mcp.json.template` (compatibility check S-009), which is pre-populated
+  untouched.
+
+Do **not** restate this as "deploy-local templates finally get `${VAR}`
+substitution" — nothing is substituted *in* at this seam. No curated template
+ships a `.mcp.json`, so those rows are unchanged either way.
+`tests/unit/test_ent128a_catalog_resilience.py::test_1900_staging_with_an_empty_credential_map_blanks_placeholders`
+pins the measured behaviour against exactly that drift.
 
 ### Malformed `credentials:` resilience (trinity-enterprise#128)
 

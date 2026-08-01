@@ -550,3 +550,53 @@ def test_1900_display_name_template_is_unaffected(tmp_path, monkeypatch):
     files = ts.generate_credential_files(template, {}, "agent")
 
     assert ".mcp.json" not in files
+
+
+def test_1900_staging_with_an_empty_credential_map_blanks_placeholders(
+    tmp_path, monkeypatch
+):
+    """PINS THE REAL BEHAVIOUR DELTA — and stops the flattering restatement.
+
+    #1900 threaded the validated directory into `template_base_path`, which for
+    a deploy-local template means this function now finds a `.mcp.json` it
+    previously always missed. It is tempting (and was written that way in an
+    earlier doc draft) to call that "deploy-local templates finally get `${VAR}`
+    substitution". They do not. The ONLY production caller,
+    `crud._stage_config_files`, passes `agent_credentials={}` — CRED-002 injects
+    real values *after* creation — so `agent_credentials.get(var, "")` rewrites
+    every placeholder to the empty string. Hardcoded entries survive verbatim.
+
+    That is the same thing the `.env` arm of this function has always done for
+    an un-supplied `credentials.env_file` variable, so it is the platform's
+    staging model rather than a new one — but it IS a change for deploy-local
+    agents, because the staged file then overwrites the archive's raw copy
+    (`startup.sh` copies `/generated-creds/.mcp.json` unconditionally, after the
+    `.trinity-initialized`-gated template block). Documented in
+    `docs/memory/feature-flows/template-processing.md`; this test is what keeps
+    the documentation and the code from drifting apart again.
+    """
+    import json
+
+    root = tmp_path / "templates"
+    root.mkdir()
+    deployed = _write_mcp(
+        tmp_path / "deployed" / "v1",
+        '{"mcpServers": {"s": {"command": "npx",'
+        ' "args": ["-y", "${MY_TOKEN}"],'
+        ' "env": {"TOKEN": "${MY_TOKEN}", "FIXED": "literal-value"}}}}',
+    )
+    ts = _load_template_service(monkeypatch, root)
+
+    # Exactly how `_stage_config_files` calls it: empty credential map.
+    files = ts.generate_credential_files(
+        dict(_MCP_DECL, name="v1"), {}, "agent", template_base_path=deployed
+    )
+
+    staged = json.loads(files[".mcp.json"])["mcpServers"]["s"]
+    assert staged["env"]["TOKEN"] == "", staged
+    assert staged["args"] == ["-y", ""], staged
+    # Not merely absent — actively rewritten, so the placeholder record is gone.
+    assert "${MY_TOKEN}" not in files[".mcp.json"]
+    # Non-placeholder content is preserved verbatim.
+    assert staged["env"]["FIXED"] == "literal-value"
+    assert staged["command"] == "npx"

@@ -133,9 +133,14 @@ def _default_host_templates_base() -> str:
 
 
 # Roots that a resolved local-template path must stay within (#950). Read at
-# TWO seams — `_resolve_local_template` and the `/template` bind decision in
-# `_stage_config_files` — which must always agree (#1759). Kept a module-level
-# tuple: it is the single monkeypatch point the create tests use.
+# THREE seams — `_resolve_local_template`, the `/template` bind decision in
+# `_stage_config_files`, and (since #1900) the credential-file stager in the
+# same function — which must always agree (#1759). The first two were named by
+# #1759; the third existed all along and did NOT agree, because it re-derived
+# the directory from the template's untrusted `name:` field. Two of the three
+# now share `_resolve_local_template_dir`, which is what makes the agreement
+# structural rather than a convention. Kept a module-level tuple: it is the
+# single monkeypatch point the create tests use.
 _LOCAL_TEMPLATE_ROOTS = (
     _curated_templates_root(),
     Path("/data/deployed-templates").resolve(),

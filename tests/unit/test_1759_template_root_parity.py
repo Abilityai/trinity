@@ -211,8 +211,10 @@ def test_1900_local_template_name_regex_parity(real_modules):
     `template_service._LOCAL_TEMPLATE_NAME_RE` (#1900) is DUPLICATED from
     `crud._LOCAL_TEMPLATE_NAME_RE` (#950), not imported, in both directions:
 
-      * crud → template_service is forbidden — `services.template_service` is
-        MagicMocked by the #1484 characterization harness, so a gate calling
+      * crud → template_service is forbidden *for a security gate* (crud does
+        import this module for `generate_credential_files` — the ban is on what
+        may be *gated* on it, not on the import edge): `services.template_service`
+        is MagicMocked by the #1484 characterization harness, so a gate calling
         into it would be satisfied by a truthy mock and those tests would stay
         green on the OLD behaviour (the same reasoning that makes
         `crud._repo_local_templates_dir` hand-rolled, crud.py:73-87).

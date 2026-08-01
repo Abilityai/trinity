@@ -435,11 +435,13 @@ def _local_templates_dir() -> Path:
 #:
 #: Duplicated verbatim from `agent_service.crud._LOCAL_TEMPLATE_NAME_RE` (#950)
 #: rather than imported, in BOTH directions:
-#:   * crud → template_service is forbidden: the #1484 characterization harness
-#:     MagicMocks `services.template_service`, so a gate calling into it would
-#:     be satisfied by a truthy mock and those tests would stay green on the OLD
-#:     behaviour (the same reason `crud._repo_local_templates_dir` is
-#:     hand-rolled, crud.py:73-87);
+#:   * crud → template_service is forbidden *for a security gate* (crud already
+#:     imports this module for `generate_credential_files`, so the ban is about
+#:     what may be *gated* on it, not about the import edge): the #1484
+#:     characterization harness MagicMocks `services.template_service`, so a
+#:     gate calling into it would be satisfied by a truthy mock and those tests
+#:     would stay green on the OLD behaviour (the same reason
+#:     `crud._repo_local_templates_dir` is hand-rolled, crud.py:73-87);
 #:   * template_service → crud would close an import cycle (crud imports this
 #:     module).
 #: `tests/unit/test_1759_template_root_parity.py` pins the two patterns equal.
