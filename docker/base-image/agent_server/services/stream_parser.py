@@ -115,6 +115,12 @@ def _split_claude_errors(raw: object) -> tuple[List[str], List[str]]:
         if not text:
             continue
         if text.casefold().startswith(_EDE_DIAGNOSTIC_PREFIX):
+            # Slicing the UNfolded text by a fixed length is safe: full case
+            # folding never SHORTENS a string, so those 16 folded chars came
+            # from at most 16 original ones — the slice starts at or AFTER the
+            # real payload, never inside the token. The token therefore cannot
+            # leak. Worst case on exotic input (a "st" ligature standing in for
+            # the "st" of "diagnostic") is one dropped payload character.
             payload = text[len(_EDE_DIAGNOSTIC_PREFIX):].strip()
             if payload:  # a bare prefix carries no information — drop it
                 diagnostics.append(payload)

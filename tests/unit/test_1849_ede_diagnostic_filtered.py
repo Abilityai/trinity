@@ -30,11 +30,14 @@ Three consequences, all reproduced:
 
 Four latent defects in the same two expressions are fixed and pinned here too:
 
-* a malformed ``errors`` shape (a dict, an int, a nested list) made
-  ``errors[0]`` **raise** inside the parser; the raise is swallowed by the
-  per-line ``except Exception`` in ``headless_executor`` and the execution fell
-  through to the #160 ``context: fork`` placeholder — HTTP 200, status=success.
-  That is #1673's own bug in a new shape;
+* a malformed ``errors`` shape (a dict, an int, a bool) made ``errors[0]``
+  **raise** inside the parser; the raise is swallowed by the per-line
+  ``except Exception`` in ``headless_executor`` and the execution fell through
+  to the #160 ``context: fork`` placeholder — HTTP 200, status=success. That is
+  #1673's own bug in a new shape. (The other two shapes pinned below failed
+  differently rather than raising: an explicit ``null`` fell through to the old
+  bare literal, and a nested list assigned a raw ``list`` into the ``str``-typed
+  ``error_message`` field. All five are now normalized to a plain string.);
 * a bare-string ``errors`` was indexed character-by-character (``"boom"`` →
   ``'b'``);
 * a blank/None entry could join to ``""``, re-introducing the empty
@@ -331,12 +334,19 @@ def test_malformed_errors_shapes_never_raise_and_never_succeed(errors):
     """A malformed `errors` shape must not raise inside the parser.
 
     THE HTTP-200 class (#1673's own bug in a new shape): `errors[0]` on a
-    non-sequence raises; the raise is swallowed by headless_executor's per-line
-    `except Exception` (which literally anticipates "process_stream_line
-    tripping on weird input"). error_type/error_message are then never set,
-    while cost_usd/duration_ms already are — so `_classify_empty_result`
-    returns None and `_finalize_headless_result` falls into the #160
-    `context: fork` placeholder: HTTP 200, status=success, error=null.
+    dict / int / bool raises; the raise is swallowed by headless_executor's
+    per-line `except Exception` (which literally anticipates
+    "process_stream_line tripping on weird input"). error_type/error_message
+    are then never set, while cost_usd/duration_ms already are — so
+    `_classify_empty_result` returns None and `_finalize_headless_result`
+    falls into the #160 `context: fork` placeholder: HTTP 200, status=success,
+    error=null.
+
+    The remaining two shapes are pinned alongside because they failed in
+    adjacent ways, not because they raised: an explicit `null` fell through
+    the `if errors` guard to the old bare "Execution error" literal, and a
+    nested list put a raw `list` object into the `str`-typed `error_message`
+    field. Post-fix every shape yields a plain, non-empty string.
     """
     metadata = _execution_error(errors)  # must not raise
 
@@ -440,19 +450,27 @@ def test_resume_fallback_survives_a_403_bearing_uuid():
 
 
 def test_multi_error_truncation_limit_is_known():
-    """Known residual (R5): `err[:300]` is applied AFTER the join.
+    """KNOWN-BAD PIN — this asserts a defect, not desired behaviour.
 
-    A long first error can push a later resume marker past the budget. Pinned
-    so a future truncation fix (widen, or prioritise the resume-relevant
-    entry) flips this deliberately rather than by accident.
+    Known residual (R5): `err[:300]` is applied AFTER the join, so a long first
+    error can push a later resume marker past the budget and the self-healing
+    silently stops firing. Pinned so a future truncation fix (widen the budget,
+    or prioritise the resume-relevant entry) has to flip it deliberately.
+
+    IF THIS TEST FAILS: the residual was FIXED — that is the good outcome. Do
+    NOT "repair" the test by re-breaking truncation. Change the assertion to
+    `assert sessions._is_resume_not_found(detail)` and drop R5 from the docs.
     """
     sessions = _load_sessions_router()
 
     detail = _detail_for([_MARKER, "A" * 400, _CLAUDE_MSG])
 
     assert len(detail) <= len("Execution error: ") + 300
+    assert _CLAUDE_MSG not in detail, "the resume marker was expected to be truncated away"
     assert not sessions._is_resume_not_found(detail), (
-        "truncation residual fixed — update R5 and this pin"
+        "R5 truncation residual is FIXED — this is a known-bad pin, not a "
+        "regression: flip it to `assert sessions._is_resume_not_found(detail)` "
+        "and remove R5 from the #1849 docs. Do not re-break truncation."
     )
 
 
