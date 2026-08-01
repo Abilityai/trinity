@@ -1861,8 +1861,10 @@ Example:
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">GitHub Templates</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
                 Configure which GitHub repositories appear as agent templates.
+                <!-- #1931: "Using defaults" is a lie about an empty set — the
+                     shipped default list is now []. Say what is actually true. -->
                 <span v-if="githubTemplatesSource === 'defaults'" class="inline-flex items-center ml-2 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300">
-                  Using defaults
+                  No defaults configured
                 </span>
                 <span v-else class="inline-flex items-center ml-2 px-2 py-0.5 rounded-full text-xs font-medium bg-action-primary-100 text-action-primary-700 dark:bg-action-primary-900 dark:text-action-primary-300">
                   Custom config
@@ -1924,9 +1926,16 @@ Example:
                           <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-action-primary-600 mx-auto"></div>
                         </td>
                       </tr>
+                      <!-- #1931: dropped "or reset to defaults" — the Reset
+                           button is :disabled in exactly this state, and the
+                           shipped default list is now empty, so resetting
+                           would land right back here. Naming an action the
+                           user cannot take is the dead end this issue is
+                           about, one click from the Library that sends them
+                           here. -->
                       <tr v-else-if="githubTemplates.length === 0">
                         <td colspan="3" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
-                          No templates configured. Add a GitHub repo above or reset to defaults.
+                          No GitHub templates configured. Trinity ships no defaults — add an <span class="font-mono">owner/repo</span> above to publish it to the Library.
                         </td>
                       </tr>
                       <tr v-else v-for="(tmpl, index) in githubTemplates" :key="tmpl.github_repo" class="hover:bg-gray-50 dark:hover:bg-gray-700">
