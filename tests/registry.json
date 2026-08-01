@@ -1256,6 +1256,18 @@
         "unit",
         "ops"
       ]
+    },
+    {
+      "file": "unit/test_1849_ede_diagnostic_filtered.py",
+      "feature": "#1849",
+      "added": "2026-08-01",
+      "categories": [
+        "agent-runtime",
+        "unit",
+        "sessions",
+        "regression"
+      ],
+      "description": "Claude Code's internal [ede_diagnostic] header must never be surfaced as the error cause (#1849): stream_parser filters diagnostic entries from result.errors at BOTH the max_turns and execution_error branches, joins the remaining real errors, keeps the token-stripped diagnostic payload as labelled context, and no longer raises on a malformed errors shape (which previously landed as HTTP 200 success). Acceptance test drives a marker-first errors[] through _finalize_headless_result to routers/sessions.py::_is_resume_not_found."
     }
   ]
 }
