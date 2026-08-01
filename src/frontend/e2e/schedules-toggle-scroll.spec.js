@@ -207,10 +207,23 @@ async function openSchedulesTab(page) {
  * `activeTab` survives the round trip — it is never URL-synced, and
  * `applyDeepLinkRouting()` only acts when `route.query.tab` is present — so the
  * panel is still mounted on Schedules when we land on B.
+ *
+ * LOCATOR NOTE — the agent row is addressed by `data-agent` + `href`, never by
+ * link text. `AgentListPanel` renders `agentDisplayName(agent)`, which is the
+ * owner-settable `display_label` when one is set (ent#181/#1640), so a
+ * `getByRole('link', { name: <slug> })` would silently stop matching the moment
+ * anyone labels the agent. `dashboard-list-view.spec.js` already states this as
+ * the house rule: "Rows carry `data-agent="<slug>"` … so locators never
+ * text-match display names."
  */
 async function switchAgentInSpa(page, targetAgent) {
   await page.getByRole('link', { name: 'Dashboard', exact: true }).first().click()
-  const targetLink = page.getByRole('link', { name: targetAgent, exact: true }).first()
+  // List mode is what renders a per-agent row; wait for its toolbar so a slow
+  // agent fetch can't be mistaken for a missing row.
+  await expect(page.getByPlaceholder('Search agents...')).toBeVisible({ timeout: 20000 })
+  const targetLink = page
+    .locator(`[data-agent="${targetAgent}"] a[href="/agents/${targetAgent}"]`)
+    .first()
   await expect(targetLink).toBeVisible({ timeout: 20000 })
   await targetLink.click()
   await expect(page).toHaveURL(new RegExp(`/agents/${targetAgent}(\\?|$|/)`), { timeout: 20000 })
@@ -242,6 +255,13 @@ test.describe('Schedules tab toggle scroll stability (#1634)', () => {
 
     // Three consecutive seeded rows, all starting DISABLED so no toggle can
     // cross the banner's 0↔1 enabled boundary (see SEED_ENABLED).
+    //
+    // Index window: the disabled set is seeded rows 2..13, so slice(4, 7) is
+    // seeded 6/7/8 — the 7th–9th of at least 14 rows, i.e. mid-list with five
+    // rows still below them. With 14 rows of ≥100px against an 800px viewport
+    // the document is always scrollable and those rows always sit well below
+    // the fold, so `scrollIntoView({ block: 'center' })` always has room to
+    // scroll. Pre-existing schedules on the agent only push them further down.
     const targets = seeded.filter((s) => !s.enabled).slice(4, 7)
     expect(targets.length).toBe(3)
 
@@ -257,7 +277,13 @@ test.describe('Schedules tab toggle scroll stability (#1634)', () => {
       // shift the offset between iterations.
       const beforeY = (await row.boundingBox()).y
       const beforeScroll = await page.evaluate(() => window.scrollY)
-      expect(beforeScroll).toBeGreaterThan(0) // the page really is scrolled
+      // FIXTURE PRECONDITION, not the assertion under test: if the page is not
+      // actually scrolled, the bug (clamp-to-top) cannot manifest and a green
+      // result would prove nothing. Fail loudly and unambiguously instead.
+      expect(
+        beforeScroll,
+        `fixture precondition failed: the page is not scrolled after centring row ${target.name}, so the clamp-to-top bug could not manifest`
+      ).toBeGreaterThan(0)
 
       const pill = row.getByTestId('schedule-status')
       const wasActive = (await pill.innerText()).trim() === 'Active'
@@ -413,15 +439,22 @@ test.describe('Schedules tab toggle scroll stability (#1634)', () => {
     await page.setViewportSize({ width: 1600, height: 800 })
     await forceDashboardListMode(page)
 
-    // A resolves LAST (2500ms) even though it was requested FIRST.
+    // A's GET is gated on an explicit release, NOT a wall-clock delay. A fixed
+    // sleep only *probably* outlives the Dashboard→B click-through; if the
+    // click-through is slower, A resolves while it is still the newest load, B's
+    // watcher then reloads cleanly, and the test goes green with the `loadSeq`
+    // guard deleted — the same tautology that sank the first draft of T4.
+    // Releasing A only after B's load has visibly finished makes "A resolves
+    // last" a certainty rather than a timing bet.
+    let releaseA
+    const heldA = new Promise((resolve) => {
+      releaseA = resolve
+    })
     await page.route(
-      (url) =>
-        url.pathname === `/api/agents/${AGENT_A}/schedules` ||
-        url.pathname === `/api/agents/${AGENT_B}/schedules`,
+      (url) => url.pathname === `/api/agents/${AGENT_A}/schedules`,
       async (route) => {
         if (route.request().method() !== 'GET') return route.continue()
-        const isA = new URL(route.request().url()).pathname === `/api/agents/${AGENT_A}/schedules`
-        await new Promise((r) => setTimeout(r, isA ? 2500 : 200))
+        await heldA
         await route.continue()
       }
     )
@@ -432,13 +465,19 @@ test.describe('Schedules tab toggle scroll stability (#1634)', () => {
 
     await switchAgentInSpa(page, AGENT_B)
 
-    // Outlive A's 2500ms response so a missing guard has every chance to paint.
-    await page.waitForTimeout(4000)
+    // B's load owns the panel and has completed.
+    await expect(page.getByText('Loading schedules...')).toHaveCount(0, { timeout: 20000 })
+    await expect(page.locator(`[data-testid="schedule-row"]:has-text("${FIXTURE_PREFIX}")`)).toHaveCount(0)
+
+    // NOW let A's superseded response land. Without the guard it writes A's rows
+    // into `schedules` under B's header.
+    releaseA()
+    await page.waitForTimeout(1500)
 
     await expect(page).toHaveURL(new RegExp(`/agents/${AGENT_B}(\\?|$|/)`))
     await expect(page.locator(`[data-testid="schedule-row"]:has-text("${FIXTURE_PREFIX}")`)).toHaveCount(0)
-    // The late response must not have cleared a spinner that B's load owns,
-    // nor left the panel stuck loading.
+    // The late response must not have cleared a flag B's load owns, nor left the
+    // panel stuck loading.
     await expect(page.getByText('Loading schedules...')).toHaveCount(0)
   })
 })
