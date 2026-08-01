@@ -75,7 +75,9 @@ def _stub_network(monkeypatch, module, calls, db_entries=None):
     monkeypatch.setattr(module, "_get_cached_metadata", _fake)
     monkeypatch.setattr(module, "_fetch_template_yaml", _fake)
     monkeypatch.setattr(module, "_get_github_pat", lambda *a, **k: "test-pat")
-    # Cache is module-global and survives across loads; keep runs independent.
+    # `_metadata_cache` is a module-level dict, so each `exec_module` above
+    # already gets a fresh one — this is belt-and-braces against a future load
+    # helper that reuses a module object, not a live requirement.
     module._metadata_cache.clear()
 
     settings_stub = types.ModuleType("services.settings_service")
@@ -157,7 +159,9 @@ def test_shipped_default_is_empty():
     Do NOT 'helpfully' refill it: the previous list was a pre-2026 repo set no
     install had ever overridden, so every operator browsed the same dead
     catalog. Curation is an operator act (Settings -> GitHub Templates)."""
-    sys.path.insert(0, str(_BACKEND))
+    # No `sys.path` mutation here on purpose: `tests/unit/conftest.py` already
+    # puts `src/backend` on the path, and a bare `insert` from a test body is a
+    # permanent, un-undone global side-effect (one duplicate entry per session).
     try:
         import config
     except Exception:  # pragma: no cover - backend venv required
