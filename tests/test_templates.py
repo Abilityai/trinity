@@ -92,3 +92,32 @@ class TestGetTemplateDetails:
         response = api_client.get("/api/templates/nonexistent-template-xyz")
 
         assert_status(response, 404)
+
+    def test_get_template_rejects_path_traversal(self, api_client: TrinityApiClient):
+        """#1900: a `local:` id must not escape the templates root.
+
+        End-to-end complement to the CI-gated guard in
+        `tests/unit/test_1900_template_id_traversal.py`. ⚠️ This FILE is
+        root-level and is collected by NO gating CI workflow (every gating job
+        runs `cd tests && pytest unit/`) — it runs under `/verify-local` and
+        manual runs only. Its value is exercising the genuine uvicorn
+        path-unquoting + auth stack, not coverage.
+
+        `%2E%2E%2F` is required for the multi-level case: RFC 3986 dot-segment
+        removal, which the httpx-based client applies, collapses a literal
+        `../../` before it ever leaves the client, so that spelling would
+        silently test nothing. Single-level and absolute forms need no trick.
+        """
+        for template_id in [
+            "local:../../etc",                       # collapsed client-side unless encoded
+            "local:%2E%2E%2F%2E%2E%2Fetc",           # encoded — reaches the handler intact
+            "local:../config",                       # single level, no encoding needed
+            "local:/etc",                            # absolute RHS wins the join
+        ]:
+            response = api_client.get(f"/api/templates/{template_id}")
+
+            assert_status(response, 404)
+            # The rejection must disclose nothing an unknown id would not.
+            body = response.text
+            assert "deployed-templates" not in body
+            assert "agent-configs" not in body
