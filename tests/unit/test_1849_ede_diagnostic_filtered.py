@@ -77,8 +77,9 @@ _MARKER_PAYLOAD = "result_type=user last_content_type=n/a stop_reason=null"
 _STALE_UUID = "2f1c9a44-0d3e-4c7a-9b21-1f0e5d8c7a63"
 _CLAUDE_MSG = f"No conversation found with session ID: {_STALE_UUID}"
 
-# A real hex UUID contains the bare substring "401" or "403" ~1.09% of the time
-# (measured over 200k UUIDs). AUTH_INDICATORS matches those bare — see R1 /
+# A real hex UUID contains the bare substring "401" or "403" ~1.73% of the time
+# (measured 1.727% over 500,000 uuid4()s — ~1 in 58; the fixed prose around it
+# contributes no match). AUTH_INDICATORS matches those bare — see R1 /
 # test_resume_fallback_survives_a_403_bearing_uuid.
 _403_UUID = "403e1c9a-0d3e-4c7a-9b21-1f0e5d8c7a63"
 _CLAUDE_MSG_403 = f"No conversation found with session ID: {_403_UUID}"
@@ -226,7 +227,7 @@ def test_all_diagnostics_keeps_payload_but_strips_token():
 
     assert metadata.error_message
     assert "ede_diagnostic" not in metadata.error_message
-    assert "stop_reason=null" in metadata.error_message
+    assert _MARKER_PAYLOAD in metadata.error_message  # whole payload, not a fragment
     assert "diagnostic:" in metadata.error_message
 
 
@@ -420,8 +421,8 @@ def test_resume_fallback_survives_a_403_bearing_uuid():
 
     Real error text on this path now reaches the backend's `is_auth_failure`
     substring classifier, which matches a BARE "403". A hex session UUID
-    contains one ~1.09% of the time, so ~1 in 92 resume-not-found failures
-    will rotate a healthy subscription and re-run the turn once. This test
+    contains "401" or "403" ~1.73% of the time, so ~1 in 58 resume-not-found
+    failures will rotate a healthy subscription and re-run the turn once. This test
     pins that the resume fallback STILL fires in that case — the outcome is
     correct, only a subscription slot is wasted. Word-boundary anchoring of
     AUTH_INDICATORS is a tracked follow-up (out of this fix's scope: the
