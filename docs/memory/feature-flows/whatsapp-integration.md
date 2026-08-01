@@ -1,7 +1,7 @@
 # WhatsApp Integration via Twilio (WHATSAPP-001)
 
-**Issues**: #299 (Phase 1), #467 (Phase 2), #1315 (Phase 3 — outbound media)
-**Status**: Phase 3 partial — outbound media attachments shipped (#1315)
+**Issues**: #299 (Phase 1), #467 (Phase 2), #1315 (Phase 3 — outbound media), #1932 (inbound media fix)
+**Status**: Phase 3 partial — outbound media attachments shipped (#1315) · inbound media download fixed (#1932)
 **Extends**: SLACK-002 `ChannelAdapter` abstraction
 
 Adds WhatsApp as a per-agent channel via Twilio's Programmable Messaging API.
@@ -290,11 +290,57 @@ revisit this once template support lands.
 - Log masking: phone numbers rendered as `whatsapp:+141***5309` in error paths
 
 ### SSRF defense on media downloads
-- Twilio media URLs are fetched with HTTP Basic auth
-- URL host must match `*.twilio.com` (allowlist in `whatsapp_adapter._is_twilio_media_url`)
-- `follow_redirects=False` on the initial request; a single 30x redirect is
-  followed only if the target also passes the allowlist check
-- Post-download size validation handled by `message_router`'s existing TOCTOU check
+
+Inbound media is a **two-hop** fetch, and the redirect is the normal path for
+every attachment — not a large-media exception:
+
+1. `https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages/{sid}/Media/{sid}`
+   — HTTP Basic auth (AccountSid:AuthToken), `follow_redirects=False`
+2. Twilio answers **302** with `Location: https://mms.twiliocdn.com/...`
+   (a short-lived signed URL, ~4h — treat it as a bearer capability; never log it)
+3. The target is re-validated, then followed **without** auth
+
+**Two-tier allowlist** (`whatsapp_adapter`), scheme must be `https`:
+
+| Tier | Constant | Hosts | Used at |
+|---|---|---|---|
+| Source (credentialed) | `_TWILIO_MEDIA_SOURCE_HOST_SUFFIXES` | `*.twilio.com` | webhook parse gate + hop 1 |
+| Redirect target | `_TWILIO_MEDIA_ALLOWED_HOST_SUFFIXES` | `*.twilio.com`, `*.twiliocdn.com` | hop 2+ only |
+
+Only the redirect tier admits the CDN, so the tenant's AuthToken is never sent to
+a CDN host. Leading-dot suffix matching refuses `eviltwiliocdn.com` and
+`twiliocdn.com.evil.com`; `urlparse().hostname` defeats userinfo
+(`https://mms.twiliocdn.com@evil.com/`) spoofs.
+
+`follow_redirects=False` stays and **every** hop is re-validated before it is
+issued — nothing is ever blind-followed. The follow budget is
+`_MAX_MEDIA_REDIRECTS` (3 redirects, i.e. ≤4 requests) rather than exactly one,
+so a future Twilio `302 → 302` chain degrades to "still works" instead of
+silently reproducing #1932.
+
+**Supported configuration:** accounts with *HTTP Basic Authentication for media*
+enabled — that setting is what makes Twilio redirect to `mms.twiliocdn.com`. It
+is **opt-in** in the Twilio Console. Without it Twilio redirects to
+`s3-external-1.amazonaws.com`, which is deliberately **not** allowlisted:
+that host is path-style (`/<any-bucket>/<key>`), so allowlisting it would admit
+arbitrary attacker-controlled content under an allowlisted host — a bypass
+primitive, not a widening. Such an account logs
+`Refusing off-domain media redirect to host=...`. (This redirect-target behaviour
+is vendor-documented and confirmed on one live account — re-check it here first
+if the fix ever underdelivers.)
+
+The allowlist is a **hardcoded constant with no env override** (#1932): it gates a
+fetch carrying a *tenant's* credential, while env is a *platform*-scope control.
+An env knob would let one operator-level actor redirect every tenant's AuthToken.
+If an escape hatch is ever genuinely needed, the shape is an admin DB setting with
+an audit trail (`agent_service/helpers.py::validate_base_image`) — never env.
+
+Bodies are capped at `_WA_MEDIA_DOWNLOAD_MAX_BYTES` (16 MB transport guard, parity
+with Telegram/Slack — it bounds what is *accepted*, not what is buffered);
+`upload_service`'s per-type policy caps still apply downstream, as does its
+`UNSUPPORTED_MIMES` policy (PDF and `audio/*` are fetched successfully and then
+rejected by that channel-agnostic gate). A relative `Location` fails closed (no
+`https` scheme).
 
 ### Proxy-header correctness
 - nginx already sets `X-Forwarded-Proto $scheme` (`src/frontend/nginx.conf:30`)
