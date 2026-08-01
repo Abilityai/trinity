@@ -12,10 +12,14 @@ This module does two jobs:
 
 1. **Regenerator** — ``python tests/unit/test_1908_bundled_template_gitignore.py
    --regenerate`` rewrites every guarded template's `.gitignore` from the
-   canonical ```gitignore``` block in `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`
-   (itself parity-tested against `git_service._GITIGNORE_PATTERNS` by
-   `test_github_init_gitignore.py::test_doc_and_constant_in_sync`). Same
-   pattern as `tests/lint_sys_modules.py --regenerate-baseline`: the guard and
+   canonical ```gitignore``` block in `docs/TRINITY_COMPATIBLE_AGENT_GUIDE.md`.
+   That block is parity-tested against `git_service._GITIGNORE_PATTERNS` by
+   `test_github_init_gitignore.py::test_doc_and_constant_in_sync`, but only in
+   the `canonical ⊆ doc` direction — so the block is a *superset* of the
+   constant (today: two `!` negations). `ALLOWED_NON_CANONICAL` below pins that
+   delta and `test_guarded_gitignore_ships_no_unreviewed_pattern` closes the
+   other direction. Same pattern as
+   `tests/lint_sys_modules.py --regenerate-baseline`: the guard and
    the fix live in one file, so "the constant gained an entry" is a one-command
    change no matter how many templates are guarded.
 
@@ -107,6 +111,29 @@ TEMPLATE_EXTRAS: dict[str, tuple[str, ...]] = {
     name: _DD_EXTRAS for name in GUARDED_TEMPLATES if name.startswith("dd-")
 }
 
+# Non-canonical patterns the guide's ```gitignore``` block legitimately carries on
+# top of `_GITIGNORE_PATTERNS`, pinned here so the doc -> 14-template regenerator
+# is a CLOSED seam.
+#
+# `test_github_init_gitignore.py::test_doc_and_constant_in_sync` asserts only
+# `canonical ⊆ doc`; it does NOT assert the reverse. Without the pin below, any
+# line added to that fence would ship, unreviewed and untested, into every
+# bundled template's `.gitignore` and thereby into every new agent's own repo —
+# where the sync-time `git rm --cached` sweep would then untrack whatever it
+# newly matched. Each entry must be justified, and
+# `test_allowed_non_canonical_is_not_stale` deletes the pin when the doc drops it.
+ALLOWED_NON_CANONICAL = (
+    # Re-includes the example file that the canonical `.env.*` would otherwise
+    # hide. `.env.example` is meant to be committed (it documents the variables
+    # an operator must supply — F-004/K-001), and K-004 HARD-scans it for real
+    # secret values, so re-including it is covered.
+    "!.env.example",
+    # Belt-and-braces: canonical `.mcp.json` is an exact-name pattern and does
+    # not match `.mcp.json.template`, so this negation is a no-op today. Kept
+    # because it is what the guide tells template authors to write.
+    "!.mcp.json.template",
+)
+
 # HARD static checks that these templates still fail after this change, with the
 # reason. Check-level, not template-level: it cannot hide a whole template, and
 # `test_known_failing_checks_are_not_stale` fails the day it stops being true.
@@ -127,7 +154,9 @@ _KNOWN_FAILING_CHECKS = {
 # `T-*` check dark, or a renamed id returning "not_implemented") fails the guard
 # instead of quietly greening it.
 _EXPECTED_SKIPS = {
-    # No bundled template ships a `dashboard.yaml` (that gap is F-010, soft).
+    # No *guarded* template ships a `dashboard.yaml` (that gap is F-010, soft).
+    # `trinity-system` does ship one, but it is hidden and unguarded, and this
+    # pair is only ever consulted over `GUARDED_TEMPLATES`.
     "D-003": "no_dashboard",
 }
 
@@ -418,18 +447,57 @@ def test_known_failing_checks_are_not_stale():
 
 @pytest.mark.parametrize("name", GUARDED_TEMPLATES)
 def test_guarded_gitignore_mirrors_canonical_patterns(name):
-    """The anti-divergence ratchet: the shipped file is a projection of
-    `_GITIGNORE_PATTERNS`, and a new canonical entry must reach every template."""
+    """One half of the anti-divergence ratchet: every canonical entry must reach
+    every template, so a new `_GITIGNORE_PATTERNS` entry cannot stop at the
+    constant. `test_guarded_gitignore_ships_no_unreviewed_pattern` is the other
+    half (nothing un-reviewed may reach a template)."""
     path = TEMPLATES_DIR / name / ".gitignore"
-    lines = {
-        ln.strip()
-        for ln in path.read_text(encoding="utf-8").splitlines()
-        if ln.strip() and not ln.strip().startswith("#")
-    }
+    lines = set(_shipped_patterns(name))
     missing = [p for p in CANONICAL if p not in lines]
     assert not missing, (
         f"{path} is missing {len(missing)} canonical pattern(s): {missing}. "
         f"Regenerate every guarded template with: {REGEN_CMD}"
+    )
+
+
+def _shipped_patterns(name: str) -> list[str]:
+    """Non-comment, non-blank lines of a guarded template's shipped file."""
+    path = TEMPLATES_DIR / name / ".gitignore"
+    return [
+        ln.strip()
+        for ln in path.read_text(encoding="utf-8").splitlines()
+        if ln.strip() and not ln.strip().startswith("#")
+    ]
+
+
+@pytest.mark.parametrize("name", GUARDED_TEMPLATES)
+def test_guarded_gitignore_ships_no_unreviewed_pattern(name):
+    """The other half of the ratchet, and the one the sibling doc-parity test
+    leaves open: nothing may reach a bundled template that is not a canonical
+    pattern, a pinned `ALLOWED_NON_CANONICAL` entry, or that template's own
+    `TEMPLATE_EXTRAS`. Without this, `render()` copies the guide's fence
+    verbatim, so an unrelated doc edit silently changes what every new agent
+    excludes from its own repository."""
+    allowed = set(CANONICAL) | set(ALLOWED_NON_CANONICAL) | set(TEMPLATE_EXTRAS.get(name, ()))
+    unreviewed = sorted(set(_shipped_patterns(name)) - allowed)
+    assert not unreviewed, (
+        f"{TEMPLATES_DIR / name / '.gitignore'} ships {len(unreviewed)} pattern(s) that are "
+        f"neither canonical nor pinned: {unreviewed}. If the guide's ```gitignore``` fence "
+        "gained them on purpose, add them to ALLOWED_NON_CANONICAL with a reason; "
+        f"otherwise revert the doc and run: {REGEN_CMD}"
+    )
+
+
+def test_allowed_non_canonical_is_not_stale():
+    """The pin self-retires. If the guide drops one of these lines, the
+    exemption must go with it rather than linger as a standing licence."""
+    assert not (set(ALLOWED_NON_CANONICAL) & set(CANONICAL)), (
+        "ALLOWED_NON_CANONICAL must list only patterns absent from _GITIGNORE_PATTERNS"
+    )
+    shipped = set(_shipped_patterns(GUARDED_TEMPLATES[0]))
+    stale = sorted(p for p in ALLOWED_NON_CANONICAL if p not in shipped)
+    assert not stale, (
+        f"ALLOWED_NON_CANONICAL entries no longer shipped by the guide: {stale} — delete them"
     )
 
 
