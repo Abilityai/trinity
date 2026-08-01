@@ -46,7 +46,7 @@ Router-level flood guard: `rate_limiter.enforce("agent_reminder:{name}", 30/60)`
 SQLAlchemy Core over `agent_reminders` (Invariant #2). Every by-id op tenant-scoped (`agent_name` in the predicate). `insert_reminder`, `list_reminders(agent_name, status)`, `get_reminder(agent_name, id)`, `count_pending_reminders`, `count_reminders_created_since`, `cancel_reminder` (CAS `pending → cancelled`, returns `cancelled`/`already_cancelled`/`conflict`/`not_found`), plus retention `count_agent_reminders_candidates` + `prune_agent_reminders`. Delegated through `database.py`.
 
 ### Models — `src/backend/models.py`
-`ReminderCreate` (`@model_validator`: `fire_at` XOR `delay_seconds`; `fire_at` ISO-validated; `message` ≤4000 → 422; `raw_fire_spec()` for the idempotency key), `Reminder`, `ReminderSummary`. Env-tunable bound constants live here.
+`ReminderCreate` (`@model_validator`: `fire_at` XOR `delay_seconds`; `fire_at` ISO-validated **by delegating to the same `parse_iso_timestamp` the service uses, so validator-acceptance and parseability cannot diverge (#1831)**; `message` ≤4000 → 422; `raw_fire_spec()` for the idempotency key), `Reminder`, `ReminderSummary`. Env-tunable bound constants live here.
 
 ## Scheduler Layer — `src/scheduler/` (arm / fire / reconcile / recover)
 The scheduler reads/writes `agent_reminders` directly through its own dual-backend DB layer (`get_connection()` + `_PgConn`/`_PgCursor` shims — same split as `agent_schedules`).
