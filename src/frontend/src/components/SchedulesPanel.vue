@@ -435,12 +435,12 @@
             </button>
             <button
               @click="toggleSchedule(schedule)"
-              :disabled="toggleLoading === schedule.id"
+              :disabled="toggleLoading.has(schedule.id)"
               class="p-1.5 rounded transition-colors"
               :class="schedule.enabled ? 'text-status-success-600 hover:text-gray-400' : 'text-gray-400 hover:text-status-success-600'"
               :title="schedule.enabled ? 'Disable' : 'Enable'"
             >
-              <svg v-if="toggleLoading === schedule.id" class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
+              <svg v-if="toggleLoading.has(schedule.id)" class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
               </svg>
@@ -857,7 +857,9 @@ const editingSchedule = ref(null)
 const formLoading = ref(false)
 const formError = ref('')
 const triggerLoading = ref(null)
-const toggleLoading = ref(null)
+// #1634: a Set, not one id — two rows can be in flight at once, and a single ref
+// let the first completion re-enable the second row's control mid-request (AC #6).
+const toggleLoading = ref(new Set())
 const deleteLoading = ref(null)
 const expandedSchedule = ref(null)
 const executions = ref({})
@@ -1285,7 +1287,7 @@ function deleteSchedule(schedule) {
 
 // Toggle schedule enabled/disabled
 async function toggleSchedule(schedule) {
-  toggleLoading.value = schedule.id
+  toggleLoading.value.add(schedule.id)
   try {
     const endpoint = schedule.enabled ? 'disable' : 'enable'
     await axios.post(`/api/agents/${props.agentName}/schedules/${schedule.id}/${endpoint}`, {}, {
@@ -1295,7 +1297,7 @@ async function toggleSchedule(schedule) {
   } catch (error) {
     console.error('Failed to toggle schedule:', error)
   } finally {
-    toggleLoading.value = null
+    toggleLoading.value.delete(schedule.id)
   }
 }
 
