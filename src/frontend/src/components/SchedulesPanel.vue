@@ -292,6 +292,8 @@
       <div
         v-for="schedule in schedules"
         :key="schedule.id"
+        data-testid="schedule-row"
+        :data-schedule-id="schedule.id"
         class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 hover:shadow-sm transition-shadow"
       >
         <div class="flex justify-between items-start">
@@ -299,6 +301,7 @@
             <div class="flex items-center space-x-2">
               <h4 class="font-medium text-gray-900 dark:text-white">{{ schedule.name }}</h4>
               <span
+                data-testid="schedule-status"
                 :class="[
                   'px-2 py-0.5 text-xs font-medium rounded-full',
                   schedule.enabled ? 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-800 dark:text-status-success-300' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
@@ -435,6 +438,7 @@
             </button>
             <button
               @click="toggleSchedule(schedule)"
+              data-testid="schedule-toggle"
               :disabled="toggleLoading.has(schedule.id)"
               class="p-1.5 rounded transition-colors"
               :class="schedule.enabled ? 'text-status-success-600 hover:text-gray-400' : 'text-gray-400 hover:text-status-success-600'"
@@ -450,6 +454,7 @@
             </button>
             <button
               @click="editSchedule(schedule)"
+              :disabled="deleteLoading === schedule.id"
               class="p-1.5 text-gray-400 hover:text-action-primary-600 rounded transition-colors"
               title="Edit"
             >
