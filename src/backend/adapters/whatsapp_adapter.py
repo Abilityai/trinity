@@ -40,8 +40,57 @@ TWILIO_WHATSAPP_MAX_LENGTH = 1600
 # Twilio REST API base (outbound send)
 TWILIO_API_BASE = "https://api.twilio.com"
 
-# SSRF allowlist for media downloads — only Twilio-hosted URLs permitted.
-_TWILIO_MEDIA_ALLOWED_HOST_SUFFIXES = (".twilio.com",)
+# SSRF allowlist for inbound media. TWO tiers by design (#1932):
+#
+#   SOURCE  — hosts we accept from the webhook (`MediaUrl{N}`) and will send the
+#             tenant's AccountSid:AuthToken to as HTTP Basic auth (hop 1).
+#             Twilio only ever puts api.twilio.com here. Keep it narrow: this is
+#             the credential's blast radius.
+#   ALLOWED — hosts a *validated* 30x may point at (hop 2+, unauthenticated).
+#             Superset: adds the media CDN (mms./media.twiliocdn.com) that
+#             api.twilio.com redirects to for every attachment. Missing until
+#             #1932, which is why ALL inbound media failed from #463 (2026-04-23).
+#
+# Splitting them means the fix widens ONLY the gate that had the bug. The
+# credentialed hop stays exactly as narrow as before, so the widening does not
+# depend on the HMAC gate in transports/twilio_webhook.py:123-128 holding forever.
+# (It does hold today — validation is unconditional, and :140-142 rebuilds
+# raw_event before overwriting _agent_name, so a forged agent name cannot select
+# another tenant's AuthToken. The split just stops that being load-bearing.)
+#
+# #1932 decision — deliberately NOT env-overridable. This constant gates a fetch
+# carrying a TENANT's credential, while env is a PLATFORM-scope control: an env
+# knob would let one operator-level actor redirect every tenant's AuthToken.
+# No comparable outbound-fetch gate here is env-driven (telegram_media
+# .ALLOWED_DOWNLOAD_HOST, url_validation's github.com lock). If an escape hatch
+# is ever genuinely required, the shape is an admin DB setting with an audit
+# trail (agent_service/helpers.py::validate_base_image) — never env.
+#
+# s3-external-1.amazonaws.com (the redirect target for accounts WITHOUT "HTTP
+# Basic Authentication for media" enabled) is deliberately absent: that host is
+# path-style (`/<any-bucket>/<key>`), so allowlisting it — even as a single exact
+# host — admits arbitrary attacker-controlled content under an allowlisted name.
+# That is a bypass primitive, not a widening. Media-auth-enabled accounts are the
+# supported configuration; see docs/user-docs/integrations/whatsapp-integration.md.
+_TWILIO_MEDIA_SOURCE_HOST_SUFFIXES = (".twilio.com",)
+_TWILIO_MEDIA_ALLOWED_HOST_SUFFIXES = (".twilio.com", ".twiliocdn.com")
+
+# Bounded redirect budget for inbound media (#1932). `follow_redirects=False`
+# stays — every hop is re-validated through _is_twilio_media_url before it is
+# issued, nothing is ever blind-followed. A budget (rather than exactly one hop)
+# means a future Twilio 302→302 chain degrades to "still works" instead of
+# silently reproducing the bug this issue fixes.
+_MAX_MEDIA_REDIRECTS = 3
+
+# Transport-layer ceiling on a single inbound media body. Parity with the
+# siblings (telegram_media.MAX_FILE_SIZE=20MB, slack_service.download_file
+# max_size=10MB); WhatsApp had none. Sits ABOVE upload_service's policy caps
+# (CHANNEL_MAX_FILE_SIZE=10MB / CHANNEL_MAX_IMAGE_SIZE=5MB) on purpose, so the
+# policy layer keeps producing its own honest "exceeds N limit" message and this
+# guard only catches the pathological case. Honest limit: the body is already
+# resident when len() runs — this bounds what we ACCEPT, not what we buffer
+# (same as both siblings; a true streaming bound is a filed follow-up).
+_WA_MEDIA_DOWNLOAD_MAX_BYTES = 16 * 1024 * 1024
 
 # Pending-login TTL (matches verification-code expiry)
 _PENDING_LOGIN_TTL = 600  # 10 minutes
@@ -148,8 +197,13 @@ def _mask_phone(phone: str) -> str:
     return f"{prefix}+{rest[:3]}***{rest[-4:]}"
 
 
-def _is_twilio_media_url(url: str) -> bool:
-    """Check if a URL is hosted on a Twilio domain (SSRF defense)."""
+def _host_matches_suffixes(url: str, suffixes: tuple) -> bool:
+    """Shared matcher — the pre-#1932 body, unchanged, with the list injected.
+
+    Deliberately takes the suffix tuple as a REQUIRED argument: a permissive
+    default would silently hand the wide (redirect-target) list to any future
+    call site that forgot to pass one, and that failure mode is invisible.
+    """
     try:
         parsed = urlparse(url)
         if parsed.scheme != "https":
@@ -157,9 +211,20 @@ def _is_twilio_media_url(url: str) -> bool:
         host = (parsed.hostname or "").lower()
         if not host:
             return False
-        return any(host == s.lstrip(".") or host.endswith(s) for s in _TWILIO_MEDIA_ALLOWED_HOST_SUFFIXES)
+        return any(host == s.lstrip(".") or host.endswith(s) for s in suffixes)
     except Exception:
         return False
+
+
+def _is_twilio_media_url(url: str) -> bool:
+    """May we FETCH this URL at all? Includes the media CDN (redirect targets)."""
+    return _host_matches_suffixes(url, _TWILIO_MEDIA_ALLOWED_HOST_SUFFIXES)
+
+
+def _is_twilio_media_source_url(url: str) -> bool:
+    """May this be an ORIGIN url — accepted from a webhook, and sent the
+    tenant's Basic auth? Narrow: API hosts only, never the CDN."""
+    return _host_matches_suffixes(url, _TWILIO_MEDIA_SOURCE_HOST_SUFFIXES)
 
 
 class WhatsAppAdapter(ChannelAdapter):
@@ -239,8 +304,10 @@ class WhatsAppAdapter(ChannelAdapter):
             media_url = raw_event.get(f"MediaUrl{i}") or ""
             if not media_url:
                 continue
-            # Defense-in-depth: reject non-Twilio URLs at parse time.
-            if not _is_twilio_media_url(media_url):
+            # Defense-in-depth: reject non-Twilio URLs at parse time. Narrow
+            # (SOURCE) tier — a webhook MediaUrl{N} is always the api.twilio.com
+            # form; the CDN is only ever a redirect *target* (#1932).
+            if not _is_twilio_media_source_url(media_url):
                 logger.warning(
                     "[WHATSAPP] Rejecting non-Twilio media URL at parse time: %s",
                     urlparse(media_url).hostname,
@@ -651,7 +718,10 @@ class WhatsAppAdapter(ChannelAdapter):
         Fetch Twilio-hosted media. The URL requires Basic auth with
         AccountSid:AuthToken.
         """
-        if not _is_twilio_media_url(file.url):
+        # SOURCE tier: this hop carries the tenant's AccountSid:AuthToken, so it
+        # stays narrow (*.twilio.com). The CDN is reachable only as a validated,
+        # unauthenticated redirect target below (#1932).
+        if not _is_twilio_media_source_url(file.url):
             logger.warning(
                 "[WHATSAPP] Refusing to download non-Twilio media URL (host=%s)",
                 urlparse(file.url).hostname,
@@ -671,17 +741,28 @@ class WhatsAppAdapter(ChannelAdapter):
                     file.url,
                     auth=(binding["account_sid"], auth_token),
                 )
-                # Twilio sometimes 302-redirects to a signed S3 URL for large media.
-                # Follow only if the redirect target is still Twilio-hosted.
-                if resp.status_code in (301, 302, 303, 307, 308):
+                # Twilio 302-redirects media to its CDN (mms./media.twiliocdn.com)
+                # — the normal path for EVERY attachment, not a large-media
+                # exception (#1932). Re-validate each target; never blind-follow.
+                # The follow carries NO auth: the signed URL has its own creds,
+                # and forwarding AccountSid:AuthToken to a CDN host would widen
+                # the credential's blast radius.
+                redirects = 0
+                while resp.status_code in (301, 302, 303, 307, 308):
+                    if redirects >= _MAX_MEDIA_REDIRECTS:
+                        logger.error(
+                            "[WHATSAPP] Media redirect budget exhausted after %d hops (file=%s)",
+                            redirects, file.name,
+                        )
+                        return None
                     location = resp.headers.get("location", "")
                     if not _is_twilio_media_url(location):
-                        logger.warning(
+                        logger.error(
                             "[WHATSAPP] Refusing off-domain media redirect to host=%s",
                             urlparse(location).hostname,
                         )
                         return None
-                    # Follow once, without auth (signed URL carries its own creds)
+                    redirects += 1
                     resp = await client.get(location)
 
                 if resp.status_code != 200:
@@ -690,12 +771,23 @@ class WhatsAppAdapter(ChannelAdapter):
                         resp.status_code, file.name,
                     )
                     return None
+                if len(resp.content) > _WA_MEDIA_DOWNLOAD_MAX_BYTES:
+                    logger.warning(
+                        "[WHATSAPP] Media exceeds transport cap (%d bytes > %d, file=%s)",
+                        len(resp.content), _WA_MEDIA_DOWNLOAD_MAX_BYTES, file.name,
+                    )
+                    return None
                 return resp.content
         except httpx.TimeoutException:
             logger.error("[WHATSAPP] Timeout downloading media %s", file.name)
             return None
         except Exception as e:
-            logger.error("[WHATSAPP] Error downloading media %s: %s", file.name, e)
+            # Log the exception TYPE only: some httpx exceptions (UnsupportedProtocol,
+            # InvalidURL) embed the URL, and the signed CDN URL is a ~4h bearer
+            # capability to the media (#1932).
+            logger.error(
+                "[WHATSAPP] Error downloading media %s: %s", file.name, type(e).__name__
+            )
             return None
 
     # =========================================================================
