@@ -53,10 +53,14 @@ TWILIO_API_BASE = "https://api.twilio.com"
 #
 # Splitting them means the fix widens ONLY the gate that had the bug. The
 # credentialed hop stays exactly as narrow as before, so the widening does not
-# depend on the HMAC gate in transports/twilio_webhook.py:123-128 holding forever.
-# (It does hold today — validation is unconditional, and :140-142 rebuilds
-# raw_event before overwriting _agent_name, so a forged agent name cannot select
-# another tenant's AuthToken. The split just stops that being load-bearing.)
+# depend on the HMAC gate in transports/twilio_webhook.py holding forever.
+# (It does hold today: TwilioWebhookTransport.handle_webhook calls
+# `RequestValidator(...).validate(...)` unconditionally and returns 403 before
+# parse_message ever runs, and the same handler builds `raw_event = dict(params)`
+# and only THEN overwrites `_agent_name` from the binding — so a forged
+# _agent_name form field cannot make download_file select another tenant's
+# AuthToken. Anchored on symbols, not line numbers, because those drift. The
+# split simply stops any of it being load-bearing.)
 #
 # #1932 decision — deliberately NOT env-overridable. This constant gates a fetch
 # carrying a TENANT's credential, while env is a PLATFORM-scope control: an env

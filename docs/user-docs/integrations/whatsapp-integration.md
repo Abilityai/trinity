@@ -249,7 +249,15 @@ That host means **HTTP Basic Authentication for media is not enabled** on your T
 
 Any other host in that warning means Twilio changed its media CDN — that needs a Trinity fix, not a config change (the allowlist is intentionally not operator-configurable, because that fetch carries your Twilio Auth Token). Please open an issue with the logged hostname.
 
-If the log shows no `Refusing…` line at all, the failure is elsewhere: `No credentials to download media` means the binding lost its Auth Token; `Media download failed (status=...)` is a Twilio-side error.
+If the log shows no `Refusing…` line at all, the failure is elsewhere:
+
+| Log line | Meaning |
+|---|---|
+| `No credentials to download media for agent=…` | The binding lost its Auth Token — re-save it |
+| `Media download failed (status=…)` | Twilio-side error (401 = bad Auth Token, 404 = media expired) |
+| `Media redirect budget exhausted` | Twilio chained more than 3 redirects — please open an issue |
+| `Media exceeds transport cap` | The file is larger than 16 MB |
+| `Error downloading media …: ConnectError` (or another type name) | Network/TLS failure reaching Twilio. Only the exception **type** is logged, deliberately: the signed media URL is a live credential for ~4 hours and some exception messages embed it |
 
 ### Attachment says "unsupported format"
 
