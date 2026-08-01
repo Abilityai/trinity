@@ -269,7 +269,13 @@
     </div>
 
     <!-- Schedules List -->
-    <div v-if="loading" class="text-center py-8">
+    <!-- #1634: the spinner means "no data yet", never "fetch in flight"
+         (design-system p4/p5/p13/p14). Gating on the in-flight flag alone
+         unmounted the whole list on every refetch — the document collapsed to
+         spinner height and the browser clamped window.scrollY to 0, so toggling
+         a row threw the page back to the top. Matches ExecutionsPanel /
+         LoopsPanel / TasksPanel / ReportsPanel / RoomsRail / CompatibilityPanel. -->
+    <div v-if="loading && schedules.length === 0" class="text-center py-8">
       <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500 mx-auto"></div>
       <p class="text-sm text-gray-500 dark:text-gray-400 mt-2">Loading schedules...</p>
     </div>
@@ -1455,6 +1461,14 @@ function summarizeToolInput(tool) {
 
 // Watch for agent name changes
 watch(() => props.agentName, () => {
+  // #1634: this state belongs to the PREVIOUS agent. With the spinner now gated
+  // on "no data yet", leaving it would (a) suppress the panel-wide spinner the
+  // new agent's first load needs and (b) render the old agent's rows under the
+  // new agent's header. ORDERING: loadSchedules() sets loading=true
+  // synchronously (no await precedes it) and this watcher is flush:'pre', so
+  // both writes land in one flush — no empty-state frame. Keep that line first.
+  schedules.value = []
+  perfBySchedule.value = {}
   loadSchedules()
 })
 
