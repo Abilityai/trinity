@@ -531,6 +531,15 @@ _KNOWN_DIVERGENT = [
 @example("2026-01-15T10:30Z:00")
 @example("2026-01-15 10Z:30:00")
 @example("2026-01-15 10:30Z:00")
+# The MECHANICAL non-vacuity floor (#1831) — an ACCEPTED input, so the assertion
+# body below is guaranteed to execute at least once no matter what happens to the
+# strategy. Keep it: all four examples above are rejected post-fix, and every
+# accepted draw `_Z_INJECTED` produces comes from `i >= len(base)` (i.e. a plain
+# trailing-'Z' append), so narrowing `st.integers(max_value=27)` to the base
+# lengths — a plausible "magic number" cleanup — would silently drop acceptance to
+# 0% and leave this property green and worthless. This example is a member of the
+# uppercase-'Z'-as-separator class #1831 deliberately started accepting.
+@example("2026-01-15Z10:30:00")
 def test_P7_validator_acceptance_implies_the_parser_can_parse(raw):
     """P7 — whatever ``ReminderCreate`` accepts, ``parse_iso_timestamp`` must be
     able to parse. The property **now holds by construction** (#1831):
@@ -550,15 +559,20 @@ def test_P7_validator_acceptance_implies_the_parser_can_parse(raw):
     value reaches it from outside the platform and — before #1831 — escaped as a
     500 rather than a 4xx.
 
-    NON-VACUITY: post-fix the four ``@example`` inputs are all *rejected* by the
-    validator, so they no longer pin a deterministic outcome here; they are
-    retained as executable documentation of the historical divergence class.
-    Non-vacuity now rests on the ``_Z_INJECTED`` draw, whose validator-acceptance
-    share the ``event()`` below reports (~21%) — a 0% share means this property
-    passed vacuously and is worthless. The four historical inputs are pinned
-    positively, as must-reject assertions, in
+    NON-VACUITY — read this before trusting a green: post-fix the four historical
+    ``@example`` inputs are all *rejected*, so they pin nothing here; they are
+    retained as executable documentation of the divergence class, and are pinned
+    positively as must-reject assertions in
     ``tests/unit/test_1296_reminders.py::test_1831_mid_string_z_fire_at_rejected``,
-    which is where a regression is now actually caught.
+    which is where a regression is now actually caught. The ``event()`` below
+    reports the validator-acceptance share (~21%), and a 0% share means this
+    property passed vacuously — but be honest about the SHAPE of that 21%:
+    measured over the full ``_Z_INJECTED`` (base, i) grid on py3.11/3.13/3.14,
+    **every** accepted draw comes from ``i >= len(base)`` — a degenerate
+    trailing-'Z' append — and **zero** true mid-string insertions are accepted.
+    So the assertion effectively runs on a handful of canonical strings. The fifth
+    ``@example`` above is therefore the mechanical floor: it is accepted, so the
+    body executes at least once regardless of what the strategy later becomes.
 
     A rejected draw takes an early ``return`` rather than ``assume()``: under the
     derandomized ``ci`` profile (which does NOT suppress ``filter_too_much``)
@@ -567,6 +581,10 @@ def test_P7_validator_acceptance_implies_the_parser_can_parse(raw):
     digest. Returning early makes the health check structurally unreachable while
     asserting exactly the same implication.
     """
+    # NOT ``assume()`` — see the last docstring paragraph. Converting this back to
+    # ``assume(_validator_accepts(raw))`` reintroduces a DETERMINISTIC
+    # ``FailedHealthCheck: filter_too_much`` red (~79% of draws are filtered) and
+    # re-arms source-digest seed sensitivity under ``derandomize=True``. (#1831)
     if not _validator_accepts(raw):
         return
     event("validator accepted")
