@@ -950,15 +950,35 @@ def generate_credential_files(
     mcp_servers_schema = creds_schema.get("mcp_servers", {})
     if mcp_servers_schema:
         if template_base_path:
-            mcp_template_path = template_base_path / ".mcp.json"
+            mcp_template_path = Path(template_base_path) / ".mcp.json"
         else:
-            templates_dir = Path("/agent-configs/templates")
-            if not templates_dir.exists():
-                templates_dir = Path("./config/agent-templates")
-            template_name = template_data.get("name", "")
-            mcp_template_path = templates_dir / template_name / ".mcp.json"
+            # #1900: this arm used to derive the directory by joining the
+            # template.yaml's own `name:` field onto a hardcoded root, then read
+            # the resulting `.mcp.json` INTO the new agent's credential files.
+            # Two things were wrong with that. `name:` is untrusted — any
+            # `creator` supplies one through `deploy_local_agent_logic` — so
+            # `name: ../../data/deployed-templates/<victim>` read another
+            # tenant's credential-bearing `.mcp.json` into the attacker's own
+            # agent. And it is not a directory name at all: 5 shipped templates
+            # declare a display string there ("Test Echo Agent").
+            #
+            # `crud` now threads the directory it already validated through
+            # `_safe_local_template_path`, so the live path never derives one.
+            # No caller supplies `template_base_path=None` with a real template
+            # today (the `github:` branch never reaches this function — its
+            # `template_data` stays empty and `_stage_config_files` guards on
+            # it), so this arm exists for a future caller of a public function:
+            # fail-closed and contained rather than trusting `name:`. The
+            # containment helper also absorbs a non-string `name:`, which used
+            # to raise TypeError out of agent creation as an uncaught 500.
+            mcp_template_path = None
+            fallback_root = contained_template_dir(
+                template_data.get("name", ""), _local_templates_dir()
+            )
+            if fallback_root is not None:
+                mcp_template_path = fallback_root / ".mcp.json"
 
-        if mcp_template_path.exists():
+        if mcp_template_path is not None and mcp_template_path.exists():
             with open(mcp_template_path) as f:
                 mcp_config = json.load(f)
 

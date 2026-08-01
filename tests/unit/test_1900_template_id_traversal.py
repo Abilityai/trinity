@@ -188,3 +188,183 @@ def test_1900_router_404_leaks_no_path(client):
     assert rejected.status_code == unknown.status_code == 404
     assert rejected.json() == unknown.json()
     assert _leaked_paths(rejected.text) == []
+
+
+# ---------------------------------------------------------------------------
+# Seam 2 — crud: the validated directory must actually be threaded through
+# ---------------------------------------------------------------------------
+
+
+def _load_crud():
+    try:
+        import services.agent_service.crud as crud
+    except ImportError:  # pragma: no cover - venv-dependent
+        pytest.skip("backend venv required")
+    return crud
+
+
+def _config(name="agent-x", template=None):
+    """Minimal AgentConfig stand-in for `_stage_config_files`."""
+    return types.SimpleNamespace(
+        name=name, template=template, type="business-assistant",
+        base_image=None, resources={}, tools=[], mcp_servers=[],
+        custom_instructions=None,
+    )
+
+
+@pytest.fixture
+def curated_root(tmp_path, monkeypatch):
+    """Point both `_LOCAL_TEMPLATE_ROOTS` entries at writable fixtures.
+
+    The module-level tuple is the single monkeypatch point the create tests
+    already use (crud.py:137-138).
+    """
+    crud = _load_crud()
+    curated = tmp_path / "curated"
+    deployed = tmp_path / "deployed"
+    curated.mkdir()
+    deployed.mkdir()
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (curated, deployed))
+    return crud, curated, deployed
+
+
+def test_1900_stage_config_files_passes_the_validated_template_dir(
+    curated_root, tmp_path, monkeypatch
+):
+    """THE WIRING TEST — catches "extracted but never wired".
+
+    If `_stage_config_files` keeps passing `github_template_path` (which has
+    ZERO writers in the backend and is therefore always `None`), every
+    service-level test still passes and the live path silently falls into the
+    fallback arm.
+    """
+    crud, curated, _deployed = curated_root
+    _seed(curated, "mytmpl", body="name: mytmpl\n")
+
+    seen = {}
+
+    def _spy(template_data, agent_credentials, agent_name, template_base_path=None):
+        seen["base"] = template_base_path
+        return {}
+
+    monkeypatch.setattr(crud, "generate_credential_files", _spy)
+    monkeypatch.setattr(crud.Path, "mkdir", lambda *a, **k: None)
+
+    crud._stage_config_files(
+        _config(template="local:mytmpl"),
+        {"credentials": {"env_file": ["K"]}},
+        None,
+    )
+
+    assert seen["base"] is not None, "validated template dir was not threaded through"
+    assert Path(seen["base"]) == crud._resolve_local_template_dir("mytmpl")
+    assert Path(seen["base"]) == curated / "mytmpl"
+
+
+def test_1900_stage_config_files_prefers_the_deploy_local_root(
+    curated_root, tmp_path, monkeypatch
+):
+    """A deploy-local template resolves to the deploy-local store.
+
+    This is the behaviour delta the threading intentionally fixes: the old
+    hardcoded lookup searched the CURATED catalog for a template living under
+    `/data/deployed-templates`, so it always missed and never substituted
+    `${VAR}` into that template's own `.mcp.json`.
+    """
+    crud, _curated, deployed = curated_root
+    _seed(deployed, "deployed-tmpl", body="name: deployed-tmpl\n")
+
+    seen = {}
+
+    def _spy(template_data, agent_credentials, agent_name, template_base_path=None):
+        seen["base"] = template_base_path
+        return {}
+
+    monkeypatch.setattr(crud, "generate_credential_files", _spy)
+    monkeypatch.setattr(crud.Path, "mkdir", lambda *a, **k: None)
+
+    crud._stage_config_files(
+        _config(template="local:deployed-tmpl"),
+        {"credentials": {"env_file": ["K"]}},
+        None,
+    )
+
+    assert Path(seen["base"]) == deployed / "deployed-tmpl"
+
+
+def test_1900_resolve_local_template_dir_is_the_single_ladder(curated_root):
+    """ANTI-DRIFT — the extraction must be behaviour-preserving.
+
+    Curated root wins when it holds the `template.yaml`; the deploy-local store
+    is the fallback; a hostile name raises the SAME named 400 as before, from
+    the untouched `_safe_local_template_path` barrier.
+    """
+    from fastapi import HTTPException
+
+    crud, curated, deployed = curated_root
+    _seed(curated, "in-curated", body="name: in-curated\n")
+    _seed(deployed, "in-deployed", body="name: in-deployed\n")
+
+    assert crud._resolve_local_template_dir("in-curated") == curated / "in-curated"
+    assert crud._resolve_local_template_dir("in-deployed") == deployed / "in-deployed"
+    # Neither root has it — falls through to the deploy-local candidate, which
+    # the caller's own `.exists()` then rejects. (Unchanged from the inline form.)
+    assert crud._resolve_local_template_dir("nowhere") == deployed / "nowhere"
+
+    for hostile in ["../evil", "..", "/etc", ".hidden", "a/b", ""]:
+        with pytest.raises(HTTPException) as exc:
+            crud._resolve_local_template_dir(hostile)
+        assert exc.value.status_code == 400, hostile
+        assert exc.value.detail["code"] == "INVALID_LOCAL_TEMPLATE_NAME", hostile
+
+
+def test_1900_blank_agent_passes_no_base_path(curated_root, monkeypatch):
+    """No-regression — a templateless agent must not resolve anything."""
+    crud, _curated, _deployed = curated_root
+
+    seen = {}
+
+    def _spy(template_data, agent_credentials, agent_name, template_base_path=None):
+        seen["base"] = template_base_path
+        return {}
+
+    def _boom(_raw):  # pragma: no cover - must not be reached
+        raise AssertionError("_resolve_local_template_dir called for a blank agent")
+
+    monkeypatch.setattr(crud, "generate_credential_files", _spy)
+    monkeypatch.setattr(crud, "_resolve_local_template_dir", _boom)
+    monkeypatch.setattr(crud.Path, "mkdir", lambda *a, **k: None)
+
+    crud._stage_config_files(
+        _config(template=None), {"credentials": {"env_file": ["K"]}}, None
+    )
+
+    assert seen["base"] is None
+
+
+def test_1900_github_template_path_still_wins_when_supplied(curated_root, monkeypatch):
+    """The (currently unwritten) `github_template_path` keeps precedence.
+
+    It has zero writers today — a severed wire flagged as a follow-up, not
+    fixed here — but if it is ever revived it must win over the local
+    derivation rather than be silently shadowed.
+    """
+    crud, curated, _deployed = curated_root
+    _seed(curated, "mytmpl", body="name: mytmpl\n")
+
+    seen = {}
+
+    def _spy(template_data, agent_credentials, agent_name, template_base_path=None):
+        seen["base"] = template_base_path
+        return {}
+
+    monkeypatch.setattr(crud, "generate_credential_files", _spy)
+    monkeypatch.setattr(crud.Path, "mkdir", lambda *a, **k: None)
+
+    crud._stage_config_files(
+        _config(template="local:mytmpl"),
+        {"credentials": {"env_file": ["K"]}},
+        "/explicit/github/path",
+    )
+
+    assert seen["base"] == "/explicit/github/path"

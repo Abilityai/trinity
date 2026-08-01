@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import yaml
 from fastapi import HTTPException, Request
@@ -809,6 +809,25 @@ async def _reserve_git_instance(
     return git_instance_id, git_working_branch
 
 
+def _resolve_local_template_dir(raw_name: str) -> Path:
+    """Curated root first, then the deploy-local store (#950) — the single
+    definition of "where does `local:<raw_name>` live".
+
+    Every candidate is `_safe_local_template_path`-validated (regex barrier +
+    `is_relative_to` barrier) before any filesystem access, so the returned path
+    is proven to be inside one of `_LOCAL_TEMPLATE_ROOTS`.
+
+    Extracted in #1900 so the THREE seams that must agree cannot drift: the
+    resolver, the `/template` bind decision, and the credential-file stager.
+    #1759 named the first two; the third existed and re-derived the directory
+    from the template's own untrusted `name:` field instead of reusing this.
+    """
+    candidate = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[0])
+    if not (candidate / "template.yaml").exists():
+        candidate = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[1])
+    return candidate
+
+
 def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
     """Load a `local:`-prefixed template's `template.yaml` (curated catalog then
     deploy-local store, #950). Mutates `config` runtime/type/resources/tools/
@@ -831,13 +850,7 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
     # is validated + resolved to prove it stays under the root before
     # any filesystem access (regex barrier + is_relative_to barrier).
     raw_name = config.template[6:]
-    template_path = _safe_local_template_path(
-        raw_name, _LOCAL_TEMPLATE_ROOTS[0]
-    )
-    if not (template_path / "template.yaml").exists():
-        template_path = _safe_local_template_path(
-            raw_name, _LOCAL_TEMPLATE_ROOTS[1]
-        )
+    template_path = _resolve_local_template_dir(raw_name)
 
     template_yaml = template_path / "template.yaml"
 
@@ -1041,20 +1054,35 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
 
 
 def _stage_config_files(
-    config: AgentConfig, template_data: dict, github_template_path: Optional[str]
+    config: AgentConfig, template_data: dict,
+    github_template_path: Optional[Union[Path, str]]
 ) -> tuple[Path, Path, Optional[dict], Optional[dict]]:
     """CRED-002: write the agent-config.yaml + empty credentials.json + template
     cred files under /tmp and compute the template/cred bind specs. Also
     normalizes + writes back the resource fields (#1197) so container labels +
     limits use canonical values. Returns
     `(config_path, credentials_path, template_volume, cred_files_volume)`."""
+    # #1900: hand `generate_credential_files` the directory we ALREADY validated
+    # rather than letting it re-derive one from the template's untrusted `name:`
+    # field (a traversal into any readable `.mcp.json`). This is the same
+    # `_safe_local_template_path`-validated ladder the `/template` bind decision
+    # below uses, so all three seams agree by construction (#1759).
+    local_template_base = None
+    if config.template and config.template.startswith("local:"):
+        # Cannot newly raise: `_resolve_local_template` already ran this exact
+        # `raw_name` through the same barrier before `template_data` could be
+        # non-empty, and a templateless agent has a falsy `config.template`.
+        local_template_base = _resolve_local_template_dir(config.template[6:])
+
     generated_files = {}
     if template_data:
         # Generate empty credential files structure from template
         try:
             generated_files = generate_credential_files(
                 template_data, {}, config.name,
-                template_base_path=github_template_path
+                # `github_template_path` first so the field's eventual revival
+                # wins; it has zero writers today (#1900 follow-up).
+                template_base_path=github_template_path or local_template_base
             )
         except CredentialDeclarationError as e:
             # Invariant #1: the service raises an HTTP-free domain error and
