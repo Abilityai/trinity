@@ -1204,8 +1204,15 @@ async function saveSchedule() {
         { headers: authStore.authHeader }
       )
     }
-    closeForm()
+    // #1634: refresh BEFORE closing. With the list no longer unmounting during a
+    // refetch, closing first leaves the stale row interactive — a click on its
+    // Edit button opens the modal pre-filled from pre-save data, and saving that
+    // silently reverts the edit just made. Keeping the modal up — it already
+    // shows the sanctioned in-button spinner (`formLoading`) — removes the
+    // interactive-stale window entirely and gives the create path the progress
+    // signal it otherwise loses.
     await loadSchedules()
+    closeForm()
   } catch (error) {
     formError.value = error.response?.data?.detail || 'Failed to save schedule'
   } finally {
