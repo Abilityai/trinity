@@ -596,29 +596,57 @@ def test_real_catalog_hides_all_known_fixtures(monkeypatch):
     leaked = forbidden & ids
     assert not leaked, f"internal fixtures leaked into the catalog: {sorted(leaked)}"
 
-    convention_leaks = {n for n in ids if n.startswith(("test-", "demo-"))}
-    assert not convention_leaks, f"test-/demo- named dirs in catalog: {sorted(convention_leaks)}"
+    # #1931: `dd-` joins the prefix convention. The 11-agent VC due-diligence
+    # fleet is a demo we still run, not a starter — it ships `hidden: true` and
+    # is reached deliberately via config/manifests/vc-due-diligence.yaml. This
+    # is the cheapest possible regression guard: un-hiding any dd-* turns CI
+    # red. It runs over VISIBLE ids only, so the hidden fleet is unaffected.
+    convention_leaks = {n for n in ids if n.startswith(("test-", "demo-", "dd-"))}
+    assert not convention_leaks, (
+        f"test-/demo-/dd- named dirs in catalog: {sorted(convention_leaks)}"
+    )
 
 
-def test_real_catalog_surfaces_starters_ahead_of_suite(monkeypatch):
-    """scout/sage/scribe are present and rank ahead of the dd-* suite after the
-    router sort — the priority-surfacing fix, verified end-to-end (#1513).
-    Also guards that scribe's template.yaml parses (a broken YAML would silently
-    drop it from the catalog)."""
+def test_real_catalog_surfaces_the_three_starters(monkeypatch):
+    """scout/sage/scribe are present, each still declares `priority: 20`, and
+    they sort ahead of anything else visible (#1513, reworked by #1931).
+
+    Renamed from `..._ahead_of_suite`: since #1931 the dd-* suite is
+    `hidden: true`, so the old `if dd_positions:` clause could only ever go
+    **vacuous, not red** — a green run would have proved nothing. What is
+    load-bearing now:
+
+    - all three present (this also proves each `template.yaml` parses — a
+      broken YAML silently drops a template from the catalog, the #1513
+      `scribe` bug);
+    - each still declares `priority: 20` — the *mechanism* the ordering
+      depends on, and a genuinely non-vacuous assertion today;
+    - the ordering clause, generalised off `dd-` to "anything else visible".
+      **It is inert today** (the visible catalog is exactly these three), kept
+      because it is what a fourth starter would rely on. Do not read a green
+      run here as proof that ordering is guarded.
+    """
     ts, real_dir = _load_ts_real_catalog(monkeypatch)
     if not real_dir.exists():
         pytest.skip("config/agent-templates not present in this checkout")
+
+    starters = ("scout", "sage", "scribe")
 
     templates = ts.get_local_templates()
     templates.sort(key=lambda t: (t.get("priority", 100), t.get("display_name", "")))
     order = [t["id"].split(":", 1)[1] for t in templates]
 
-    for starter in ("scout", "sage", "scribe"):
+    by_name = {t["id"].split(":", 1)[1]: t for t in templates}
+    for starter in starters:
         assert starter in order, f"starter {starter} missing from catalog"
+        assert by_name[starter].get("priority") == 20, (
+            f"starter {starter} no longer declares priority: 20 — the router "
+            f"sort would drop it behind every default-100 template"
+        )
 
-    dd_positions = [i for i, n in enumerate(order) if n.startswith("dd-")]
-    if dd_positions:
-        last_starter = max(order.index(s) for s in ("scout", "sage", "scribe"))
-        assert last_starter < min(dd_positions), (
-            "real starters must sort ahead of the dd-* suite"
+    others = [i for i, n in enumerate(order) if n not in starters]
+    if others:  # inert while the visible catalog is exactly the three starters
+        last_starter = max(order.index(s) for s in starters)
+        assert last_starter < min(others), (
+            "real starters must sort ahead of every other visible template"
         )

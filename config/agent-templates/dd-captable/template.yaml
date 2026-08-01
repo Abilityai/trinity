@@ -1,4 +1,8 @@
 name: dd-captable
+# Excluded from the user-facing template catalog (GET /api/templates). See
+# README "Not starting points". Demo fleet, not a starter — deploy the whole
+# set with config/manifests/vc-due-diligence.yaml. (#1931)
+hidden: true
 display_name: DD Cap Table Agent
 description: Equity structure analysis, dilution assessment, and investor reputation check
 tagline: Who owns what

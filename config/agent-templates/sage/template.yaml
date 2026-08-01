@@ -1,4 +1,7 @@
 name: sage
+# Catalog intent, declared explicitly (#1931): a starter we stand behind as
+# someone's first agent. See README "Starter templates".
+hidden: false
 display_name: Sage - Strategic Advisor
 description: Strategic advisor that synthesizes research and provides actionable recommendations
 type: strategy-agent

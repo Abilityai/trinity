@@ -1,4 +1,7 @@
 name: scout
+# Catalog intent, declared explicitly (#1931): a starter we stand behind as
+# someone's first agent. See README "Starter templates".
+hidden: false
 display_name: Scout - Market Research Analyst
 description: Market research specialist that discovers trends, analyzes competitors, and identifies opportunities
 type: research-agent
