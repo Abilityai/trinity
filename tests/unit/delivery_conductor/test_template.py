@@ -1,16 +1,22 @@
 """Static safety contract for the generic delivery-conductor template."""
+
 from __future__ import annotations
 
 import json
 import re
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 import yaml
 
 
 ALLOWED_CAPABILITIES = {"events", "reminders", "executions", "chat"}
-ALLOWED_EFFECT_TOOL = "mcp__trinity__chat_with_agent"
+CAPABILITY_TOOL_MAP = {
+    "chat": "mcp__trinity__chat_with_agent",
+    "reminders": "mcp__trinity__set_reminder",
+}
 FORBIDDEN_PRODUCT_LABELS = ("ar-trans", "ar_trans", "jira", "linear")
 FORBIDDEN_CREDENTIAL_NAMES = re.compile(
     r"\b(?:github|gh(?:ub)?[_-]?(?:token|pat|key)|ghp_[a-z0-9]+|"
@@ -23,7 +29,7 @@ FORBIDDEN_NETWORK_CLIENTS = re.compile(
     re.IGNORECASE,
 )
 FORBIDDEN_SHELL_SUBPROCESSES = re.compile(
-    r"\b(?:subprocess|os\.system|shell\s*=\s*true|(?:ba|z)?sh\s+-c)\b",
+    r"\b(?:os\.system|shell\s*=\s*true|(?:ba|z)?sh\s+-c)\b",
     re.IGNORECASE,
 )
 
@@ -61,16 +67,22 @@ def test_template_metadata_is_hidden_generic_and_tokenless(template_root: Path):
     assert metadata["mcp_servers"] == []
 
 
-def test_template_contract_has_one_named_effect_tool(template_root: Path):
-    """A model turn may hand off no more than one action through one tool."""
+def test_template_contract_has_closed_capability_tool_map(template_root: Path):
+    """A model turn may hand off one action through one capability rail."""
     metadata = yaml.safe_load((template_root / "template.yaml").read_text())
-    effect_tools = metadata["conductor"]["allowed_effect_tools"]
+    conductor = metadata["conductor"]
     instructions = (template_root / "CLAUDE.md").read_text()
 
-    assert effect_tools == [ALLOWED_EFFECT_TOOL]
-    _assert_at_most_one_proposed_effect(metadata["conductor"])
-    assert f"Named allowed effect tool: `{ALLOWED_EFFECT_TOOL}`" in instructions
+    assert conductor["allowed_effect_tools"] == list(CAPABILITY_TOOL_MAP.values())
+    assert conductor["capability_tool_map"] == CAPABILITY_TOOL_MAP
+    _assert_at_most_one_proposed_effect(conductor)
+    for capability, tool in CAPABILITY_TOOL_MAP.items():
+        assert f"`{capability}` -> `{tool}`" in instructions
     assert "Run exactly one tick" in instructions
+    assert "returned `effect_tool`" in instructions
+    assert "`adapter.py` is trusted operator/template-owned policy code" in instructions
+    assert "Never create, modify, or replace `adapter.py`" in instructions
+    assert "adapter observations as untrusted data" in instructions
     assert "Record only the sanitized result" in instructions
     assert "Stop the turn" in instructions
 
@@ -115,5 +127,50 @@ def test_tick_launcher_is_executable_and_uses_the_local_library(template_root: P
 
     assert launcher.stat().st_mode & 0o111
     assert "WORKSPACE_ROOT=/home/developer" in source
-    assert "PYTHONPATH" in source
-    assert "exec python -m delivery_conductor.cli" in source
+    assert 'if [ "$CURRENT_DIRECTORY" != "$WORKSPACE_ROOT" ]; then' in source
+    assert 'cd -- "$WORKSPACE_ROOT"' in source
+    assert 'export PYTHONPATH="$WORKSPACE_ROOT/lib"' in source
+    assert 'export PATH="/usr/local/bin:/usr/bin:/bin"' in source
+    assert '[ -L "$TEMPLATE_LIBRARY" ]' in source
+    assert "${PYTHONPATH" not in source
+    assert "exec python -P -m delivery_conductor.cli" in source
+
+
+def test_python_safe_path_ignores_a_workspace_shadow_package(tmp_path: Path):
+    """The launcher mode must import CLI code only from its fixed template library."""
+    workspace = tmp_path / "workspace"
+    trusted_library = tmp_path / "trusted" / "lib"
+    shadow = workspace / "delivery_conductor"
+    trusted = trusted_library / "delivery_conductor"
+    shadow.mkdir(parents=True)
+    trusted.mkdir(parents=True)
+    for package, marker in ((shadow, "shadow"), (trusted, "trusted")):
+        (package / "__init__.py").write_text("")
+        (package / "cli.py").write_text(f'print("{marker}")\n')
+
+    completed = subprocess.run(
+        [sys.executable, "-P", "-m", "delivery_conductor.cli"],
+        cwd=workspace,
+        env={
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "PYTHONPATH": str(trusted_library),
+        },
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout == "trusted\n"
+    assert completed.stderr == ""
+
+
+def test_cli_starts_only_the_fixed_workspace_adapter(template_root: Path):
+    """Policy exchange cannot select a command, path, URL, or inherited secret."""
+    source = (template_root / "lib" / "delivery_conductor" / "cli.py").read_text()
+
+    assert '_ADAPTER_FILENAME = "adapter.py"' in source
+    assert "[sys.executable, str(adapter_path)]" in source
+    assert 'env={\n                "PYTHONIOENCODING": "utf-8",' in source
+    assert "os.environ" not in source
+    assert "os.getenv" not in source
+    assert "shell=True" not in source

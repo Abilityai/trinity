@@ -23,7 +23,12 @@ capabilities:
 mcp_servers: []
 credentials: {}
 
-# The future executor may hand off one reserved action through this one tool.
+# The controller may hand off at most one reserved action through this closed
+# capability-to-tool map. The model cannot select any other effect surface.
 conductor:
   allowed_effect_tools:
     - mcp__trinity__chat_with_agent
+    - mcp__trinity__set_reminder
+  capability_tool_map:
+    chat: mcp__trinity__chat_with_agent
+    reminders: mcp__trinity__set_reminder

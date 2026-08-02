@@ -197,6 +197,7 @@ class BoundedJsonLinesExchange:
         if not completed.wait(max(0.0, deadline - time.monotonic())):
             self._cleanup_until(deadline)
             raise PortExchangeError("template-controlled JSON Lines port timed out")
+        worker.join()
         self._cleanup_until(deadline)
         if failure:
             error = failure[0]

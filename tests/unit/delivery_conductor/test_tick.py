@@ -658,6 +658,70 @@ def test_budget_and_breaker_block_after_reservation_without_returning_action(
     assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
 
 
+def test_post_claim_gate_replaces_stale_view_before_adapter_and_effect_gate(
+    ledger: ControlLedger,
+    database_path: Path,
+):
+    """The authoritative safety view must be sampled only after lease ownership."""
+    adapter = FakeAdapter(_decision("execute", action=_action()))
+    fresh_budget = BudgetView(0, 6, 7)
+    observed_fences: list[int] = []
+
+    def fresh_gate(lease: object) -> tuple[BudgetView, bool]:
+        observed_fences.extend(
+            row[0]
+            for row in _fetchall(database_path, "SELECT fence_token FROM repo_lease")
+        )
+        return fresh_budget, True
+
+    result = _runner(ledger, adapter).run(
+        _wake(1),
+        NOW,
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+        post_claim_gate=fresh_gate,
+    )
+
+    assert observed_fences == [1]
+    assert adapter.requests[0].budget_view == fresh_budget
+    assert result.status == "blocked"
+    assert result.reason_code == "budget-exhausted"
+    assert result.action is None
+
+
+@pytest.mark.parametrize(
+    "fresh_gate",
+    (
+        lambda _lease: object(),
+        lambda _lease: (_ for _ in ()).throw(RuntimeError("gate unavailable")),
+    ),
+)
+def test_post_claim_gate_error_or_invalid_output_releases_without_effect(
+    ledger: ControlLedger,
+    database_path: Path,
+    fresh_gate: object,
+):
+    """A broken authoritative gate must fail closed after safely releasing its lease."""
+    adapter = FakeAdapter(_decision("execute", action=_action()))
+
+    result = _runner(ledger, adapter).run(
+        _wake(1),
+        NOW,
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+        post_claim_gate=fresh_gate,  # type: ignore[arg-type]
+    )
+
+    assert result.status == "blocked"
+    assert result.reason_code == "safety-gate-unavailable"
+    assert result.action is None
+    assert adapter.requests == []
+    assert _fetchall(database_path, "SELECT * FROM action_journal") == []
+    assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
+
+
 def test_noop_without_reminder_checkpoints_and_acknowledges(
     ledger: ControlLedger, database_path: Path
 ):
@@ -670,6 +734,64 @@ def test_noop_without_reminder_checkpoints_and_acknowledges(
     assert _fetchall(database_path, "SELECT state FROM event_inbox") == [
         ("acknowledged",)
     ]
+    assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
+
+
+def test_noop_pre_release_hook_runs_after_checkpoint_while_lease_is_live(
+    ledger: ControlLedger,
+    database_path: Path,
+):
+    """Safety classification must become durable before another wake can claim."""
+    observations: list[tuple[list[tuple[object, ...]], list[tuple[object, ...]]]] = []
+
+    def classify_noop(_lease: object) -> None:
+        observations.append(
+            (
+                _fetchall(database_path, "SELECT wake_id FROM repo_lease"),
+                _fetchall(database_path, "SELECT acknowledged_wake_id FROM run_checkpoint"),
+            )
+        )
+
+    result = _runner(ledger, FakeAdapter(_decision("noop"))).run(
+        _wake(1),
+        NOW,
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+        before_noop_release=classify_noop,
+    )
+
+    assert result.status == "noop"
+    assert observations == [([("wake-1",)], [("wake-1",)])]
+    assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
+
+
+@pytest.mark.parametrize(
+    "classify_noop",
+    (
+        lambda _lease: "unexpected",
+        lambda _lease: (_ for _ in ()).throw(RuntimeError("classification unavailable")),
+    ),
+)
+def test_noop_pre_release_hook_failure_releases_without_effect(
+    ledger: ControlLedger,
+    database_path: Path,
+    classify_noop: object,
+):
+    """A failed no-work classification cannot strand a lease or emit an effect."""
+    result = _runner(ledger, FakeAdapter(_decision("noop"))).run(
+        _wake(1),
+        NOW,
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+        before_noop_release=classify_noop,  # type: ignore[arg-type]
+    )
+
+    assert result.status == "blocked"
+    assert result.reason_code == "safety-gate-unavailable"
+    assert result.action is None
+    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [("pending",)]
     assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
 
 

@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from typing import Literal
+from typing import Callable, Literal
 
 from .adapter import PolicyAdapterPort
 from .contracts import (
@@ -41,6 +41,8 @@ TickStatus = Literal[
     "investigate",
 ]
 HandoffKind = Literal["action", "reminder"]
+PostClaimGate = Callable[[Lease], tuple[BudgetView, bool]]
+BeforeNoopRelease = Callable[[Lease], None]
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _REMINDER_REFERENCE_MARKER = "delivery-conductor-reminder-v1"
@@ -132,6 +134,8 @@ class DeliveryConductorTick:
         budget_view: BudgetView,
         *,
         breaker_allows_effect: bool,
+        post_claim_gate: PostClaimGate | None = None,
+        before_noop_release: BeforeNoopRelease | None = None,
     ) -> TickResult:
         """Prepare zero or one effect without invoking a capability."""
         request = AdapterRequest(
@@ -144,6 +148,31 @@ class DeliveryConductorTick:
         lease = self._ledger.claim_wake(wake, now, self._lease_seconds)
         if lease is None:
             return TickResult("not-claimed", "wake-not-claimed")
+
+        if post_claim_gate is not None:
+            try:
+                fresh_gate = post_claim_gate(lease)
+                if (
+                    not isinstance(fresh_gate, tuple)
+                    or len(fresh_gate) != 2
+                    or not isinstance(fresh_gate[0], BudgetView)
+                    or type(fresh_gate[1]) is not bool
+                ):
+                    raise ValueError("post-claim gate output is invalid")
+                budget_view, breaker_allows_effect = fresh_gate
+                request = AdapterRequest(
+                    schema_version=1,
+                    wake=wake,
+                    now_utc=_utc_timestamp(now),
+                    checkpoint=checkpoint,
+                    budget_view=budget_view,
+                )
+            except Exception:
+                return self._reject(
+                    lease,
+                    "safety-gate-unavailable",
+                    status="blocked",
+                )
 
         try:
             recovered_reminder = self._load_recoverable_reminder(lease.wake_id)
@@ -179,7 +208,12 @@ class DeliveryConductorTick:
                     budget_view,
                     breaker_allows_effect,
                 )
-            return self._finish_noop(lease, decision, budget_view)
+            return self._finish_noop(
+                lease,
+                decision,
+                budget_view,
+                before_noop_release,
+            )
 
         action = decision.proposed_action
         if action is None:
@@ -710,6 +744,7 @@ class DeliveryConductorTick:
         lease: Lease,
         decision: AdapterDecision,
         budget_view: BudgetView,
+        before_noop_release: BeforeNoopRelease | None,
     ) -> TickResult:
         self._write_checkpoint(
             lease,
@@ -717,6 +752,16 @@ class DeliveryConductorTick:
             reason_code=decision.reason_code,
             budget_view=budget_view,
         )
+        if before_noop_release is not None:
+            try:
+                if before_noop_release(lease) is not None:
+                    raise ValueError("pre-release hook output is invalid")
+            except Exception:
+                return self._reject(
+                    lease,
+                    "safety-gate-unavailable",
+                    status="blocked",
+                )
         self._ledger.release(
             lease,
             TickOutcome(True, decision.reason_code, 0, 0, 0),
