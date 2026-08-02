@@ -17,6 +17,10 @@ from pathlib import Path, PurePosixPath
 import httpx
 import yaml
 from config import DEFAULT_GITHUB_TEMPLATE_REPOS, GITHUB_PAT_CREDENTIAL_ID
+from services.template_schedules import (
+    normalize_declared_schedules,
+    schedule_shape_errors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +32,21 @@ _metadata_cache: Dict[str, tuple] = {}  # repo -> (timestamp, metadata_dict)
 _CACHE_TTL = 600  # 10 minutes
 
 
-def _fetch_template_yaml(repo: str, pat: str) -> dict:
-    """Fetch and parse template.yaml from a GitHub repo via the API.
+def _fetch_template_yaml_result(
+    repo: str, pat: str, ref: Optional[str] = None
+) -> tuple:
+    """Fetch + parse a repo's template.yaml. Returns `(metadata, reason)`.
 
-    Returns parsed YAML dict, or empty dict if not found / error.
+    `reason` is `None` on success and a short operator-readable string
+    otherwise, so each caller can pick its own log level. The catalog path
+    treats a missing template.yaml as ordinary (DEBUG); the creation path
+    (`fetch_template_metadata_for_create`) must be loud, because a silently
+    empty declaration is the exact failure trinity-enterprise#89 exists to
+    prevent.
+
+    `ref` pins the branch/tag/SHA. Unqualified, the contents API always reads
+    the repo's DEFAULT branch — so `github:owner/repo@feature` would clone
+    `feature` and read `main`'s declarations.
     """
     try:
         headers = {"Accept": "application/vnd.github+json"}
@@ -42,18 +57,77 @@ def _fetch_template_yaml(repo: str, pat: str) -> dict:
             resp = client.get(
                 f"https://api.github.com/repos/{repo}/contents/template.yaml",
                 headers=headers,
+                params={"ref": ref} if ref else None,
             )
 
         if resp.status_code != 200:
-            logger.debug("template.yaml not found for %s (HTTP %s)", repo, resp.status_code)
-            return {}
+            return {}, f"HTTP {resp.status_code}"
 
         data = resp.json()
         content = base64.b64decode(data["content"]).decode("utf-8")
-        return yaml.safe_load(content) or {}
+        return (yaml.safe_load(content) or {}), None
     except Exception as e:
-        logger.warning("Failed to fetch template.yaml for %s: %s", repo, e)
+        return {}, f"{type(e).__name__}: {e}"
+
+
+def _fetch_template_yaml(repo: str, pat: str, ref: Optional[str] = None) -> dict:
+    """Fetch and parse template.yaml from a GitHub repo via the API.
+
+    Returns parsed YAML dict, or empty dict if not found / error. Behaviour is
+    unchanged from before trinity-enterprise#89 — the split exists so the
+    creation path can distinguish "no template.yaml" from "we could not read
+    it" without changing the catalog's log levels.
+    """
+    metadata, reason = _fetch_template_yaml_result(repo, pat, ref)
+    if reason and reason.startswith("HTTP "):
+        logger.debug("template.yaml not found for %s (%s)", repo, reason)
+    elif reason:
+        logger.warning("Failed to fetch template.yaml for %s: %s", repo, reason)
+    return metadata
+
+
+def fetch_template_metadata_for_create(
+    repo: str, pat: Optional[str] = None, ref: Optional[str] = None
+) -> dict:
+    """Raw template.yaml for the CREATION path — resolved PAT, pinned ref, no cache.
+
+    Deliberately NOT `_get_cached_metadata` (trinity-enterprise#89):
+
+    * that path uses the **global platform** PAT (`_get_github_pat`), while
+      creation resolves per-agent -> per-user -> global (`resolve_github_pat`,
+      ent#162). A user creating from their own private repo with their own
+      token clones fine and then 403s here — the declaration would come back
+      empty with no signal at all;
+    * it sends no `?ref=`, so an `@branch` create would read the default
+      branch's declarations;
+    * it is a 10-minute per-process cache, so a template.yaml edited inside the
+      window (or a tokenless create that tripped GitHub's anonymous rate cap)
+      is served stale.
+
+    Non-fatal and **never silently empty**: any failure returns `{}` and logs a
+    WARNING naming the repo, the ref and the reason.
+    """
+    metadata, reason = _fetch_template_yaml_result(repo, pat or "", ref)
+    if reason:
+        logger.warning(
+            "Could not read template.yaml for %s (ref=%s): %s — the template's "
+            "declared schedules will not be materialized. Common causes: the "
+            "resolved GitHub token cannot read this repo, or an anonymous "
+            "(tokenless) request hit GitHub's rate limit.",
+            _sanitize_for_warning(repo),
+            _sanitize_for_warning(ref or "default"),
+            reason,
+        )
         return {}
+    if not isinstance(metadata, dict):
+        logger.warning(
+            "template.yaml for %s (ref=%s) is a %s, not a mapping — ignoring it",
+            _sanitize_for_warning(repo),
+            _sanitize_for_warning(ref or "default"),
+            _type_name(metadata),
+        )
+        return {}
+    return metadata
 
 
 def _get_github_pat() -> str:
@@ -329,6 +403,31 @@ def _template_credential_errors(block, template_id: str) -> List[str]:
     return errors
 
 
+def _template_schedules(block, template_id: str) -> tuple:
+    """Normalized declared `schedules:` + named errors for a catalog entry.
+
+    Exactly one WARNING per malformed template, naming the id — the same
+    contract as `_template_credential_errors`. The entry still lists: a broken
+    `schedules:` block costs that template its schedule metadata, not its place
+    in the catalog (the ent#128 / #1835 rule).
+
+    The catalog surfaces the **normalized** list rather than the raw block
+    (unlike `data_paths`, which is surfaced raw). Normalizing here is what makes
+    it safe for the frontend to render — every entry is a mapping with
+    type-checked, bounded, cron-validated fields — and it matches the sibling
+    `credential_mcp_server_names`. (trinity-enterprise#89)
+    """
+    errors = schedule_shape_errors(block)
+    if errors:
+        logger.warning(
+            "Template %s has a malformed `schedules:` block (%d problem(s)): %s",
+            _sanitize_for_warning(template_id),
+            len(errors),
+            "; ".join(errors),
+        )
+    return normalize_declared_schedules(block), errors
+
+
 def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> dict:
     """Build a full template dict from repo + fetched metadata + optional admin overrides.
 
@@ -368,6 +467,10 @@ def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> d
     # git_service, which imports database/docker modules at module load.
     from services.git_service import DEFAULT_PERSISTENT_STATE
 
+    schedules, schedule_errors = _template_schedules(
+        metadata.get("schedules"), f"github:{repo}"
+    )
+
     return {
         "id": f"github:{repo}",
         "display_name": display_name,
@@ -400,6 +503,14 @@ def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> d
         # `.trinity/data-paths.yaml` + the per-agent .gitignore at creation.
         # Opt-in — defaults to an empty list when the template omits the key.
         "data_paths": metadata.get("data_paths", []),
+        # Declared `schedules:` (trinity-enterprise#89), normalized. Surfaced by
+        # BOTH builders — the pre-existing asymmetry (`persistent_state` is
+        # surfaced only here) means parity cannot be assumed. This is the
+        # CATALOG surface; creation reads its own fresh copy, because this one
+        # is fetched with the global PAT off the default branch (see
+        # `fetch_template_metadata_for_create`).
+        "schedules": schedules,
+        "schedule_errors": schedule_errors,
         # trinity-enterprise#93: fork-to-own declaration. 'required' makes
         # creation demand a user-owned destination repo (crud enforces it —
         # the copy lands there and origin points at it). Also drives the
@@ -521,6 +632,9 @@ def _build_local_template(template_dir: Path) -> Optional[dict]:
 
     name = template_dir.name
     credentials_block = data.get("credentials")
+    schedules, schedule_errors = _template_schedules(
+        data.get("schedules"), f"local:{name}"
+    )
     return {
         "id": f"local:{name}",
         "display_name": data.get("display_name") or data.get("name") or name,
@@ -555,7 +669,31 @@ def _build_local_template(template_dir: Path) -> Optional[dict]:
         "use_cases": data.get("use_cases", []),
         # Opt-in runtime-data declaration (#1169); defaults to empty.
         "data_paths": data.get("data_paths", []),
+        # Declared `schedules:` (trinity-enterprise#89), normalized. See
+        # `_build_template` — both builders surface this, deliberately.
+        "schedules": schedules,
+        "schedule_errors": schedule_errors,
     }
+
+
+def _safe_build_github_template(
+    repo: str, metadata: dict, admin_override: dict = None
+) -> Optional[dict]:
+    """`_build_template` behind the same per-template fence the local path has.
+
+    ent#128 PR-A fenced `_build_local_template` only; both GitHub call sites
+    below were bare list comprehensions, so ANY raise inside the untrusted
+    GitHub builder 500s the entire GitHub half of `GET /api/templates`. The
+    tolerant readers are the real fix; this guarantees the property they buy —
+    one malformed template costs *itself*, never the catalog — survives a
+    future field being reached through without a guard.
+    (trinity-enterprise#89, closing the gap #1835 left open.)
+    """
+    try:
+        return _build_template(repo, metadata, admin_override)
+    except Exception:  # noqa: BLE001
+        logger.exception("Skipping GitHub template %s: failed to build entry", repo)
+        return None
 
 
 def get_local_templates() -> List[dict]:
@@ -652,15 +790,25 @@ def get_all_templates() -> List[dict]:
         repos = [e["github_repo"] for e in db_entries]
         all_metadata = _fetch_all_metadata(repos)
         github = [
-            _build_template(e["github_repo"], all_metadata.get(e["github_repo"], {}), e)
-            for e in db_entries
+            entry
+            for entry in (
+                _safe_build_github_template(
+                    e["github_repo"], all_metadata.get(e["github_repo"], {}), e
+                )
+                for e in db_entries
+            )
+            if entry is not None
         ]
     else:
         # Defaults
         all_metadata = _fetch_all_metadata(DEFAULT_GITHUB_TEMPLATE_REPOS)
         github = [
-            _build_template(repo, all_metadata.get(repo, {}))
-            for repo in DEFAULT_GITHUB_TEMPLATE_REPOS
+            entry
+            for entry in (
+                _safe_build_github_template(repo, all_metadata.get(repo, {}))
+                for repo in DEFAULT_GITHUB_TEMPLATE_REPOS
+            )
+            if entry is not None
         ]
 
     return local + github
