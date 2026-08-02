@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_1870_completed_turn_recovery.py",
+      "feature": "#1870",
+      "added": "2026-08-02",
+      "categories": [
+        "agent-server",
+        "unit",
+        "reliability",
+        "recovery"
+      ],
+      "description": "Completed-turn recovery on error_during_execution (#1870): the runtime reports a finished turn as failed when a background subagent's <task-notification> lands after stop_reason=end_turn. Drives the REAL _finalize_headless_result against a committed REAL captured CC 2.1.220 transcript tail (tests/unit/fixtures/). Covers the reproduction; the message.id-group rule with fail-closed no-text (the E1 pin - 40.6% of real markers are thinking-only, so a window rule returns narration without the answer as a 200 the moment the tail line drops); 17 boundary shapes A-Q incl. the isSidechain/isMeta sub-thread gate, the since_iso staleness guard on both ends, and last-qualifying-must-itself-be-end_turn strictness; truncation; hostile session ids + malformed records; exception isolation (502 not 500); replace-not-append; the Option C signals (recovered_terminal kept SEPARATE from recovered_from_jsonl, the recovery notice, {{previous_response}} flow); sanitization; and decline-reason logging."
+    },
+    {
       "file": "unit/test_77_webhook_signature.py",
       "feature": "trinity-enterprise#77",
       "added": "2026-07-06",

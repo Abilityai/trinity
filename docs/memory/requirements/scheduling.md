@@ -126,6 +126,98 @@
   - `src/backend/config.py` — env-var read of the two new knobs
   - `docker-compose.yml` — env-var pass-through for backend service
 
+### 10.4.3 Completed-Turn Recovery on `error_during_execution` (#1870)
+- **Status**: ✅ Implemented (2026-08-02)
+- **GitHub Issue**: #1870
+- **Description**: Claude Code can report a `result` line with `is_error: true` /
+  `subtype: error_during_execution` for a turn that actually **finished**. The
+  reproduction is a fan-out turn: the model reaches `stop_reason: end_turn`, a
+  background subagent's `<task-notification>` lands *after* it, the follow-on turn
+  is interrupted, and the CLI's terminal-state check sees a non-terminal last
+  message — so it reports the whole turn as failed
+  (`[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null`).
+  `_finalize_headless_result` treated that as terminal and raised HTTP 502,
+  discarding a complete assistant answer that was sitting on disk. Observed 4× in
+  ~30 runs of one schedule. The existing #678 recovery could not be reused: its
+  boundary walk anchors on the newest string-content user record, and the trailing
+  `<task-notification>` **is** one — so the boundary lands *past* the completed
+  answer and the forward scan returns nothing. The notification is inside any
+  plausible time window, so adding a `since` parameter would not have helped
+  either; the boundary rule itself was the defect.
+- **Key Features**:
+  - New additive recovery surface
+    `jsonl_recovery._recover_completed_turn_from_jsonl(session_id, since_iso)`,
+    consulted from inside the existing `execution_error` branch via
+    `headless_executor._try_recover_completed_turn(ctx)`. On a hit the recovered
+    text becomes the response and the turn returns **200 / SUCCESS**; on a miss the
+    502 is unchanged. `_recover_response_from_jsonl` (#678) is **not modified**.
+  - **Three independent gates, all required** — *main-thread only* × *turn-scoped* ×
+    *finished*. "Finished" is on-disk `message.stop_reason == "end_turn"`, and the
+    **last** qualifying assistant record must *itself* carry it (an interrupted
+    mid-tool thread cannot be rescued by an earlier marker). `max_tokens` and
+    `stop_sequence` are rejected. Sub-thread records (`isSidechain` / `isMeta`) are
+    excluded from marker selection, the boundary walk **and** text collection — a
+    subagent's `end_turn` plus its string-content prompt otherwise satisfy both the
+    marker and boundary tests, so a crashed main thread would return 200 carrying a
+    subagent's internal thought.
+  - **The recovered answer is the marker message's `message.id` group, fail-closed
+    when that group holds no text** — never a text window ending at the marker. A
+    thinking-enabled final message is written as *two* records sharing one
+    `message.id` (`thinking` then `text`), and **both** carry `end_turn`; measured
+    over 1,075 real transcripts, **40.6% of markers are thinking-only**.
+    `_read_jsonl_records` drops the final partial line on an interrupted write —
+    and this bug *is* the interrupted-tail case — so a window rule would silently
+    store the turn's narration *without* the answer as a 200 SUCCESS, with no error
+    and no retry. Grouping by `message.id` is also exactly `result_text` semantics,
+    so a recovered response is the same artifact a clean success stores.
+  - **Staleness guard**: the marker's timestamp must parse and fall within
+    `[task_start_iso, now + 300s]`. Without the lower bound, an aborted turn on a
+    `--resume` session would recover the *previous* turn's answer as this turn's
+    success. The upper bound exists because `task_start_iso` is a naive-UTC value
+    stamped `Z`, so a container clock ahead of UTC would fail **open**. An
+    unparseable `since_iso` declines.
+  - **Distinguishing signals — a recovered turn is SUCCESS but never
+    indistinguishable from a clean one.** (1) `ExecutionMetadata.recovered_terminal`
+    (agent-side, additive, defaulted) is the machine-readable marker, deliberately
+    **separate** from `recovered_from_jsonl`, which #678 already sets whenever mere
+    *telemetry* is back-filled from disk — overloading it would make "a reported
+    failure became a success" unmeasurable. Both are set on recovery. (2) A
+    `_RECOVERY_NOTICE` line is prepended to the response so an operator reading the
+    deliverable cannot mistake it; it names the partial-checkpoint risk explicitly,
+    because a recovered answer can legitimately be a mid-turn checkpoint rather than
+    the final deliverable. The notice is part of the stored response and therefore
+    flows into loop templating (`{{previous_response}}`) and fan-out joins — that is
+    deliberate and pinned by test.
+  - **Observability in both directions**: a hit logs
+    `event=completed_turn_recovered_from_jsonl`; **every** decline logs
+    `event=completed_turn_recovery_declined reason=<no_since_iso|file_missing|
+    no_session_id|invalid_session_id|no_records|no_marker|stale_marker|
+    sub_thread_only|no_boundary|no_text|exception>`. A fail-closed gate that
+    silently stops firing is otherwise indistinguishable from "the bug never
+    happened". Logs carry session id and character counts only, never the text.
+  - Recovery is scoped to `error_type == "execution_error"` only; `rate_limit` /
+    `max_turns` / `authentication_failed` short-circuit above it and are unaffected.
+    A recovery exception degrades to today's 502, never a 500.
+- **⚠️ Coverage bound — permanent, with no fallback**: this reads a JSONL that only
+  exists when session persistence is on. `headless_executor` auto-enables it for
+  `timeout_seconds > 600` only, and `task_execution_service.execute_task` never
+  passes `persist_session=True` — so **every schedule or webhook whose agent has
+  `execution_timeout_seconds <= 600` writes no JSONL and #1870 remains unfixed for
+  it, silently.** There is no in-memory alternative: stream-json carries no
+  completion signal (`message.stop_reason` measured `None` in 179/179 real
+  assistant records, versus 99.96% populated on disk). **The only operator lever is
+  raising the agent's execution timeout above 600s** (`PUT /api/agents/{name}/timeout`,
+  §10.7). When diagnosing "the fix isn't firing", check for
+  `event=jsonl_persistence_auto_enabled` in the agent's logs *first* — its absence is
+  the answer, not a gate problem.
+- **Rollout**: the change is inside `trinity-agent-base`. A running fleet keeps
+  discarding completed turns until `./scripts/deploy/build-base-image.sh` runs **and
+  each agent is cold-recreated** (a plain restart does not always adopt, #1809).
+- **Files**:
+  - `docker/base-image/agent_server/services/jsonl_recovery.py` — `_recover_completed_turn_from_jsonl`, `_is_main_thread`, `_is_before`
+  - `docker/base-image/agent_server/services/headless_executor.py` — `_try_recover_completed_turn`, `_RECOVERY_NOTICE`, the `execution_error` branch
+  - `docker/base-image/agent_server/models.py` — `ExecutionMetadata.recovered_terminal`
+
 ### 10.5 Model Selection for Tasks & Schedules (MODEL-001)
 - **Status**: ✅ Implemented (2026-03-02)
 - **Description**: Select which Claude model to use for task execution and scheduled runs
