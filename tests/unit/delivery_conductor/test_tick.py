@@ -48,7 +48,7 @@ from delivery_conductor.executor import (
     JsonLinesCapabilityExecutor,
 )
 from delivery_conductor.ledger import ControlLedger, EffectResult, StaleLeaseError
-from delivery_conductor.tick import DeliveryConductorTick
+from delivery_conductor.tick import DeliveryConductorTick, TickCorrelationError
 
 
 NOW = datetime(2026, 8, 2, 9, 10, 11, tzinfo=timezone.utc)
@@ -865,8 +865,37 @@ def test_wrong_reminder_confirmation_cannot_acknowledge(
     with pytest.raises(ValueError, match="correl"):
         runner.accept_result(
             prepared.handoff,
-            action_key="reminder:other",
+            action_key="reminder-other",
             result=EffectResult("completed", "e" * 64, "reminder-established"),
+        )
+    assert _fetchall(database_path, "SELECT status FROM action_journal") == [
+        ("reserved",)
+    ]
+    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [("pending",)]
+
+
+@pytest.mark.parametrize("reason_code", ("bad:reason", "r" * 129))
+def test_result_reason_uses_projection_safe_identifier_before_ledger_mutation(
+    ledger: ControlLedger,
+    database_path: Path,
+    reason_code: str,
+):
+    runner = DeliveryConductorTick(
+        ledger=ledger,
+        adapter=FakeAdapter(_decision("execute", action=_action())),
+        installed_capabilities=frozenset({"chat"}),
+        lease_seconds=60,
+    )
+    prepared = runner.run(
+        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    )
+    assert prepared.handoff is not None
+
+    with pytest.raises(TickCorrelationError, match="sanitized identifier"):
+        runner.accept_result(
+            prepared.handoff,
+            action_key="action-1",
+            result=EffectResult("completed", "e" * 64, reason_code),
         )
 
     assert _fetchall(database_path, "SELECT status FROM action_journal") == [
@@ -898,7 +927,7 @@ def test_ambiguous_action_is_terminal_and_leaves_wake_for_reminder_only_tick(
     assert ambiguous.action is None
     assert ambiguous.handoff is None
     assert ambiguous.reminder == ReminderSpec(
-        "investigate:action-1",
+        "investigate-action-1",
         "2026-08-02T09:15:11Z",
         "result-unknown",
     )
@@ -1174,7 +1203,7 @@ def test_ambiguous_result_reserves_stable_executable_reminder_before_release(
     assert recovered.reminder.due_at_utc == "2026-08-02T09:15:11Z"
     payload = json.loads(recovered.action.payload_json)
     assert payload["references"]["identifiers"] == [
-        "investigate:action-1",
+        "investigate-action-1",
         "action-1",
     ]
     assert payload["references"]["utc_timestamp"] == "2026-08-02T09:15:11Z"

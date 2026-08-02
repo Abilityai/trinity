@@ -32,3 +32,16 @@ conductor:
   capability_tool_map:
     chat: mcp__trinity__chat_with_agent
     reminders: mcp__trinity__set_reminder
+  wake_provenance:
+    trust_boundary: model-mediated-system-prompt
+    execution_id_env: TRINITY_EXECUTION_ID
+    digest_domain: delivery-conductor-wake-v1
+    trigger_source_map:
+      manual: direct
+      chat: direct
+      schedule: schedule
+      reminder: reminder
+      event: worker-completion
+    worker_event_types:
+      - agent.task.completed
+      - agent.task.failed

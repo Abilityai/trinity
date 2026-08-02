@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+from os import environ
 from pathlib import Path
-import re
 import sqlite3
 import stat
 import subprocess
@@ -32,6 +32,7 @@ from .contracts import (
     Wake,
 )
 from .ledger import ControlLedger, EffectResult, Lease
+from .identifiers import is_safe_identifier
 from .projection import publish_current_projection
 from .safety import (
     SafetyController,
@@ -43,7 +44,12 @@ from .safety import (
     parse_safety_policy_json,
     serialize_safety_policy_request,
 )
-from .tick import DeliveryConductorTick, TickHandoff, TickResult
+from .tick import (
+    DeliveryConductorTick,
+    TickHandoff,
+    TickResult,
+    is_runtime_decision_safe,
+)
 from .wakes import normalize_wake
 
 
@@ -52,7 +58,18 @@ _DATABASE_RELATIVE_PATH = Path("data/delivery-conductor/control.sqlite3")
 _ADAPTER_FILENAME = "adapter.py"
 _ADAPTER_DEADLINE_SECONDS = 5.0
 _LEASE_SECONDS = 300
-_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+_RUNTIME_TRIGGER_SOURCES = MappingProxyType(
+    {
+        "manual": "direct",
+        "chat": "direct",
+        "schedule": "schedule",
+        "reminder": "reminder",
+    }
+)
+_WORKER_EVENT_TYPES = frozenset(
+    {"agent.task.completed", "agent.task.failed"}
+)
+_WAKE_DIGEST_DOMAIN = b"delivery-conductor-wake-v1"
 
 CAPABILITY_TOOL_MAP = MappingProxyType(
     {
@@ -133,16 +150,96 @@ def parse_cli_input(message: str) -> CliInput:
         fence_token = value["fence_token"]
         if type(fence_token) is not int or fence_token <= 0:
             raise CliValidationError("fence_token must be a positive integer")
+        reason_code = _required_string(value, "reason_code")
+        _identifier("reason_code", reason_code)
         try:
             result = EffectResult(
                 _required_string(value, "status"),  # type: ignore[arg-type]
                 _required_string(value, "result_sha256"),
-                _required_string(value, "reason_code"),
+                reason_code,
             )
         except ValueError as error:
             raise CliValidationError("record-result input is invalid") from error
         return RecordResultInput(action_key, fence_token, result)
     raise CliValidationError("operation is not supported")
+
+
+def build_runtime_prepare_message(
+    provenance_message: str,
+    runtime_execution_id: str,
+) -> str:
+    """Derive one internal wake from the model-visible trusted runtime context.
+
+    The launcher boundary intentionally accepts provenance rather than a caller-
+    selected wake digest. This is a consistency check inside the template's
+    explicit model-mediated trust boundary, not cryptographic authentication:
+    the model reads Trinity's trusted system-prompt context and must not replace
+    its inherited environment. The current execution ID must match that env.
+    Worker-completion uses the distinct backend-generated event ID so separate
+    terminal events from one worker do not collapse into one wake.
+    """
+    value = _parse_one_json_line(provenance_message)
+    _require_keys(
+        value,
+        {
+            "schema_version",
+            "triggered_by",
+            "execution_id",
+            "event_type",
+            "event_id",
+        },
+        "runtime provenance",
+    )
+    _require_schema_version(value)
+    _identifier("runtime_execution_id", runtime_execution_id)
+    execution_id = _required_string(value, "execution_id")
+    _identifier("execution_id", execution_id)
+    if execution_id != runtime_execution_id:
+        raise CliValidationError("runtime provenance does not match the execution")
+    triggered_by = _required_string(value, "triggered_by")
+
+    event_type = value["event_type"]
+    event_id = value["event_id"]
+    if triggered_by == "event":
+        if event_type not in _WORKER_EVENT_TYPES:
+            raise CliValidationError("runtime event type is not supported")
+        event_id = _identifier("event_id", event_id)
+        source = "worker-completion"
+        source_event_id = event_id
+    else:
+        source = _RUNTIME_TRIGGER_SOURCES.get(triggered_by)
+        if source is None:
+            raise CliValidationError("runtime trigger is not supported")
+        if event_type is not None or event_id is not None:
+            raise CliValidationError("non-event provenance cannot carry event fields")
+        source_event_id = execution_id
+
+    payload_sha256 = hashlib.sha256(
+        b"\0".join(
+            (
+                _WAKE_DIGEST_DOMAIN,
+                source.encode("ascii"),
+                source_event_id.encode("ascii"),
+                triggered_by.encode("ascii"),
+                (event_type or "").encode("ascii"),
+            )
+        )
+    ).hexdigest()
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "operation": "prepare",
+            "wake": {
+                "source": source,
+                "source_event_id": source_event_id,
+                "payload_sha256": payload_sha256,
+            },
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    )
 
 
 def guard_agent_workspace(
@@ -414,7 +511,10 @@ class _FixedWorkspaceAdapter(PolicyAdapterPort):
             ) from error
 
     def observe_and_decide(self, request: AdapterRequest) -> AdapterDecision:
-        return self._decision_adapter.observe_and_decide(request)
+        decision = self._decision_adapter.observe_and_decide(request)
+        if not _is_cli_adapter_decision_safe(decision):
+            raise CliValidationError("fixed adapter decision is invalid")
+        return decision
 
     def _new_exchange(self) -> _ProcessJsonLinesExchange:
         return _ProcessJsonLinesExchange(
@@ -507,6 +607,39 @@ class _ProcessJsonLinesExchange:
 class _NeverPolicyAdapter:
     def observe_and_decide(self, request: AdapterRequest) -> AdapterDecision:
         raise RuntimeError("record-result cannot observe policy")
+
+
+def _is_cli_adapter_decision_safe(decision: AdapterDecision) -> bool:
+    if not is_runtime_decision_safe(decision):
+        return False
+    if decision.next_reminder is not None:
+        try:
+            due_at = _parse_utc(decision.next_reminder.due_at_utc)
+        except CliValidationError:
+            return False
+        if decision.next_reminder.due_at_utc not in {
+            _utc_seconds(due_at),
+            _utc_text(due_at),
+        }:
+            return False
+    if decision.decision != "execute":
+        return True
+    action = decision.proposed_action
+    if action is None or action.capability_name != "chat":
+        return False
+    try:
+        payload = json.loads(action.payload_json)
+    except json.JSONDecodeError:
+        return False
+    if not (
+        isinstance(payload, dict)
+        and set(payload) in ({"identifier"}, {"identifier", "references"})
+        and payload.get("identifier") == decision.target_id
+        and is_safe_identifier(payload.get("identifier"))
+    ):
+        return False
+    message_limit = 3400 if decision.next_reminder is not None else 4000
+    return len(_canonical_effect_message(action, payload)) <= message_limit
 
 
 def _initialize_cli_state(database_path: Path) -> None:
@@ -1046,7 +1179,7 @@ def _pending_reminder(
             ).encode("utf-8")
         ).hexdigest()
         expected_action_key = (
-            "reminder:"
+            "reminder-"
             + hashlib.sha256(reminder.reminder_id.encode("utf-8")).hexdigest()
         )
         if (
@@ -1141,20 +1274,26 @@ def _prepare_output(result: TickResult) -> dict[str, object]:
     action = result.action
     handoff = result.handoff
     reminder = result.reminder
+    effect_tool = None
+    effect_arguments = None
+    if action is not None:
+        if handoff is None or handoff.action != action:
+            raise CliValidationError("prepared action is missing its durable handoff")
+        effect_tool = resolve_effect_tool(action.capability_name)
+        effect_arguments = _effect_arguments(action, handoff, reminder)
     return {
         "schema_version": 1,
         "operation": "prepare",
         "status": result.status,
         "reason_code": result.reason_code,
-        "effect_tool": None
-        if action is None
-        else resolve_effect_tool(action.capability_name),
+        "effect_tool": effect_tool,
+        "effect_arguments": effect_arguments,
         "action": None
         if action is None
         else {
             "capability_name": action.capability_name,
             "action_key": action.action_key,
-            "payload": json.loads(action.payload_json),
+            "payload_sha256": handoff.payload_sha256,
             "target_revision": action.target_revision,
             "invalidation_class": action.invalidation_class,
         },
@@ -1166,6 +1305,98 @@ def _prepare_output(result: TickResult) -> dict[str, object]:
         },
         "reminder": _reminder_output(reminder),
     }
+
+
+def _effect_arguments(
+    action: ProposedAction,
+    handoff: TickHandoff,
+    reminder: ReminderSpec | None,
+) -> dict[str, str]:
+    try:
+        references = json.loads(action.payload_json)
+    except json.JSONDecodeError as error:
+        raise CliValidationError("prepared action payload is invalid") from error
+    if not isinstance(references, dict):
+        raise CliValidationError("prepared action payload is invalid")
+    payload_sha256 = hashlib.sha256(action.payload_json.encode("utf-8")).hexdigest()
+    if payload_sha256 != handoff.payload_sha256:
+        raise CliValidationError("prepared action digest does not match its handoff")
+    message = _canonical_effect_message(action, references)
+    if not 1 <= len(message) <= 4000:
+        raise CliValidationError("prepared effect message is outside tool bounds")
+
+    if action.capability_name == "chat":
+        if set(references) not in ({"identifier"}, {"identifier", "references"}):
+            raise CliValidationError("chat action payload must use the closed schema")
+        agent_name = _identifier("agent_name", references.get("identifier"))
+        arguments = {"agent_name": agent_name, "message": message}
+    elif action.capability_name == "reminders":
+        if set(references) != {"digest", "references"}:
+            raise CliValidationError("reminder action payload must use the closed schema")
+        if reminder is None or handoff.reminder != reminder:
+            raise CliValidationError("reminder action is missing its durable due time")
+        _parse_utc(reminder.due_at_utc)
+        arguments = {"message": message, "fire_at": reminder.due_at_utc}
+    else:
+        raise CliValidationError("prepared effect capability is not supported")
+    _validate_effect_arguments(action, payload_sha256, references, arguments)
+    return arguments
+
+
+def _canonical_effect_message(
+    action: ProposedAction,
+    references: dict[str, object],
+) -> str:
+    return json.dumps(
+        {
+            "action_key": action.action_key,
+            "payload_sha256": hashlib.sha256(
+                action.payload_json.encode("utf-8")
+            ).hexdigest(),
+            "references": references,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
+def _validate_effect_arguments(
+    action: ProposedAction,
+    payload_sha256: str,
+    references: dict[str, object],
+    arguments: dict[str, str],
+) -> None:
+    expected_keys = {
+        "chat": {"agent_name", "message"},
+        "reminders": {"message", "fire_at"},
+    }.get(action.capability_name)
+    if expected_keys is None or set(arguments) != expected_keys:
+        raise CliValidationError("effect arguments do not use the closed tool schema")
+    message = arguments.get("message")
+    if not isinstance(message, str) or not 1 <= len(message) <= 4000:
+        raise CliValidationError("effect arguments contain an invalid message")
+    try:
+        message_value = json.loads(message, object_pairs_hook=_reject_duplicate_keys)
+    except json.JSONDecodeError as error:
+        raise CliValidationError("effect message is invalid") from error
+    if not isinstance(message_value, dict) or set(message_value) != {
+        "action_key",
+        "payload_sha256",
+        "references",
+    }:
+        raise CliValidationError("effect message must use the closed schema")
+    if message_value != {
+        "action_key": action.action_key,
+        "payload_sha256": payload_sha256,
+        "references": references,
+    }:
+        raise CliValidationError("effect message does not match durable action state")
+    if action.capability_name == "chat":
+        _identifier("agent_name", arguments.get("agent_name"))
+    else:
+        _parse_utc(arguments.get("fire_at", ""))
 
 
 def _record_output(result: TickResult, fence_token: int) -> dict[str, object]:
@@ -1267,7 +1498,7 @@ def _safety_event_key(kind: str, identity: str, fence_token: int) -> str:
     digest = hashlib.sha256(
         f"{kind}:{identity}:{fence_token}".encode("utf-8")
     ).hexdigest()
-    return f"{kind}:{digest}"
+    return f"{kind}-{digest}"
 
 
 def _parse_one_json_line(message: str) -> dict[str, Any]:
@@ -1316,9 +1547,10 @@ def _required_string(value: dict[str, Any], field: str) -> str:
     return item
 
 
-def _identifier(name: str, value: object) -> None:
-    if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
+def _identifier(name: str, value: object) -> str:
+    if not is_safe_identifier(value):
         raise CliValidationError(f"{name} must be a sanitized identifier")
+    return value
 
 
 def _parse_utc(value: str) -> datetime:
@@ -1389,6 +1621,11 @@ def main(argv: list[str] | None = None) -> int:
     message = sys.stdin.buffer.read(MAX_MESSAGE_BYTES + 2)
     try:
         decoded = message.decode("utf-8")
+        if arguments == []:
+            decoded = build_runtime_prepare_message(
+                decoded,
+                environ.get("TRINITY_EXECUTION_ID", ""),
+            )
         parsed = parse_cli_input(decoded)
         if arguments == ["record-result"] and not isinstance(parsed, RecordResultInput):
             raise CliValidationError("command does not match the input operation")

@@ -13,6 +13,7 @@ import sqlite3
 from typing import Any, Callable, Iterator, Literal, Mapping
 
 from .contracts import BudgetView, MAX_MESSAGE_BYTES, Wake
+from .identifiers import is_safe_identifier
 
 
 BreakerState = Literal["closed", "open"]
@@ -27,7 +28,6 @@ SafetyEventKind = Literal[
     "transient-failure",
 ]
 
-_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _EVENT_KINDS = frozenset(
     {
@@ -1009,7 +1009,7 @@ class SafetyController:
             ).hexdigest()
             self._insert_event(
                 connection,
-                f"{kind}:{digest}",
+                f"{kind}-{digest}",
                 kind,
                 event_scope,
                 now_text,
@@ -1307,7 +1307,7 @@ def _require_scope(scope: object) -> SafetyScope:
 
 
 def _validate_identifier(name: str, value: object) -> None:
-    if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
+    if not is_safe_identifier(value):
         raise SafetyValidationError(f"{name} must be a sanitized identifier")
 
 

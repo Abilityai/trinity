@@ -5,9 +5,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import hashlib
 import hmac
 import json
 from pathlib import Path
+import re
 import secrets
 import sqlite3
 import sys
@@ -30,6 +32,7 @@ import delivery_conductor.cli as cli_module
 from delivery_conductor.cli import (
     CliCorrelationError,
     CliValidationError,
+    build_runtime_prepare_message,
     guard_agent_workspace,
     parse_cli_input,
     resolve_effect_tool,
@@ -133,6 +136,44 @@ def _prepare_message(
     )
 
 
+def _runtime_provenance(
+    triggered_by: str,
+    execution_id: str,
+    *,
+    event_type: str | None = None,
+    event_id: str | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "triggered_by": triggered_by,
+            "execution_id": execution_id,
+            "event_type": event_type,
+            "event_id": event_id,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _provenance_digest(
+    source: str,
+    source_event_id: str,
+    triggered_by: str,
+    event_type: str | None,
+) -> str:
+    payload = b"\0".join(
+        (
+            b"delivery-conductor-wake-v1",
+            source.encode("ascii"),
+            source_event_id.encode("ascii"),
+            triggered_by.encode("ascii"),
+            (event_type or "").encode("ascii"),
+        )
+    )
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _record_message(
     prepared: dict[str, object],
     *,
@@ -166,6 +207,12 @@ def _write_fixed_adapter(
     decision: str = "execute",
     reminder: bool = False,
     invalidation_class: str = "delivery-intent",
+    run_id: str = "run-1",
+    action_key: str | None = None,
+    target_id: str = "target-1",
+    payload_identifier: str = "target-1",
+    capability_name: str = "chat",
+    payload_references: object | None = None,
 ) -> Path:
     workspace.mkdir(parents=True, exist_ok=True)
     effective = limits or _limits()
@@ -176,11 +223,14 @@ def _write_fixed_adapter(
     policy = {
         "schema_version": 1,
         "kind": "safety-policy",
-        "run_id": "run-1",
+        "run_id": run_id,
         "issue_id": "issue-1",
         "signature": "signature-1",
         "ceilings": ceilings,
     }
+    action_payload: dict[str, object] = {"identifier": payload_identifier}
+    if payload_references is not None:
+        action_payload["references"] = payload_references
     source = f"""from __future__ import annotations
 import json
 import sys
@@ -197,16 +247,16 @@ else:
         "observed_revision": "revision-1",
         "decision": "execute" if execute else "noop",
         "reason_code": "work-ready" if execute else "no-work",
-        "target_id": "target-1" if execute else None,
+        "target_id": {target_id!r} if execute else None,
         "proposed_action": {{
-            "capability_name": "chat",
-            "action_key": "action:" + event_id,
-            "payload": {{"identifier": "target-1"}},
+            "capability_name": {capability_name!r},
+            "action_key": {action_key!r} or "action-" + event_id,
+            "payload": {action_payload!r},
             "target_revision": "revision-1",
             "invalidation_class": {invalidation_class!r},
         }} if execute else None,
         "next_reminder": {{
-            "reminder_id": "reminder:" + event_id,
+            "reminder_id": "reminder-" + event_id,
             "due_at_utc": "2026-08-02T12:30:00Z",
             "reason_code": "follow-up",
         }} if execute and {reminder!r} else None,
@@ -413,7 +463,7 @@ def test_usage_is_reconciled_from_the_durable_ledger_across_restarts(tmp_path: P
         wake.wake_id,
         scope,
         NOW,
-        action_key="action:cost-1",
+        action_key="action-cost-1",
         result_status="completed",
         result_sha256="7" * 64,
         reason_code="completed",
@@ -455,7 +505,7 @@ def test_cost_reconciliation_uses_durable_result_time_across_utc_midnight(
         wake.wake_id,
         scope,
         dispatched_at,
-        action_key="action:midnight-cost",
+        action_key="action-midnight-cost",
         result_status="completed",
         result_sha256="7" * 64,
         reason_code="completed",
@@ -615,7 +665,7 @@ def test_issue_and_daily_cost_limits_use_ledger_usage(
         wake.wake_id,
         scope,
         NOW,
-        action_key=f"action:cost-{limit_field}",
+        action_key=f"action-cost-{limit_field}",
         result_status="completed",
         result_sha256="7" * 64,
         reason_code="completed",
@@ -1034,6 +1084,137 @@ def test_cli_input_is_one_closed_bounded_utc_json_object(message: str):
         parse_cli_input(message)
 
 
+@pytest.mark.parametrize(
+    ("triggered_by", "source", "source_event_id", "event_type", "event_id"),
+    (
+        ("manual", "direct", "exec-manual-1", None, None),
+        ("chat", "direct", "exec-chat-1", None, None),
+        ("schedule", "schedule", "exec-schedule-1", None, None),
+        ("reminder", "reminder", "exec-reminder-1", None, None),
+        (
+            "event",
+            "worker-completion",
+            "evt-worker-1",
+            "agent.task.completed",
+            "evt-worker-1",
+        ),
+        (
+            "event",
+            "worker-completion",
+            "evt-worker-2",
+            "agent.task.failed",
+            "evt-worker-2",
+        ),
+    ),
+)
+def test_runtime_provenance_builds_one_deterministic_closed_wake(
+    triggered_by: str,
+    source: str,
+    source_event_id: str,
+    event_type: str | None,
+    event_id: str | None,
+):
+    """Trusted prompt provenance maps to one wake without persisting prompt text."""
+    execution_id = f"exec-{triggered_by}-1"
+    message = build_runtime_prepare_message(
+        _runtime_provenance(
+            triggered_by,
+            execution_id,
+            event_type=event_type,
+            event_id=event_id,
+        ),
+        execution_id,
+    )
+
+    parsed = parse_cli_input(message)
+
+    assert parsed.wake.source == source
+    assert parsed.wake.source_event_id == source_event_id
+    assert parsed.wake.payload_sha256 == _provenance_digest(
+        source,
+        source_event_id,
+        triggered_by,
+        event_type,
+    )
+    assert "prompt" not in message
+    assert "message" not in message
+
+
+@pytest.mark.parametrize(
+    ("message", "runtime_execution_id"),
+    (
+        (_runtime_provenance("mcp", "exec-1"), "exec-1"),
+        (_runtime_provenance("retry", "exec-1"), "exec-1"),
+        (_runtime_provenance("event", "exec-1"), "exec-1"),
+        (
+            _runtime_provenance(
+                "event",
+                "exec-1",
+                event_type="custom.event",
+                event_id="evt-1",
+            ),
+            "exec-1",
+        ),
+        (
+            _runtime_provenance(
+                "event",
+                "exec-1",
+                event_type="agent.task.completed",
+                event_id=None,
+            ),
+            "exec-1",
+        ),
+        (_runtime_provenance("schedule", "forged-exec"), "exec-1"),
+        (_runtime_provenance("schedule", "exec-1"), ""),
+        (
+            '{"schema_version":1,"triggered_by":"schedule",'
+            '"execution_id":"exec-1","event_type":null,"event_id":null,'
+            '"extra":"forbidden"}',
+            "exec-1",
+        ),
+    ),
+)
+def test_runtime_provenance_rejects_missing_unsupported_or_mismatched_context(
+    message: str,
+    runtime_execution_id: str,
+):
+    """Unsupported triggers and incomplete worker events fail before a wake exists."""
+    with pytest.raises(CliValidationError):
+        build_runtime_prepare_message(message, runtime_execution_id)
+
+
+@pytest.mark.parametrize("poisoned", ("bad:reason", "r" * 129))
+def test_record_result_reason_identifier_is_rejected_before_state_mutation(
+    tmp_path: Path,
+    poisoned: str,
+):
+    """A projection-incompatible result reason cannot reach checkpoint state."""
+    workspace = tmp_path / "workspace"
+    _write_fixed_adapter(workspace)
+    prepared = run_cli(
+        _prepare_message("direct", "result-reason-poison"),
+        workspace,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(CliValidationError):
+        run_cli(
+            _record_message(prepared, reason_code=poisoned),
+            workspace,
+            clock=lambda: NOW + timedelta(seconds=1),
+        )
+
+    database = workspace / "data" / "delivery-conductor" / "control.sqlite3"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT status FROM action_journal"
+        ).fetchone() == ("reserved",)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM conductor_result_observations"
+        ).fetchone()[0] == 0
+    publish_current_projection(workspace, database, NOW + timedelta(seconds=2))
+
+
 def test_prepare_uses_only_the_injected_trusted_utc_clock(tmp_path: Path):
     """Untrusted input cannot mint a future lease or move safety accounting in time."""
     workspace = tmp_path / "workspace"
@@ -1055,6 +1236,95 @@ def test_prepare_uses_only_the_injected_trusted_utc_clock(tmp_path: Path):
             "2026-08-04T12:00:00.000000Z",
             "2026-08-04T12:05:00.000000Z",
         )
+
+
+@pytest.mark.parametrize("poisoned", ("run:poison", "r" * 129))
+def test_untrusted_safety_scope_identifier_cannot_poison_durable_projection(
+    tmp_path: Path,
+    poisoned: str,
+):
+    """Projection-incompatible policy identifiers fail before safety mutation."""
+    workspace = tmp_path / "workspace"
+    _write_fixed_adapter(workspace, run_id=poisoned)
+
+    with pytest.raises(CliValidationError, match="safety policy"):
+        run_cli(
+            _prepare_message("direct", "scope-poison"),
+            workspace,
+            clock=lambda: NOW,
+        )
+
+    database = workspace / "data" / "delivery-conductor" / "control.sqlite3"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM conductor_wake_scope"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM conductor_safety_limits"
+        ).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM event_inbox").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("poisoned", ("action:poison", "a" * 129))
+def test_untrusted_action_identifier_cannot_enter_ledger_or_break_projection(
+    tmp_path: Path,
+    poisoned: str,
+):
+    """Adapter action IDs use the same <=128/no-colon grammar as projections."""
+    workspace = tmp_path / "workspace"
+    _write_fixed_adapter(workspace, action_key=poisoned)
+
+    rejected = run_cli(
+        _prepare_message("direct", "action-poison"),
+        workspace,
+        clock=lambda: NOW,
+    )
+
+    assert rejected["status"] == "blocked"
+    assert rejected["reason_code"] == "adapter-unavailable"
+    database = workspace / "data" / "delivery-conductor" / "control.sqlite3"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM action_journal").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM run_checkpoint"
+        ).fetchone()[0] == 0
+    publish_current_projection(workspace, database, NOW + timedelta(seconds=1))
+
+
+@pytest.mark.parametrize(
+    "adapter_overrides",
+    (
+        {"target_id": "target-1", "payload_identifier": "target-2"},
+        {"capability_name": "reminders"},
+        {
+            "payload_references": {
+                "identifiers": [
+                    f"reference-{number}-" + "x" * 110 for number in range(40)
+                ]
+            }
+        },
+        {"payload_references": {"revision": "repo:poison"}},
+    ),
+)
+def test_cli_rejects_noncanonical_capability_payload_before_action_reservation(
+    tmp_path: Path,
+    adapter_overrides: dict[str, object],
+):
+    """The adapter cannot invent tool arguments outside the local closed schema."""
+    workspace = tmp_path / "workspace"
+    _write_fixed_adapter(workspace, **adapter_overrides)
+
+    blocked = run_cli(
+        _prepare_message("direct", "closed-effect-schema"),
+        workspace,
+        clock=lambda: NOW,
+    )
+
+    assert blocked["status"] == "blocked"
+    assert blocked["reason_code"] == "adapter-unavailable"
+    database = workspace / "data" / "delivery-conductor" / "control.sqlite3"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM action_journal").fetchone()[0] == 0
 
 
 def test_cli_workspace_guard_requires_the_exact_physical_agent_root(tmp_path: Path):
@@ -1111,10 +1381,25 @@ def test_cli_prepare_and_record_result_are_two_correlated_processes(tmp_path: Pa
 
     assert prepared["status"] == "action-ready"
     assert prepared["effect_tool"] == "mcp__trinity__chat_with_agent"
+    expected_payload = '{"identifier":"target-1"}'
+    expected_payload_sha256 = hashlib.sha256(expected_payload.encode()).hexdigest()
+    expected_effect_message = json.dumps(
+        {
+            "action_key": "action-cli-1",
+            "payload_sha256": expected_payload_sha256,
+            "references": {"identifier": "target-1"},
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    assert prepared["effect_arguments"] == {
+        "agent_name": "target-1",
+        "message": expected_effect_message,
+    }
     assert prepared["action"] == {
         "capability_name": "chat",
-        "action_key": "action:cli-1",
-        "payload": {"identifier": "target-1"},
+        "action_key": "action-cli-1",
+        "payload_sha256": expected_payload_sha256,
         "target_revision": "revision-1",
         "invalidation_class": "delivery-intent",
     }
@@ -1147,14 +1432,14 @@ def test_cli_prepare_and_record_result_are_two_correlated_processes(tmp_path: Pa
     )
 
     assert recorded["status"] == "completed"
-    assert recorded["action_key"] == "action:cli-1"
+    assert recorded["action_key"] == "action-cli-1"
     assert recorded["fence_token"] == correlation["fence_token"]
     assert duplicate == recorded
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM repo_lease").fetchone()[0] == 0
         assert (
             connection.execute(
-                "SELECT status FROM action_journal WHERE action_key = 'action:cli-1'"
+                "SELECT status FROM action_journal WHERE action_key = 'action-cli-1'"
             ).fetchone()[0]
             == "completed"
         )
@@ -1263,7 +1548,7 @@ def test_observed_result_identity_rejects_a_contradictory_retry_before_ledger(
             FROM conductor_result_observations
             """
         ).fetchone() == (
-            "action:observed-identity",
+            "action-observed-identity",
             "completed",
             "9" * 64,
             "completed",
@@ -1606,6 +1891,24 @@ def test_completed_action_reconciles_one_reminder_then_late_wake_is_noop(
     assert completed["status"] == "reminder"
     assert reminder["status"] == "reminder-ready"
     assert reminder["effect_tool"] == "mcp__trinity__set_reminder"
+    reminder_action = reminder["action"]
+    assert isinstance(reminder_action, dict)
+    reminder_arguments = reminder["effect_arguments"]
+    assert isinstance(reminder_arguments, dict)
+    assert set(reminder_arguments) == {"message", "fire_at"}
+    assert reminder_arguments["fire_at"] == "2026-08-02T12:30:00Z"
+    effect_message = json.loads(reminder_arguments["message"])
+    assert effect_message["action_key"] == reminder_action["action_key"]
+    assert effect_message["payload_sha256"] == reminder_action["payload_sha256"]
+    assert set(effect_message) == {"action_key", "payload_sha256", "references"}
+    effect_references = effect_message["references"]
+    assert set(effect_references) == {"digest", "references"}
+    assert re.fullmatch(r"[a-f0-9]{64}", effect_references["digest"])
+    assert effect_references["references"] == {
+        "identifiers": ["reminder-reminder-1", "action-reminder-1"],
+        "reason_code": "follow-up",
+        "utc_timestamp": "2026-08-02T12:30:00Z",
+    }
     assert reminder["action"]["capability_name"] == "reminders"
     run_cli(
         _record_message(reminder),
@@ -1858,7 +2161,7 @@ def test_over_cost_dispatch_is_reserved_but_returns_no_action_or_usage(tmp_path:
     with sqlite3.connect(database) as connection:
         assert (
             connection.execute(
-                "SELECT status FROM action_journal WHERE action_key = 'action:cost-cli-2'"
+                "SELECT status FROM action_journal WHERE action_key = 'action-cost-cli-2'"
             ).fetchone()[0]
             == "reserved"
         )

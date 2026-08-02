@@ -27,6 +27,7 @@ from .ledger import (
     Lease,
     TickOutcome,
 )
+from .identifiers import is_safe_identifier
 
 
 TickStatus = Literal[
@@ -44,7 +45,6 @@ HandoffKind = Literal["action", "reminder"]
 PostClaimGate = Callable[[Lease], tuple[BudgetView, bool]]
 BeforeNoopRelease = Callable[[Lease], None]
 
-_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _REMINDER_REFERENCE_MARKER = "delivery-conductor-reminder-v1"
 
 
@@ -196,7 +196,7 @@ class DeliveryConductorTick:
             decision = self._adapter.observe_and_decide(request)
         except Exception:
             return self._reject(lease, "adapter-unavailable", status="blocked")
-        if not _valid_decision(decision):
+        if not is_runtime_decision_safe(decision):
             return self._reject(lease, "invalid-adapter-decision")
 
         if decision.decision != "execute":
@@ -327,6 +327,8 @@ class DeliveryConductorTick:
         self._validate_handoff(handoff, correlation=action_key)
         if not isinstance(result, EffectResult):
             raise TickCorrelationError("result must be a sanitized EffectResult")
+        if not _is_identifier(result.reason_code):
+            raise TickCorrelationError("result reason is not a sanitized identifier")
         pending_reminder: ReminderSpec | None = None
         pending_reservation: ActionReservation | None = None
         if handoff.kind == "action" and result.status == "ambiguous":
@@ -850,8 +852,23 @@ class DeliveryConductorTick:
         )
 
 
-def _valid_decision(value: object) -> bool:
+def is_runtime_decision_safe(value: object) -> bool:
     if not isinstance(value, AdapterDecision):
+        return False
+    if not all(
+        _is_identifier(identifier)
+        for identifier in (value.observed_revision, value.reason_code)
+    ):
+        return False
+    if value.target_id is not None and not _is_identifier(value.target_id):
+        return False
+    if value.next_reminder is not None and not all(
+        _is_identifier(identifier)
+        for identifier in (
+            value.next_reminder.reminder_id,
+            value.next_reminder.reason_code,
+        )
+    ):
         return False
     if value.decision == "execute":
         action = value.proposed_action
@@ -859,6 +876,16 @@ def _valid_decision(value: object) -> bool:
             action is not None
             and value.target_id is not None
             and action.target_revision == value.observed_revision
+            and all(
+                _is_identifier(identifier)
+                for identifier in (
+                    action.capability_name,
+                    action.action_key,
+                    action.target_revision,
+                    action.invalidation_class,
+                )
+            )
+            and _payload_identifiers_are_safe(action.payload_json)
         )
     if value.decision == "noop":
         return value.target_id is None and value.proposed_action is None
@@ -869,6 +896,34 @@ def _valid_decision(value: object) -> bool:
             and value.next_reminder is not None
         )
     return False
+
+
+def _payload_identifiers_are_safe(payload_json: str) -> bool:
+    """Apply the projection grammar to semantic identifiers in a closed payload."""
+    try:
+        payload = json.loads(payload_json)
+    except (TypeError, json.JSONDecodeError):
+        return False
+
+    def visit(value: object) -> bool:
+        if isinstance(value, list):
+            return all(visit(item) for item in value)
+        if not isinstance(value, dict):
+            return True
+        for key, item in value.items():
+            if key in {"identifier", "revision", "reason_code"}:
+                if not _is_identifier(item):
+                    return False
+            elif key in {"identifiers", "revisions", "reason_codes"}:
+                if not isinstance(item, list) or not all(
+                    _is_identifier(identifier) for identifier in item
+                ):
+                    return False
+            elif key == "references" and not visit(item):
+                return False
+        return True
+
+    return visit(payload)
 
 
 def _effect_gate_reason(
@@ -1015,7 +1070,7 @@ def _reminder_action(
     )
     return ProposedAction(
         capability_name="reminders",
-        action_key=f"reminder:{identity_digest}",
+        action_key=f"reminder-{identity_digest}",
         payload_json=payload_json,
         target_revision=revision,
         invalidation_class="reminder-intent",
@@ -1053,9 +1108,9 @@ def _investigation_reminder(
     reason_code: str,
     due_at: datetime,
 ) -> ReminderSpec:
-    reminder_id = f"investigate:{action_key}"
-    if len(reminder_id) > 256:
-        reminder_id = "investigate:" + hashlib.sha256(action_key.encode("utf-8")).hexdigest()
+    reminder_id = f"investigate-{action_key}"
+    if not _is_identifier(reminder_id):
+        reminder_id = "investigate-" + hashlib.sha256(action_key.encode("utf-8")).hexdigest()
     return ReminderSpec(reminder_id, _utc_timestamp(due_at), reason_code)
 
 
@@ -1078,4 +1133,4 @@ def _parse_utc_timestamp(value: object) -> datetime:
 
 
 def _is_identifier(value: object) -> bool:
-    return isinstance(value, str) and _IDENTIFIER.fullmatch(value) is not None
+    return is_safe_identifier(value)

@@ -14,11 +14,12 @@ import stat
 import tempfile
 from typing import Any, Iterator
 
+from .identifiers import is_safe_identifier
+
 
 _PIPELINE_ID = "delivery-conductor"
 _INSTANCE_ID = "current"
 _MAX_PROJECTION_BYTES = 256 * 1024
-_PIPELINE_IDENTIFIER = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 
 
@@ -375,10 +376,8 @@ def _projection_path(workspace: Path) -> Path:
     if not target_directory.resolve().is_relative_to(root):
         raise ProjectionError("projection workspace is invalid")
     if (
-        not _PIPELINE_IDENTIFIER.fullmatch(_PIPELINE_ID)
-        or not _PIPELINE_IDENTIFIER.fullmatch(_INSTANCE_ID)
-        or ".." in _PIPELINE_ID
-        or ".." in _INSTANCE_ID
+        not is_safe_identifier(_PIPELINE_ID)
+        or not is_safe_identifier(_INSTANCE_ID)
     ):
         raise ProjectionError("projection identity is invalid")
     return target_directory / f"{_INSTANCE_ID}.json"
@@ -398,11 +397,7 @@ def _optional_row(
 
 
 def _identifier(value: object) -> None:
-    if (
-        not isinstance(value, str)
-        or not _PIPELINE_IDENTIFIER.fullmatch(value)
-        or ".." in value
-    ):
+    if not is_safe_identifier(value):
         raise ProjectionError("durable projection state is invalid")
 
 
