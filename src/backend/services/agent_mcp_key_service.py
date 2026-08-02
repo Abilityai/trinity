@@ -35,10 +35,13 @@ Revoking first 401s all four at once.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import os
+import secrets
 import uuid
+from datetime import timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 from fastapi import HTTPException
@@ -141,7 +144,11 @@ for name, entry in list(servers.items())[:50]:
         "name": str(name)[:64],
         "is_trinity": bool(is_trinity),
         # ONLY the digest. Never the token, never the header, never the body.
-        "digest": hashlib.sha256(token.encode()).hexdigest() if token else None,
+        # And only for a TRINITY-pointing entry: the interpreter discards every
+        # other digest anyway, so hashing a third-party server's bearer (a PAT, a
+        # Slack token) would move an offline-verification oracle for somebody
+        # else's credential across the container boundary for no gain.
+        "digest": hashlib.sha256(token.encode()).hexdigest() if (token and is_trinity) else None,
     })
 
 emit()
@@ -228,7 +235,7 @@ def build_mcp_key_env_overrides(agent_name: str, *, description: str) -> Dict[st
 # --------------------------------------------------------------------------- #
 # Self-heal (called from start_agent_internal on drift)
 # --------------------------------------------------------------------------- #
-def heal_agent_mcp_key_env(agent_name: str) -> Optional[Dict[str, str]]:
+async def heal_agent_mcp_key_env(agent_name: str) -> Optional[Dict[str, str]]:
     """Mint + reconcile + prune for the start-time drift path (#1854).
 
     Returns the env override payload, or ``None`` on any failure — the caller
@@ -238,37 +245,97 @@ def heal_agent_mcp_key_env(agent_name: str) -> Optional[Dict[str, str]]:
     this cannot become a hot recreate loop.
 
     Prunes the captured superseded rows for the same reason rotation does: #1811
-    observed 50 accumulated active rows on one instance. Safe here because the
-    predicate only fires when the container's key matches NO active row — i.e.
-    every active row is already unusable by this container.
+    observed 50 accumulated active rows on one instance, each a live credential
+    the container is not using.
+
+    **Serialised under the SAME lock as an owner-initiated rotation, and it does
+    nothing at all when it cannot hold it.** The naive reading — "the predicate
+    only fires when the container's key matches no active row, so every active
+    row is already unusable by this container" — is a statement about the state
+    at *predicate* time, while the DELETE runs after a mint and possibly after
+    another actor has already replaced the container. There is no per-agent
+    start lock (``restart_agent_internal`` says so explicitly), so two
+    concurrent ``start_agent_internal`` calls both see the drift; if the second
+    captures after the first's mint but before its delete, it deletes the very
+    key the first is about to bake in, and whichever container survives the
+    ``containers.run`` name-conflict adoption is left holding a deleted key —
+    401-ing the heartbeat, the #1083 result callback, the #1081 pull worker and
+    the MCP client at once. That is the exact interleave the rotation path
+    already treats as fail-closed-worthy (#1644), reached here on an
+    *automatic*, unattended path.
+
+    Widening the window is not enough to be safe and narrowing it is not
+    possible: a mint taken outside the lock can always be captured-and-deleted
+    by the holder, so capture→mint→delete must be atomic as a unit. Hence: no
+    lock, no heal. A skipped pass changes nothing (no mint, no delete, the
+    recreate proceeds with the container's existing env), the agent is left
+    exactly as drifted as it already was, and the next start retries. Redis is a
+    hard platform dependency, so "Redis down ⇒ no self-heal this pass" is a
+    degraded-platform behaviour, not a functional gap.
     """
     if _is_system_agent(agent_name) or _is_ephemeral(agent_name):
         # Belt-and-braces: the predicate already exempts both, so reaching here
         # would mean a caller bypassed it.
         return None
-    try:
-        captured = list(db.list_active_agent_key_ids(agent_name))
-        env, new_key = _mint_and_build_env(agent_name, "drift-self-heal (#1854)")
-        try:
-            db.reconcile_spawn_key_id(agent_name, new_key.id)
-        except Exception as e:  # noqa: BLE001
+    with _try_regen_lock(agent_name) as held:
+        if not held:
             logger.warning(
-                "MCP key self-heal: spawn-id reconcile failed for %s: %s", agent_name, e
+                "MCP key self-heal skipped for %s: another rotation/heal holds the "
+                "lock (or Redis is unreachable). Nothing was minted or deleted; "
+                "the next start retries. (#1854)",
+                agent_name,
             )
+            return None
         try:
-            db.delete_superseded_agent_keys(agent_name, new_key.id, captured)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "MCP key self-heal: superseded prune failed for %s: %s", agent_name, e
+            captured = list(db.list_active_agent_key_ids(agent_name))
+            env, new_key = _mint_and_build_env(agent_name, "drift-self-heal (#1854)")
+            try:
+                children_repointed = db.reconcile_spawn_key_id(agent_name, new_key.id)
+            except Exception as e:  # noqa: BLE001
+                children_repointed = 0
+                logger.warning(
+                    "MCP key self-heal: spawn-id reconcile failed for %s: %s", agent_name, e
+                )
+            deleted = 0
+            try:
+                deleted = db.delete_superseded_agent_keys(agent_name, new_key.id, captured)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "MCP key self-heal: superseded prune failed for %s: %s", agent_name, e
+                )
+            logger.info(
+                "MCP key drift healed for %s — minted %s, pruned %d superseded row(s), "
+                "re-pointed %d child agent(s) (#1854)",
+                agent_name, new_key.id, deleted, children_repointed,
             )
-        logger.info(
-            "MCP key drift healed for %s — minted %s and baking it on this recreate (#1854)",
-            agent_name, new_key.id,
-        )
-        return env
-    except Exception as e:  # noqa: BLE001 — never block a start
-        logger.warning("MCP key self-heal failed for %s: %s", agent_name, e)
-        return None
+            # This path mints AND DELETES credentials with no human in the loop,
+            # across the whole fleet, on every drifted start. An INFO log is not
+            # an audit trail — the whole premise of #1854 is that the platform
+            # could not say what its agents authenticate with, so the repair
+            # itself has to be answerable. Metadata only: NEVER the plaintext,
+            # the hash, or the env payload (`audit_log` is append-only with a
+            # 365-day no-delete trigger). Best-effort by construction —
+            # `platform_audit_service.log` swallows its own failures.
+            await platform_audit_service.log(
+                event_type=AuditEventType.MCP_OPERATION,
+                event_action="agent_key_self_heal",
+                source="system",
+                target_type="mcp_key",
+                target_id=new_key.id,
+                details={
+                    "agent_name": agent_name,
+                    "trigger": "start_drift",
+                    "new_key_id": new_key.id,
+                    "new_key_prefix": new_key.key_prefix,
+                    "superseded_key_ids": captured,
+                    "superseded_deleted": deleted,
+                    "children_repointed": children_repointed,
+                },
+            )
+            return env
+        except Exception as e:  # noqa: BLE001 — never block a start
+            logger.warning("MCP key self-heal failed for %s: %s", agent_name, e)
+            return None
 
 
 # --------------------------------------------------------------------------- #
@@ -313,7 +380,17 @@ def get_agent_mcp_key_status(agent_name: str) -> AgentMcpKeyStatus:
     except Exception as e:  # noqa: BLE001 — health must never 500
         logger.debug("last-execution lookup failed for %s: %s", agent_name, e)
 
-    health, detail = _classify_health(last_used, last_exec_raw)
+    # The container's env OUTRANKS every usage-derived state. A row that exists
+    # and was used last week says nothing about what the container is running
+    # with right now, and reporting "In active use" over an env that carries no
+    # key at all is precisely the green-during-the-incident failure this feature
+    # exists to remove. Cheap (a Docker inspect, not the `verify` docker exec),
+    # so the panel is honest on load rather than only after a click.
+    env_health = _container_env_health(agent_name)
+    if env_health:
+        health, detail = env_health, _ENV_HEALTH_DETAIL[env_health]
+    else:
+        health, detail = _classify_health(last_used, last_exec_raw)
 
     return AgentMcpKeyStatus(
         agent_name=agent_name,
@@ -328,6 +405,55 @@ def get_agent_mcp_key_status(agent_name: str) -> AgentMcpKeyStatus:
         health_detail=detail,
         rotatable=True,
     )
+
+
+_ENV_HEALTH_DETAIL = {
+    "env_absent": (
+        "The container carries no Trinity MCP credential at all, so it cannot "
+        "call Trinity tools — the injection needs both the key and the URL and "
+        "silently skips when either is missing. Starting the agent repairs this "
+        "automatically."
+    ),
+    "env_mismatch": (
+        "The container is running with a key this platform does not recognize "
+        "as this agent's own — it may be a personal key, another agent's, or one "
+        "that has been rotated out. Use the container check below to see which, "
+        "then restart the agent (or regenerate) to repair it."
+    ),
+}
+
+
+def _container_env_health(agent_name: str) -> Optional[str]:
+    """`env_absent` / `env_mismatch` / None, read from the container's env.
+
+    A Docker inspect, NOT the `verify` docker exec: this answers "what did the
+    platform bake in", which is enough to catch a swallowed mint at creation and
+    a rotated-out key. Only `verify` can see a hand-edited `.mcp.json` whose
+    entry disagrees with the env, which is why both exist.
+
+    The match verdict is delegated to `check_agent_mcp_key_matches` rather than
+    re-derived, so the panel and the start-time recreate decision can never
+    disagree about what "recognized" means. Lazy import: `lifecycle` reaches
+    back into this module for the self-heal, so binding the agent_service
+    package at import time would be circular.
+
+    Fail-soft to None (no env verdict) on anything — a read-only health panel
+    must degrade to the usage-derived states, never 500 and never claim drift it
+    could not observe.
+    """
+    try:
+        container = get_agent_container(agent_name)
+        if container is None:
+            return None
+        env = _container_env(container)
+        if not env.get("TRINITY_MCP_API_KEY") or not env.get("TRINITY_MCP_URL"):
+            return "env_absent"
+        from services.agent_service.helpers import check_agent_mcp_key_matches
+
+        return None if check_agent_mcp_key_matches(container, agent_name) else "env_mismatch"
+    except Exception as e:  # noqa: BLE001 — health must never 500
+        logger.debug("container env health lookup failed for %s: %s", agent_name, e)
+        return None
 
 
 def _classify_health(last_used, last_execution_at):
@@ -362,10 +488,20 @@ def _classify_health(last_used, last_execution_at):
 
 
 def _as_dt(value):
+    """Coerce to a tz-AWARE datetime, or None.
+
+    The awareness coercion is load-bearing, not tidiness: `stale` subtracts one
+    of these from the other, and `datetime - datetime` raises TypeError when
+    exactly one side is naive. `last_used_at` arrives already parsed (aware for
+    every `utc_now_iso()`-written row, but naive for any legacy row written
+    before that convention), while the execution timestamp arrives as a raw
+    string. One naive legacy row would otherwise turn an owner's Settings tab
+    into a 500.
+    """
     if value is None:
         return None
     if hasattr(value, "tzinfo"):
-        return value
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
     try:
         return parse_iso_timestamp(str(value))
     except Exception:  # noqa: BLE001
@@ -455,9 +591,14 @@ def _entry_verdict(row: Optional[Dict[str, Any]], agent_name: str) -> str:
         return "ok" if row.get("is_active") else "unknown_key"
     if scope == "agent":
         return "foreign_agent_key"
-    if scope in ("user", "system", "portal_delegate"):
-        return "foreign_user_key"
-    return "unknown_key"
+    # ALLOWlist, matching `reject_non_interactive_principal`: everything that is
+    # not this agent's own agent-scoped key is foreign. `scope` is free-text with
+    # no CHECK constraint, so an explicit ("user","system","portal_delegate")
+    # denylist sends `connector` — and any sixth scope a future PR adds — down
+    # the `unknown_key` branch, whose message asserts "matches no active key on
+    # the platform". That is a false negative on a row we just read, and it
+    # under-reports the exact condition this probe exists to surface.
+    return "foreign_user_key"
 
 
 def _verdict_message(entry: AgentMcpKeyVerifyEntry) -> Optional[str]:
@@ -599,6 +740,48 @@ class _RegenLock:
 def _acquire_regen_lock(agent_name: str) -> _RegenLock:
     """Single entry point for the rotation lock (one obvious seam)."""
     return _RegenLock(agent_name)
+
+
+@contextlib.contextmanager
+def _try_regen_lock(agent_name: str):
+    """Best-effort sibling of :class:`_RegenLock` for the AUTOMATIC heal path.
+
+    Same Redis key, so a start-time self-heal and an owner-initiated rotation
+    are mutually exclusive — the two paths run the identical
+    capture→mint→delete sequence and interleave into "the container holds K1
+    while the only active row is K2".
+
+    Different failure semantics, deliberately: an owner asked for a rotation, so
+    refusing it must be *loud* (503/409); nobody asked for a heal, so refusing
+    it must be *silent and inert*. Yields ``True`` when the lock is held and
+    ``False`` otherwise; the caller must do nothing at all on ``False``, because
+    a mint taken outside the lock can still be captured-and-deleted by whoever
+    holds it.
+    """
+    key = _REGEN_LOCK_KEY.format(name=agent_name)
+    token = uuid.uuid4().hex
+    client = None
+    held = False
+    try:
+        client = _regen_lock_client()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("regen lock (heal): Redis client unavailable: %s", e)
+        client = None
+    if client is not None:
+        try:
+            held = bool(client.set(key, token, nx=True, ex=_REGEN_LOCK_TTL_S))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("regen lock (heal): acquire failed: %s", e)
+            held = False
+    try:
+        yield held
+    finally:
+        if held and client is not None:
+            try:
+                if client.get(key) == token:
+                    client.delete(key)
+            except Exception:  # noqa: BLE001 — the TTL backstops
+                logger.debug("regen lock (heal) release failed for %s", key, exc_info=True)
 
 
 async def _recreate_with_env(agent_name: str, container, env_overrides: Dict[str, str]):
@@ -774,7 +957,7 @@ async def _regenerate_locked(
         # container someone else created — with someone else's env. Without this
         # check we would delete the superseded keys while the live container
         # holds a different one, 401-ing all four readers.
-        if not await _new_key_is_live(new_container, new_key.key_prefix):
+        if not await _new_key_is_live(new_container, new_key.api_key):
             await _audit(
                 "agent_key_regenerate_failed",
                 {
@@ -835,12 +1018,22 @@ async def _regenerate_locked(
     )
 
 
-async def _new_key_is_live(container, key_prefix: Optional[str]) -> bool:
-    if container is None or not key_prefix:
+async def _new_key_is_live(container, expected_key: Optional[str]) -> bool:
+    """Does the live container carry EXACTLY the key we just minted?
+
+    Compared in full, constant-time — not by ``key_prefix``. The prefix is
+    ``api_key[:20]``, of which the first 12 characters are the literal
+    ``trinity_mcp_``, so a prefix test is an eight-character assertion standing
+    between a 409-adopted stranger's container and the DELETE of every
+    superseded key. The full plaintext is already in this frame (it is what we
+    just baked), so the exact comparison is free and leaves no residual
+    argument about entropy. Never logged, never returned, never audited.
+    """
+    if container is None or not expected_key:
         return False
     try:
         await container_reload(container)
     except Exception:  # noqa: BLE001 — fall back to the attrs we already have
         pass
     baked = _container_env(container).get("TRINITY_MCP_API_KEY") or ""
-    return baked.startswith(key_prefix)
+    return secrets.compare_digest(baked, expected_key)

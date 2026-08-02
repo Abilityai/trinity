@@ -356,6 +356,94 @@ def test_17c_drift_predicate_is_fail_safe_on_db_error(keys_db, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# 17d/e/f — the self-heal BODY: same lock as rotation, inert without it
+# --------------------------------------------------------------------------- #
+def _heal(agent_name):
+    from services import agent_mcp_key_service as svc
+    return asyncio.run(svc.heal_agent_mcp_key_env(agent_name))
+
+
+def test_17d_self_heal_mints_prunes_and_audits_under_the_lock(keys_db, monkeypatch):
+    from database import db
+    from services import agent_mcp_key_service as svc
+
+    _mk_agent("scout")
+    _mk_key("k-old", "scout")
+    _mk_key("k-connector", "scout", scope="connector")
+    _mk_agent("child", spawned_by_agent="scout", spawned_by_key_id="k-old")
+
+    audited = []
+
+    async def _capture(**kw):
+        audited.append(kw)
+    monkeypatch.setattr(svc, "_regen_lock_client", lambda: _FakeLock())
+    monkeypatch.setattr(svc.platform_audit_service, "log", _capture)
+
+    env = _heal("scout")
+    assert set(env) >= {"TRINITY_MCP_API_KEY", "TRINITY_MCP_URL", "TRINITY_BACKEND_URL"}
+    assert "k-old" not in _key_ids(), "the superseded row is pruned"
+    assert "k-connector" in _key_ids(), "the connector key is NOT this rotation's business"
+    assert db.get_agent_ephemeral_info("child")["spawned_by_key_id"] != "k-old"
+
+    # A fleet-wide, unattended mint+DELETE of credentials has to be answerable.
+    assert audited, "the automatic repair path must leave an audit trail"
+    details = audited[0]["details"]
+    assert details["superseded_key_ids"] == ["k-old"]
+    assert details["superseded_deleted"] == 1
+    assert env["TRINITY_MCP_API_KEY"] not in json.dumps(audited[0]), "never the plaintext"
+
+
+@pytest.mark.parametrize(
+    "client_factory, why",
+    [
+        (lambda: None, "Redis unreachable"),
+        (lambda: SimpleNamespace(set=lambda *a, **k: False, get=lambda k: None,
+                                 delete=lambda k: None), "another heal/rotation holds it"),
+    ],
+)
+def test_17e_self_heal_does_NOTHING_without_the_lock(keys_db, monkeypatch, client_factory, why):
+    """The 'every active row is already unusable by this container' argument is a
+    claim about PREDICATE time; the DELETE runs after a mint, and there is no
+    per-agent start lock. Two concurrent starts both see the drift — if the
+    second captures after the first's mint but before its delete, it deletes the
+    key the first is about to bake in, and the surviving container is left
+    401-ing the heartbeat, the result callback, the pull worker and the MCP
+    client. A mint taken outside the lock can always be captured-and-deleted by
+    the holder, so capture→mint→delete is atomic as a UNIT: no lock, no heal."""
+    from services import agent_mcp_key_service as svc
+
+    _mk_agent("scout")
+    _mk_key("k-old", "scout")
+    monkeypatch.setattr(svc, "_regen_lock_client", client_factory)
+    monkeypatch.setattr(svc.db, "create_agent_mcp_api_key",
+                        lambda *a, **k: pytest.fail(f"must not mint ({why})"))
+
+    assert _heal("scout") is None
+    assert "k-old" in _key_ids(), f"nothing may be deleted ({why})"
+
+
+def test_17f_self_heal_and_rotation_share_one_lock_key(keys_db, monkeypatch):
+    """They run the identical capture→mint→delete sequence, so they must exclude
+    each other — not just their own kind."""
+    from services import agent_mcp_key_service as svc
+
+    _mk_agent("scout")
+    _mk_key("k-old", "scout")
+    shared = _FakeLock()
+    monkeypatch.setattr(svc, "_regen_lock_client", lambda: shared)
+    monkeypatch.setattr(svc.platform_audit_service, "log", _noop_log)
+    monkeypatch.setattr(svc, "clear_agent_breakers", lambda name: None)
+    monkeypatch.setattr(svc, "get_agent_container", lambda name: _container({}, status="exited"))
+
+    # Hold the rotation lock, then prove the heal declines rather than racing.
+    with svc._acquire_regen_lock("scout"):
+        assert _heal("scout") is None
+        assert "k-old" in _key_ids()
+    # Released — the heal proceeds.
+    assert _heal("scout") is not None
+
+
+# --------------------------------------------------------------------------- #
 # 7 — THE headline AC: both env vars land when the container had NEITHER
 # --------------------------------------------------------------------------- #
 def test_07_env_overrides_carry_both_key_and_url(keys_db, monkeypatch):
@@ -510,6 +598,21 @@ def test_18_probe_verdicts(keys_db):
         "touched by re-injection and is not fixed by rotating the key"
     )
 
+    # ALLOWlist, same rule the auth guard uses: `scope` is free-text with no
+    # CHECK constraint, so an explicit ("user","system","portal_delegate")
+    # denylist sends `connector` — and any sixth scope — down the `unknown_key`
+    # branch, whose message asserts "matches no active key on the platform".
+    # That is a false negative on a row we just read.
+    for other_scope in ("connector", "portal_delegate", "some_future_scope"):
+        _mk_key(f"k-{other_scope}", None, scope=other_scope,
+                key_hash=_digest(f"trinity_mcp_{other_scope}"))
+        out = svc.interpret_probe_payload(
+            _probe([{"name": "trinity", "is_trinity": True,
+                     "digest": _digest(f"trinity_mcp_{other_scope}")}]),
+            "scout",
+        )
+        assert out.verdict == "foreign_user_key", other_scope
+
 
 def test_18b_stopped_container_degrades_to_unavailable(keys_db, monkeypatch):
     from services import agent_mcp_key_service as svc
@@ -554,6 +657,14 @@ def test_18d_probe_script_source_can_only_emit_a_digest():
 
     for forbidden in ("out[\"raw\"]", '"body"', '"mcp_json"', "json.dumps(cfg", "json.dumps(servers"):
         assert forbidden not in script, f"the probe must never return {forbidden}"
+
+    # A THIRD-PARTY server's bearer (a GitHub PAT, a Slack token) must not be
+    # hashed at all. The interpreter discards every non-Trinity digest anyway, so
+    # emitting one only moves an offline-verification oracle for somebody else's
+    # credential across the container boundary.
+    assert "if (token and is_trinity)" in script, (
+        "the digest must be gated on is_trinity"
+    )
 
 
 def test_18c_probe_returns_only_digests_never_tokens(keys_db, monkeypatch):
@@ -620,6 +731,74 @@ def test_19b_health_states(keys_db):
     _mk_agent("busy")
     _mk_key("k-busy", "busy", last_used_at=utc_now_iso())
     assert svc.get_agent_mcp_key_status("busy").health == "active"
+
+
+def test_19d_container_env_outranks_usage_derived_health(keys_db, monkeypatch):
+    """A row that exists and was used last week says NOTHING about what the
+    container is running with now. Reporting 'In active use' over an env that
+    carries no key at all is the green-during-the-incident failure this feature
+    exists to remove — and `env_absent`/`env_mismatch` are in the plan's own
+    health table, so leaving them unreachable ships the panel half-blind."""
+    from database import db
+    from services import agent_mcp_key_service as svc
+    from utils.helpers import utc_now_iso
+
+    url = "http://mcp-server:8080/mcp"
+    _mk_agent("scout")
+    live = db.create_agent_mcp_api_key("scout", "owner")
+    # Make the usage-derived classifier say `active`, so only the env can fail it.
+    _mk_key("k-used", "scout", last_used_at=utc_now_iso(),
+            created_at="2030-01-01T00:00:00Z")
+
+    monkeypatch.setattr(svc, "get_agent_container", lambda name: _container({}))
+    assert svc.get_agent_mcp_key_status("scout").health == "env_absent"
+
+    monkeypatch.setattr(svc, "get_agent_container",
+                        lambda name: _container({"TRINITY_MCP_API_KEY": live.api_key}))
+    assert svc.get_agent_mcp_key_status("scout").health == "env_absent", (
+        "the injection needs BOTH vars and silently skips without either"
+    )
+
+    monkeypatch.setattr(svc, "get_agent_container", lambda name: _container(
+        {"TRINITY_MCP_API_KEY": "trinity_mcp_somebodyelses", "TRINITY_MCP_URL": url}))
+    assert svc.get_agent_mcp_key_status("scout").health == "env_mismatch"
+
+    monkeypatch.setattr(svc, "get_agent_container", lambda name: _container(
+        {"TRINITY_MCP_API_KEY": live.api_key, "TRINITY_MCP_URL": url}))
+    assert svc.get_agent_mcp_key_status("scout").health == "active"
+
+
+def test_19e_env_health_is_fail_soft(keys_db, monkeypatch):
+    """A read-only health panel must degrade to the usage-derived state, never
+    500 and never claim drift it could not observe."""
+    from services import agent_mcp_key_service as svc
+
+    _mk_agent("scout")
+    _mk_key("k", "scout", last_used_at=None)
+
+    def _docker_is_down(name):
+        raise RuntimeError("docker daemon unreachable")
+    monkeypatch.setattr(svc, "get_agent_container", _docker_is_down)
+    assert svc.get_agent_mcp_key_status("scout").health == "never_used"
+
+
+def test_19f_stale_survives_a_naive_legacy_timestamp(keys_db):
+    """`stale` subtracts two datetimes; `datetime - datetime` raises TypeError
+    when exactly one side is naive, and any row written before the utc_now_iso()
+    convention parses naive. One legacy row must not 500 the Settings tab."""
+    from sqlalchemy import insert
+    from db.engine import get_engine
+    from db.tables import schedule_executions
+    from services import agent_mcp_key_service as svc
+
+    _mk_agent("scout")
+    _mk_key("k", "scout", last_used_at="2026-01-01T00:00:00")  # naive, no Z
+    with get_engine().begin() as conn:
+        conn.execute(insert(schedule_executions).values(
+            id="e1", schedule_id="s", agent_name="scout", status="success",
+            started_at="2026-07-30T00:00:00Z", message="m", triggered_by="schedule"))
+
+    assert svc.get_agent_mcp_key_status("scout").health == "stale"
 
 
 def test_19c_system_agent_is_not_a_false_missing(keys_db):
@@ -794,6 +973,31 @@ def test_12_409_adoption_postcondition_blocks_deletion(regen_harness, monkeypatc
         _regen("scout")
     assert exc.value.status_code >= 500
     assert "k-old" in _key_ids(), "nothing may be deleted when the post-condition fails"
+
+
+def test_12b_postcondition_is_an_exact_match_not_a_prefix_match(regen_harness, monkeypatch):
+    """`key_prefix` is `api_key[:20]`, of which 12 characters are the literal
+    `trinity_mcp_`. A `startswith` test is an EIGHT-character assertion standing
+    between a 409-adopted stranger's container and the DELETE of every superseded
+    key. The full plaintext is in the frame already, so exactness is free."""
+    from fastapi import HTTPException
+
+    svc = regen_harness
+    _mk_agent("scout")
+    _mk_key("k-old", "scout")
+
+    monkeypatch.setattr(svc, "get_agent_container", lambda name: _container({}))
+
+    async def _adopt_a_prefix_twin(agent_name, container, env_overrides):
+        minted = env_overrides["TRINITY_MCP_API_KEY"]
+        return _container({"TRINITY_MCP_API_KEY": minted[:20] + "_a_different_tail",
+                           "TRINITY_MCP_URL": env_overrides["TRINITY_MCP_URL"]})
+    monkeypatch.setattr(svc, "_recreate_with_env", _adopt_a_prefix_twin)
+
+    with pytest.raises(HTTPException) as exc:
+        _regen("scout")
+    assert exc.value.status_code >= 500
+    assert "k-old" in _key_ids()
 
 
 def test_running_agent_happy_path(regen_harness, monkeypatch):

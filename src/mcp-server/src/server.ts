@@ -62,7 +62,11 @@ export interface McpApiKeyValidationResult {
   user_email?: string;
   key_name?: string;
   agent_name?: string;  // Agent name if scope is 'agent' or 'system'
-  scope?: "user" | "agent" | "system";  // Key scope: user=human, agent=regular agent, system=system agent (bypasses permissions)
+  // Key scope, as the backend's free-text `mcp_api_keys.scope` column reports
+  // it. #1854: kept in step with `McpAuthContext["scope"]` — declaring a
+  // narrower set here (it named only user/agent/system) makes the cast below
+  // launder two live values, which is how `portal_delegate` went unnoticed.
+  scope?: McpAuthContext["scope"];
 }
 
 /**

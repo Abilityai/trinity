@@ -49,6 +49,11 @@ router = APIRouter(prefix="/api/agents", tags=["agent_mcp_key"])
 # The probe is a docker exec; rotation replaces a container. Both are cheap to
 # ask for and expensive to serve, so both are limited — rotation hard.
 _VERIFY_LIMIT, _VERIFY_WINDOW_S = 20, 60
+# Per-actor too, not just per-agent: ownership is fleet-wide for an admin, so a
+# per-agent-only limit bounds nothing an operator actually does — a scripted
+# sweep of N agents is N × 20/min docker execs against one daemon, each holding
+# a 15s timeout. Same reasoning that gives rotation both limits.
+_VERIFY_ACTOR_LIMIT, _VERIFY_ACTOR_WINDOW_S = 60, 60
 _REGEN_AGENT_LIMIT, _REGEN_AGENT_WINDOW_S = 3, 300
 _REGEN_ACTOR_LIMIT, _REGEN_ACTOR_WINDOW_S = 10, 300
 
@@ -83,6 +88,11 @@ async def verify_agent_mcp_key_endpoint(
     rate_limiter.enforce(
         f"mcp_key_verify:{agent_name}", _VERIFY_LIMIT, _VERIFY_WINDOW_S,
         detail="Too many verification checks for this agent.",
+    )
+    rate_limiter.enforce(
+        f"mcp_key_verify_actor:{_actor_key(current_user)}",
+        _VERIFY_ACTOR_LIMIT, _VERIFY_ACTOR_WINDOW_S,
+        detail="Too many verification checks.",
     )
     return await verify_agent_mcp_key(agent_name)
 

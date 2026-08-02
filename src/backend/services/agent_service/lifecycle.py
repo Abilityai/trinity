@@ -407,7 +407,7 @@ async def start_agent_internal(agent_name: str) -> dict:
         mcp_env_overrides = None
         if not mcp_key_match:
             from services.agent_mcp_key_service import heal_agent_mcp_key_env
-            mcp_env_overrides = heal_agent_mcp_key_env(agent_name)
+            mcp_env_overrides = await heal_agent_mcp_key_env(agent_name)
 
         # Recreate container with updated config
         # Use system user for internal operations
