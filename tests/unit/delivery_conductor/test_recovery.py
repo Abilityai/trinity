@@ -27,7 +27,7 @@ TEMPLATE_LIB = (
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(TEMPLATE_LIB))
 
-from delivery_conductor.contracts import ProposedAction
+from delivery_conductor.contracts import ProposedAction, ReminderSpec, Wake
 import delivery_conductor.cli as cli_module
 from delivery_conductor.cli import (
     CliCorrelationError,
@@ -54,6 +54,7 @@ from delivery_conductor.safety import (
     serialize_safety_policy_request,
 )
 from delivery_conductor.wakes import normalize_wake
+import delivery_conductor.tick as tick_module
 
 
 NOW = datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc)
@@ -142,6 +143,7 @@ def _runtime_provenance(
     *,
     event_type: str | None = None,
     event_id: str | None = None,
+    reminder_message: str | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -150,6 +152,7 @@ def _runtime_provenance(
             "execution_id": execution_id,
             "event_type": event_type,
             "event_id": event_id,
+            "reminder_message": reminder_message,
         },
         separators=(",", ":"),
         sort_keys=True,
@@ -260,6 +263,57 @@ else:
             "due_at_utc": "2026-08-02T12:30:00Z",
             "reason_code": "follow-up",
         }} if execute and {reminder!r} else None,
+    }}
+sys.stdout.write(json.dumps(response, separators=(",", ":"), sort_keys=True) + "\\n")
+sys.stdout.flush()
+"""
+    adapter = workspace / "adapter.py"
+    adapter.write_text(source)
+    return adapter
+
+
+def _write_due_reconciliation_adapter(workspace: Path) -> Path:
+    workspace.mkdir(parents=True, exist_ok=True)
+    ceilings = {
+        item.name: getattr(_limits(), item.name)
+        for item in _limits().__dataclass_fields__.values()
+    }
+    source = f"""from __future__ import annotations
+import json
+import sys
+
+request = json.loads(sys.stdin.readline())
+wake = request["wake"]
+source = wake["source"]
+if request.get("kind") == "safety-policy":
+    response = {{
+        "schema_version": 1,
+        "kind": "safety-policy",
+        "run_id": "run-" + source,
+        "issue_id": "issue-1",
+        "signature": "signature-1",
+        "ceilings": {ceilings!r},
+    }}
+else:
+    due = source == "reminder"
+    response = {{
+        "schema_version": 1,
+        "observed_revision": "revision-1",
+        "decision": "execute",
+        "reason_code": "due-work" if due else "source-work",
+        "target_id": "target-1",
+        "proposed_action": {{
+            "capability_name": "chat",
+            "action_key": "action-due" if due else "action-source",
+            "payload": {{"identifier": "target-1"}},
+            "target_revision": "revision-1",
+            "invalidation_class": "delivery-intent",
+        }},
+        "next_reminder": None if due else {{
+            "reminder_id": "reminder-source",
+            "due_at_utc": "2026-08-02T12:01:00Z",
+            "reason_code": "follow-up",
+        }},
     }}
 sys.stdout.write(json.dumps(response, separators=(",", ":"), sort_keys=True) + "\\n")
 sys.stdout.flush()
@@ -1140,6 +1194,143 @@ def test_runtime_provenance_builds_one_deterministic_closed_wake(
     assert "message" not in message
 
 
+def test_canonical_fired_reminder_and_local_due_promotion_have_one_wake_identity():
+    """Changing fired-reminder identity must let actual and local recovery both run."""
+    reminder = ReminderSpec("reminder-1", "2026-08-02T09:15:11.1Z", "observe-later")
+    action = tick_module._reminder_action(reminder, "repo-4")
+    payload_sha256 = hashlib.sha256(action.payload_json.encode("utf-8")).hexdigest()
+    message = json.dumps(
+        {
+            "action_key": action.action_key,
+            "payload_sha256": payload_sha256,
+            "references": json.loads(action.payload_json),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+    parsed = parse_cli_input(
+        build_runtime_prepare_message(
+            _runtime_provenance(
+                "reminder",
+                "exec-fired-1",
+                reminder_message=message,
+            ),
+            "exec-fired-1",
+        )
+    )
+
+    assert parsed.wake == Wake(
+        "bb11bebb6e5a305fac1f29b3399b3c213c2c99e0ab34867e77770031f56fb59f",
+        "reminder",
+        "reminder-6e65617c9573c280babf77f6707f358d7d495996c58b586aab53442a8f75c843",
+        payload_sha256,
+    )
+
+
+def test_fired_reminder_requires_the_exact_durable_intent_and_due_time(
+    tmp_path: Path,
+):
+    """A forged or early envelope cannot pre-consume the real reminder wake."""
+    workspace = tmp_path / "workspace"
+    _write_fixed_adapter(workspace, decision="noop")
+    due_at = "2026-08-02T12:01:00.1Z"
+    due_now = NOW + timedelta(seconds=60, microseconds=100_000)
+    reminder = ReminderSpec("reminder-durable-1", due_at, "observe-later")
+    action = tick_module._reminder_action(reminder, "revision-1")
+    payload_sha256 = hashlib.sha256(action.payload_json.encode("utf-8")).hexdigest()
+    reminder_message = json.dumps(
+        {
+            "action_key": action.action_key,
+            "payload_sha256": payload_sha256,
+            "references": json.loads(action.payload_json),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    prepare_message = build_runtime_prepare_message(
+        _runtime_provenance(
+            "reminder",
+            "exec-fired-durable-1",
+            reminder_message=reminder_message,
+        ),
+        "exec-fired-durable-1",
+    )
+
+    with pytest.raises(CliValidationError, match="no durable intent"):
+        run_cli(prepare_message, workspace, clock=lambda: due_now)
+
+    database = workspace / "data" / "delivery-conductor" / "control.sqlite3"
+    ledger = ControlLedger(database)
+    ledger.initialize()
+    source_wake = normalize_wake("direct", "source-durable-1", "e" * 64)
+    source_lease = ledger.claim_wake(source_wake, NOW, 300)
+    assert source_lease is not None
+    ledger.reserve_action(source_lease, action)
+    safety = SafetyController(database)
+    safety.initialize()
+    safety.bind_wake(source_wake.wake_id, _scope(), NOW)
+    safety.assess(_scope(), NOW, _limits())
+
+    with pytest.raises(CliValidationError, match="not due"):
+        run_cli(prepare_message, workspace, clock=lambda: NOW)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM event_inbox WHERE source = 'reminder'"
+        ).fetchone() == (0,)
+
+    ledger.release(source_lease, TickOutcome(False, "awaiting-reminder", 0, 0, 0))
+    fired = run_cli(prepare_message, workspace, clock=lambda: due_now)
+
+    assert fired["status"] == "noop"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT source_event_id, payload_sha256, state FROM event_inbox "
+            "WHERE source = 'reminder'"
+        ).fetchone() == (action.action_key, payload_sha256, "acknowledged")
+
+
+@pytest.mark.parametrize(
+    ("triggered_by", "reminder_message"),
+    (
+        ("schedule", "{}"),
+        ("reminder", "{}"),
+        (
+            "reminder",
+            '{"action_key":"reminder-wrong","payload_sha256":"'
+            + "a" * 64
+            + '","references":{}}',
+        ),
+        (
+            "reminder",
+            '{"action_key":"reminder-'
+            + "a" * 64
+            + '","payload_sha256":"'
+            + "b" * 64
+            + '","references":{"digest":"'
+            + "c" * 64
+            + '","references":{"identifiers":["reminder-1"],'
+            '"reason_code":"observe-later",'
+            '"utc_timestamp":"2026-08-02T09:15:11Z"}}}',
+        ),
+    ),
+)
+def test_runtime_provenance_rejects_invalid_conductor_reminder_envelope(
+    triggered_by: str,
+    reminder_message: str,
+):
+    """Partial, mismatched, or non-reminder envelopes cannot select a stable wake."""
+    with pytest.raises(CliValidationError):
+        build_runtime_prepare_message(
+            _runtime_provenance(
+                triggered_by,
+                "exec-envelope-1",
+                reminder_message=reminder_message,
+            ),
+            "exec-envelope-1",
+        )
+
+
 @pytest.mark.parametrize(
     ("message", "runtime_execution_id"),
     (
@@ -1931,6 +2122,54 @@ def test_completed_action_reconciles_one_reminder_then_late_wake_is_noop(
             ).fetchone()[0]
             == 1
         )
+
+
+def test_overdue_cli_rebinds_safety_to_stable_due_wake_without_reminder_effect(
+    tmp_path: Path,
+):
+    """Promoting a due intent must use its own policy scope before one next effect."""
+    workspace = tmp_path / "workspace"
+    _write_due_reconciliation_adapter(workspace)
+    message = _prepare_message("direct", "due-scope-1")
+    source = run_cli(message, workspace, clock=lambda: NOW)
+    run_cli(
+        _record_message(source),
+        workspace,
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+
+    due = run_cli(
+        message,
+        workspace,
+        clock=lambda: NOW + timedelta(seconds=61),
+    )
+
+    assert due["status"] == "action-ready"
+    assert due["effect_tool"] == "mcp__trinity__chat_with_agent"
+    assert due["action"]["action_key"] == "action-due"
+    assert due["reminder"] is None
+    database = workspace / "data" / "delivery-conductor" / "control.sqlite3"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT run_id FROM conductor_cli_handoff"
+        ).fetchone() == ("run-reminder",)
+        assert connection.execute(
+            "SELECT inbox.source, scope.run_id "
+            "FROM event_inbox AS inbox "
+            "JOIN conductor_wake_scope AS scope ON scope.wake_id = inbox.wake_id "
+            "ORDER BY inbox.source"
+        ).fetchall() == [
+            ("direct", "run-direct"),
+            ("reminder", "run-reminder"),
+        ]
+        assert connection.execute(
+            "SELECT run_units, issue_units, daily_units, reason_code "
+            "FROM budget_usage WHERE reason_code = 'reminder-due'"
+        ).fetchone() == (0, 0, 0, "reminder-due")
+        assert connection.execute(
+            "SELECT capability_name, status, reason_code FROM action_journal "
+            "WHERE capability_name = 'reminders'"
+        ).fetchone() == ("reminders", "completed", "reminder-due")
 
 
 def test_deterministic_result_opens_breaker_before_later_dispatch(tmp_path: Path):

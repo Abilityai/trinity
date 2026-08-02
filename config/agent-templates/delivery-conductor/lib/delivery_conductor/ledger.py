@@ -290,6 +290,26 @@ class ControlLedger:
 
     def claim_wake(self, wake: Wake, now: datetime, lease_seconds: int) -> Lease | None:
         """Persist one wake and acquire the sole lease when it is available."""
+        lease, _ = self._claim_wake(wake, now, lease_seconds, prefer_due=False)
+        return lease
+
+    def claim_wake_or_due(
+        self,
+        wake: Wake,
+        now: datetime,
+        lease_seconds: int,
+    ) -> tuple[Lease | None, Wake]:
+        """Persist one incoming wake, prioritizing one reconciled due wake."""
+        return self._claim_wake(wake, now, lease_seconds, prefer_due=True)
+
+    def _claim_wake(
+        self,
+        wake: Wake,
+        now: datetime,
+        lease_seconds: int,
+        *,
+        prefer_due: bool,
+    ) -> tuple[Lease | None, Wake]:
         if not isinstance(wake, Wake):
             raise LedgerValidationError("wake must be a Wake")
         _validate_utc_datetime("now", now)
@@ -325,16 +345,39 @@ class ControlLedger:
             expected = (wake.wake_id, wake.source, wake.source_event_id, wake.payload_sha256)
             if len(stored) != 1 or tuple(stored[0][:4]) != expected:
                 raise LedgerValidationError("conflicting wake deduplication identity")
-            if stored[0][4] == "acknowledged":
-                return None
-
             current = connection.execute(
                 "SELECT expires_at FROM repo_lease WHERE singleton = 1"
             ).fetchone()
             if current is not None and current[0] > now_text:
-                return None
+                return None, wake
             if current is not None:
                 connection.execute("DELETE FROM repo_lease WHERE singleton = 1")
+
+            selected = None
+            if prefer_due:
+                selected = connection.execute(
+                    """
+                    SELECT inbox.wake_id, inbox.source, inbox.source_event_id,
+                           inbox.payload_sha256
+                    FROM event_inbox AS inbox
+                    JOIN action_journal AS journal
+                      ON journal.action_key = inbox.source_event_id
+                     AND journal.payload_sha256 = inbox.payload_sha256
+                    WHERE inbox.source = 'reminder'
+                      AND inbox.state = 'pending'
+                      AND journal.capability_name = 'reminders'
+                      AND journal.status = 'completed'
+                      AND journal.reason_code = 'reminder-due'
+                    ORDER BY inbox.first_seen_at, inbox.wake_id
+                    LIMIT 1
+                    """
+                ).fetchone()
+            if selected is None:
+                if stored[0][4] == "acknowledged":
+                    return None, wake
+                selected_wake = wake
+            else:
+                selected_wake = Wake(*selected)
 
             row = connection.execute(
                 "SELECT last_fence_token FROM controller_state WHERE singleton = 1"
@@ -356,10 +399,225 @@ class ControlLedger:
                     (singleton, wake_id, fence_token, claimed_at, expires_at)
                 VALUES (1, ?, ?, ?, ?)
                 """,
-                (wake.wake_id, fence_token, now_text, expires_text),
+                (selected_wake.wake_id, fence_token, now_text, expires_text),
             )
 
-        return Lease(wake.wake_id, fence_token, now, expires_at)
+        return Lease(selected_wake.wake_id, fence_token, now, expires_at), selected_wake
+
+    def reconcile_due_reminder(
+        self,
+        lease: Lease,
+        action: ProposedAction,
+        due_wake: Wake,
+        result: EffectResult,
+        checkpoint: Checkpoint,
+        now: datetime,
+        lease_seconds: int,
+    ) -> Lease | None:
+        """Atomically terminalize one due reminder and transfer to its stable wake."""
+        canonical_payload = _validated_action_payload(action)
+        payload_sha256 = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+        if (
+            action.capability_name != "reminders"
+            or action.invalidation_class != "reminder-intent"
+            or not isinstance(due_wake, Wake)
+            or due_wake.source != "reminder"
+            or due_wake.source_event_id != action.action_key
+            or due_wake.payload_sha256 != payload_sha256
+            or due_wake.wake_id
+            != hashlib.sha256(("reminder" + action.action_key).encode("utf-8")).hexdigest()
+        ):
+            raise LedgerValidationError("due reminder wake does not match its action")
+        if (
+            not isinstance(result, EffectResult)
+            or result.status != "completed"
+            or result.reason_code != "reminder-due"
+        ):
+            raise LedgerValidationError("due reminder result is invalid")
+        if (
+            not isinstance(checkpoint, Checkpoint)
+            or checkpoint.acknowledged_wake_id != lease.wake_id
+            or checkpoint.action_key != action.action_key
+            or checkpoint.action_status != "completed"
+            or checkpoint.action_result_sha256 != result.result_sha256
+            or checkpoint.reason_code != result.reason_code
+        ):
+            raise LedgerValidationError("due reminder checkpoint is invalid")
+        _validate_utc_datetime("now", now)
+        if type(lease_seconds) is not int or lease_seconds <= 0:
+            raise LedgerValidationError("lease_seconds must be a positive integer")
+        now_text = _utc_text(now)
+        expires_at = now + timedelta(seconds=lease_seconds)
+        expires_text = _utc_text(expires_at)
+
+        with self._transaction() as connection:
+            self._require_current_lease(connection, lease)
+            row = connection.execute(
+                """
+                SELECT capability_name, payload_json, payload_sha256,
+                       target_revision, invalidation_class, status,
+                       result_sha256, reason_code, wake_id, fence_token
+                FROM action_journal WHERE action_key = ?
+                """,
+                (action.action_key,),
+            ).fetchone()
+            expected_identity = (
+                action.capability_name,
+                canonical_payload,
+                payload_sha256,
+                action.target_revision,
+                action.invalidation_class,
+                "reserved",
+                None,
+                None,
+                lease.wake_id,
+                lease.fence_token,
+            )
+            if row is None or tuple(row) != expected_identity:
+                raise ActionConflictError("due reminder is not the canonical reservation")
+
+            connection.execute(
+                """
+                UPDATE action_journal
+                SET status = 'completed', result_sha256 = ?, reason_code = ?
+                WHERE action_key = ?
+                """,
+                (result.result_sha256, result.reason_code, action.action_key),
+            )
+            connection.execute(
+                """
+                INSERT INTO action_events
+                    (action_key, event_type, wake_id, fence_token, payload_sha256,
+                     result_sha256, reason_code)
+                VALUES (?, 'completed', ?, ?, ?, ?, ?)
+                """,
+                (
+                    action.action_key,
+                    lease.wake_id,
+                    lease.fence_token,
+                    payload_sha256,
+                    result.result_sha256,
+                    result.reason_code,
+                ),
+            )
+            self._require_action_outcome(connection, checkpoint)
+            connection.execute(
+                """
+                INSERT INTO run_checkpoint
+                    (singleton, revision, checkpoint_sha256, acknowledged_wake_id,
+                     reason_code, fence_token, run_units_remaining,
+                     issue_units_remaining, daily_units_remaining, action_key,
+                     action_status, action_result_sha256)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(singleton) DO UPDATE SET
+                    revision = excluded.revision,
+                    checkpoint_sha256 = excluded.checkpoint_sha256,
+                    acknowledged_wake_id = excluded.acknowledged_wake_id,
+                    reason_code = excluded.reason_code,
+                    fence_token = excluded.fence_token,
+                    run_units_remaining = excluded.run_units_remaining,
+                    issue_units_remaining = excluded.issue_units_remaining,
+                    daily_units_remaining = excluded.daily_units_remaining,
+                    action_key = excluded.action_key,
+                    action_status = excluded.action_status,
+                    action_result_sha256 = excluded.action_result_sha256
+                """,
+                (
+                    checkpoint.revision,
+                    checkpoint.checkpoint_sha256,
+                    checkpoint.acknowledged_wake_id,
+                    checkpoint.reason_code,
+                    lease.fence_token,
+                    checkpoint.run_units_remaining,
+                    checkpoint.issue_units_remaining,
+                    checkpoint.daily_units_remaining,
+                    checkpoint.action_key,
+                    checkpoint.action_status,
+                    checkpoint.action_result_sha256,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO budget_usage
+                    (wake_id, fence_token, run_units, issue_units, daily_units, reason_code)
+                VALUES (?, ?, 0, 0, 0, ?)
+                """,
+                (lease.wake_id, lease.fence_token, result.reason_code),
+            )
+            connection.execute(
+                """
+                UPDATE event_inbox
+                SET state = 'acknowledged', acknowledged_fence_token = ?
+                WHERE wake_id = ?
+                """,
+                (lease.fence_token, lease.wake_id),
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO event_inbox
+                    (wake_id, source, source_event_id, payload_sha256, first_seen_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    due_wake.wake_id,
+                    due_wake.source,
+                    due_wake.source_event_id,
+                    due_wake.payload_sha256,
+                    now_text,
+                ),
+            )
+            stored = connection.execute(
+                """
+                SELECT wake_id, source, source_event_id, payload_sha256, state
+                FROM event_inbox
+                WHERE wake_id = ? OR (source = ? AND source_event_id = ?)
+                """,
+                (due_wake.wake_id, due_wake.source, due_wake.source_event_id),
+            ).fetchall()
+            expected_wake = (
+                due_wake.wake_id,
+                due_wake.source,
+                due_wake.source_event_id,
+                due_wake.payload_sha256,
+            )
+            if len(stored) != 1 or tuple(stored[0][:4]) != expected_wake:
+                raise LedgerValidationError("conflicting due reminder wake identity")
+
+            connection.execute("DELETE FROM repo_lease WHERE singleton = 1")
+            if stored[0][4] == "acknowledged":
+                connection.execute(
+                    """
+                    UPDATE controller_state
+                    SET state = 'idle', reason_code = ? WHERE singleton = 1
+                    """,
+                    (result.reason_code,),
+                )
+                return None
+
+            state = connection.execute(
+                "SELECT last_fence_token FROM controller_state WHERE singleton = 1"
+            ).fetchone()
+            if state is None:
+                raise LedgerError("controller_state is not initialized")
+            fence_token = state[0] + 1
+            connection.execute(
+                """
+                UPDATE controller_state
+                SET last_fence_token = ?, state = 'leased', reason_code = NULL
+                WHERE singleton = 1
+                """,
+                (fence_token,),
+            )
+            connection.execute(
+                """
+                INSERT INTO repo_lease
+                    (singleton, wake_id, fence_token, claimed_at, expires_at)
+                VALUES (1, ?, ?, ?, ?)
+                """,
+                (due_wake.wake_id, fence_token, now_text, expires_text),
+            )
+
+        return Lease(due_wake.wake_id, fence_token, now, expires_at)
 
     def reserve_action(self, lease: Lease, action: ProposedAction) -> ActionReservation:
         """Reserve one stable action identity or return its durable replay state."""

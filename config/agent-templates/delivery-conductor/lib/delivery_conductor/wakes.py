@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 
 from .contracts import Wake
+from .identifiers import is_safe_identifier
 
 
 _SOURCES = frozenset({"direct", "schedule", "reminder", "worker-completion"})
@@ -28,3 +29,19 @@ def normalize_wake(
         raise WakeNormalizationError("wake source event identifier is invalid")
     wake_id = hashlib.sha256((source + source_event_id).encode("utf-8")).hexdigest()
     return Wake(wake_id, source, source_event_id, payload_sha256)
+
+
+def normalize_conductor_reminder_wake(
+    reminder_id: str,
+    action_key: str,
+    payload_sha256: str,
+) -> Wake:
+    """Normalize the shared identity for a durable conductor reminder wake."""
+    if not is_safe_identifier(reminder_id) or not is_safe_identifier(action_key):
+        raise WakeNormalizationError("conductor reminder identity is invalid")
+    expected_action_key = (
+        "reminder-" + hashlib.sha256(reminder_id.encode("utf-8")).hexdigest()
+    )
+    if action_key != expected_action_key:
+        raise WakeNormalizationError("conductor reminder identity does not match")
+    return normalize_wake("reminder", action_key, payload_sha256)

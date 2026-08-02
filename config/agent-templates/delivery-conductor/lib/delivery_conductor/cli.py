@@ -48,9 +48,10 @@ from .tick import (
     DeliveryConductorTick,
     TickHandoff,
     TickResult,
+    adapter_reminder_window_reason,
     is_runtime_decision_safe,
 )
-from .wakes import normalize_wake
+from .wakes import normalize_conductor_reminder_wake, normalize_wake
 
 
 _AGENT_WORKSPACE = Path("/home/developer")
@@ -88,8 +89,14 @@ class CliCorrelationError(CliValidationError):
 
 
 @dataclass(frozen=True)
+class ConductorReminderEvidence:
+    due_at_utc: str
+
+
+@dataclass(frozen=True)
 class PrepareInput:
     wake: Wake
+    conductor_reminder: ConductorReminderEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -107,11 +114,12 @@ def parse_cli_input(message: str) -> CliInput:
     value = _parse_one_json_line(message)
     operation = value.get("operation")
     if operation == "prepare":
-        _require_keys(
-            value,
-            {"schema_version", "operation", "wake"},
-            "prepare input",
-        )
+        prepare_keys = {"schema_version", "operation", "wake"}
+        if set(value) not in (
+            prepare_keys,
+            prepare_keys | {"conductor_reminder"},
+        ):
+            raise CliValidationError("prepare input must use the closed schema")
         _require_schema_version(value)
         wake_value = value["wake"]
         if not isinstance(wake_value, dict):
@@ -129,7 +137,20 @@ def parse_cli_input(message: str) -> CliInput:
             )
         except ValueError as error:
             raise CliValidationError("prepare input is invalid") from error
-        return PrepareInput(wake)
+        conductor_reminder = None
+        if "conductor_reminder" in value:
+            reminder_value = value["conductor_reminder"]
+            if not isinstance(reminder_value, dict):
+                raise CliValidationError("conductor reminder evidence is invalid")
+            _require_keys(
+                reminder_value,
+                {"due_at_utc"},
+                "conductor reminder evidence",
+            )
+            due_at_utc = _required_string(reminder_value, "due_at_utc")
+            _parse_utc(due_at_utc)
+            conductor_reminder = ConductorReminderEvidence(due_at_utc)
+        return PrepareInput(wake, conductor_reminder)
     if operation == "record-result":
         _require_keys(
             value,
@@ -187,6 +208,7 @@ def build_runtime_prepare_message(
             "execution_id",
             "event_type",
             "event_id",
+            "reminder_message",
         },
         "runtime provenance",
     )
@@ -200,7 +222,10 @@ def build_runtime_prepare_message(
 
     event_type = value["event_type"]
     event_id = value["event_id"]
+    reminder_message = value["reminder_message"]
     if triggered_by == "event":
+        if reminder_message is not None:
+            raise CliValidationError("non-reminder provenance cannot carry a message")
         if event_type not in _WORKER_EVENT_TYPES:
             raise CliValidationError("runtime event type is not supported")
         event_id = _identifier("event_id", event_id)
@@ -212,34 +237,141 @@ def build_runtime_prepare_message(
             raise CliValidationError("runtime trigger is not supported")
         if event_type is not None or event_id is not None:
             raise CliValidationError("non-event provenance cannot carry event fields")
+        if triggered_by != "reminder" and reminder_message is not None:
+            raise CliValidationError("non-reminder provenance cannot carry a message")
         source_event_id = execution_id
 
-    payload_sha256 = hashlib.sha256(
-        b"\0".join(
-            (
-                _WAKE_DIGEST_DOMAIN,
-                source.encode("ascii"),
-                source_event_id.encode("ascii"),
-                triggered_by.encode("ascii"),
-                (event_type or "").encode("ascii"),
+    if triggered_by == "reminder" and reminder_message is not None:
+        if not isinstance(reminder_message, str):
+            raise CliValidationError("reminder message must be a string or null")
+        wake, conductor_reminder = _conductor_reminder_wake(reminder_message)
+    else:
+        payload_sha256 = hashlib.sha256(
+            b"\0".join(
+                (
+                    _WAKE_DIGEST_DOMAIN,
+                    source.encode("ascii"),
+                    source_event_id.encode("ascii"),
+                    triggered_by.encode("ascii"),
+                    (event_type or "").encode("ascii"),
+                )
             )
-        )
-    ).hexdigest()
-    return json.dumps(
-        {
-            "schema_version": 1,
-            "operation": "prepare",
-            "wake": {
-                "source": source,
-                "source_event_id": source_event_id,
-                "payload_sha256": payload_sha256,
-            },
+        ).hexdigest()
+        wake = normalize_wake(source, source_event_id, payload_sha256)
+        conductor_reminder = None
+    prepare_value: dict[str, object] = {
+        "schema_version": 1,
+        "operation": "prepare",
+        "wake": {
+            "source": wake.source,
+            "source_event_id": wake.source_event_id,
+            "payload_sha256": wake.payload_sha256,
         },
+    }
+    if conductor_reminder is not None:
+        prepare_value["conductor_reminder"] = {
+            "due_at_utc": conductor_reminder.due_at_utc,
+        }
+    return json.dumps(
+        prepare_value,
         ensure_ascii=True,
         separators=(",", ":"),
         sort_keys=True,
         allow_nan=False,
     )
+
+
+def _conductor_reminder_wake(
+    message: str,
+) -> tuple[Wake, ConductorReminderEvidence]:
+    """Validate a fired conductor message and recover its stable durable wake."""
+    if "\n" in message or "\r" in message:
+        raise CliValidationError("conductor reminder message must be one JSON line")
+    value = _parse_one_json_line(message)
+    canonical_message = json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    )
+    if message != canonical_message:
+        raise CliValidationError("conductor reminder message must be canonical JSON")
+    _require_keys(
+        value,
+        {"action_key", "payload_sha256", "references"},
+        "conductor reminder message",
+    )
+    action_key = _identifier("action_key", value["action_key"])
+    payload_sha256 = _required_string(value, "payload_sha256")
+    action_payload = value["references"]
+    if not isinstance(action_payload, dict):
+        raise CliValidationError("conductor reminder payload must be an object")
+    _require_keys(
+        action_payload,
+        {"digest", "references"},
+        "conductor reminder payload",
+    )
+    reminder_digest = _required_string(action_payload, "digest")
+    references = action_payload["references"]
+    if not isinstance(references, dict):
+        raise CliValidationError("conductor reminder references must be an object")
+    _require_keys(
+        references,
+        {"identifiers", "reason_code", "utc_timestamp"},
+        "conductor reminder references",
+    )
+    identifiers = references["identifiers"]
+    if not isinstance(identifiers, list) or len(identifiers) not in (1, 2):
+        raise CliValidationError("conductor reminder identifiers are invalid")
+    normalized_identifiers = [
+        _identifier("conductor reminder identifier", identifier)
+        for identifier in identifiers
+    ]
+    reminder_id = normalized_identifiers[0]
+    reason_code = _identifier("reason_code", references["reason_code"])
+    due_at_utc = _required_string(references, "utc_timestamp")
+    _parse_utc(due_at_utc)
+
+    canonical_payload = json.dumps(
+        action_payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    )
+    expected_payload_sha256 = hashlib.sha256(
+        canonical_payload.encode("utf-8")
+    ).hexdigest()
+    if payload_sha256 != expected_payload_sha256:
+        raise CliValidationError("conductor reminder payload digest does not match")
+    reminder_wire = {
+        "due_at_utc": due_at_utc,
+        "reason_code": reason_code,
+        "reminder_id": reminder_id,
+    }
+    expected_reminder_digest = hashlib.sha256(
+        json.dumps(
+            reminder_wire,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    if reminder_digest != expected_reminder_digest:
+        raise CliValidationError("conductor reminder digest does not match")
+    try:
+        return (
+            normalize_conductor_reminder_wake(
+                reminder_id,
+                action_key,
+                payload_sha256,
+            ),
+            ConductorReminderEvidence(due_at_utc),
+        )
+    except ValueError as error:
+        raise CliValidationError("conductor reminder identity does not match") from error
 
 
 def guard_agent_workspace(
@@ -303,6 +435,11 @@ def _prepare(
     parsed: PrepareInput,
     now: datetime,
 ) -> dict[str, object]:
+    _validate_conductor_reminder_evidence(
+        ledger.database_path,
+        parsed,
+        now,
+    )
     _recover_observed_result(
         workspace,
         ledger,
@@ -314,6 +451,40 @@ def _prepare(
     policy = adapter.safety_policy(parsed.wake, now)
     safety.bind_wake(parsed.wake.wake_id, policy.scope, now)
     assessment = safety.assess(policy.scope, now, policy.limits)
+    policies_by_wake = {parsed.wake.wake_id: policy}
+    scopes_by_fence: dict[int, SafetyScope] = {}
+    no_work_policy: SafetyPolicy | None = None
+
+    def claimed_effect_gate(lease: Lease) -> tuple[BudgetView, bool]:
+        wake = _load_wake(ledger.database_path, lease.wake_id)
+        selected_policy = policies_by_wake.get(wake.wake_id)
+        if selected_policy is None:
+            selected_policy = adapter.safety_policy(wake, now)
+            safety.bind_wake(wake.wake_id, selected_policy.scope, now)
+            policies_by_wake[wake.wake_id] = selected_policy
+        selected = safety.assess(
+            selected_policy.scope,
+            now,
+            selected_policy.limits,
+        )
+        scopes_by_fence[lease.fence_token] = selected_policy.scope
+        return selected.budget_view, selected.allows_effect
+
+    def claimed_no_work(lease: Lease) -> None:
+        nonlocal no_work_policy
+        wake = _load_wake(ledger.database_path, lease.wake_id)
+        selected_policy = policies_by_wake.get(wake.wake_id)
+        if selected_policy is None:
+            raise CliValidationError("claimed wake has no safety policy")
+        no_work_policy = selected_policy
+        _record_no_work(
+            safety,
+            wake.wake_id,
+            selected_policy.scope,
+            now,
+            selected_policy.limits,
+        )
+
     checkpoint = _load_checkpoint(ledger.database_path)
     tick = DeliveryConductorTick(
         ledger=ledger,
@@ -327,22 +498,14 @@ def _prepare(
         checkpoint,
         assessment.budget_view,
         breaker_allows_effect=assessment.allows_effect,
-        post_claim_gate=lambda _lease: _fresh_effect_gate(
-            safety,
-            policy.scope,
-            now,
-            policy.limits,
-        ),
-        before_noop_release=lambda _lease: _record_no_work(
-            safety,
-            parsed.wake.wake_id,
-            policy.scope,
-            now,
-            policy.limits,
-        ),
+        post_claim_gate=claimed_effect_gate,
+        before_noop_release=claimed_no_work,
     )
     if result.handoff is not None:
-        _store_handoff(ledger.database_path, result.handoff, policy.scope, now)
+        active_scope = scopes_by_fence.get(result.handoff.lease.fence_token)
+        if active_scope is None:
+            raise CliValidationError("prepared handoff has no safety scope")
+        _store_handoff(ledger.database_path, result.handoff, active_scope, now)
         if result.handoff.kind == "action":
             safety.record_event(
                 _safety_event_key(
@@ -351,7 +514,7 @@ def _prepare(
                     result.handoff.lease.fence_token,
                 ),
                 "attempt",
-                policy.scope,
+                active_scope,
                 now,
             )
             if result.handoff.action.invalidation_class == "repair-cycle":
@@ -362,23 +525,60 @@ def _prepare(
                         result.handoff.lease.fence_token,
                     ),
                     "repair-cycle",
-                    policy.scope,
+                    active_scope,
                     now,
                 )
     elif result.status == "noop":
-        safety.assess(policy.scope, now, policy.limits)
+        if no_work_policy is None:
+            raise CliValidationError("no-work result has no safety policy")
+        safety.assess(no_work_policy.scope, now, no_work_policy.limits)
     publish_current_projection(workspace, ledger.database_path, now)
-    return _prepare_output(result)
+    return _prepare_output(result, now)
 
 
-def _fresh_effect_gate(
-    safety: SafetyController,
-    scope: SafetyScope,
+def _validate_conductor_reminder_evidence(
+    database_path: Path,
+    parsed: PrepareInput,
     now: datetime,
-    limits: SafetyLimits,
-) -> tuple[BudgetView, bool]:
-    assessment = safety.assess(scope, now, limits)
-    return assessment.budget_view, assessment.allows_effect
+) -> None:
+    evidence = parsed.conductor_reminder
+    if evidence is None:
+        return
+    wake = parsed.wake
+    if wake.source != "reminder" or wake.source_event_id == "":
+        raise CliValidationError("conductor reminder evidence does not match its wake")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA query_only = ON")
+        row = connection.execute(
+            """
+            SELECT capability_name, payload_json, payload_sha256,
+                   invalidation_class
+            FROM action_journal WHERE action_key = ?
+            """,
+            (wake.source_event_id,),
+        ).fetchone()
+    if row is None or (row[0], row[3]) != ("reminders", "reminder-intent"):
+        raise CliValidationError("conductor reminder has no durable intent")
+    try:
+        references = json.loads(row[1], object_pairs_hook=_reject_duplicate_keys)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise CliValidationError("durable conductor reminder is invalid") from error
+    durable_message = json.dumps(
+        {
+            "action_key": wake.source_event_id,
+            "payload_sha256": row[2],
+            "references": references,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    )
+    durable_wake, durable_evidence = _conductor_reminder_wake(durable_message)
+    if durable_wake != wake or durable_evidence != evidence:
+        raise CliValidationError("conductor reminder does not match durable intent")
+    if _parse_utc(evidence.due_at_utc) > now:
+        raise CliValidationError("conductor reminder is not due")
 
 
 def _record_no_work(
@@ -614,13 +814,8 @@ def _is_cli_adapter_decision_safe(decision: AdapterDecision) -> bool:
         return False
     if decision.next_reminder is not None:
         try:
-            due_at = _parse_utc(decision.next_reminder.due_at_utc)
+            _parse_utc(decision.next_reminder.due_at_utc)
         except CliValidationError:
-            return False
-        if decision.next_reminder.due_at_utc not in {
-            _utc_seconds(due_at),
-            _utc_text(due_at),
-        }:
             return False
     if decision.decision != "execute":
         return True
@@ -1270,7 +1465,25 @@ def _load_checkpoint(database_path: Path) -> CheckpointView | None:
     return CheckpointView(*row) if row is not None else None
 
 
-def _prepare_output(result: TickResult) -> dict[str, object]:
+def _load_wake(database_path: Path, wake_id: str) -> Wake:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA query_only = ON")
+        row = connection.execute(
+            """
+            SELECT wake_id, source, source_event_id, payload_sha256
+            FROM event_inbox WHERE wake_id = ?
+            """,
+            (wake_id,),
+        ).fetchone()
+    if row is None:
+        raise CliValidationError("claimed wake is absent from the durable inbox")
+    try:
+        return Wake(*row)
+    except (TypeError, ValueError) as error:
+        raise CliValidationError("claimed wake is invalid") from error
+
+
+def _prepare_output(result: TickResult, now: datetime) -> dict[str, object]:
     action = result.action
     handoff = result.handoff
     reminder = result.reminder
@@ -1280,7 +1493,7 @@ def _prepare_output(result: TickResult) -> dict[str, object]:
         if handoff is None or handoff.action != action:
             raise CliValidationError("prepared action is missing its durable handoff")
         effect_tool = resolve_effect_tool(action.capability_name)
-        effect_arguments = _effect_arguments(action, handoff, reminder)
+        effect_arguments = _effect_arguments(action, handoff, reminder, now)
     return {
         "schema_version": 1,
         "operation": "prepare",
@@ -1311,6 +1524,7 @@ def _effect_arguments(
     action: ProposedAction,
     handoff: TickHandoff,
     reminder: ReminderSpec | None,
+    now: datetime,
 ) -> dict[str, str]:
     try:
         references = json.loads(action.payload_json)
@@ -1336,6 +1550,8 @@ def _effect_arguments(
         if reminder is None or handoff.reminder != reminder:
             raise CliValidationError("reminder action is missing its durable due time")
         _parse_utc(reminder.due_at_utc)
+        if adapter_reminder_window_reason(reminder, now) is not None:
+            raise CliValidationError("prepared reminder is outside the allowed due window")
         arguments = {"message": message, "fire_at": reminder.due_at_utc}
     else:
         raise CliValidationError("prepared effect capability is not supported")

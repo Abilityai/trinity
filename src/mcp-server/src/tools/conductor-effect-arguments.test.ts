@@ -62,8 +62,8 @@ reminder_handoff = TickHandoff(
 )
 
 print(json.dumps({
-    "chat": _effect_arguments(chat_action, chat_handoff, None),
-    "reminder": _effect_arguments(reminder_action, reminder_handoff, reminder),
+    "chat": _effect_arguments(chat_action, chat_handoff, None, now),
+    "reminder": _effect_arguments(reminder_action, reminder_handoff, reminder, now),
 }, separators=(",", ":"), sort_keys=True))
 `;
 

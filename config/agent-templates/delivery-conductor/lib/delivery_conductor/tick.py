@@ -28,6 +28,7 @@ from .ledger import (
     TickOutcome,
 )
 from .identifiers import is_safe_identifier
+from .wakes import normalize_conductor_reminder_wake
 
 
 TickStatus = Literal[
@@ -46,6 +47,9 @@ PostClaimGate = Callable[[Lease], tuple[BudgetView, bool]]
 BeforeNoopRelease = Callable[[Lease], None]
 
 _REMINDER_REFERENCE_MARKER = "delivery-conductor-reminder-v1"
+_REMINDER_MIN_DELAY = timedelta(seconds=60)
+_REMINDER_MAX_DELAY = timedelta(days=30)
+_DUE_RESULT_DOMAIN = b"delivery-conductor-reminder-due-v1"
 
 
 class TickCorrelationError(ValueError):
@@ -138,6 +142,43 @@ class DeliveryConductorTick:
         before_noop_release: BeforeNoopRelease | None = None,
     ) -> TickResult:
         """Prepare zero or one effect without invoking a capability."""
+        AdapterRequest(
+            schema_version=1,
+            wake=wake,
+            now_utc=_utc_timestamp(now),
+            checkpoint=checkpoint,
+            budget_view=budget_view,
+        )
+        lease, effective_wake = self._ledger.claim_wake_or_due(
+            wake,
+            now,
+            self._lease_seconds,
+        )
+        if lease is None:
+            return TickResult("not-claimed", "wake-not-claimed")
+        return self._run_claimed(
+            effective_wake,
+            lease,
+            now,
+            checkpoint,
+            budget_view,
+            breaker_allows_effect=breaker_allows_effect,
+            post_claim_gate=post_claim_gate,
+            before_noop_release=before_noop_release,
+        )
+
+    def _run_claimed(
+        self,
+        wake: Wake,
+        lease: Lease,
+        now: datetime,
+        checkpoint: CheckpointView | None,
+        budget_view: BudgetView,
+        *,
+        breaker_allows_effect: bool,
+        post_claim_gate: PostClaimGate | None,
+        before_noop_release: BeforeNoopRelease | None,
+    ) -> TickResult:
         request = AdapterRequest(
             schema_version=1,
             wake=wake,
@@ -145,9 +186,6 @@ class DeliveryConductorTick:
             checkpoint=checkpoint,
             budget_view=budget_view,
         )
-        lease = self._ledger.claim_wake(wake, now, self._lease_seconds)
-        if lease is None:
-            return TickResult("not-claimed", "wake-not-claimed")
 
         if post_claim_gate is not None:
             try:
@@ -190,6 +228,10 @@ class DeliveryConductorTick:
                 reminder,
                 budget_view,
                 breaker_allows_effect,
+                now=now,
+                checkpoint=checkpoint,
+                post_claim_gate=post_claim_gate,
+                before_noop_release=before_noop_release,
             )
 
         try:
@@ -198,6 +240,9 @@ class DeliveryConductorTick:
             return self._reject(lease, "adapter-unavailable", status="blocked")
         if not is_runtime_decision_safe(decision):
             return self._reject(lease, "invalid-adapter-decision")
+        window_reason = adapter_reminder_window_reason(decision.next_reminder, now)
+        if window_reason is not None:
+            return self._reject(lease, window_reason)
 
         if decision.decision != "execute":
             if decision.next_reminder is not None:
@@ -207,6 +252,10 @@ class DeliveryConductorTick:
                     decision.next_reminder,
                     budget_view,
                     breaker_allows_effect,
+                    now=now,
+                    checkpoint=checkpoint,
+                    post_claim_gate=post_claim_gate,
+                    before_noop_release=before_noop_release,
                 )
             return self._finish_noop(
                 lease,
@@ -260,6 +309,10 @@ class DeliveryConductorTick:
                     budget_view,
                     breaker_allows_effect,
                     source_action_key=action.action_key,
+                    now=now,
+                    checkpoint=checkpoint,
+                    post_claim_gate=post_claim_gate,
+                    before_noop_release=before_noop_release,
                 )
             return self._finish_terminal_replay(
                 lease, decision.observed_revision, budget_view, reservation
@@ -278,6 +331,10 @@ class DeliveryConductorTick:
                 budget_view,
                 breaker_allows_effect,
                 source_action_key=action.action_key,
+                now=now,
+                checkpoint=checkpoint,
+                post_claim_gate=post_claim_gate,
+                before_noop_release=before_noop_release,
             )
 
         gate_reason = _effect_gate_reason(budget_view, breaker_allows_effect)
@@ -453,6 +510,10 @@ class DeliveryConductorTick:
         breaker_allows_effect: bool,
         *,
         source_action_key: str | None = None,
+        now: datetime,
+        checkpoint: CheckpointView | None,
+        post_claim_gate: PostClaimGate | None,
+        before_noop_release: BeforeNoopRelease | None,
     ) -> TickResult:
         action = _reminder_action(
             reminder,
@@ -475,6 +536,10 @@ class DeliveryConductorTick:
             reminder,
             budget_view,
             breaker_allows_effect,
+            now=now,
+            checkpoint=checkpoint,
+            post_claim_gate=post_claim_gate,
+            before_noop_release=before_noop_release,
         )
 
     def _prepare_reminder_action(
@@ -484,6 +549,11 @@ class DeliveryConductorTick:
         reminder: ReminderSpec,
         budget_view: BudgetView,
         breaker_allows_effect: bool,
+        *,
+        now: datetime,
+        checkpoint: CheckpointView | None,
+        post_claim_gate: PostClaimGate | None,
+        before_noop_release: BeforeNoopRelease | None,
     ) -> TickResult:
         if "reminders" not in self._installed_capabilities:
             return self._reject(lease, "capability-not-installed")
@@ -510,6 +580,81 @@ class DeliveryConductorTick:
                 action.target_revision,
                 budget_view,
                 reservation,
+                reminder=reminder,
+            )
+        due_at = _parse_utc_timestamp(reminder.due_at_utc)
+        if due_at <= now:
+            result_sha256 = hashlib.sha256(
+                b"\0".join(
+                    (
+                        _DUE_RESULT_DOMAIN,
+                        action.action_key.encode("ascii"),
+                        reservation.payload_sha256.encode("ascii"),
+                    )
+                )
+            ).hexdigest()
+            due_result = EffectResult("completed", result_sha256, "reminder-due")
+            terminal = ActionReservation(
+                action.action_key,
+                "completed",
+                reservation.payload_sha256,
+                result_sha256,
+                due_result.reason_code,
+            )
+            terminal_checkpoint = self._build_checkpoint(
+                lease,
+                revision=action.target_revision,
+                reason_code=due_result.reason_code,
+                budget_view=budget_view,
+                reservation=terminal,
+            )
+            due_wake = normalize_conductor_reminder_wake(
+                reminder.reminder_id,
+                action.action_key,
+                reservation.payload_sha256,
+            )
+            due_lease = self._ledger.reconcile_due_reminder(
+                lease,
+                action,
+                due_wake,
+                due_result,
+                terminal_checkpoint,
+                now,
+                self._lease_seconds,
+            )
+            if due_lease is None:
+                return TickResult(
+                    "reminder",
+                    due_result.reason_code,
+                    action_key=action.action_key,
+                    action_status="completed",
+                    result_sha256=result_sha256,
+                    reminder=reminder,
+                )
+            terminal_view = CheckpointView(
+                terminal_checkpoint.revision,
+                terminal_checkpoint.checkpoint_sha256,
+                lease.fence_token,
+                terminal_checkpoint.acknowledged_wake_id,
+            )
+            return self._run_claimed(
+                due_wake,
+                due_lease,
+                now,
+                terminal_view,
+                budget_view,
+                breaker_allows_effect=breaker_allows_effect,
+                post_claim_gate=post_claim_gate,
+                before_noop_release=before_noop_release,
+            )
+        window_reason = _reminder_window_reason(reminder, now)
+        if window_reason is not None:
+            return self._block_reserved(
+                lease,
+                action.target_revision,
+                budget_view,
+                reservation,
+                window_reason,
                 reminder=reminder,
             )
         gate_reason = _effect_gate_reason(budget_view, breaker_allows_effect)
@@ -813,6 +958,26 @@ class DeliveryConductorTick:
         budget_view: BudgetView,
         reservation: ActionReservation | None = None,
     ) -> None:
+        self._ledger.checkpoint(
+            lease,
+            self._build_checkpoint(
+                lease,
+                revision=revision,
+                reason_code=reason_code,
+                budget_view=budget_view,
+                reservation=reservation,
+            ),
+        )
+
+    def _build_checkpoint(
+        self,
+        lease: Lease,
+        *,
+        revision: str,
+        reason_code: str,
+        budget_view: BudgetView,
+        reservation: ActionReservation | None = None,
+    ) -> Checkpoint:
         checkpoint_fields: dict[str, object] = {
             "revision": revision,
             "wake_id": lease.wake_id,
@@ -835,20 +1000,17 @@ class DeliveryConductorTick:
                 "utf-8"
             )
         ).hexdigest()
-        self._ledger.checkpoint(
-            lease,
-            Checkpoint(
-                revision=revision,
-                checkpoint_sha256=checkpoint_sha256,
-                acknowledged_wake_id=lease.wake_id,
-                reason_code=reason_code,
-                run_units_remaining=budget_view.run_units_remaining,
-                issue_units_remaining=budget_view.issue_units_remaining,
-                daily_units_remaining=budget_view.daily_units_remaining,
-                action_key=reservation.action_key if reservation else None,
-                action_status=reservation.status if reservation else None,
-                action_result_sha256=reservation.result_sha256 if reservation else None,
-            ),
+        return Checkpoint(
+            revision=revision,
+            checkpoint_sha256=checkpoint_sha256,
+            acknowledged_wake_id=lease.wake_id,
+            reason_code=reason_code,
+            run_units_remaining=budget_view.run_units_remaining,
+            issue_units_remaining=budget_view.issue_units_remaining,
+            daily_units_remaining=budget_view.daily_units_remaining,
+            action_key=reservation.action_key if reservation else None,
+            action_status=reservation.status if reservation else None,
+            action_result_sha256=reservation.result_sha256 if reservation else None,
         )
 
 
@@ -924,6 +1086,25 @@ def _payload_identifiers_are_safe(payload_json: str) -> bool:
         return True
 
     return visit(payload)
+
+
+def adapter_reminder_window_reason(
+    reminder: ReminderSpec | None,
+    now: datetime,
+) -> str | None:
+    if reminder is None:
+        return None
+    return _reminder_window_reason(reminder, now)
+
+
+def _reminder_window_reason(reminder: ReminderSpec, now: datetime) -> str | None:
+    due_at = _parse_utc_timestamp(reminder.due_at_utc)
+    delta = due_at - now
+    if delta < _REMINDER_MIN_DELAY:
+        return "reminder-too-soon"
+    if delta > _REMINDER_MAX_DELAY:
+        return "reminder-too-far"
+    return None
 
 
 def _effect_gate_reason(

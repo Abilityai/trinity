@@ -114,6 +114,15 @@ class FakeAdapter:
         return value  # type: ignore[return-value]
 
 
+class CrashableAdapter(FakeAdapter):
+    def observe_and_decide(self, request: AdapterRequest) -> AdapterDecision:
+        self.requests.append(request)
+        value = self.decisions.popleft()
+        if isinstance(value, BaseException):
+            raise value
+        return value  # type: ignore[return-value]
+
+
 class ReplayExecutor:
     """External capability fake with action-key replay, outside the tick."""
 
@@ -823,6 +832,271 @@ def test_reminder_intent_is_reserved_before_return_and_wake_stays_unacknowledged
     ) == [(result.action_key, "reserved")]
     assert _fetchall(database_path, "SELECT state FROM event_inbox") == [("pending",)]
     assert _fetchall(database_path, "SELECT wake_id FROM repo_lease") == [("wake-1",)]
+
+
+@pytest.mark.parametrize(
+    "due_at_utc",
+    (
+        "2026-08-02T09:11:11Z",
+        "2026-08-02T09:11:12Z",
+        "2026-09-01T09:10:10Z",
+        "2026-09-01T09:10:11Z",
+    ),
+)
+def test_adapter_reminder_accepts_exact_and_inside_trinity_time_window(
+    ledger: ControlLedger,
+    database_path: Path,
+    due_at_utc: str,
+):
+    """Changing either inclusive comparison must reject an executable boundary."""
+    reminder = ReminderSpec("reminder-window-1", due_at_utc, "observe-later")
+
+    prepared = _prepare_action(
+        ledger,
+        FakeAdapter(_decision("remind", reminder=reminder)),
+    )
+
+    assert prepared.status == "reminder-ready"
+    assert prepared.reminder == reminder
+    assert prepared.action is not None
+    assert _fetchall(
+        database_path,
+        "SELECT capability_name, status FROM action_journal",
+    ) == [("reminders", "reserved")]
+
+
+@pytest.mark.parametrize(
+    ("due_at_utc", "reason_code"),
+    (
+        ("2026-08-02T09:10:11Z", "reminder-too-soon"),
+        ("2026-08-02T09:11:10Z", "reminder-too-soon"),
+        ("2026-09-01T09:10:12Z", "reminder-too-far"),
+    ),
+)
+def test_out_of_window_follow_up_rejects_before_source_reservation(
+    ledger: ControlLedger,
+    database_path: Path,
+    due_at_utc: str,
+    reason_code: str,
+):
+    """A bad follow-up must not reserve or expose the otherwise valid chat action."""
+    reminder = ReminderSpec("reminder-window-1", due_at_utc, "observe-later")
+
+    rejected = _prepare_action(
+        ledger,
+        FakeAdapter(
+            _decision("execute", action=_action(), reminder=reminder),
+        ),
+    )
+
+    assert rejected.status == "rejected"
+    assert rejected.reason_code == reason_code
+    assert rejected.action is None
+    assert rejected.handoff is None
+    assert _fetchall(database_path, "SELECT * FROM action_journal") == []
+    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [("pending",)]
+    assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
+
+
+def test_overdue_reserved_reminder_becomes_one_stable_zero_effect_wake(
+    ledger: ControlLedger,
+    database_path: Path,
+):
+    """Replaying a past fire_at must neither call set_reminder nor lose its due wake."""
+    adapter = FakeAdapter(
+        _decision("remind", reminder=_reminder()),
+        _decision("noop"),
+    )
+    runner = _runner(ledger, adapter)
+    prepared = runner.run(
+        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    )
+
+    recovered = runner.run(
+        _wake(1),
+        NOW + timedelta(seconds=301),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+
+    assert recovered.status == "noop"
+    assert recovered.action is None
+    assert len(adapter.requests) == 2
+    assert adapter.requests[1].wake == Wake(
+        "bb11bebb6e5a305fac1f29b3399b3c213c2c99e0ab34867e77770031f56fb59f",
+        "reminder",
+        "reminder-6e65617c9573c280babf77f6707f358d7d495996c58b586aab53442a8f75c843",
+        prepared.handoff.payload_sha256,
+    )
+    assert _fetchall(
+        database_path,
+        "SELECT capability_name, status, reason_code FROM action_journal",
+    ) == [("reminders", "completed", "reminder-due")]
+    assert _fetchall(
+        database_path,
+        "SELECT source, source_event_id, state FROM event_inbox ORDER BY source",
+    ) == [
+        ("event", "event-1", "acknowledged"),
+        (
+            "reminder",
+            "reminder-6e65617c9573c280babf77f6707f358d7d495996c58b586aab53442a8f75c843",
+            "acknowledged",
+        ),
+    ]
+    assert _fetchall(
+        database_path,
+        "SELECT run_units, issue_units, daily_units, reason_code "
+        "FROM budget_usage ORDER BY fence_token",
+    ) == [
+        (0, 0, 0, "reminder-due"),
+        (0, 0, 0, "decision-noop"),
+    ]
+
+    duplicate = runner.run(
+        _wake(1),
+        NOW + timedelta(seconds=302),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+    assert duplicate.status == "not-claimed"
+    assert len(adapter.requests) == 2
+    assert _fetchall(database_path, "SELECT COUNT(*) FROM action_events") == [(2,)]
+
+
+def test_actual_late_reminder_races_local_reconciliation_under_one_wake_id(
+    ledger: ControlLedger,
+    database_path: Path,
+):
+    """A fired reminder racing crash recovery must not create a second due wake."""
+    adapter = FakeAdapter(
+        _decision("remind", reminder=_reminder()),
+        _decision("noop"),
+    )
+    runner = _runner(ledger, adapter)
+    prepared = runner.run(
+        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    )
+    actual_wake = Wake(
+        "bb11bebb6e5a305fac1f29b3399b3c213c2c99e0ab34867e77770031f56fb59f",
+        "reminder",
+        prepared.action_key,
+        prepared.handoff.payload_sha256,
+    )
+
+    actual = runner.run(
+        actual_wake,
+        NOW + timedelta(seconds=300),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+    recovered = runner.run(
+        _wake(1),
+        NOW + timedelta(seconds=301),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+    duplicate = runner.run(
+        actual_wake,
+        NOW + timedelta(seconds=302),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+
+    assert actual.status == "noop"
+    assert recovered.status == "reminder"
+    assert recovered.action is None
+    assert duplicate.status == "not-claimed"
+    assert adapter.requests[1].wake == actual_wake
+    assert _fetchall(database_path, "SELECT COUNT(*) FROM event_inbox") == [(2,)]
+    assert _fetchall(
+        database_path,
+        "SELECT COUNT(*) FROM action_journal WHERE capability_name = 'reminders'",
+    ) == [(1,)]
+
+
+def test_restart_after_atomic_due_handoff_reclaims_pending_reminder_wake(
+    ledger: ControlLedger,
+    database_path: Path,
+):
+    """A crash after local handoff must leave one durable wake for the next launch."""
+    adapter = CrashableAdapter(
+        _decision("remind", reminder=_reminder()),
+        SystemExit("crash before due-wake observation"),
+        _decision("noop"),
+    )
+    runner = _runner(ledger, adapter)
+    runner.run(_wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True)
+
+    with pytest.raises(SystemExit, match="before due-wake observation"):
+        runner.run(
+            _wake(1),
+            NOW + timedelta(seconds=301),
+            None,
+            HEALTHY_BUDGET,
+            breaker_allows_effect=True,
+        )
+
+    recovered = runner.run(
+        _wake(1),
+        NOW + timedelta(seconds=332),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+
+    assert recovered.status == "noop"
+    assert adapter.requests[2].wake.source == "reminder"
+    assert _fetchall(database_path, "SELECT COUNT(*) FROM event_inbox") == [(2,)]
+    assert _fetchall(
+        database_path,
+        "SELECT capability_name, status FROM action_journal",
+    ) == [("reminders", "completed")]
+
+
+def test_crash_before_due_wake_effect_replays_one_adapter_action(
+    ledger: ControlLedger,
+    database_path: Path,
+):
+    """Losing the returned effect must reobserve one due wake and reuse one key."""
+    due_action = _action(action_key="due-action-1")
+    adapter = FakeAdapter(
+        _decision("remind", reminder=_reminder()),
+        _decision("execute", action=due_action),
+        _decision("execute", action=due_action),
+    )
+    runner = _runner(ledger, adapter)
+    runner.run(_wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True)
+
+    first = runner.run(
+        _wake(1),
+        NOW + timedelta(seconds=301),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+    replay = runner.run(
+        _wake(1),
+        NOW + timedelta(seconds=332),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+
+    assert first.status == "action-ready"
+    assert replay.status == "action-ready"
+    assert first.action == replay.action == due_action
+    assert adapter.requests[1].wake == adapter.requests[2].wake
+    assert adapter.requests[1].wake.source == "reminder"
+    assert _fetchall(
+        database_path,
+        "SELECT capability_name, status, COUNT(*) FROM action_journal "
+        "GROUP BY capability_name, status ORDER BY capability_name",
+    ) == [("chat", "reserved", 1), ("reminders", "completed", 1)]
 
 
 def test_confirmed_reminder_records_result_before_acknowledgement(
