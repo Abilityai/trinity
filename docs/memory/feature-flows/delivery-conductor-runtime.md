@@ -16,7 +16,11 @@ authoritative conductor-state store.
    normalizes it into a stable wake record.
 2. The conductor persists the record in its durable inbox before processing it.
    Inbox delivery is at least once, so duplicate wakes and recovery replay are
-   normal inputs rather than exceptional cases.
+   normal inputs rather than exceptional cases. The durable inbox, checkpoints,
+   and action-reservation ledger may contain only identifiers, hashes,
+   revisions, budgets, and sanitized reason codes. Issue bodies, requirements,
+   discovery, and evidence logs are forbidden; they may be referenced only by
+   an allowed identifier or hash.
 3. A worker claims work under a time-bounded lease. Each successful claim uses
    a monotonically advancing fence token; a stale holder cannot acknowledge,
    checkpoint, reserve an action, or otherwise commit after a newer holder.
@@ -31,9 +35,11 @@ authoritative conductor-state store.
 ## Checkpoints, budgets, and reminders
 
 Each checkpoint contains only generic runtime fields needed for safe progress:
-the pipeline projection, acknowledged inbox position, current fence token,
-action-reservation outcome, and explicit budget counters or deadlines. Budget
-exhaustion prevents another tick; it never authorizes hidden background work.
+identifiers, hashes, revisions, budgets, and sanitized reason codes. This
+binding allowlist covers the acknowledged inbox position, current fence token,
+and action-reservation outcome; it excludes issue bodies, requirements,
+discovery, and evidence logs. Budget exhaustion prevents another tick; it never
+authorizes hidden background work.
 
 A reminder is a persisted wake source, not a parallel transition engine. On
 startup or after a missed interval, the conductor reconciles due reminders into
@@ -42,12 +48,14 @@ then apply.
 
 ## Adapter and executor isolation
 
-Adapters isolate untrusted input from conductor mechanics. Executors isolate
-capability invocation from wake parsing. Both communicate over JSON Lines using
-versioned, closed schemas and reject messages above **1 MiB**. Schemas contain
-only declared typed fields and references: no arbitrary command, URL,
-environment, credential, or file-content fields are permitted. Raw
-payload/evidence storage is outside this contract.
+Adapters isolate untrusted input from conductor mechanics. An adapter may use
+only its configured read-only observation port and must not directly invoke
+mutating network or MCP capabilities. Executors isolate capability invocation
+from wake parsing. Both communicate over JSON Lines using versioned, closed
+schemas and reject messages above **1 MiB**. Schemas contain only declared typed
+fields and references: no arbitrary command, URL, environment, credential, or
+file-content fields are permitted. Raw payload/evidence storage is outside this
+contract.
 
 ## Platform projection
 

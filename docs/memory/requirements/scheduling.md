@@ -498,25 +498,31 @@
 - **Wake and inbox contract**: Every schedule, event, reminder, or manual
   signal is normalized into a stable wake record before it reaches a durable
   inbox. Delivery is at least once, so duplicate wakes and recovery replay are
-  expected. A worker holds a time-bounded lease with a monotonically advancing
-  fence token; a stale holder must not checkpoint, reserve an action, or
-  acknowledge work after a newer holder has fenced it.
+  expected. The durable inbox, checkpoints, and action-reservation ledger have
+  a binding allowlist: identifiers, hashes, revisions, budgets, and sanitized
+  reason codes only. They must never contain issue bodies, requirements,
+  discovery, or evidence logs; such material may be referenced only by an
+  allowed identifier or hash. A worker holds a time-bounded lease with a
+  monotonically advancing fence token; a stale holder must not checkpoint,
+  reserve an action, or acknowledge work after a newer holder has fenced it.
 - **Tick and action contract**: One conductor tick makes at most one external
   effect. Before requesting it, the conductor durably reserves an action
   identity and persists the replay outcome. A retry resumes or observes that
   reservation instead of minting an equivalent new action.
 - **Checkpoint, budget, and recovery contract**: Checkpoints carry the generic
-  pipeline projection, inbox acknowledgement position, lease fence, and budget
-  fields needed to decide whether another tick may run. A persisted reminder is
-  a wake source, not a second transition engine: after restart the conductor
-  reconciles due reminders into the inbox and applies the same reservation and
-  replay rules.
+  identifiers, hashes, revisions, budgets, and sanitized reason codes needed to
+  decide whether another tick may run; the durable-state allowlist above is
+  exhaustive. A persisted reminder is a wake source, not a second transition
+  engine: after restart the conductor reconciles due reminders into the inbox
+  and applies the same reservation and replay rules.
 - **Adapter and executor boundary**: Adapters isolate untrusted wake sources;
-  executors isolate capability invocation. Their JSON Lines messages are
-  versioned, closed schemas with a **1 MiB** maximum message size. The schemas
-  must reject arbitrary command, URL, environment, credential, and file-content
-  fields; they carry typed references and intent, never raw payload/evidence
-  storage or ambient execution authority.
+  an adapter may use only its configured read-only observation port and must not
+  directly invoke mutating network or MCP capabilities. Executors isolate
+  capability invocation. Their JSON Lines messages are versioned, closed schemas
+  with a **1 MiB** maximum message size. The schemas must reject arbitrary
+  command, URL, environment, credential, and file-content fields; they carry
+  typed references and intent, never raw payload/evidence storage or ambient
+  execution authority.
 - **Projection**: The conductor may publish a read-only pipeline-state
   projection through the existing `~/.trinity/pipeline-state/` convention.
   Trinity reads that projection but does not use it to drive transitions, mutate
