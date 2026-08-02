@@ -65,6 +65,14 @@ def _type_name(value: Any) -> str:
 def _safe_echo(text: Any, max_len: int = 80) -> str:
     """Make an author-supplied string safe to echo in an error message.
 
+    Used ONLY for the cron and timezone strings — the sole values these errors
+    echo. `name`/`message`/`description` are never echoed: they are unbounded,
+    prompt-injection-shaped, and this list is persisted into
+    `agent_compatibility_results.checks_json`, rendered in the UI, and returned
+    in the catalog response. Cron/timezone are bounded, printable, and are what
+    make the error actionable (`validate_cron_expression` already echoes the
+    cron on the router path).
+
     Twin of `template_service._sanitize_for_warning` (#950 L1) — strip
     non-printable characters (ANSI escapes, newlines, C0/C1 control bytes) so a
     crafted value cannot hijack a terminal rendering the error, and bound the
@@ -154,8 +162,8 @@ def _parse(block: Any) -> Tuple[List[Dict[str, Any]], List[str]]:
 
         if name in seen_names:
             errors.append(
-                f"schedules[{index}].name: duplicate schedule name "
-                f"'{_safe_echo(name)}' — only the first is materialized"
+                f"schedules[{index}].name: duplicate of an earlier entry's "
+                f"name — only the first is materialized"
             )
             continue
 
