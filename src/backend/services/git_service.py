@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from database import db, AgentGitConfig, GitSyncResult
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, execute_command_in_container
+from utils.credential_sanitizer import redact_url_userinfo
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +220,250 @@ async def update_remote_pat(agent_name: str, github_pat: str, github_repo: str) 
     except Exception as e:  # noqa: BLE001 — best-effort, container may be down
         logger.warning("update_remote_pat: error for %s: %s", agent_name, e)
         return False
+
+
+# ============================================================================
+# Post-creation repo binding (trinity-enterprise#109)
+# ============================================================================
+
+# A full-history push of an agent's accumulated workspace, over the container's
+# network. Matched to fork_to_own.PUSH_TIMEOUT_S so the two halves of the same
+# feature cannot disagree about how long a push may legitimately take.
+REBIND_PUSH_TIMEOUT_S = 120
+
+
+def _credentialless_remote_url(github_repo: str) -> str:
+    """A remote URL with no userinfo, honouring ``TRINITY_GIT_BASE_URL``.
+
+    Mirrors ``startup.sh``'s ``UPSTREAM_URL`` construction
+    (``${GIT_SCHEME}://${GIT_HOST_PATH}/${repo}.git``) so the ``upstream``
+    remote this module writes and the one startup.sh self-heals are the same
+    string. Distinct from ``_git_remote_url``, which always embeds
+    ``oauth2:<pat>@`` — passing an empty PAT there yields ``oauth2:@host``,
+    which is NOT credential-less and defeats anonymous fetch.
+    """
+    base = os.getenv("TRINITY_GIT_BASE_URL", "https://github.com").rstrip("/")
+    return f"{base}/{github_repo}.git"
+
+
+@dataclass
+class RebindResult:
+    """Outcome of the in-container half of a repo rebind (ent#109)."""
+
+    success: bool
+    stage: str  # detect | branch | push | rewire — where it stopped
+    branch: Optional[str] = None
+    error: Optional[str] = None
+
+
+def _scrub_git_output(text: str, user_pat: str) -> str:
+    """Redact BOTH the request's PAT and any URL userinfo from git output.
+
+    Two passes, because they cover different secrets. ``scrub_secret`` removes
+    the token the caller just handed us; ``redact_url_userinfo`` removes
+    whatever userinfo is embedded in a remote URL git happens to echo — which
+    on a rebind can be a *stale baked* token that is not ``user_pat`` at all
+    (learnings 2026-07-14). Dropping either one leaks a real credential into
+    an HTTP error body or the audit trail.
+    """
+    from services.agent_service.fork_to_own import scrub_secret
+
+    return redact_url_userinfo(scrub_secret(text or "", user_pat))
+
+
+async def rebind_origin_and_push(
+    agent_name: str,
+    destination_repo: str,
+    user_pat: str,
+    previous_repo: str,
+    branch: str,
+) -> RebindResult:
+    """Push the agent's current history to ``destination_repo`` and repoint ``origin``.
+
+    The in-container half of "bind this agent to a repo you own"
+    (trinity-enterprise#109 §4.4 step 5). Unlike ent#93's create-time fork,
+    the content source is the agent's **workspace volume** — the accumulated
+    knowledge base — not a clone of the template, which is the whole reason
+    the two paths cannot share a copy step.
+
+``branch`` is the ref the caller already resolved via
+    ``inspect_container_git`` during classification, and is the SAME value it
+    wrote into the CAS's ``source_branch`` — re-reading it here would open a
+    window where the row and the pushed ref disagree.
+
+    Order is chosen so a failure is never half-applied:
+
+    1. push to the destination via an **explicit URL**, not via ``origin`` —
+       so a push failure leaves ``origin`` still pointing at the old repo and
+       the agent exactly as it was;
+    2. only then repoint ``origin``, clear the ent#123 push blackhole, and add
+       the old repo as a credential-less ``upstream``;
+    3. read ``origin`` back and confirm it resolves to the destination. AC #5
+       forbids a *silent* origin mismatch, and a set-url that exits 0 without
+       taking effect is precisely the silent case.
+
+    **Committed history only.** This deliberately does NOT ``git add``/commit
+    the working tree. Nothing is lost — the files live on the workspace volume
+    and the next Push (which now works) commits them — and staging blind would
+    walk straight into the ``git add .`` credential hazard that has to be
+    solved before `local:` agents are supported.
+
+    Idempotent: re-running after a partial failure re-pushes the same refs and
+    re-applies the same set-urls.
+
+    Never raises; the caller maps ``stage`` to a structured 502.
+    """
+    container_name = f"agent-{agent_name}"
+    dest_url = _git_remote_url(user_pat, destination_repo)
+
+    try:
+        git_dir = await _detect_git_dir(container_name)
+    except Exception as e:  # noqa: BLE001 — container may be down mid-op
+        return RebindResult(False, "detect", error=f"Could not reach the agent container: {e}")
+
+    async def _run(cmd: str, timeout: int = 120) -> tuple:
+        result = await execute_command_in_container(
+            container_name=container_name,
+            command=f"bash -c {shlex.quote(f'cd {shlex.quote(git_dir)} && {cmd}')}",
+            timeout=timeout,
+        )
+        return (
+            result.get("exit_code", 1),
+            _scrub_git_output(result.get("output", ""), user_pat),
+        )
+
+    # 1. Push committed history to the destination by explicit URL.
+    rc, out = await _run(
+        f"git push {shlex.quote(dest_url)} "
+        f"{shlex.quote(f'refs/heads/{branch}:refs/heads/{branch}')}",
+        timeout=REBIND_PUSH_TIMEOUT_S,
+    )
+    if rc != 0:
+        last = out.strip().splitlines()[-1][:300] if out.strip() else "push failed"
+        return RebindResult(
+            False, "push", branch=branch,
+            error=(
+                f"Could not push the agent's history to '{destination_repo}': "
+                f"{last}"
+            ),
+        )
+
+    # 3. Repoint origin, clear the ent#123 blackhole, record the old repo as
+    #    upstream. Each is idempotent; `--unset-all` exits 5 when the key is
+    #    absent (the normal case for an agent that always had a token), so it
+    #    is explicitly tolerated rather than treated as a failure.
+    upstream_url = _credentialless_remote_url(previous_repo)
+    rewire = (
+        f"{_remote_seturl_subcommand(dest_url)} && "
+        f"(git config --unset-all remote.origin.pushurl 2>/dev/null || true) && "
+        f"(git remote set-url upstream {shlex.quote(upstream_url)} 2>/dev/null || "
+        f"git remote add upstream {shlex.quote(upstream_url)} 2>/dev/null || true)"
+    )
+    rc, out = await _run(rewire, timeout=60)
+    if rc != 0:
+        last = out.strip().splitlines()[-1][:300] if out.strip() else "rewire failed"
+        return RebindResult(
+            False, "rewire", branch=branch,
+            error=(
+                f"The history reached '{destination_repo}', but repointing the "
+                f"agent's origin failed: {last}"
+            ),
+        )
+
+    # 3. Read back — a set-url that "succeeded" without taking effect is the
+    #    silent origin mismatch AC #5 exists to prevent.
+    observed = (await inspect_container_git(agent_name)).origin_repo
+    if not observed or observed.lower() != destination_repo.lower():
+        return RebindResult(
+            False, "rewire", branch=branch,
+            error=(
+                f"The history reached '{destination_repo}', but the agent's "
+                f"origin reads as '{observed or 'unset'}' afterwards, not the "
+                f"destination. Nothing further was changed."
+            ),
+        )
+
+    logger.info(
+        "repo-bind: %s pushed branch %s to %s and repointed origin (upstream=%s)",
+        agent_name, branch, destination_repo, previous_repo,
+    )
+    return RebindResult(True, "done", branch=branch)
+
+
+def _parse_repo_from_remote_url(raw: str) -> Optional[str]:
+    """``owner/repo`` from a git remote URL, with any userinfo discarded.
+
+    The userinfo strip is not cosmetic: a bound agent's origin is
+    ``https://oauth2:<pat>@github.com/owner/repo.git``, and this value reaches
+    error messages, the audit row, and the API response.
+    """
+    without_scheme = raw.split("://", 1)[-1]
+    without_userinfo = without_scheme.split("@", 1)[-1]
+    path = without_userinfo.partition("/")[2]
+    if path.endswith(".git"):
+        path = path[: -len(".git")]
+    parts = [seg for seg in path.strip("/").split("/") if seg]
+    if len(parts) < 2:
+        return None
+    return "/".join(parts[-2:])
+
+
+@dataclass
+class ContainerGitState:
+    """What the LIVE container's git actually says (ent#109 classification).
+
+    Both fields are ``None`` when unreadable — container down, no git dir, no
+    ``origin``, detached HEAD. The caller must treat ``None`` as *unknown* and
+    refuse, never as agreement: guessing here is how an agent silently ends up
+    bound to a repo it is not actually pointing at (AC #5).
+    """
+
+    origin_repo: Optional[str] = None
+    branch: Optional[str] = None
+
+
+async def inspect_container_git(agent_name: str) -> ContainerGitState:
+    """Read the live container's ``origin`` repo and current branch.
+
+    Used by the rebind pre-flight (ent#109 FR-1) to refuse
+    ``BIND_STATE_UNCLASSIFIED`` when the container disagrees with the DB row,
+    and to learn the branch the push and the CAS's ``source_branch`` must both
+    use — they have to be the same value, so it is read once here rather than
+    twice with a window in between.
+
+    Never raises; an unreachable container yields an empty state.
+    """
+    container_name = f"agent-{agent_name}"
+    try:
+        git_dir = await _detect_git_dir(container_name)
+    except Exception as e:  # noqa: BLE001 — unknown, never "matches"
+        logger.warning("inspect_container_git: git dir probe failed for %s: %s", agent_name, e)
+        return ContainerGitState()
+
+    async def _read(cmd: str) -> Optional[str]:
+        try:
+            result = await execute_command_in_container(
+                container_name=container_name,
+                command=f"bash -c {shlex.quote(f'cd {shlex.quote(git_dir)} && {cmd}')}",
+                timeout=30,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("inspect_container_git: %r failed for %s: %s", cmd, agent_name, e)
+            return None
+        if result.get("exit_code", 1) != 0:
+            return None
+        lines = [ln.strip() for ln in (result.get("output") or "").splitlines() if ln.strip()]
+        return lines[-1] if lines else None
+
+    origin_raw = await _read("git remote get-url origin")
+    # Empty on a detached HEAD — deliberately left as None so the caller
+    # refuses rather than inventing a ref to push.
+    branch = await _read("git branch --show-current")
+
+    return ContainerGitState(
+        origin_repo=_parse_repo_from_remote_url(origin_raw) if origin_raw else None,
+        branch=branch or None,
+    )
 
 
 # ============================================================================
