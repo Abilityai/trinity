@@ -315,6 +315,19 @@ class User(BaseModel):
     # rather than on the resolved user: the whole point of the request is that
     # it concerns somebody other than the owner.
     portal_delegate: bool = False
+    # #1854: the raw `mcp_api_keys.scope` this principal authenticated with, or
+    # None on the JWT (interactive human) branch. `scope` is a free-text column
+    # with NO CHECK constraint and already carries five live values
+    # (user/agent/system/connector/portal_delegate), so the two flags above are a
+    # DENYlist over an open space: `scope='system'` sets neither `agent_name`
+    # (only for scope='agent') nor `connector_agent` (only for
+    # scope='connector'), walks through both guards, and resolves to the key
+    # OWNER carrying the owner's role. This field is what lets a guard be an
+    # ALLOWlist ("is this a human?") instead — fail-closed against a sixth scope
+    # a future PR invents. Also the missing audit dimension: without it a
+    # credential-rotation row cannot distinguish "the owner from a browser" from
+    # "the owner's leaked MCP key".
+    mcp_scope: Optional[str] = None
 
 
 class Token(BaseModel):

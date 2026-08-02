@@ -519,6 +519,15 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
                 agent_name=agent_name,
                 connector_agent=connector_agent,
                 portal_delegate=portal_delegate,
+                # #1854: carry the RAW scope, unconditionally. Every field above
+                # is set only for its own scope, so a principal outside those
+                # three (today: `user`, `system`; tomorrow: whatever a future PR
+                # adds to this free-text column) is indistinguishable from a
+                # browser session downstream. `reject_non_interactive_principal`
+                # allowlists on this being None, so a NULL scope column must
+                # NOT read as "interactive" — coerce it the same way
+                # `validate_mcp_api_key` does.
+                mcp_scope=scope or "user",
             )
 
     # Both JWT and MCP key failed
@@ -585,6 +594,35 @@ def reject_agent_principal(current_user: User) -> None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This operation is human-only; agent-scoped keys cannot perform it",
+        )
+
+
+def reject_non_interactive_principal(current_user: User) -> None:
+    """Interactive-human-only guard — an ALLOWlist, not a denylist (#1854).
+
+    `reject_agent_principal` + `_reject_connector_principal` together cover only
+    two of the five live `mcp_api_keys.scope` values. For a `scope='system'` key
+    BOTH are no-ops (`agent_name` is set only for scope='agent',
+    `connector_agent` only for scope='connector'), and the principal still
+    resolves to the key OWNER carrying the owner's role — on a default
+    admin-owned install `can_user_share_agent` is then True for every agent in
+    the fleet. `scope` is a free-text column with no CHECK constraint, so any
+    denylist is open at the top.
+
+    This inverts it: pass ONLY when the caller authenticated interactively (JWT
+    ⇒ `mcp_scope is None`). Fail-closed against `user`, `agent`, `system`,
+    `connector`, `portal_delegate` and whatever scope ships next.
+
+    Use for credential-lifecycle operations whose whole point is that a human
+    decided — never for read/chat surfaces an MCP key legitimately drives.
+    """
+    if current_user.mcp_scope is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "This operation requires an interactive session; "
+                "MCP API keys cannot perform it"
+            ),
         )
 
 
