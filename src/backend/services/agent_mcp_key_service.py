@@ -464,12 +464,15 @@ def _verdict_message(entry: AgentMcpKeyVerifyEntry) -> Optional[str]:
     if entry.verdict == "ok":
         return "This agent authenticates with its own platform key."
     if entry.verdict == "foreign_user_key":
-        # The issue's requested badge, verbatim.
+        # The badge the issue asked for. Deliberately identifies the offending
+        # credential by PREFIX rather than by owner username: the prefix is what
+        # Settings → MCP Keys lists (so it is the actionable handle) and it
+        # avoids disclosing another account's identity to this agent's owner.
         return (
-            "This agent authenticates as user "
-            f"{entry.key_prefix or 'unknown'} — the permissions matrix is not in "
-            "effect. Regenerate the key here, then revoke that key in "
-            "Settings → MCP Keys."
+            "This agent authenticates with a personal, user-scoped key "
+            f"({entry.key_prefix or 'unknown'}…) rather than its own — so it acts "
+            "as that person and the permissions matrix is not in effect. "
+            "Regenerate the key here, then revoke that one in Settings → MCP Keys."
         )
     if entry.verdict == "foreign_agent_key":
         return (
