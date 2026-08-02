@@ -25,6 +25,7 @@ _REFERENCE_IDENTIFIERS_FIELDS = frozenset({"identifiers", "revisions", "reason_c
 _REFERENCE_DIGEST_FIELDS = frozenset({"digest", "sha256"})
 _REFERENCE_DIGESTS_FIELDS = frozenset({"digests", "sha256s"})
 _REFERENCE_UNITS_FIELDS = frozenset({"units", "budget_units"})
+_REFERENCE_UTC_TIMESTAMP_FIELDS = frozenset({"utc_timestamp"})
 
 
 class ContractValidationError(ValueError):
@@ -349,6 +350,8 @@ def _validate_reference_object(value: Any, name: str) -> None:
             _validate_reference_list(key, item, _validate_sha256)
         elif key in _REFERENCE_UNITS_FIELDS:
             _validate_non_negative_int(key, item)
+        elif key in _REFERENCE_UTC_TIMESTAMP_FIELDS:
+            _validate_utc_timestamp(key, item)
         elif key == "references":
             _validate_reference_children(item)
         else:

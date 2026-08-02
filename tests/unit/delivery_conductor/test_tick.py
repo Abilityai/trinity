@@ -32,6 +32,7 @@ from delivery_conductor.adapter import (
     JsonLinesPolicyAdapter,
     PortExchangeError,
 )
+import delivery_conductor.adapter as adapter_module
 from delivery_conductor.contracts import (
     MAX_MESSAGE_BYTES,
     AdapterDecision,
@@ -179,13 +180,32 @@ class BlockingCloseReader:
         self.read_released.set()
 
 
+class CloseReturningBlockedReader:
+    def __init__(self) -> None:
+        self.read_released = threading.Event()
+        self.read_started = threading.Event()
+        self.close_called = threading.Event()
+        self.read_calls = 0
+
+    def readline(self, _limit: int) -> bytes:
+        self.read_calls += 1
+        self.read_started.set()
+        self.read_released.wait()
+        return b""
+
+    def close(self) -> None:
+        self.close_called.set()
+
+
 class CloseTrackingWriter:
     def __init__(self) -> None:
         self.value = bytearray()
         self.written = threading.Event()
         self.closed = threading.Event()
+        self.write_calls = 0
 
     def write(self, value: bytes) -> int:
+        self.write_calls += 1
         self.value.extend(value)
         self.written.set()
         return len(value)
@@ -198,6 +218,32 @@ class CloseTrackingWriter:
 
     def getvalue(self) -> bytes:
         return bytes(self.value)
+
+
+class CrashInjectingLedger(ControlLedger):
+    """Real SQLite ledger with process-crash injection at transaction boundaries."""
+
+    def __init__(self, database_path: Path) -> None:
+        super().__init__(database_path)
+        self.crash_before_terminal_result = False
+        self.crash_before_reminder_reservation = False
+
+    def record_result(
+        self,
+        lease,
+        action_key: str,
+        result: EffectResult,
+    ) -> None:
+        if self.crash_before_terminal_result:
+            self.crash_before_terminal_result = False
+            raise SystemExit("crash before terminal result")
+        super().record_result(lease, action_key, result)
+
+    def reserve_action(self, lease, action: ProposedAction):
+        if action.capability_name == "reminders" and self.crash_before_reminder_reservation:
+            self.crash_before_reminder_reservation = False
+            raise SystemExit("crash before reminder reservation")
+        return super().reserve_action(lease, action)
 
 
 @pytest.fixture
@@ -664,6 +710,132 @@ def test_completed_action_with_next_reminder_keeps_wake_pending(
     assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
 
 
+def test_crash_before_terminal_result_never_exposes_a_reminder(
+    database_path: Path,
+):
+    """A reminder cannot execute while its source action is still only reserved."""
+    ledger = CrashInjectingLedger(database_path)
+    ledger.initialize()
+    action = _action()
+    reminder = _reminder()
+    adapter = FakeAdapter(
+        _decision("execute", action=action, reminder=reminder),
+        _decision("execute", action=action, reminder=reminder),
+    )
+    runner = _runner(ledger, adapter)
+    prepared = runner.run(
+        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    )
+    payload = json.loads(prepared.action.payload_json)
+    embedded = payload["references"][1]
+    assert embedded["identifier"] == "delivery-conductor-reminder-v1"
+    assert embedded["identifiers"] == ["reminder-1"]
+    assert embedded["utc_timestamp"] == "2026-08-02T09:15:11Z"
+
+    ledger.crash_before_terminal_result = True
+    with pytest.raises(SystemExit, match="before terminal result"):
+        runner.accept_result(
+            prepared.handoff,
+            action_key=action.action_key,
+            result=EffectResult("completed", "c" * 64, "accepted"),
+        )
+
+    assert _fetchall(
+        database_path,
+        "SELECT capability_name, status FROM action_journal ORDER BY action_key",
+    ) == [("chat", "reserved")]
+
+    source_replay = runner.run(
+        _wake(1),
+        NOW + timedelta(seconds=31),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+    assert source_replay.status == "action-ready"
+    assert source_replay.action.capability_name == "chat"
+    runner.accept_result(
+        source_replay.handoff,
+        action_key=action.action_key,
+        result=EffectResult("completed", "c" * 64, "accepted"),
+    )
+
+    reminder_tick = runner.run(
+        _wake(1),
+        NOW + timedelta(seconds=62),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+    assert reminder_tick.status == "reminder-ready"
+    assert reminder_tick.reminder == reminder
+    runner.accept_result(
+        reminder_tick.handoff,
+        action_key=reminder_tick.action_key,
+        result=EffectResult("completed", "e" * 64, "reminder-established"),
+    )
+    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [
+        ("acknowledged",)
+    ]
+
+
+def test_crash_after_terminal_result_recovers_reminder_before_adapter(
+    database_path: Path,
+):
+    """The terminal source row must durably reconstruct an unreserved reminder."""
+    ledger = CrashInjectingLedger(database_path)
+    ledger.initialize()
+    action = _action()
+    reminder = _reminder()
+    adapter = FakeAdapter(
+        _decision("execute", action=action, reminder=reminder),
+        _decision("noop"),
+    )
+    runner = _runner(ledger, adapter)
+    prepared = runner.run(
+        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    )
+
+    ledger.crash_before_reminder_reservation = True
+    with pytest.raises(SystemExit, match="before reminder reservation"):
+        runner.accept_result(
+            prepared.handoff,
+            action_key=action.action_key,
+            result=EffectResult("completed", "c" * 64, "accepted"),
+        )
+
+    assert _fetchall(
+        database_path,
+        "SELECT capability_name, status FROM action_journal ORDER BY action_key",
+    ) == [("chat", "completed")]
+
+    recovered = runner.run(
+        _wake(1),
+        NOW + timedelta(seconds=31),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+    assert recovered.status == "reminder-ready"
+    assert recovered.reminder == reminder
+    assert len(adapter.requests) == 1
+    recovered_payload = json.loads(recovered.action.payload_json)
+    assert recovered_payload["references"] == {
+        "identifiers": ["reminder-1", "action-1"],
+        "reason_code": "observe-later",
+        "utc_timestamp": "2026-08-02T09:15:11Z",
+    }
+
+    runner.accept_result(
+        recovered.handoff,
+        action_key=recovered.action_key,
+        result=EffectResult("completed", "e" * 64, "reminder-established"),
+    )
+    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [
+        ("acknowledged",)
+    ]
+
+
 def test_ambiguous_result_reserves_stable_executable_reminder_before_release(
     ledger: ControlLedger, database_path: Path
 ):
@@ -703,8 +875,9 @@ def test_ambiguous_result_reserves_stable_executable_reminder_before_release(
     payload = json.loads(recovered.action.payload_json)
     assert payload["references"]["identifiers"] == [
         "investigate:action-1",
-        "2026-08-02T09:15:11Z",
+        "action-1",
     ]
+    assert payload["references"]["utc_timestamp"] == "2026-08-02T09:15:11Z"
     assert len(adapter.requests) == 1
 
 
@@ -791,9 +964,11 @@ def test_completed_follow_up_reminder_preempts_recovery_noop(
     assert recovered.status == "reminder-ready"
     assert recovered.action.capability_name == "reminders"
     assert recovered.reminder == reminder
-    assert json.loads(recovered.action.payload_json)["references"]["identifiers"][1] == (
-        "2026-08-02T09:15:11Z"
-    )
+    assert json.loads(recovered.action.payload_json)["references"] == {
+        "identifiers": ["reminder-1", "action-1"],
+        "reason_code": "observe-later",
+        "utc_timestamp": "2026-08-02T09:15:11Z",
+    }
     assert len(adapter.requests) == 1
     assert _fetchall(database_path, "SELECT state FROM event_inbox") == [("pending",)]
 
@@ -1127,6 +1302,89 @@ def test_policy_adapter_rejects_a_second_wrapper_over_one_live_channel():
     assert isinstance(first_errors[0], PortExchangeError)
 
 
+@pytest.mark.parametrize("reused_side", ("reader", "writer"))
+def test_policy_adapter_rejects_either_reused_live_stream(reused_side: str):
+    """A new wrapper cannot share either half of a still-running channel."""
+    first_reader = CloseReturningBlockedReader()
+    first_writer = CloseTrackingWriter()
+    second_reader = first_reader if reused_side == "reader" else CloseReturningBlockedReader()
+    second_writer = first_writer if reused_side == "writer" else CloseTrackingWriter()
+    exchanges = deque(
+        (
+            BoundedJsonLinesExchange(
+                first_reader,  # type: ignore[arg-type]
+                first_writer,  # type: ignore[arg-type]
+                deadline_seconds=0.02,
+            ),
+            BoundedJsonLinesExchange(
+                second_reader,  # type: ignore[arg-type]
+                second_writer,  # type: ignore[arg-type]
+                deadline_seconds=0.02,
+            ),
+        )
+    )
+    adapter = JsonLinesPolicyAdapter(exchanges.popleft)
+    request = AdapterRequest(
+        1, _wake(1), "2026-08-02T09:10:11Z", None, HEALTHY_BUDGET
+    )
+
+    try:
+        with pytest.raises(PortExchangeError, match="timed out"):
+            adapter.observe_and_decide(request)
+        with pytest.raises(PortExchangeError, match="fresh channel"):
+            adapter.observe_and_decide(request)
+
+        assert first_reader.read_calls == 1
+        if reused_side == "reader":
+            assert second_writer.write_calls == 0
+            assert second_writer.closed.wait(0.1)
+        else:
+            assert second_reader.read_calls == 0
+            assert second_reader.close_called.wait(0.1)
+    finally:
+        first_reader.read_released.set()
+        second_reader.read_released.set()
+
+
+def test_policy_adapter_cap_rejection_closes_channels_without_starting_more_workers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Repeated pre-exchange cap rejection must keep worker and resource use bounded."""
+    cap = 4
+    monkeypatch.setattr(adapter_module, "_MAX_LIVE_CHANNELS", cap)
+    readers: list[CloseReturningBlockedReader] = []
+    writers: list[CloseTrackingWriter] = []
+
+    def fresh_blocked_exchange() -> BoundedJsonLinesExchange:
+        reader = CloseReturningBlockedReader()
+        writer = CloseTrackingWriter()
+        readers.append(reader)
+        writers.append(writer)
+        return BoundedJsonLinesExchange(
+            reader,  # type: ignore[arg-type]
+            writer,  # type: ignore[arg-type]
+            deadline_seconds=0.01,
+        )
+
+    adapter = JsonLinesPolicyAdapter(fresh_blocked_exchange)
+    request = AdapterRequest(
+        1, _wake(1), "2026-08-02T09:10:11Z", None, HEALTHY_BUDGET
+    )
+
+    try:
+        for _ in range(cap + 8):
+            with pytest.raises(PortExchangeError):
+                adapter.observe_and_decide(request)
+
+        assert sum(reader.read_calls for reader in readers) == cap
+        assert sum(writer.write_calls for writer in writers) == cap
+        assert all(reader.close_called.wait(0.1) for reader in readers)
+        assert all(writer.closed.wait(0.1) for writer in writers)
+    finally:
+        for reader in readers:
+            reader.read_released.set()
+
+
 def test_policy_adapter_uses_closed_bounded_fresh_json_line():
     """Changing the production adapter framing must bypass the reviewed contract parser."""
     request_output = CloseTrackingWriter()
@@ -1212,3 +1470,44 @@ def test_external_executor_rejects_a_reused_channel_with_queued_results():
     assert rejected.status == "ambiguous"
     assert rejected.reason_code == "executor-exchange-ambiguous"
     assert len(rejected.result_sha256) == 64
+
+
+@pytest.mark.parametrize("reused_side", ("reader", "writer"))
+def test_external_executor_rejects_either_reused_live_stream(reused_side: str):
+    """Executor confinement applies to each stream, even after close returns."""
+    first_reader = CloseReturningBlockedReader()
+    first_writer = CloseTrackingWriter()
+    second_reader = first_reader if reused_side == "reader" else CloseReturningBlockedReader()
+    second_writer = first_writer if reused_side == "writer" else CloseTrackingWriter()
+    exchanges = deque(
+        (
+            BoundedJsonLinesExchange(
+                first_reader,  # type: ignore[arg-type]
+                first_writer,  # type: ignore[arg-type]
+                deadline_seconds=0.02,
+            ),
+            BoundedJsonLinesExchange(
+                second_reader,  # type: ignore[arg-type]
+                second_writer,  # type: ignore[arg-type]
+                deadline_seconds=0.02,
+            ),
+        )
+    )
+    executor = JsonLinesCapabilityExecutor({"chat": exchanges.popleft})
+
+    try:
+        first = executor.execute(_action())
+        second = executor.execute(_action("action-2"))
+
+        assert first.reason_code == "executor-exchange-ambiguous"
+        assert second.reason_code == "executor-exchange-ambiguous"
+        assert first_reader.read_calls == 1
+        if reused_side == "reader":
+            assert second_writer.write_calls == 0
+            assert second_writer.closed.wait(0.1)
+        else:
+            assert second_reader.read_calls == 0
+            assert second_reader.close_called.wait(0.1)
+    finally:
+        first_reader.read_released.set()
+        second_reader.read_released.set()

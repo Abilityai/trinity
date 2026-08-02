@@ -119,6 +119,70 @@ def test_decision_canonicalizes_payload_and_round_trips_once():
     )
 
 
+def test_generic_reference_utc_timestamp_round_trips_direct_and_parsed():
+    """A reminder due time must remain typed data throughout the closed payload."""
+    timestamp = "2026-08-02T10:10:11Z"
+    action = ProposedAction(
+        capability_name="reminders",
+        action_key="reminder-typed-time",
+        payload_json=json.dumps(
+            {
+                "references": {
+                    "identifier": "follow-up-7",
+                    "utc_timestamp": timestamp,
+                }
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        target_revision="repo-4",
+        invalidation_class="reminder-intent",
+    )
+    decision = AdapterDecision(
+        1,
+        "repo-4",
+        "dispatch",
+        "eligible",
+        "target-7",
+        action,
+        None,
+    )
+
+    serialized = serialize_adapter_decision(decision)
+    reparsed = parse_adapter_decision_json(serialized)
+
+    assert reparsed == decision
+    assert json.loads(reparsed.proposed_action.payload_json)["references"] == {
+        "identifier": "follow-up-7",
+        "utc_timestamp": timestamp,
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "2026-08-02T10:10:11+00:00",
+        "2026-08-02T10:10:11",
+        "2026-02-30T10:10:11Z",
+        7,
+    ),
+)
+def test_generic_reference_utc_timestamp_rejects_non_exact_values(value: object):
+    """The generic timestamp field cannot accept offsets, local time, or invalid dates."""
+    with pytest.raises(ContractValidationError, match="UTC|timestamp|string"):
+        ProposedAction(
+            capability_name="reminders",
+            action_key="reminder-invalid-time",
+            payload_json=json.dumps(
+                {"references": {"utc_timestamp": value}},
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            target_revision="repo-4",
+            invalidation_class="reminder-intent",
+        )
+
+
 @pytest.mark.parametrize(
     ("parser", "payload"),
     [

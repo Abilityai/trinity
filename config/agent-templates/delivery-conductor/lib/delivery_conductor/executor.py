@@ -12,6 +12,7 @@ from .adapter import (
     LiveChannel,
     PortExchangeError,
     _claim_live_channel,
+    _reject_exchange,
     _release_live_channel,
 )
 from .contracts import MAX_MESSAGE_BYTES, ProposedAction
@@ -62,6 +63,7 @@ class JsonLinesCapabilityExecutor:
         try:
             exchange = exchange_factory()
             if not hasattr(exchange, "exchange"):
+                _reject_exchange(exchange)
                 raise PortExchangeError(
                     "exchange factory did not provide a JSON Lines port"
                 )

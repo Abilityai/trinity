@@ -46,6 +46,15 @@ class JsonLinesExchangePort(Protocol):
         """Signal when both channel resources have finished closing."""
         ...
 
+    @property
+    def release_complete(self) -> threading.Event:
+        """Signal when both I/O and resource cleanup have finished."""
+        ...
+
+    def reject(self) -> None:
+        """Bounded-clean this fresh port without starting its I/O worker."""
+        ...
+
     def exchange(self, request_line: str) -> str:
         """Write one request line and read at most one capped response line."""
         ...
@@ -94,6 +103,8 @@ class BoundedJsonLinesExchange:
         self._cleanup_lock = threading.Lock()
         self._cleanup_events: tuple[threading.Event, ...] | None = None
         self._cleanup_complete = threading.Event()
+        self._io_complete = threading.Event()
+        self._release_complete = threading.Event()
         self._used = False
 
     @property
@@ -104,11 +115,24 @@ class BoundedJsonLinesExchange:
     def cleanup_complete(self) -> threading.Event:
         return self._cleanup_complete
 
+    @property
+    def release_complete(self) -> threading.Event:
+        return self._release_complete
+
+    def reject(self) -> None:
+        """Close an unclaimed channel without creating an exchange worker."""
+        with self._state_lock:
+            if not self._used:
+                self._used = True
+                self._io_complete.set()
+        self._cleanup_until(time.monotonic())
+        self._update_release_complete()
+
     def exchange(self, request_line: str) -> str:
         deadline = time.monotonic() + self._deadline_seconds
         request_bytes = request_line.encode("utf-8")
         if len(request_bytes) > MAX_MESSAGE_BYTES or b"\n" in request_bytes:
-            self._cleanup_until(deadline)
+            self.reject()
             raise PortExchangeError("request is not one bounded JSON line")
         with self._state_lock:
             if self._used:
@@ -136,6 +160,8 @@ class BoundedJsonLinesExchange:
                 failure.append(error)
             finally:
                 completed.set()
+                self._io_complete.set()
+                self._update_release_complete()
 
         worker = threading.Thread(target=exchange_once, daemon=True)
         worker.start()
@@ -173,6 +199,7 @@ class BoundedJsonLinesExchange:
                         done.set()
                         if all(event.is_set() for event in cleanup_events):
                             self._cleanup_complete.set()
+                            self._update_release_complete()
 
                 for stream, completed in zip(streams, cleanup_events, strict=True):
                     threading.Thread(
@@ -187,6 +214,10 @@ class BoundedJsonLinesExchange:
             if remaining <= 0:
                 return
             completed.wait(remaining)
+
+    def _update_release_complete(self) -> None:
+        if self._io_complete.is_set() and self._cleanup_complete.is_set():
+            self._release_complete.set()
 
 
 class JsonLinesPolicyAdapter:
@@ -203,6 +234,7 @@ class JsonLinesPolicyAdapter:
         request_line = serialize_adapter_request(request)
         exchange = self._exchange_factory()
         if not hasattr(exchange, "exchange"):
+            _reject_exchange(exchange)
             raise PortExchangeError("exchange_factory did not provide a JSON Lines port")
         identity = _claim_live_channel(
             exchange,
@@ -243,24 +275,39 @@ def _claim_live_channel(
 ) -> LiveChannel:
     identity = getattr(exchange, "channel_identity", None)
     if not isinstance(identity, tuple) or len(identity) != 2:
+        _reject_exchange(exchange)
         raise PortExchangeError("exchange did not expose a fresh channel identity")
-    cleanup_complete = getattr(exchange, "cleanup_complete", None)
-    if not isinstance(cleanup_complete, threading.Event):
-        raise PortExchangeError("exchange did not expose bounded cleanup state")
+    release_complete = getattr(exchange, "release_complete", None)
+    if not isinstance(release_complete, threading.Event):
+        _reject_exchange(exchange)
+        raise PortExchangeError("exchange did not expose bounded release state")
+    rejection: str | None = None
     with lock:
         live_channels[:] = [
             channel for channel in live_channels if not channel[2].is_set()
         ]
         if any(
-            identity[0] is reader and identity[1] is writer
+            identity[0] is reader or identity[1] is writer
             for reader, writer, _ in live_channels
         ):
-            raise PortExchangeError("a fresh channel is required while a channel is live")
-        if len(live_channels) >= _MAX_LIVE_CHANNELS:
-            raise PortExchangeError("too many channels are still closing")
-        channel = (identity[0], identity[1], cleanup_complete)
-        live_channels.append(channel)
-    return channel
+            rejection = "a fresh channel is required while a channel is live"
+        elif len(live_channels) >= _MAX_LIVE_CHANNELS:
+            rejection = "too many channels are still live"
+        else:
+            channel = (identity[0], identity[1], release_complete)
+            live_channels.append(channel)
+            return channel
+    _reject_exchange(exchange)
+    raise PortExchangeError(rejection)
+
+
+def _reject_exchange(exchange: object) -> None:
+    reject = getattr(exchange, "reject", None)
+    if callable(reject):
+        try:
+            reject()
+        except BaseException:
+            pass
 
 
 def _release_live_channel(
