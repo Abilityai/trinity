@@ -405,8 +405,13 @@ def interpret_probe_payload(payload: Dict[str, Any], agent_name: str) -> AgentMc
             agent_name=agent_name,
             verdict="not_configured",
             message=(
-                "The container has no Trinity MCP entry. It cannot call Trinity "
-                "tools; starting the agent re-injects one."
+                # Covers both shapes honestly: no Trinity entry at all, and an
+                # entry that carries no bearer token (which the probe filters out
+                # because there is nothing to hash). Either way the agent cannot
+                # authenticate, and either way a start re-injects.
+                "The container has no usable Trinity MCP entry (missing, or "
+                "present with no credential). It cannot call Trinity tools; "
+                "starting the agent re-injects one."
             ),
             entries=[],
         )
