@@ -6,7 +6,7 @@ ordering. This module guards the router: the layer that produced the behaviour
 an operator actually sees, and where the auth gates, the locks, the idempotency
 claim and the audit row live.
 
-Five things are checked here because none of them is visible to a service-level
+Six things are checked here because none of them is visible to a service-level
 test:
 
 1. **`reject_agent_principal` is really called.** `OwnedAgentByName` alone is
@@ -32,10 +32,16 @@ test:
    operation whose failures are invisible to the audit trail is exactly the gap
    the sync/pull handlers were fixed for.
 
+6. **`agent_name` resolves through the enumeration-safe dependency**
+   (Invariant #8). The uniform-404 BEHAVIOUR is proven parametrically in
+   `test_186_enumeration_uniformity.py`; what no dependency-level test can see
+   is whether *this* endpoint is wired to it rather than to a hand-rolled
+   lookup with a 404-then-403 split.
+
 The handlers are plain `async def`s, so they are called directly rather than
 through a TestClient: the assertions are about the handler's own branches, and
-resolving the auth dependency is FastAPI's job, not this test's. Item 2 is the
-exception and is checked by route introspection.
+resolving the auth dependency is FastAPI's job, not this test's. Items 2 and 6
+are the exception and are checked by route introspection.
 
 Module: src/backend/routers/git.py
 Issue:  abilityai/trinity-enterprise#109
@@ -68,6 +74,7 @@ if _BACKEND not in sys.path:
 # Pinned at import time (sys.modules victim-side trap).
 from fastapi import HTTPException  # noqa: E402
 
+import dependencies  # noqa: E402
 import routers.git as git_router  # noqa: E402
 import models  # noqa: E402
 from models import BindAgentRepoRequest  # noqa: E402
@@ -307,6 +314,54 @@ class TestRouteWiring:
         assert (
             "GET"
             in routes["/api/agents/{agent_name}/git/bind-to-own-repo/status"].methods
+        )
+
+    @pytest.mark.parametrize(
+        "path,expected_dependency",
+        [
+            (
+                "/api/agents/{agent_name}/git/bind-to-own-repo",
+                "get_owned_agent_by_name",
+            ),
+            (
+                "/api/agents/{agent_name}/git/bind-to-own-repo/status",
+                "get_authorized_agent_by_name",
+            ),
+        ],
+    )
+    def test_agent_name_resolves_through_the_enumeration_safe_dependency(
+        self, path, expected_dependency
+    ):
+        """Invariant #8: route through the dependency, never a 404-then-403
+        split.
+
+        Both helpers return a UNIFORM 404 for an agent that does not exist and
+        one the caller cannot reach, evaluating existence and access before
+        branching — behaviour proven parametrically in
+        `test_186_enumeration_uniformity.py`. Re-asserting it here would only
+        re-test the shared dependency. What that test cannot see is whether THIS
+        endpoint is wired to it, so the assertion is the identity of the
+        callable actually bound to `agent_name` — not a name that happens to
+        match, and not an import with no call site.
+
+        The scopes are not interchangeable: the mutating verb is owner-scoped
+        (it creates external GitHub state, persists a credential and replaces a
+        container) while the read-only status verb is read-scoped, because it
+        discloses nothing the Git tab does not already show. Swapping them
+        would either lock a shared reader out of a surface they can already see
+        or let one rebind an agent they do not own.
+        """
+        route = self._routes()[path]
+        bound = {d.name: d.call for d in route.dependant.dependencies}
+        assert "agent_name" in bound, (
+            f"{path} does not resolve `agent_name` through a dependency at all "
+            "— a hand-rolled lookup is how the 404-then-403 enumeration oracle "
+            "gets reintroduced (Invariant #8)"
+        )
+        assert bound["agent_name"] is getattr(dependencies, expected_dependency), (
+            f"{path} must bind `agent_name` to "
+            f"dependencies.{expected_dependency}, got "
+            f"{getattr(bound['agent_name'], '__name__', bound['agent_name'])!r}"
         )
 
 
