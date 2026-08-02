@@ -269,6 +269,76 @@ class BlockingRejectExchange:
         raise AssertionError("a rejected exchange must not start I/O")
 
 
+class ObservableBlockingRejectExchange(BlockingRejectExchange):
+    """Rejected port that reveals accidental admission without stalling the test."""
+
+    def __init__(
+        self,
+        reader: object,
+        writer: object,
+        release_reject: threading.Event,
+        response_line: str,
+        *,
+        raise_after_release: bool = False,
+        return_after_release: threading.Event | None = None,
+    ) -> None:
+        super().__init__(reader, writer, release_reject)  # type: ignore[arg-type]
+        self._response_line = response_line
+        self._raise_after_release = raise_after_release
+        self._return_after_release = return_after_release
+        self.reject_returned = threading.Event()
+
+    def reject(self, *, preserve: tuple[object, ...] = ()) -> None:
+        try:
+            super().reject(preserve=preserve)
+            if self._return_after_release is not None:
+                self._return_after_release.wait()
+            if self._raise_after_release:
+                raise RuntimeError("reject callback failed after releasing resources")
+        finally:
+            self.reject_returned.set()
+
+    def exchange(self, _request_line: str) -> str:
+        self.exchange_calls += 1
+        self._cleanup_complete.set()
+        self._release_complete.set()
+        return self._response_line
+
+
+class CompletingIdentityExchange:
+    """Protocol fake proving a retired identity can be admitted again."""
+
+    def __init__(self, identity: tuple[object, object], response_line: str) -> None:
+        self._identity = identity
+        self._response_line = response_line
+        self._cleanup_complete = threading.Event()
+        self._release_complete = threading.Event()
+        self.exchange_calls = 0
+
+    @property
+    def channel_identity(self) -> tuple[object, object]:
+        return self._identity
+
+    @property
+    def cleanup_complete(self) -> threading.Event:
+        return self._cleanup_complete
+
+    @property
+    def release_complete(self) -> threading.Event:
+        return self._release_complete
+
+    def reject(self, *, preserve: tuple[object, ...] = ()) -> None:
+        del preserve
+        self._cleanup_complete.set()
+        self._release_complete.set()
+
+    def exchange(self, _request_line: str) -> str:
+        self.exchange_calls += 1
+        self._cleanup_complete.set()
+        self._release_complete.set()
+        return self._response_line
+
+
 class CrashInjectingLedger(ControlLedger):
     """Real SQLite ledger with process-crash injection at transaction boundaries."""
 
@@ -1586,6 +1656,287 @@ def test_blocking_collision_rejection_has_one_global_fixed_resource_ceiling(
         assert all(exchange._writer.close_calls == 1 for exchange in rejected)
     else:
         assert all(exchange._reader.close_calls == 1 for exchange in rejected)
+
+
+@pytest.mark.parametrize("pending_side", ("reader", "writer"))
+def test_blocked_rejection_reserves_its_unique_endpoint_across_port_types(
+    monkeypatch: pytest.MonkeyPatch,
+    pending_side: str,
+):
+    """Dropping rejected identities must admit their cleanup-owned half to new I/O."""
+    monkeypatch.setattr(adapter_module, "_MAX_LIVE_CHANNELS", 4)
+    first_reader = CloseReturningBlockedReader()
+    first_writer = CloseTrackingWriter()
+    release_reject = threading.Event()
+    return_reject = threading.Event()
+    first_exchange = BoundedJsonLinesExchange(
+        first_reader,  # type: ignore[arg-type]
+        first_writer,  # type: ignore[arg-type]
+        deadline_seconds=0.01,
+    )
+    first_adapter = JsonLinesPolicyAdapter(lambda: first_exchange)
+    request = AdapterRequest(
+        1, _wake(1), "2026-08-02T09:10:11Z", None, HEALTHY_BUDGET
+    )
+
+    pending_reader = (
+        CloseReturningBlockedReader() if pending_side == "reader" else first_reader
+    )
+    pending_writer = (
+        CloseTrackingWriter() if pending_side == "writer" else first_writer
+    )
+    pending_endpoint = pending_reader if pending_side == "reader" else pending_writer
+    original_reject = ObservableBlockingRejectExchange(
+        pending_reader,
+        pending_writer,
+        release_reject,
+        "{}",
+        return_after_release=return_reject,
+    )
+    original_executor = JsonLinesCapabilityExecutor(
+        {"chat": lambda: original_reject}
+    )
+
+    adapter_other = (
+        CloseTrackingWriter()
+        if pending_side == "reader"
+        else CloseReturningBlockedReader()
+    )
+    adapter_identity = (
+        (pending_endpoint, adapter_other)
+        if pending_side == "reader"
+        else (adapter_other, pending_endpoint)
+    )
+    adapter_reuse = ObservableBlockingRejectExchange(
+        adapter_identity[0],
+        adapter_identity[1],
+        release_reject,
+        _noop_response("unsafe-adapter-reuse").decode().strip(),
+    )
+    reuse_adapter = JsonLinesPolicyAdapter(lambda: adapter_reuse)
+
+    executor_other = (
+        CloseTrackingWriter()
+        if pending_side == "reader"
+        else CloseReturningBlockedReader()
+    )
+    executor_identity = (
+        (pending_endpoint, executor_other)
+        if pending_side == "reader"
+        else (executor_other, pending_endpoint)
+    )
+    executor_response = json.dumps(
+        {
+            "schema_version": 1,
+            "action_key": "action-3",
+            "status": "completed",
+            "result_sha256": "c" * 64,
+            "reason_code": "unsafe-executor-reuse",
+        },
+        separators=(",", ":"),
+    )
+    executor_reuse = ObservableBlockingRejectExchange(
+        executor_identity[0],
+        executor_identity[1],
+        release_reject,
+        executor_response,
+    )
+    reuse_executor = JsonLinesCapabilityExecutor({"chat": lambda: executor_reuse})
+
+    try:
+        with pytest.raises(PortExchangeError, match="timed out"):
+            first_adapter.observe_and_decide(request)
+        first_result = original_executor.execute(_action("action-2"))
+        assert first_result.reason_code == "executor-exchange-ambiguous"
+        assert original_reject.reject_started.wait(0.1)
+
+        adapter_error: PortExchangeError | None = None
+        try:
+            reuse_adapter.observe_and_decide(request)
+        except PortExchangeError as error:
+            adapter_error = error
+        executor_result = reuse_executor.execute(_action("action-3"))
+
+        assert adapter_error is not None
+        assert "fresh channel" in str(adapter_error)
+        assert executor_result.reason_code == "executor-exchange-ambiguous"
+        assert adapter_reuse.reject_started.wait(0.1)
+        assert executor_reuse.reject_started.wait(0.1)
+        assert original_reject.exchange_calls == 0
+        assert adapter_reuse.exchange_calls == 0
+        assert executor_reuse.exchange_calls == 0
+        assert pending_endpoint.close_calls == 0
+        assert any(
+            pending_endpoint is preserved for preserved in adapter_reuse.preserved
+        )
+        assert any(
+            pending_endpoint is preserved for preserved in executor_reuse.preserved
+        )
+
+        release_reject.set()
+        for exchange in (original_reject, adapter_reuse, executor_reuse):
+            assert exchange.release_complete.wait(0.2)
+        assert original_reject.reject_returned.is_set() is False
+
+        # One live channel plus the reject callback blocked after release must
+        # fill the cap. Its factory cannot run and create another worker.
+        monkeypatch.setattr(adapter_module, "_MAX_LIVE_CHANNELS", 2)
+        blocked_factory_calls = 0
+
+        def blocked_factory() -> CompletingIdentityExchange:
+            nonlocal blocked_factory_calls
+            blocked_factory_calls += 1
+            return CompletingIdentityExchange(
+                (object(), object()),
+                _noop_response("unsafe-worker-growth").decode().strip(),
+            )
+
+        with pytest.raises(PortExchangeError, match="too many channels"):
+            JsonLinesPolicyAdapter(blocked_factory).observe_and_decide(request)
+        assert blocked_factory_calls == 0
+
+        return_reject.set()
+        assert original_reject.reject_returned.wait(0.2)
+        post_adapter_identity = (
+            (pending_endpoint, object())
+            if pending_side == "reader"
+            else (object(), pending_endpoint)
+        )
+        post_adapter_exchange = CompletingIdentityExchange(
+            post_adapter_identity,
+            _noop_response("identity-retired").decode().strip(),
+        )
+        post_adapter = JsonLinesPolicyAdapter(lambda: post_adapter_exchange)
+        deadline = time.monotonic() + 0.2
+        while True:
+            try:
+                post_decision = post_adapter.observe_and_decide(request)
+                break
+            except PortExchangeError as error:
+                assert "too many channels" in str(error)
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        "returned reject callback did not release capacity"
+                    ) from error
+                time.sleep(0.001)
+        assert post_decision.reason_code == "identity-retired"
+        assert post_adapter_exchange.exchange_calls == 1
+
+        post_executor_identity = (
+            (pending_endpoint, object())
+            if pending_side == "reader"
+            else (object(), pending_endpoint)
+        )
+        post_executor_exchange = CompletingIdentityExchange(
+            post_executor_identity,
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "action_key": "action-4",
+                    "status": "completed",
+                    "result_sha256": "d" * 64,
+                    "reason_code": "identity-retired",
+                },
+                separators=(",", ":"),
+            ),
+        )
+        post_executor = JsonLinesCapabilityExecutor(
+            {"chat": lambda: post_executor_exchange}
+        )
+        assert post_executor.execute(_action("action-4")) == EffectResult(
+            "completed", "d" * 64, "identity-retired"
+        )
+        assert post_executor_exchange.exchange_calls == 1
+    finally:
+        release_reject.set()
+        return_reject.set()
+        first_reader.read_released.set()
+        first_exchange.release_complete.wait(0.2)
+
+    assert pending_endpoint.close_calls == 1
+    assert first_reader.close_calls == 1
+    assert first_writer.close_calls == 1
+    assert adapter_other.close_calls == 1
+    assert executor_other.close_calls == 1
+
+
+def test_reject_callback_exception_releases_capacity_after_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Returning early on a reject exception must strand its admission forever."""
+    monkeypatch.setattr(adapter_module, "_MAX_LIVE_CHANNELS", 2)
+    first_reader = CloseReturningBlockedReader()
+    first_writer = CloseTrackingWriter()
+    first_exchange = BoundedJsonLinesExchange(
+        first_reader,  # type: ignore[arg-type]
+        first_writer,  # type: ignore[arg-type]
+        deadline_seconds=0.01,
+    )
+    request = AdapterRequest(
+        1, _wake(1), "2026-08-02T09:10:11Z", None, HEALTHY_BUDGET
+    )
+    first_adapter = JsonLinesPolicyAdapter(lambda: first_exchange)
+    release_reject = threading.Event()
+    exception_reject = ObservableBlockingRejectExchange(
+        first_reader,
+        first_writer,
+        release_reject,
+        "{}",
+        raise_after_release=True,
+    )
+    exception_executor = JsonLinesCapabilityExecutor(
+        {"chat": lambda: exception_reject}
+    )
+
+    try:
+        with pytest.raises(PortExchangeError, match="timed out"):
+            first_adapter.observe_and_decide(request)
+        result = exception_executor.execute(_action("action-5"))
+        assert result.reason_code == "executor-exchange-ambiguous"
+        assert exception_reject.reject_started.wait(0.1)
+        assert any(first_reader is item for item in exception_reject.preserved)
+        assert any(first_writer is item for item in exception_reject.preserved)
+
+        release_reject.set()
+        assert exception_reject.release_complete.wait(0.2)
+        assert exception_reject.reject_returned.wait(0.2)
+
+        factory_calls = 0
+        completing_exchange = CompletingIdentityExchange(
+            (object(), object()),
+            _noop_response("exception-capacity-retired").decode().strip(),
+        )
+
+        def completing_factory() -> CompletingIdentityExchange:
+            nonlocal factory_calls
+            factory_calls += 1
+            return completing_exchange
+
+        deadline = time.monotonic() + 0.2
+        while True:
+            try:
+                decision = JsonLinesPolicyAdapter(
+                    completing_factory
+                ).observe_and_decide(request)
+                break
+            except PortExchangeError as error:
+                assert "too many channels" in str(error)
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        "reject callback exception did not release capacity"
+                    ) from error
+                time.sleep(0.001)
+
+        assert decision.reason_code == "exception-capacity-retired"
+        assert factory_calls == 1
+        assert completing_exchange.exchange_calls == 1
+    finally:
+        release_reject.set()
+        first_reader.read_released.set()
+        first_exchange.release_complete.wait(0.2)
+
+    assert first_reader.close_calls == 1
+    assert first_writer.close_calls == 1
 
 
 def test_policy_adapter_uses_closed_bounded_fresh_json_line():

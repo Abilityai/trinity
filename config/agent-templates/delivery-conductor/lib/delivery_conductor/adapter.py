@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 import threading
 import time
-from typing import BinaryIO, Callable, Protocol
+from typing import BinaryIO, Callable, NamedTuple, Protocol
 
 from .contracts import (
     MAX_MESSAGE_BYTES,
@@ -62,17 +62,35 @@ class JsonLinesExchangePort(Protocol):
 
 JsonLinesExchangeFactory = Callable[[], JsonLinesExchangePort]
 ChannelAdmission = object
-LiveChannel = tuple[object, object, threading.Event, ChannelAdmission]
+
+
+class ChannelReservation(NamedTuple):
+    endpoints: tuple[object, ...]
+    release_complete: threading.Event
+    admission: ChannelAdmission
+    release_admission_with_identity: bool
+
 
 _CHANNEL_STATE_LOCK = threading.Lock()
 _CHANNEL_ADMISSIONS: set[ChannelAdmission] = set()
-_LIVE_CHANNELS: list[LiveChannel] = []
+# Active channels and cleanup-owned endpoints from asynchronously rejected ports
+# share one identity domain. Rejected admissions additionally stay held until
+# their arbitrary reject callback exits, bounding cleanup workers at the cap.
+_LIVE_CHANNELS: list[ChannelReservation] = []
 
 
 class _ChannelClaimRejected(PortExchangeError):
-    def __init__(self, message: str, preserve: tuple[object, ...] = ()) -> None:
+    def __init__(
+        self,
+        message: str,
+        preserve: tuple[object, ...] = (),
+        reservation: ChannelReservation | None = None,
+        release_complete: threading.Event | None = None,
+    ) -> None:
         super().__init__(message)
         self.preserve = preserve
+        self.reservation = reservation
+        self.release_complete = release_complete
 
 
 class BoundedJsonLinesExchange:
@@ -266,7 +284,13 @@ class JsonLinesPolicyAdapter:
         try:
             identity = _claim_live_channel(exchange, admission)
         except _ChannelClaimRejected as error:
-            _reject_exchange(exchange, admission, preserve=error.preserve)
+            _reject_exchange(
+                exchange,
+                admission,
+                preserve=error.preserve,
+                reservation=error.reservation,
+                release_complete=error.release_complete,
+            )
             raise PortExchangeError(str(error)) from error
         try:
             response_line = exchange.exchange(request_line)
@@ -298,7 +322,7 @@ def _decode_response(response: bytes) -> str:
 def _claim_live_channel(
     exchange: JsonLinesExchangePort,
     admission: ChannelAdmission,
-) -> LiveChannel:
+) -> ChannelReservation:
     identity = getattr(exchange, "channel_identity", None)
     if not isinstance(identity, tuple) or len(identity) != 2:
         raise _ChannelClaimRejected(
@@ -309,22 +333,47 @@ def _claim_live_channel(
         raise _ChannelClaimRejected("exchange did not expose bounded release state")
     with _CHANNEL_STATE_LOCK:
         _purge_released_channels_locked()
-        preserved = tuple(
+        unique_identity = tuple(
             candidate
             for position, candidate in enumerate(identity)
             if not any(candidate is prior for prior in identity[:position])
-            and any(
+        )
+        preserved = tuple(
+            candidate
+            for candidate in unique_identity
+            if any(
                 candidate is existing
-                for reader, writer, _, _ in _LIVE_CHANNELS
-                for existing in (reader, writer)
+                for reservation in _LIVE_CHANNELS
+                for existing in reservation.endpoints
             )
         )
         if preserved:
+            owned = tuple(
+                candidate
+                for candidate in unique_identity
+                if not any(candidate is shared for shared in preserved)
+            )
+            reservation = None
+            if owned:
+                reservation = ChannelReservation(
+                    owned,
+                    release_complete,
+                    admission,
+                    False,
+                )
+                _LIVE_CHANNELS.append(reservation)
             raise _ChannelClaimRejected(
                 "a fresh channel is required while a channel is live",
                 preserved,
+                reservation,
+                release_complete,
             )
-        channel = (identity[0], identity[1], release_complete, admission)
+        channel = ChannelReservation(
+            unique_identity,
+            release_complete,
+            admission,
+            True,
+        )
         _LIVE_CHANNELS.append(channel)
         return channel
 
@@ -344,20 +393,31 @@ def _reject_exchange(
     admission: ChannelAdmission,
     *,
     preserve: tuple[object, ...] = (),
+    reservation: ChannelReservation | None = None,
+    release_complete: threading.Event | None = None,
 ) -> None:
     def reject_and_release() -> None:
-        reject = getattr(exchange, "reject", None)
-        if not callable(reject):
-            return
         try:
-            reject(preserve=preserve)
+            reject = getattr(exchange, "reject", None)
+            if callable(reject):
+                reject(preserve=preserve)
         except BaseException:
-            return
-        release_complete = getattr(exchange, "release_complete", None)
-        if not isinstance(release_complete, threading.Event):
-            return
-        release_complete.wait()
-        _release_channel_admission(admission)
+            pass
+        finally:
+            completion = release_complete
+            if completion is None:
+                try:
+                    candidate = getattr(exchange, "release_complete", None)
+                except BaseException:
+                    candidate = None
+                if isinstance(candidate, threading.Event):
+                    completion = candidate
+            if completion is not None:
+                completion.wait()
+            if reservation is None:
+                _release_channel_admission(admission)
+            else:
+                _retire_live_channel(reservation, release_admission=True)
 
     threading.Thread(
         target=reject_and_release,
@@ -367,21 +427,30 @@ def _reject_exchange(
 
 
 def _release_live_channel(
-    channel: LiveChannel,
+    channel: ChannelReservation,
 ) -> None:
     def release_when_closed() -> None:
-        channel[2].wait()
-        with _CHANNEL_STATE_LOCK:
-            for index, current in enumerate(_LIVE_CHANNELS):
-                if current is channel:
-                    del _LIVE_CHANNELS[index]
-                    break
-            _CHANNEL_ADMISSIONS.discard(channel[3])
+        channel.release_complete.wait()
+        _retire_live_channel(channel)
 
-    if channel[2].is_set():
+    if channel.release_complete.is_set():
         release_when_closed()
     else:
         threading.Thread(target=release_when_closed, daemon=True).start()
+
+
+def _retire_live_channel(
+    channel: ChannelReservation,
+    *,
+    release_admission: bool = False,
+) -> None:
+    with _CHANNEL_STATE_LOCK:
+        for index, current in enumerate(_LIVE_CHANNELS):
+            if current is channel:
+                del _LIVE_CHANNELS[index]
+                break
+        if release_admission or channel.release_admission_with_identity:
+            _CHANNEL_ADMISSIONS.discard(channel.admission)
 
 
 def _release_channel_admission(admission: ChannelAdmission) -> None:
@@ -390,10 +459,11 @@ def _release_channel_admission(admission: ChannelAdmission) -> None:
 
 
 def _purge_released_channels_locked() -> None:
-    retained: list[LiveChannel] = []
+    retained: list[ChannelReservation] = []
     for channel in _LIVE_CHANNELS:
-        if channel[2].is_set():
-            _CHANNEL_ADMISSIONS.discard(channel[3])
+        if channel.release_complete.is_set():
+            if channel.release_admission_with_identity:
+                _CHANNEL_ADMISSIONS.discard(channel.admission)
         else:
             retained.append(channel)
     _LIVE_CHANNELS[:] = retained

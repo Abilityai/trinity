@@ -76,7 +76,13 @@ class JsonLinesCapabilityExecutor:
             try:
                 identity = _claim_live_channel(exchange, admission)
             except _ChannelClaimRejected as error:
-                _reject_exchange(exchange, admission, preserve=error.preserve)
+                _reject_exchange(
+                    exchange,
+                    admission,
+                    preserve=error.preserve,
+                    reservation=error.reservation,
+                    release_complete=error.release_complete,
+                )
                 raise PortExchangeError(str(error)) from error
             try:
                 response_line = exchange.exchange(request_line)
