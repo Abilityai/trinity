@@ -414,6 +414,184 @@
 - **Flow**: `docs/memory/feature-flows/activity-stream.md`,
   `docs/memory/feature-flows/task-execution-service.md`
 
+### 10.16 Template-Declared Schedules at Creation (trinity-enterprise#89)
+- **Status**: ✅ Implemented (2026-08-02, trinity-enterprise#89, sub of Epic #122)
+- **GitHub Issue**: trinity-enterprise#89 (code lands as a public `abilityai/trinity` PR)
+- **Description**: An agent template's `template.yaml` may declare a `schedules:` block. The
+  abilities plugin ecosystem (`create-agent` wizards, `agent-dev:add-pipeline`, `trinity:onboard`)
+  treats that block as the **design source of truth** for an agent's recurring tasks, but Trinity
+  never read it — only `/trinity:sync` reconciled it onto a live instance. An agent created from the
+  same template through the UI, the API, or MCP got **none** of its declared schedules. Creation now
+  materializes them through the existing `db.create_schedule` path, for **both** `github:` and
+  `local:` templates.
+
+#### The declared block
+```yaml
+schedules:
+  - name: daily-briefing          # required, non-empty string, ≤ 200 chars, unique in the block
+    cron: "0 9 * * *"             # required, non-empty string, strict 5-field Unix cron
+    message: /daily-briefing       # required, non-empty string, ≤ 10 000 chars (truncated beyond)
+    enabled: true                  # optional bool; anything else → False + a named error
+    timezone: Europe/London        # optional string, pytz zone; default "UTC"
+    description: ...               # optional string, ≤ 1000 chars (`purpose:` is an accepted alias)
+    id: sched-1                    # IGNORED — Trinity mints its own schedule id
+```
+- Required-key shape mirrors `system_service.validate_manifest` (`name`/`cron`/`message`).
+- **Unknown keys are ignored** (AC #1) — a plugin may carry extra design metadata.
+- `timeout_seconds`, `model`, and `allowed_tools` are deliberately **not surfaced**.
+  `ScheduleCreate.timeout_seconds` defaults to `None` = "inherit the agent's
+  `execution_timeout_seconds`" (#913), so every materialized schedule sits inside the §35 agent-cap
+  ceiling **by construction** and can never trip `schedule_timeout_exceeds_agent_cap`.
+
+#### Reader — `services/template_schedules.py` (new leaf)
+- Public surface: `schedule_shape_errors(block) -> List[str]` and
+  `normalize_declared_schedules(block) -> List[dict]`, both over one private `_parse()` so the
+  error list and the accepted list can never disagree. Mirrors the sibling
+  `credential_shape_errors` / `credential_mcp_server_names` convention (trinity-enterprise#128).
+- **Total function contract — `template.yaml` is untrusted input and the reader never raises.**
+  `yaml.safe_load(...) or {}` can yield a scalar, a list, or a mapping at any level:
+
+  | Input | Behaviour |
+  |---|---|
+  | absent / `None` | `[]`, no error (a commented-out block is not a problem) |
+  | `schedules: "yes"` / `5` / `true` / `{a: b}` | `[]` + named error |
+  | `[null]`, non-mapping entry | entry dropped + named error |
+  | missing / non-string / empty `name`, `cron`, `message` | entry dropped + named error |
+  | non-string `timezone` | entry dropped + named error |
+  | invalid cron (`@daily`, 6-field, `99 99 * * *`) or unknown timezone | entry dropped + named error |
+  | `name` > 200 / `description` > 1000 | entry dropped + named error |
+  | `message` > 10 000 | truncated + named error |
+  | duplicate `name` within the block | second and later dropped + named error |
+  | non-bool `enabled` | entry kept with `enabled=False` + named error (fail-safe) |
+  | more than `MAX_DECLARED_SCHEDULES` (20) entries | truncated to 20 + named error |
+- **Error-string discipline**: an error carries the **entry index, the key, and a YAML type name**
+  — never the `name` or `message` *value*. Those strings are author-controlled, unbounded, and
+  prompt-injection-shaped, and the error list is persisted into the compatibility report
+  (`agent_compatibility_results.checks_json`), rendered in the UI, and echoed into the catalog
+  response. The **cron** string is the one echoed value — bounded and printable-filtered by a local
+  4-line helper (the leaf cannot import `template_service._sanitize_for_warning` without closing an
+  import cycle; the two are comment-linked).
+- **Strict cron at the reader** (`services/schedule_validation.validate_cron_expression`, the same
+  validator the dedicated scheduler registers with, #1472). This is a **materialization** gate, not
+  a report verdict: `_calculate_next_run_at` *swallows* a bad cron and returns `None`
+  (`db/schedules/crud.py`), and `set_schedule_enabled` never re-validates — so an unvalidated entry
+  would create a **zombie schedule**: a row that exists, shows no next run, and never fires.
+- `MAX_DECLARED_SCHEDULES = 20` lives in the reader, so the catalog surface and the materializer
+  inherit the same cap. (Verified: the platform has no other per-agent schedule cap.)
+
+#### Catalog surface (AC #1)
+- Both builders surface `schedules` (the **normalized** list, not the raw block) and
+  `schedule_errors`: `template_service._build_template` (GitHub) and `_build_local_template`
+  (local). Parity is explicit — the pre-existing asymmetry (`persistent_state` is surfaced only by
+  the GitHub builder) means it cannot be assumed.
+- `_template_schedule_errors()` logs exactly one WARNING per malformed template naming the id; the
+  template still lists. A broken `schedules:` block costs that template its schedule metadata, not
+  its place in the catalog (the trinity-enterprise#128 / #1835 contract).
+- **Both GitHub catalog list paths are now fenced** per-template (`get_all_templates`), matching the
+  local path's fence. They were bare list comprehensions, so any raise inside `_build_template`
+  would 500 the whole GitHub half of `GET /api/templates`.
+
+#### Materialization at creation (AC #2)
+- `_TemplateResolution.declared_schedules` is the **normalized carrier populated by both resolver
+  branches**. It is deliberately *not* `template_data`: that field is raw template YAML on the
+  `local:` path and `{}` on the `github:` path, and `_stage_config_files` gates credential-file
+  generation on `if template_data:` — merging the two shapes would change credential generation for
+  every GitHub agent.
+- The `github:` branch fetches the raw `template.yaml` via
+  `template_service.fetch_template_metadata_for_create(repo, pat=…, ref=…)` — the
+  **creation-resolved PAT** (per-agent → per-user → global, ent#162) and the **parsed `@branch`
+  ref**, bypassing the 10-minute catalog cache. The catalog's own metadata fetch uses the *global*
+  platform PAT with no `?ref=`, so a user creating from their own private repo with their own
+  per-user token would silently get zero schedules, and `github:owner/repo@feature` would
+  materialize `main`'s. The fetch is **non-fatal and never silently empty**: any failure logs a
+  WARNING naming the repo, the status, and the likely cause.
+- `crud.reconcile_declared_schedules(agent_name, declared, owner_username)` runs inside
+  `_materialize_agent_files`, beside the `persistent_state` (#383) and `data_paths` (#1169) steps.
+  **Every step in that function is non-fatal by design — creation must never fail because a
+  schedule didn't materialize.** The helper is shaped as a *reconcile* primitive (takes
+  `agent_name`, not `AgentConfig`) so a future operator-triggered "re-apply template" can reuse it.
+- Ghost agents are skipped at the caller (`config.ephemeral`) — schedules on an ephemeral agent are
+  a 400 by ent#69 fleet hygiene, and a new caller must exclude ghosts itself.
+- `db.create_schedule` **returns `None`** (it does not raise) on three paths — unknown user, no
+  agent access, and the #1445 `is_agent_live` no-orphan gate. The materializer checks the return
+  value and counts a falsy result as *failed*, mirroring `system_service`. The summary INFO line
+  reports created / skipped-existing / skipped-invalid / failed derived from **actual outcomes**,
+  never from the input length.
+- Ordering is already correct: `_register_agent` runs before `_materialize_agent_files`, so
+  `is_agent_live()` is satisfied.
+
+#### `enabled:` semantics (AC #3)
+- A declared `enabled: true` **is honored**; an unspecified `enabled` defaults to **`False`**.
+  Passed explicitly to `ScheduleCreate`, whose own default is `True`.
+- Safety rests on the platform master gate, not on the flag: `agent_ownership.autonomy_enabled` is
+  `INTEGER DEFAULT 0` and `register_agent_owner()` has no parameter for it, so a newly created agent
+  can never have autonomy on; a cron fire against an autonomy-off agent is skipped with no execution
+  row. Honoring also gives the UI a real "Next run" — `db.create_schedule` computes `next_run_at`
+  only when `enabled` is true.
+- **Documented caveat (pre-existing, and the actual control):** `set_autonomy_status` force-enables
+  **every** schedule on the agent when an owner turns autonomy on, with no filter — so per-schedule
+  `enabled` intent is erased at the first toggle whether the row was written `0` or `1`. Forcing
+  `False` at creation would therefore prevent nothing. Making `set_autonomy_status` stop clobbering
+  per-schedule intent is the real guard and is tracked as a separate P2 follow-up.
+
+#### Idempotency (AC #4) — three places, all required
+1. **At creation** — name-match read-then-skip against `db.list_agent_schedules(agent_name)` before
+   each insert. No recreate hook is added: container recreate goes through `lifecycle.py`, and an
+   eager re-materialize would **resurrect schedules an operator deliberately deleted**.
+2. **Within the declared block** — `normalize_declared_schedules` dedupes by name (first wins,
+   named error), and the materializer adds each created name to the seen-set as it goes.
+3. **Manifest deploy** — `system_service.create_schedules` runs *after* `create_agent_internal`, so
+   post-#89 it is the second schedule producer for the same agent. It gains the same name-match
+   skip; otherwise a manifest declaring `daily-briefing` on a template that also declares it yields
+   two rows.
+- There is **no** `UNIQUE(agent_name, name)` index on `agent_schedules` and none is added: it is a
+  schema change (Invariant #3, dual-track) and would fail on installs already holding
+  duplicate-named schedules. Known blind spot: `list_agent_schedules` excludes soft-deleted rows, so
+  a soft-deleted schedule of the same name does not suppress a re-create.
+
+#### Compatibility validation (AC #5)
+- **T-018** (`soft`, `static`, category `T`, not `claude_only`): *"schedules block entries are
+  well-formed"* — **structural** validity only (presence/type of `name`/`cron`/`message`, entry
+  shape, block shape, cap), via `template_schedules.schedule_shape_errors`. It deliberately does
+  **not** report cron syntax: **A-002** already ships as *"cron expressions are valid"*, and two
+  contradicting cron authorities in the same report on the same field is worse than either alone.
+- **A-002 is corrected in the same change.** Its private `_valid_cron` was a per-field
+  `^[\d*/,\-]+$` regex — it **rejected** `0 9 * * MON` (valid) and **accepted** `99 99 * * *`
+  (invalid). It now delegates to `validate_cron_expression`, so the report agrees with both the
+  scheduler and the materializer. *Validate a config with the same parser the executor uses.*
+- **T-018 fails closed.** `run_static` converts a raising check into `skipped`, and `_counts` counts
+  only `status == "fail"`, so a raising *soft* check drops `soft_count` 1→0 and flips
+  `overall_status` from `issues` to `compatible` — a validator that breaks reports "healthy", and
+  `_report_from_persisted` replays that clean bill of health from `checks_json` on every
+  stopped-agent read. T-018 therefore catches its own `Exception` and returns `_fail`, carrying
+  `type(e).__name__` **only** (never `str(e)`, which would embed untrusted template content into a
+  persisted, UI-rendered blob).
+- Two in-radius corrections ship with it: **`c_p006`** (a **HARD** check) iterated
+  `data.get("schedules") or []` with no `isinstance(..., list)` guard, unlike all four of its
+  siblings — `schedules: 5` raised `TypeError` and made a HARD check silently vanish from
+  `hard_count`; and **`run_static` now logs** the swallow (it previously recorded `check_error` with
+  no log line anywhere, for all ~100 checks).
+
+#### Blast radius and non-goals
+- **Zero on the default install.** Of the bundled templates only `demo-analyst` and
+  `demo-researcher` declare `schedules:` and both are `hidden: true`; `local:scout/sage/scribe` (the
+  ent#124 default manifest fleet) declare none. Zero declared schedules ⇒ zero behaviour change.
+  No migration, no feature flag, no new endpoint, no new Pydantic model.
+- **Invariant removed, named deliberately:** `config/manifests/default-system.yaml` records as an
+  ent#124 decision *"No `schedules:` — a zero-credential fresh install must not accumulate failing
+  cron executions."* #89 transfers that control from the manifest author to the template author with
+  no opt-out (a manifest can only add schedules, never suppress a template's).
+- **Amplification to note, not gate:** a schedule `message` carries the same trust level as that
+  template's `CLAUDE.md` and skills — no new trust boundary. But an agent-scoped MCP key holding
+  `create_agent` can now spawn an agent from an arbitrary `github:` template *and* mint recurring
+  autonomous tasks on it. Bounded by `autonomy_enabled=0`, `MAX_DECLARED_SCHEDULES`, the ghost skip,
+  and ent#69's ephemeral-caller refusal.
+- **Out of scope**: no `deploy_system` fallback to a template's declared block when the manifest
+  omits one; no recreate/repull hook; no `timeout_seconds`/`model`/`allowed_tools` surface.
+- **Flow**: `docs/memory/feature-flows/template-processing.md`,
+  `docs/memory/feature-flows/scheduling.md`,
+  `docs/memory/feature-flows/agent-compatibility-validation.md`
+
 ---
 
 ## 34. Agent-Defined Pipelines (#919)
