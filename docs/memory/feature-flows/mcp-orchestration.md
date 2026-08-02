@@ -551,9 +551,13 @@ create_agent({
 - Repository should be a valid Trinity-compatible agent (CLAUDE.md recommended)
 
 **Template formats**:
-- `github:owner/repo` - Any GitHub repository (dynamic)
-- `github:abilityai/agent-ruby` - Pre-defined template (from `list_templates`)
-- `local:template-name` - Local template from config directory
+- `github:owner/repo` - Any GitHub repository (dynamic); resolves whether or not it is in the configured browse list
+- `local:template-name` - Local template from config directory (e.g. `local:scout`; ids returned by `list_templates`)
+
+Note (#1931): `DEFAULT_GITHUB_TEMPLATE_REPOS` ships **empty**, so on a default
+install `list_templates` returns local templates only until an admin curates
+repos under Settings → GitHub Templates. Any `github:` id stays creatable
+regardless — the browse list never gated creation.
 
 ### Queue-Aware Chat (429 Handling) - Added 2025-12-06
 

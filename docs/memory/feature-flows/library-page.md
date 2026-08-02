@@ -56,6 +56,19 @@ Renamed from `Templates.vue` via a **pure `git mv` commit** followed by a conten
 
 **Agent Templates section** (unchanged behavior from the Templates page): single `GET /api/templates` fetch (now via the shared `api` client — Invariant #7; previously raw axios with a hand-built auth header), split client-side into Starter (`source === 'local' || !source`) and GitHub (`source === 'github'`) grids, plus the Custom/Blank Agent card and a "No templates configured" empty state. The backend already excludes hidden fixtures (#1513). `CreateAgentModal.vue`'s single `/api/templates` call was migrated to the shared client in the same change, so no half-migrated consumer of the endpoint remains.
 
+**GitHub-zero empty state (#1931).** `DEFAULT_GITHUB_TEMPLATE_REPOS` is now empty, so a default install has **zero** GitHub templates. The section previously wrapped everything in `v-if="githubTemplates.length > 0"` and therefore *vanished* — honouring §4.5's "empty states teach the next action" only by accident (it had never been zero before). It now renders on `v-if="!noTemplatesAtAll"` and branches internally: grid when there are entries, else a dashed-border placeholder card matching the Blank Agent idiom on the same page. Card content, in the order it is read — **marketplace first** (the operator decision): the `abilityai/abilities` marketplace + `create-agent` wizards as the *recommended* path, then a **Create from a GitHub repository** button for "I already have a repo" (both roles; wired to `useTemplate({ id: 'github-custom' })` — `CreateAgentModal`'s own sentinel for the free-form `owner/repo` option, explicitly exempted from that component's unknown-template reset — deliberately **not** `useTemplate(null)`, which is byte-identically the Blank Agent button), then a role-branched curation hint via `useRole()` (admin → `/settings?tab=agents`; non-admin → ask an admin), mirroring `LibrarySkillsSection.vue`'s convention on this same page.
+
+**Precedence — the two empty states are mutually exclusive by construction.** `noTemplatesAtAll = templates.length === 0` is computed over the **whole** `/api/templates` response (local *and* github), and the page-level "No templates configured" block keeps its existing `v-if="templates.length === 0 && !loading"` **unchanged**:
+
+| local | github | `templates.length` | page-level empty | GitHub section | GitHub inner |
+|---|---|---|---|---|---|
+| 3 | 0 | 3 | no | yes | **placeholder** ← the new default install |
+| 3 | 6 | 9 | no | yes | grid |
+| 0 | 6 | 6 | no | yes | grid |
+| 0 | 0 | 0 | **yes** | no | — |
+
+Exactly one empty state renders in every row. `githubTemplates ⊆ templates`, so `githubTemplates.length > 0` *implies* `!noTemplatesAtAll` — the section condition needs no second disjunct. The page-level hint's copy was also corrected (#1931): it pointed at `config.py`, which is not an operator surface and is now empty by design.
+
 ### LibrarySkillsSection.vue (`src/frontend/src/components/LibrarySkillsSection.vue`)
 Fleet-level **browse** over the skills library — read-only discovery, NOT a second assignment path (strategy epic ent#182: one skill model, no parallel mechanisms). Assignment stays on each agent's Skills tab (PR #1877); cards link there via `/agents`.
 
@@ -152,6 +165,7 @@ CI runs admin-authenticated (`e2e/.auth/admin.json`), so the non-admin empty-sta
 
 | Date | Changes |
 |------|---------|
+| 2026-08-01 | **#1931 — catalog honesty**: the 11 `dd-*` VC-demo templates go `hidden: true` (visible catalog 14 → 3: `sage`/`scout`/`scribe`), `DEFAULT_GITHUB_TEMPLATE_REPOS` emptied (6 → 0, so `GET /api/templates` makes no outbound GitHub calls on a cold cache), new marketplace-first GitHub-zero placeholder card + corrected page-level hint copy, and the demo fleet stays deployable as a set via the promoted `config/manifests/vc-due-diligence.yaml`. |
 | 2026-07-31 | **ent#263 — Templates page → Library**: file renamed from `templates-page.md`; full rewrite. `/library` route + query/hash-preserving `/templates` redirect, NavBar rename, Agent Templates section (content preserved, fetch migrated to shared api client), new Skills fleet-browse section (`LibrarySkillsSection.vue` + `stores/skillsLibrary.js` + shared `components/skills/` chips seam), per-kind empty states, security notes. Previous revision documented the standalone Templates page (incl. the long-gone `AgentSubNav` and dead `env-template`/`refresh` endpoints). |
 | 2026-03-04 | TMPL-001 configurable GitHub templates (historical — see git history of `templates-page.md`). |
 | 2026-01-21 | Initial creation as `templates-page.md`. |

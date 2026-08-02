@@ -144,9 +144,16 @@ user-facing list hides them. Both `_build_local_template` and `_build_template`
 now surface a coerced-int `priority` (`_coerce_priority`; a present-but-null or
 string value would otherwise `TypeError` the router sort), so the step-5 sort
 actually orders the real starters (`scout`/`sage`/`scribe`, `priority: 20`)
-ahead of the rest. `Templates.vue` renders a **Starter Templates** (local)
-section in addition to GitHub, so it shows the same curated set as
-`CreateAgentModal`.
+ahead of the rest. `Library.vue` (the Agent Templates section; renamed from
+`Templates.vue` in ent#263) renders a **Starter Templates** (local) section in
+addition to GitHub, so it shows the same curated set as `CreateAgentModal`.
+
+**Since #1931 there is no "rest"**: the 11 `dd-*` VC-demo directories declare
+`hidden: true`, so the visible local catalog is exactly those three starters and
+the ordering clause guards nothing today. It is kept because it is the mechanism
+a fourth starter would rely on; what is now enforced instead is that each starter
+still declares `priority: 20`, and that every bundled directory declares `hidden:`
+at all (see requirements/core-agent.md §4.1).
 
 **Read-path containment (#1900).** `get_local_template("local:<name>")` — the
 single-template resolver behind `GET /api/templates/{template_id:path}` — routes

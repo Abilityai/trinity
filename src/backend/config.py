@@ -326,14 +326,20 @@ VOIP_CALL_RATE_WINDOW = int(os.getenv("VOIP_CALL_RATE_WINDOW", "60"))  # seconds
 # Default GitHub Template Repositories
 # Just repo identifiers — metadata is fetched from each repo's template.yaml at runtime.
 # Admins can override this list via Settings → GitHub Templates (stored in system_settings).
-DEFAULT_GITHUB_TEMPLATE_REPOS = [
-    "abilityai/agent-ruby",
-    "abilityai/agent-cornelius",
-    "abilityai/agent-corbin",
-    "abilityai/ruby-orchestrator",
-    "abilityai/ruby-content",
-    "abilityai/ruby-engagement",
-]
+#
+# Intentionally EMPTY (#1931). The bundled list had gone stale — a pre-2026 repo
+# set no install had ever overridden — so every operator browsed the same dead
+# catalog. Curating GitHub templates is an explicit operator act, not a bundled
+# default. An empty default costs nothing: any repo is still creatable at any
+# time via `template: github:owner/repo` (`template_service.get_github_template`
+# resolves an unconfigured id through its dynamic branch), so this removes a
+# *browse* surface, never a *create* capability. It also means `GET /api/templates`
+# makes zero outbound GitHub calls on a cold metadata cache.
+#
+# Do NOT refill this list. Keep the constant: TMPL-001's None-vs-[] fallback,
+# routers/settings.py, and the Settings "defaults" badge all reference it, and
+# trinity-enterprise#14 (remote template registry) will repoint this seam.
+DEFAULT_GITHUB_TEMPLATE_REPOS: list[str] = []
 
 
 # ============================================================================

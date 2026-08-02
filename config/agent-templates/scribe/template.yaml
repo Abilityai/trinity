@@ -1,4 +1,7 @@
 name: scribe
+# Catalog intent, declared explicitly (#1931): a starter we stand behind as
+# someone's first agent. See README "Starter templates".
+hidden: false
 display_name: Scribe - Content Writer
 description: Professional content writer that creates reports, proposals, and client deliverables
 type: content-agent
