@@ -860,3 +860,7 @@ Tests: `tests/unit/test_fork_to_own.py` (40 — model validation, orchestrator c
 
 - **Upstream**: User authentication
 - **Downstream**: Credential Injection (hot-reload), Agent Lifecycle (start after creation)
+- **Per-agent runtime companion**: [guided-credential-setup.md](guided-credential-setup.md) —
+  this flow is catalog/template-time (what a template *declares*); ent#127 is the
+  per-agent runtime half (what a **deployed** agent declares and which of those
+  variables are actually set in its `.env`).
