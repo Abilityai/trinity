@@ -69,7 +69,9 @@ if _BACKEND not in sys.path:
 from fastapi import HTTPException  # noqa: E402
 
 import routers.git as git_router  # noqa: E402
+import models  # noqa: E402
 from models import BindAgentRepoRequest  # noqa: E402
+from pydantic import ValidationError  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -505,6 +507,114 @@ class TestAuditCoverage:
     async def test_pat_never_reaches_the_audit_trail(self, endpoint):
         await _call(endpoint)
         assert PAT not in repr(endpoint.audits)
+
+
+# ---------------------------------------------------------------------------
+# 5b. The PAT cannot become a header-injection / log-leak vector (/cso S1)
+# ---------------------------------------------------------------------------
+
+
+class TestPatCharsetGuard:
+    """A PAT is sent as `Authorization: Bearer <pat>` and embedded in a git
+    remote URL. h11 rejects an illegal header value by ECHOING it, so a token
+    carrying `\r` or `\n` — what a paste from a terminal or clipboard routinely
+    picks up — puts the RAW token in the exception message, which then reaches
+    the 500 response body and the Vector-captured platform log.
+
+    Guarded at the MODEL boundary rather than at each error handler, so every
+    consumer of a PAT field inherits it and a future one cannot forget.
+    """
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "ghp_token\r\nX-Injected: 1",   # header injection, the malicious shape
+            "ghp_tok en",                   # embedded space
+            "ghp_token\x00",                # NUL
+            "ghp_tokené",                   # non-ASCII → UnicodeEncodeError downstream
+            "ghp_a\tb",                     # tab
+        ],
+    )
+    def test_header_unsafe_tokens_are_rejected(self, bad):
+        with pytest.raises(ValidationError):
+            models.BindAgentRepoRequest(
+                destination_repo=DEST, github_pat=bad, private=True
+            )
+
+    def test_the_rejection_message_does_not_quote_the_value(self):
+        """The validator's OWN message must not echo what it rejected. Pydantic
+        separately puts the value in `errors()[0]["input"]`, which is why
+        `main.py` strips that field from every 422 body — asserted in
+        `test_ent109_validation_error_no_input.py`."""
+        secret = "ghp_THE_USERS_REAL_TOKEN bad"
+        with pytest.raises(ValidationError) as exc:
+            models.BindAgentRepoRequest(
+                destination_repo=DEST, github_pat=secret, private=True
+            )
+        assert secret not in exc.value.errors()[0]["msg"]
+
+    @pytest.mark.parametrize(
+        "padded",
+        ["  ghp_valid_token\n", "ghp_valid_token\r\n", "\tghp_valid_token ", "ghp_valid_token\r"],
+    )
+    def test_surrounding_whitespace_is_stripped_not_rejected(self, padded):
+        """The single commonest real input by far: a good token that picked up a
+        trailing newline from a terminal or clipboard. Rejecting it would be
+        user-hostile for the case that motivates the guard; stripping keeps it
+        working, and passing it through unstripped is the leak."""
+        m = models.BindAgentRepoRequest(
+            destination_repo=DEST, github_pat=padded, private=True
+        )
+        assert m.github_pat.get_secret_value() == "ghp_valid_token"
+
+    @pytest.mark.parametrize(
+        "good",
+        ["ghp_" + "a" * 36, "github_pat_" + "B9_" * 10, "ghs_xyz", "v1.abcdef0123"],
+    )
+    def test_real_token_formats_still_pass(self, good):
+        m = models.BindAgentRepoRequest(
+            destination_repo=DEST, github_pat=good, private=True
+        )
+        assert m.github_pat.get_secret_value() == good
+
+    def test_empty_is_still_rejected(self):
+        with pytest.raises(ValidationError):
+            models.BindAgentRepoRequest(
+                destination_repo=DEST, github_pat="   ", private=True
+            )
+
+    def test_the_create_path_model_carries_the_same_guard(self):
+        """ForkToOwnRequest (ent#93) feeds the SAME GitHubService constructor
+        through crud._apply_fork_to_own, which sits deliberately outside
+        create_agent_internal's try. Same class, same fix site — asserted so the
+        variant cannot regress independently."""
+        with pytest.raises(ValidationError):
+            models.ForkToOwnRequest(
+                destination_repo=DEST, github_pat="ghp_x\nX-Injected: 1", private=True
+            )
+        m = models.ForkToOwnRequest(
+            destination_repo=DEST, github_pat=" ghp_ok\n", private=True
+        )
+        assert m.github_pat.get_secret_value() == "ghp_ok"
+
+
+class TestUnexpectedErrorIsScrubbed:
+    @pytest.mark.asyncio
+    async def test_a_foreign_exception_echoing_the_pat_does_not_reach_the_response(
+        self, endpoint
+    ):
+        """Belt for the class the charset guard closes at the boundary: the next
+        library that echoes a credential in an exception message is not knowable
+        in advance, so the one handler that surfaces a raw exception string
+        scrubs it."""
+        endpoint.bind_raises = RuntimeError(
+            f"Illegal header value b'Bearer {PAT}'"
+        )
+        with pytest.raises(HTTPException) as exc:
+            await _call(endpoint)
+        assert exc.value.status_code == 500
+        assert PAT not in str(exc.value.detail)
+        assert "***" in exc.value.detail["error"]
 
 
 # ---------------------------------------------------------------------------

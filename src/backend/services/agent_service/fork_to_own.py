@@ -34,6 +34,8 @@ from typing import List, Literal
 
 from fastapi import HTTPException
 
+from utils.credential_sanitizer import scrub_secret as _scrub_secret
+
 from services.github_service import GitHubService, GitHubError, OwnerType
 
 logger = logging.getLogger(__name__)
@@ -92,15 +94,11 @@ class DestinationState:
     branches: List[dict]
 
 
-def scrub_secret(text: str, secret: str) -> str:
-    """Replace every occurrence of ``secret`` (and its b64 form) in ``text``."""
-    if not text:
-        return text or ""
-    if secret:
-        text = text.replace(secret, "***")
-        b64 = base64.b64encode(f"x-access-token:{secret}".encode()).decode()
-        text = text.replace(b64, "***")
-    return text
+# Re-exported from `utils.credential_sanitizer`, which is the home for the
+# whole family (ent#109 moved it there so the repo-binding path and this one
+# cannot drift). Kept importable from here for the create path's existing
+# callers and tests.
+scrub_secret = _scrub_secret
 
 
 def _http_error(status_code: int, code: str, message: str) -> HTTPException:

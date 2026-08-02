@@ -43,7 +43,7 @@ from typing import Optional
 
 from database import db
 from services import git_service
-from utils.credential_sanitizer import redact_url_userinfo
+from utils.credential_sanitizer import scrub_secret_and_urls
 
 logger = logging.getLogger(__name__)
 
@@ -96,19 +96,14 @@ class BindOutcome:
 def _scrub(text: str, user_pat: str) -> str:
     """Belt at the boundary where the PAT is in scope.
 
-    Every message this module builds from FOREIGN text — git output, a docker
-    exception, GitHub's own error string — is scrubbed here even though the
-    producer is supposed to have scrubbed it already. Relying on "the producer
-    handled it" is the single point of failure the dual-scrub rule exists to
-    remove: `git_service` scrubs what it reads from a container, but the
-    docker/GitHub exception paths reach us through libraries that never saw the
-    token and have no reason to. `scrub_secret` removes the request's PAT;
-    `redact_url_userinfo` removes a *stale baked* token embedded in a remote
-    URL, which is not the request's PAT and would otherwise survive.
+    Every message this module builds from FOREIGN text is scrubbed here even
+    though the producer is supposed to have scrubbed it already. Relying on
+    "the producer handled it" is the single point of failure the dual-scrub
+    rule exists to remove: `git_service` scrubs what it reads from a container,
+    but the docker/GitHub/httpx exception paths reach us through libraries that
+    never saw the token and have no reason to.
     """
-    from services.agent_service.fork_to_own import scrub_secret
-
-    return redact_url_userinfo(scrub_secret(text or "", user_pat))
+    return scrub_secret_and_urls(text, user_pat)
 
 
 def _translate_destination_error(exc) -> BindError:
@@ -147,6 +142,28 @@ async def _classify(agent_name: str, destination_repo: str):
     instead — the intuitive reading of "is this agent writable yet?" — is an
     orthogonal column, and would route a credential-less ``source_mode = 0``
     row into this engine, whose rebind then moves it *within* that index.
+
+    **Resumption is not an unclassified state.** The CAS (step 3) is the commit
+    point, and after it the row names the destination while the container's
+    ``origin`` still names the old repo until step 4 lands. That skew is the
+    NORMAL, expected shape of a partially-applied bind — every post-commit
+    failure message tells the user to retry — so reading it as "unknown state"
+    would refuse the exact recovery the feature documents. A row that already
+    names *this* destination is therefore treated as a resumption: the origin is
+    allowed to lag, because the row is the record of intent and the retry's job
+    is to make the container catch up. A mismatch against any OTHER repo is
+    still unclassified, which is the case the guard actually exists for.
+
+    A resumption tolerates an origin that is neither the old repo nor the
+    destination, and that is not a weakened guard: ``origin`` never selects what
+    gets pushed. Step 4 pushes ``refs/heads/<branch>`` from the workspace to the
+    destination by EXPLICIT URL and only then writes ``origin``, so the "could
+    push the wrong history" rationale does not reach this case. It also cannot
+    be tightened without cost — a committed CAS has already overwritten the old
+    repo name, so "still the old repo" and "something else entirely" are
+    indistinguishable from the row alone, and treating that ambiguity as fatal
+    would strand the agent with no recovery path, which is the dead end this
+    carve-out removes.
     """
     from services.docker_service import get_agent_container
 
@@ -203,7 +220,8 @@ async def _classify(agent_name: str, destination_repo: str):
     # and GitHub slugs are case-insensitive. The CAS asks the different
     # question "did the row change under me?", where any write — including a
     # pure re-casing — is a change worth losing the race over.
-    if state.origin_repo.lower() != (config.github_repo or "").lower():
+    resuming = (config.github_repo or "").lower() == destination_repo.lower()
+    if not resuming and state.origin_repo.lower() != (config.github_repo or "").lower():
         raise BindError(
             409,
             "BIND_STATE_UNCLASSIFIED",
@@ -217,7 +235,7 @@ async def _classify(agent_name: str, destination_repo: str):
             },
         )
 
-    return config, container, state.branch
+    return config, container, state.branch, resuming
 
 
 def _refuse_if_destination_bound_elsewhere(
@@ -265,10 +283,13 @@ async def bind_agent_to_own_repo(
     """
     from services.agent_service import fork_to_own as f2o
     from services.agent_service.lifecycle import recreate_container_with_updated_config
+    from services.agent_runtime_state import clear_agent_breakers
     from services.github_service import GitHubService
 
     # --- 1. Classify. Read-only; every refusal leaves the agent untouched. ---
-    config, container, branch = await _classify(agent_name, destination_repo)
+    config, container, branch, resuming = await _classify(
+        agent_name, destination_repo
+    )
     previous_repo = config.github_repo
     previous_source_branch = config.source_branch
     previous_auto_sync = bool(getattr(config, "auto_sync_enabled", False))
@@ -297,8 +318,18 @@ async def bind_agent_to_own_repo(
 
     # Reuse/refuse POLICY — this caller's, not the primitive's. There is no
     # template tip to compare against here (the content source is the agent's
-    # workspace volume), so ANY existing ref is data we must not push over.
-    if dest.state == "branches":
+    # workspace volume), so ANY existing ref is data we must not push over —
+    # UNLESS this is a resumption, in which case those refs are this agent's
+    # OWN history from the attempt that already committed the CAS, and refusing
+    # them would refuse the documented retry.
+    #
+    # Relaxing the gate is bounded by git, not by trust: the push at step 4 is a
+    # plain `git push <url> refs/heads/X:refs/heads/X` with no `--force` and no
+    # `+` refspec, so unrelated history is rejected non-fast-forward and an
+    # unrelated branch is left untouched. This gate is a UX guard against
+    # tangling an agent into an occupied repo; integrity is enforced one layer
+    # down.
+    if dest.state == "branches" and not resuming:
         raise BindError(
             409,
             "BIND_DESTINATION_EXISTS",
@@ -364,11 +395,16 @@ async def bind_agent_to_own_repo(
         raise
 
     # --- 4. In-container: push the workspace, repoint origin. ----------------
+    # `previous_repo` is the row's value, which on a resumption already IS the
+    # destination — passing it through would point `upstream` at the destination
+    # itself and erase the record of the real upstream (the public template the
+    # agent was cloned from). None means "leave upstream alone"; the first
+    # attempt already set it if it got that far.
     rebind = await git_service.rebind_origin_and_push(
         agent_name=agent_name,
         destination_repo=destination_repo,
         user_pat=user_pat,
-        previous_repo=previous_repo,
+        previous_repo=None if resuming else previous_repo,
         branch=branch,
     )
     if not rebind.success:
@@ -391,7 +427,13 @@ async def bind_agent_to_own_repo(
     try:
         pat_saved = db.set_agent_github_pat(agent_name, user_pat)
     except Exception as e:  # noqa: BLE001
-        logger.error("repo-bind: PAT persist raised for %s: %s", agent_name, e)
+        # Scrubbed like every other foreign-text path: the encryption layer is
+        # handed the raw token, so an exception from it is the one place a
+        # persist failure could echo the value into the platform log.
+        logger.error(
+            "repo-bind: PAT persist raised for %s: %s",
+            agent_name, _scrub(str(e), user_pat),
+        )
         pat_saved = False
     if not pat_saved:
         raise BindError(
@@ -409,6 +451,14 @@ async def bind_agent_to_own_repo(
     #        the rebind is reverted by the next plain restart (FR-5).
     recreated = False
     try:
+        # Both circuit breakers are keyed by agent NAME with no TTL, so the
+        # replacement container inherits its predecessor's verdict and can come
+        # up fast-failed without ever being contacted (#1560). `start_agent_internal`
+        # clears them immediately before its own recreate call (lifecycle.py) —
+        # this is the second production call site of that helper and owes the
+        # same. Slots are deliberately NOT cleared: `force_clear_slots` would
+        # drop capacity accounting for an in-flight execution.
+        clear_agent_breakers(agent_name)
         await recreate_container_with_updated_config(
             agent_name, container, owner_username
         )

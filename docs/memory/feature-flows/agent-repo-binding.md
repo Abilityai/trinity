@@ -207,13 +207,13 @@ so there is nothing to snapshot and overlay back.
 | `BIND_NO_GIT_CONFIG` | 400 | no `agent_git_config` row — also `local:` agents and `trinity-system` | no |
 | `BIND_WORKING_BRANCH_MODE_UNSUPPORTED` | 409 | `source_mode = 0`; needs a branch re-reservation | no |
 | `BIND_AGENT_NOT_RUNNING` | 400 | the engine needs `docker exec` on a live workspace | no |
-| `BIND_STATE_UNCLASSIFIED` | 409 | no readable `.git`/`origin`, detached HEAD, or origin ≠ row | no |
+| `BIND_STATE_UNCLASSIFIED` | 409 | no readable `.git`/`origin`, detached HEAD, or origin ≠ row **and the row does not already name this destination** (see Resumption) | no |
 | `FORK_PAT_INVALID` | 400 | shared primitive | no |
 | `FORK_DESTINATION_FORBIDDEN` | 400 | shared primitive — PAT login ≠ destination owner | no |
 | `FORK_DESTINATION_UNREACHABLE` | 502 | shared primitive — GitHub unreadable while inspecting the destination | no |
 | `FORK_REPO_CREATE_FAILED` | 400 | shared primitive | no |
 | `FORK_REPO_NOT_VISIBLE` | 502 | shared primitive — retryable, reuses the repo | no |
-| `BIND_DESTINATION_EXISTS` | 409 | destination holds branches | no |
+| `BIND_DESTINATION_EXISTS` | 409 | destination holds branches **and this is not a resumption** (on a resume they are the agent's own pushed history) | no |
 | `BIND_DESTINATION_IN_USE` | 409 | another agent's git config binds the destination | no |
 | `BIND_CONCURRENT_MODIFICATION` | 409 | CAS rowcount 0 | no |
 | `BIND_PUSH_FAILED` | 502 | push to the destination failed | **yes** |
@@ -230,11 +230,49 @@ binding **is** saved; reporting it as a flat failure would send the operator
 looking in the wrong place.
 
 **Failure honesty.** Every partial message names what is saved and what is not,
-and says retrying is safe — which is true by construction: the destination is
-reused, the push and rewire are idempotent, and a retry's CAS reads the
-already-updated row as its `expected_old`. It does **not** claim self-healing.
+and says retrying is safe. It does **not** claim self-healing.
 `BIND_RECREATE_FAILED` additionally warns *against* a plain container restart,
 which re-runs `startup.sh` and would undo the rebind.
+
+**Resumption is an explicit branch, not a property of idempotence.** The first
+draft assumed the retry converged "by construction" because the destination is
+reused and the push and rewire are idempotent. It did not: after the CAS the row
+names the destination while the container's `origin` still names the old repo,
+and *both* pre-flight gates read that skew as a refusal — `_classify`
+(origin ≠ row → `BIND_STATE_UNCLASSIFIED`) and the destination policy (the
+branches now in the destination are the agent's own just-pushed history →
+`BIND_DESTINATION_EXISTS`). All four post-commit messages told the user to do
+the one thing that returned 409.
+
+So the row naming **this** destination is treated as a resumption and relaxes
+both gates:
+
+* `_classify` lets `origin` lag. Safe because `origin` never selects what gets
+  pushed — step 4 pushes `refs/heads/<branch>` from the workspace by *explicit
+  URL* and writes `origin` afterwards — and it cannot be tightened anyway: a
+  committed CAS has overwritten the old repo name, so "still the old repo" and
+  "something else" are indistinguishable from the row, and treating the
+  ambiguity as fatal strands the agent with no recovery at all.
+* The destination policy accepts existing branches. Bounded by git, not by
+  trust: the push carries no `--force` and no `+` refspec, so unrelated history
+  is rejected non-fast-forward and an unrelated branch is untouched. The gate is
+  a UX guard against tangling an agent into an occupied repo; integrity sits one
+  layer down.
+* `rebind_origin_and_push` receives `previous_repo=None` on a resume, so
+  `upstream` is left alone rather than being repointed at the destination
+  itself — which would erase the provenance the rebind exists to preserve.
+
+A mismatch against any *other* repo is still `BIND_STATE_UNCLASSIFIED`.
+
+**The container recreate clears name-keyed breaker state first.** Both circuit
+breakers are keyed by agent name with no TTL, so the replacement container would
+otherwise inherit its predecessor's verdict and come up fast-failed without ever
+being contacted (#1560). `start_agent_internal` clears them immediately before
+its own recreate call; this is that helper's **second** production call site and
+carries the same `clear_agent_breakers`, before the recreate rather than after
+(clearing afterwards would reset a breaker the fresh container had legitimately
+tripped). Slots are deliberately untouched — `force_clear_slots` would drop
+capacity accounting for an in-flight execution.
 
 > **Why there is no drift predicate.** Decision #17 recommended adding
 > `check_github_repo_env_matches` to `needs_recreation`'s eager predicates so a
@@ -244,7 +282,8 @@ which re-runs `startup.sh` and would undo the rebind.
 > helper has **exactly two** callers, because "git env had two writers and one
 > was wrong" is the bug PR 1 fixed. Re-implementing the derivation independently
 > is the writer/matcher feedback loop `lifecycle.py` warns about (infinite
-> recreate). Idempotent retry already provides the convergence, so the honest
+> recreate). The resumption branch above supplies the convergence instead — as an
+> explicit, tested code path rather than as an assumed property — so the honest
 > move was to drop the promise, not weaken the guard.
 
 ---

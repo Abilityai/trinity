@@ -258,6 +258,28 @@
 
   Every refusal is **structural** ("this shape needs machinery this feature does
   not build"), not product gating, and each names the state and the next action.
+
+  **Resumption exception.** When the row *already names the requested
+  destination*, the operation is a retry of a partially-applied bind and the
+  last two refusals do not apply: `origin` is allowed to lag the row, and
+  branches already in the destination are the agent's own pushed history. Both
+  are safe — `origin` never selects what is pushed (step 4 pushes by explicit
+  URL and writes `origin` afterwards), and the push carries no `--force`/`+`
+  refspec so unrelated history is rejected non-fast-forward. Without this,
+  every post-commit failure message promises a retry that returns 409.
+
+- **FR-8 — A GitHub PAT must be header-safe before it leaves the model.**
+  A PAT is sent as `Authorization: Bearer <pat>` and embedded in a git remote
+  URL; h11 rejects an illegal header value by **echoing** it, so a token
+  carrying `\r`/`\n` — what a paste from a terminal or clipboard routinely
+  produces — puts the raw credential in an error response and the
+  Vector-captured platform log. `models._validate_pat_secret` strips surrounding
+  whitespace (the common case must keep working) and rejects anything outside
+  printable ASCII, for **both** `BindAgentRepoRequest` and `ForkToOwnRequest`.
+  Because Pydantic v2 records the rejected value in `errors()["input"]` and
+  FastAPI returns `exc.errors()` verbatim, `error_handlers.validation_error_without_input`
+  strips `input` from every 422 entry — otherwise the guard would relocate the
+  leak rather than close it.
   No refusal is reachable for the flagship tokenless agent or for a user
   re-running the operation after a typo or a partial failure.
 

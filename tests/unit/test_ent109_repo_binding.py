@@ -168,10 +168,18 @@ def bind_env(monkeypatch):
     docker_mod = SimpleNamespace(get_agent_container=lambda name: running)
     monkeypatch.setitem(sys.modules, "services.docker_service", docker_mod)
 
+    # The container's `origin` is tracked INDEPENDENTLY of the DB row, because
+    # that is the whole subject: the CAS is the commit point, so between it and
+    # the in-container rewire the row and the container legitimately disagree.
+    # Deriving this from `fake_db.config` (as the first version of this fixture
+    # did) makes the two agree by construction — the double then cannot witness
+    # the one state every post-commit failure produces, and the retry test that
+    # exists to prove convergence passes without exercising it.
+    world = {"origin": OLD_REPO, "branch": "main"}
+
     async def fake_inspect(agent_name):
         return git_service.ContainerGitState(
-            origin_repo=fake_db.config.github_repo if fake_db.config else None,
-            branch="main",
+            origin_repo=world["origin"], branch=world["branch"]
         )
 
     monkeypatch.setattr(git_service, "inspect_container_git", fake_inspect)
@@ -190,7 +198,19 @@ def bind_env(monkeypatch):
 
     async def fake_rebind(**kwargs):
         order.append("rebind")
-        return state["rebind_result"]
+        calls["rebind_kwargs"] = kwargs
+        res = state["rebind_result"]
+        # Mirror the real side effects so a later step observes the world the
+        # production code would have left behind.
+        if res.success:
+            state["dest_state"] = "branches"      # our own history now occupies it
+            state["dest_branches"] = [{"name": "main", "sha": "deadbeef"}]
+            world["origin"] = kwargs["destination_repo"]
+        elif res.stage == "rewire":
+            # Push landed, origin did not move.
+            state["dest_state"] = "branches"
+            state["dest_branches"] = [{"name": "main", "sha": "deadbeef"}]
+        return res
 
     monkeypatch.setattr(git_service, "rebind_origin_and_push", fake_rebind)
 
@@ -202,6 +222,15 @@ def bind_env(monkeypatch):
     lifecycle = SimpleNamespace(recreate_container_with_updated_config=fake_recreate)
     monkeypatch.setitem(sys.modules, "services.agent_service.lifecycle", lifecycle)
 
+    def fake_clear_breakers(agent_name):
+        order.append("clear_breakers")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "services.agent_runtime_state",
+        SimpleNamespace(clear_agent_breakers=fake_clear_breakers),
+    )
+
     # `set_agent_github_pat` goes through the recorded fake_db, but stamp the
     # ordering marker too so PAT-vs-recreate order is directly assertable.
     real_set = fake_db.set_agent_github_pat
@@ -212,6 +241,7 @@ def bind_env(monkeypatch):
 
     fake_db.set_agent_github_pat = ordered_set
 
+    calls = {}
     state = {
         "dest_state": "created",
         "dest_branches": [],
@@ -219,7 +249,9 @@ def bind_env(monkeypatch):
         "recreate_raises": False,
     }
 
-    yield SimpleNamespace(db=fake_db, order=order, state=state)
+    yield SimpleNamespace(
+        db=fake_db, order=order, state=state, world=world, calls=calls
+    )
 
 
 async def _bind(**over):
@@ -259,6 +291,7 @@ class TestClassification:
         be refused ALREADY_WRITABLE — which is exactly what made the documented
         retry after a partial failure return 409 instead of converging."""
         bind_env.db.config = _config(github_repo="alice/old-brain")
+        bind_env.world["origin"] = "alice/old-brain"  # steady state: row and container agree
         bind_env.db.pat_saved = "ghp_existing"
         out = await _bind()
         assert out.github_repo == DEST
@@ -459,6 +492,43 @@ class TestCommitPoint:
 
 class TestOrdering:
     @pytest.mark.asyncio
+    async def test_breakers_are_cleared_before_the_container_is_replaced(
+        self, bind_env
+    ):
+        """Both circuit breakers are keyed by agent NAME with no TTL, so the
+        replacement container inherits its predecessor's verdict and can come up
+        fast-failed without ever being contacted (#1560).
+
+        `start_agent_internal` clears them immediately before its own call to
+        `recreate_container_with_updated_config`; this is that helper's SECOND
+        production call site and owes the same. A dispatch breaker can be open
+        on an agent that is running and answering `docker exec` — exactly the
+        state a bind requires — so the inheritance is reachable, not theoretical.
+
+        Order matters: clearing AFTER the recreate would reset a breaker the
+        fresh container had already legitimately tripped.
+        """
+        await _bind()
+        assert "clear_breakers" in bind_env.order, (
+            "the bind path replaces the container without clearing name-keyed "
+            "breaker state (#1560)"
+        )
+        assert bind_env.order.index("clear_breakers") < bind_env.order.index(
+            "recreate"
+        )
+
+    @pytest.mark.asyncio
+    async def test_breakers_are_not_cleared_when_the_bind_never_gets_that_far(
+        self, bind_env
+    ):
+        """A refusal must not reset a live agent's breaker as a side effect —
+        no container is replaced, so there is nothing to clear for."""
+        bind_env.db.config = None  # BIND_NO_GIT_CONFIG
+        with pytest.raises(BindError):
+            await _bind()
+        assert "clear_breakers" not in bind_env.order
+
+    @pytest.mark.asyncio
     async def test_pat_is_persisted_after_the_rewire_and_before_the_recreate(
         self, bind_env
     ):
@@ -488,24 +558,114 @@ class TestOrdering:
     @pytest.mark.asyncio
     async def test_fail_at_push_then_retry_succeeds(self, bind_env):
         """The §0.4 contradiction as an explicit regression test: the retry after
-        a partial failure must converge, not hit a refusal."""
+        a partial failure must converge, not hit a refusal.
+
+        Nothing is hand-waved back into place between the two calls. The fixture
+        moves the world the way production does — the CAS lands, the push does
+        not, so the row names the destination while the container's origin still
+        names the old repo. An earlier version of this test derived origin FROM
+        the row and reset `dest_state` by hand, which made it pass against code
+        that refused the retry with `BIND_STATE_UNCLASSIFIED`.
+        """
         bind_env.state["rebind_result"] = git_service.RebindResult(
             False, "push", branch="main", error="transient network error."
         )
         with pytest.raises(BindError):
             await _bind()
 
-        # The row now names the destination; a retry re-reads it as `expected`.
+        # The state a real partial failure leaves: row moved, container did not.
         assert bind_env.db.config.github_repo == DEST
+        assert bind_env.world["origin"] == OLD_REPO
+
         bind_env.state["rebind_result"] = git_service.RebindResult(
             True, "done", branch="main"
         )
-        bind_env.state["dest_state"] = "empty"  # the repo it created is reused
-
         out = await _bind()
         assert out.github_repo == DEST
         assert bind_env.db.pat_saved == PAT
         assert out.recreated is True
+
+    @pytest.mark.asyncio
+    async def test_retry_after_a_failed_recreate_converges(self, bind_env):
+        """The other half: push and rewire landed, the rebuild did not.
+
+        Here the row and the container AGREE (both name the destination) — so
+        classification is happy — but the destination now holds the history the
+        first attempt pushed. Reading those refs as foreign data refuses the
+        retry with `BIND_DESTINATION_EXISTS`; they are this agent's own.
+        """
+        bind_env.state["recreate_raises"] = True
+        with pytest.raises(BindError) as exc:
+            await _bind()
+        assert exc.value.code == "BIND_RECREATE_FAILED"
+        assert exc.value.partial is True
+        assert bind_env.world["origin"] == DEST
+        assert bind_env.state["dest_state"] == "branches"  # our own pushed history
+
+        bind_env.state["recreate_raises"] = False
+        out = await _bind()
+        assert out.github_repo == DEST
+        assert out.recreated is True
+
+    @pytest.mark.asyncio
+    async def test_resumption_does_not_repoint_upstream_at_the_destination(
+        self, bind_env
+    ):
+        """`previous_repo` on a resume already IS the destination.
+
+        Passing it through would set `upstream` to the destination itself and
+        erase the record of the real upstream (the public template the agent was
+        cloned from), which is the one piece of provenance the rebind exists to
+        preserve. The first attempt already set it, and `.git/config` lives on
+        the workspace volume every recreate reuses (#1664).
+        """
+        bind_env.state["recreate_raises"] = True
+        with pytest.raises(BindError):
+            await _bind()
+        assert bind_env.calls["rebind_kwargs"]["previous_repo"] == OLD_REPO
+
+        bind_env.state["recreate_raises"] = False
+        await _bind()
+        assert bind_env.calls["rebind_kwargs"]["previous_repo"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_resume_tolerates_an_unexpected_origin(self, bind_env):
+        """A resumption proceeds even when `origin` is a third, unexpected repo.
+
+        This looks like a weakened guard and is not, because `origin` never
+        selects what gets pushed: step 4 pushes `refs/heads/<branch>` from the
+        workspace to the destination by EXPLICIT URL, and only then writes
+        `origin`. So the "could push the wrong history" rationale the
+        unclassified refusal is built on does not apply once the row
+        unambiguously names this destination — the user has now asked for it
+        twice, and the content is the workspace either way.
+
+        Refusing here would instead recreate the very dead end this carve-out
+        exists to remove: after a committed CAS the old repo name is gone from
+        the row, so "still the old repo" and "something else" are
+        indistinguishable, and treating the ambiguity as fatal would strand any
+        agent whose origin drifted out of band with no recovery path at all.
+        """
+        bind_env.db.config = _config(github_repo=DEST)
+        bind_env.world["origin"] = "someone/else"
+
+        out = await _bind()
+        assert out.github_repo == DEST
+        # ...and it did NOT invent an upstream from the resumed row.
+        assert bind_env.calls["rebind_kwargs"]["previous_repo"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_mismatch_against_any_other_repo_is_still_unclassified(
+        self, bind_env
+    ):
+        """The carve-out is scoped to the requested destination, not to mismatch
+        in general: a row naming some THIRD repo, with a container that
+        disagrees, is still the unknown state the guard exists for."""
+        bind_env.db.config = _config(github_repo="alice/some-other-repo")
+        bind_env.world["origin"] = "someone/else"
+        with pytest.raises(BindError) as exc:
+            await _bind()
+        assert exc.value.code == "BIND_STATE_UNCLASSIFIED"
 
     @pytest.mark.asyncio
     async def test_rewire_failure_is_reported_as_partial(self, bind_env):

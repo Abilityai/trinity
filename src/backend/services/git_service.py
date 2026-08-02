@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from database import db, AgentGitConfig, GitSyncResult
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, execute_command_in_container
-from utils.credential_sanitizer import redact_url_userinfo
+from utils.credential_sanitizer import scrub_secret_and_urls
 
 logger = logging.getLogger(__name__)
 
@@ -266,16 +266,14 @@ def _scrub_git_output(text: str, user_pat: str) -> str:
     (learnings 2026-07-14). Dropping either one leaks a real credential into
     an HTTP error body or the audit trail.
     """
-    from services.agent_service.fork_to_own import scrub_secret
-
-    return redact_url_userinfo(scrub_secret(text or "", user_pat))
+    return scrub_secret_and_urls(text, user_pat)
 
 
 async def rebind_origin_and_push(
     agent_name: str,
     destination_repo: str,
     user_pat: str,
-    previous_repo: str,
+    previous_repo: Optional[str],
     branch: str,
 ) -> RebindResult:
     """Push the agent's current history to ``destination_repo`` and repoint ``origin``.
@@ -297,7 +295,9 @@ async def rebind_origin_and_push(
        so a push failure leaves ``origin`` still pointing at the old repo and
        the agent exactly as it was;
     2. only then repoint ``origin``, clear the ent#123 push blackhole, and add
-       the old repo as a credential-less ``upstream``;
+       the old repo as a credential-less ``upstream`` (skipped when
+       ``previous_repo`` is None — a resumption, where the row already names
+       the destination and writing it would erase the real upstream);
     3. read ``origin`` back and confirm it resolves to the destination. AC #5
        forbids a *silent* origin mismatch, and a set-url that exits 0 without
        taking effect is precisely the silent case.
@@ -348,17 +348,27 @@ async def rebind_origin_and_push(
             ),
         )
 
-    # 3. Repoint origin, clear the ent#123 blackhole, record the old repo as
+    # 2. Repoint origin, clear the ent#123 blackhole, record the old repo as
     #    upstream. Each is idempotent; `--unset-all` exits 5 when the key is
     #    absent (the normal case for an agent that always had a token), so it
     #    is explicitly tolerated rather than treated as a failure.
-    upstream_url = _credentialless_remote_url(previous_repo)
+    #
+    #    `previous_repo=None` means the caller is RESUMING a partially-applied
+    #    bind, where the row already names the destination — writing `upstream`
+    #    from it would point upstream at the destination itself and erase the
+    #    record of the real upstream. Skip it: a first attempt that reached this
+    #    point already set it, and `.git/config` is on the workspace volume every
+    #    recreate reuses (#1664), so it survives.
     rewire = (
         f"{_remote_seturl_subcommand(dest_url)} && "
-        f"(git config --unset-all remote.origin.pushurl 2>/dev/null || true) && "
-        f"(git remote set-url upstream {shlex.quote(upstream_url)} 2>/dev/null || "
-        f"git remote add upstream {shlex.quote(upstream_url)} 2>/dev/null || true)"
+        f"(git config --unset-all remote.origin.pushurl 2>/dev/null || true)"
     )
+    if previous_repo:
+        upstream_url = _credentialless_remote_url(previous_repo)
+        rewire += (
+            f" && (git remote set-url upstream {shlex.quote(upstream_url)} 2>/dev/null || "
+            f"git remote add upstream {shlex.quote(upstream_url)} 2>/dev/null || true)"
+        )
     rc, out = await _run(rewire, timeout=60)
     if rc != 0:
         last = out.strip().splitlines()[-1][:300] if out.strip() else "rewire failed"
@@ -385,7 +395,7 @@ async def rebind_origin_and_push(
 
     logger.info(
         "repo-bind: %s pushed branch %s to %s and repointed origin (upstream=%s)",
-        agent_name, branch, destination_repo, previous_repo,
+        agent_name, branch, destination_repo, previous_repo or "unchanged",
     )
     return RebindResult(True, "done", branch=branch)
 

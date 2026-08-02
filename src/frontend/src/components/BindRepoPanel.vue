@@ -247,6 +247,51 @@ const closeForm = () => {
   pat.value = ''
 }
 
+// A timed-out request may have landed — the bind's worst case (repo create +
+// visibility poll + full-history push + container replacement) can outrun any
+// client deadline. Ask the backend what the DB and the live container actually
+// say rather than reporting a guess. `origin_in_sync: false` is the precise
+// signal that the CAS committed but the in-container rewire or the rebuild did
+// not; a retry is the documented fix and is idempotent.
+const resolveTimeout = async () => {
+  try {
+    const st = await agentsStore.getBindToOwnRepoStatus(props.agentName)
+    if (st.bound && st.origin_in_sync) {
+      result.value = {
+        github_repo: st.github_repo,
+        repo_url: `https://github.com/${st.github_repo}`,
+        message:
+          'The request timed out, but the binding completed: this agent now ' +
+          `points at ${st.github_repo} on branch ${st.branch || 'its default branch'}.`,
+      }
+      showForm.value = false
+      destination.value = ''
+      emit('bound', st)
+      return
+    }
+    error.value = {
+      message: st.bound
+        ? `The request timed out and the binding is only partly applied: Trinity has ` +
+          `recorded ${st.github_repo}, but the agent's origin reads as ` +
+          `${st.container_origin || 'unset'}. Re-run the bind to finish — it is idempotent.`
+        : 'The request timed out and no binding was recorded. It is safe to retry.',
+      code: 'BIND_TIMEOUT',
+      partial: !!st.bound,
+    }
+  } catch {
+    // The status call failed too — say so plainly rather than inventing an
+    // outcome for an operation whose result we genuinely do not know.
+    error.value = {
+      message:
+        'The request timed out and Trinity could not be reached to check the ' +
+        'outcome. Reload this tab to see the agent\'s current repository ' +
+        'before retrying.',
+      code: 'BIND_TIMEOUT',
+      partial: true,
+    }
+  }
+}
+
 const submit = async () => {
   destinationError.value = null
   const dest = destination.value.trim()
@@ -286,15 +331,9 @@ const submit = async () => {
       }
     } else if (e?.code === 'ECONNABORTED') {
       // The one case the status endpoint exists for: the request may well have
-      // landed. Never report a timeout as a clean failure.
-      error.value = {
-        message:
-          'The request timed out before Trinity answered. It may still have ' +
-          'completed — reload this tab to see the agent\'s current repository ' +
-          'before retrying.',
-        code: 'BIND_TIMEOUT',
-        partial: true,
-      }
+      // landed. Never report a timeout as a clean failure — resolve it against
+      // state instead of asking the user to guess from a reloaded tab.
+      await resolveTimeout()
     } else {
       error.value = {
         message: detail || e?.message || 'Binding failed.',

@@ -878,6 +878,7 @@ async def bind_agent_to_own_repo(
         BindError,
         bind_agent_to_own_repo as _bind,
     )
+    from utils.credential_sanitizer import scrub_secret_and_urls
 
     reject_agent_principal(current_user)
 
@@ -903,7 +904,18 @@ async def bind_agent_to_own_repo(
         )
 
     if idem.replay:
+        # Audited like every other exit (#905). A replay is not a no-op from an
+        # operator's point of view — it is the visible trace of a client that
+        # retried a partially-irreversible external write, and reading the audit
+        # log without it makes one bind look like one attempt.
         if idem.in_flight:
+            await _audit(False, {
+                "destination_repo": destination,
+                "private": body.private,
+                "code": "BIND_OP_IN_PROGRESS",
+                "status_code": 409,
+                "idempotent_replay": "in_flight",
+            })
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -915,6 +927,11 @@ async def bind_agent_to_own_repo(
                 },
             )
         if idem.snapshot:
+            await _audit(True, {
+                "destination_repo": destination,
+                "private": body.private,
+                "idempotent_replay": "completed",
+            })
             return JSONResponse(
                 content=idem.snapshot,
                 headers={"X-Idempotent-Replay": "true"},
@@ -958,7 +975,19 @@ async def bind_agent_to_own_repo(
             idempotency_service.fail(idem)
         raise
     except Exception as e:
-        logger.exception("repo-bind: unexpected failure for %s", agent_name)
+        # The ONE path that surfaces a raw exception string, so it is the one
+        # that must scrub. An httpx/h11 header-validation error echoes the
+        # offending header value verbatim — i.e. `Bearer <the user's PAT>` —
+        # and `logger.exception` would put it in the Vector-captured platform
+        # log while the detail put it in the response body. The model-level
+        # charset guard (`models._validate_pat_secret`) is the primary fix;
+        # this is the belt, because the next foreign exception type is not
+        # knowable in advance.
+        safe = scrub_secret_and_urls(str(e), body.github_pat.get_secret_value())
+        logger.error(
+            "repo-bind: unexpected failure for %s (%s): %s",
+            agent_name, type(e).__name__, safe,
+        )
         await _audit(False, {
             "destination_repo": destination,
             "private": body.private,
@@ -970,7 +999,7 @@ async def bind_agent_to_own_repo(
         raise HTTPException(
             status_code=500,
             detail={
-                "error": f"Repository binding failed unexpectedly: {e}",
+                "error": f"Repository binding failed unexpectedly: {safe}",
                 "code": "BIND_UNEXPECTED_ERROR",
             },
         )
