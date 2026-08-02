@@ -259,6 +259,25 @@ def test_completed_result_is_returned_on_action_replay(ledger: ControlLedger):
     assert replay.reason_code == "ok"
 
 
+def test_identical_completed_result_replay_is_an_idempotent_no_op(
+    ledger: ControlLedger, database_path: Path
+):
+    """Retrying one completed result must not fail or duplicate its terminal event."""
+    lease = ledger.claim_wake(_wake(1), NOW, lease_seconds=30)
+    assert lease is not None
+    action = _action()
+    result = EffectResult("completed", "c" * 64, "ok")
+    ledger.reserve_action(lease, action)
+
+    ledger.record_result(lease, action.action_key, result)
+    ledger.record_result(lease, action.action_key, result)
+
+    assert _fetchall(
+        database_path,
+        "SELECT event_type FROM action_events WHERE event_type = 'completed'",
+    ) == [("completed",)]
+
+
 def test_ambiguous_result_is_terminal_for_immediate_replay(ledger: ControlLedger):
     """Treating an ambiguous effect as merely reserved could execute it a second time."""
     lease = ledger.claim_wake(_wake(1), NOW, lease_seconds=30)
@@ -277,6 +296,25 @@ def test_ambiguous_result_is_terminal_for_immediate_replay(ledger: ControlLedger
             action.action_key,
             EffectResult("completed", "e" * 64, "late-success"),
         )
+
+
+def test_identical_ambiguous_result_replay_is_an_idempotent_no_op(
+    ledger: ControlLedger, database_path: Path
+):
+    """Retrying one ambiguous result must not fail or duplicate its terminal event."""
+    lease = ledger.claim_wake(_wake(1), NOW, lease_seconds=30)
+    assert lease is not None
+    action = _action()
+    result = EffectResult("ambiguous", "d" * 64, "result-unknown")
+    ledger.reserve_action(lease, action)
+
+    ledger.record_result(lease, action.action_key, result)
+    ledger.record_result(lease, action.action_key, result)
+
+    assert _fetchall(
+        database_path,
+        "SELECT event_type FROM action_events WHERE event_type = 'ambiguous'",
+    ) == [("ambiguous",)]
 
 
 def test_new_lease_must_replay_a_reservation_before_recording_its_result(

@@ -437,7 +437,9 @@ class ControlLedger:
             if (row[4], row[5]) != (lease.wake_id, lease.fence_token):
                 raise StaleLeaseError("action reservation fence does not match the lease")
             if row[0] != "reserved":
-                if tuple(row[::2]) == (result.status, result.result_sha256) and row[3] == result.reason_code:
+                stored_result = (row[0], row[2], row[3])
+                requested_result = (result.status, result.result_sha256, result.reason_code)
+                if stored_result == requested_result:
                     return
                 raise ActionConflictError("action already has a different terminal result")
             connection.execute(
