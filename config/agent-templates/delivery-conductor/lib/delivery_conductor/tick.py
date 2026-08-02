@@ -140,6 +140,7 @@ class DeliveryConductorTick:
         breaker_allows_effect: bool,
         post_claim_gate: PostClaimGate | None = None,
         before_noop_release: BeforeNoopRelease | None = None,
+        verified_fired_reminder: bool = False,
     ) -> TickResult:
         """Prepare zero or one effect without invoking a capability."""
         AdapterRequest(
@@ -153,6 +154,7 @@ class DeliveryConductorTick:
             wake,
             now,
             self._lease_seconds,
+            verified_fired_reminder=verified_fired_reminder,
         )
         if lease is None:
             return TickResult("not-claimed", "wake-not-claimed")

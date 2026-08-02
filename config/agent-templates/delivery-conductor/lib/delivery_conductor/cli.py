@@ -500,6 +500,7 @@ def _prepare(
         breaker_allows_effect=assessment.allows_effect,
         post_claim_gate=claimed_effect_gate,
         before_noop_release=claimed_no_work,
+        verified_fired_reminder=parsed.conductor_reminder is not None,
     )
     if result.handoff is not None:
         active_scope = scopes_by_fence.get(result.handoff.lease.fence_token)

@@ -225,6 +225,26 @@ class ControlLedger:
                     )
                 );
 
+                CREATE TABLE IF NOT EXISTS verified_fired_reminders (
+                    wake_id TEXT PRIMARY KEY REFERENCES event_inbox(wake_id),
+                    action_key TEXT NOT NULL UNIQUE
+                        REFERENCES action_journal(action_key),
+                    payload_sha256 TEXT NOT NULL,
+                    first_verified_at TEXT NOT NULL
+                );
+
+                CREATE TRIGGER IF NOT EXISTS verified_fired_reminders_reject_update
+                BEFORE UPDATE ON verified_fired_reminders
+                BEGIN
+                    SELECT RAISE(ABORT, 'verified_fired_reminders is append-only');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS verified_fired_reminders_reject_delete
+                BEFORE DELETE ON verified_fired_reminders
+                BEGIN
+                    SELECT RAISE(ABORT, 'verified_fired_reminders is append-only');
+                END;
+
                 CREATE TABLE IF NOT EXISTS action_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     action_key TEXT NOT NULL REFERENCES action_journal(action_key),
@@ -290,7 +310,13 @@ class ControlLedger:
 
     def claim_wake(self, wake: Wake, now: datetime, lease_seconds: int) -> Lease | None:
         """Persist one wake and acquire the sole lease when it is available."""
-        lease, _ = self._claim_wake(wake, now, lease_seconds, prefer_due=False)
+        lease, _ = self._claim_wake(
+            wake,
+            now,
+            lease_seconds,
+            prefer_due=False,
+            verified_fired_reminder=False,
+        )
         return lease
 
     def claim_wake_or_due(
@@ -298,9 +324,17 @@ class ControlLedger:
         wake: Wake,
         now: datetime,
         lease_seconds: int,
+        *,
+        verified_fired_reminder: bool = False,
     ) -> tuple[Lease | None, Wake]:
         """Persist one incoming wake, prioritizing one reconciled due wake."""
-        return self._claim_wake(wake, now, lease_seconds, prefer_due=True)
+        return self._claim_wake(
+            wake,
+            now,
+            lease_seconds,
+            prefer_due=True,
+            verified_fired_reminder=verified_fired_reminder,
+        )
 
     def _claim_wake(
         self,
@@ -309,12 +343,17 @@ class ControlLedger:
         lease_seconds: int,
         *,
         prefer_due: bool,
+        verified_fired_reminder: bool,
     ) -> tuple[Lease | None, Wake]:
         if not isinstance(wake, Wake):
             raise LedgerValidationError("wake must be a Wake")
         _validate_utc_datetime("now", now)
         if type(lease_seconds) is not int or lease_seconds <= 0:
             raise LedgerValidationError("lease_seconds must be a positive integer")
+        if type(verified_fired_reminder) is not bool:
+            raise LedgerValidationError("verified_fired_reminder must be a boolean")
+        if verified_fired_reminder and wake.source != "reminder":
+            raise LedgerValidationError("verified fired wake must be a reminder")
         now_text = _utc_text(now)
         expires_at = now + timedelta(seconds=lease_seconds)
         expires_text = _utc_text(expires_at)
@@ -336,7 +375,8 @@ class ControlLedger:
             )
             stored = connection.execute(
                 """
-                SELECT wake_id, source, source_event_id, payload_sha256, state
+                SELECT wake_id, source, source_event_id, payload_sha256, state,
+                       first_seen_at
                 FROM event_inbox
                 WHERE wake_id = ? OR (source = ? AND source_event_id = ?)
                 """,
@@ -345,16 +385,91 @@ class ControlLedger:
             expected = (wake.wake_id, wake.source, wake.source_event_id, wake.payload_sha256)
             if len(stored) != 1 or tuple(stored[0][:4]) != expected:
                 raise LedgerValidationError("conflicting wake deduplication identity")
-            current = connection.execute(
-                "SELECT expires_at FROM repo_lease WHERE singleton = 1"
+            if verified_fired_reminder:
+                durable = connection.execute(
+                    """
+                    SELECT journal.action_key FROM action_journal AS journal
+                    WHERE action_key = ?
+                      AND journal.payload_sha256 = ?
+                      AND journal.capability_name = 'reminders'
+                      AND journal.invalidation_class = 'reminder-intent'
+                    """,
+                    (wake.source_event_id, wake.payload_sha256),
+                ).fetchone()
+                if durable is None:
+                    raise LedgerValidationError(
+                        "verified fired reminder has no durable intent"
+                    )
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO verified_fired_reminders
+                        (wake_id, action_key, payload_sha256, first_verified_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        wake.wake_id,
+                        wake.source_event_id,
+                        wake.payload_sha256,
+                        now_text,
+                    ),
+                )
+                evidence = connection.execute(
+                    """
+                    SELECT wake_id, action_key, payload_sha256
+                    FROM verified_fired_reminders
+                    WHERE wake_id = ? OR action_key = ?
+                    """,
+                    (wake.wake_id, wake.source_event_id),
+                ).fetchall()
+                if len(evidence) != 1 or tuple(evidence[0]) != (
+                    wake.wake_id,
+                    wake.source_event_id,
+                    wake.payload_sha256,
+                ):
+                    raise LedgerValidationError(
+                        "conflicting verified fired reminder identity"
+                    )
+            selected = connection.execute(
+                """
+                SELECT source.wake_id, source.source, source.source_event_id,
+                       source.payload_sha256, journal.fence_token,
+                       fired.first_seen_at
+                FROM verified_fired_reminders AS evidence
+                JOIN event_inbox AS fired ON fired.wake_id = evidence.wake_id
+                JOIN action_journal AS journal
+                  ON journal.action_key = evidence.action_key
+                 AND journal.payload_sha256 = evidence.payload_sha256
+                JOIN event_inbox AS source ON source.wake_id = journal.wake_id
+                WHERE fired.source = 'reminder'
+                  AND fired.source_event_id = evidence.action_key
+                  AND fired.payload_sha256 = evidence.payload_sha256
+                  AND fired.state = 'pending'
+                  AND journal.capability_name = 'reminders'
+                  AND journal.invalidation_class = 'reminder-intent'
+                  AND journal.status = 'reserved'
+                  AND source.state = 'pending'
+                ORDER BY evidence.first_verified_at, evidence.wake_id
+                LIMIT 1
+                """
             ).fetchone()
-            if current is not None and current[0] > now_text:
-                return None, wake
+            current = connection.execute(
+                """
+                SELECT wake_id, fence_token, claimed_at, expires_at
+                FROM repo_lease WHERE singleton = 1
+                """
+            ).fetchone()
+            if current is not None and current[3] > now_text:
+                can_fence_origin = (
+                    selected is not None
+                    and (current[0], current[1]) == (selected[0], selected[4])
+                    and current[2] < selected[5]
+                )
+                if not can_fence_origin:
+                    return None, wake
             if current is not None:
                 connection.execute("DELETE FROM repo_lease WHERE singleton = 1")
 
-            selected = None
-            if prefer_due:
+            if selected is None and prefer_due:
                 selected = connection.execute(
                     """
                     SELECT inbox.wake_id, inbox.source, inbox.source_event_id,
@@ -377,7 +492,7 @@ class ControlLedger:
                     return None, wake
                 selected_wake = wake
             else:
-                selected_wake = Wake(*selected)
+                selected_wake = Wake(*selected[:4])
 
             row = connection.execute(
                 "SELECT last_fence_token FROM controller_state WHERE singleton = 1"

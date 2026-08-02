@@ -48,7 +48,11 @@ from delivery_conductor.executor import (
     JsonLinesCapabilityExecutor,
 )
 from delivery_conductor.ledger import ControlLedger, EffectResult, StaleLeaseError
-from delivery_conductor.tick import DeliveryConductorTick, TickCorrelationError
+from delivery_conductor.tick import (
+    DeliveryConductorTick,
+    TickCorrelationError,
+    TickResult,
+)
 
 
 NOW = datetime(2026, 8, 2, 9, 10, 11, tzinfo=timezone.utc)
@@ -965,11 +969,11 @@ def test_overdue_reserved_reminder_becomes_one_stable_zero_effect_wake(
     assert _fetchall(database_path, "SELECT COUNT(*) FROM action_events") == [(2,)]
 
 
-def test_actual_late_reminder_races_local_reconciliation_under_one_wake_id(
+def test_verified_actual_reminder_reconciles_source_before_local_race(
     ledger: ControlLedger,
     database_path: Path,
 ):
-    """A fired reminder racing crash recovery must not create a second due wake."""
+    """A fired reminder must terminalize its source before a local retry races it."""
     adapter = FakeAdapter(
         _decision("remind", reminder=_reminder()),
         _decision("noop"),
@@ -991,6 +995,7 @@ def test_actual_late_reminder_races_local_reconciliation_under_one_wake_id(
         None,
         HEALTHY_BUDGET,
         breaker_allows_effect=True,
+        verified_fired_reminder=True,
     )
     recovered = runner.run(
         _wake(1),
@@ -1008,14 +1013,170 @@ def test_actual_late_reminder_races_local_reconciliation_under_one_wake_id(
     )
 
     assert actual.status == "noop"
-    assert recovered.status == "reminder"
-    assert recovered.action is None
+    assert recovered.status == "not-claimed"
     assert duplicate.status == "not-claimed"
     assert adapter.requests[1].wake == actual_wake
     assert _fetchall(database_path, "SELECT COUNT(*) FROM event_inbox") == [(2,)]
     assert _fetchall(
         database_path,
-        "SELECT COUNT(*) FROM action_journal WHERE capability_name = 'reminders'",
+        "SELECT status, reason_code FROM action_journal "
+        "WHERE capability_name = 'reminders'",
+    ) == [("completed", "reminder-due")]
+    assert _fetchall(
+        database_path,
+        "SELECT COUNT(*) FROM action_events WHERE event_type = 'completed'",
+    ) == [(1,)]
+    assert _fetchall(
+        database_path,
+        "SELECT run_units, issue_units, daily_units, reason_code "
+        "FROM budget_usage ORDER BY fence_token",
+    ) == [
+        (0, 0, 0, "reminder-due"),
+        (0, 0, 0, "decision-noop"),
+    ]
+
+
+def test_verified_actual_and_local_recovery_race_terminalizes_once(
+    ledger: ControlLedger,
+    database_path: Path,
+):
+    """Concurrent actual/local claims must converge before either can duplicate work."""
+    adapter = FakeAdapter(
+        _decision("remind", reminder=_reminder()),
+        _decision("noop"),
+    )
+    runner = _runner(ledger, adapter)
+    prepared = runner.run(
+        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    )
+    actual_wake = Wake(
+        "bb11bebb6e5a305fac1f29b3399b3c213c2c99e0ab34867e77770031f56fb59f",
+        "reminder",
+        prepared.action_key,
+        prepared.handoff.payload_sha256,
+    )
+    barrier = threading.Barrier(3)
+    results: list[TickResult] = []
+    failures: list[BaseException] = []
+
+    def recover(wake: Wake, *, verified: bool) -> None:
+        try:
+            barrier.wait(timeout=2)
+            results.append(
+                runner.run(
+                    wake,
+                    NOW + timedelta(seconds=300),
+                    None,
+                    HEALTHY_BUDGET,
+                    breaker_allows_effect=True,
+                    verified_fired_reminder=verified,
+                )
+            )
+        except BaseException as error:
+            failures.append(error)
+
+    actual = threading.Thread(
+        target=recover,
+        args=(actual_wake,),
+        kwargs={"verified": True},
+    )
+    local = threading.Thread(
+        target=recover,
+        args=(_wake(1),),
+        kwargs={"verified": False},
+    )
+    actual.start()
+    local.start()
+    barrier.wait(timeout=2)
+    actual.join(timeout=3)
+    local.join(timeout=3)
+
+    assert not actual.is_alive()
+    assert not local.is_alive()
+    assert failures == []
+    assert sorted(result.status for result in results) == ["noop", "not-claimed"]
+    assert len(adapter.requests) == 2
+    assert adapter.requests[1].wake == actual_wake
+    assert _fetchall(
+        database_path,
+        "SELECT status, reason_code FROM action_journal "
+        "WHERE capability_name = 'reminders'",
+    ) == [("completed", "reminder-due")]
+    assert _fetchall(
+        database_path,
+        "SELECT COUNT(*) FROM action_events WHERE event_type = 'completed'",
+    ) == [(1,)]
+    assert _fetchall(
+        database_path,
+        "SELECT COUNT(*) FROM budget_usage WHERE reason_code = 'reminder-due'",
+    ) == [(1,)]
+    assert _fetchall(
+        database_path,
+        "SELECT source, state FROM event_inbox ORDER BY source",
+    ) == [("event", "acknowledged"), ("reminder", "acknowledged")]
+
+
+def test_verified_actual_claim_crash_recovers_from_an_unrelated_wake(
+    ledger: ControlLedger,
+    database_path: Path,
+):
+    """Losing the fired invocation after origin claim must not strand its evidence."""
+    adapter = FakeAdapter(
+        _decision("remind", reminder=_reminder()),
+        _decision("noop"),
+    )
+    runner = _runner(ledger, adapter)
+    prepared = runner.run(
+        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    )
+    actual_wake = Wake(
+        "bb11bebb6e5a305fac1f29b3399b3c213c2c99e0ab34867e77770031f56fb59f",
+        "reminder",
+        prepared.action_key,
+        prepared.handoff.payload_sha256,
+    )
+
+    def crash_after_origin_claim(_lease: object) -> tuple[BudgetView, bool]:
+        raise SystemExit("crash after verified origin claim")
+
+    with pytest.raises(SystemExit, match="verified origin claim"):
+        runner.run(
+            actual_wake,
+            NOW + timedelta(seconds=300),
+            None,
+            HEALTHY_BUDGET,
+            breaker_allows_effect=True,
+            post_claim_gate=crash_after_origin_claim,
+            verified_fired_reminder=True,
+        )
+
+    recovered = runner.run(
+        _wake(2),
+        NOW + timedelta(seconds=601),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+
+    assert recovered.status == "noop"
+    assert len(adapter.requests) == 2
+    assert adapter.requests[1].wake == actual_wake
+    assert _fetchall(
+        database_path,
+        "SELECT status, reason_code FROM action_journal "
+        "WHERE capability_name = 'reminders'",
+    ) == [("completed", "reminder-due")]
+    assert _fetchall(
+        database_path,
+        "SELECT source, state FROM event_inbox ORDER BY source, source_event_id",
+    ) == [
+        ("event", "acknowledged"),
+        ("event", "pending"),
+        ("reminder", "acknowledged"),
+    ]
+    assert _fetchall(
+        database_path,
+        "SELECT COUNT(*) FROM budget_usage WHERE reason_code = 'reminder-due'",
     ) == [(1,)]
 
 

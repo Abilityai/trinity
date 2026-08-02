@@ -272,7 +272,11 @@ sys.stdout.flush()
     return adapter
 
 
-def _write_due_reconciliation_adapter(workspace: Path) -> Path:
+def _write_due_reconciliation_adapter(
+    workspace: Path,
+    *,
+    due_at_utc: str = "2026-08-02T12:01:00Z",
+) -> Path:
     workspace.mkdir(parents=True, exist_ok=True)
     ceilings = {
         item.name: getattr(_limits(), item.name)
@@ -311,7 +315,7 @@ else:
         }},
         "next_reminder": None if due else {{
             "reminder_id": "reminder-source",
-            "due_at_utc": "2026-08-02T12:01:00Z",
+            "due_at_utc": {due_at_utc!r},
             "reason_code": "follow-up",
         }},
     }}
@@ -1288,6 +1292,108 @@ def test_fired_reminder_requires_the_exact_durable_intent_and_due_time(
             "SELECT source_event_id, payload_sha256, state FROM event_inbox "
             "WHERE source = 'reminder'"
         ).fetchone() == (action.action_key, payload_sha256, "acknowledged")
+
+
+def test_fired_reminder_reconciles_reserved_source_before_due_effect_and_replay(
+    tmp_path: Path,
+):
+    """Crash-after-set must converge the source before exposing one due action key."""
+    workspace = tmp_path / "workspace"
+    _write_due_reconciliation_adapter(
+        workspace,
+        due_at_utc="2026-08-02T12:02:00Z",
+    )
+    source_message = _prepare_message("direct", "fired-reserved-1")
+    source = run_cli(source_message, workspace, clock=lambda: NOW)
+    completed = run_cli(
+        _record_message(source),
+        workspace,
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+    reminder = run_cli(
+        source_message,
+        workspace,
+        clock=lambda: NOW + timedelta(seconds=2),
+    )
+    assert completed["status"] == "reminder"
+    assert reminder["status"] == "reminder-ready"
+    reminder_arguments = reminder["effect_arguments"]
+    assert isinstance(reminder_arguments, dict)
+    fired_message = build_runtime_prepare_message(
+        _runtime_provenance(
+            "reminder",
+            "exec-fired-reserved-1",
+            reminder_message=reminder_arguments["message"],
+        ),
+        "exec-fired-reserved-1",
+    )
+
+    fired = run_cli(
+        fired_message,
+        workspace,
+        clock=lambda: NOW + timedelta(seconds=120),
+    )
+
+    assert fired["status"] == "action-ready"
+    assert fired["effect_tool"] == "mcp__trinity__chat_with_agent"
+    assert fired["action"]["action_key"] == "action-due"
+    database = workspace / "data" / "delivery-conductor" / "control.sqlite3"
+    with sqlite3.connect(database) as connection:
+        source_row = connection.execute(
+            "SELECT wake_id, state FROM event_inbox WHERE source = 'direct'"
+        ).fetchone()
+        due_row = connection.execute(
+            "SELECT wake_id, source_event_id, state FROM event_inbox "
+            "WHERE source = 'reminder'"
+        ).fetchone()
+        assert source_row[1] == "acknowledged"
+        assert due_row[1:] == (reminder["action"]["action_key"], "pending")
+        assert connection.execute(
+            "SELECT status, reason_code FROM action_journal "
+            "WHERE capability_name = 'reminders'"
+        ).fetchone() == ("completed", "reminder-due")
+        assert connection.execute(
+            "SELECT run_units, issue_units, daily_units, reason_code "
+            "FROM budget_usage WHERE reason_code = 'reminder-due'"
+        ).fetchall() == [(0, 0, 0, "reminder-due")]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM action_events "
+            "WHERE event_type = 'completed' "
+            "AND action_key = ?",
+            (reminder["action"]["action_key"],),
+        ).fetchone() == (1,)
+        checkpoint = connection.execute(
+            "SELECT acknowledged_wake_id, fence_token, action_key "
+            "FROM run_checkpoint"
+        ).fetchone()
+        lease = connection.execute(
+            "SELECT wake_id, fence_token FROM repo_lease"
+        ).fetchone()
+        assert checkpoint == (due_row[0], lease[1], "action-due")
+        assert lease[0] == due_row[0]
+
+    replay = run_cli(
+        fired_message,
+        workspace,
+        clock=lambda: NOW + timedelta(seconds=421),
+    )
+
+    assert replay["status"] == "action-ready"
+    assert replay["action"]["action_key"] == fired["action"]["action_key"]
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM event_inbox WHERE source = 'reminder'"
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM action_events "
+            "WHERE event_type = 'completed' "
+            "AND action_key = ?",
+            (reminder["action"]["action_key"],),
+        ).fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM budget_usage "
+            "WHERE reason_code = 'reminder-due'"
+        ).fetchone() == (1,)
 
 
 @pytest.mark.parametrize(
