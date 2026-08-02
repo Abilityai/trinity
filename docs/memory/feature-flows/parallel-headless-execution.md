@@ -469,6 +469,16 @@ deliverable. The notice is part of the stored response and so flows into
 `{{previous_response}}` templating and fan-out joins; that is deliberate and pinned
 by test.
 
+Where those signals land was traced, not assumed: `apply_result`'s success branch
+cherry-picks exactly six metadata keys (`cache_read_tokens`/`cache_creation_tokens`/
+`input_tokens`, `context_window`, `cost_usd`, `session_id`, `compact_events`) and
+drops the rest, and `schedule_executions` has no metadata column — so
+`recovered_terminal`, like `error_type` and `recovered_from_jsonl` before it, is
+**agent-side and on-the-wire only, not persisted to a DB column**. What actually
+survives onto the execution row is the **notice** (inside the stored `response`) and
+the **log line**. Teaching the backend to read `recovered_terminal` is a follow-up;
+`apply_result`'s success branch is the single chokepoint.
+
 **Observability**: a hit logs `event=completed_turn_recovered_from_jsonl`; **every**
 decline logs `event=completed_turn_recovery_declined reason=<…>`. A fail-closed gate
 that silently stops firing is otherwise indistinguishable from "the bug never

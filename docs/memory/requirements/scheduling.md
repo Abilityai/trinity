@@ -188,6 +188,21 @@
     the final deliverable. The notice is part of the stored response and therefore
     flows into loop templating (`{{previous_response}}`) and fan-out joins — that is
     deliberate and pinned by test.
+  - **Where each signal actually lands (verified, not assumed).**
+    `task_execution_service.apply_result`'s success branch cherry-picks exactly six
+    metadata keys (`cache_read_tokens`/`cache_creation_tokens`/`input_tokens`,
+    `context_window`, `cost_usd`, `session_id`, `compact_events`) and drops the
+    rest; `schedule_executions` has no metadata column, and the #1083 async callback
+    converges on the same applier. So `recovered_terminal` — like `error_type` and
+    `recovered_from_jsonl` before it — is **agent-side and on-the-wire only, not
+    persisted to a DB column today**. The signals that genuinely survive onto the
+    execution row are the **recovery notice** (it rides inside the stored `response`
+    text) and the **agent log line** (captured by Vector). That makes the notice the
+    only persisted operator-facing signal, not a secondary nicety — worth knowing
+    before anyone proposes reducing it to a footnote. Teaching the backend to read
+    `recovered_terminal` is a follow-up; `apply_result`'s success branch is the
+    single chokepoint. The field is additive and defaulted, so an old backend with a
+    new image is safe and a newer backend can start reading it with no coordination.
   - **Observability in both directions**: a hit logs
     `event=completed_turn_recovered_from_jsonl`; **every** decline logs
     `event=completed_turn_recovery_declined reason=<no_since_iso|file_missing|

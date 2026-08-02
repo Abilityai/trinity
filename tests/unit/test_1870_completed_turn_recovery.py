@@ -817,14 +817,22 @@ def test_recovery_notice_flows_into_previous_response_templating(jsonl_dir):
 
 
 def test_metadata_error_type_still_set_on_recovered_200(jsonl_dir):
-    """R8/T2: `error_type` is deliberately LEFT SET on the recovered 200 as the
-    provenance that recovery fired. Pinned so a future "cleanup" cannot
-    silently drop it.
+    """`error_type` is deliberately LEFT SET on the recovered 200. Pinned so a
+    future "cleanup" cannot silently drop it.
 
-    Note the honest scope: nothing in the backend or the agent turns a
-    *returned* `error_type` into a failure, and the returned metadata is what
-    the caller persists — so this is provenance, not control flow. C1
-    (`recovered_terminal`) is the primary machine-readable record.
+    HONEST SCOPE — verified by tracing the backend, not assumed. `error_type`
+    is NOT persisted on a 200 row, and neither is `recovered_terminal`:
+    `task_execution_service.apply_result`'s success branch cherry-picks exactly
+    six metadata keys (`cache_read_tokens`/`cache_creation_tokens`/
+    `input_tokens`, `context_window`, `cost_usd`, `session_id`,
+    `compact_events`) and drops the rest, and `schedule_executions` has no
+    metadata column. The #1083 async callback converges on the same applier.
+
+    So this flag is agent-side + on-the-wire provenance only. Of the three
+    #1870 signals, the ones that actually PERSIST today are the recovery notice
+    (it rides inside the stored response text) and the agent log line. Teaching
+    the backend to read `recovered_terminal` is a filed follow-up; until then
+    do not describe this field as a stored audit trail.
     """
     _install_captured(jsonl_dir)
     ctx = _make_ctx()
