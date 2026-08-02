@@ -24,6 +24,8 @@ from delivery_conductor.contracts import (
     ContractValidationError,
     MAX_MESSAGE_BYTES,
     ProposedAction,
+    ReminderSpec,
+    Wake,
     parse_adapter_decision_json,
     parse_adapter_request_json,
     serialize_adapter_decision,
@@ -65,7 +67,7 @@ def _decision_payload() -> dict[str, object]:
         "proposed_action": {
             "capability_name": "chat",
             "action_key": "action-0007",
-            "payload": {"digest": "c" * 64, "operation": "notify"},
+            "payload": {"references": {"digest": "c" * 64, "identifier": "notify-7"}},
             "target_revision": "repo-4",
             "invalidation_class": "observation-change",
         },
@@ -103,14 +105,15 @@ def test_decision_canonicalizes_payload_and_round_trips_once():
     assert isinstance(decision, AdapterDecision)
     assert decision.proposed_action is not None
     assert decision.proposed_action.payload_json == (
-        '{"digest":"' + "c" * 64 + '","operation":"notify"}'
+        '{"references":{"digest":"' + "c" * 64 + '","identifier":"notify-7"}}'
     )
     assert serialize_adapter_decision(decision) == (
         '{"decision":"dispatch","next_reminder":{"due_at_utc":"2026-08-02T10:10:11Z",'
         '"reason_code":"await-result","reminder_id":"follow-up-7"},'
         '"observed_revision":"repo-4","proposed_action":{"action_key":"action-0007",'
         '"capability_name":"chat","invalidation_class":"observation-change",'
-        '"payload":{"digest":"' + "c" * 64 + '","operation":"notify"},'
+        '"payload":{"references":{"digest":"' + "c" * 64
+        + '","identifier":"notify-7"}},'
         '"target_revision":"repo-4"},"reason_code":"eligible","schema_version":1,'
         '"target_id":"target-7"}'
     )
@@ -168,7 +171,7 @@ def test_serializer_rejects_an_oversized_direct_envelope():
         capability_name="chat",
         action_key="action-oversized",
         payload_json=json.dumps(
-            {"items": ["x" * 4000] * 270}, separators=(",", ":"), sort_keys=True
+            {"digests": ["a" * 64] * 16000}, separators=(",", ":"), sort_keys=True
         ),
         target_revision="repo-4",
         invalidation_class="observation-change",
@@ -190,7 +193,7 @@ def test_request_rejects_malformed_hashes(hash_key: str):
         parse_adapter_request_json(json.dumps(payload))
 
 
-def test_decision_rejects_deep_payload_and_forbidden_authority_fields():
+def test_decision_rejects_deep_payload_and_unknown_authority_fields():
     """A payload cannot smuggle executable authority or evade review by nesting."""
     payload = _decision_payload()
     nested: object = "leaf"
@@ -201,12 +204,74 @@ def test_decision_rejects_deep_payload_and_forbidden_authority_fields():
         parse_adapter_decision_json(json.dumps(payload))
 
     payload = _decision_payload()
-    payload["proposed_action"] = {
+    payload["proposed_action"] = {  # type: ignore[arg-type]
         **payload["proposed_action"],
-        "payload": {"command": "outside-contract"},
-    }  # type: ignore[arg-type]
-    with pytest.raises(ContractValidationError, match="forbidden"):
+        "payload": {"references": {"command": "outside-contract"}},
+    }
+    with pytest.raises(ContractValidationError, match="unknown"):
         parse_adapter_decision_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    "raw_key",
+    (
+        "command",
+        "Command",
+        "%63ommand",
+        "ｃｏｍｍａｎｄ",
+        "fileContent",
+        "issue_body",
+    ),
+)
+def test_payload_accepts_only_generic_reference_fields_recursively(raw_key: str):
+    """Aliases, encoding, and confusables cannot bypass the closed reference schema."""
+    payload = _decision_payload()
+    payload["proposed_action"] = {  # type: ignore[arg-type]
+        **payload["proposed_action"],
+        "payload": {"references": {raw_key: "outside-contract"}},
+    }
+
+    with pytest.raises(ContractValidationError, match="unknown"):
+        parse_adapter_decision_json(json.dumps(payload))
+
+
+def test_payload_rejects_json_escaped_authority_key_before_payload_construction():
+    """JSON escape decoding still reaches the same closed key validator."""
+    message = json.dumps(_decision_payload()).replace("references", "\\u0072eferences")
+    message = message.replace("identifier", "\\u0063ommand")
+
+    with pytest.raises(ContractValidationError, match="unknown"):
+        parse_adapter_decision_json(message)
+
+
+@pytest.mark.parametrize(
+    "raw_key",
+    ("Command", "%63ommand", "ｃｏｍｍａｎｄ", "fileContent", "issue_body"),
+)
+def test_direct_proposed_action_rejects_the_same_closed_payload_aliases(raw_key: str):
+    """Direct construction cannot bypass the parser's recursive reference schema."""
+    with pytest.raises(ContractValidationError, match="unknown"):
+        ProposedAction(
+            capability_name="chat",
+            action_key="action-direct",
+            payload_json=json.dumps({"references": {raw_key: "outside-contract"}}, separators=(",", ":")),
+            target_revision="repo-4",
+            invalidation_class="observation-change",
+        )
+
+
+@pytest.mark.parametrize(
+    "factory",
+    (
+        lambda: Wake(7, "reminder", "rem-017", "a" * 64),
+        lambda: Wake("wake-017", "reminder", "rem-017", 7),
+        lambda: ReminderSpec("follow-up-7", 7, "await-result"),
+    ),
+)
+def test_direct_string_fields_raise_contract_validation_error(factory):
+    """Wrong direct-construction types must not leak implementation TypeErrors."""
+    with pytest.raises(ContractValidationError):
+        factory()
 
 
 @pytest.mark.parametrize("field", ("proposed_action", "next_reminder"))

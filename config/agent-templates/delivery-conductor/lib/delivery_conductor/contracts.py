@@ -20,25 +20,11 @@ MAX_NESTING_DEPTH = 20
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _UTC_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
-_FORBIDDEN_PAYLOAD_KEYS = frozenset(
-    {
-        "command",
-        "cmd",
-        "url",
-        "uri",
-        "environment",
-        "env",
-        "credential",
-        "credentials",
-        "token",
-        "password",
-        "secret",
-        "file",
-        "file_content",
-        "content",
-        "contents",
-    }
-)
+_REFERENCE_IDENTIFIER_FIELDS = frozenset({"identifier", "revision", "reason_code"})
+_REFERENCE_IDENTIFIERS_FIELDS = frozenset({"identifiers", "revisions", "reason_codes"})
+_REFERENCE_DIGEST_FIELDS = frozenset({"digest", "sha256"})
+_REFERENCE_DIGESTS_FIELDS = frozenset({"digests", "sha256s"})
+_REFERENCE_UNITS_FIELDS = frozenset({"units", "budget_units"})
 
 
 class ContractValidationError(ValueError):
@@ -346,20 +332,44 @@ def _parse_reminder(value: Any) -> ReminderSpec | None:
 
 def _validate_payload(value: Any) -> None:
     _validate_json_shape(value)
-    if not isinstance(value, (dict, list)):
-        raise ContractValidationError("payload must be a JSON object or array")
-    _reject_forbidden_payload_keys(value)
+    _validate_reference_object(value, "payload")
 
 
-def _reject_forbidden_payload_keys(value: Any) -> None:
-    if isinstance(value, list):
-        for item in value:
-            _reject_forbidden_payload_keys(item)
-    elif isinstance(value, dict):
-        for key, item in value.items():
-            if key.lower() in _FORBIDDEN_PAYLOAD_KEYS:
-                raise ContractValidationError(f"forbidden payload field: {key}")
-            _reject_forbidden_payload_keys(item)
+def _validate_reference_object(value: Any, name: str) -> None:
+    if not isinstance(value, dict):
+        raise ContractValidationError(f"{name} must be a generic reference object")
+    for key, item in value.items():
+        if key in _REFERENCE_IDENTIFIER_FIELDS:
+            _validate_identifier(key, item)
+        elif key in _REFERENCE_IDENTIFIERS_FIELDS:
+            _validate_reference_list(key, item, _validate_identifier)
+        elif key in _REFERENCE_DIGEST_FIELDS:
+            _validate_sha256(key, item)
+        elif key in _REFERENCE_DIGESTS_FIELDS:
+            _validate_reference_list(key, item, _validate_sha256)
+        elif key in _REFERENCE_UNITS_FIELDS:
+            _validate_non_negative_int(key, item)
+        elif key == "references":
+            _validate_reference_children(item)
+        else:
+            raise ContractValidationError(f"unknown generic reference field: {key}")
+
+
+def _validate_reference_list(name: str, value: Any, validator: Any) -> None:
+    if not isinstance(value, list):
+        raise ContractValidationError(f"{name} must be a list")
+    for item in value:
+        validator(name, item)
+
+
+def _validate_reference_children(value: Any) -> None:
+    if isinstance(value, dict):
+        _validate_reference_object(value, "references")
+        return
+    if not isinstance(value, list):
+        raise ContractValidationError("references must be an object or list")
+    for item in value:
+        _validate_reference_object(item, "references")
 
 
 def _require_object_keys(value: dict[str, Any], expected: set[str], name: str) -> None:
@@ -419,7 +429,9 @@ def _validate_non_negative_int(name: str, value: Any) -> None:
         raise ContractValidationError(f"{name} must be a non-negative integer")
 
 
-def _validate_string(name: str, value: str) -> None:
+def _validate_string(name: str, value: Any) -> None:
+    if not isinstance(value, str):
+        raise ContractValidationError(f"{name} must be a string")
     if len(value) > MAX_STRING_LENGTH:
         raise ContractValidationError(f"{name} string exceeds {MAX_STRING_LENGTH} characters")
 
