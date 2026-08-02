@@ -67,12 +67,17 @@ disclosed. `result["output"]` is never logged or returned: on failure
 """
 
 import asyncio
+import base64
 import inspect
 import json
 import logging
+import threading
+import time
 from typing import Any, Dict, List, Optional
 
 import yaml
+
+from redis_breaker_util import get_breaker_redis
 
 from services.credential_charset import (
     CREDENTIAL_DETECTOR_REF_RE,
@@ -353,8 +358,6 @@ async def collect_agent_credential_facts(agent_name: str) -> Dict[str, Any]:
     container = get_agent_container(agent_name)
     if container is None or getattr(container, "status", None) != "running":
         return {"status": "not_running", "facts": None}
-
-    import base64
 
     b64 = base64.b64encode(_COLLECTOR_SCRIPT.encode("utf-8")).decode("ascii")
     # b64's charset is [A-Za-z0-9+/=] — shell-safe inside the double quotes, and
@@ -739,3 +742,135 @@ async def build_report(agent_name: str) -> Dict[str, Any]:
         # length-capped, but NOT HTML-escaped — text-interpolate only.
         "errors": [e for e in errors if isinstance(e, str)][:20],
     }
+
+
+# ---------------------------------------------------------------------------
+# Admission: single-flight + a short cache
+# ---------------------------------------------------------------------------
+#
+# Every uncached GET spawns a container process against the backend's SHARED
+# 4-slot Docker pool (Invariant #11), so this endpoint needs backpressure the
+# read-only compatibility report never did. Three layers, cheapest first: an
+# in-process cache, a cross-worker single-flight lock, and (at the router, where
+# the caller identity lives) a per-user rate limit.
+#
+# These live in the service rather than the router because the router holds no
+# logic (Invariant #1) — the same split `compatibility/fixes.py` uses for its
+# `compat_fix:{name}` lock.
+
+_CACHE_TTL_SECONDS = 10
+_LOCK_TTL_SECONDS = 30
+_report_cache: Dict[str, tuple] = {}
+_report_cache_lock = threading.Lock()
+
+
+class CredentialRequirementsBusy(RuntimeError):
+    """A probe for this agent is already in flight (router -> 409)."""
+
+
+def _generation(agent_name: str) -> Optional[int]:
+    """Current cache generation for an agent, or None when Redis is unreachable.
+
+    The cache is per-worker but a credential WRITE lands on whichever worker
+    served the POST, so a purely local invalidation leaves the other worker
+    serving "missing" for a variable the operator just set — the single most
+    confusing outcome this feature could produce. A generation counter makes
+    invalidation cross-worker for one cheap GET per request.
+
+    Fail-open: `None` means "cannot tell", and the entry then ages out on TTL
+    alone, which is the pre-existing behaviour rather than a new failure.
+    """
+    client = get_breaker_redis()
+    if client is None:
+        return None
+    try:
+        raw = client.get("credreq:gen:{0}".format(agent_name))
+        return int(raw) if raw is not None else 0
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def invalidate_report_cache(agent_name: str) -> None:
+    """Drop any cached report for an agent. Called after a credential write."""
+    with _report_cache_lock:
+        _report_cache.pop(agent_name, None)
+    client = get_breaker_redis()
+    if client is None:
+        return
+    try:
+        client.incr("credreq:gen:{0}".format(agent_name))
+        client.expire("credreq:gen:{0}".format(agent_name), 3600)
+    except Exception:  # noqa: BLE001 — invalidation is best-effort, never a 500
+        pass
+
+
+def _cache_get(agent_name: str, generation: Optional[int]) -> Optional[Dict[str, Any]]:
+    with _report_cache_lock:
+        entry = _report_cache.get(agent_name)
+    if entry is None:
+        return None
+    expires_at, cached_generation, report = entry
+    if time.monotonic() >= expires_at:
+        return None
+    if generation is not None and cached_generation != generation:
+        return None
+    return report
+
+
+def _cache_put(agent_name: str, generation: Optional[int], report: Dict[str, Any]) -> None:
+    with _report_cache_lock:
+        # Bounded: an unbounded dict keyed by agent name is a slow leak on a
+        # fleet that churns names.
+        if len(_report_cache) > 500:
+            _report_cache.clear()
+        _report_cache[agent_name] = (
+            time.monotonic() + _CACHE_TTL_SECONDS,
+            generation,
+            report,
+        )
+
+
+def _acquire_probe_lock(agent_name: str):
+    """Cross-worker single-flight. Fail-open when Redis is down (compat pattern)."""
+    client = get_breaker_redis()
+    if client is None:
+        return None
+    try:
+        if client.set(
+            "credreq:probe:{0}".format(agent_name), "1", nx=True, ex=_LOCK_TTL_SECONDS
+        ):
+            return client
+    except Exception:  # noqa: BLE001 — Redis down -> proceed best-effort
+        logger.warning(
+            "[credential-requirements] probe lock unavailable for %s", agent_name
+        )
+        return None
+    raise CredentialRequirementsBusy(
+        "a credential-requirements probe is already running for this agent"
+    )
+
+
+def _release_probe_lock(client, agent_name: str) -> None:
+    if client is None:
+        return
+    try:
+        client.delete("credreq:probe:{0}".format(agent_name))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def get_report(agent_name: str) -> Dict[str, Any]:
+    """`build_report` behind the cache and the single-flight lock."""
+    generation = _generation(agent_name)
+    cached = _cache_get(agent_name, generation)
+    if cached is not None:
+        return cached
+
+    client = _acquire_probe_lock(agent_name)
+    try:
+        report = await build_report(agent_name)
+    finally:
+        _release_probe_lock(client, agent_name)
+
+    _cache_put(agent_name, generation, report)
+    return report

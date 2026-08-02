@@ -6,7 +6,7 @@ import re
 import unicodedata
 
 from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Union
 from datetime import datetime
 from enum import Enum
 
@@ -748,6 +748,101 @@ class CredentialImportResponse(BaseModel):
 class InternalDecryptInjectRequest(BaseModel):
     """Request for internal decrypt-and-inject (startup.sh)."""
     agent_name: str
+
+# ============================================================================
+# Guided Credential Setup (trinity-enterprise#127)
+# ============================================================================
+
+class CredentialRequirement(BaseModel):
+    """One credential variable an agent needs, with its live status.
+
+    RENDERING CONTRACT — binding, and enforced by component tests rather than by
+    this model, because it is about the DOM the fields land in:
+
+    * `title`, `description`, `source`, `default` and `errors[]` are
+      author-controlled text that reaches an operator. Interpolate them as TEXT
+      only. Do NOT route them through `utils/markdown.js`: for these fields
+      markdown is a WIDENING, since it hands the template author an arbitrary
+      `[label](url)` surface immediately beside a credential input, which defeats
+      the point of having one validated `setup_url`. `v-html` stays banned
+      (H-005).
+    * The anchor text for `setup_url` MUST be `setup_url_display_host`, never
+      `title`. `<a href="https://evil.tld">OpenAI API keys</a>` recreates the
+      userinfo attack in pure HTML with no validator in the way — and
+      `_setup_url_error` rejects `user@host` precisely to stop label/destination
+      divergence.
+    * `setup_url_display_host is None` means the host could not be verified:
+      render the URL as INERT TEXT, not a link.
+    * `secret is True` (the default) MUST mask the input.
+    * `format` is an OPEN vocabulary — never map an unrecognised value onto a DOM
+      attribute (`type`, `pattern`) without a client-side allowlist.
+    """
+
+    name: str
+    title: str
+    description: Optional[str] = None
+    # Tri-state: True | False | "unknown". `"unknown"` means the template author
+    # never opted in (a bare `- FOO`), and rendering it as required cries wolf on
+    # every legacy template. It never counts toward `summary.blocking`.
+    required: Union[bool, str] = "unknown"
+    # Fail-safe default: mask until an author says otherwise.
+    secret: bool = True
+    format: Optional[str] = None
+    # A PLACEHOLDER, never a prefilled value, and suppressed entirely by the UI
+    # unless `secret is False`. Nothing enforces the schema's "NEVER put a real
+    # credential here", so an author — or a prompt-injected agent rewriting its
+    # own template.yaml — could set `default: "sk-attacker-controlled"`; prefilling
+    # it turns author YAML into a one-click credential write, and `secret: true`
+    # would MASK the field, making it less likely the operator reads what they
+    # submit. `default` exists for `"./Brain"`-style paths, i.e. the
+    # `secret: false` case.
+    default: Optional[str] = None
+    source: Optional[str] = None
+    # True for a name observed in `.mcp.json.template` / `.env.example` but never
+    # declared (`state: "declaration_incomplete"`). Advisory rows are never
+    # required and never blocking.
+    advisory: bool = False
+    status: str  # "set" | "missing" | "unknown"
+    setup_url: Optional[str] = None
+    setup_url_display_host: Optional[str] = None
+    setup_url_registrable: Optional[str] = None
+    setup_url_verified: bool = False
+
+
+class CredentialRequirementsSummary(BaseModel):
+    """Server-computed counts, so a badge and its headline cannot drift."""
+
+    total: int = 0
+    set: int = 0
+    missing: int = 0
+    unknown: int = 0
+    # `required is True AND status == "missing"`. Excludes `required == "unknown"`
+    # and every advisory row by construction.
+    blocking: int = 0
+    # Platform-injected variables are dropped from `requirements` (they are never
+    # the operator's to set) but counted here, so the exclusion stays visible.
+    platform_injected_excluded: int = 0
+    advisory: int = 0
+
+
+class CredentialRequirementsResponse(BaseModel):
+    """Per-agent credential checklist (trinity-enterprise#127)."""
+
+    agent_name: str
+    # `degraded` DOMINATES `no_credentials_required` unconditionally — a degraded
+    # lookup and a genuinely credential-free agent produce an identical empty
+    # requirement set, and "Ready" is the one state nobody investigates.
+    state: str  # ok | no_credentials_required | declaration_incomplete | degraded
+    requirements_source: str  # live_workspace | catalog | none
+    status_source: str  # live | unavailable
+    degraded_reason: Optional[str] = None
+    requirements: List[CredentialRequirement] = []
+    summary: CredentialRequirementsSummary = CredentialRequirementsSummary()
+    # The normalizer's sanitized messages: non-printables stripped and
+    # length-capped, but NOT HTML-escaped. Text-interpolate only.
+    errors: List[str] = []
+
+
 
 
 # ============================================================================
