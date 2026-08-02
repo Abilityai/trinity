@@ -186,6 +186,7 @@ class CloseReturningBlockedReader:
         self.read_started = threading.Event()
         self.close_called = threading.Event()
         self.read_calls = 0
+        self.close_calls = 0
 
     def readline(self, _limit: int) -> bytes:
         self.read_calls += 1
@@ -194,6 +195,7 @@ class CloseReturningBlockedReader:
         return b""
 
     def close(self) -> None:
+        self.close_calls += 1
         self.close_called.set()
 
 
@@ -203,6 +205,7 @@ class CloseTrackingWriter:
         self.written = threading.Event()
         self.closed = threading.Event()
         self.write_calls = 0
+        self.close_calls = 0
 
     def write(self, value: bytes) -> int:
         self.write_calls += 1
@@ -214,10 +217,56 @@ class CloseTrackingWriter:
         pass
 
     def close(self) -> None:
+        self.close_calls += 1
         self.closed.set()
 
     def getvalue(self) -> bytes:
         return bytes(self.value)
+
+
+class BlockingRejectExchange:
+    """Protocol-valid rejected port whose arbitrary cleanup callback blocks."""
+
+    def __init__(
+        self,
+        reader: CloseReturningBlockedReader,
+        writer: CloseTrackingWriter,
+        release_reject: threading.Event,
+    ) -> None:
+        self._reader = reader
+        self._writer = writer
+        self._release_reject = release_reject
+        self._cleanup_complete = threading.Event()
+        self._release_complete = threading.Event()
+        self.reject_started = threading.Event()
+        self.preserved: tuple[object, ...] = ()
+        self.exchange_calls = 0
+
+    @property
+    def channel_identity(self) -> tuple[object, object]:
+        return (self._reader, self._writer)
+
+    @property
+    def cleanup_complete(self) -> threading.Event:
+        return self._cleanup_complete
+
+    @property
+    def release_complete(self) -> threading.Event:
+        return self._release_complete
+
+    def reject(self, *, preserve: tuple[object, ...] = ()) -> None:
+        self.preserved = preserve
+        self.reject_started.set()
+        self._release_reject.wait(0.4)
+        for stream in (self._reader, self._writer):
+            if not any(stream is item for item in preserve):
+                stream.close()
+        self._cleanup_complete.set()
+        self._release_complete.set()
+
+    def exchange(self, _request_line: str) -> str:
+        self.exchange_calls += 1
+        raise AssertionError("a rejected exchange must not start I/O")
 
 
 class CrashInjectingLedger(ControlLedger):
@@ -713,14 +762,19 @@ def test_completed_action_with_next_reminder_keeps_wake_pending(
 def test_crash_before_terminal_result_never_exposes_a_reminder(
     database_path: Path,
 ):
-    """A reminder cannot execute while its source action is still only reserved."""
+    """A later reminder cannot change bytes under one reserved source action key."""
     ledger = CrashInjectingLedger(database_path)
     ledger.initialize()
     action = _action()
     reminder = _reminder()
+    later_reminder = ReminderSpec(
+        "reminder-1",
+        "2026-08-02T09:45:42Z",
+        "later-observation",
+    )
     adapter = FakeAdapter(
         _decision("execute", action=action, reminder=reminder),
-        _decision("execute", action=action, reminder=reminder),
+        _decision("execute", action=action, reminder=later_reminder),
     )
     runner = _runner(ledger, adapter)
     prepared = runner.run(
@@ -731,6 +785,7 @@ def test_crash_before_terminal_result_never_exposes_a_reminder(
     assert embedded["identifier"] == "delivery-conductor-reminder-v1"
     assert embedded["identifiers"] == ["reminder-1"]
     assert embedded["utc_timestamp"] == "2026-08-02T09:15:11Z"
+    canonical_source_payload = prepared.action.payload_json
 
     ledger.crash_before_terminal_result = True
     with pytest.raises(SystemExit, match="before terminal result"):
@@ -742,8 +797,9 @@ def test_crash_before_terminal_result_never_exposes_a_reminder(
 
     assert _fetchall(
         database_path,
-        "SELECT capability_name, status FROM action_journal ORDER BY action_key",
-    ) == [("chat", "reserved")]
+        "SELECT capability_name, status, payload_json "
+        "FROM action_journal ORDER BY action_key",
+    ) == [("chat", "reserved", canonical_source_payload)]
 
     source_replay = runner.run(
         _wake(1),
@@ -753,7 +809,9 @@ def test_crash_before_terminal_result_never_exposes_a_reminder(
         breaker_allows_effect=True,
     )
     assert source_replay.status == "action-ready"
-    assert source_replay.action.capability_name == "chat"
+    assert source_replay.action == prepared.action
+    assert source_replay.reminder == reminder
+    assert len(adapter.requests) == 2
     runner.accept_result(
         source_replay.handoff,
         action_key=action.action_key,
@@ -769,6 +827,7 @@ def test_crash_before_terminal_result_never_exposes_a_reminder(
     )
     assert reminder_tick.status == "reminder-ready"
     assert reminder_tick.reminder == reminder
+    assert reminder_tick.reminder != later_reminder
     runner.accept_result(
         reminder_tick.handoff,
         action_key=reminder_tick.action_key,
@@ -777,6 +836,55 @@ def test_crash_before_terminal_result_never_exposes_a_reminder(
     assert _fetchall(database_path, "SELECT state FROM event_inbox") == [
         ("acknowledged",)
     ]
+    assert _fetchall(
+        database_path,
+        "SELECT payload_json FROM action_journal WHERE capability_name = 'chat'",
+    ) == [(canonical_source_payload,)]
+
+
+def test_pre_terminal_recovery_rejects_conflicting_same_key_observation(
+    ledger: ControlLedger,
+    database_path: Path,
+):
+    """A changed source payload under one reserved key cannot reach an effect."""
+    action = _action()
+    conflicting_action = ProposedAction(
+        capability_name="chat",
+        action_key=action.action_key,
+        payload_json='{"references":{"digest":"'
+        + "b" * 64
+        + '","identifier":"target-1"}}',
+        target_revision=action.target_revision,
+        invalidation_class=action.invalidation_class,
+    )
+    adapter = FakeAdapter(
+        _decision("execute", action=action, reminder=_reminder()),
+        _decision("execute", action=conflicting_action, reminder=_reminder()),
+    )
+    runner = _runner(ledger, adapter)
+    prepared = runner.run(
+        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    )
+
+    recovered = runner.run(
+        _wake(1),
+        NOW + timedelta(seconds=31),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+
+    assert recovered.status == "rejected"
+    assert recovered.reason_code == "reserved-action-conflict"
+    assert recovered.action is None
+    assert recovered.handoff is None
+    assert len(adapter.requests) == 2
+    assert _fetchall(
+        database_path,
+        "SELECT status, payload_json FROM action_journal",
+    ) == [("reserved", prepared.action.payload_json)]
+    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [("pending",)]
+    assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
 
 
 def test_crash_after_terminal_result_recovers_reminder_before_adapter(
@@ -1383,6 +1491,101 @@ def test_policy_adapter_cap_rejection_closes_channels_without_starting_more_work
     finally:
         for reader in readers:
             reader.read_released.set()
+
+
+@pytest.mark.parametrize("reused_side", ("reader", "writer"))
+def test_blocking_collision_rejection_has_one_global_fixed_resource_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+    reused_side: str,
+):
+    """Blocking reject callbacks cannot grow workers or close a live shared half."""
+    cap = 3
+    monkeypatch.setattr(adapter_module, "_MAX_LIVE_CHANNELS", cap)
+    first_reader = CloseReturningBlockedReader()
+    first_writer = CloseTrackingWriter()
+    release_reject = threading.Event()
+    rejected: list[BlockingRejectExchange] = []
+    adapter_rejected: list[BlockingRejectExchange] = []
+    executor_rejected: list[BlockingRejectExchange] = []
+    first_exchange = BoundedJsonLinesExchange(
+        first_reader,  # type: ignore[arg-type]
+        first_writer,  # type: ignore[arg-type]
+        deadline_seconds=0.01,
+    )
+    adapter_factory_calls = 0
+    executor_factory_calls = 0
+
+    def rejected_exchange() -> BlockingRejectExchange:
+        reader = (
+            first_reader
+            if reused_side == "reader"
+            else CloseReturningBlockedReader()
+        )
+        writer = first_writer if reused_side == "writer" else CloseTrackingWriter()
+        exchange = BlockingRejectExchange(reader, writer, release_reject)
+        rejected.append(exchange)
+        return exchange
+
+    def adapter_factory():
+        nonlocal adapter_factory_calls
+        adapter_factory_calls += 1
+        if adapter_factory_calls == 1:
+            return first_exchange
+        exchange = rejected_exchange()
+        adapter_rejected.append(exchange)
+        return exchange
+
+    def executor_factory():
+        nonlocal executor_factory_calls
+        executor_factory_calls += 1
+        exchange = rejected_exchange()
+        executor_rejected.append(exchange)
+        return exchange
+
+    request = AdapterRequest(
+        1, _wake(1), "2026-08-02T09:10:11Z", None, HEALTHY_BUDGET
+    )
+    adapter = JsonLinesPolicyAdapter(adapter_factory)
+    executor = JsonLinesCapabilityExecutor({"chat": executor_factory})
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(PortExchangeError):
+            adapter.observe_and_decide(request)
+        for number in range(cap + 6):
+            if number % 2:
+                result = executor.execute(_action(f"action-{number + 1}"))
+                assert result.reason_code == "executor-exchange-ambiguous"
+            else:
+                with pytest.raises(PortExchangeError):
+                    adapter.observe_and_decide(request)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.25
+        assert adapter_factory_calls + executor_factory_calls == cap
+        assert len(rejected) == cap - 1
+        assert len(adapter_rejected) == 1
+        assert len(executor_rejected) == 1
+        assert all(exchange.reject_started.wait(0.1) for exchange in rejected)
+        assert all(exchange.exchange_calls == 0 for exchange in rejected)
+        shared = first_reader if reused_side == "reader" else first_writer
+        assert all(
+            any(shared is preserved for preserved in exchange.preserved)
+            for exchange in rejected
+        )
+    finally:
+        release_reject.set()
+        for exchange in rejected:
+            exchange.release_complete.wait(0.2)
+        first_reader.read_released.set()
+        first_exchange.release_complete.wait(0.2)
+
+    assert first_reader.close_calls == 1
+    assert first_writer.close_calls == 1
+    if reused_side == "reader":
+        assert all(exchange._writer.close_calls == 1 for exchange in rejected)
+    else:
+        assert all(exchange._reader.close_calls == 1 for exchange in rejected)
 
 
 def test_policy_adapter_uses_closed_bounded_fresh_json_line():

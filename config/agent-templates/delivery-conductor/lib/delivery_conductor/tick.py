@@ -186,19 +186,43 @@ class DeliveryConductorTick:
             return self._reject(lease, "invalid-adapter-decision")
         if action.capability_name not in self._installed_capabilities:
             return self._reject(lease, "capability-not-installed")
-        if decision.next_reminder is not None:
+
+        follow_up = decision.next_reminder
+        try:
+            canonical_action = self._load_action_by_key(action.action_key)
+        except (RuntimeError, sqlite3.Error, ValueError):
+            return self._reject(
+                lease,
+                "action-recovery-invalid",
+                status="blocked",
+            )
+        if canonical_action is not None:
             try:
-                action = _with_embedded_reminder(action, decision.next_reminder)
+                canonical_reminder = _embedded_reminder(canonical_action)
+                observed_canonical = (
+                    _with_embedded_reminder(action, canonical_reminder)
+                    if canonical_reminder is not None
+                    else action
+                )
+            except (TypeError, ValueError):
+                return self._reject(lease, "reserved-action-conflict")
+            if observed_canonical != canonical_action:
+                return self._reject(lease, "reserved-action-conflict")
+            action = canonical_action
+            follow_up = canonical_reminder
+        elif follow_up is not None:
+            try:
+                action = _with_embedded_reminder(action, follow_up)
             except (TypeError, ValueError):
                 return self._reject(lease, "invalid-adapter-decision")
 
         reservation = self._ledger.reserve_action(lease, action)
         if reservation.status == "completed":
-            if decision.next_reminder is not None:
+            if follow_up is not None:
                 return self._prepare_reminder(
                     lease,
                     decision.observed_revision,
-                    decision.next_reminder,
+                    follow_up,
                     budget_view,
                     breaker_allows_effect,
                     source_action_key=action.action_key,
@@ -207,7 +231,7 @@ class DeliveryConductorTick:
                 lease, decision.observed_revision, budget_view, reservation
             )
         if reservation.status == "ambiguous":
-            reminder = decision.next_reminder
+            reminder = follow_up
             if reminder is None:
                 reminder = self._terminal_investigation_reminder(
                     action.action_key,
@@ -246,7 +270,7 @@ class DeliveryConductorTick:
             budget_view=budget_view,
             action=action,
             payload_sha256=reservation.payload_sha256,
-            reminder=decision.next_reminder,
+            reminder=follow_up,
         )
         return TickResult(
             "action-ready",
@@ -255,7 +279,7 @@ class DeliveryConductorTick:
             handoff=handoff,
             action_key=action.action_key,
             action_status="reserved",
-            reminder=decision.next_reminder,
+            reminder=follow_up,
         )
 
     def accept_result(
@@ -592,6 +616,20 @@ class DeliveryConductorTick:
         ) != action:
             raise RuntimeError("reserved reminder intent is not canonical")
         return action, reminder
+
+    def _load_action_by_key(self, action_key: str) -> ProposedAction | None:
+        with sqlite3.connect(self._ledger.database_path) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            row = connection.execute(
+                """
+                SELECT capability_name, action_key, payload_json,
+                       target_revision, invalidation_class
+                FROM action_journal
+                WHERE action_key = ?
+                """,
+                (action_key,),
+            ).fetchone()
+        return ProposedAction(*row) if row is not None else None
 
     def _source_action_is_terminal(self, action_key: str) -> bool:
         with sqlite3.connect(self._ledger.database_path) as connection:

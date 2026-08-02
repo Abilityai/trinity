@@ -3,16 +3,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-import threading
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol
 
 from .adapter import (
     JsonLinesExchangeFactory,
-    LiveChannel,
     PortExchangeError,
+    _ChannelClaimRejected,
+    _claim_channel_admission,
     _claim_live_channel,
     _reject_exchange,
+    _release_channel_admission,
     _release_live_channel,
 )
 from .contracts import MAX_MESSAGE_BYTES, ProposedAction
@@ -50,8 +51,6 @@ class JsonLinesCapabilityExecutor:
                 raise TypeError("installed exchange factory must be callable")
             exchanges[capability_name] = exchange_factory
         self._installed_exchanges = MappingProxyType(exchanges)
-        self._live_channels: list[LiveChannel] = []
-        self._channel_lock = threading.Lock()
 
     def execute(self, action: ProposedAction) -> EffectResult:
         if not isinstance(action, ProposedAction):
@@ -61,25 +60,28 @@ class JsonLinesCapabilityExecutor:
             raise CapabilityNotInstalledError("capability is not installed by the template")
         request_line = _serialize_action(action)
         try:
-            exchange = exchange_factory()
+            admission = _claim_channel_admission()
+            if admission is None:
+                raise PortExchangeError("too many channels are still live")
+            try:
+                exchange = exchange_factory()
+            except Exception as error:
+                _release_channel_admission(admission)
+                raise PortExchangeError("exchange factory failed") from error
             if not hasattr(exchange, "exchange"):
-                _reject_exchange(exchange)
+                _reject_exchange(exchange, admission)
                 raise PortExchangeError(
                     "exchange factory did not provide a JSON Lines port"
                 )
-            identity = _claim_live_channel(
-                exchange,
-                self._live_channels,
-                self._channel_lock,
-            )
+            try:
+                identity = _claim_live_channel(exchange, admission)
+            except _ChannelClaimRejected as error:
+                _reject_exchange(exchange, admission, preserve=error.preserve)
+                raise PortExchangeError(str(error)) from error
             try:
                 response_line = exchange.exchange(request_line)
             finally:
-                _release_live_channel(
-                    identity,
-                    self._live_channels,
-                    self._channel_lock,
-                )
+                _release_live_channel(identity)
         except PortExchangeError:
             return _ambiguous_result(action, "executor-exchange-ambiguous")
         try:
