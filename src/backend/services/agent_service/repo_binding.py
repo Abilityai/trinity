@@ -43,6 +43,7 @@ from typing import Optional
 
 from database import db
 from services import git_service
+from utils.credential_sanitizer import redact_url_userinfo
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,24 @@ class BindOutcome:
     reused_existing: bool
     recreated: bool
     audit: dict = field(default_factory=dict)
+
+
+def _scrub(text: str, user_pat: str) -> str:
+    """Belt at the boundary where the PAT is in scope.
+
+    Every message this module builds from FOREIGN text — git output, a docker
+    exception, GitHub's own error string — is scrubbed here even though the
+    producer is supposed to have scrubbed it already. Relying on "the producer
+    handled it" is the single point of failure the dual-scrub rule exists to
+    remove: `git_service` scrubs what it reads from a container, but the
+    docker/GitHub exception paths reach us through libraries that never saw the
+    token and have no reason to. `scrub_secret` removes the request's PAT;
+    `redact_url_userinfo` removes a *stale baked* token embedded in a remote
+    URL, which is not the request's PAT and would otherwise survive.
+    """
+    from services.agent_service.fork_to_own import scrub_secret
+
+    return redact_url_userinfo(scrub_secret(text or "", user_pat))
 
 
 def _translate_destination_error(exc) -> BindError:
@@ -356,7 +375,7 @@ async def bind_agent_to_own_repo(
         raise BindError(
             502,
             "BIND_PUSH_FAILED" if rebind.stage == "push" else "BIND_REWIRE_FAILED",
-            f"{rebind.error} Trinity has recorded the new repository "
+            f"{_scrub(rebind.error or '', user_pat)} Trinity has recorded the new repository "
             f"('{destination_repo}'), but the agent's origin, credential and "
             f"container environment are unchanged. Retrying this action is "
             f"safe — the repository is reused and the push is idempotent.",
@@ -401,7 +420,8 @@ async def bind_agent_to_own_repo(
             "BIND_RECREATE_FAILED",
             f"'{destination_repo}' now holds the agent's history and Trinity "
             f"has recorded the binding, but rebuilding the container to pick up "
-            f"the new repository failed: {e}. Retry this action to finish — it "
+            f"the new repository failed: {_scrub(str(e), user_pat)}. Retry this "
+            f"action to finish — it "
             f"is idempotent. Do NOT rely on a plain container restart: that "
             f"re-runs the startup script, which rewrites origin from the "
             f"container's stale environment and would undo the rebind.",
