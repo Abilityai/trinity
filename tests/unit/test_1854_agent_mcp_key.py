@@ -521,6 +521,41 @@ def test_18b_stopped_container_degrades_to_unavailable(keys_db, monkeypatch):
     assert out.verdict == "unavailable"
 
 
+def test_18d_probe_script_source_can_only_emit_a_digest():
+    """Source-level guard on the in-container script (#1854).
+
+    The runtime test below proves the CURRENT script does not leak; this proves
+    no future edit can start leaking. The script runs inside an agent container
+    and its stdout is parsed by the backend, so a line that put the raw bearer or
+    the `.mcp.json` body into `out` would exfiltrate a live credential to an
+    HTTP response — and, once any caller audits the result, into the append-only
+    audit_log.
+    """
+    import re
+    from services import agent_mcp_key_service as svc
+
+    script = svc.PROBE_SCRIPT
+
+    emitted = set(re.findall(r'"(\w+)"\s*:', script)) | set(re.findall(r'out\["(\w+)"\]', script))
+    assert emitted <= {"schema", "present", "entries", "error", "name", "is_trinity", "digest"}, (
+        f"the probe emits an unexpected key: {sorted(emitted)}"
+    )
+
+    # `token` may appear only as (a) its initialisation, (b) its extraction from
+    # the Authorization header, (c) a comment, or (d) inside sha256(...).
+    for line in script.splitlines():
+        stripped = line.strip()
+        if "token" not in stripped or stripped.startswith("#"):
+            continue
+        assert (
+            stripped.startswith("token =")
+            or "hashlib.sha256(token.encode()).hexdigest()" in stripped
+        ), f"the raw bearer token escapes the hash on: {stripped!r}"
+
+    for forbidden in ("out[\"raw\"]", '"body"', '"mcp_json"', "json.dumps(cfg", "json.dumps(servers"):
+        assert forbidden not in script, f"the probe must never return {forbidden}"
+
+
 def test_18c_probe_returns_only_digests_never_tokens(keys_db, monkeypatch):
     """The digest is computed INSIDE the container; no secret crosses the
     boundary, and the `.mcp.json` body is never returned."""
