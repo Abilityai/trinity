@@ -75,7 +75,19 @@ export interface McpAuthContext extends Record<string, unknown> {
   keyId?: string;        // MCP API key ID (AUDIT-001: for execution origin tracking)
   keyName: string;       // Name of the MCP API key
   agentName?: string;    // Agent name if scope is 'agent', 'system', or 'connector'
-  scope: "user" | "agent" | "system" | "connector"; // user=human, agent=regular agent, system=bypasses all permissions, connector=end-user consumption key bound to one agent (ent#46)
+  // user=human, agent=regular agent, system=bypasses all permissions,
+  // connector=end-user consumption key bound to one agent (ent#46),
+  // portal_delegate=trusted issuer that exchanges an end-user email for a portal
+  // session and nothing else (ent#163).
+  //
+  // #1854: `portal_delegate` was missing here, so a fifth live value arrived as
+  // a runtime string outside the declared union — the backend column is
+  // free-text with no CHECK constraint, and every scope check in this codebase
+  // is an equality test, so an unlisted value silently falls through to the
+  // "user-scoped keys see all accessible agents" branch. Keep this union
+  // exhaustive against `mcp_api_keys.scope`; anything not listed must be
+  // treated as least-privileged, never as `user`.
+  scope: "user" | "agent" | "system" | "connector" | "portal_delegate";
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
 }
 
