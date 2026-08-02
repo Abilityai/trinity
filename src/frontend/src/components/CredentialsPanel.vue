@@ -7,6 +7,21 @@
     </div>
 
     <template v-else>
+      <!-- Guided credential setup (ent#127). Rendered for a STOPPED agent too:
+           the endpoint answers with a degraded body, and gating the whole
+           section on `running` would make the degraded design dead code. Only
+           the INPUTS are gated. -->
+      <CredentialSetupChecklist
+        :report="requirements"
+        :loading="requirementsLoading"
+        :error="requirementsError"
+        :saving="savingChecklist"
+        :save-result="checklistResult"
+        :can-submit="agentStatus === 'running'"
+        @refresh="loadRequirements"
+        @submit="saveChecklistCredentials"
+      />
+
       <!-- Credential Files Section -->
       <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
@@ -277,6 +292,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import { useNotification } from '../composables'
+import CredentialSetupChecklist from './CredentialSetupChecklist.vue'
 
 const props = defineProps({
   agentName: {
@@ -295,6 +311,12 @@ const { showNotification } = useNotification()
 // State
 const loading = ref(false)
 const credentialStatus = ref(null)
+// ent#127 — guided setup checklist
+const requirements = ref(null)
+const requirementsLoading = ref(false)
+const requirementsError = ref(null)
+const savingChecklist = ref(false)
+const checklistResult = ref(null)
 const exporting = ref(false)
 const importing = ref(false)
 const quickInjectText = ref('')
@@ -348,6 +370,29 @@ const loadCredentialStatus = async () => {
   }
 }
 
+/**
+ * ent#127 — fetched UNCONDITIONALLY, unlike `loadCredentialStatus`.
+ *
+ * `/credentials/status` genuinely needs a running container; the requirements
+ * endpoint is designed to answer for a stopped agent (200 with a degraded body
+ * and `unknown` per-variable status). Gating this on `running` the way the rest
+ * of the panel is gated would make the whole degraded design — and three of its
+ * tests — dead code.
+ */
+const loadRequirements = async () => {
+  if (!props.agentName) return
+  requirementsLoading.value = true
+  requirementsError.value = null
+  try {
+    requirements.value = await agentsStore.getCredentialRequirements(props.agentName)
+  } catch (err) {
+    requirementsError.value =
+      err.response?.data?.detail || 'Failed to load credential requirements'
+  } finally {
+    requirementsLoading.value = false
+  }
+}
+
 const countCredentials = (text) => {
   if (!text) return 0
   let count = 0
@@ -370,9 +415,20 @@ const parseEnvText = (text) => {
       const key = trimmed.substring(0, eqIndex).trim()
       let value = trimmed.substring(eqIndex + 1).trim()
       // Remove surrounding quotes
-      if ((value.startsWith('"') && value.endsWith('"')) ||
+      const wasDoubleQuoted = value.startsWith('"') && value.endsWith('"') && value.length >= 2
+      if (wasDoubleQuoted ||
           (value.startsWith("'") && value.endsWith("'"))) {
         value = value.slice(1, -1)
+      }
+      // ent#127: UNESCAPE what `formatEnvContent` escaped. Without this the
+      // read-merge-write round-trip is lossy in one direction only: the writer
+      // emits `\"` for every `"`, the reader strips the surrounding quotes but
+      // never unescapes, so a value containing a quote grows one backslash PER
+      // SUBMIT — for every other credential in the file, not just the one being
+      // edited. Latent while Quick Inject was a rare bulk paste; the per-row
+      // checklist makes read-merge-write the normal interaction.
+      if (wasDoubleQuoted) {
+        value = value.replace(/\\(["\\])/g, '$1')
       }
       if (key) {
         credentials[key] = value
@@ -385,11 +441,73 @@ const parseEnvText = (text) => {
 const formatEnvContent = (credentials) => {
   const lines = ['# Credential file - managed by Trinity', '']
   for (const [key, value] of Object.entries(credentials)) {
-    // Escape quotes in values
+    // Escape quotes in values. `parseEnvText` unescapes this (ent#127), so the
+    // UI round-trip is now stable.
+    //
+    // RESIDUAL, deliberately not changed here: the AGENT's own reader
+    // (`agent_server/routers/credentials.py`) strips quote characters and does
+    // not unescape, so a value containing a `"` reaches the agent with the
+    // backslash. Escaping for a format nobody unescapes is a pre-existing
+    // defect in its own right; widening the escaping would make the agent-side
+    // mismatch worse, not better. Filed separately.
     const escapedValue = String(value).replace(/"/g, '\\"')
     lines.push(`${key}="${escapedValue}"`)
   }
   return lines.join('\n') + '\n'
+}
+
+/**
+ * The CURRENT `.env`, parsed. Throws unless the file is genuinely absent.
+ *
+ * `formatEnvContent` rewrites the whole file, so this is not an optimisation —
+ * it is the merge base. Swallowing a transient read failure as "start fresh"
+ * (the pre-ent#127 behaviour) wipes every credential already configured. A 404
+ * is the agent server's own "File not found" and is the ONLY safe empty base.
+ */
+const readExistingEnv = async () => {
+  try {
+    const content = await agentsStore.downloadAgentFile(props.agentName, '/home/developer/.env')
+    return parseEnvText(content)
+  } catch (err) {
+    if (err.response?.status === 404) return {}
+    throw new Error(
+      "Couldn't read this agent's current credentials, so nothing was written " +
+      '(writing now would overwrite the credentials already configured). ' +
+      'Try again once the agent is reachable.'
+    )
+  }
+}
+
+/**
+ * ent#127 — save the checklist's filled rows through the EXISTING owner-gated
+ * inject path. One writer, no new backend write surface.
+ */
+const saveChecklistCredentials = async (credentials) => {
+  const names = Object.keys(credentials || {})
+  if (names.length === 0) return
+
+  savingChecklist.value = true
+  checklistResult.value = null
+  try {
+    const existingEnv = await readExistingEnv()
+    const merged = { ...existingEnv, ...credentials }
+    await agentsStore.injectCredentials(props.agentName, {
+      '.env': formatEnvContent(merged),
+    })
+    checklistResult.value = {
+      success: true,
+      message: `Saved ${names.length} credential${names.length === 1 ? '' : 's'}.`,
+    }
+    await Promise.all([loadRequirements(), loadCredentialStatus()])
+    if (showNotification) showNotification('Credentials saved', 'success')
+  } catch (err) {
+    checklistResult.value = {
+      success: false,
+      message: err.response?.data?.detail || err.message || 'Failed to save credentials',
+    }
+  } finally {
+    savingChecklist.value = false
+  }
 }
 
 const quickInject = async () => {
@@ -410,14 +528,11 @@ const quickInject = async () => {
       return
     }
 
-    // Get existing .env content and merge
-    let existingEnv = {}
-    try {
-      const content = await agentsStore.downloadAgentFile(props.agentName, '/home/developer/.env')
-      existingEnv = parseEnvText(content)
-    } catch (e) {
-      // File doesn't exist, start fresh
-    }
+    // Merge onto the CURRENT file. `formatEnvContent` rewrites `.env`
+    // wholesale, so a merge base we failed to read is not "start fresh" — it
+    // silently wipes every credential already configured. Only a genuine 404
+    // (the agent server's own "File not found") means the file is absent.
+    const existingEnv = await readExistingEnv()
 
     // Merge new credentials (overwrite existing keys)
     const merged = { ...existingEnv, ...credentials }
@@ -617,14 +732,18 @@ const formatDate = (isoString) => {
 // Lifecycle
 onMounted(() => {
   loadCredentialStatus()
+  loadRequirements()
 })
 
 // Watch for agent status changes
 watch(() => props.agentStatus, () => {
   loadCredentialStatus()
+  // Starting the agent upgrades every `unknown` to a real set/missing verdict.
+  loadRequirements()
 })
 
 watch(() => props.agentName, () => {
   loadCredentialStatus()
+  loadRequirements()
 })
 </script>
