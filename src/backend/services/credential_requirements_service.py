@@ -42,8 +42,10 @@ layer, and it is agent-triggerable: the agent owns `/home/developer/.env`, and
      `agent_unreachable` instead of hanging the caller.
   3. `stat.S_ISREG` before `open()` — closes the FIFO vector at the source.
 
-`compatibility/collector.py:_EXEC_TIMEOUT` is decorative for the same reason and
-is tracked as its own fix; it is out of scope here.
+`compatibility/collector.py:_EXEC_TIMEOUT` is decorative for the same reason.
+That is a SECOND live instance of this hole, out of scope here and — as of this
+writing — NOT filed on either tracker. Stated plainly rather than as "tracked
+separately": a comment claiming a follow-up exists is the reason nobody checks.
 
 WHAT CROSSES THE IMAGE BOUNDARY
 -------------------------------
@@ -71,13 +73,14 @@ import base64
 import inspect
 import json
 import logging
+import secrets
 import threading
 import time
 from typing import Any, Dict, List, Optional
 
 import yaml
 
-from redis_breaker_util import get_breaker_redis
+from redis_breaker_util import get_breaker_redis, lock_token_matches
 
 from services.credential_charset import (
     CREDENTIAL_DETECTOR_REF_RE,
@@ -456,6 +459,14 @@ def _parse_template_text(text: str) -> Optional[dict]:
 def _safe_normalize(data: dict) -> tuple:
     """`normalize_credential_requirements`, wrapped NARROWLY and deliberately.
 
+    Returns ``(records, errors, ok)``. **`ok is False` means the normalizer
+    RAISED, and the caller MUST convert that into a `degraded_reason`** — the
+    wrapper catching the exception is only half the fix. An empty record list on
+    its own renders as "Ready — this agent needs no credentials", so swallowing
+    the raise and returning `[]` reproduces the ent#128 `run_static` lesson one
+    level up: a failure that reads as a pass, on the exact state this module's
+    `degraded`-dominates rule says must never be reachable from a failure.
+
     Its docstring calls "never raises" a load-bearing security property, and its
     own callers wrap it anyway rather than resting the property on one
     function's discipline. This wrapper is that belt — and it is scoped to the
@@ -465,12 +476,13 @@ def _safe_normalize(data: dict) -> tuple:
     explicit `degraded_reason` instead.
     """
     try:
-        return normalize_credential_requirements(data, source_trust="deployed")
+        records, errors = normalize_credential_requirements(data, source_trust="deployed")
+        return records, errors, True
     except Exception:  # noqa: BLE001
         logger.exception(
             "[credential-requirements] normalize raised on a deployed template"
         )
-        return [], ["template declaration could not be read"]
+        return [], ["template declaration could not be read"], False
 
 
 def _observed_operator_names(facts: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -634,8 +646,18 @@ async def build_report(agent_name: str) -> Dict[str, Any]:
             if data is None:
                 degraded_reason = "template_unreadable"
             else:
-                records, errors = _safe_normalize(data)
-                requirements_source = "live_workspace"
+                records, errors, normalized_ok = _safe_normalize(data)
+                if normalized_ok:
+                    requirements_source = "live_workspace"
+                else:
+                    # Reuse the EXISTING reason rather than minting a fifth enum
+                    # value: "this agent's template.yaml could not be read" is
+                    # accurate for a normalizer raise, every consumer (frontend
+                    # switch, docs, tests) already handles it, and `errors[]`
+                    # carries the message that distinguishes the two. Leaving
+                    # `requirements_source == "none"` also lets the catalog
+                    # fallback still try, while `degraded` already dominates.
+                    degraded_reason = "template_unreadable"
 
     if requirements_source == "none":
         catalog_records, catalog_errors, catalog_reason = await _catalog_requirements(
@@ -831,30 +853,44 @@ def _cache_put(agent_name: str, generation: Optional[int], report: Dict[str, Any
 
 
 def _acquire_probe_lock(agent_name: str):
-    """Cross-worker single-flight. Fail-open when Redis is down (compat pattern)."""
+    """Cross-worker single-flight. Fail-open when Redis is down (compat pattern).
+
+    Returns ``(client, token)``; ``(None, None)`` when Redis is unreachable.
+
+    The lock carries a random TOKEN rather than a constant, because the release
+    must be a compare-and-delete (#1919): `build_report` can legitimately reach
+    the lock TTL — the probe bound is `_REQUEST_TIMEOUT` (20s) and the catalog
+    fallback adds `get_github_template`'s own 10s HTTP timeout, which is exactly
+    `_LOCK_TTL_SECONDS`. Past that the lease has expired, another worker may
+    hold it, and a bare DELETE would drop *their* lock and let a third caller
+    probe concurrently — defeating the backpressure this exists to provide.
+    """
     client = get_breaker_redis()
     if client is None:
-        return None
+        return None, None
+    key = "credreq:probe:{0}".format(agent_name)
+    token = secrets.token_hex(16)
     try:
-        if client.set(
-            "credreq:probe:{0}".format(agent_name), "1", nx=True, ex=_LOCK_TTL_SECONDS
-        ):
-            return client
+        if client.set(key, token, nx=True, ex=_LOCK_TTL_SECONDS):
+            return client, token
     except Exception:  # noqa: BLE001 — Redis down -> proceed best-effort
         logger.warning(
             "[credential-requirements] probe lock unavailable for %s", agent_name
         )
-        return None
+        return None, None
     raise CredentialRequirementsBusy(
         "a credential-requirements probe is already running for this agent"
     )
 
 
-def _release_probe_lock(client, agent_name: str) -> None:
-    if client is None:
+def _release_probe_lock(client, agent_name: str, token: Optional[str]) -> None:
+    """Compare-and-delete: only ever release a lease we still own."""
+    if client is None or token is None:
         return
+    key = "credreq:probe:{0}".format(agent_name)
     try:
-        client.delete("credreq:probe:{0}".format(agent_name))
+        if lock_token_matches(client.get(key), token):
+            client.delete(key)
     except Exception:  # noqa: BLE001
         pass
 
@@ -866,11 +902,11 @@ async def get_report(agent_name: str) -> Dict[str, Any]:
     if cached is not None:
         return cached
 
-    client = _acquire_probe_lock(agent_name)
+    client, token = _acquire_probe_lock(agent_name)
     try:
         report = await build_report(agent_name)
     finally:
-        _release_probe_lock(client, agent_name)
+        _release_probe_lock(client, agent_name, token)
 
     _cache_put(agent_name, generation, report)
     return report

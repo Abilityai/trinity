@@ -399,20 +399,32 @@ class TestHardening:
         assert report["degraded_reason"] == "template_unreadable"
 
     @pytest.mark.asyncio
-    async def test_normalizer_raise_is_caught_narrowly(self, monkeypatch):
-        """Wrapped at the CALL, not around the whole build: the ent#128 lesson is
-        that blanket swallowing turns a raise into a verdict indistinguishable
-        from a pass."""
+    async def test_normalizer_raise_degrades_and_never_reads_as_ready(self, monkeypatch):
+        """A caught raise must not render as "Ready — needs no credentials".
+
+        This test previously asserted only that the wrapper was NARROW and that
+        `requirements_source` stayed `live_workspace` — and passed while
+        `build_report` returned `state="no_credentials_required"` on a
+        normalizer raise. That is the ent#128 `run_static` lesson recurring one
+        layer up, and in the test layer too: catching the exception is half the
+        fix, propagating it into the state machine is the other half, and a test
+        that stops at "it was caught" cannot tell the two apart. Assert the
+        STATE a failure produces, not just that it was swallowed.
+        """
         def boom(*_a, **_k):
             raise RuntimeError("normalizer exploded")
 
         monkeypatch.setattr(crs, "normalize_credential_requirements", boom)
         _install_probe(monkeypatch, _probe())
+        _install_catalog(monkeypatch, entry=None)
         report = await crs.build_report("acme")
         assert report["requirements"] == []
         assert report["errors"]
-        # It still reports live_workspace: the template WAS read and parsed.
-        assert report["requirements_source"] == "live_workspace"
+        # The whole point: `degraded` dominates, and the green state is
+        # unreachable from a failure.
+        assert report["state"] == "degraded"
+        assert report["state"] != "no_credentials_required"
+        assert report["degraded_reason"] == "template_unreadable"
 
     @pytest.mark.asyncio
     async def test_normalizer_errors_surface(self, monkeypatch):
@@ -471,3 +483,179 @@ class TestHardening:
         )
         report = await crs.build_report("acme")
         assert secret not in str(report)
+
+
+class TestProbeLockOwnership:
+    """The single-flight lock must only ever release a lease it still owns (#1919).
+
+    `get_report` holds `credreq:probe:{agent}` for `_LOCK_TTL_SECONDS` while it
+    probes. That bound is reachable in normal operation, not just pathologically:
+    the probe itself is capped at `_REQUEST_TIMEOUT` (20s) and the catalog
+    fallback adds `get_github_template`'s own 10s HTTP timeout, which sums to
+    exactly the TTL. Past the TTL the lease has expired and another worker may
+    legitimately hold the key — so a bare `DELETE` in the `finally` drops
+    *their* lock and lets a third caller start a concurrent probe against the
+    same container. That is the precise failure the lock exists to prevent, and
+    it is silent: nothing errors, the fleet just probes harder under load.
+
+    A constant lock value cannot express ownership, so these tests assert on the
+    token, not just on "a key was written".
+    """
+
+    class _FakeRedis:
+        """SETNX/GET/DEL over a dict — enough to model lease ownership."""
+
+        def __init__(self, store=None, fail_on=()):
+            self.store = dict(store or {})
+            self.fail_on = set(fail_on)
+            self.deleted = []
+            self.set_calls = []
+
+        def set(self, key, value, nx=False, ex=None):
+            if "set" in self.fail_on:
+                raise RuntimeError("redis down")
+            self.set_calls.append({"key": key, "value": value, "nx": nx, "ex": ex})
+            if nx and key in self.store:
+                return None
+            self.store[key] = value
+            return True
+
+        def get(self, key):
+            if "get" in self.fail_on:
+                raise RuntimeError("redis down")
+            return self.store.get(key)
+
+        def delete(self, key):
+            self.deleted.append(key)
+            self.store.pop(key, None)
+
+        def incr(self, key):  # used by invalidate_report_cache
+            self.store[key] = str(int(self.store.get(key, 0)) + 1)
+
+        def expire(self, key, ttl):
+            return True
+
+    def _install(self, monkeypatch, client):
+        monkeypatch.setattr(crs, "get_breaker_redis", lambda: client)
+        return client
+
+    # -- ownership ---------------------------------------------------------
+
+    def test_release_deletes_a_lease_we_still_hold(self, monkeypatch):
+        fake = self._install(monkeypatch, self._FakeRedis())
+        client, token = crs._acquire_probe_lock("acme")
+        assert client is fake and token
+
+        crs._release_probe_lock(client, "acme", token)
+
+        assert "credreq:probe:acme" not in fake.store
+        assert fake.deleted == ["credreq:probe:acme"]
+
+    def test_release_never_drops_a_foreign_lease(self, monkeypatch):
+        """THE case this design exists for.
+
+        Our probe overran the TTL, the key expired, and another worker acquired
+        it. Releasing must be a no-op — otherwise we free a lock we do not hold
+        and a third caller probes the same container concurrently.
+        """
+        fake = self._install(monkeypatch, self._FakeRedis())
+        _client, ours = crs._acquire_probe_lock("acme")
+
+        # TTL elapsed; worker B now owns the key.
+        fake.store["credreq:probe:acme"] = "worker-b-token"
+
+        crs._release_probe_lock(fake, "acme", ours)
+
+        assert fake.store["credreq:probe:acme"] == "worker-b-token"
+        assert fake.deleted == [], "released a lease owned by another worker"
+
+    def test_the_lock_value_is_a_per_acquisition_random_token(self, monkeypatch):
+        """A constant (the old `"1"`) makes compare-and-delete a tautology: every
+        holder's token matches, so the guard reads as ownership while granting
+        none."""
+        fake = self._install(monkeypatch, self._FakeRedis())
+        _c1, t1 = crs._acquire_probe_lock("acme")
+        crs._release_probe_lock(fake, "acme", t1)
+        _c2, t2 = crs._acquire_probe_lock("acme")
+
+        assert t1 != t2
+        assert t1 not in ("1", "", None) and len(t1) >= 16
+        for call in fake.set_calls:
+            assert call["nx"] is True, "a non-NX set is not a lock"
+            assert call["ex"] == crs._LOCK_TTL_SECONDS, "a lock without a TTL wedges"
+
+    def test_a_stale_token_from_a_previous_run_cannot_release(self, monkeypatch):
+        """Same predicate from the other direction: holding *a* token is not
+        holding *the* token."""
+        fake = self._install(monkeypatch, self._FakeRedis())
+        _c, current = crs._acquire_probe_lock("acme")
+
+        crs._release_probe_lock(fake, "acme", "a-token-from-a-previous-request")
+
+        assert fake.store["credreq:probe:acme"] == current
+        assert fake.deleted == []
+
+    # -- contention + fail-open -------------------------------------------
+
+    def test_a_concurrent_probe_is_told_busy(self, monkeypatch):
+        self._install(
+            monkeypatch, self._FakeRedis({"credreq:probe:acme": "someone-elses"})
+        )
+        with pytest.raises(crs.CredentialRequirementsBusy):
+            crs._acquire_probe_lock("acme")
+
+    def test_redis_absent_fails_open(self, monkeypatch):
+        """No Redis must degrade to "no backpressure", never to a 409: the lock
+        is an optimisation, and a Redis outage must not make the checklist
+        unreadable."""
+        monkeypatch.setattr(crs, "get_breaker_redis", lambda: None)
+        client, token = crs._acquire_probe_lock("acme")
+        assert (client, token) == (None, None)
+        crs._release_probe_lock(client, "acme", token)  # must not raise
+
+    def test_a_redis_error_fails_open_and_is_never_reported_as_busy(
+        self, monkeypatch
+    ):
+        self._install(monkeypatch, self._FakeRedis(fail_on={"set"}))
+        client, token = crs._acquire_probe_lock("acme")
+        assert (client, token) == (None, None)
+
+    def test_release_swallows_a_redis_error(self, monkeypatch):
+        fake = self._install(monkeypatch, self._FakeRedis(fail_on={"get"}))
+        crs._release_probe_lock(fake, "acme", "tok")  # must not raise
+        assert fake.deleted == []
+
+    # -- the finally -------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_get_report_releases_the_lock_when_build_report_raises(
+        self, monkeypatch
+    ):
+        """Without the `finally`, one failed probe locks the agent out of the
+        checklist for the whole TTL."""
+        fake = self._install(monkeypatch, self._FakeRedis())
+
+        async def boom(_agent_name):
+            raise RuntimeError("probe exploded")
+
+        monkeypatch.setattr(crs, "build_report", boom)
+        crs.invalidate_report_cache("lock-agent")
+
+        with pytest.raises(RuntimeError):
+            await crs.get_report("lock-agent")
+
+        assert "credreq:probe:lock-agent" not in fake.store
+
+    @pytest.mark.asyncio
+    async def test_get_report_releases_the_lock_on_success(self, monkeypatch):
+        fake = self._install(monkeypatch, self._FakeRedis())
+
+        async def ok(_agent_name):
+            return {"state": "ready", "requirements": []}
+
+        monkeypatch.setattr(crs, "build_report", ok)
+        crs.invalidate_report_cache("lock-agent-2")
+
+        await crs.get_report("lock-agent-2")
+
+        assert "credreq:probe:lock-agent-2" not in fake.store

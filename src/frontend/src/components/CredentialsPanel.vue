@@ -317,6 +317,8 @@ const requirementsLoading = ref(false)
 const requirementsError = ref(null)
 const savingChecklist = ref(false)
 const checklistResult = ref(null)
+// Plain let, not a ref: a one-shot 409 retry latch, never rendered.
+let requirementsRetried = false
 const exporting = ref(false)
 const importing = ref(false)
 const quickInjectText = ref('')
@@ -386,8 +388,23 @@ const loadRequirements = async () => {
   try {
     requirements.value = await agentsStore.getCredentialRequirements(props.agentName)
   } catch (err) {
-    requirementsError.value =
-      err.response?.data?.detail || 'Failed to load credential requirements'
+    // A 409 is the service's cross-worker single-flight lock, not a failure of
+    // this agent: a second viewer (another tab, another operator, the other
+    // uvicorn worker) landing inside the ~1s probe window gets it. Surfacing it
+    // as `error` would be doubly wrong — the checklist renders `v-if="error"`
+    // ahead of `v-else-if="report"`, so a concurrent viewer's transient 409
+    // would BLANK a report that had already loaded fine. Retry once behind the
+    // cache the winning probe is about to populate.
+    if (err.response?.status === 409 && !requirementsRetried) {
+      requirementsRetried = true
+      setTimeout(() => { requirementsRetried = false; loadRequirements() }, 1500)
+      return
+    }
+    // Never let a failed refresh destroy a report the user is already reading.
+    if (!requirements.value) {
+      requirementsError.value =
+        err.response?.data?.detail || 'Failed to load credential requirements'
+    }
   } finally {
     requirementsLoading.value = false
   }
@@ -449,7 +466,9 @@ const formatEnvContent = (credentials) => {
     // not unescape, so a value containing a `"` reaches the agent with the
     // backslash. Escaping for a format nobody unescapes is a pre-existing
     // defect in its own right; widening the escaping would make the agent-side
-    // mismatch worse, not better. Filed separately.
+    // mismatch worse, not better. NOT filed on either tracker as of this
+    // writing — said plainly rather than as "filed separately", because a
+    // comment asserting a follow-up exists is exactly why nobody re-checks.
     const escapedValue = String(value).replace(/"/g, '\\"')
     lines.push(`${key}="${escapedValue}"`)
   }

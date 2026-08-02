@@ -217,6 +217,27 @@ contention) and a short cache. An audit row is written on the read — every
 sibling credential route logs one, and silence on the route that enumerates a
 credential inventory reads as an oversight — carrying **counts only**.
 
+The lock holds a **random per-acquisition token** and releases by
+compare-and-delete (#1919), not a bare `DELETE`. Its TTL is reachable in normal
+operation rather than only pathologically: the probe is bounded at
+`_REQUEST_TIMEOUT` (20s) and the catalog fallback adds `get_github_template`'s
+own 10s HTTP timeout — exactly `_LOCK_TTL_SECONDS`. Past that the lease has
+expired and another worker may legitimately hold the key, so an unconditional
+release would drop *their* lock and let a third caller probe the same container
+concurrently. That is the precise failure the lock exists to prevent, and it is
+silent: nothing errors, the fleet just probes harder under load. A constant lock
+value cannot express ownership — it makes the compare a tautology.
+
+**The 409 is a concurrency signal, not a verdict, and the client treats it as
+one.** A second viewer (another tab, another operator, the other uvicorn worker)
+landing inside the ~1s probe window gets it on a perfectly healthy agent. The
+checklist renders `v-if="error"` **ahead of** `v-else-if="report"`, so surfacing
+it would blank a report that had already loaded — `CredentialsPanel` retries once
+behind a resettable latch (once per episode, not once per session) and never lets
+a failed *refresh* clobber a report already on screen. Same failure-reads-as-a-
+verdict class the `degraded`-dominates rule exists to prevent, arriving through
+the UI instead.
+
 ### 2. The probe, and why the exec is bounded three ways
 
 `execute_command_in_container` **accepts** a `timeout` and then never references
@@ -303,6 +324,17 @@ documented heuristic over a small embedded suffix list (Trinity ships no Public
 Suffix List); the **full host is always displayed**, so the security-load-bearing
 part of the render never depends on that table being complete.
 
+Because that split is **right-anchored**, the DNS root dot is normalised before
+canonicalising (`hostname.rstrip(".")`, with a fail-closed empty check).
+`accounts.google.com.evil.tld.` resolves identically in every browser but adds a
+trailing empty label, shifting every label one place right — un-normalised it
+emphasised `tld.` and dimmed the true registrant, moving the bold **off** the
+attacker-controlled part with one character the author fully controls. Punycode
+canonicalisation is irrelevant to that attack: it is pure ASCII. Any host-parsing
+control that counts labels from the right needs the same normalisation, and its
+vectors need the trailing-dot form of each adversarial case — a hostname that is
+*equivalent for resolution* is not equivalent for string-indexed parsing.
+
 `idna` is pinned explicitly in `docker/backend/Dockerfile` even though httpx
 already pulls it in — a transitive pin is one dependency resolution away from
 vanishing, and that class of packaging bug (#1033) is invisible to
@@ -387,6 +419,54 @@ fail-open). Both `.env` writers call it: inject and import.
 | Tests | `tests/unit/test_ent127_{setup_url,predicate,service,endpoint,frontend_contract}.py` |
 
 **No DB table, no migration, no feature flag, no new backend write endpoint.**
+
+---
+
+## Testing
+
+**Status**: ✅ 208 unit + 3 live-backend smoke.
+
+| Suite | Covers | Tests |
+|---|---|---|
+| `unit/test_ent127_setup_url.py` | UTS-46 canonicalisation against an adversarial table where **every row passes `_setup_url_error`**: `faß.de` / `ς.example` (stdlib codec displays a different domain than a browser resolves), percent-encoded authority, empty/over-long label, NFKC-confusable delimiter, IPv6 literal, non-https. Every failure path must report `display_host is None` — a raw-host fallback would make a failed check byte-identical to a pass. Plus eTLD+1 emphasis for the pure-ASCII `accounts.google.com.evil.tld` shape and its **trailing-root-dot** form | 38 |
+| `unit/test_ent127_predicate.py` | The **agent-exporter parity test** (highest-value in the PR): `_env_pairs` must agree with `agent_server/routers/credentials.py` over a 27-row fixture table, anchor resolved through `ast` (a `str.find` offset returns `-1` on a rename and silently asserts against an empty slice). Plus emptiness semantics, script assembly, and **executed** runs of the assembled script — FIFO `.env` (the agent-triggerable pool-wedge), oversize/binary/non-UTF-8, absent `.env`, and "no fixture secret appears in the output" | 78 |
+| `unit/test_ent127_service.py` | Report assembly, probe faked. `TestDegradedDominates` is load-bearing: stopped agent, **empty** catalog result, missing template label, label→not-in-catalog, Docker unavailable, unparseable template — none may render as "no credentials required". `TestProbeLockOwnership` covers the single-flight compare-and-delete (#1919) | 43 |
+| `unit/test_ent127_endpoint.py` | Principal matrix + auth **wiring**: the route must depend on `get_owned_agent_by_name` (not `…authorized…`) and must `reject_agent_principal`. Stopped → 200 not 4xx; 409 single-flight; 429 rate limit; audit row carries counts, never a variable name; both `.env` writers invalidate the cache | 12 |
+| `unit/test_ent127_frontend_contract.py` | `src/frontend` has no component-test runner, so the rendering contract is source-anchored: no markdown/`v-html` on author text, anchor text is the parsed host, `rel`/`referrerpolicy` present, `secret` masks on `!== false`. Plus an **executed** node `.env` round-trip proving the quote-escape corruption fix, and `TestTransientFailureNeverBlanksTheReport` | 37 |
+| `test_ent127_credential_requirements_api.py` | Live-backend route-wiring smoke (#1069 class) — the unit suite mounts the router on a **synthetic** app, so only these prove `main.py` registration + the real dependency chain resolves | 3 |
+
+**Edge cases pinned by name** (each is a fixed defect, not a hypothetical):
+
+- **A caught exception that reads as a pass.** `_safe_normalize` catching a
+  normalizer raise is *half* the fix; propagating it into `degraded_reason` is
+  the other half. The test asserts the resulting **state**, not that the
+  exception was swallowed — the ent#128 `run_static` lesson recurring one layer
+  up, and in the test layer too.
+- **The trailing DNS root dot.** `accounts.google.com.evil.tld.` resolves
+  identically in every browser but adds an empty label, shifting the
+  right-anchored eTLD+1 split so the UI bolds `tld.` and dims the true
+  registrant — the emphasis moving **off** the attacker-controlled part.
+- **Releasing a foreign lease.** The lock TTL is reachable in normal operation
+  (`_REQUEST_TIMEOUT` 20s + the catalog fallback's 10s HTTP timeout = exactly
+  `_LOCK_TTL_SECONDS`), so a bare `DELETE` in the `finally` frees a lease
+  another worker now owns.
+- **A transient 409 blanking a healthy report.** The checklist renders
+  `v-if="error"` **ahead of** `v-else-if="report"`, so any write to
+  `requirementsError` beats a report that loaded fine.
+
+**Not covered** (stated rather than implied): no Playwright/component test
+exercises the rendered checklist — the frontend contract is source-anchored
+only, and will not catch a regression that keeps the source pattern while
+breaking the render. No test boots a real agent container; the probe script is
+executed against fixture directories, not through `docker exec`.
+
+## Related Flows
+
+| Flow | Relationship |
+|---|---|
+| [template-processing.md](template-processing.md) | **Upstream.** Owns `credentials:` / `credential_setup:` and `normalize_credential_requirements` (ent#128) — the declaration half this flow joins against live state. This flow is a read-only consumer; `template_service.py` is unedited |
+| [credential-injection.md](credential-injection.md) | **Downstream.** The checklist's write path reuses the existing owner-gated inject route (CRED-002) — no new write surface. Both of that path's latent defects are fixed here |
+| [agent-compatibility-validation.md](agent-compatibility-validation.md) | **Sibling, deliberately NOT shared.** The #668 collector is the pattern this probe follows, but stays a **separate** exec: compat treats `.env` as existence-only by security design and its payload feeds AI checks, so value-derived data there would be a widening. Do not unify them without re-reading §2 |
 
 ---
 

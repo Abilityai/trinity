@@ -126,6 +126,18 @@ def describe_setup_url(url) -> dict:
     if not hostname:
         return dict(_FAIL_CLOSED)
 
+    # A trailing dot is the DNS root label: `example.com.` and `example.com`
+    # resolve identically in every browser, but it shifts every label one place
+    # right for `_registrable_domain`. `accounts.google.com.evil.tld.` would
+    # then emphasise `tld.` instead of `evil.tld` — moving the bold off the true
+    # registrant, i.e. defeating this module's PRIMARY defence (punycode is
+    # irrelevant to the all-ASCII subdomain attack; eTLD+1 is the part an
+    # operator can judge) with one character an author fully controls. Strip it
+    # before canonicalising; a host of only dots fails closed.
+    hostname = hostname.rstrip(".")
+    if not hostname:
+        return dict(_FAIL_CLOSED)
+
     # Defence in depth. The backend validates https at declaration time
     # (`_setup_url_error`), but this module is a standalone leaf that other
     # consumers will reuse, and a describer that vouches for the host of a

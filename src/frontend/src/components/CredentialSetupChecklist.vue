@@ -286,6 +286,7 @@ watch(
                 <span class="text-gray-500 dark:text-gray-400">Get one at </span>
                 <a
                   :href="row.setup_url"
+                  :title="row.setup_url"
                   target="_blank"
                   rel="noopener noreferrer"
                   referrerpolicy="no-referrer"

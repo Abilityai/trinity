@@ -146,6 +146,51 @@ class TestValidatorAgreement:
         assert describe_setup_url(url)["verified"] is True
 
 
+class TestTrailingRootDot:
+    """A trailing dot is the DNS root label: `evil.tld.` resolves identically in
+    every browser, but it produces a trailing EMPTY label, which shifts every
+    label one place right for a right-anchored eTLD+1 split. Un-normalised, the
+    UI bolded the public suffix (`tld.`) and dimmed the true registrant — the
+    bold moving off the attacker-controlled part is exactly the failure the
+    registrable-domain emphasis exists to prevent, bought with one character the
+    template author fully controls.
+    """
+
+    @pytest.mark.parametrize(
+        "url,expected_host,expected_registrable",
+        [
+            # The motivating case: subdomain deception wearing a root dot.
+            (
+                "https://accounts.google.com.evil.tld./apikey",
+                "accounts.google.com.evil.tld",
+                "evil.tld",
+            ),
+            ("https://google.com./keys", "google.com", "google.com"),
+            # Multi-label public suffix must still resolve past the root dot.
+            ("https://foo.example.co.uk./k", "foo.example.co.uk", "example.co.uk"),
+            # Idempotent: the dot-free form is unchanged.
+            (
+                "https://platform.openai.com/api-keys",
+                "platform.openai.com",
+                "openai.com",
+            ),
+        ],
+    )
+    def test_root_dot_does_not_shift_the_emphasis(
+        self, url, expected_host, expected_registrable
+    ):
+        result = describe_setup_url(url)
+        assert result["display_host"] == expected_host
+        assert result["registrable"] == expected_registrable
+        assert result["verified"] is True
+
+    @pytest.mark.parametrize("url", ["https://.../k", "https://./k", "https://../k"])
+    def test_dots_only_host_fails_closed(self, url):
+        # Stripping must not manufacture an empty host that later reads as valid.
+        assert describe_setup_url(url)["display_host"] is None
+        assert describe_setup_url(url)["verified"] is False
+
+
 class TestOptionalWrapper:
     def test_none_in_none_out(self):
         assert describe_setup_url_or_none(None) is None

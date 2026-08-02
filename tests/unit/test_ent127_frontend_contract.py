@@ -273,3 +273,68 @@ class TestEnvRoundTrip:
         """The corruption hit every OTHER credential in the file, which is what
         made it a data-loss bug rather than an editing annoyance."""
         assert self._round_trip("plain", times=5)["OTHER"] == 'sib"ling'
+
+
+class TestTransientFailureNeverBlanksTheReport:
+    """A refresh that fails must not destroy a report already on screen.
+
+    The checklist renders `v-if="error"` AHEAD of `v-else-if="report"`, so any
+    write to `requirementsError` wins over a report that loaded fine. Two live
+    paths reach that write with a *transient* failure:
+
+      * a 409 from the service's cross-worker single-flight lock — a second
+        viewer (another tab, another operator, the other uvicorn worker) landing
+        inside the ~1s probe window. It says "someone else is probing right
+        now", never "this agent is broken";
+      * `loadRequirements()` re-running after a successful write
+        (`saveChecklistCredentials` calls it), where a blip would replace the
+        just-updated checklist with an error panel.
+
+    Both render as a dead-end error on a healthy agent, which is the same
+    failure-reads-as-a-verdict class the backend's `degraded` rule exists to
+    prevent — arriving through the UI instead.
+    """
+
+    def test_a_409_is_retried_once_not_surfaced_as_an_error(self, panel):
+        src = _function_source(panel, "loadRequirements")
+        assert "err.response?.status === 409" in src, (
+            "the single-flight 409 is not distinguished from a real failure"
+        )
+        # One-shot: a latch, so a persistently-locked agent cannot spin.
+        assert "requirementsRetried" in src
+        assert "setTimeout" in src
+
+    def test_the_retry_latch_is_reset_so_it_is_once_per_episode_not_once_ever(
+        self, panel
+    ):
+        """A latch that never resets makes the retry a single lifetime event —
+        the second concurrent viewer in a session gets the blank error anyway."""
+        src = _function_source(panel, "loadRequirements")
+        assert "requirementsRetried = false" in src
+
+    def test_a_failed_refresh_does_not_clobber_a_loaded_report(self, panel):
+        src = _function_source(panel, "loadRequirements")
+        assert "if (!requirements.value)" in src, (
+            "an error from a REFRESH still overwrites a report already rendered"
+        )
+
+    def test_the_latch_is_not_reactive_state(self, panel):
+        """It is control flow, never rendered — a `ref` would invite a template
+        binding on it and make the retry visible as a state flicker."""
+        assert "let requirementsRetried = false" in panel
+        assert "requirementsRetried = ref(" not in panel
+
+
+class TestFullUrlIsDiscoverable:
+    def test_the_anchor_title_is_the_url_never_the_author_label(self, checklist):
+        """The visible anchor text is deliberately the parsed host, so the full
+        destination has to be reachable somewhere — hover is that somewhere.
+        Putting the author's `title` there instead would rebuild the deception
+        the host-only anchor text exists to prevent, one layer down where no
+        validator looks."""
+        anchors = re.findall(r"<a\b[^>]*?>", checklist, re.S)
+        assert anchors, "no anchor found — re-anchor this test on the new markup"
+        for tag in anchors:
+            assert ':title="row.setup_url"' in tag
+            assert ':title="row.title"' not in tag
+            assert ':title="row.description"' not in tag
