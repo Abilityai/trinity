@@ -75,6 +75,12 @@ croniter>=5.0.0
 psutil>=6.1.0
 aiofiles>=24.1.0
 python-magic>=0.4.27
+# idna: UTS-46 host canonicalisation in services/setup_url_display.py, which
+# tests/unit/test_ent127_setup_url.py imports directly. httpx pulls it in
+# transitively, but an undeclared direct import is exactly the dependency a
+# resolver change drops silently. Floor matches docker/backend/Dockerfile's
+# exact pin. (trinity-enterprise#127)
+idna>=3.10
 slack_sdk[socket-mode]>=3.41.0
 slackify-markdown>=0.2.0
 twilio>=9.10.0
