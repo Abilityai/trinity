@@ -1,0 +1,29 @@
+name: delivery-conductor
+# A reusable runtime scaffold, intentionally excluded from the starter catalog.
+hidden: true
+display_name: Delivery Conductor
+description: Generic agent-owned conductor scaffold for bounded, recoverable delivery ticks.
+version: "1.0.0"
+author: Trinity Platform
+
+# Runtime state is durable but remains outside the source workspace history.
+data_paths:
+  - data/**
+
+# Trinity supplies these generic wake and handoff capabilities. No schedule is
+# installed by default; adopters configure their own wake policy.
+capabilities:
+  - events
+  - reminders
+  - executions
+  - chat
+
+# This template deliberately asks for no repository credentials or external MCP
+# clients. Trinity injects its own capability surface at runtime.
+mcp_servers: []
+credentials: {}
+
+# The future executor may hand off one reserved action through this one tool.
+conductor:
+  allowed_effect_tools:
+    - mcp__trinity__chat_with_agent

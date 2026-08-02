@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+WORKSPACE_ROOT=/home/developer
+CURRENT_DIRECTORY="$(pwd -P)"
+
+case "$CURRENT_DIRECTORY" in
+  "$WORKSPACE_ROOT"|"$WORKSPACE_ROOT"/*) ;;
+  *)
+    printf '%s\n' "conductor-tick must run from the agent workspace" >&2
+    exit 64
+    ;;
+esac
+
+SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "$0")" && pwd -P)"
+TEMPLATE_ROOT="$(cd -- "$SCRIPT_DIRECTORY/.." && pwd -P)"
+TEMPLATE_LIBRARY="$TEMPLATE_ROOT/lib"
+
+if [ ! -d "$TEMPLATE_LIBRARY" ]; then
+  printf '%s\n' "conductor-tick could not find its template library" >&2
+  exit 65
+fi
+
+export PYTHONPATH="$TEMPLATE_LIBRARY${PYTHONPATH:+:$PYTHONPATH}"
+exec python -m delivery_conductor.cli "$@"
