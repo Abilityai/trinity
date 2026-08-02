@@ -28,7 +28,7 @@ from services.agent_service.helpers import validate_base_image
 from services.agent_runtime_state import clear_agent_breakers
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
 from services.skill_service import skill_service
-from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, check_base_image_matches, is_claude_runtime, is_system_agent_name
+from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, check_agent_mcp_key_matches, check_base_image_matches, is_claude_runtime, is_system_agent_name
 from services.agent_auth import derive_agent_token
 from utils.helpers import utc_now_iso
 from .file_sharing import check_public_folder_mount_matches
@@ -298,6 +298,12 @@ async def start_agent_internal(agent_name: str) -> dict:
     await container_reload(container)
     was_already_running = getattr(container, "status", None) == "running"
     shared_folder_match = await check_shared_folder_mounts_match(container, agent_name)
+    # #1854: evaluated separately (not inlined into the `or` chain) because its
+    # verdict is needed twice — once to decide whether to recreate, and once to
+    # decide whether this recreate must also mint + bake a fresh MCP key. The
+    # other predicates are satisfied by the recreate's own derived-env rules; a
+    # missing/stale MCP key is not, because the plaintext is unrecoverable.
+    mcp_key_match = check_agent_mcp_key_matches(container, agent_name)
     needs_recreation = (
         not shared_folder_match or
         not check_public_folder_mount_matches(container, agent_name) or
@@ -306,7 +312,8 @@ async def start_agent_internal(agent_name: str) -> dict:
         not check_resource_limits_match(container, agent_name) or
         not check_full_capabilities_match(container, agent_name) or
         not check_guardrails_env_matches(container, agent_name) or
-        not check_agent_auth_token_env_matches(container, agent_name)
+        not check_agent_auth_token_env_matches(container, agent_name) or
+        not mcp_key_match
     )
 
     # #1809: a rebuilt base image is picked up on COLD start only. Evaluated
@@ -386,9 +393,27 @@ async def start_agent_internal(agent_name: str) -> dict:
         clear_agent_breakers(agent_name)
 
     if needs_recreation:
+        # #1854: when the MCP-key predicate is what drifted, the recreate cannot
+        # heal it from derived state the way the other predicates do — only the
+        # key HASH is stored, so a container whose key is absent or unrecognized
+        # can never have the right plaintext reconstructed. Mint a fresh one and
+        # bake it (with TRINITY_MCP_URL and TRINITY_BACKEND_URL, which the agent
+        # server's injection requires together) as an env override.
+        #
+        # Fail-soft: heal_agent_mcp_key_env returns None on any failure, and the
+        # recreate proceeds without it — a credential-bookkeeping problem must
+        # never block a start. The predicate simply stays unsatisfied and the
+        # next manual start retries.
+        mcp_env_overrides = None
+        if not mcp_key_match:
+            from services.agent_mcp_key_service import heal_agent_mcp_key_env
+            mcp_env_overrides = heal_agent_mcp_key_env(agent_name)
+
         # Recreate container with updated config
         # Use system user for internal operations
-        await recreate_container_with_updated_config(agent_name, container, "system")
+        await recreate_container_with_updated_config(
+            agent_name, container, "system", env_overrides=mcp_env_overrides
+        )
         container = get_agent_container(agent_name)
 
     await container_start(container)
@@ -746,6 +771,7 @@ async def recreate_container_with_updated_config(
     owner_username: str,
     *,
     full_capabilities: Optional[bool] = None,
+    env_overrides: Optional[dict] = None,
 ):
     """
     Recreate an agent container with updated configuration.
@@ -753,6 +779,20 @@ async def recreate_container_with_updated_config(
     Preserves the agent's workspace volume and other configuration.
 
     Args:
+        env_overrides: #1854 — env vars to force onto the replacement,
+            applied LAST (immediately before the container handoff), so they win
+            over every derived rule in between. The caller owns the value; this
+            function neither mints nor validates it.
+
+            Used by MCP-key rotation and by the start-time drift self-heal, both
+            of which must bake a freshly minted `TRINITY_MCP_API_KEY` that
+            cannot be reconstructed from persisted state (only the hash is
+            stored). NOT applied at the `Config.Env` copy point: roughly twenty
+            derived mutations sit between there and the handoff (subscription
+            token/API-key juggling, GitHub PAT, guardrails, stall limit,
+            TRINITY_AGENT_AUTH_TOKEN, the pull-mode pop+update), and an override
+            landing before them would be silently clobbered by any that happened
+            to collide.
         full_capabilities: #1816 override for the fleet-wide capabilities
             setting. ``None`` (every existing caller) resolves it the same way
             the matching predicate does — the fleet default for a regular
@@ -1013,6 +1053,12 @@ async def recreate_container_with_updated_config(
             vol_name = m.get("Name")
             if vol_name:
                 volumes[vol_name] = {"bind": dest, "mode": "rw" if m.get("RW", True) else "ro"}
+
+    # #1854: caller-forced env, applied LAST so it wins over every derived rule
+    # above (see the `env_overrides` note in this function's docstring). Keys are
+    # coerced to str because they go straight into the Docker `environment` dict.
+    if env_overrides:
+        env_vars.update({str(k): str(v) for k, v in env_overrides.items() if k})
 
     try:
         return await _provision_folders_and_run_agent_container(

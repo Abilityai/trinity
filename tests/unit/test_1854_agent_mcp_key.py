@@ -793,9 +793,16 @@ def test_16_clear_agent_breakers_runs_before_the_recreate():
     fast-failed without ever being contacted — read as 'the rotation broke my
     agent'. `learnings.md` names this call site explicitly."""
     src = _SERVICE_SRC.read_text()
-    clear_at = src.index("clear_agent_breakers(")
-    recreate_at = src.index("recreate_container_with_updated_config")
-    assert clear_at < recreate_at
+    body = src[src.index("async def _regenerate_locked"):]
+    clear_at = body.index("clear_agent_breakers(")
+    recreate_at = body.index("_recreate_with_env(")
+    assert clear_at < recreate_at, (
+        "the name-keyed heartbeat + both breakers must be cleared BEFORE the "
+        "replacement comes up — `_recreate_with_env` starts it via "
+        "containers_run(detach=True), so clearing afterwards leaves a window in "
+        "which a concurrent dispatch reads the predecessor's verdict against a "
+        "container that is already live (#1560)"
+    )
 
 
 # --------------------------------------------------------------------------- #
