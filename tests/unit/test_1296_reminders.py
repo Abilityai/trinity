@@ -164,6 +164,184 @@ def test_raw_fire_spec():
     )
 
 
+# ---------------------------------------------------------------------------
+# #1831 — fire_at validation delegates to parse_iso_timestamp
+#
+# The validator used to normalize with ``v.replace("Z", "+00:00")`` (EVERY 'Z')
+# while ``parse_iso_timestamp`` strips only a TRAILING 'Z'. A mid-string 'Z'
+# therefore passed validation and then raised ValueError out of the UNGUARDED
+# ``reminder_service._resolve_fire_at`` — HTTP 500 on an agent-supplied value.
+# ---------------------------------------------------------------------------
+
+# The measured divergence class on the production interpreter (py3.13): each of
+# these was confirmed a live 500 through the real code before the fix. The
+# parser raises on all seven under BOTH py3.13 and py3.14, so the list is
+# interpreter-portable.
+_1831_MID_STRING_Z = [
+    "2026-01-15 10:30Z:00",
+    "2026-01-15 10Z:30:00",
+    "2026-01-15T10:30:00Z.5",
+    "2026-01-15T10:30Z:00",
+    "2026-01-15T10:30Z:00.5",
+    "2026-01-15T10Z:30",
+    "2026-01-15T10Z:30:00",
+]
+
+# The DELIBERATE loosening: an uppercase 'Z' used as the date/time SEPARATOR.
+# ``fromisoformat`` (3.11+) accepts any single character there, so lowercase 'z'
+# and 'X' already worked; uppercase 'Z' was rejected only as an artifact of the
+# ``replace`` bug mangling it into "2026-01-15+00:0010:30:00".
+_1831_Z_SEPARATOR = [
+    "2026-01-15Z10:30",
+    "2026-01-15Z10:30:00",
+    "2026-01-15Z10:30:00Z",
+    "2026-01-15Z10:30:00+00:00",
+    "2026-01-15Z10:30:00-05:00",
+    "2026-01-15Z10:30:00.123456",
+    "2026-01-15Z10:30:00.123456Z",
+]
+
+# Shapes accepted before AND after the fix — the no-regression anchor.
+_1831_CANONICAL = [
+    "2026-08-01T10:00:00Z",
+    "2026-08-01T10:00:00+00:00",
+    "2026-08-01T10:00:00",
+    "2026-08-01 10:00:00",
+    "2026-08-01T10:00:00.123456Z",
+    "2026-08-01T13:00:00+03:00",
+    "2026-08-01",
+]
+
+_1831_GARBAGE = ["not-a-date", "", "2026-13-45T99:99:99", "Z", "2026-01-15T"]
+
+
+def _1831_validator_accepts(s) -> bool:
+    from models import ReminderCreate
+    from pydantic import ValidationError
+    try:
+        ReminderCreate(message="x", fire_at=s)
+        return True
+    except ValidationError:
+        return False
+
+
+@pytest.mark.parametrize("s", _1831_MID_STRING_Z)
+def test_1831_mid_string_z_fire_at_rejected(s):
+    """T1 — the reported bug. Each of these seven produced HTTP 500 before the
+    fix (validator ACCEPT -> parser RAISE -> ValueError escapes the router's
+    ``except HTTPException``). They must now be rejected at validation."""
+    _load()
+    assert not _1831_validator_accepts(s), f"{s!r} must be rejected, not 500 later"
+
+
+@pytest.mark.parametrize("s", _1831_CANONICAL + _1831_Z_SEPARATOR)
+def test_1831_validator_does_not_canonicalize_fire_at(s):
+    """T2 — the Invariant #18 guard. The create-idempotency key hashes
+    ``raw_fire_spec()``, so a validator that "helpfully" returned a normalized
+    value would fork the key and DOUBLE-CREATE on a client retry. ``fire_at``
+    must round-trip byte-identically."""
+    _load()
+    from models import ReminderCreate
+    d = ReminderCreate(message="x", fire_at=s)
+    assert d.fire_at == s
+    assert d.raw_fire_spec() == f"fire_at={s}"
+
+
+@pytest.mark.parametrize(
+    "s", _1831_MID_STRING_Z + _1831_Z_SEPARATOR + _1831_CANONICAL + _1831_GARBAGE
+)
+def test_1831_validator_implies_parser(s):
+    """T3 — P7 restated discretely and Hypothesis-free: validator_accepts(s)
+    implies parser_accepts(s). Survives if the property suite is ever
+    deselected. ONE-DIRECTIONAL on purpose — asserting the converse would forbid
+    the validator from ever becoming legitimately stricter than the parser."""
+    _load()
+    from utils.helpers import parse_iso_timestamp
+    if _1831_validator_accepts(s):
+        parse_iso_timestamp(s)  # must not raise
+
+
+@pytest.mark.parametrize("s", _1831_Z_SEPARATOR)
+def test_1831_uppercase_z_separator_now_accepted(s):
+    """T4 — pins the DELIBERATE loosening so a future reader does not "fix" it
+    back. These parse to a single unambiguous instant and remain subject to the
+    service's min/max-window bounds."""
+    _load()
+    from models import ReminderCreate
+    from utils.helpers import parse_iso_timestamp
+    assert ReminderCreate(message="x", fire_at=s).fire_at == s
+    assert parse_iso_timestamp(s) is not None
+
+
+def test_1831_fire_at_none_cannot_reach_the_parser(monkeypatch):
+    """T5 — the XOR guard is the ONLY thing between ``fire_at=None`` and an
+    ``AttributeError`` 500 in ``parse_iso_timestamp(None)``. Pin that it is
+    load-bearing: None alone is rejected, and the ``delay_seconds`` branch
+    returns before the parser is ever consulted."""
+    _load()
+    from datetime import datetime, timezone
+    from models import ReminderCreate
+    from pydantic import ValidationError
+    from services import reminder_service
+
+    with pytest.raises(ValidationError):
+        ReminderCreate(message="x", fire_at=None)   # neither supplied
+    with pytest.raises(ValidationError):
+        ReminderCreate(message="x")                  # neither supplied
+
+    data = ReminderCreate(message="x", fire_at=None, delay_seconds=120)
+    assert data.fire_at is None
+
+    def _never(_value):
+        raise AssertionError("parse_iso_timestamp reached on the delay_seconds branch")
+
+    monkeypatch.setattr(reminder_service, "parse_iso_timestamp", _never)
+    resolved = reminder_service._resolve_fire_at(data)
+    assert isinstance(resolved, datetime) and resolved.tzinfo is not None
+    assert resolved > datetime.now(timezone.utc)
+
+
+def test_1831_malformed_fire_at_never_claims_an_idempotency_key(monkeypatch):
+    """T6 — the fix's second-order value, pinned so a later refactor cannot move
+    validation back into the service. A malformed ``fire_at`` must be rejected
+    at BODY BINDING, i.e. before ``idempotency_service.begin()``. Pre-#1831 the
+    escaping ``ValueError`` skipped the router's ``except HTTPException:
+    fail(idem)`` rescue and stranded an ``in_flight`` claim, turning every
+    identical retry into a 409 for 24h (attempt 1 -> 500, attempts 2-3 -> 409)."""
+    _load()
+    from models import ReminderCreate
+    from pydantic import ValidationError
+    from services import idempotency_service
+
+    a = _agent()
+    payload = {"message": "wedge", "fire_at": "2026-08-01T10Z:30:00"}
+    real_begin = idempotency_service.begin
+    claimed = []
+
+    def _spy(scope, key):
+        claimed.append((scope, key))
+        return real_begin(scope, key)
+
+    monkeypatch.setattr(idempotency_service, "begin", _spy)
+
+    for _ in range(3):
+        # Exactly what FastAPI does: bind the body, THEN run the path function.
+        with pytest.raises(ValidationError):
+            _create(a, _user(agent_name=a), ReminderCreate(**payload))
+
+    assert claimed == [], "begin() must not run for a body that never binds"
+
+    # And the key that WOULD have been claimed is still free — a corrected retry
+    # proceeds instead of hitting a stranded-claim 409.
+    scope = idempotency_service.make_agent_scope(a)
+    key = idempotency_service.derive_reminder_key(
+        a, payload["message"], f"fire_at={payload['fire_at']}"
+    )
+    decision = real_begin(scope, key)
+    assert not decision.replay
+    idempotency_service.fail(decision)
+
+
 def test_derive_reminder_key_stable_and_raw():
     _load()
     from services import idempotency_service as idem
