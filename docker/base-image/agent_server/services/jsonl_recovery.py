@@ -244,6 +244,22 @@ def _recover_response_from_jsonl(session_id: Optional[str]) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Completed-turn recovery (#1870)
+# ---------------------------------------------------------------------------
+
+
+def _recover_completed_turn_from_jsonl(
+    session_id: Optional[str], since_iso: Optional[str]
+) -> Optional[str]:
+    """Recover the answer of a turn the runtime mislabelled as failed (#1870).
+
+    STUB — the real boundary rule lands in the next commit. Returning None
+    preserves today's behaviour exactly (the caller raises the same 502).
+    """
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Compact event extraction (refactored on top of the snapshot reader)
 # ---------------------------------------------------------------------------
 
