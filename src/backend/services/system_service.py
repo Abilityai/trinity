@@ -535,7 +535,35 @@ def create_schedules(
         if not final_name or not config.schedules:
             continue
 
+        # trinity-enterprise#89: this runs AFTER `create_agent_internal`, which
+        # now materializes the TEMPLATE's declared `schedules:`. Without a
+        # name-match skip, a manifest declaring `daily-briefing` on a template
+        # that also declares it yields TWO rows — there is no
+        # UNIQUE(agent_name, name) index (and adding one is a dual-track schema
+        # change that would fail on installs already holding duplicates), so
+        # idempotency has to be an explicit read-then-skip in the caller that
+        # runs second. Failing open on a read error preserves the pre-#89
+        # behaviour (create everything) rather than silently dropping a
+        # manifest's schedules.
+        try:
+            existing_names = {
+                s.name for s in db.list_agent_schedules(final_name)
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"Could not read existing schedules for {final_name} "
+                f"({e}); manifest schedules will be created unfiltered"
+            )
+            existing_names = set()
+
         for schedule_data in config.schedules:
+            if schedule_data["name"] in existing_names:
+                logger.info(
+                    f"Skipping schedule '{schedule_data['name']}' for "
+                    f"{final_name}: a schedule of that name already exists"
+                )
+                continue
+
             schedule_create = ScheduleCreate(
                 name=schedule_data["name"],
                 cron_expression=schedule_data["cron"],
@@ -554,6 +582,7 @@ def create_schedules(
 
             if schedule:
                 schedules_count += 1
+                existing_names.add(schedule_data["name"])
                 logger.info(f"Created schedule '{schedule_data['name']}' for {final_name}")
                 # Dedicated scheduler syncs from database automatically
             else:
