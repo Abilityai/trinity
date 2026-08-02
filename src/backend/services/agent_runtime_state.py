@@ -88,6 +88,17 @@ EXEMPT_KEYSPACES: Dict[str, str] = {
         "would unserialize the other. Registered here so the parity test stays "
         "green and the omission stays a decision."
     ),
+    "agent:mcp_key_regen:": (
+        "Short-lived SETNX MCP-key rotation lock carrying its own TTL (#1854). "
+        "Same shape as agent:data_op: above, and clearing it would be actively "
+        "harmful: this lock is deliberately FAIL-CLOSED because two interleaved "
+        "rotations end at 'the container holds K1 while the only active row is "
+        "K2', permanently 401-ing the heartbeat, the result callback, the pull "
+        "worker and the MCP client — with the surviving plaintext unrecoverable. "
+        "Deleting it mid-rotation would manufacture exactly that interleave, and "
+        "the rotation itself replaces the container, so a lifecycle clear on the "
+        "start path could fire against its own in-flight operation."
+    ),
 }
 
 

@@ -65,6 +65,7 @@ def wait_for_agent_ready(monkeypatch):
             check_full_capabilities_match=None,
             check_guardrails_env_matches=None,
             check_agent_auth_token_env_matches=None,  # added to lifecycle.py import (#1159)
+            check_agent_mcp_key_matches=None,  # added to lifecycle.py import (#1854)
             check_base_image_matches=None,  # added to lifecycle.py import (#1809)
             is_claude_runtime=None,  # added to lifecycle.py import (#1187)
             is_system_agent_name=None,  # added to lifecycle.py import (#1816)
