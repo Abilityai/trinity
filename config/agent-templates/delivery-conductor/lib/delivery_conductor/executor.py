@@ -9,8 +9,10 @@ from typing import Any, Mapping, Protocol
 
 from .adapter import (
     JsonLinesExchangeFactory,
+    LiveChannel,
     PortExchangeError,
-    _claim_fresh_channel,
+    _claim_live_channel,
+    _release_live_channel,
 )
 from .contracts import MAX_MESSAGE_BYTES, ProposedAction
 from .ledger import EffectResult, LedgerValidationError
@@ -47,7 +49,7 @@ class JsonLinesCapabilityExecutor:
                 raise TypeError("installed exchange factory must be callable")
             exchanges[capability_name] = exchange_factory
         self._installed_exchanges = MappingProxyType(exchanges)
-        self._used_channels: list[tuple[object, object]] = []
+        self._live_channels: list[LiveChannel] = []
         self._channel_lock = threading.Lock()
 
     def execute(self, action: ProposedAction) -> EffectResult:
@@ -63,8 +65,19 @@ class JsonLinesCapabilityExecutor:
                 raise PortExchangeError(
                     "exchange factory did not provide a JSON Lines port"
                 )
-            _claim_fresh_channel(exchange, self._used_channels, self._channel_lock)
-            response_line = exchange.exchange(request_line)
+            identity = _claim_live_channel(
+                exchange,
+                self._live_channels,
+                self._channel_lock,
+            )
+            try:
+                response_line = exchange.exchange(request_line)
+            finally:
+                _release_live_channel(
+                    identity,
+                    self._live_channels,
+                    self._channel_lock,
+                )
         except PortExchangeError:
             return _ambiguous_result(action, "executor-exchange-ambiguous")
         try:

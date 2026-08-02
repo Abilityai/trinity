@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime, timedelta, timezone
+import gc
 from io import BytesIO
 import json
 from pathlib import Path
@@ -12,6 +13,7 @@ import sys
 import threading
 import time
 from typing import Any
+import weakref
 
 import pytest
 
@@ -159,6 +161,43 @@ class BlockingReader:
 
     def close(self) -> None:
         self.closed.set()
+
+
+class BlockingCloseReader:
+    def __init__(self) -> None:
+        self.read_released = threading.Event()
+        self.close_started = threading.Event()
+        self.close_released = threading.Event()
+
+    def readline(self, _limit: int) -> bytes:
+        self.read_released.wait()
+        return b""
+
+    def close(self) -> None:
+        self.close_started.set()
+        self.close_released.wait(0.4)
+        self.read_released.set()
+
+
+class CloseTrackingWriter:
+    def __init__(self) -> None:
+        self.value = bytearray()
+        self.written = threading.Event()
+        self.closed = threading.Event()
+
+    def write(self, value: bytes) -> int:
+        self.value.extend(value)
+        self.written.set()
+        return len(value)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed.set()
+
+    def getvalue(self) -> bytes:
+        return bytes(self.value)
 
 
 @pytest.fixture
@@ -625,6 +664,140 @@ def test_completed_action_with_next_reminder_keeps_wake_pending(
     assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
 
 
+def test_ambiguous_result_reserves_stable_executable_reminder_before_release(
+    ledger: ControlLedger, database_path: Path
+):
+    """Deferring reminder reservation must let a later noop lose ambiguous recovery."""
+    action = _action()
+    adapter = FakeAdapter(
+        _decision("execute", action=action),
+        _decision("noop"),
+    )
+    runner = _runner(ledger, adapter)
+    prepared = runner.run(
+        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    )
+
+    runner.accept_result(
+        prepared.handoff,
+        action_key="action-1",
+        result=EffectResult("ambiguous", "d" * 64, "result-unknown"),
+    )
+
+    assert _fetchall(
+        database_path,
+        "SELECT capability_name, status FROM action_journal ORDER BY action_key",
+    ) == [("chat", "ambiguous"), ("reminders", "reserved")]
+
+    recovered = runner.run(
+        _wake(1),
+        NOW + timedelta(seconds=90),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+
+    assert recovered.status == "reminder-ready"
+    assert recovered.action.capability_name == "reminders"
+    assert recovered.reminder.due_at_utc == "2026-08-02T09:15:11Z"
+    payload = json.loads(recovered.action.payload_json)
+    assert payload["references"]["identifiers"] == [
+        "investigate:action-1",
+        "2026-08-02T09:15:11Z",
+    ]
+    assert len(adapter.requests) == 1
+
+
+def test_repeated_ambiguous_recovery_reuses_one_reminder_key_and_due_time(
+    ledger: ControlLedger, database_path: Path
+):
+    """Deriving reminder due time from each recovery now must mint duplicate effects."""
+    action = _action()
+    adapter = FakeAdapter(
+        _decision("execute", action=action),
+        _decision("execute", action=action),
+    )
+    runner = _runner(ledger, adapter)
+    prepared = runner.run(
+        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    )
+    runner.accept_result(
+        prepared.handoff,
+        action_key="action-1",
+        result=EffectResult("ambiguous", "d" * 64, "result-unknown"),
+    )
+
+    first = runner.run(
+        _wake(1),
+        NOW + timedelta(seconds=60),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+    second = runner.run(
+        _wake(2),
+        NOW + timedelta(seconds=120),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+
+    assert first.action.action_key == second.action.action_key
+    assert first.action.payload_json == second.action.payload_json
+    assert first.reminder.due_at_utc == second.reminder.due_at_utc
+    assert _fetchall(
+        database_path,
+        "SELECT capability_name, COUNT(*) FROM action_journal "
+        "GROUP BY capability_name ORDER BY capability_name",
+    ) == [("chat", 1), ("reminders", 1)]
+    assert [request.wake.wake_id for request in adapter.requests] == ["wake-1", "wake-2"]
+
+
+def test_completed_follow_up_reminder_preempts_recovery_noop(
+    ledger: ControlLedger, database_path: Path
+):
+    """Consulting the adapter first must let noop acknowledge a durable follow-up."""
+    action = _action()
+    reminder = _reminder()
+    adapter = FakeAdapter(
+        _decision("execute", action=action, reminder=reminder),
+        _decision("noop"),
+    )
+    runner = _runner(ledger, adapter)
+    prepared = runner.run(
+        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    )
+    accepted = runner.accept_result(
+        prepared.handoff,
+        action_key="action-1",
+        result=EffectResult("completed", "c" * 64, "accepted"),
+    )
+
+    assert accepted.action is None
+    assert accepted.handoff is None
+    assert _fetchall(
+        database_path,
+        "SELECT capability_name, status FROM action_journal ORDER BY action_key",
+    ) == [("chat", "completed"), ("reminders", "reserved")]
+
+    recovered = runner.run(
+        _wake(1),
+        NOW + timedelta(seconds=60),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+
+    assert recovered.status == "reminder-ready"
+    assert recovered.action.capability_name == "reminders"
+    assert recovered.reminder == reminder
+    assert json.loads(recovered.action.payload_json)["references"]["identifiers"][1] == (
+        "2026-08-02T09:15:11Z"
+    )
+    assert len(adapter.requests) == 1
+    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [("pending",)]
+
+
 def test_pre_effect_recovery_requires_fresh_observation_before_returning_action(
     ledger: ControlLedger, database_path: Path
 ):
@@ -806,7 +979,7 @@ def test_policy_adapter_requires_a_fresh_exchange_for_every_observation():
     )
 
     assert adapter.observe_and_decide(first_request).reason_code == "first"
-    with pytest.raises(PortExchangeError, match="fresh|one request"):
+    with pytest.raises(PortExchangeError):
         adapter.observe_and_decide(second_request)
 
 
@@ -838,16 +1011,129 @@ def test_bounded_exchange_cancels_a_stalled_read_at_its_deadline():
         exchange.exchange("{}")
 
     assert time.monotonic() - started < 0.5
-    assert reader.closed.is_set()
+    assert reader.closed.wait(0.1)
+
+
+def test_timeout_does_not_wait_for_a_blocking_stream_close():
+    """Calling arbitrary close synchronously must let cleanup exceed the deadline."""
+    reader = BlockingCloseReader()
+    writer = CloseTrackingWriter()
+    exchange = BoundedJsonLinesExchange(
+        reader,  # type: ignore[arg-type]
+        writer,  # type: ignore[arg-type]
+        deadline_seconds=0.02,
+    )
+    started = time.monotonic()
+
+    try:
+        with pytest.raises(PortExchangeError, match="timed out"):
+            exchange.exchange("{}")
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.2
+        assert reader.close_started.wait(0.1)
+        assert writer.closed.wait(0.1)
+    finally:
+        reader.close_released.set()
+        reader.read_released.set()
+
+
+def test_exchange_closes_both_streams_after_success():
+    """Leaving one-shot streams open must leak descriptors after success."""
+    success_reader = BytesIO(_noop_response("closed-success"))
+    success_writer = BytesIO()
+    successful = BoundedJsonLinesExchange(
+        success_reader,
+        success_writer,
+        deadline_seconds=1,
+    )
+
+    assert "closed-success" in successful.exchange("{}")
+    assert success_reader.closed is True
+    assert success_writer.closed is True
+
+
+def test_exchange_closes_both_streams_after_decode_error():
+    """Skipping cleanup on a decode error must leak both one-shot streams."""
+    error_reader = BytesIO(b"\xff\n")
+    error_writer = BytesIO()
+    failing = BoundedJsonLinesExchange(
+        error_reader,
+        error_writer,
+        deadline_seconds=1,
+    )
+
+    with pytest.raises(PortExchangeError, match="UTF-8"):
+        failing.exchange("{}")
+    assert error_reader.closed is True
+    assert error_writer.closed is True
+
+
+def test_policy_adapter_registry_does_not_retain_completed_channels():
+    """Remembering every completed stream pair must grow memory without a bound."""
+    channel_refs: list[weakref.ReferenceType[BytesIO]] = []
+
+    def fresh_exchange() -> BoundedJsonLinesExchange:
+        reader = BytesIO(_noop_response("many"))
+        writer = BytesIO()
+        channel_refs.extend((weakref.ref(reader), weakref.ref(writer)))
+        return BoundedJsonLinesExchange(reader, writer, deadline_seconds=1)
+
+    adapter = JsonLinesPolicyAdapter(fresh_exchange)
+    for _ in range(64):
+        request = AdapterRequest(
+            1,
+            _wake(1),
+            "2026-08-02T09:10:11Z",
+            None,
+            HEALTHY_BUDGET,
+        )
+        assert adapter.observe_and_decide(request).reason_code == "many"
+
+    gc.collect()
+    assert all(channel_ref() is None for channel_ref in channel_refs)
+
+
+def test_policy_adapter_rejects_a_second_wrapper_over_one_live_channel():
+    """Dropping active identity tracking must allow concurrent response theft."""
+    reader = BlockingReader()
+    writer = CloseTrackingWriter()
+    adapter = JsonLinesPolicyAdapter(
+        lambda: BoundedJsonLinesExchange(
+            reader,  # type: ignore[arg-type]
+            writer,  # type: ignore[arg-type]
+            deadline_seconds=1,
+        )
+    )
+    request = AdapterRequest(
+        1, _wake(1), "2026-08-02T09:10:11Z", None, HEALTHY_BUDGET
+    )
+    first_errors: list[BaseException] = []
+
+    def first_observation() -> None:
+        try:
+            adapter.observe_and_decide(request)
+        except BaseException as error:
+            first_errors.append(error)
+
+    worker = threading.Thread(target=first_observation)
+    worker.start()
+    assert writer.written.wait(0.2)
+    with pytest.raises(PortExchangeError):
+        adapter.observe_and_decide(request)
+    reader.closed.set()
+    worker.join(0.5)
+    assert not worker.is_alive()
+    assert len(first_errors) == 1
+    assert isinstance(first_errors[0], PortExchangeError)
 
 
 def test_policy_adapter_uses_closed_bounded_fresh_json_line():
     """Changing the production adapter framing must bypass the reviewed contract parser."""
-    request_output = BytesIO()
+    request_output = CloseTrackingWriter()
     adapter = JsonLinesPolicyAdapter(
         lambda: BoundedJsonLinesExchange(
             BytesIO(_noop_response("observed-current")),
-            request_output,
+            request_output,  # type: ignore[arg-type]
             deadline_seconds=1,
         )
     )
@@ -878,12 +1164,12 @@ def test_external_json_lines_executor_is_fresh_capability_mapped_and_closed():
         b'{"schema_version":1,"action_key":"action-1","status":"completed",'
         b'"result_sha256":"' + b"c" * 64 + b'","reason_code":"accepted"}\n'
     )
-    request_output = BytesIO()
+    request_output = CloseTrackingWriter()
     executor = JsonLinesCapabilityExecutor(
         {
             "chat": lambda: BoundedJsonLinesExchange(
                 response,
-                request_output,
+                request_output,  # type: ignore[arg-type]
                 deadline_seconds=1,
             )
         }
@@ -893,6 +1179,8 @@ def test_external_json_lines_executor_is_fresh_capability_mapped_and_closed():
     written = json.loads(request_output.getvalue())
     assert written["capability_name"] == "chat"
     assert written["action_key"] == "action-1"
+    assert response.closed is True
+    assert request_output.closed.is_set()
     with pytest.raises(CapabilityNotInstalledError):
         executor.execute(_action("action-2", capability_name="uninstalled"))
 

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
+import sqlite3
 from typing import Literal
 
 from .adapter import PolicyAdapterPort
@@ -144,6 +145,24 @@ class DeliveryConductorTick:
             return TickResult("not-claimed", "wake-not-claimed")
 
         try:
+            recovered_reminder = self._load_recoverable_reminder(lease.wake_id)
+        except (RuntimeError, sqlite3.Error, ValueError):
+            return self._reject(
+                lease,
+                "reminder-recovery-invalid",
+                status="blocked",
+            )
+        if recovered_reminder is not None:
+            action, reminder = recovered_reminder
+            return self._prepare_reminder_action(
+                lease,
+                action,
+                reminder,
+                budget_view,
+                breaker_allows_effect,
+            )
+
+        try:
             decision = self._adapter.observe_and_decide(request)
         except Exception:
             return self._reject(lease, "adapter-unavailable", status="blocked")
@@ -241,6 +260,29 @@ class DeliveryConductorTick:
         self._validate_handoff(handoff, correlation=action_key)
         if not isinstance(result, EffectResult):
             raise TickCorrelationError("result must be a sanitized EffectResult")
+        pending_reminder: ReminderSpec | None = None
+        pending_reservation: ActionReservation | None = None
+        if handoff.kind == "action" and result.status == "ambiguous":
+            pending_reminder = handoff.reminder or _investigation_reminder(
+                action_key,
+                result.reason_code,
+                handoff.lease.claimed_at
+                + timedelta(seconds=self._ambiguity_reminder_seconds),
+            )
+        elif handoff.kind == "action" and handoff.reminder is not None:
+            pending_reminder = handoff.reminder
+        if pending_reminder is not None:
+            reminder_action = _reminder_action(
+                pending_reminder,
+                handoff.observed_revision,
+            )
+            existing = self._load_reminder_by_key(reminder_action.action_key)
+            if existing is not None:
+                reminder_action, pending_reminder = existing
+            pending_reservation = self._ledger.reserve_action(
+                handoff.lease,
+                reminder_action,
+            )
         self._ledger.record_result(handoff.lease, action_key, result)
         remaining_budget = _spend_one(handoff.budget_view)
         reservation = ActionReservation(
@@ -257,6 +299,14 @@ class DeliveryConductorTick:
             budget_view=remaining_budget,
             reservation=reservation,
         )
+        if pending_reservation is not None:
+            self._write_checkpoint(
+                handoff.lease,
+                revision=handoff.observed_revision,
+                reason_code="reminder-pending",
+                budget_view=remaining_budget,
+                reservation=pending_reservation,
+            )
 
         if handoff.kind == "reminder":
             acknowledged = result.status == "completed"
@@ -274,12 +324,6 @@ class DeliveryConductorTick:
             )
 
         if result.status == "ambiguous":
-            reminder = handoff.reminder or _investigation_reminder(
-                action_key,
-                result.reason_code,
-                handoff.lease.claimed_at
-                + timedelta(seconds=self._ambiguity_reminder_seconds),
-            )
             self._ledger.release(
                 handoff.lease,
                 TickOutcome(False, result.reason_code, 1, 1, 1),
@@ -290,10 +334,10 @@ class DeliveryConductorTick:
                 action_key=action_key,
                 action_status="ambiguous",
                 result_sha256=result.result_sha256,
-                reminder=reminder,
+                reminder=pending_reminder,
             )
 
-        if handoff.reminder is not None:
+        if pending_reminder is not None:
             self._ledger.release(
                 handoff.lease,
                 TickOutcome(False, "reminder-pending", 1, 1, 1),
@@ -304,7 +348,7 @@ class DeliveryConductorTick:
                 action_key=action_key,
                 action_status="completed",
                 result_sha256=result.result_sha256,
-                reminder=handoff.reminder,
+                reminder=pending_reminder,
             )
 
         self._ledger.release(
@@ -338,14 +382,40 @@ class DeliveryConductorTick:
         budget_view: BudgetView,
         breaker_allows_effect: bool,
     ) -> TickResult:
+        action = _reminder_action(reminder, revision)
+        try:
+            existing = self._load_reminder_by_key(action.action_key)
+        except (RuntimeError, sqlite3.Error, ValueError):
+            return self._reject(
+                lease,
+                "reminder-recovery-invalid",
+                status="blocked",
+            )
+        if existing is not None:
+            action, reminder = existing
+        return self._prepare_reminder_action(
+            lease,
+            action,
+            reminder,
+            budget_view,
+            breaker_allows_effect,
+        )
+
+    def _prepare_reminder_action(
+        self,
+        lease: Lease,
+        action: ProposedAction,
+        reminder: ReminderSpec,
+        budget_view: BudgetView,
+        breaker_allows_effect: bool,
+    ) -> TickResult:
         if "reminders" not in self._installed_capabilities:
             return self._reject(lease, "capability-not-installed")
-        action = _reminder_action(reminder, revision)
         reservation = self._ledger.reserve_action(lease, action)
         if reservation.status != "reserved":
             return self._finish_terminal_replay(
                 lease,
-                revision,
+                action.target_revision,
                 budget_view,
                 reservation,
                 reminder=reminder,
@@ -354,7 +424,7 @@ class DeliveryConductorTick:
         if gate_reason is not None:
             return self._block_reserved(
                 lease,
-                revision,
+                action.target_revision,
                 budget_view,
                 reservation,
                 gate_reason,
@@ -362,7 +432,7 @@ class DeliveryConductorTick:
             )
         self._write_checkpoint(
             lease,
-            revision=revision,
+            revision=action.target_revision,
             reason_code="reminder-ready",
             budget_view=budget_view,
             reservation=reservation,
@@ -370,7 +440,7 @@ class DeliveryConductorTick:
         handoff = TickHandoff(
             kind="reminder",
             lease=lease,
-            observed_revision=revision,
+            observed_revision=action.target_revision,
             budget_view=budget_view,
             action=action,
             payload_sha256=reservation.payload_sha256,
@@ -385,6 +455,63 @@ class DeliveryConductorTick:
             action_status="reserved",
             reminder=reminder,
         )
+
+    def _load_recoverable_reminder(
+        self,
+        wake_id: str,
+    ) -> tuple[ProposedAction, ReminderSpec] | None:
+        with sqlite3.connect(self._ledger.database_path) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            rows = connection.execute(
+                """
+                SELECT capability_name, action_key, payload_json,
+                       target_revision, invalidation_class
+                FROM action_journal AS journal
+                WHERE capability_name = 'reminders'
+                      AND (
+                          wake_id = ?
+                          OR EXISTS (
+                              SELECT 1 FROM run_checkpoint AS checkpoint
+                              WHERE checkpoint.acknowledged_wake_id = ?
+                                    AND checkpoint.action_key = journal.action_key
+                          )
+                      )
+                ORDER BY action_key
+                """,
+                (wake_id, wake_id),
+            ).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise RuntimeError("wake has multiple recoverable reminder intents")
+        action = ProposedAction(*rows[0])
+        reminder = _reminder_from_action(action)
+        if _reminder_action(reminder, action.target_revision) != action:
+            raise RuntimeError("reserved reminder intent is not canonical")
+        return action, reminder
+
+    def _load_reminder_by_key(
+        self,
+        action_key: str,
+    ) -> tuple[ProposedAction, ReminderSpec] | None:
+        with sqlite3.connect(self._ledger.database_path) as connection:
+            connection.execute("PRAGMA query_only = ON")
+            row = connection.execute(
+                """
+                SELECT capability_name, action_key, payload_json,
+                       target_revision, invalidation_class
+                FROM action_journal
+                WHERE action_key = ? AND capability_name = 'reminders'
+                """,
+                (action_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        action = ProposedAction(*row)
+        reminder = _reminder_from_action(action)
+        if _reminder_action(reminder, action.target_revision) != action:
+            raise RuntimeError("reserved reminder intent is not canonical")
+        return action, reminder
 
     def _block_reserved(
         self,
@@ -577,21 +704,44 @@ def _reminder_action(reminder: ReminderSpec, revision: str) -> ProposedAction:
     reminder_digest = hashlib.sha256(
         json.dumps(reminder_wire, separators=(",", ":"), sort_keys=True).encode("utf-8")
     ).hexdigest()
+    identity_digest = hashlib.sha256(reminder.reminder_id.encode("utf-8")).hexdigest()
     payload_json = json.dumps(
         {
             "digest": reminder_digest,
-            "identifier": reminder.reminder_id,
-            "reason_code": reminder.reason_code,
+            "references": {
+                "identifiers": [reminder.reminder_id, reminder.due_at_utc],
+                "reason_code": reminder.reason_code,
+            },
         },
         separators=(",", ":"),
         sort_keys=True,
     )
     return ProposedAction(
         capability_name="reminders",
-        action_key=f"reminder:{reminder_digest}",
+        action_key=f"reminder:{identity_digest}",
         payload_json=payload_json,
         target_revision=revision,
         invalidation_class="reminder-intent",
+    )
+
+
+def _reminder_from_action(action: ProposedAction) -> ReminderSpec:
+    payload = json.loads(action.payload_json)
+    if not isinstance(payload, dict) or set(payload) != {"digest", "references"}:
+        raise ValueError("reminder action payload is invalid")
+    references = payload["references"]
+    if not isinstance(references, dict) or set(references) != {
+        "identifiers",
+        "reason_code",
+    }:
+        raise ValueError("reminder action references are invalid")
+    identifiers = references["identifiers"]
+    if not isinstance(identifiers, list) or len(identifiers) != 2:
+        raise ValueError("reminder action identifiers are invalid")
+    return ReminderSpec(
+        identifiers[0],
+        identifiers[1],
+        references["reason_code"],
     )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from typing import BinaryIO, Callable, Protocol
 
 from .contracts import (
@@ -17,6 +18,7 @@ from .contracts import (
 
 _READ_LIMIT = MAX_MESSAGE_BYTES + 2
 _MAX_DEADLINE_SECONDS = 300.0
+_MAX_LIVE_CHANNELS = 256
 
 
 class PortExchangeError(RuntimeError):
@@ -39,21 +41,27 @@ class JsonLinesExchangePort(Protocol):
         """Return the underlying reader/writer identity pair."""
         ...
 
+    @property
+    def cleanup_complete(self) -> threading.Event:
+        """Signal when both channel resources have finished closing."""
+        ...
+
     def exchange(self, request_line: str) -> str:
         """Write one request line and read at most one capped response line."""
         ...
 
 
 JsonLinesExchangeFactory = Callable[[], JsonLinesExchangePort]
+LiveChannel = tuple[object, object, threading.Event]
 
 
 class BoundedJsonLinesExchange:
     """One deadline-bound exchange over fresh template-owned binary streams.
 
     Each instance accepts exactly one request, so queued output cannot answer a
-    later observation. The streams are closed on timeout to cancel a stalled
-    write or read. No wake or response can select a program, endpoint,
-    environment, credential, or file path.
+    later observation. The streams are closed after every outcome; cleanup is
+    asynchronous when a close stalls. No wake or response can select a program,
+    endpoint, environment, credential, or file path.
     """
 
     def __init__(
@@ -83,15 +91,24 @@ class BoundedJsonLinesExchange:
         self._writer = writer
         self._deadline_seconds = float(deadline_seconds)
         self._state_lock = threading.Lock()
+        self._cleanup_lock = threading.Lock()
+        self._cleanup_events: tuple[threading.Event, ...] | None = None
+        self._cleanup_complete = threading.Event()
         self._used = False
 
     @property
     def channel_identity(self) -> tuple[object, object]:
         return (self._reader, self._writer)
 
+    @property
+    def cleanup_complete(self) -> threading.Event:
+        return self._cleanup_complete
+
     def exchange(self, request_line: str) -> str:
+        deadline = time.monotonic() + self._deadline_seconds
         request_bytes = request_line.encode("utf-8")
         if len(request_bytes) > MAX_MESSAGE_BYTES or b"\n" in request_bytes:
+            self._cleanup_until(deadline)
             raise PortExchangeError("request is not one bounded JSON line")
         with self._state_lock:
             if self._used:
@@ -122,10 +139,10 @@ class BoundedJsonLinesExchange:
 
         worker = threading.Thread(target=exchange_once, daemon=True)
         worker.start()
-        if not completed.wait(self._deadline_seconds):
-            self._cancel()
-            completed.wait(0.1)
+        if not completed.wait(max(0.0, deadline - time.monotonic())):
+            self._cleanup_until(deadline)
             raise PortExchangeError("template-controlled JSON Lines port timed out")
+        self._cleanup_until(deadline)
         if failure:
             error = failure[0]
             if isinstance(error, PortExchangeError):
@@ -135,16 +152,41 @@ class BoundedJsonLinesExchange:
             raise PortExchangeError("port returned no JSON line")
         return _decode_response(response[0])
 
-    def _cancel(self) -> None:
-        closed: set[int] = set()
-        for stream in (self._reader, self._writer):
-            if id(stream) in closed:
-                continue
-            closed.add(id(stream))
-            try:
-                stream.close()
-            except (OSError, ValueError):
-                pass
+    def _cleanup_until(self, deadline: float) -> None:
+        with self._cleanup_lock:
+            if self._cleanup_events is None:
+                streams: list[object] = []
+                seen: set[int] = set()
+                for stream in (self._reader, self._writer):
+                    if id(stream) not in seen:
+                        seen.add(id(stream))
+                        streams.append(stream)
+                cleanup_events = tuple(threading.Event() for _ in streams)
+                self._cleanup_events = cleanup_events
+
+                def close_stream(target: object, done: threading.Event) -> None:
+                    try:
+                        target.close()  # type: ignore[attr-defined]
+                    except BaseException:
+                        pass
+                    finally:
+                        done.set()
+                        if all(event.is_set() for event in cleanup_events):
+                            self._cleanup_complete.set()
+
+                for stream, completed in zip(streams, cleanup_events, strict=True):
+                    threading.Thread(
+                        target=close_stream,
+                        args=(stream, completed),
+                        daemon=True,
+                    ).start()
+            cleanup_events = self._cleanup_events
+
+        for completed in cleanup_events:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            completed.wait(remaining)
 
 
 class JsonLinesPolicyAdapter:
@@ -154,7 +196,7 @@ class JsonLinesPolicyAdapter:
         if not callable(exchange_factory):
             raise TypeError("exchange_factory must be callable")
         self._exchange_factory = exchange_factory
-        self._used_channels: list[tuple[object, object]] = []
+        self._live_channels: list[LiveChannel] = []
         self._channel_lock = threading.Lock()
 
     def observe_and_decide(self, request: AdapterRequest) -> AdapterDecision:
@@ -162,8 +204,15 @@ class JsonLinesPolicyAdapter:
         exchange = self._exchange_factory()
         if not hasattr(exchange, "exchange"):
             raise PortExchangeError("exchange_factory did not provide a JSON Lines port")
-        _claim_fresh_channel(exchange, self._used_channels, self._channel_lock)
-        response_line = exchange.exchange(request_line)
+        identity = _claim_live_channel(
+            exchange,
+            self._live_channels,
+            self._channel_lock,
+        )
+        try:
+            response_line = exchange.exchange(request_line)
+        finally:
+            _release_live_channel(identity, self._live_channels, self._channel_lock)
         try:
             return parse_adapter_decision_json(response_line)
         except ContractValidationError as error:
@@ -187,18 +236,47 @@ def _decode_response(response: bytes) -> str:
         raise PortExchangeError("JSON Lines response is not UTF-8") from error
 
 
-def _claim_fresh_channel(
+def _claim_live_channel(
     exchange: JsonLinesExchangePort,
-    used_channels: list[tuple[object, object]],
+    live_channels: list[LiveChannel],
     lock: threading.Lock,
-) -> None:
+) -> LiveChannel:
     identity = getattr(exchange, "channel_identity", None)
     if not isinstance(identity, tuple) or len(identity) != 2:
         raise PortExchangeError("exchange did not expose a fresh channel identity")
+    cleanup_complete = getattr(exchange, "cleanup_complete", None)
+    if not isinstance(cleanup_complete, threading.Event):
+        raise PortExchangeError("exchange did not expose bounded cleanup state")
     with lock:
+        live_channels[:] = [
+            channel for channel in live_channels if not channel[2].is_set()
+        ]
         if any(
             identity[0] is reader and identity[1] is writer
-            for reader, writer in used_channels
+            for reader, writer, _ in live_channels
         ):
-            raise PortExchangeError("a fresh channel is required for each request")
-        used_channels.append(identity)
+            raise PortExchangeError("a fresh channel is required while a channel is live")
+        if len(live_channels) >= _MAX_LIVE_CHANNELS:
+            raise PortExchangeError("too many channels are still closing")
+        channel = (identity[0], identity[1], cleanup_complete)
+        live_channels.append(channel)
+    return channel
+
+
+def _release_live_channel(
+    channel: LiveChannel,
+    live_channels: list[LiveChannel],
+    lock: threading.Lock,
+) -> None:
+    def release_when_closed() -> None:
+        channel[2].wait()
+        with lock:
+            for index, current in enumerate(live_channels):
+                if current is channel:
+                    del live_channels[index]
+                    return
+
+    if channel[2].is_set():
+        release_when_closed()
+    else:
+        threading.Thread(target=release_when_closed, daemon=True).start()
