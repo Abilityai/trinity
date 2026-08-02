@@ -46,6 +46,57 @@ Mirrors the deterministic `canary/` library: `spec.py` (single source of truth),
 - **Runtime-aware**: Claude-only checks (`CLAUDE.md`, `.claude/` skills) are omitted for non-Claude runtimes (Codex/Gemini, #1187).
 - **Fixes**: the 10 gitignore checks; reuses `git_service._GITIGNORE_PATTERNS`; per-agent Redis lock (`compat_fix:{name}`); atomic base64 write-back (`… | base64 -d > .gitignore.tmp && mv`); G-001 removes a blanket `.claude/` line by exact-line match (never substring, CRLF-normalized). **No auto-commit** — uncommitted until the agent's next git sync. `check_id` validated against the spec-derived whitelist (400 otherwise; 409 on a concurrent fix).
 
+### T-018 and the fail-open class (trinity-enterprise#89)
+
+`T-018` (soft, static) reports the `template.yaml` `schedules:` block's
+**structure** — presence/type of `name`/`cron`/`message`, entry shape, block
+shape, bounds, cap — via the same `services/template_schedules.py` reader the
+creation-time materializer uses, so the report cannot drift from what creation
+actually does. It exists because Trinity now *acts* on that block: a malformed
+one silently costs the agent its recurring tasks.
+
+**Cron is A-002's, not T-018's.** A-002 already shipped as "cron expressions are
+valid"; two checks disagreeing about one field is worse than either alone. (The
+reader *does* gate cron strictly, but that is a materialization decision — drop
+the entry — not a report verdict.) A-002's own validator was replaced in the
+same change: `_valid_cron` was a per-field `^[\d*/,\-]+$` regex, wrong in **both
+directions** — it rejected `0 9 * * MON` (valid; the scheduler translates named
+days) and accepted `99 99 * * *` (invalid; no range check). It now delegates to
+`schedule_validation.validate_cron_expression`, the parser the dedicated
+scheduler registers jobs with (#1472). *Validate a config with the same parser
+the executor uses.*
+
+**T-018 is the one check that fails closed, and the reason generalizes.**
+`run_static` catches a raising check and records `_skip(..., "check_error")`;
+`_counts` counts only `status == "fail"`. So a raising **soft** check drops
+`soft_count` 1→0, and because `overall` is a bare
+`(hard_count + soft_count) > 0` test, the whole report flips `issues` →
+`compatible` exactly when that check's finding was the only failure — which is
+the entire population T-018 serves. It is also **durable**: `build_report`
+persists `checks_json`, and `_report_from_persisted` recomputes counts from that
+snapshot, so one transient raise is replayed as a clean bill of health on every
+stopped-agent read. T-018 therefore catches its own `Exception` and returns
+`_fail`, carrying `type(e).__name__` **only** — `str(e)` can embed untrusted
+template content into a persisted, UI-rendered blob.
+
+This was not hypothetical. **`c_p006` — a HARD check — was failing open in the
+field**: it iterated `data.get("schedules") or []` with no
+`isinstance(..., list)` guard, unlike all four sibling readers of that field, so
+`schedules: 5` raised `TypeError` and the check silently vanished from
+`hard_count`. Fixed in the same change, which is what makes the fail-closed
+design evidence-backed rather than theoretical.
+
+`run_static`'s swallow now **logs** (`logger.error`, previously silent for all
+~100 checks). Converting that swallow to `fail` platform-wide is deliberately
+*not* done here — it would flip an unmeasured number of installs to `issues` in
+one step; the log line is the instrument for measuring first.
+
+Regression coverage runs every malformed fixture through **all** of
+`spec.STATIC_IDS` asserting no check lands at `skip_reason == "check_error"` — a
+T-018-only assertion would never have caught `c_p006` — plus a `build_report`
+test pinning the *direction* (a raising reader must still yield
+`overall_status == "issues"`).
+
 ## Persistence
 
 `agent_compatibility_results` (latest-snapshot-per-agent, upserted by `agent_name`). **Departs from the issue's original "no DB table" note** (see requirements §41): AI verdicts aren't cheaply recomputable, so persistence lets them show on every Overview load without re-spending tokens and unlocks fleet aggregation. STATIC recomputes live each read; persisted AI verdicts merge in until a re-run. Dual-track migration (SQLite `db/migrations.py` + Alembic `migrations/versions/0003_*`); cascade/rename via the `AGENT_REFS` registry. Creates no execution, so Invariant #18 (idempotency) doesn't apply.
