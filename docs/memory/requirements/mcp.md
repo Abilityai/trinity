@@ -222,6 +222,19 @@ server name (which the injection never touches and which no credential rotation 
 - `trinity-system` and ephemeral ghosts are **exempt** (the system key is `scope='system'` —
   minting an agent-scoped replacement is an irreversible privilege downgrade; ghosts are
   volume-less and "never recreate").
+- The heal takes the **same** `agent:mcp_key_regen:{name}` lock as FR-3 and does **nothing**
+  when it cannot hold it. It runs the identical capture→mint→DELETE sequence, and there is no
+  per-agent start lock, so two concurrent starts both observe the drift; if the second
+  captures after the first's mint but before its delete, it removes the key the first is
+  about to bake in and the surviving container 401s all four readers. A mint taken outside
+  the lock can still be captured-and-deleted by the holder, so the three steps are atomic as
+  a unit. Failure is **silent and inert** here (nothing minted, nothing deleted, the recreate
+  proceeds on the existing env, the next start retries) — the opposite of FR-3's loud
+  503/409, because nobody asked for a heal.
+- The heal writes an `agent_key_self_heal` audit row (metadata only, actor `system`): it
+  mints and deletes credentials fleet-wide with no human in the loop, and an INFO log is not
+  an audit trail for a feature premised on the platform not knowing what its agents
+  authenticate with.
 - The env plaintext is hashed and discarded — never logged.
 
 ### FR-3 — Rotate: owner-visible key + deliberate regeneration
@@ -258,8 +271,11 @@ server name (which the injection never touches and which no credential rotation 
   they would silently revoke the owner's MCP **connector** key.
 - 409-adoption post-condition: `recreate_container_with_updated_config` can adopt a
   container someone else created on a name conflict. After the recreate the container is
-  reloaded and its env asserted to carry the new key's prefix; if not, **nothing is deleted**
-  and the call fails.
+  reloaded and its `TRINITY_MCP_API_KEY` compared **in full, constant-time** against the
+  plaintext just minted; if it differs, **nothing is deleted** and the call fails. Not a
+  `key_prefix` comparison — the prefix is `api_key[:20]` and its first 12 characters are the
+  constant `trinity_mcp_`, so that would put an eight-character assertion between a
+  stranger's container and the DELETE of every superseded key.
 - Honest failure semantics: the old container is stopped and removed *before* the
   replacement is created, so a post-removal failure leaves the agent with no container. The
   response says exactly that ("the container was replaced and failed to start; press Start
@@ -306,10 +322,19 @@ parent never spawned.
 | State | Predicate | Tone |
 |---|---|---|
 | `missing` | no active `scope='agent'` row | Warning |
-| `env_absent` / `env_mismatch` | container env lacks the key, or its hash matches no active row | Warning |
+| `env_absent` | the container env has no `TRINITY_MCP_API_KEY` / `TRINITY_MCP_URL` | Warning |
+| `env_mismatch` | the env key matches no active `scope='agent'` row for this agent | Warning |
 | `never_used` | row exists, `last_used_at IS NULL` | Neutral (Warning when corroborated) |
 | `stale` | `last_used_at` materially older than the agent's most recent execution | Warning |
 | `active` | recently used | Info |
+
+The two `env_*` states **outrank** every usage-derived state: a key row that exists and was
+used last week says nothing about what the container runs with *now*, and reporting `active`
+over an env with no key at all is the green-during-the-incident failure this feature exists to
+remove. They cost a Docker **inspect**, not the FR-1 docker **exec**, so the panel is honest on
+load; the match verdict is delegated to `check_agent_mcp_key_matches` so the panel and the
+start-time recreate decision cannot disagree; and any error falls back to the usage-derived
+state rather than claiming unobserved drift.
 
 `stale` is load-bearing: the motivating incident's signature is literally *"the agent-scoped
 key sat unused for months"* — non-NULL but old — which a binary used/unused predicate renders

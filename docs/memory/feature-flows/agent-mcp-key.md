@@ -98,6 +98,27 @@ never logged.
 On drift, `start_agent_internal` calls `heal_agent_mcp_key_env` (mint + reconcile
 + prune) and passes the result as `env_overrides` to the recreate.
 
+- **Same lock as rotation, and inert without it.** The heal runs the identical
+  capture→mint→DELETE sequence, so it takes the same
+  `agent:mcp_key_regen:{name}` lock and does **nothing at all** when it cannot
+  hold it. "The predicate only fires when no active row matches the container,
+  so every active row is already unusable by it" is true at *predicate* time,
+  but the DELETE runs after a mint — and there is no per-agent start lock, so
+  two concurrent starts both see the drift. If the second captures after the
+  first's mint but before its delete, it deletes the key the first is about to
+  bake in, and whichever container survives the `containers.run` name-conflict
+  adoption is left 401-ing the heartbeat, the result callback, the pull worker
+  and the MCP client. A mint taken outside the lock can always be
+  captured-and-deleted by the holder, so capture→mint→delete is atomic as a
+  unit: no lock, no heal. Failure semantics differ from rotation on purpose —
+  an owner asked for a rotation, so refusing it is loud (503/409); nobody asked
+  for a heal, so refusing it is silent and inert (no mint, no delete, the
+  recreate proceeds on the container's existing env, the next start retries).
+- **Audited.** The heal mints and deletes credentials fleet-wide with no human
+  in the loop, so it writes an `agent_key_self_heal` `mcp_operation` row
+  (metadata only, actor `system`) — an INFO log is not an audit trail for a
+  feature whose whole premise is that the platform could not say what its
+  agents authenticate with.
 - **Exemptions**: `trinity-system` (its key is `scope='system'`, so the predicate
   could never be satisfied and the recreate would mint an agent-scoped
   replacement — an irreversible privilege downgrade of the orchestrator, #1816)
@@ -162,8 +183,12 @@ Each step earns its place:
   rotation broke my agent"*.
 - **409-adoption post-condition.** On a name conflict the recreate ADOPTS a
   container someone else created, with someone else's env. The live container is
-  reloaded and asserted to carry the new key's prefix; otherwise nothing is
-  deleted and the call fails.
+  reloaded and its `TRINITY_MCP_API_KEY` compared **in full, constant-time**
+  against the plaintext just minted; otherwise nothing is deleted and the call
+  fails. Not a `key_prefix` test — the prefix is `api_key[:20]`, of which 12
+  characters are the literal `trinity_mcp_`, so that would be an
+  eight-character assertion standing between a stranger's container and the
+  DELETE of every superseded key. The plaintext is already in the frame.
 - **DB-only for a stopped agent.** `recreate_container_with_updated_config` ends
   at `containers_run(..., detach=True)`, which CREATES AND STARTS. Stopping an
   agent is the standard containment response to a suspected compromise and
@@ -227,11 +252,24 @@ raw exception.
 | State | Predicate | Tone |
 |---|---|---|
 | `missing` | no active `scope='agent'` row | Warning |
-| `env_absent` / `env_mismatch` | container env lacks the key, or its hash matches no active row | Warning |
+| `env_absent` | the container env has no `TRINITY_MCP_API_KEY`/`TRINITY_MCP_URL` | Warning |
+| `env_mismatch` | the env key matches no active `scope='agent'` row for this agent | Warning |
 | `never_used` | `last_used_at IS NULL` | Neutral, escalates on a non-`ok` probe verdict |
 | `stale` | `last_used_at` older than the agent's most recent execution by > 7d | Warning |
 | `active` | recently used | Info |
 | `exempt` | `trinity-system` | Info |
+
+The two `env_*` states **outrank** every usage-derived state. A key row that
+exists and was used last week says nothing about what the container is running
+with *now*, and reporting `active` over an env carrying no key at all is exactly
+the green-during-the-incident failure this feature exists to remove. They cost a
+Docker **inspect**, not the `verify` docker **exec** — so the panel is honest on
+load rather than only after a click — and the match verdict is delegated to
+`check_agent_mcp_key_matches` so the panel and the start-time recreate decision
+can never disagree about what "recognized" means. Fail-soft: any error (Docker
+down, no container) falls back to the usage-derived state rather than claiming
+drift it could not observe. Only `verify` can see a hand-edited `.mcp.json` whose
+entry disagrees with the env, which is why both exist.
 
 `stale` is load-bearing. The motivating incident's signature is verbatim *"the
 agent-scoped key sat unused for months"* — non-NULL but old — which a binary
