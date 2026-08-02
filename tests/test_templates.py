@@ -64,6 +64,66 @@ class TestListTemplates:
         # This is optional - just verify structure if present
 
 
+class TestDeclaredSchedulesSurface:
+    """trinity-enterprise#89: the catalog surfaces a template's declared
+    `schedules:` block.
+
+    The unit suite proves both BUILDERS emit the keys; only a live call proves
+    the router actually serves them (and that a malformed block in any bundled
+    or configured template hasn't emptied the catalog — the ent#128 / #1835
+    property, now also guarding the two newly-fenced GitHub list paths).
+    """
+
+    @pytest.mark.smoke
+    def test_every_template_carries_the_schedule_keys(
+            self, api_client: TrinityApiClient):
+        response = api_client.get("/api/templates")
+
+        assert_status(response, 200)
+        templates = response.json()
+        if not templates:
+            pytest.skip("No templates available")
+
+        for template in templates:
+            assert "schedules" in template, template.get("id")
+            assert "schedule_errors" in template, template.get("id")
+            assert isinstance(template["schedules"], list)
+            assert isinstance(template["schedule_errors"], list)
+
+    @pytest.mark.smoke
+    def test_declared_entries_are_normalized_not_raw(
+            self, api_client: TrinityApiClient):
+        """The catalog serves the NORMALIZED list, so the frontend can render
+        it without a per-source branch or a shape check."""
+        response = api_client.get("/api/templates")
+
+        assert_status(response, 200)
+        for template in response.json():
+            for entry in template.get("schedules") or []:
+                assert set(entry) == {
+                    "name", "cron", "message", "enabled", "timezone",
+                    "description"}, template.get("id")
+                assert isinstance(entry["enabled"], bool)
+
+    @pytest.mark.smoke
+    def test_a_malformed_block_never_empties_the_catalog(
+            self, api_client: TrinityApiClient):
+        """A template reporting `schedule_errors` must still be LISTED — a
+        broken block costs that template its schedule metadata, not the
+        catalog."""
+        response = api_client.get("/api/templates")
+
+        assert_status(response, 200)
+        templates = response.json()
+        assert len(templates) > 0, (
+            "empty catalog — a malformed declarative block may have taken it "
+            "down (ent#128 / #1835 class)"
+        )
+        for template in templates:
+            if template.get("schedule_errors"):
+                assert template.get("id")
+
+
 class TestGetTemplateDetails:
     """REQ-TMPL-002: Get template details endpoint tests."""
 

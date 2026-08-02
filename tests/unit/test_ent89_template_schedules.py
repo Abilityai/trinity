@@ -484,3 +484,117 @@ class TestCreatePathFetch:
 
         monkeypatch.setattr(ts.httpx, "Client", boom)
         assert ts.fetch_template_metadata_for_create("owner/repo") == {}
+
+
+class TestGitHubContentsApiContract:
+    """The outbound request itself, against the documented GitHub contents API.
+
+    Every other test here stubs `_fetch_template_yaml_result`, i.e. BELOW the
+    HTTP layer — so a wrong param name (`?ref=` is what pins the revision) or a
+    dropped Authorization header would leave them all green while the feature
+    silently read the default branch, or read nothing at all for a private
+    repo. That is exactly the R2 failure this fetch exists to prevent, so it is
+    asserted at the wire.
+    """
+
+    @staticmethod
+    def _fake_client(monkeypatch, calls, status=200, body=None):
+        import base64
+        import json as _json
+        from services import template_service as ts
+
+        class _Resp:
+            status_code = status
+
+            def json(self):
+                return {"content": base64.b64encode(
+                    (body or "schedules: []").encode()).decode()}
+
+        class _Client:
+            def __init__(self, **kwargs):
+                calls.append({"init": kwargs})
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def get(self, url, headers=None, params=None):
+                calls.append({"url": url, "headers": headers, "params": params})
+                return _Resp()
+
+        monkeypatch.setattr(ts.httpx, "Client", _Client)
+        return _json
+
+    def test_ref_is_sent_as_the_ref_query_param(self, monkeypatch):
+        from services import template_service as ts
+
+        calls = []
+        self._fake_client(monkeypatch, calls)
+        ts.fetch_template_metadata_for_create(
+            "owner/repo", pat="tok", ref="feature-x")
+
+        request = next(c for c in calls if "url" in c)
+        assert request["url"] == (
+            "https://api.github.com/repos/owner/repo/contents/template.yaml")
+        assert request["params"] == {"ref": "feature-x"}
+
+    def test_no_ref_sends_no_params(self, monkeypatch):
+        from services import template_service as ts
+
+        calls = []
+        self._fake_client(monkeypatch, calls)
+        ts.fetch_template_metadata_for_create("owner/repo", pat="tok")
+
+        request = next(c for c in calls if "url" in c)
+        assert request["params"] is None
+
+    def test_the_resolved_pat_is_sent_as_a_bearer_token(self, monkeypatch):
+        """A private template read with the creator's per-user token is the
+        whole point — drop this header and the fetch 403s into an empty
+        declaration."""
+        from services import template_service as ts
+
+        calls = []
+        self._fake_client(monkeypatch, calls)
+        ts.fetch_template_metadata_for_create("owner/private", pat="per-user-tok")
+
+        request = next(c for c in calls if "url" in c)
+        assert request["headers"]["Authorization"] == "Bearer per-user-tok"
+        assert request["headers"]["Accept"] == "application/vnd.github+json"
+
+    def test_no_pat_sends_no_authorization_header(self, monkeypatch):
+        """ent#123 tokenless public creates must stay anonymous, not send
+        `Bearer ` and get rejected."""
+        from services import template_service as ts
+
+        calls = []
+        self._fake_client(monkeypatch, calls)
+        ts.fetch_template_metadata_for_create("owner/public", pat=None)
+
+        request = next(c for c in calls if "url" in c)
+        assert "Authorization" not in request["headers"]
+
+    def test_a_403_is_reported_not_swallowed(self, monkeypatch, caplog):
+        import logging
+        from services import template_service as ts
+
+        calls = []
+        self._fake_client(monkeypatch, calls, status=403)
+        with caplog.at_level(logging.WARNING):
+            assert ts.fetch_template_metadata_for_create(
+                "owner/private", pat="tok") == {}
+        assert "403" in " ".join(r.getMessage() for r in caplog.records)
+
+    def test_the_declared_block_survives_the_round_trip(self, monkeypatch):
+        from services import template_service as ts
+
+        calls = []
+        self._fake_client(
+            monkeypatch, calls,
+            body="schedules:\n  - name: daily\n    cron: '0 9 * * *'\n"
+                 "    message: /m\n")
+        metadata = ts.fetch_template_metadata_for_create("owner/repo", pat="tok")
+        assert normalize_declared_schedules(metadata.get("schedules"))[0]["name"] \
+            == "daily"
