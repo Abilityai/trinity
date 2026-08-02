@@ -526,44 +526,66 @@ _KNOWN_DIVERGENT = [
 @pytest.mark.skipif(
     not _HAVE_MODELS, reason="backend venv required for models.ReminderCreate"
 )
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG: ReminderCreate._check_fire_at_iso normalizes with "
-        "v.replace('Z','+00:00') (every Z) while parse_iso_timestamp strips only "
-        "a TRAILING Z, so a mid-string Z is accepted by the validator and then "
-        "raises ValueError in reminder_service._resolve_fire_at — which is "
-        "UNGUARDED, so an agent-supplied MCP set_reminder(fire_at=...) returns "
-        "500 instead of 400. See #1771 slice b finding F7."
-    ),
-)
 @given(st.one_of(st.sampled_from(_KNOWN_DIVERGENT), _Z_INJECTED))
 @example("2026-01-15T10Z:30:00")
 @example("2026-01-15T10:30Z:00")
 @example("2026-01-15 10Z:30:00")
 @example("2026-01-15 10:30Z:00")
+# The MECHANICAL non-vacuity floor (#1831) — an ACCEPTED input, so the assertion
+# body below is guaranteed to execute at least once no matter what happens to the
+# strategy. Keep it: all four examples above are rejected post-fix, and every
+# accepted draw `_Z_INJECTED` produces comes from `i >= len(base)` (i.e. a plain
+# trailing-'Z' append), so narrowing `st.integers(max_value=27)` to the base
+# lengths — a plausible "magic number" cleanup — would silently drop acceptance to
+# 0% and leave this property green and worthless. This example is a member of the
+# uppercase-'Z'-as-separator class #1831 deliberately started accepting.
+@example("2026-01-15Z10:30:00")
 def test_P7_validator_acceptance_implies_the_parser_can_parse(raw):
     """P7 — whatever ``ReminderCreate`` accepts, ``parse_iso_timestamp`` must be
-    able to parse. **This property does not hold** — hence the strict xfail.
+    able to parse. The property **now holds by construction** (#1831):
+    ``_check_fire_at_iso`` no longer re-implements the normalization, it calls
+    ``parse_iso_timestamp`` itself, so "the validator accepted it" and "the
+    parser can parse it" are the same statement rather than two hand-maintained
+    rules that happened to agree. A pass is therefore close to definitional —
+    what it still guards is a FUTURE re-introduction of a local normalization in
+    the validator, at inputs no fixed list enumerates.
 
     Reachability (why this is a bug and not an unreachable-input note):
     ``services/reminder_service.py::_resolve_fire_at`` calls
     ``parse_iso_timestamp(data.fire_at)`` with NO try/except, under a comment
-    that asserts the very invariant this test falsifies ("fire_at already
+    that asserts the very invariant this test used to falsify ("fire_at already
     validated ISO-8601 by ReminderCreate"). ``fire_at`` is agent-supplied through
     the MCP ``set_reminder`` tool (``z.string().optional()``), so a malformed
-    value reaches it from outside the platform and escapes as a 500 rather than
-    the 400 the router documents.
+    value reaches it from outside the platform and — before #1831 — escaped as a
+    500 rather than a 4xx.
 
-    NON-VACUITY: the generator is seeded with the divergence class (a 'Z'
-    injected at every position of each canonical shape), and the four confirmed
-    divergent inputs are pinned as ``@example`` so the failure is deterministic
-    under the derandomized ``ci`` profile rather than dependent on a lucky draw.
+    NON-VACUITY — read this before trusting a green: post-fix the four historical
+    ``@example`` inputs are all *rejected*, so they pin nothing here; they are
+    retained as executable documentation of the divergence class, and are pinned
+    positively as must-reject assertions in
+    ``tests/unit/test_1296_reminders.py::test_1831_mid_string_z_fire_at_rejected``,
+    which is where a regression is now actually caught. The ``event()`` below
+    reports the validator-acceptance share (~21%), and a 0% share means this
+    property passed vacuously — but be honest about the SHAPE of that 21%:
+    measured over the full ``_Z_INJECTED`` (base, i) grid on py3.11/3.13/3.14,
+    **every** accepted draw comes from ``i >= len(base)`` — a degenerate
+    trailing-'Z' append — and **zero** true mid-string insertions are accepted.
+    So the assertion effectively runs on a handful of canonical strings. The fifth
+    ``@example`` above is therefore the mechanical floor: it is accepted, so the
+    body executes at least once regardless of what the strategy later becomes.
 
-    Per AC4 this ships as a strict xfail with a findings entry; the product-code
-    fix (guard the call, or align the two normalizations) is deliberately NOT
-    made here.
+    A rejected draw takes an early ``return`` rather than ``assume()``: under the
+    derandomized ``ci`` profile (which does NOT suppress ``filter_too_much``)
+    filtering ~79% of draws trips a ``FailedHealthCheck``, and the pass/fail of a
+    suppressed variant would be re-rolled by any edit to this function's source
+    digest. Returning early makes the health check structurally unreachable while
+    asserting exactly the same implication.
     """
-    assume(_validator_accepts(raw))
+    # NOT ``assume()`` — see the last docstring paragraph. Converting this back to
+    # ``assume(_validator_accepts(raw))`` reintroduces a DETERMINISTIC
+    # ``FailedHealthCheck: filter_too_much`` red (~79% of draws are filtered) and
+    # re-arms source-digest seed sensitivity under ``derandomize=True``. (#1831)
+    if not _validator_accepts(raw):
+        return
     event("validator accepted")
     BACKEND.parse_iso_timestamp(raw)  # must not raise

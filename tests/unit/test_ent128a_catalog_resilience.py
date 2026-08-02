@@ -413,3 +413,190 @@ def test_every_bundled_template_declares_a_valid_credentials_block(monkeypatch):
             offenders[template_yaml.parent.name] = errors
 
     assert offenders == {}
+
+
+# ---------------------------------------------------------------------------
+# #1900 — the SECOND path-traversal sink, found by this issue's AC #4 audit
+#
+# `generate_credential_files` located the shipped `.mcp.json` by joining the
+# template.yaml's own `name:` field onto a hard-coded curated root — an
+# unvalidated join whose result is read INTO the new agent's `.mcp.json`.
+# `name:` is untrusted (any `creator` uploads one via `deploy_local_agent`), so
+# `name: ../../data/deployed-templates/<victim>` read another tenant's
+# credential-bearing `.mcp.json` into the attacker's own agent.
+#
+# It was also simply WRONG: `name:` is a display string in 5 shipped templates
+# ("Test Echo Agent"), not a directory name. The create path now threads the
+# directory it already validated, so the derivation is gone from the live path;
+# the residual arm is fail-closed and contained.
+# ---------------------------------------------------------------------------
+
+
+_MCP_DECL = {"credentials": {"mcp_servers": {"s": {"command": "x"}}}}
+
+
+def _write_mcp(d: Path, body: str) -> Path:
+    d.mkdir(parents=True, exist_ok=True)
+    (d / ".mcp.json").write_text(body)
+    return d
+
+
+def test_1900_mcp_lookup_rejects_traversal_name(tmp_path, monkeypatch):
+    """REPRO — a `..` in `name:` must not read an out-of-root `.mcp.json`.
+
+    ⚠️ The fixture shape is load-bearing. The UNPATCHED sink ignores
+    `_local_templates_dir()` entirely and hardcodes its own root
+    (`/agent-configs/templates`, else the CWD-relative
+    `./config/agent-templates`). Monkeypatching `_local_templates_dir` alone
+    therefore plants the target somewhere the bug never looks, and the test
+    passes before *and* after — proving nothing. So: `chdir` into `tmp_path`
+    and lay the fixture out as `config/agent-templates`, which is exactly where
+    the old hardcoded fallback resolves. Both the old and new roots then point
+    at the same directory and containment is the only variable.
+
+    Verified red on unpatched code: the marker lands in the generated
+    `.mcp.json` verbatim. (Non-differential in-container, where
+    `/agent-configs/templates` exists and wins the old branch — the post-fix
+    assertion holds either way.)
+    """
+    root = tmp_path / "config" / "agent-templates"
+    root.mkdir(parents=True)
+    _write_mcp(
+        tmp_path / "config" / "evil",
+        '{"mcpServers": {"leak": {"env": {"K": "MARKER-CROSS-TENANT-SECRET"}}}}',
+    )
+    monkeypatch.chdir(tmp_path)
+    ts = _load_template_service(monkeypatch, root)
+
+    template = dict(_MCP_DECL, name="../evil")
+    files = ts.generate_credential_files(template, {}, "agent")
+
+    assert ".mcp.json" not in files
+    assert "MARKER-CROSS-TENANT-SECRET" not in "".join(files.values())
+
+
+def test_1900_mcp_lookup_tolerates_non_string_name(tmp_path, monkeypatch):
+    """REPRO — `name: 123` used to raise TypeError out of agent creation.
+
+    `Path(root) / 123` is a TypeError, i.e. an uncaught HTTP 500 on create.
+    This is the ent#128 bug class (one malformed field takes down a path), one
+    seam over; the isinstance guard in the containment helper absorbs it.
+    """
+    root = tmp_path / "templates"
+    root.mkdir()
+    ts = _load_template_service(monkeypatch, root)
+
+    for bad in (123, None, ["a"], {"a": 1}, 1.5, True):
+        template = dict(_MCP_DECL, name=bad)
+        files = ts.generate_credential_files(template, {}, "agent")
+        assert ".mcp.json" not in files, bad
+
+
+def test_1900_mcp_lookup_still_reads_the_real_template(tmp_path, monkeypatch):
+    """Anti-over-blocking on the residual arm — a legitimate `name:` still
+    resolves and still substitutes `${VAR}`.
+
+    Also the regression guard for routing the fallback root through
+    `_local_templates_dir()`: it fails if that was not threaded in.
+    """
+    root = tmp_path / "templates"
+    _write_mcp(
+        root / "foo",
+        '{"mcpServers": {"s": {"env": {"K": "${MY_VAR}"}, "args": ["${MY_VAR}"]}}}',
+    )
+    ts = _load_template_service(monkeypatch, root)
+
+    template = dict(_MCP_DECL, name="foo")
+    files = ts.generate_credential_files(template, {"MY_VAR": "real-value"}, "agent")
+
+    assert ".mcp.json" in files
+    assert "real-value" in files[".mcp.json"]
+    assert "${MY_VAR}" not in files[".mcp.json"]
+
+
+def test_1900_explicit_base_path_wins_and_ignores_name(tmp_path, monkeypatch):
+    """THE THREADING GUARD — when the caller supplies the validated directory,
+    `name:` becomes irrelevant on the live path."""
+    root = tmp_path / "templates"
+    root.mkdir()
+    _write_mcp(
+        tmp_path / "evil",
+        '{"mcpServers": {"leak": {"env": {"K": "MARKER-SHOULD-NOT-APPEAR"}}}}',
+    )
+    good = _write_mcp(
+        tmp_path / "deployed" / "v1",
+        '{"mcpServers": {"s": {"env": {"K": "${MY_VAR}"}}}}',
+    )
+    ts = _load_template_service(monkeypatch, root)
+
+    template = dict(_MCP_DECL, name="../evil")  # hostile, and now inert
+    files = ts.generate_credential_files(
+        template, {"MY_VAR": "from-base-path"}, "agent", template_base_path=good
+    )
+
+    assert "from-base-path" in files[".mcp.json"]
+    assert "MARKER-SHOULD-NOT-APPEAR" not in "".join(files.values())
+
+
+def test_1900_display_name_template_is_unaffected(tmp_path, monkeypatch):
+    """No-regression — 5 shipped templates put a DISPLAY STRING in `name:`
+    ("Test Echo Agent"). That never resolved to a directory before this change
+    and must still not raise."""
+    root = tmp_path / "templates"
+    root.mkdir()
+    ts = _load_template_service(monkeypatch, root)
+
+    template = dict(_MCP_DECL, name="Test Echo Agent")
+    files = ts.generate_credential_files(template, {}, "agent")
+
+    assert ".mcp.json" not in files
+
+
+def test_1900_staging_with_an_empty_credential_map_blanks_placeholders(
+    tmp_path, monkeypatch
+):
+    """PINS THE REAL BEHAVIOUR DELTA — and stops the flattering restatement.
+
+    #1900 threaded the validated directory into `template_base_path`, which for
+    a deploy-local template means this function now finds a `.mcp.json` it
+    previously always missed. It is tempting (and was written that way in an
+    earlier doc draft) to call that "deploy-local templates finally get `${VAR}`
+    substitution". They do not. The ONLY production caller,
+    `crud._stage_config_files`, passes `agent_credentials={}` — CRED-002 injects
+    real values *after* creation — so `agent_credentials.get(var, "")` rewrites
+    every placeholder to the empty string. Hardcoded entries survive verbatim.
+
+    That is the same thing the `.env` arm of this function has always done for
+    an un-supplied `credentials.env_file` variable, so it is the platform's
+    staging model rather than a new one — but it IS a change for deploy-local
+    agents, because the staged file then overwrites the archive's raw copy
+    (`startup.sh` copies `/generated-creds/.mcp.json` unconditionally, after the
+    `.trinity-initialized`-gated template block). Documented in
+    `docs/memory/feature-flows/template-processing.md`; this test is what keeps
+    the documentation and the code from drifting apart again.
+    """
+    import json
+
+    root = tmp_path / "templates"
+    root.mkdir()
+    deployed = _write_mcp(
+        tmp_path / "deployed" / "v1",
+        '{"mcpServers": {"s": {"command": "npx",'
+        ' "args": ["-y", "${MY_TOKEN}"],'
+        ' "env": {"TOKEN": "${MY_TOKEN}", "FIXED": "literal-value"}}}}',
+    )
+    ts = _load_template_service(monkeypatch, root)
+
+    # Exactly how `_stage_config_files` calls it: empty credential map.
+    files = ts.generate_credential_files(
+        dict(_MCP_DECL, name="v1"), {}, "agent", template_base_path=deployed
+    )
+
+    staged = json.loads(files[".mcp.json"])["mcpServers"]["s"]
+    assert staged["env"]["TOKEN"] == "", staged
+    assert staged["args"] == ["-y", ""], staged
+    # Not merely absent — actively rewritten, so the placeholder record is gone.
+    assert "${MY_TOKEN}" not in files[".mcp.json"]
+    # Non-placeholder content is preserved verbatim.
+    assert staged["env"]["FIXED"] == "literal-value"
+    assert staged["command"] == "npx"
