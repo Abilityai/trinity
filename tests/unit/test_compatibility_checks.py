@@ -106,7 +106,7 @@ class TestSpecConsistency:
         assert len(ids) == len(set(ids)), "duplicate check ids in spec.CHECKS"
 
     def test_catalog_size(self):
-        assert len(spec.CHECKS) == 100, f"expected 100 checks, found {len(spec.CHECKS)}"
+        assert len(spec.CHECKS) == 101, f"expected 101 checks, found {len(spec.CHECKS)}"
 
     def test_severity_and_type_valid(self):
         for c in spec.CHECKS:
