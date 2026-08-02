@@ -72,7 +72,20 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+import yaml
+
+from services.credential_charset import (
+    CREDENTIAL_DETECTOR_REF_RE,
+    is_credential_var_name,
+)
 from services.docker_service import execute_command_in_container, get_agent_container
+from services.setup_url_display import describe_setup_url_or_none
+from services.template_service import (
+    get_github_template,
+    get_local_template,
+    normalize_credential_requirements,
+    operator_supplied_credential_names,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -399,3 +412,330 @@ async def collect_agent_credential_facts(agent_name: str) -> Dict[str, Any]:
         return {"status": "unavailable", "facts": None}
 
     return {"status": "ok", "facts": _normalize_facts(facts)}
+
+
+# ---------------------------------------------------------------------------
+# Report assembly
+# ---------------------------------------------------------------------------
+
+# Advisory rows (§2.6) are bounded independently of the normalizer's own record
+# cap: they come from `${VAR}` references in files the AGENT can rewrite, so a
+# hostile or broken template must not be able to render a 10,000-row checklist.
+_MAX_ADVISORY = 50
+
+
+class _NoAliasSafeLoader(yaml.SafeLoader):
+    """`SafeLoader` that refuses YAML *aliases*.
+
+    `template.yaml` here comes from a LIVE, agent-writable workspace, and alias
+    expansion is a documented amplifier in this very codebase — `_clean_field`
+    measures 443 B expanding to 52 MB in 1.5 s, x10 per alias level. Rejecting
+    at compose time is precise: it costs a template nothing unless it actually
+    *uses* an alias, unlike a textual `&`/`*` scan, which would false-reject any
+    description containing an asterisk.
+    """
+
+    def compose_node(self, parent, index):
+        if self.check_event(yaml.events.AliasEvent):
+            raise yaml.YAMLError("YAML aliases are not permitted in template.yaml")
+        return super().compose_node(parent, index)
+
+
+def _parse_template_text(text: str) -> Optional[dict]:
+    """Parse a live `template.yaml`. `None` for anything that isn't a mapping."""
+    try:
+        data = yaml.load(text, Loader=_NoAliasSafeLoader)
+    except Exception:  # noqa: BLE001 — untrusted YAML; unreadable is a state, not a 500
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _safe_normalize(data: dict) -> tuple:
+    """`normalize_credential_requirements`, wrapped NARROWLY and deliberately.
+
+    Its docstring calls "never raises" a load-bearing security property, and its
+    own callers wrap it anyway rather than resting the property on one
+    function's discipline. This wrapper is that belt — and it is scoped to the
+    single call, not to the whole report build: the ent#128 lesson is that
+    `run_static`-style blanket swallowing turns a raise into a verdict
+    indistinguishable from a pass. Every other failure in this module sets an
+    explicit `degraded_reason` instead.
+    """
+    try:
+        return normalize_credential_requirements(data, source_trust="deployed")
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[credential-requirements] normalize raised on a deployed template"
+        )
+        return [], ["template declaration could not be read"]
+
+
+def _observed_operator_names(facts: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Operator-suppliable variable names OBSERVED but never declared (§2.6).
+
+    AC #1 names three sources. Using `credentials:` alone produces a
+    confidently-wrong green: of the 25 bundled templates, 12 declare
+    `credentials: {}` and 13 declare nothing at all, so a legacy template with
+    `${SLACK_BOT_TOKEN}` in `.mcp.json.template` would render "Ready — this
+    agent needs no credentials". The codebase already treats
+    undeclared-but-referenced as a HARD compatibility failure (K-002/T-015).
+
+    These names are an ANTI-GREEN SIGNAL and nothing more. `.mcp.json.template`
+    never becomes a declaration authority — the schema's authoring note forbids
+    it — so every row built from this is advisory: never `required`, never
+    counted as blocking.
+    """
+    seen = []
+    order = {}
+
+    mcp_text = facts.get("mcp_template_text") or ""
+    for name in CREDENTIAL_DETECTOR_REF_RE.findall(mcp_text):
+        if name not in order:
+            order[name] = "observed:mcp_template"
+            seen.append(name)
+
+    env_example_text = facts.get("env_example_text") or ""
+    for line in env_example_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name = line.split("=", 1)[0].strip()
+        if is_credential_var_name(name) and name not in order:
+            order[name] = "observed:env_example"
+            seen.append(name)
+
+    # Platform-injected vars are never the operator's to supply. Filtered
+    # through the PUBLIC accessor (fed a synthetic block) rather than the
+    # private `_is_platform_injected`, so this module keeps its zero-edit
+    # relationship with template_service.
+    suppliable = operator_supplied_credential_names({"env_file": seen})
+    return [{"name": n, "source": order[n]} for n in suppliable][:_MAX_ADVISORY]
+
+
+def _requirement_row(record: Dict[str, Any], *, status: str, advisory: bool) -> Dict[str, Any]:
+    """One API row from one normalized record."""
+    setup_url = record.get("setup_url")
+    display = describe_setup_url_or_none(setup_url)
+    return {
+        "name": record.get("name"),
+        "title": record.get("title") or record.get("name"),
+        "description": record.get("description"),
+        # Tri-state, preserved end to end. `"unknown"` means the author never
+        # opted in; rendering it as required cries wolf on every legacy template.
+        "required": record.get("required", "unknown"),
+        # Fail-safe: mask unless an author explicitly said otherwise.
+        "secret": record.get("secret", True) is not False,
+        "format": record.get("format"),
+        # A PLACEHOLDER, never a prefilled value — see the response model.
+        "default": record.get("default"),
+        "source": record.get("source"),
+        "advisory": advisory,
+        "status": status,
+        "setup_url": setup_url,
+        "setup_url_display_host": (display or {}).get("display_host"),
+        "setup_url_registrable": (display or {}).get("registrable"),
+        "setup_url_verified": bool((display or {}).get("verified")),
+    }
+
+
+def _status_for(name: str, *, status_source: str, env_keys: set) -> str:
+    """Tri-state per-variable status.
+
+    `.env` ABSENT is a definite `missing`, not `unknown`: a `github:` agent never
+    gets a generated `.env` at all (`_stage_config_files` guards on
+    `template_data`, which only the `local:` arm populates), and the ent#123
+    tokenless seeded fleet — AC #3's literal audience — is entirely `github:`.
+    Reporting `unknown` there would make the feature inert for exactly the fleet
+    it exists to serve. `unknown` is reserved for "we could not look".
+    """
+    if status_source != "live":
+        return "unknown"
+    return "set" if name in env_keys else "missing"
+
+
+async def _catalog_requirements(agent_name: str) -> tuple:
+    """`(records, errors, reason)` from the catalog entry named by the container label.
+
+    Fallback only — reached when the live workspace could not be read. `reason`
+    is non-None whenever the catalog could not answer either.
+    """
+    container = get_agent_container(agent_name)
+    labels = {}
+    if container is not None:
+        try:
+            labels = container.labels or {}
+        except Exception:  # noqa: BLE001
+            labels = {}
+    template_id = labels.get("trinity.template") or ""
+    if not template_id:
+        return [], [], "template_label_missing"
+
+    try:
+        if template_id.startswith("local:"):
+            entry = get_local_template(template_id)
+        elif template_id.startswith("github:"):
+            # `_get_cached_metadata` -> `_fetch_template_yaml` uses a SYNCHRONOUS
+            # httpx client with a 10s timeout. Called inline from an async route,
+            # a cache miss stalls the whole worker for those 10 seconds.
+            entry = await asyncio.to_thread(get_github_template, template_id)
+        else:
+            return [], [], "catalog_unavailable"
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[credential-requirements] catalog lookup failed for %s", agent_name
+        )
+        return [], [], "catalog_unavailable"
+
+    if not isinstance(entry, dict):
+        return [], [], "catalog_unavailable"
+    records = entry.get("credential_requirements") or []
+    errors = entry.get("credential_errors") or []
+    if not isinstance(records, list):
+        return [], [], "catalog_unavailable"
+    return records, [e for e in errors if isinstance(e, str)], None
+
+
+async def build_report(agent_name: str) -> Dict[str, Any]:
+    """The whole per-agent credential-requirements report. Never raises.
+
+    Authority is the LIVE workspace (`/home/developer/template.yaml`), because a
+    forked or hand-edited agent's requirements drift from the catalog entry it
+    was created from — the AC #3 case. The catalog is the fallback only, and it
+    is reachable ONLY from an already-degraded live read, which is what makes
+    "degraded dominates" (below) structural rather than a rule someone has to
+    remember.
+    """
+    facts: Dict[str, Any] = {}
+    records: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    requirements_source = "none"
+    status_source = "unavailable"
+    degraded_reason = None
+
+    probe = await collect_agent_credential_facts(agent_name)
+    if probe["status"] == "not_running":
+        degraded_reason = "agent_not_running"
+    elif probe["status"] != "ok":
+        degraded_reason = "agent_unreachable"
+    else:
+        facts = probe["facts"] or {}
+        # The probe answered, so per-variable status is a live fact even if the
+        # template turns out to be unreadable.
+        status_source = "live"
+        if not facts.get("template_present"):
+            degraded_reason = "no_template"
+        elif facts.get("template_text") is None:
+            degraded_reason = "template_unreadable"
+        else:
+            data = _parse_template_text(facts["template_text"])
+            if data is None:
+                degraded_reason = "template_unreadable"
+            else:
+                records, errors = _safe_normalize(data)
+                requirements_source = "live_workspace"
+
+    if requirements_source == "none":
+        catalog_records, catalog_errors, catalog_reason = await _catalog_requirements(
+            agent_name
+        )
+        if catalog_reason is not None:
+            # Keep the FIRST reason — it names why the live read failed, which is
+            # the more actionable half ("agent not running" beats "catalog
+            # unavailable" for an operator deciding what to do next).
+            degraded_reason = degraded_reason or catalog_reason
+        elif catalog_records:
+            records = catalog_records
+            errors = catalog_errors
+            requirements_source = "catalog"
+        else:
+            # An EMPTY catalog result is degraded data, not data:
+            # `get_github_template` returns `_build_template(repo, {})` — empty
+            # requirements, not None — when the repo is gone or the fetch failed,
+            # and with no PAT (the ent#123 tokenless fleet) GitHub's 60-req/hr
+            # anonymous limit makes that the EXPECTED outcome.
+            errors = catalog_errors
+            degraded_reason = degraded_reason or "catalog_unavailable"
+
+    env_keys = set(facts.get("env_keys_nonempty") or [])
+
+    declared = [r for r in records if isinstance(r, dict) and r.get("name")]
+    platform_injected_excluded = sum(1 for r in declared if r.get("platform_injected"))
+    operator_records = [r for r in declared if not r.get("platform_injected")]
+
+    requirements = [
+        _requirement_row(
+            r,
+            status=_status_for(r["name"], status_source=status_source, env_keys=env_keys),
+            advisory=False,
+        )
+        for r in operator_records
+    ]
+
+    # §2.6: only when `credentials:` declared NOTHING. A template that declares
+    # only platform-injected variables HAS opted in, and collapses to
+    # "no credentials required" rather than acquiring advisory noise.
+    advisory_rows = []
+    if not declared:
+        for observed in _observed_operator_names(facts):
+            advisory_rows.append(
+                _requirement_row(
+                    {
+                        "name": observed["name"],
+                        "title": observed["name"],
+                        "required": "unknown",
+                        "secret": True,
+                        "source": observed["source"],
+                    },
+                    status=_status_for(
+                        observed["name"], status_source=status_source, env_keys=env_keys
+                    ),
+                    advisory=True,
+                )
+            )
+    requirements.extend(advisory_rows)
+
+    # `degraded` DOMINATES, unconditionally. A degraded lookup and a genuinely
+    # credential-free agent produce a textually identical empty requirement set,
+    # and "Ready — this agent needs no credentials" is the one state a user will
+    # never investigate. Reachability is structural (the catalog arm is only
+    # entered from a failed live read), but the precedence is stated here so it
+    # survives someone adding a fifth state.
+    if degraded_reason is not None:
+        state = "degraded"
+    elif requirements and not advisory_rows:
+        state = "ok"
+    elif advisory_rows:
+        state = "declaration_incomplete"
+    else:
+        state = "no_credentials_required"
+
+    counts = {"set": 0, "missing": 0, "unknown": 0}
+    for row in requirements:
+        counts[row["status"]] = counts.get(row["status"], 0) + 1
+
+    return {
+        "agent_name": agent_name,
+        "state": state,
+        "requirements_source": requirements_source,
+        "status_source": status_source,
+        "degraded_reason": degraded_reason,
+        "requirements": requirements,
+        "summary": {
+            "total": len(requirements),
+            "set": counts["set"],
+            "missing": counts["missing"],
+            "unknown": counts["unknown"],
+            # Server-side so the badge and the headline cannot drift. Advisory
+            # rows carry `required == "unknown"` and so can never land here.
+            "blocking": sum(
+                1
+                for row in requirements
+                if row["required"] is True and row["status"] == "missing"
+            ),
+            "platform_injected_excluded": platform_injected_excluded,
+            "advisory": len(advisory_rows),
+        },
+        # The normalizer's sanitized messages. Non-printables stripped and
+        # length-capped, but NOT HTML-escaped — text-interpolate only.
+        "errors": [e for e in errors if isinstance(e, str)][:20],
+    }
