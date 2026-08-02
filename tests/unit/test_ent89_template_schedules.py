@@ -466,6 +466,47 @@ class TestCreatePathFetch:
         assert "owner/private" in blob and "403" in blob
         assert "wrong-pat" not in blob, "the PAT must never reach the logs"
 
+    def test_the_failure_reason_is_sanitized_like_its_neighbours(
+            self, monkeypatch, caplog):
+        """`reason` embeds `str(e)`, and an httpx error message carries the
+        request URL — which carries the caller-supplied `owner/repo`. A repo
+        with no `/` skips `_GITHUB_REPO_PATH_RE` upstream, so control bytes do
+        reach this line. Its two neighbours on the SAME call are
+        `_sanitize_for_warning`-wrapped; leaving this one raw is the hygiene
+        inconsistency the /review pass called out."""
+        import logging
+        from services import template_service as ts
+
+        hostile = "boom \x1b[2J\x07 at https://api.github.com/x\nWARNING faked"
+        monkeypatch.setattr(
+            ts, "_fetch_template_yaml_result", lambda *a, **k: ({}, hostile))
+        with caplog.at_level(logging.WARNING):
+            assert ts.fetch_template_metadata_for_create("owner/repo") == {}
+
+        blob = " ".join(
+            r.getMessage() for r in caplog.records
+            if "owner/repo" in r.getMessage())
+        assert blob, "the failure must still be logged"
+        for ch in ("\x1b", "\x07", "\n"):
+            assert ch not in blob, f"{ch!r} survived into the log line"
+        assert "boom" in blob, "sanitizing must not gut the diagnostic"
+
+    def test_a_flooding_failure_reason_is_bounded(self, monkeypatch, caplog):
+        """Bounded at 200, not the 80 default: this WARNING exists to be
+        diagnosable and an 80-char truncation defeats that — but unbounded lets
+        a hostile template flood the operator's log."""
+        import logging
+        from services import template_service as ts
+
+        monkeypatch.setattr(
+            ts, "_fetch_template_yaml_result", lambda *a, **k: ({}, "z" * 5000))
+        with caplog.at_level(logging.WARNING):
+            ts.fetch_template_metadata_for_create("owner/repo")
+
+        blob = " ".join(r.getMessage() for r in caplog.records)
+        assert "z" * 200 in blob
+        assert "z" * 201 not in blob, "the reason must be length-bounded"
+
     def test_a_non_mapping_template_yaml_is_rejected_not_returned(
             self, monkeypatch, caplog):
         import logging

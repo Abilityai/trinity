@@ -116,7 +116,13 @@ def fetch_template_metadata_for_create(
             "(tokenless) request hit GitHub's rate limit.",
             _sanitize_for_warning(repo),
             _sanitize_for_warning(ref or "default"),
-            reason,
+            # Sanitized like its two neighbours: `reason` embeds `str(e)`, and an
+            # httpx error message carries the request URL — which carries the
+            # caller-supplied `owner/repo`. A repo with no `/` skips
+            # `_GITHUB_REPO_PATH_RE` upstream, so control bytes can reach here.
+            # 200 rather than the 80 default: this WARNING exists to be
+            # diagnosable, and a truncated reason defeats its purpose.
+            _sanitize_for_warning(reason, max_len=200),
         )
         return {}
     if not isinstance(metadata, dict):

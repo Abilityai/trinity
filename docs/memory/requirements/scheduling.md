@@ -484,7 +484,7 @@ schedules:
   `schedule_errors`: `template_service._build_template` (GitHub) and `_build_local_template`
   (local). Parity is explicit — the pre-existing asymmetry (`persistent_state` is surfaced only by
   the GitHub builder) means it cannot be assumed.
-- `_template_schedule_errors()` logs exactly one WARNING per malformed template naming the id; the
+- `_template_schedules()` logs exactly one WARNING per malformed template naming the id; the
   template still lists. A broken `schedules:` block costs that template its schedule metadata, not
   its place in the catalog (the trinity-enterprise#128 / #1835 contract).
 - **Both GitHub catalog list paths are now fenced** per-template (`get_all_templates`), matching the
@@ -532,7 +532,7 @@ schedules:
   **every** schedule on the agent when an owner turns autonomy on, with no filter — so per-schedule
   `enabled` intent is erased at the first toggle whether the row was written `0` or `1`. Forcing
   `False` at creation would therefore prevent nothing. Making `set_autonomy_status` stop clobbering
-  per-schedule intent is the real guard and is tracked as a separate P2 follow-up.
+  per-schedule intent is the real guard and is tracked as **#1945** (P2, `type-bug`).
 
 #### Idempotency (AC #4) — three places, all required
 1. **At creation** — name-match read-then-skip against `db.list_agent_schedules(agent_name)` before
