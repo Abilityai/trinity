@@ -1002,10 +1002,16 @@ async def get_git_status(agent_name: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+# ent#109 retired the workaround this used to teach ("create a new agent with
+# fork-to-own and import your data"), which discarded the agent's identity,
+# name reservation and history. The retrofit now exists in place, so point at
+# it. Kept in sync with the MCP 409 hint in `src/mcp-server/src/tools/git.ts`
+# (Invariant #13) by `tests/unit/test_ent109_no_write_credentials_message.py`.
 NO_WRITE_CREDENTIALS_MESSAGE = (
     "This agent has no write credentials — it tracks a public template "
-    "read-only. To keep your changes, create a new agent with fork-to-own "
-    "and import your data (agent Files → Export), or add a GitHub token."
+    "read-only. Use 'Bind to your own repo' in this agent's Git tab to point "
+    "it at a GitHub repository you own (keeping everything it has learned), "
+    "or add a GitHub token."
 )
 
 
