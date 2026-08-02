@@ -308,6 +308,24 @@ When a single container's `max_parallel_tasks` ceiling — bounded by container 
 
 **Result reporting, not journal-as-truth**: execution state is owned by the backend `schedule_executions` row, applied from the worker's result POST under a compare-and-set guard. The agent *computes* the result; it does not own a parallel authoritative history. An optional `~/.trinity/journal.ndjson` may be kept as a local audit/debug aid, but it is not the source of truth and the platform does not depend on projecting it (this is the deliberate departure from the earlier actor-model design, which made the agent's journal authoritative and thereby reintroduced cross-store reconciliation). **The result *content* the worker reports must come from an agent-owned out-of-band record, not from parsed `stdout`.** Today the authoritative terminal line (`{"type":"result"}`, carrying cost/tokens/turns/session-id) rides the same `stdout` pipe that Claude's grandchild processes inherit (fd 1), so it can be lost or truncated *before* the worker POSTs it (#548/#333) — and lease re-delivery would then re-run a turn that null-everythings the same way. The worker therefore reads its result POST from a durable agent-written record (the recovered JSONL / a result file), which is authoritative *for the result payload the worker uploads* even though the backend row stays authoritative *for execution state*. This is the one deliberate exception to "journal-as-truth": state is the backend's; the uploaded result payload must not depend on a lossy inherited pipe.
 
+### Agent-owned delivery conductor runtime
+
+The target architecture permits a reusable agent template to own a generic
+delivery conductor. It normalizes platform wakes into an at-least-once inbox,
+uses lease fencing to reject stale workers, executes no more than one external
+effect per tick, and durably reserves and replays actions. Its checkpoints carry
+generic pipeline progress, acknowledgement, fence, and budget fields; it
+recovers due reminders as ordinary wakes. These are template runtime mechanics,
+not backend workflow policy or a Trinity DAG service.
+
+Trinity supplies scheduling, events, reminders, execution, and capability tools
+as the wake and effect substrate. It does not own conductor state, policy, or
+transition mechanics. Adapter and executor JSON Lines protocols are versioned,
+closed schemas with a 1 MiB cap and no arbitrary command, URL, environment,
+credential, or file-content fields. The only platform-facing state is the
+existing read-only pipeline-state projection; Trinity may inspect it but never
+transitions or persists it as authoritative workflow state.
+
 **Recovery-trace capture (v2, #1401)**: the *same* agent-owned record surface is where the **structured, three-state (`done`/`not-done`/`unknown`), write-ahead side-effect trace** lives — the record the backend injects into a re-delivered turn *and* the next execution (§"Re-Delivery and Side-Effect Recovery"). Capturing it reliably, **including effects the agent performs through its own channels** (its own email key, `gh`, `curl`), is the load-bearing prerequisite for gating irreversible effects; effects the trace cannot see fall back to the human gate exactly like an un-confineable irreversible one. The fidelity ceiling here is the #548/#333 stdout-inheritance family — the same seam that makes result reporting lossy makes trace capture lossy, so the two problems are solved together, not separately.
 
 **Post-execution hooks**: companion to the existing pre-check hook. `~/.trinity/post-check` runs after every task completion (language-agnostic, shebang-selected). Enables custom alerting, output validation, or state transitions defined by the agent template — and is the natural home for finalizing the recovery trace above.

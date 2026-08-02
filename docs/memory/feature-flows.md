@@ -119,6 +119,7 @@
 | Fan-Out | [fan-out.md](feature-flows/fan-out.md) | Parallel task dispatch and result collection via semaphore (FANOUT-001) |
 | Sequential Agent Loops | [run-agent-loop.md](feature-flows/run-agent-loop.md) | `run_agent_loop` server-side sequential bounded task execution with stop-signal + graceful stop (#740) |
 | Agent Self-Reminders | [agent-self-reminders.md](feature-flows/agent-self-reminders.md) | Durable one-shot deferred self-trigger — the scheduler arms a `DateTrigger` per pending reminder + fires a normal execution of the same agent (`triggered_by="reminder"`); self-scoped `set/list/cancel_reminder` (#1296) |
+| Delivery Conductor Runtime | [delivery-conductor-runtime.md](feature-flows/delivery-conductor-runtime.md) | Generic agent-template conductor: normalized at-least-once wakes, fenced leases, one-effect ticks, reserved action replay, bounded JSON Lines adapters/executors, and read-only pipeline-state projection |
 | Dispatch Circuit Breaker | [dispatch-circuit-breaker.md](feature-flows/dispatch-circuit-breaker.md) | Per-agent producer-side dispatch breaker (RELIABILITY-007, #526) |
 | Execution Context Injection | [execution-context-injection.md](feature-flows/execution-context-injection.md) | Inject prior-execution context into a turn (#171) |
 | Schedule Pre-Check | [scheduler-pre-check.md](feature-flows/scheduler-pre-check.md) | Conditional template-supplied pre-check hook before a cron run (SCHED-COND-001, #454) |

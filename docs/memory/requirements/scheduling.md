@@ -484,6 +484,44 @@
   `docs/schemas/agent-pipeline.schema.json` and
   `agent-pipeline-state.schema.json`; the agent guide documents the
   contract, the operator-queue `context` convention, and the adoption note.
+
+### 34.2 Agent-Owned Delivery Conductor Runtime
+- **Status**: Authored contract — implementation belongs in a reusable agent
+  template, not in Trinity.
+- **Description**: A template may include a delivery conductor that turns
+  normalized wakes into bounded, recoverable progress for work it owns. The
+  conductor owns its orchestration state and policy-independent transition
+  mechanics. Business policy and pipeline-stage meaning remain template-defined.
+  Trinity continues to provide scheduling, events, reminders, execution, and
+  capability tools only; it is not a workflow backend, DAG executor, or
+  authoritative conductor-state store.
+- **Wake and inbox contract**: Every schedule, event, reminder, or manual
+  signal is normalized into a stable wake record before it reaches a durable
+  inbox. Delivery is at least once, so duplicate wakes and recovery replay are
+  expected. A worker holds a time-bounded lease with a monotonically advancing
+  fence token; a stale holder must not checkpoint, reserve an action, or
+  acknowledge work after a newer holder has fenced it.
+- **Tick and action contract**: One conductor tick makes at most one external
+  effect. Before requesting it, the conductor durably reserves an action
+  identity and persists the replay outcome. A retry resumes or observes that
+  reservation instead of minting an equivalent new action.
+- **Checkpoint, budget, and recovery contract**: Checkpoints carry the generic
+  pipeline projection, inbox acknowledgement position, lease fence, and budget
+  fields needed to decide whether another tick may run. A persisted reminder is
+  a wake source, not a second transition engine: after restart the conductor
+  reconciles due reminders into the inbox and applies the same reservation and
+  replay rules.
+- **Adapter and executor boundary**: Adapters isolate untrusted wake sources;
+  executors isolate capability invocation. Their JSON Lines messages are
+  versioned, closed schemas with a **1 MiB** maximum message size. The schemas
+  must reject arbitrary command, URL, environment, credential, and file-content
+  fields; they carry typed references and intent, never raw payload/evidence
+  storage or ambient execution authority.
+- **Projection**: The conductor may publish a read-only pipeline-state
+  projection through the existing `~/.trinity/pipeline-state/` convention.
+  Trinity reads that projection but does not use it to drive transitions, mutate
+  it, or recover the conductor on its behalf.
+- **Flow**: [Delivery Conductor Runtime](../feature-flows/delivery-conductor-runtime.md)
 ## 35. Schedule Timeout Validation (#929)
 
 ### 35.1 Agent Cap as Schedule Ceiling (#929)

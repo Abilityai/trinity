@@ -302,6 +302,20 @@ FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: 
 | `operator_queue.ts` (3) | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue` | Read the Operating Room queue (broad or `agent_name`-scoped) and **resolve** a pending item — answer / approve / deny via `POST /{id}/respond`. The respond tool resolves the item's `agent_name`, then applies the same MCP-layer gate before writing (non-`pending` → structured error). Agent-scoped keys gated to `{self} ∪ permitted`. `cancel` deferred. (OPS-001, #1101 read / #1104 respond) |
 | `git.ts` (6) | `get_git_status`, `git_sync`, `get_git_log`, `git_pull`, `get_git_sync_state`, `reset_to_main_preserve_state` | Direct, deterministic (non-LLM) git operations — bypass `chat_with_agent` for status/sync/log/pull/sync-state and the destructive `reset_to_main_preserve_state` recovery. Conflicts stay LLM-mediated: a 409 surfaces `X-Conflict-Type`/`X-Conflict-Class` verbatim + a `chat_with_agent` hint (except `no_write_credentials` — a credentials gap chat can't fix; the hint says fork-to-own/add-a-token instead, ent#123). Mutating ops (`git_sync`/`reset`) are `OwnedAgentByName` (owner-only; a shared key gets read+pull only); agent-scoped keys gated to `{self} ∪ permitted` at the MCP layer. Each call mints a `requestId` it stamps on its `mcp_operation` audit row AND forwards as `X-Request-ID`, so the paired backend `git_operation` row joins via `GET /api/audit-log?request_id=` (#905) |
 
+**Agent-owned delivery conductor runtime**: a reusable agent template may run a
+generic delivery conductor for its own long-running pipeline. The template owns
+orchestration state and policy-independent transition mechanics: it normalizes
+wakes into an at-least-once inbox, uses fenced leases, advances through
+one-effect ticks, reserves/replays actions, persists checkpoints and budget
+fields, and reconciles its due reminders. Trinity remains the substrate for
+scheduling, events, reminders, execution, and capability tools; it has no
+conductor table, transition logic, or workflow/DAG ownership. Adapters and
+executors use versioned, closed JSON Lines schemas with a 1 MiB message cap and
+no arbitrary command, URL, environment, credential, or file-content fields.
+The agent may publish a read-only pipeline-state projection through the existing
+pipeline files; Trinity can display it but never writes it or uses it to advance
+the pipeline. See [Delivery Conductor Runtime](feature-flows/delivery-conductor-runtime.md).
+
 ### Vector Log Aggregator (`config/vector.yaml`)
 
 Vector 0.43.1 (`timberio/vector:0.43.1-alpine`). Captures all container stdout/stderr via Docker socket; routes platform logs to `/data/logs/platform.json` and agent logs to `/data/logs/agents.json`; enriches with container metadata; parses JSON logs. Health: `http://localhost:8686/health`. Query: `docker exec trinity-vector sh -c "tail -50 /data/logs/platform.json" | jq .` (same for `agents.json`).
