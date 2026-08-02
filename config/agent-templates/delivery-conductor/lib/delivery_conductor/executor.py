@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol
 
-from .adapter import JsonLinesExchangePort, PortExchangeError
+from .adapter import (
+    JsonLinesExchangeFactory,
+    PortExchangeError,
+    _claim_fresh_channel,
+)
 from .contracts import MAX_MESSAGE_BYTES, ProposedAction
 from .ledger import EffectResult, LedgerValidationError
 
@@ -16,7 +21,7 @@ class CapabilityNotInstalledError(RuntimeError):
 
 
 class CapabilityExecutorPort(Protocol):
-    """Execute one already-reserved action through a capability-confined rail."""
+    """Model-owned boundary for one already-reserved capability action."""
 
     def execute(self, action: ProposedAction) -> EffectResult:
         """Return one sanitized completed or ambiguous result."""
@@ -24,28 +29,41 @@ class CapabilityExecutorPort(Protocol):
 
 
 class JsonLinesCapabilityExecutor:
-    """Route a typed action only through a template-installed command mapping."""
+    """Outer model bridge using fresh template-installed JSON Lines channels.
+
+    DeliveryConductorTick never owns or calls this bridge. The approved model
+    handoff invokes it only after run() returns one reserved ProposedAction,
+    then passes its sanitized result to accept_result().
+    """
 
     def __init__(
         self,
-        installed_exchanges: Mapping[str, JsonLinesExchangePort],
+        installed_exchanges: Mapping[str, JsonLinesExchangeFactory],
     ) -> None:
-        exchanges: dict[str, JsonLinesExchangePort] = {}
-        for capability_name, exchange in installed_exchanges.items():
+        exchanges: dict[str, JsonLinesExchangeFactory] = {}
+        for capability_name, exchange_factory in installed_exchanges.items():
             _validate_capability_name(capability_name)
-            if not hasattr(exchange, "exchange"):
-                raise TypeError("installed exchange must provide a JSON Lines port")
-            exchanges[capability_name] = exchange
+            if not callable(exchange_factory):
+                raise TypeError("installed exchange factory must be callable")
+            exchanges[capability_name] = exchange_factory
         self._installed_exchanges = MappingProxyType(exchanges)
+        self._used_channels: list[tuple[object, object]] = []
+        self._channel_lock = threading.Lock()
 
     def execute(self, action: ProposedAction) -> EffectResult:
         if not isinstance(action, ProposedAction):
             raise TypeError("action must be a ProposedAction")
-        exchange = self._installed_exchanges.get(action.capability_name)
-        if exchange is None:
+        exchange_factory = self._installed_exchanges.get(action.capability_name)
+        if exchange_factory is None:
             raise CapabilityNotInstalledError("capability is not installed by the template")
         request_line = _serialize_action(action)
         try:
+            exchange = exchange_factory()
+            if not hasattr(exchange, "exchange"):
+                raise PortExchangeError(
+                    "exchange factory did not provide a JSON Lines port"
+                )
+            _claim_fresh_channel(exchange, self._used_channels, self._channel_lock)
             response_line = exchange.exchange(request_line)
         except PortExchangeError:
             return _ambiguous_result(action, "executor-exchange-ambiguous")

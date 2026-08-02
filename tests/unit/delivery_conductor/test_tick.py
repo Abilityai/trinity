@@ -1,4 +1,4 @@
-"""Behavior tests for one delivery-conductor control tick through its ports."""
+"""Behavior tests for one two-phase delivery-conductor control tick."""
 # ruff: noqa: E402
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 import sqlite3
 import sys
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -33,7 +35,7 @@ from delivery_conductor.contracts import (
     AdapterDecision,
     AdapterRequest,
     BudgetView,
-    CheckpointView,
+    ContractValidationError,
     ProposedAction,
     ReminderSpec,
     Wake,
@@ -42,7 +44,7 @@ from delivery_conductor.executor import (
     CapabilityNotInstalledError,
     JsonLinesCapabilityExecutor,
 )
-from delivery_conductor.ledger import ControlLedger, EffectResult
+from delivery_conductor.ledger import ControlLedger, EffectResult, StaleLeaseError
 from delivery_conductor.tick import DeliveryConductorTick
 
 
@@ -109,21 +111,8 @@ class FakeAdapter:
         return value  # type: ignore[return-value]
 
 
-class FakeExecutor:
-    def __init__(self, *results: EffectResult | BaseException | Any) -> None:
-        self.results = deque(results)
-        self.calls: list[ProposedAction] = []
-
-    def execute(self, action: ProposedAction) -> EffectResult:
-        self.calls.append(action)
-        value = self.results.popleft()
-        if isinstance(value, BaseException):
-            raise value
-        return value  # type: ignore[return-value]
-
-
 class ReplayExecutor:
-    """A capability fake whose stable action key prevents duplicate effects."""
+    """External capability fake with action-key replay, outside the tick."""
 
     def __init__(self) -> None:
         self.calls: list[ProposedAction] = []
@@ -142,6 +131,36 @@ class ReplayExecutor:
         return result
 
 
+class ShortWriter(BytesIO):
+    def write(self, value: bytes) -> int:
+        super().write(value[:1])
+        return 1
+
+
+class FailIfRead:
+    def __init__(self) -> None:
+        self.called = False
+
+    def readline(self, _limit: int) -> bytes:
+        self.called = True
+        raise AssertionError("read must not start after a short write")
+
+    def close(self) -> None:
+        pass
+
+
+class BlockingReader:
+    def __init__(self) -> None:
+        self.closed = threading.Event()
+
+    def readline(self, _limit: int) -> bytes:
+        self.closed.wait()
+        return b""
+
+    def close(self) -> None:
+        self.closed.set()
+
+
 @pytest.fixture
 def database_path(tmp_path: Path) -> Path:
     return tmp_path / "control.db"
@@ -154,16 +173,11 @@ def ledger(database_path: Path) -> ControlLedger:
     return value
 
 
-def _runner(
-    ledger: ControlLedger,
-    adapter: FakeAdapter,
-    executor: FakeExecutor | ReplayExecutor,
-) -> DeliveryConductorTick:
+def _runner(ledger: ControlLedger, adapter: FakeAdapter) -> DeliveryConductorTick:
     return DeliveryConductorTick(
         ledger=ledger,
         adapter=adapter,
-        executor=executor,
-        installed_capabilities=frozenset({"chat"}),
+        installed_capabilities=frozenset({"chat", "reminders"}),
         lease_seconds=30,
     )
 
@@ -173,58 +187,84 @@ def _fetchall(database_path: Path, query: str) -> list[tuple[object, ...]]:
         return connection.execute(query).fetchall()
 
 
-def test_completed_tick_records_one_effect_checkpoint_budget_and_acknowledgement(
-    ledger: ControlLedger, database_path: Path
+def _prepare_action(
+    ledger: ControlLedger,
+    adapter: FakeAdapter,
+    *,
+    wake: Wake | None = None,
+    now: datetime = NOW,
 ):
-    """Skipping any commit stage must leave the durable completed tick incomplete."""
-    action = _action()
-    adapter = FakeAdapter(_decision("execute", action=action))
-    executor = FakeExecutor(EffectResult("completed", "c" * 64, "accepted"))
-    checkpoint = CheckpointView("checkpoint-0", "0" * 64, 0, "wake-0")
-
-    result = _runner(ledger, adapter, executor).run(
-        _wake(1),
-        NOW,
-        checkpoint=checkpoint,
+    return _runner(ledger, adapter).run(
+        wake or _wake(1),
+        now,
+        checkpoint=None,
         budget_view=HEALTHY_BUDGET,
         breaker_allows_effect=True,
     )
 
-    assert result.status == "completed"
-    assert result.action_key == "action-1"
-    assert result.action_status == "completed"
-    assert result.result_sha256 == "c" * 64
-    assert result.reminder is None
-    assert adapter.requests == [
-        AdapterRequest(1, _wake(1), "2026-08-02T09:10:11Z", checkpoint, HEALTHY_BUDGET)
+
+def test_prepare_returns_one_reserved_action_without_invoking_or_releasing(
+    ledger: ControlLedger, database_path: Path
+):
+    """Calling the capability inside run must bypass the approved model handoff."""
+    action = _action()
+    adapter = FakeAdapter(_decision("execute", action=action))
+
+    prepared = _prepare_action(ledger, adapter)
+
+    assert prepared.status == "action-ready"
+    assert prepared.action == action
+    assert prepared.handoff.kind == "action"
+    assert prepared.handoff.action == action
+    assert prepared.action_key == "action-1"
+    assert prepared.action_status == "reserved"
+    assert _fetchall(
+        database_path,
+        "SELECT action_key, status FROM action_journal",
+    ) == [("action-1", "reserved")]
+    assert _fetchall(
+        database_path,
+        "SELECT action_key, action_status FROM run_checkpoint",
+    ) == [("action-1", "reserved")]
+    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [("pending",)]
+    assert _fetchall(database_path, "SELECT wake_id, fence_token FROM repo_lease") == [
+        ("wake-1", 1)
     ]
-    assert executor.calls == [action]
-    assert _fetchall(database_path, "SELECT wake_id, state FROM event_inbox") == [
-        ("wake-1", "acknowledged")
+    assert _fetchall(database_path, "SELECT * FROM budget_usage") == []
+
+
+def test_accept_matching_result_checkpoints_acknowledges_and_releases(
+    ledger: ControlLedger, database_path: Path
+):
+    """Dropping correlated acceptance must leave a completed tool result uncommitted."""
+    action = _action()
+    runner = _runner(ledger, FakeAdapter(_decision("execute", action=action)))
+    prepared = runner.run(
+        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    )
+
+    completed = runner.accept_result(
+        prepared.handoff,
+        action_key="action-1",
+        result=EffectResult("completed", "c" * 64, "accepted"),
+    )
+
+    assert completed.status == "completed"
+    assert completed.action is None
+    assert completed.handoff is None
+    assert completed.result_sha256 == "c" * 64
+    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [
+        ("acknowledged",)
     ]
     assert _fetchall(
         database_path,
-        "SELECT action_key, status, result_sha256 FROM action_journal",
-    ) == [("action-1", "completed", "c" * 64)]
-    checkpoint_rows = _fetchall(
+        "SELECT status, result_sha256 FROM action_journal",
+    ) == [("completed", "c" * 64)]
+    assert _fetchall(
         database_path,
-        "SELECT revision, acknowledged_wake_id, reason_code, "
-        "run_units_remaining, issue_units_remaining, daily_units_remaining, "
-        "action_key, action_status, action_result_sha256 FROM run_checkpoint",
-    )
-    assert checkpoint_rows == [
-        (
-            "repo-4",
-            "wake-1",
-            "accepted",
-            4,
-            5,
-            6,
-            "action-1",
-            "completed",
-            "c" * 64,
-        )
-    ]
+        "SELECT run_units_remaining, issue_units_remaining, daily_units_remaining, "
+        "action_status FROM run_checkpoint",
+    ) == [(4, 5, 6, "completed")]
     assert _fetchall(
         database_path,
         "SELECT run_units, issue_units, daily_units FROM budget_usage",
@@ -232,81 +272,107 @@ def test_completed_tick_records_one_effect_checkpoint_budget_and_acknowledgement
     assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
 
 
-def test_acknowledged_duplicate_never_reobserves_or_reexecutes(ledger: ControlLedger):
-    """Removing inbox deduplication from the tick must call both ports twice."""
-    action = _action()
-    adapter = FakeAdapter(
-        _decision("execute", action=action),
-        _decision("execute", action=action),
-    )
-    executor = FakeExecutor(
-        EffectResult("completed", "c" * 64, "accepted"),
-        EffectResult("completed", "c" * 64, "accepted"),
-    )
-    runner = _runner(ledger, adapter, executor)
-    first = runner.run(
+def test_accept_rejects_wrong_action_key_under_the_live_fence(
+    ledger: ControlLedger, database_path: Path
+):
+    """Uncorrelated record-result input must not finalize another reserved action."""
+    runner = _runner(ledger, FakeAdapter(_decision("execute", action=_action())))
+    prepared = runner.run(
         _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
     )
-    duplicate = runner.run(
-        _wake(1), NOW + timedelta(seconds=1), None, HEALTHY_BUDGET,
-        breaker_allows_effect=True,
-    )
 
-    assert first.status == "completed"
-    assert duplicate.status == "not-claimed"
-    assert len(adapter.requests) == 1
-    assert executor.calls == [action]
+    with pytest.raises(ValueError, match="correl"):
+        runner.accept_result(
+            prepared.handoff,
+            action_key="action-other",
+            result=EffectResult("completed", "c" * 64, "accepted"),
+        )
+
+    assert _fetchall(database_path, "SELECT status FROM action_journal") == [
+        ("reserved",)
+    ]
+    assert _fetchall(database_path, "SELECT wake_id FROM repo_lease") == [("wake-1",)]
+    assert _fetchall(database_path, "SELECT * FROM budget_usage") == []
 
 
-def test_out_of_order_wake_reobserves_and_can_become_noop(ledger: ControlLedger):
-    """Trusting event order must execute a stale event without current observation."""
-    action = _action()
+def test_stale_result_after_a_newer_fence_is_rejected(
+    ledger: ControlLedger, database_path: Path
+):
+    """Accepting a late old result must let a stale model turn overwrite new work."""
     adapter = FakeAdapter(
-        _decision("execute", action=action),
+        _decision("execute", action=_action()),
         _decision("noop"),
     )
-    executor = FakeExecutor(EffectResult("completed", "c" * 64, "accepted"))
-    runner = _runner(ledger, adapter, executor)
-
-    first = runner.run(_wake(2), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True)
-    older = runner.run(
-        _wake(1), NOW + timedelta(seconds=1), None, HEALTHY_BUDGET,
+    runner = _runner(ledger, adapter)
+    old = runner.run(_wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True)
+    newer = runner.run(
+        _wake(2),
+        NOW + timedelta(seconds=30),
+        None,
+        HEALTHY_BUDGET,
         breaker_allows_effect=True,
     )
+    assert newer.status == "noop"
 
-    assert first.status == "completed"
-    assert older.status == "noop"
-    assert [request.wake.wake_id for request in adapter.requests] == ["wake-2", "wake-1"]
-    assert executor.calls == [action]
+    with pytest.raises(StaleLeaseError):
+        runner.accept_result(
+            old.handoff,
+            action_key="action-1",
+            result=EffectResult("completed", "c" * 64, "accepted"),
+        )
+
+    assert _fetchall(
+        database_path,
+        "SELECT wake_id, state FROM event_inbox ORDER BY wake_id",
+    ) == [("wake-1", "pending"), ("wake-2", "acknowledged")]
 
 
-def test_live_lease_makes_a_stale_competing_wake_a_noop(ledger: ControlLedger):
-    """Ignoring the live lease must let a competing wake produce a second effect."""
-    action = _action()
+def test_duplicate_while_action_handoff_is_live_does_not_reobserve(
+    ledger: ControlLedger,
+):
+    """A live two-phase handoff must retain the sole repository lease."""
     adapter = FakeAdapter(
-        _decision("execute", action=action),
-        _decision("execute", action=_action("action-2")),
+        _decision("execute", action=_action()),
+        _decision("execute", action=_action()),
     )
-    executor = FakeExecutor(SystemExit("crash before effect"))
-    runner = _runner(ledger, adapter, executor)
-    with pytest.raises(SystemExit, match="crash before effect"):
-        runner.run(_wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True)
-
-    competing = runner.run(
-        _wake(2), NOW + timedelta(seconds=29), None, HEALTHY_BUDGET,
+    runner = _runner(ledger, adapter)
+    first = runner.run(_wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True)
+    duplicate = runner.run(
+        _wake(1),
+        NOW + timedelta(seconds=1),
+        None,
+        HEALTHY_BUDGET,
         breaker_allows_effect=True,
     )
 
-    assert competing.status == "not-claimed"
+    assert first.status == "action-ready"
+    assert duplicate.status == "not-claimed"
     assert len(adapter.requests) == 1
-    assert len(executor.calls) == 1
+
+
+def test_invalid_request_is_rejected_before_claiming_the_wake(
+    ledger: ControlLedger, database_path: Path
+):
+    """Constructing AdapterRequest after claim must strand a lease on bad caller input."""
+    runner = _runner(ledger, FakeAdapter(_decision("noop")))
+
+    with pytest.raises(ContractValidationError, match="checkpoint"):
+        runner.run(
+            _wake(1),
+            NOW,
+            checkpoint=object(),  # type: ignore[arg-type]
+            budget_view=HEALTHY_BUDGET,
+            breaker_allows_effect=True,
+        )
+
+    assert _fetchall(database_path, "SELECT * FROM event_inbox") == []
+    assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
 
 
 @pytest.mark.parametrize(
     "decision",
     [
         _decision("execute"),
-        _decision("noop", action=_action()),
         _decision("remind"),
         _decision("investigate"),
         _decision("execute", action=_action(target_revision="repo-3")),
@@ -315,7 +381,6 @@ def test_live_lease_makes_a_stale_competing_wake_a_noop(ledger: ControlLedger):
     ],
     ids=[
         "execute-without-action",
-        "noop-with-action",
         "remind-without-reminder",
         "investigate-without-reminder",
         "stale-target-revision",
@@ -323,20 +388,14 @@ def test_live_lease_makes_a_stale_competing_wake_a_noop(ledger: ControlLedger):
         "wrong-result-type",
     ],
 )
-def test_invalid_adapter_decision_fails_closed_without_reserving_or_executing(
+def test_invalid_adapter_decision_fails_closed_without_reservation(
     ledger: ControlLedger, database_path: Path, decision: AdapterDecision | object
 ):
-    """Weak semantic validation must turn malformed policy output into authority."""
-    adapter = FakeAdapter(decision)
-    executor = FakeExecutor(EffectResult("completed", "c" * 64, "accepted"))
-
-    result = _runner(ledger, adapter, executor).run(
-        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
-    )
+    """Weak semantic validation must turn malformed adapter data into authority."""
+    result = _prepare_action(ledger, FakeAdapter(decision))
 
     assert result.status == "rejected"
     assert result.reason_code == "invalid-adapter-decision"
-    assert executor.calls == []
     assert _fetchall(database_path, "SELECT action_key FROM action_journal") == []
     assert _fetchall(database_path, "SELECT state FROM event_inbox") == [("pending",)]
     assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
@@ -345,21 +404,18 @@ def test_invalid_adapter_decision_fails_closed_without_reserving_or_executing(
 def test_disallowed_capability_fails_closed_before_reservation(
     ledger: ControlLedger, database_path: Path
 ):
-    """Letting adapter output choose an uninstalled capability grants new authority."""
-    adapter = FakeAdapter(
-        _decision("execute", action=_action(capability_name="uninstalled"))
-    )
-    executor = FakeExecutor(EffectResult("completed", "c" * 64, "accepted"))
-
-    result = _runner(ledger, adapter, executor).run(
-        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    """Letting adapter output choose an uninstalled capability grants authority."""
+    result = _prepare_action(
+        ledger,
+        FakeAdapter(
+            _decision("execute", action=_action(capability_name="uninstalled"))
+        ),
     )
 
     assert result.status == "rejected"
     assert result.reason_code == "capability-not-installed"
-    assert executor.calls == []
+    assert result.action is None
     assert _fetchall(database_path, "SELECT action_key FROM action_journal") == []
-    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [("pending",)]
 
 
 @pytest.mark.parametrize(
@@ -372,285 +428,429 @@ def test_disallowed_capability_fails_closed_before_reservation(
         (HEALTHY_BUDGET, None, "invalid-breaker-state"),
     ],
 )
-def test_budget_and_breaker_fail_closed_after_durable_reservation(
+def test_budget_and_breaker_block_after_reservation_without_returning_action(
     ledger: ControlLedger,
     database_path: Path,
     budget: BudgetView,
     breaker_allows_effect: bool | None,
     reason_code: str,
 ):
-    """Moving either gate after execution must spend authority while blocked."""
-    action = _action()
-    adapter = FakeAdapter(_decision("execute", action=action))
-    executor = FakeExecutor(EffectResult("completed", "c" * 64, "accepted"))
+    """Returning an action before either gate must spend blocked authority."""
+    runner = _runner(ledger, FakeAdapter(_decision("execute", action=_action())))
 
-    result = _runner(ledger, adapter, executor).run(
+    result = runner.run(
         _wake(1), NOW, None, budget, breaker_allows_effect=breaker_allows_effect
     )
 
     assert result.status == "blocked"
     assert result.reason_code == reason_code
+    assert result.action is None
+    assert result.handoff is None
     assert result.action_status == "reserved"
-    assert executor.calls == []
-    assert _fetchall(
-        database_path,
-        "SELECT action_key, status FROM action_journal",
-    ) == [("action-1", "reserved")]
-    assert _fetchall(
-        database_path,
-        "SELECT action_key, action_status FROM run_checkpoint",
-    ) == [("action-1", "reserved")]
+    assert _fetchall(database_path, "SELECT status FROM action_journal") == [
+        ("reserved",)
+    ]
     assert _fetchall(database_path, "SELECT state FROM event_inbox") == [("pending",)]
-    assert _fetchall(
-        database_path,
-        "SELECT run_units, issue_units, daily_units FROM budget_usage",
-    ) == [(0, 0, 0)]
+    assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
 
 
-def test_noop_checkpoints_and_acknowledges_without_executor(
+def test_noop_without_reminder_checkpoints_and_acknowledges(
     ledger: ControlLedger, database_path: Path
 ):
-    """Treating no-op as an error must keep a settled wake pending forever."""
-    adapter = FakeAdapter(_decision("noop"))
-    executor = FakeExecutor(EffectResult("completed", "c" * 64, "accepted"))
-
-    result = _runner(ledger, adapter, executor).run(
-        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
-    )
+    """A settled no-op must not leave its wake or lease live."""
+    result = _prepare_action(ledger, FakeAdapter(_decision("noop")))
 
     assert result.status == "noop"
+    assert result.action is None
     assert result.reminder is None
-    assert executor.calls == []
     assert _fetchall(database_path, "SELECT state FROM event_inbox") == [
         ("acknowledged",)
     ]
+    assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
+
+
+@pytest.mark.parametrize("decision_name", ["noop", "remind", "investigate"])
+def test_reminder_intent_is_reserved_before_return_and_wake_stays_unacknowledged(
+    ledger: ControlLedger, database_path: Path, decision_name: str
+):
+    """Acknowledging before reminder confirmation must lose the only recovery wake."""
+    reminder = _reminder()
+    result = _prepare_action(
+        ledger,
+        FakeAdapter(_decision(decision_name, reminder=reminder)),
+    )
+
+    assert result.status == "reminder-ready"
+    assert result.action == result.handoff.action
+    assert result.action.capability_name == "reminders"
+    assert result.reminder == reminder
+    assert result.handoff.kind == "reminder"
+    assert result.handoff.reminder == reminder
+    assert result.action_status == "reserved"
     assert _fetchall(
         database_path,
-        "SELECT revision, reason_code, action_key FROM run_checkpoint",
-    ) == [("repo-4", "decision-noop", None)]
+        "SELECT capability_name, status FROM action_journal",
+    ) == [("reminders", "reserved")]
+    assert _fetchall(
+        database_path,
+        "SELECT action_key, action_status FROM run_checkpoint",
+    ) == [(result.action_key, "reserved")]
+    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [("pending",)]
+    assert _fetchall(database_path, "SELECT wake_id FROM repo_lease") == [("wake-1",)]
 
 
-def test_reminder_decision_returns_one_reminder_without_executor(
+def test_confirmed_reminder_records_result_before_acknowledgement(
     ledger: ControlLedger, database_path: Path
 ):
-    """Dropping a policy reminder must lose the only requested future wake."""
+    """Reminder confirmation without journal completion must permit invented success."""
     reminder = _reminder()
-    adapter = FakeAdapter(_decision("remind", reminder=reminder))
-    executor = FakeExecutor(EffectResult("completed", "c" * 64, "accepted"))
-
-    result = _runner(ledger, adapter, executor).run(
+    runner = _runner(ledger, FakeAdapter(_decision("remind", reminder=reminder)))
+    prepared = runner.run(
         _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    )
+
+    confirmed = runner.accept_result(
+        prepared.handoff,
+        action_key=prepared.action_key,
+        result=EffectResult("completed", "e" * 64, "reminder-established"),
+    )
+
+    assert confirmed.status == "reminder"
+    assert confirmed.handoff is None
+    assert _fetchall(
+        database_path,
+        "SELECT status, result_sha256 FROM action_journal",
+    ) == [("completed", "e" * 64)]
+    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [
+        ("acknowledged",)
+    ]
+    assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
+
+
+def test_wrong_reminder_confirmation_cannot_acknowledge(
+    ledger: ControlLedger, database_path: Path
+):
+    """A mismatched reminder result must not consume the pending wake."""
+    runner = _runner(ledger, FakeAdapter(_decision("remind", reminder=_reminder())))
+    prepared = runner.run(
+        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    )
+
+    with pytest.raises(ValueError, match="correl"):
+        runner.accept_result(
+            prepared.handoff,
+            action_key="reminder:other",
+            result=EffectResult("completed", "e" * 64, "reminder-established"),
+        )
+
+    assert _fetchall(database_path, "SELECT status FROM action_journal") == [
+        ("reserved",)
+    ]
+    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [("pending",)]
+
+
+def test_ambiguous_action_is_terminal_and_leaves_wake_for_reminder_only_tick(
+    ledger: ControlLedger, database_path: Path
+):
+    """Acknowledging ambiguity or returning the action again can lose or duplicate work."""
+    action = _action()
+    adapter = FakeAdapter(
+        _decision("execute", action=action),
+        _decision("execute", action=action),
+    )
+    runner = _runner(ledger, adapter)
+    prepared = runner.run(
+        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    )
+    ambiguous = runner.accept_result(
+        prepared.handoff,
+        action_key="action-1",
+        result=EffectResult("ambiguous", "d" * 64, "result-unknown"),
+    )
+
+    assert ambiguous.status == "investigate"
+    assert ambiguous.action is None
+    assert ambiguous.handoff is None
+    assert ambiguous.reminder == ReminderSpec(
+        "investigate:action-1",
+        "2026-08-02T09:15:11Z",
+        "result-unknown",
+    )
+    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [("pending",)]
+    assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
+
+    reminder_tick = runner.run(
+        _wake(1),
+        NOW + timedelta(seconds=1),
+        None,
+        HEALTHY_BUDGET,
+        breaker_allows_effect=True,
+    )
+    assert reminder_tick.status == "reminder-ready"
+    assert reminder_tick.action == reminder_tick.handoff.action
+    assert reminder_tick.action.capability_name == "reminders"
+    assert reminder_tick.action.action_key != action.action_key
+    assert reminder_tick.handoff.kind == "reminder"
+    assert _fetchall(
+        database_path,
+        "SELECT action_key, status FROM action_journal ORDER BY action_key",
+    ) == [("action-1", "ambiguous"), (reminder_tick.action_key, "reserved")]
+
+
+def test_completed_action_with_next_reminder_keeps_wake_pending(
+    ledger: ControlLedger, database_path: Path
+):
+    """One effect plus reminder acknowledgement must create an unrecoverable crash gap."""
+    action = _action()
+    reminder = _reminder()
+    runner = _runner(
+        ledger,
+        FakeAdapter(_decision("execute", action=action, reminder=reminder)),
+    )
+    prepared = runner.run(
+        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    )
+
+    result = runner.accept_result(
+        prepared.handoff,
+        action_key="action-1",
+        result=EffectResult("completed", "c" * 64, "accepted"),
     )
 
     assert result.status == "reminder"
     assert result.reminder == reminder
-    assert executor.calls == []
-    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [
-        ("acknowledged",)
-    ]
+    assert result.action is None
+    assert result.handoff is None
+    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [("pending",)]
+    assert _fetchall(database_path, "SELECT * FROM repo_lease") == []
 
 
-def test_reserved_action_is_not_replayed_until_fresh_adapter_observes_absence(
+def test_pre_effect_recovery_requires_fresh_observation_before_returning_action(
     ledger: ControlLedger, database_path: Path
 ):
-    """Automatic reservation replay must execute without a fresh absence observation."""
+    """Automatic reservation replay must bypass a fresh absence observation."""
     action = _action()
     adapter = FakeAdapter(
         _decision("execute", action=action),
         _decision("noop"),
     )
-    executor = FakeExecutor(
-        SystemExit("crash before effect"),
-        EffectResult("completed", "c" * 64, "accepted"),
-    )
-    runner = _runner(ledger, adapter, executor)
-    with pytest.raises(SystemExit, match="crash before effect"):
-        runner.run(_wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True)
+    runner = _runner(ledger, adapter)
+    first = runner.run(_wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True)
+    assert first.status == "action-ready"
 
     recovered = runner.run(
-        _wake(1), NOW + timedelta(seconds=30), None, HEALTHY_BUDGET,
+        _wake(1),
+        NOW + timedelta(seconds=30),
+        None,
+        HEALTHY_BUDGET,
         breaker_allows_effect=True,
     )
 
     assert recovered.status == "noop"
+    assert recovered.action is None
     assert len(adapter.requests) == 2
-    assert executor.calls == [action]
-    assert _fetchall(
-        database_path,
-        "SELECT action_key, status FROM action_journal",
-    ) == [("action-1", "reserved")]
-    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [
-        ("acknowledged",)
+    assert _fetchall(database_path, "SELECT status FROM action_journal") == [
+        ("reserved",)
     ]
 
 
-def test_reserved_action_retries_after_fresh_adapter_observes_absence(
+def test_reserved_action_replay_returns_same_action_after_fresh_absence(
     ledger: ControlLedger, database_path: Path
 ):
-    """Refusing a freshly re-observed reservation must strand known-absent work."""
+    """Minting or hiding an action on recovery must break action-key replay."""
     action = _action()
     adapter = FakeAdapter(
         _decision("execute", action=action),
         _decision("execute", action=action),
     )
-    executor = FakeExecutor(
-        SystemExit("crash before effect"),
-        EffectResult("completed", "c" * 64, "accepted"),
-    )
-    runner = _runner(ledger, adapter, executor)
-    with pytest.raises(SystemExit, match="crash before effect"):
-        runner.run(_wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True)
-
+    runner = _runner(ledger, adapter)
+    first = runner.run(_wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True)
     recovered = runner.run(
-        _wake(1), NOW + timedelta(seconds=30), None, HEALTHY_BUDGET,
+        _wake(1),
+        NOW + timedelta(seconds=30),
+        None,
+        HEALTHY_BUDGET,
         breaker_allows_effect=True,
     )
 
-    assert recovered.status == "completed"
-    assert len(adapter.requests) == 2
-    assert executor.calls == [action, action]
+    assert first.action == action
+    assert recovered.action == action
+    assert recovered.handoff.lease.fence_token == 2
     assert _fetchall(
         database_path,
         "SELECT event_type FROM action_events ORDER BY id",
-    ) == [("reserved",), ("completed",)]
+    ) == [("reserved",)]
 
 
-def test_crash_after_effect_reuses_action_key_and_records_capability_replay(
+def test_post_effect_recovery_uses_external_action_key_replay(
     ledger: ControlLedger, database_path: Path
 ):
-    """Minting a replacement action after a lost result must duplicate the effect."""
+    """A lost result must not cause the conductor to mint a replacement action."""
     action = _action()
     adapter = FakeAdapter(
         _decision("execute", action=action),
         _decision("execute", action=action),
     )
+    runner = _runner(ledger, adapter)
     executor = ReplayExecutor()
-    runner = _runner(ledger, adapter, executor)
+    first = runner.run(_wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True)
     with pytest.raises(SystemExit, match="crash after effect"):
-        runner.run(_wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True)
+        executor.execute(first.action)
 
     recovered = runner.run(
-        _wake(1), NOW + timedelta(seconds=30), None, HEALTHY_BUDGET,
+        _wake(1),
+        NOW + timedelta(seconds=30),
+        None,
+        HEALTHY_BUDGET,
         breaker_allows_effect=True,
     )
+    result = executor.execute(recovered.action)
+    completed = runner.accept_result(
+        recovered.handoff,
+        action_key="action-1",
+        result=result,
+    )
 
-    assert recovered.status == "completed"
+    assert completed.status == "completed"
     assert len(executor.calls) == 2
     assert list(executor.effects) == ["action-1"]
-    assert _fetchall(
-        database_path,
-        "SELECT action_key, status, result_sha256 FROM action_journal",
-    ) == [("action-1", "completed", "c" * 64)]
+    assert _fetchall(database_path, "SELECT status FROM action_journal") == [
+        ("completed",)
+    ]
 
 
-def test_completed_action_key_replay_never_calls_executor_again(ledger: ControlLedger):
-    """Ignoring a completed reservation must call an idempotent rail unnecessarily."""
+def test_completed_action_replay_returns_no_action(ledger: ControlLedger):
+    """A terminal journal replay must not return an executable action again."""
     action = _action()
     adapter = FakeAdapter(
         _decision("execute", action=action),
         _decision("execute", action=action),
     )
-    executor = FakeExecutor(EffectResult("completed", "c" * 64, "accepted"))
-    runner = _runner(ledger, adapter, executor)
+    runner = _runner(ledger, adapter)
     first = runner.run(_wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True)
+    runner.accept_result(
+        first.handoff,
+        action_key="action-1",
+        result=EffectResult("completed", "c" * 64, "accepted"),
+    )
+
     replay = runner.run(
-        _wake(2), NOW + timedelta(seconds=1), None, HEALTHY_BUDGET,
+        _wake(2),
+        NOW + timedelta(seconds=1),
+        None,
+        HEALTHY_BUDGET,
         breaker_allows_effect=True,
     )
 
-    assert first.status == "completed"
     assert replay.status == "completed"
-    assert executor.calls == [action]
+    assert replay.action is None
+    assert replay.handoff is None
 
 
-def test_ambiguous_result_becomes_investigate_reminder_and_never_reexecutes(
-    ledger: ControlLedger, database_path: Path
-):
-    """Treating ambiguity as retryable must perform the same effect immediately again."""
+def test_out_of_order_wake_reobserves_and_can_become_noop(ledger: ControlLedger):
+    """Trusting event order must return stale executable work without observation."""
     action = _action()
     adapter = FakeAdapter(
         _decision("execute", action=action),
-        _decision("execute", action=action),
+        _decision("noop"),
     )
-    executor = FakeExecutor(EffectResult("ambiguous", "d" * 64, "result-unknown"))
-    runner = _runner(ledger, adapter, executor)
-    first = runner.run(_wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True)
-    replay = runner.run(
-        _wake(2), NOW + timedelta(seconds=1), None, HEALTHY_BUDGET,
+    runner = _runner(ledger, adapter)
+    first = runner.run(_wake(2), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True)
+    runner.accept_result(
+        first.handoff,
+        action_key="action-1",
+        result=EffectResult("completed", "c" * 64, "accepted"),
+    )
+    older = runner.run(
+        _wake(1),
+        NOW + timedelta(seconds=1),
+        None,
+        HEALTHY_BUDGET,
         breaker_allows_effect=True,
     )
 
-    assert first.status == "investigate"
-    assert first.reminder == ReminderSpec(
-        "investigate:action-1",
-        "2026-08-02T09:15:11Z",
-        "result-unknown",
+    assert older.status == "noop"
+    assert older.action is None
+    assert [request.wake.wake_id for request in adapter.requests] == ["wake-2", "wake-1"]
+
+
+def _noop_response(reason_code: str) -> bytes:
+    value = {
+        "schema_version": 1,
+        "observed_revision": "repo-4",
+        "decision": "noop",
+        "reason_code": reason_code,
+        "target_id": None,
+        "proposed_action": None,
+        "next_reminder": None,
+    }
+    return json.dumps(value, separators=(",", ":")).encode() + b"\n"
+
+
+def test_policy_adapter_requires_a_fresh_exchange_for_every_observation():
+    """Reusing one buffered channel must let a queued stale decision answer a new wake."""
+    shared_reader = BytesIO(_noop_response("first") + _noop_response("stale-second"))
+    shared_writer = BytesIO()
+    adapter = JsonLinesPolicyAdapter(
+        lambda: BoundedJsonLinesExchange(
+            shared_reader,
+            shared_writer,
+            deadline_seconds=1,
+        )
     )
-    assert replay.status == "investigate"
-    assert replay.reminder == ReminderSpec(
-        "investigate:action-1",
-        "2026-08-02T09:15:12Z",
-        "result-unknown",
+    first_request = AdapterRequest(
+        1, _wake(1), "2026-08-02T09:10:11Z", None, HEALTHY_BUDGET
     )
-    assert executor.calls == [action]
-    assert _fetchall(
-        database_path,
-        "SELECT event_type FROM action_events ORDER BY id",
-    ) == [("reserved",), ("ambiguous",)]
-
-
-def test_invalid_executor_result_is_recorded_ambiguous_not_retried(
-    ledger: ControlLedger, database_path: Path
-):
-    """Trusting a malformed result must checkpoint invented success or retry the effect."""
-    action = _action()
-    adapter = FakeAdapter(_decision("execute", action=action))
-    executor = FakeExecutor(object())
-
-    result = _runner(ledger, adapter, executor).run(
-        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
-    )
-
-    assert result.status == "investigate"
-    assert result.reason_code == "invalid-executor-result"
-    assert len(executor.calls) == 1
-    assert _fetchall(
-        database_path,
-        "SELECT status, reason_code FROM action_journal",
-    ) == [("ambiguous", "invalid-executor-result")]
-
-
-def test_executor_mapping_mismatch_is_pre_effect_block_not_ambiguity(
-    ledger: ControlLedger, database_path: Path
-):
-    """Calling a missing installed rail must not invent an ambiguous external effect."""
-    action = _action()
-    adapter = FakeAdapter(_decision("execute", action=action))
-    executor = FakeExecutor(CapabilityNotInstalledError("mapping mismatch"))
-
-    result = _runner(ledger, adapter, executor).run(
-        _wake(1), NOW, None, HEALTHY_BUDGET, breaker_allows_effect=True
+    second_request = AdapterRequest(
+        1, _wake(2), "2026-08-02T09:10:12Z", None, HEALTHY_BUDGET
     )
 
-    assert result.status == "blocked"
-    assert result.reason_code == "capability-not-installed"
-    assert result.action_status == "reserved"
-    assert _fetchall(
-        database_path,
-        "SELECT status, reason_code FROM action_journal",
-    ) == [("reserved", None)]
-    assert _fetchall(database_path, "SELECT state FROM event_inbox") == [("pending",)]
+    assert adapter.observe_and_decide(first_request).reason_code == "first"
+    with pytest.raises(PortExchangeError, match="fresh|one request"):
+        adapter.observe_and_decide(second_request)
 
 
-def test_json_lines_adapter_uses_one_bounded_template_owned_stream_exchange():
-    """Unbounded framing must let adapter output escape the closed policy port."""
-    response = BytesIO(
-        b'{"schema_version":1,"observed_revision":"repo-4","decision":"noop",'
-        b'"reason_code":"observed-current","target_id":null,'
-        b'"proposed_action":null,"next_reminder":null}\n'
+def test_bounded_exchange_rejects_short_write_before_reading():
+    """Waiting for a response after a partial request write can deadlock forever."""
+    reader = FailIfRead()
+    exchange = BoundedJsonLinesExchange(
+        reader,  # type: ignore[arg-type]
+        ShortWriter(),
+        deadline_seconds=1,
     )
+
+    with pytest.raises(PortExchangeError, match="partially written"):
+        exchange.exchange("{}")
+    assert reader.called is False
+
+
+def test_bounded_exchange_cancels_a_stalled_read_at_its_deadline():
+    """A byte cap without a deadline must let a silent peer hang the tick."""
+    reader = BlockingReader()
+    exchange = BoundedJsonLinesExchange(
+        reader,  # type: ignore[arg-type]
+        BytesIO(),
+        deadline_seconds=0.02,
+    )
+    started = time.monotonic()
+
+    with pytest.raises(PortExchangeError, match="timed out"):
+        exchange.exchange("{}")
+
+    assert time.monotonic() - started < 0.5
+    assert reader.closed.is_set()
+
+
+def test_policy_adapter_uses_closed_bounded_fresh_json_line():
+    """Changing the production adapter framing must bypass the reviewed contract parser."""
     request_output = BytesIO()
-    adapter = JsonLinesPolicyAdapter(BoundedJsonLinesExchange(response, request_output))
+    adapter = JsonLinesPolicyAdapter(
+        lambda: BoundedJsonLinesExchange(
+            BytesIO(_noop_response("observed-current")),
+            request_output,
+            deadline_seconds=1,
+        )
+    )
     request = AdapterRequest(
         1, _wake(1), "2026-08-02T09:10:11Z", None, HEALTHY_BUDGET
     )
@@ -659,32 +859,34 @@ def test_json_lines_adapter_uses_one_bounded_template_owned_stream_exchange():
         1, "repo-4", "noop", "observed-current", None, None, None
     )
     written = json.loads(request_output.getvalue())
-    assert written["wake"] == {
-        "payload_sha256": "1" * 64,
-        "source": "event",
-        "source_event_id": "event-1",
-        "wake_id": "wake-1",
-    }
+    assert written["wake"]["wake_id"] == "wake-1"
 
     oversized = JsonLinesPolicyAdapter(
-        BoundedJsonLinesExchange(
+        lambda: BoundedJsonLinesExchange(
             BytesIO(b"x" * (MAX_MESSAGE_BYTES + 2)),
             BytesIO(),
+            deadline_seconds=1,
         )
     )
     with pytest.raises(PortExchangeError, match="exceeds"):
         oversized.observe_and_decide(request)
 
 
-def test_json_lines_executor_is_capability_mapped_and_returns_closed_result():
-    """Using adapter-selected invocation data must execute outside the installed mapping."""
+def test_external_json_lines_executor_is_fresh_capability_mapped_and_closed():
+    """Letting adapter data select a channel or stale response must bypass confinement."""
     response = BytesIO(
         b'{"schema_version":1,"action_key":"action-1","status":"completed",'
         b'"result_sha256":"' + b"c" * 64 + b'","reason_code":"accepted"}\n'
     )
     request_output = BytesIO()
     executor = JsonLinesCapabilityExecutor(
-        {"chat": BoundedJsonLinesExchange(response, request_output)}
+        {
+            "chat": lambda: BoundedJsonLinesExchange(
+                response,
+                request_output,
+                deadline_seconds=1,
+            )
+        }
     )
 
     assert executor.execute(_action()) == EffectResult("completed", "c" * 64, "accepted")
@@ -693,3 +895,32 @@ def test_json_lines_executor_is_capability_mapped_and_returns_closed_result():
     assert written["action_key"] == "action-1"
     with pytest.raises(CapabilityNotInstalledError):
         executor.execute(_action("action-2", capability_name="uninstalled"))
+
+
+def test_external_executor_rejects_a_reused_channel_with_queued_results():
+    """A queued result on a reused capability channel must not satisfy another action."""
+    first_result = (
+        b'{"schema_version":1,"action_key":"action-1","status":"completed",'
+        b'"result_sha256":"' + b"c" * 64 + b'","reason_code":"accepted"}\n'
+    )
+    stale_result = (
+        b'{"schema_version":1,"action_key":"action-2","status":"completed",'
+        b'"result_sha256":"' + b"d" * 64 + b'","reason_code":"stale"}\n'
+    )
+    shared_reader = BytesIO(first_result + stale_result)
+    shared_writer = BytesIO()
+    executor = JsonLinesCapabilityExecutor(
+        {
+            "chat": lambda: BoundedJsonLinesExchange(
+                shared_reader,
+                shared_writer,
+                deadline_seconds=1,
+            )
+        }
+    )
+
+    assert executor.execute(_action()) == EffectResult("completed", "c" * 64, "accepted")
+    rejected = executor.execute(_action("action-2"))
+    assert rejected.status == "ambiguous"
+    assert rejected.reason_code == "executor-exchange-ambiguous"
+    assert len(rejected.result_sha256) == 64

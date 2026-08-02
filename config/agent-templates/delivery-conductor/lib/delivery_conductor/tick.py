@@ -1,4 +1,4 @@
-"""One fenced, one-effect delivery-conductor control tick."""
+"""One fenced, two-phase, one-effect delivery-conductor control tick."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,7 +18,6 @@ from .contracts import (
     ReminderSpec,
     Wake,
 )
-from .executor import CapabilityExecutorPort, CapabilityNotInstalledError
 from .ledger import (
     ActionReservation,
     Checkpoint,
@@ -34,20 +33,60 @@ TickStatus = Literal[
     "rejected",
     "blocked",
     "noop",
+    "action-ready",
+    "reminder-ready",
     "reminder",
     "completed",
     "investigate",
 ]
+HandoffKind = Literal["action", "reminder"]
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 
 
+class TickCorrelationError(ValueError):
+    """Raised when a result does not match the prepared action and fence."""
+
+
+@dataclass(frozen=True)
+class TickHandoff:
+    """Safe state required to accept one externally produced result."""
+
+    kind: HandoffKind
+    lease: Lease
+    observed_revision: str
+    budget_view: BudgetView
+    action: ProposedAction
+    payload_sha256: str
+    reminder: ReminderSpec | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("action", "reminder"):
+            raise TickCorrelationError("handoff kind is invalid")
+        if not isinstance(self.lease, Lease):
+            raise TickCorrelationError("handoff lease is invalid")
+        if not _is_identifier(self.observed_revision):
+            raise TickCorrelationError("handoff revision is invalid")
+        if not isinstance(self.budget_view, BudgetView):
+            raise TickCorrelationError("handoff budget is invalid")
+        if not isinstance(self.action, ProposedAction):
+            raise TickCorrelationError("handoff action is invalid")
+        if not re.fullmatch(r"[a-f0-9]{64}", self.payload_sha256):
+            raise TickCorrelationError("handoff payload digest is invalid")
+        if self.kind == "reminder" and not isinstance(self.reminder, ReminderSpec):
+            raise TickCorrelationError("reminder handoff requires a reminder")
+        if self.reminder is not None and not isinstance(self.reminder, ReminderSpec):
+            raise TickCorrelationError("handoff reminder is invalid")
+
+
 @dataclass(frozen=True)
 class TickResult:
-    """Sanitized result of one claimed tick and at most one executor call."""
+    """Sanitized result of one phase and at most one executable action."""
 
     status: TickStatus
     reason_code: str
+    action: ProposedAction | None = None
+    handoff: TickHandoff | None = None
     action_key: str | None = None
     action_status: str | None = None
     result_sha256: str | None = None
@@ -55,14 +94,13 @@ class TickResult:
 
 
 class DeliveryConductorTick:
-    """Advance one wake through read-only policy and one installed capability."""
+    """Prepare one effect, then accept its correlated sanitized result."""
 
     def __init__(
         self,
         *,
         ledger: ControlLedger,
         adapter: PolicyAdapterPort,
-        executor: CapabilityExecutorPort,
         installed_capabilities: frozenset[str],
         lease_seconds: int,
         ambiguity_reminder_seconds: int = 300,
@@ -80,7 +118,6 @@ class DeliveryConductorTick:
             raise ValueError("ambiguity_reminder_seconds must be a positive integer")
         self._ledger = ledger
         self._adapter = adapter
-        self._executor = executor
         self._installed_capabilities = installed_capabilities
         self._lease_seconds = lease_seconds
         self._ambiguity_reminder_seconds = ambiguity_reminder_seconds
@@ -94,11 +131,7 @@ class DeliveryConductorTick:
         *,
         breaker_allows_effect: bool,
     ) -> TickResult:
-        """Run one atomic control step, invoking the executor zero or one times."""
-        lease = self._ledger.claim_wake(wake, now, self._lease_seconds)
-        if lease is None:
-            return TickResult("not-claimed", "wake-not-claimed")
-
+        """Prepare zero or one effect without invoking a capability."""
         request = AdapterRequest(
             schema_version=1,
             wake=wake,
@@ -106,6 +139,10 @@ class DeliveryConductorTick:
             checkpoint=checkpoint,
             budget_view=budget_view,
         )
+        lease = self._ledger.claim_wake(wake, now, self._lease_seconds)
+        if lease is None:
+            return TickResult("not-claimed", "wake-not-claimed")
+
         try:
             decision = self._adapter.observe_and_decide(request)
         except Exception:
@@ -114,7 +151,15 @@ class DeliveryConductorTick:
             return self._reject(lease, "invalid-adapter-decision")
 
         if decision.decision != "execute":
-            return self._finish_without_action(lease, decision, budget_view)
+            if decision.next_reminder is not None:
+                return self._prepare_reminder(
+                    lease,
+                    decision.observed_revision,
+                    decision.next_reminder,
+                    budget_view,
+                    breaker_allows_effect,
+                )
+            return self._finish_noop(lease, decision, budget_view)
 
         action = decision.proposed_action
         if action is None:
@@ -123,84 +168,248 @@ class DeliveryConductorTick:
             return self._reject(lease, "capability-not-installed")
 
         reservation = self._ledger.reserve_action(lease, action)
-        if reservation.status != "reserved":
+        if reservation.status == "completed":
+            if decision.next_reminder is not None:
+                return self._prepare_reminder(
+                    lease,
+                    decision.observed_revision,
+                    decision.next_reminder,
+                    budget_view,
+                    breaker_allows_effect,
+                )
             return self._finish_terminal_replay(
+                lease, decision.observed_revision, budget_view, reservation
+            )
+        if reservation.status == "ambiguous":
+            reminder = decision.next_reminder or _investigation_reminder(
+                action.action_key,
+                reservation.reason_code or "result-unknown",
+                now + timedelta(seconds=self._ambiguity_reminder_seconds),
+            )
+            return self._prepare_reminder(
                 lease,
-                decision,
+                decision.observed_revision,
+                reminder,
                 budget_view,
-                reservation,
-                now,
+                breaker_allows_effect,
             )
 
         gate_reason = _effect_gate_reason(budget_view, breaker_allows_effect)
         if gate_reason is not None:
-            self._write_checkpoint(
+            return self._block_reserved(
                 lease,
-                revision=decision.observed_revision,
-                reason_code=gate_reason,
-                budget_view=budget_view,
-                reservation=reservation,
-            )
-            self._ledger.release(lease, TickOutcome(False, gate_reason, 0, 0, 0))
-            return TickResult(
-                "blocked",
+                decision.observed_revision,
+                budget_view,
+                reservation,
                 gate_reason,
-                action_key=action.action_key,
-                action_status="reserved",
-                reminder=decision.next_reminder,
             )
 
-        try:
-            effect_result = self._executor.execute(action)
-        except CapabilityNotInstalledError:
-            reason_code = "capability-not-installed"
-            self._write_checkpoint(
-                lease,
-                revision=decision.observed_revision,
-                reason_code=reason_code,
-                budget_view=budget_view,
-                reservation=reservation,
-            )
-            self._ledger.release(
-                lease,
-                TickOutcome(False, reason_code, 0, 0, 0),
-            )
-            return TickResult(
-                "blocked",
-                reason_code,
-                action_key=action.action_key,
-                action_status="reserved",
-                reminder=decision.next_reminder,
-            )
-        except Exception:
-            effect_result = _synthetic_ambiguous_result(action, "executor-result-ambiguous")
-        if not isinstance(effect_result, EffectResult):
-            effect_result = _synthetic_ambiguous_result(action, "invalid-executor-result")
-
-        self._ledger.record_result(lease, action.action_key, effect_result)
-        remaining_budget = _spend_one(budget_view)
-        terminal_reservation = ActionReservation(
-            action.action_key,
-            effect_result.status,
-            reservation.payload_sha256,
-            effect_result.result_sha256,
-            effect_result.reason_code,
-        )
         self._write_checkpoint(
             lease,
             revision=decision.observed_revision,
-            reason_code=effect_result.reason_code,
+            reason_code="action-ready",
+            budget_view=budget_view,
+            reservation=reservation,
+        )
+        handoff = TickHandoff(
+            kind="action",
+            lease=lease,
+            observed_revision=decision.observed_revision,
+            budget_view=budget_view,
+            action=action,
+            payload_sha256=reservation.payload_sha256,
+            reminder=decision.next_reminder,
+        )
+        return TickResult(
+            "action-ready",
+            decision.reason_code,
+            action=action,
+            handoff=handoff,
+            action_key=action.action_key,
+            action_status="reserved",
+            reminder=decision.next_reminder,
+        )
+
+    def accept_result(
+        self,
+        handoff: TickHandoff,
+        *,
+        action_key: str,
+        result: EffectResult,
+    ) -> TickResult:
+        """Accept one prepared action result under its action key and fence."""
+        self._validate_handoff(handoff, correlation=action_key)
+        if not isinstance(result, EffectResult):
+            raise TickCorrelationError("result must be a sanitized EffectResult")
+        self._ledger.record_result(handoff.lease, action_key, result)
+        remaining_budget = _spend_one(handoff.budget_view)
+        reservation = ActionReservation(
+            action_key,
+            result.status,
+            handoff.payload_sha256,
+            result.result_sha256,
+            result.reason_code,
+        )
+        self._write_checkpoint(
+            handoff.lease,
+            revision=handoff.observed_revision,
+            reason_code=result.reason_code,
             budget_view=remaining_budget,
-            reservation=terminal_reservation,
+            reservation=reservation,
         )
+
+        if handoff.kind == "reminder":
+            acknowledged = result.status == "completed"
+            self._ledger.release(
+                handoff.lease,
+                TickOutcome(acknowledged, result.reason_code, 1, 1, 1),
+            )
+            return TickResult(
+                "reminder" if acknowledged else "investigate",
+                result.reason_code,
+                action_key=action_key,
+                action_status=result.status,
+                result_sha256=result.result_sha256,
+                reminder=handoff.reminder,
+            )
+
+        if result.status == "ambiguous":
+            reminder = handoff.reminder or _investigation_reminder(
+                action_key,
+                result.reason_code,
+                handoff.lease.claimed_at
+                + timedelta(seconds=self._ambiguity_reminder_seconds),
+            )
+            self._ledger.release(
+                handoff.lease,
+                TickOutcome(False, result.reason_code, 1, 1, 1),
+            )
+            return TickResult(
+                "investigate",
+                result.reason_code,
+                action_key=action_key,
+                action_status="ambiguous",
+                result_sha256=result.result_sha256,
+                reminder=reminder,
+            )
+
+        if handoff.reminder is not None:
+            self._ledger.release(
+                handoff.lease,
+                TickOutcome(False, "reminder-pending", 1, 1, 1),
+            )
+            return TickResult(
+                "reminder",
+                "reminder-pending",
+                action_key=action_key,
+                action_status="completed",
+                result_sha256=result.result_sha256,
+                reminder=handoff.reminder,
+            )
+
         self._ledger.release(
-            lease,
-            TickOutcome(True, effect_result.reason_code, 1, 1, 1),
+            handoff.lease,
+            TickOutcome(True, result.reason_code, 1, 1, 1),
         )
-        return self._terminal_result(
-            terminal_reservation,
-            decision.next_reminder,
-            now,
+        return TickResult(
+            "completed",
+            result.reason_code,
+            action_key=action_key,
+            action_status="completed",
+            result_sha256=result.result_sha256,
+        )
+
+    def _validate_handoff(
+        self,
+        handoff: TickHandoff,
+        *,
+        correlation: str,
+    ) -> None:
+        if not isinstance(handoff, TickHandoff):
+            raise TickCorrelationError("result does not correlate to the prepared handoff")
+        if correlation != handoff.action.action_key:
+            raise TickCorrelationError("result does not correlate to the prepared handoff")
+
+    def _prepare_reminder(
+        self,
+        lease: Lease,
+        revision: str,
+        reminder: ReminderSpec,
+        budget_view: BudgetView,
+        breaker_allows_effect: bool,
+    ) -> TickResult:
+        if "reminders" not in self._installed_capabilities:
+            return self._reject(lease, "capability-not-installed")
+        action = _reminder_action(reminder, revision)
+        reservation = self._ledger.reserve_action(lease, action)
+        if reservation.status != "reserved":
+            return self._finish_terminal_replay(
+                lease,
+                revision,
+                budget_view,
+                reservation,
+                reminder=reminder,
+            )
+        gate_reason = _effect_gate_reason(budget_view, breaker_allows_effect)
+        if gate_reason is not None:
+            return self._block_reserved(
+                lease,
+                revision,
+                budget_view,
+                reservation,
+                gate_reason,
+                reminder=reminder,
+            )
+        self._write_checkpoint(
+            lease,
+            revision=revision,
+            reason_code="reminder-ready",
+            budget_view=budget_view,
+            reservation=reservation,
+        )
+        handoff = TickHandoff(
+            kind="reminder",
+            lease=lease,
+            observed_revision=revision,
+            budget_view=budget_view,
+            action=action,
+            payload_sha256=reservation.payload_sha256,
+            reminder=reminder,
+        )
+        return TickResult(
+            "reminder-ready",
+            "reminder-ready",
+            action=action,
+            handoff=handoff,
+            action_key=action.action_key,
+            action_status="reserved",
+            reminder=reminder,
+        )
+
+    def _block_reserved(
+        self,
+        lease: Lease,
+        revision: str,
+        budget_view: BudgetView,
+        reservation: ActionReservation,
+        reason_code: str,
+        *,
+        reminder: ReminderSpec | None = None,
+    ) -> TickResult:
+        self._write_checkpoint(
+            lease,
+            revision=revision,
+            reason_code=reason_code,
+            budget_view=budget_view,
+            reservation=reservation,
+        )
+        self._ledger.release(lease, TickOutcome(False, reason_code, 0, 0, 0))
+        return TickResult(
+            "blocked",
+            reason_code,
+            action_key=reservation.action_key,
+            action_status="reserved",
+            reminder=reminder,
         )
 
     def _reject(
@@ -213,7 +422,7 @@ class DeliveryConductorTick:
         self._ledger.release(lease, TickOutcome(False, reason_code, 0, 0, 0))
         return TickResult(status, reason_code)
 
-    def _finish_without_action(
+    def _finish_noop(
         self,
         lease: Lease,
         decision: AdapterDecision,
@@ -229,56 +438,36 @@ class DeliveryConductorTick:
             lease,
             TickOutcome(True, decision.reason_code, 0, 0, 0),
         )
-        status: TickStatus = {
-            "noop": "noop",
-            "remind": "reminder",
-            "investigate": "investigate",
-        }[decision.decision]
-        return TickResult(status, decision.reason_code, reminder=decision.next_reminder)
+        return TickResult("noop", decision.reason_code)
 
     def _finish_terminal_replay(
         self,
         lease: Lease,
-        decision: AdapterDecision,
+        revision: str,
         budget_view: BudgetView,
         reservation: ActionReservation,
-        now: datetime,
+        *,
+        reminder: ReminderSpec | None = None,
     ) -> TickResult:
         if reservation.reason_code is None:
             raise RuntimeError("terminal reservation has no reason code")
         self._write_checkpoint(
             lease,
-            revision=decision.observed_revision,
+            revision=revision,
             reason_code=reservation.reason_code,
             budget_view=budget_view,
             reservation=reservation,
         )
+        acknowledged = reservation.status == "completed"
         self._ledger.release(
             lease,
-            TickOutcome(True, reservation.reason_code, 0, 0, 0),
+            TickOutcome(acknowledged, reservation.reason_code, 0, 0, 0),
         )
-        return self._terminal_result(reservation, decision.next_reminder, now)
-
-    def _terminal_result(
-        self,
-        reservation: ActionReservation,
-        reminder: ReminderSpec | None,
-        now: datetime,
-    ) -> TickResult:
-        if reservation.status == "ambiguous":
-            if reservation.reason_code is None:
-                raise RuntimeError("ambiguous reservation has no reason code")
-            reminder = reminder or _investigation_reminder(
-                reservation.action_key,
-                reservation.reason_code,
-                now + timedelta(seconds=self._ambiguity_reminder_seconds),
-            )
-            status: TickStatus = "investigate"
-        else:
-            status = "completed"
         return TickResult(
-            status,
-            reservation.reason_code or "effect-completed",
+            "reminder" if reminder and acknowledged else (
+                "completed" if acknowledged else "investigate"
+            ),
+            reservation.reason_code,
             action_key=reservation.action_key,
             action_status=reservation.status,
             result_sha256=reservation.result_sha256,
@@ -344,11 +533,7 @@ def _valid_decision(value: object) -> bool:
             and action.target_revision == value.observed_revision
         )
     if value.decision == "noop":
-        return (
-            value.target_id is None
-            and value.proposed_action is None
-            and value.next_reminder is None
-        )
+        return value.target_id is None and value.proposed_action is None
     if value.decision in ("remind", "investigate"):
         return (
             value.target_id is None
@@ -383,11 +568,31 @@ def _spend_one(budget_view: BudgetView) -> BudgetView:
     )
 
 
-def _synthetic_ambiguous_result(action: ProposedAction, reason_code: str) -> EffectResult:
-    result_sha256 = hashlib.sha256(
-        f"{action.action_key}:{action.target_revision}:{reason_code}".encode("utf-8")
+def _reminder_action(reminder: ReminderSpec, revision: str) -> ProposedAction:
+    reminder_wire = {
+        "due_at_utc": reminder.due_at_utc,
+        "reason_code": reminder.reason_code,
+        "reminder_id": reminder.reminder_id,
+    }
+    reminder_digest = hashlib.sha256(
+        json.dumps(reminder_wire, separators=(",", ":"), sort_keys=True).encode("utf-8")
     ).hexdigest()
-    return EffectResult("ambiguous", result_sha256, reason_code)
+    payload_json = json.dumps(
+        {
+            "digest": reminder_digest,
+            "identifier": reminder.reminder_id,
+            "reason_code": reminder.reason_code,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return ProposedAction(
+        capability_name="reminders",
+        action_key=f"reminder:{reminder_digest}",
+        payload_json=payload_json,
+        target_revision=revision,
+        invalidation_class="reminder-intent",
+    )
 
 
 def _investigation_reminder(
