@@ -169,7 +169,13 @@
     and this bug *is* the interrupted-tail case — so a window rule would silently
     store the turn's narration *without* the answer as a 200 SUCCESS, with no error
     and no retry. Grouping by `message.id` is also exactly `result_text` semantics,
-    so a recovered response is the same artifact a clean success stores.
+    so a recovered response is the same artifact a clean success stores. A marker
+    carrying no `message.id` (unobserved — 0 of 6,663 corpus markers) falls back to a
+    `(boundary, marker]` window walk, but **only after the marker record is confirmed
+    to carry text itself**: without an id the thinking/text split cannot be grouped,
+    so an unguarded window would return the turn's earlier *narration* — answer
+    absent — as a 200 SUCCESS, re-opening the same regression on the one path that
+    would ever run if the field disappeared.
   - **Staleness guard**: the marker's timestamp must parse and fall within
     `[task_start_iso, now + 300s]`. Without the lower bound, an aborted turn on a
     `--resume` session would recover the *previous* turn's answer as this turn's
@@ -206,10 +212,19 @@
   - **Observability in both directions**: a hit logs
     `event=completed_turn_recovered_from_jsonl`; **every** decline logs
     `event=completed_turn_recovery_declined reason=<no_since_iso|file_missing|
-    no_session_id|invalid_session_id|no_records|no_marker|stale_marker|
-    sub_thread_only|no_boundary|no_text|exception>`. A fail-closed gate that
-    silently stops firing is otherwise indistinguishable from "the bug never
-    happened". Logs carry session id and character counts only, never the text.
+    no_session_id|invalid_session_id|no_records|no_marker|marker_no_timestamp|
+    future_marker|malformed_message|stale_marker|sub_thread_only|not_finished|
+    no_boundary|no_text|exception>`. A fail-closed gate that silently stops firing is
+    otherwise indistinguishable from "the bug never happened", so the reasons are
+    deliberately split by **the action they imply**, not by where the code returned:
+    `marker_no_timestamp` / `malformed_message` mean the on-disk format moved (fix
+    the parser), `future_marker` means the container clock is wrong (fix the clock),
+    while `stale_marker`, `sub_thread_only` and `not_finished` are the guard working
+    as designed — `not_finished` (the turn was genuinely interrupted) being the
+    expected steady-state decline, and it carries the observed `stop_reason` as a
+    `stop_reason=<token>` field, echoed only when it matches `^[a-z_]{1,32}$` because
+    the value comes from an untrusted file. Logs carry session id, that token and
+    character counts only — never the text.
   - Recovery is scoped to `error_type == "execution_error"` only; `rate_limit` /
     `max_turns` / `authentication_failed` short-circuit above it and are unaffected.
     A recovery exception degrades to today's 502, never a 500.

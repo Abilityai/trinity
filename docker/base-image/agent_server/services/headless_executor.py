@@ -274,9 +274,14 @@ def _try_recover_completed_turn(ctx: "HeadlessRunContext") -> bool:
             effective_session_id, since_iso=ctx.task_start_iso
         )
     except Exception as e:  # noqa: BLE001 — must never mask the 502 with a 500
+        # `%r` on the session id, not `%s`: `resume_session_id` reaches
+        # `claude_session_uuid` straight from the /task request body, the agent
+        # server logs plain text (`logging.basicConfig`), and Vector splits on
+        # newlines — so an unescaped value here is a log-forging primitive.
+        # Same reason `_read_jsonl_records` already reports it with `!r`.
         logger.warning(
             "event=completed_turn_recovery_declined reason=exception exc=%s "
-            "session_id=%s — failing as before",
+            "session_id=%r — failing as before",
             type(e).__name__,
             effective_session_id,
         )
@@ -299,8 +304,8 @@ def _try_recover_completed_turn(ctx: "HeadlessRunContext") -> bool:
     ctx.metadata.recovered_from_jsonl = True   # #678 continuity
     ctx.metadata.recovered_terminal = True     # §2.5 C1 — the precise signal
     logger.warning(
-        "event=completed_turn_recovered_from_jsonl session_id=%s chars=%d "
-        "task=%s — runtime reported error_during_execution but the transcript "
+        "event=completed_turn_recovered_from_jsonl session_id=%r chars=%d "
+        "task=%r — runtime reported error_during_execution but the transcript "
         "shows stop_reason=end_turn; surfacing the recovered answer as success",
         effective_session_id,
         len(recovered),

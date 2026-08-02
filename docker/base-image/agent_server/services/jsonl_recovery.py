@@ -83,7 +83,29 @@ _COMPLETED_STOP_REASON = "end_turn"
 # so a container clock running AHEAD of UTC would let a previous turn's marker
 # pass the lower bound. Bounding both ends makes the staleness guard fail
 # closed in either direction.
+#
+# Calibration note: both sides of this comparison are produced INSIDE the agent
+# container — `task_start_iso` by the agent server and the record timestamps by
+# the `claude` CLI — and `now()` is read there too, so there is no cross-host
+# skew term to size against. In practice the bound catches a corrupt or absurd
+# future timestamp (and a container whose CLI ever wrote local-naive rather
+# than `Z` times, which would fail closed). The exact value is therefore slop,
+# not a tuned threshold; it fails closed either way, so the blast radius of it
+# being wrong is "the bug is not fixed for this turn".
 _MAX_FUTURE_CLOCK_SKEW_S = 300
+
+# #1870: `stop_reason` comes from an untrusted file, so only a known-shaped
+# token is ever echoed into a log line (the decline reason wants the value for
+# rollout diagnosis; the real vocabulary is `end_turn`/`tool_use`/`max_tokens`/
+# `stop_sequence`/`refusal`/...).
+_SAFE_STOP_REASON_RE = re.compile(r"^[a-z_]{1,32}$")
+
+
+def _safe_stop_reason(value: Any) -> str:
+    """A log-safe rendering of an untrusted ``stop_reason``."""
+    if isinstance(value, str) and _SAFE_STOP_REASON_RE.match(value):
+        return value
+    return "absent" if value is None else "other"
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +460,7 @@ def _recover_completed_turn_from_jsonl(
     if since_dt is None:
         logger.warning(
             f"event=completed_turn_recovery_declined reason=no_since_iso "
-            f"session_id={session_id}"
+            f"session_id={session_id!r}"
         )
         return None
 
@@ -446,13 +468,13 @@ def _recover_completed_turn_from_jsonl(
     if err:
         logger.warning(
             f"event=completed_turn_recovery_declined reason={err} "
-            f"session_id={session_id}"
+            f"session_id={session_id!r}"
         )
         return None
     if not records:
         logger.warning(
             f"event=completed_turn_recovery_declined reason=no_records "
-            f"session_id={session_id}"
+            f"session_id={session_id!r}"
         )
         return None
 
@@ -461,49 +483,80 @@ def _recover_completed_turn_from_jsonl(
     )
 
     # --- Gate 1+2: the last main-thread assistant record inside the window.
+    #
+    # Every skip records a DISTINCT reason. A decline is the only observable
+    # this gate emits, so collapsing causes into one label is how it rots: if a
+    # future CLI moves the `timestamp` field, EVERY recovery would decline with
+    # a reason an operator reads as "working as intended, the marker was old"
+    # and never investigates.
     marker_idx: Optional[int] = None
-    saw_sub_thread_assistant = False
-    saw_out_of_window_assistant = False
+    skipped: set[str] = set()
     for i, entry in enumerate(records):
         if entry.get("type") != "assistant":
             continue
         if not _is_main_thread(entry):
-            saw_sub_thread_assistant = True
+            skipped.add("sub_thread_only")
             continue
         if _message_of(entry) is None:
+            skipped.add("malformed_message")
             continue
         rec_dt = _record_timestamp(entry)
-        if rec_dt is None or rec_dt < since_dt or rec_dt > max_dt:
-            saw_out_of_window_assistant = True
+        if rec_dt is None:
+            skipped.add("marker_no_timestamp")
+            continue
+        if rec_dt < since_dt:
+            skipped.add("stale_marker")
+            continue
+        if rec_dt > max_dt:
+            skipped.add("future_marker")
             continue
         marker_idx = i
 
     if marker_idx is None:
-        if saw_out_of_window_assistant:
-            reason = "stale_marker"
-        elif saw_sub_thread_assistant:
-            reason = "sub_thread_only"
-        else:
-            reason = "no_marker"
+        # Precedence = "which cause implies an ACTION". An unparseable
+        # timestamp means the on-disk format moved (fix the parser); a future
+        # one means the container clock is wrong (fix the clock); a malformed
+        # message means the record shape moved. `stale_marker` and
+        # `sub_thread_only` are the guard working exactly as designed and are
+        # therefore reported last.
+        reason = "no_marker"
+        for candidate in (
+            "marker_no_timestamp",
+            "future_marker",
+            "malformed_message",
+            "stale_marker",
+            "sub_thread_only",
+        ):
+            if candidate in skipped:
+                reason = candidate
+                break
         logger.warning(
             f"event=completed_turn_recovery_declined reason={reason} "
-            f"session_id={session_id}"
+            f"session_id={session_id!r}"
         )
         return None
 
     # --- Gate 3: that record must ITSELF report the turn finished.
     marker_msg = _message_of(records[marker_idx])
     assert marker_msg is not None  # guaranteed by the scan above
-    if marker_msg.get("stop_reason") != _COMPLETED_STOP_REASON:
+    marker_stop_reason = marker_msg.get("stop_reason")
+    if marker_stop_reason != _COMPLETED_STOP_REASON:
         # Includes `tool_use` (interrupted mid-work), `max_tokens` (truncated
         # output is not a completed turn), a missing field, and any
         # non-string junk. `stop_sequence` is also rejected: it is a
         # legitimately-completed turn (63x main-thread in the corpus) but
         # rejecting it merely leaves the bug unfixed for a rare shape, whereas
         # accepting a shape we have not characterised risks a wrong answer.
+        #
+        # Distinct from `no_marker` on purpose: "the turn was genuinely
+        # interrupted" is the EXPECTED steady-state decline and must not read
+        # the same as "there were no main-thread assistant records at all".
+        # The observed value is the useful bit during rollout, but it comes
+        # from an untrusted file, so only a known-shaped token is echoed.
         logger.warning(
-            f"event=completed_turn_recovery_declined reason=no_marker "
-            f"session_id={session_id}"
+            f"event=completed_turn_recovery_declined reason=not_finished "
+            f"stop_reason={_safe_stop_reason(marker_stop_reason)} "
+            f"session_id={session_id!r}"
         )
         return None
 
@@ -520,6 +573,27 @@ def _recover_completed_turn_from_jsonl(
             if _is_before(entry, since_dt):
                 continue
             text_parts.extend(_text_blocks(msg))
+    elif not _text_blocks(marker_msg):
+        # FAIL CLOSED before the window walk ever runs.
+        #
+        # The `message.id` rule exists because a thinking-enabled final message
+        # is two records sharing one id and BOTH carry `end_turn`, so a dropped
+        # tail line leaves a thinking-only marker. Without an id we cannot
+        # group — and a `(boundary, marker]` window would then happily return
+        # the turn's EARLIER narration, with the answer entirely absent, as a
+        # 200 SUCCESS. That is the exact silent-partial-deliverable regression
+        # the id rule was written to prevent, re-opened on the only path that
+        # would ever run in the world where `message.id` is gone.
+        #
+        # Requiring the marker record to carry text itself closes it: a
+        # thinking-only marker declines here instead of laundering narration
+        # into an answer. A multi-record final message still gets its full
+        # window text below, because its LAST record carries text.
+        logger.warning(
+            f"event=completed_turn_recovery_declined reason=no_text "
+            f"session_id={session_id!r}"
+        )
+        return None
     else:
         # Fallback only for a marker with no `message.id`: the window walk.
         # Boundary = the most recent MAIN-THREAD user record with string
@@ -538,7 +612,7 @@ def _recover_completed_turn_from_jsonl(
         if boundary_idx is None:
             logger.warning(
                 f"event=completed_turn_recovery_declined reason=no_boundary "
-                f"session_id={session_id}"
+                f"session_id={session_id!r}"
             )
             return None
         for entry in records[boundary_idx + 1: marker_idx + 1]:
@@ -556,7 +630,7 @@ def _recover_completed_turn_from_jsonl(
         # described above.
         logger.warning(
             f"event=completed_turn_recovery_declined reason=no_text "
-            f"session_id={session_id}"
+            f"session_id={session_id!r}"
         )
         return None
 

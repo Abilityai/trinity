@@ -352,6 +352,50 @@ def test_window_fallback_only_when_message_id_absent(jsonl_dir):
         _SID, since_iso=_TURN_START) == "windowed answer"
 
 
+def test_window_fallback_never_launders_narration_into_an_answer(jsonl_dir):
+    """The E1 pin FOR THE FALLBACK PATH — this is the shape the window rule
+    exists to serve, and the shape on which it is most dangerous.
+
+    Without a `message.id` the thinking/text split cannot be grouped, so a
+    dropped tail line leaves a thinking-only marker. A `(boundary, marker]`
+    window then collects the turn's EARLIER narration — with the answer
+    entirely absent — and returns it as a recovered 200 SUCCESS: exactly the
+    silent partial-deliverable regression the `message.id` rule was written to
+    prevent, re-opened on the only path that would ever run in a world where
+    `message.id` is gone.
+
+    The marker record must therefore carry text ITSELF before the window is
+    consulted at all. Verified red before the guard: returned
+    "INTERMEDIATE NARRATION…".
+    """
+    _write_records(jsonl_dir, _SID, [
+        _user("do the thing"),
+        _assistant("INTERMEDIATE NARRATION - let me check the ledger",
+                   stop="tool_use", ts="2026-07-28T18:07:00.000Z", msg_id=None),
+        _assistant(None, thinking="internal deliberation", stop="end_turn",
+                   ts="2026-07-28T18:07:45.773Z", msg_id=None),
+        # the answer record was lost to the truncated write
+    ])
+
+    assert _recover_completed_turn_from_jsonl(_SID, since_iso=_TURN_START) is None
+
+
+def test_window_fallback_still_joins_a_multi_record_final_message(jsonl_dir):
+    """...and the guard does not cost the fallback its reason to exist: when
+    the LAST record carries text, the window still joins the whole final
+    message."""
+    _write_records(jsonl_dir, _SID, [
+        _user("do the thing"),
+        _assistant("part one", stop="end_turn", msg_id=None,
+                   ts="2026-07-28T18:07:45.001Z"),
+        _assistant("part two", stop="end_turn", msg_id=None,
+                   ts="2026-07-28T18:07:45.002Z"),
+    ])
+
+    assert _recover_completed_turn_from_jsonl(
+        _SID, since_iso=_TURN_START) == "part one\npart two"
+
+
 # ===========================================================================
 # B. Boundary-rule shapes A-Q
 # ===========================================================================
@@ -646,6 +690,29 @@ def test_hostile_session_id_returns_none_without_raising(jsonl_dir, bad_sid):
     assert _recover_completed_turn_from_jsonl(bad_sid, since_iso=_TURN_START) is None
 
 
+def test_decline_log_escapes_a_hostile_session_id(jsonl_dir, caplog):
+    """The decline line must not be a log-forging primitive.
+
+    `resume_session_id` reaches `ctx.claude_session_uuid` straight from the
+    /task request body, the agent server logs plain text
+    (`logging.basicConfig`), and Vector splits records on newlines — so an
+    unescaped id would let a caller inject a fabricated log record. Reported
+    with `!r`, matching what `_read_jsonl_records` already does on its own
+    reject path.
+    """
+    hostile = "abc\nevent=completed_turn_recovered_from_jsonl chars=9999"
+
+    with caplog.at_level("WARNING"):
+        assert _recover_completed_turn_from_jsonl(
+            hostile, since_iso=_TURN_START) is None
+
+    rendered = "\n".join(r.getMessage() for r in caplog.records)
+    assert "reason=invalid_session_id" in rendered
+    # the newline survives only inside a repr, never as a real line break
+    assert "\\nevent=" in rendered
+    assert "\nevent=completed_turn_recovered_from_jsonl" not in rendered
+
+
 @pytest.mark.parametrize("record", [
     {"type": "assistant", "message": ["not", "a", "dict"]},
     {"type": "assistant", "message": 7},
@@ -889,16 +956,27 @@ def test_declined_recovery_logs_a_reason(jsonl_dir, caplog):
             _finalize_headless_result(_make_ctx())
 
     assert "completed_turn_recovery_declined" in caplog.text
-    assert "reason=no_marker" in caplog.text
+    assert "reason=not_finished" in caplog.text
 
 
 @pytest.mark.parametrize("records,expected_reason", [
     ([], "no_records"),
-    ([_user("x"), _assistant("a", stop="tool_use", tool_use=True)], "no_marker"),
+    # The turn was genuinely interrupted — the EXPECTED steady-state decline.
+    ([_user("x"), _assistant("a", stop="tool_use", tool_use=True)], "not_finished"),
     ([_user("x", ts=_PRIOR_TURN),
       _assistant("prior", ts="2026-07-28T17:00:05.000Z")], "stale_marker"),
     ([_user("x"), _assistant(None, stop="end_turn")], "no_text"),
     ([_user("Main"), _assistant("sub", isSidechain=True)], "sub_thread_only"),
+    # Distinct from `stale_marker`: an absent/unparseable timestamp means the
+    # on-disk FORMAT moved (fix the parser), not that the marker was old.
+    # Reporting both as "stale" is how the gate rots unnoticed — an operator
+    # reads "stale" as the guard working as designed.
+    ([_user("x"), _assistant("a", ts=None)], "marker_no_timestamp"),
+    ([_user("x"), _assistant("a", ts="not-a-timestamp")], "marker_no_timestamp"),
+    # ...and a clock problem is its own action (fix the clock).
+    ([_user("x"), _assistant("a", ts="2999-01-01T00:00:00.000Z")], "future_marker"),
+    # No main-thread assistant record of any kind.
+    ([_user("x")], "no_marker"),
 ])
 def test_decline_reasons_are_specific(jsonl_dir, caplog, records, expected_reason):
     _write_records(jsonl_dir, _SID, records)
@@ -906,6 +984,31 @@ def test_decline_reasons_are_specific(jsonl_dir, caplog, records, expected_reaso
         assert _recover_completed_turn_from_jsonl(
             _SID, since_iso=_TURN_START) is None
     assert f"reason={expected_reason}" in caplog.text
+
+
+@pytest.mark.parametrize("stop,expected", [
+    ("tool_use", "stop_reason=tool_use"),
+    ("max_tokens", "stop_reason=max_tokens"),
+    (None, "stop_reason=absent"),
+    ({"nested": "dict"}, "stop_reason=other"),
+    ("<script>alert(1)</script> " + "A" * 200, "stop_reason=other"),
+])
+def test_not_finished_echoes_only_a_known_shaped_stop_reason(
+    jsonl_dir, caplog, stop, expected
+):
+    """The observed `stop_reason` is the useful bit during rollout, but it comes
+    from an untrusted file — only a known-shaped token may reach a log line."""
+    rec = _assistant("some text", stop=stop)
+    if stop is None:
+        del rec["message"]["stop_reason"]
+    _write_records(jsonl_dir, _SID, [_user("x"), rec])
+
+    with caplog.at_level("WARNING"):
+        assert _recover_completed_turn_from_jsonl(
+            _SID, since_iso=_TURN_START) is None
+
+    assert expected in caplog.text
+    assert "<script>" not in caplog.text
 
 
 # ===========================================================================
