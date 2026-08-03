@@ -67,6 +67,8 @@ The app ships `darkMode: 'class'`. Every primitive and pattern is specced, built
 
 - **Do (dark):** `dark:text-gray-300` for "Last run 12 min ago".
 - **Don't:** `dark:text-gray-500` on anything a user is expected to read.
+- **Also don't:** ship a light-theme `text-gray-500` with *no* `dark:` override. It is not neutral — the light tertiary is reused verbatim in dark, where it lands exactly on the floor. This is the quieter half of the breach and the harder half to catch in review (#1922).
+- **Enforced, per file:** `npm run check:tokens` holds the ladder over the files a sweep has already cleaned (`INK_LADDER_SWEPT` in `scripts/check-design-tokens.mjs`) — nothing below the floor, no missing `dark:` override, and a per-file cap on floor-level ink that may be lowered but never raised. It also reads FleetGrid's `--gv-*` ink, which states its ladder as hex custom properties that no class scanner can see. Fleet-wide enforcement waits on the raw-color ratchet (#1430); each sweep adds its files to the set and they can never regress.
 
 ### Interactive accent (`action-primary`) per theme
 
