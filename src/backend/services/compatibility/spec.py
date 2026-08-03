@@ -116,6 +116,7 @@ CHECKS: List[CheckDef] = [
     _c("T-015", "soft", "static", "T", "credentials schema lists all MCP ${VAR} variables"),
     _c("T-016", "info", "static", "T", "schedule messages reference existing commands", claude_only=True),
     _c("T-017", "hard", "static", "T", "commit paths do not overwrite Trinity-injected files"),
+    _c("T-018", "soft", "static", "T", "schedules block entries are well-formed"),
     # --- C: CLAUDE.md (Claude runtime only) --------------------------------
     _c("C-001", "hard", "static", "C", "CLAUDE.md is valid UTF-8 and non-empty", claude_only=True),
     _c("C-002", "hard", "ai", "C", "has an identity/purpose section", claude_only=True,

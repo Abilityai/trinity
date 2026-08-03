@@ -588,6 +588,46 @@ def c_t016(snap):
     return _with_template(snap, f)
 
 
+def c_t018(snap):
+    """STATIC: the `schedules:` block is STRUCTURALLY well-formed (ent#89).
+
+    Structure only — presence and type of `name`/`cron`/`message`, entry shape,
+    block shape, and the declared-schedule cap. It deliberately does NOT report
+    cron syntax: A-002 already ships as "cron expressions are valid", and two
+    contradicting cron authorities in the same report on the same field is
+    worse than either alone. (The *reader* validates cron strictly, but that is
+    a materialization gate — drop the entry — not a report verdict.)
+    """
+    def f(d):
+        try:
+            from services.template_schedules import schedule_shape_errors
+            errors = schedule_shape_errors(d.get("schedules"))
+        except Exception as e:  # noqa: BLE001
+            # Fail CLOSED, deliberately, and against the grain of every other
+            # check here. `run_static` converts a raise into `skipped`, and
+            # `_counts` (compatibility/__init__.py) counts only `status ==
+            # "fail"` — so a raising SOFT check drops soft_count 1->0 and, since
+            # `overall` is a bare `> 0` test, flips the whole report from
+            # `issues` to `compatible` exactly when this check's finding was the
+            # only failure. That is the entire population T-018 exists to serve.
+            # Worse, `build_report` persists `checks_json` and
+            # `_report_from_persisted` recomputes counts from it, so one
+            # transient raise is replayed as a clean bill of health on every
+            # stopped-agent read. A check whose whole purpose is
+            # malformed-input tolerance must not rely on that fail-open net.
+            #
+            # Type name ONLY: `detail` is persisted to
+            # agent_compatibility_results.checks_json and rendered in the UI,
+            # and `str(e)` can embed untrusted template content.
+            return _fail("schedules block could not be evaluated",
+                         {"error_type": type(e).__name__})
+        if errors:
+            return _fail("template.yaml `schedules:` entries are malformed",
+                         {"errors": errors[:25]})
+        return _ok("schedules block entries are well-formed")
+    return _with_template(snap, f)
+
+
 def c_t017(snap):
     def f(d):
         git = d.get("git") or {}
@@ -819,7 +859,15 @@ def c_p006(snap):
     data, _err = _template(snap)
     scheduled_cmds = set()
     if isinstance(data, dict):
-        for s in (data.get("schedules") or []):
+        # ent#89: `isinstance(..., list)` was MISSING here, unlike all four
+        # sibling readers of this field (c_t016, c_a001, c_a002, c_x007). A
+        # template with `schedules: 5` raised `TypeError: 'int' object is not
+        # iterable`, `run_static` swallowed it into `skipped`, and `_counts`
+        # ignores `skipped` — so this HARD check silently vanished from
+        # hard_count. A live instance of the exact fail-open class T-018 above
+        # guards against.
+        schedules = data.get("schedules")
+        for s in (schedules if isinstance(schedules, list) else []):
             msg = (s.get("message") if isinstance(s, dict) else "") or ""
             name = _slash_command(msg)
             if name:
@@ -865,14 +913,32 @@ def _command_names(snap) -> List[str]:
     return sorted(set(out))
 
 
-_CRON_FIELD = re.compile(r"^[\d*/,\-]+$")
-
-
 def _valid_cron(expr: str) -> bool:
-    parts = (expr or "").split()
-    if len(parts) != 5:
+    r"""True if the dedicated scheduler would accept this cron expression.
+
+    ent#89: this was a per-field `^[\d*/,\-]+$` regex, which was wrong in BOTH
+    directions — it rejected `0 9 * * MON` (valid; the scheduler translates
+    named days) and accepted `99 99 * * *` (invalid; no range check). So A-002
+    reported "cron expressions are valid" for an expression creation silently
+    drops, and flagged one that works. Delegate to the same validator the
+    scheduler registers with (#1472): *validate a config with the SAME parser
+    the executor uses.*
+
+    Imported inside the function so `apscheduler`/`pytz` stay off this module's
+    load path — `static_checks` is imported by the templates router on every
+    catalog request.
+    """
+    from services.schedule_validation import (
+        ScheduleValidationError,
+        validate_cron_expression,
+    )
+    try:
+        validate_cron_expression(expr)
+    except ScheduleValidationError:
         return False
-    return all(_CRON_FIELD.match(p) for p in parts)
+    except Exception:  # noqa: BLE001 — an unexpected shape is still "not valid"
+        return False
+    return True
 
 
 def c_a001(snap):
@@ -1142,7 +1208,7 @@ STATIC_CHECKS = {
     "T-001": c_t001, "T-002": c_t002, "T-003": c_t003, "T-004": c_t004,
     "T-005": c_t005, "T-006": c_t006, "T-007": c_t007, "T-008": c_t008,
     "T-010": c_t010, "T-011": c_t011, "T-012": c_t012, "T-015": c_t015,
-    "T-016": c_t016, "T-017": c_t017,
+    "T-016": c_t016, "T-017": c_t017, "T-018": c_t018,
     "C-001": c_c001, "C-007": c_c007,
     "K-001": c_k001, "K-002": c_k002, "K-003": c_k003, "K-004": c_k004,
     "G-001": c_g001, "G-002": c_g002, "G-003": c_g003, "G-004": c_g004,
@@ -1186,7 +1252,18 @@ def run_static(snapshot: Dict[str, Any], check_ids: List[str]) -> Dict[str, Resu
         try:
             out[cid] = fn(snapshot)
         except Exception as e:  # noqa: BLE001 — one bad check never breaks the report
-            logger.warning("compatibility check %s raised: %s", cid, e)
+            # This swallow previously left NO trace anywhere AND dropped out of
+            # `_counts` (which counted only `status == "fail"`), so a broken
+            # validator reported "healthy" with nothing in the logs saying
+            # otherwise. Both halves are now closed: ent#128 flipped the result
+            # from `_skip` to `_fail` so a crashed check is counted, and ent#89
+            # added the log so all ~100 checks' failures are observable.
+            #
+            # ERROR with `exc_info`, not WARNING: the status alone says a check
+            # crashed but not where, and this handler is only reached by an
+            # unanticipated shape — the traceback is the whole diagnostic value.
+            logger.error("Static compatibility check %s raised: %s", cid, e,
+                         exc_info=True)
             out[cid] = _fail(
                 f"check could not be evaluated: {e}", {"check_error": str(e)}
             )

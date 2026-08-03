@@ -1258,6 +1258,42 @@
       ]
     },
     {
+      "file": "unit/test_ent89_template_schedules.py",
+      "feature": "trinity-enterprise#89",
+      "added": "2026-08-02",
+      "categories": [
+        "backend",
+        "unit",
+        "templates",
+        "scheduling"
+      ],
+      "description": "The tolerant `schedules:` reader (ent#89): full tolerance matrix over untrusted template.yaml shapes (scalar/list/mapping blocks, non-string cron/timezone, length bounds, intra-block duplicates, the 20-entry cap), strict cron via the scheduler's own validator (named days accepted, macros/6-field/out-of-range rejected), enabled defaulting to False, error strings that never echo name/message values, a Hypothesis totality property, plus the catalog surface in BOTH builders, the GitHub list-path fence (R3), and the create-path metadata fetch (resolved PAT + ref, cache-bypassed, loud on failure)."
+    },
+    {
+      "file": "unit/test_ent89_schedule_materialization.py",
+      "feature": "trinity-enterprise#89",
+      "added": "2026-08-02",
+      "categories": [
+        "backend",
+        "unit",
+        "scheduling",
+        "agents"
+      ],
+      "description": "Creation-time schedule materialization (ent#89) against a REAL DB with row read-back: both resolver branches populate declared_schedules (the \u00a70/R2 regression \u2014 the github: branch never populated template_data), the github fetch uses the creation-resolved PAT and the parsed @branch ref, enabled honored/defaulted, cron->cron_expression, name-match and intra-block idempotency, the ghost skip, a falsy create_schedule return counted as failed (R6), and non-fatality of a raising create_schedule / list_agent_schedules inside the rollback fence."
+    },
+    {
+      "file": "unit/test_ent89_manifest_no_duplicate.py",
+      "feature": "trinity-enterprise#89",
+      "added": "2026-08-02",
+      "categories": [
+        "backend",
+        "unit",
+        "scheduling",
+        "systems"
+      ],
+      "description": "R5: deploy_manifest runs create_schedules AFTER create_agent_internal, so post-ent#89 it is the second schedule producer for the same agent. Asserts a manifest declaring a name the template already materialized yields ONE row (and does not overwrite it), that manifest-only schedules still land, within-block dedupe, redeploy idempotency, and fail-open on an unreadable existing set."
+    },
+    {
       "file": "unit/test_ent109_git_env_seam.py",
       "feature": "trinity-enterprise#109",
       "added": "2026-07-30",

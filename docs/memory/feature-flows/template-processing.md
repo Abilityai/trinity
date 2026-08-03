@@ -516,6 +516,58 @@ declaration (trinity-enterprise#128 PR-B) lands under its own top-level key
 precisely so an older Trinity reading a newer template is structurally
 untouched.
 
+### Declared `schedules:` (trinity-enterprise#89)
+
+The same tolerant-reader shape, applied to the second untrusted block Trinity
+now acts on. `services/template_schedules.py` is a **leaf** (stdlib +
+`services.schedule_validation`) with two public functions over one private
+`_parse`, so the reported errors and the accepted entries cannot drift:
+
+| Helper | Contract |
+|---|---|
+| `schedule_shape_errors(block)` | Named errors for a malformed block. Never raises. Absent / null / `[]` = no declared schedules, **not** an error |
+| `normalize_declared_schedules(block)` | Well-formed entries only, each `{name, cron, message, enabled, timezone, description}` — type-checked, bounded, cron/timezone-validated, name-deduped, capped at `MAX_DECLARED_SCHEDULES` (20) |
+
+**Totality is the contract, and three consumers depend on it.** A raise here
+would (a) empty the catalog, (b) enter creation's destructive rollback fence, or
+(c) fail-open compatibility check T-018. A 40-row matrix plus a Hypothesis
+property over recursive JSON-ish values pin it
+(`tests/unit/test_ent89_template_schedules.py`).
+
+Three things differ from the `credentials:` readers, each deliberate:
+
+- **The catalog surfaces the NORMALIZED list**, not the raw block (unlike
+  `data_paths`, which is surfaced raw). Normalizing at the builder is what makes
+  it safe for the frontend to render, and it matches
+  `credential_mcp_server_names`.
+- **Both GitHub list paths are now fenced.** ent#128 PR-A fenced
+  `_build_local_template` only; `get_all_templates`' two GitHub call sites were
+  bare list comprehensions. Adding a new untrusted-input reader inside
+  `_build_template` would have put a raise-capable call on an unfenced path —
+  re-opening the exact bug (#1835) this convention exists to prevent. Both now
+  route through `_safe_build_github_template` (log-and-skip per template).
+- **Creation does not read the catalog's copy.** `_get_cached_metadata` fetches
+  with the **global platform** PAT, off the **default branch**, through a
+  10-minute per-process cache. Creation resolves its PAT differently (per-agent
+  → per-user → global, ent#162) and may target `@branch`, so
+  `fetch_template_metadata_for_create(repo, pat, ref)` does a fresh, pinned,
+  authenticated read — and logs a WARNING naming the repo and reason on any
+  failure. A silently empty declaration on the `github:` path is precisely the
+  class this feature exists to close, and the catalog dict would have
+  reintroduced it one layer up.
+
+Errors carry the **entry index, the key, and a YAML type name** — never the
+`name`/`message`/`description` *value*, since the list is persisted into
+`agent_compatibility_results.checks_json`, rendered in the UI, and returned in
+the catalog response. The cron and timezone strings are the one echo, bounded
+and printable-filtered by a local twin of `_sanitize_for_warning` (the leaf
+cannot import it back without closing a cycle; the two are comment-linked).
+
+Consumption at creation is in
+[scheduling.md](scheduling.md#template-declared-schedules-at-creation-trinity-enterprise89);
+the compatibility check is T-018 in
+[agent-compatibility-validation.md](agent-compatibility-validation.md).
+
 ### Trinity-Compatible Validation (`services/template_service.py:608-728`)
 ```python
 def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dict]]:

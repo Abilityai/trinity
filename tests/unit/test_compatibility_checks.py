@@ -106,7 +106,7 @@ class TestSpecConsistency:
         assert len(ids) == len(set(ids)), "duplicate check ids in spec.CHECKS"
 
     def test_catalog_size(self):
-        assert len(spec.CHECKS) == 100, f"expected 100 checks, found {len(spec.CHECKS)}"
+        assert len(spec.CHECKS) == 101, f"expected 101 checks, found {len(spec.CHECKS)}"
 
     def test_severity_and_type_valid(self):
         for c in spec.CHECKS:
@@ -458,3 +458,256 @@ class TestCollectorScript:
         snap = self._run(tmp_path)
         assert snap["files"]["CLAUDE.md"]["truncated"] is True
         assert len(snap["files"]["CLAUDE.md"]["content"]) <= 256 * 1024
+
+
+# ---------------------------------------------------------------------------
+# T-018 + the three in-radius corrections (trinity-enterprise#89)
+# ---------------------------------------------------------------------------
+
+def _template_snapshot(template_yaml: str, **extra):
+    """A snapshot whose only interesting content is `template.yaml`."""
+    snap = good_snapshot()
+    snap["files"]["template.yaml"] = _f(template_yaml)
+    snap.update(extra)
+    return snap
+
+
+_SCHEDULES_OK = """\
+name: acme-bot
+description: does things
+schedules:
+  - name: daily-briefing
+    cron: "0 9 * * MON"
+    message: /triage
+    enabled: true
+"""
+
+_SCHEDULES_MALFORMED = """\
+name: acme-bot
+description: does things
+schedules:
+  - cron: "0 9 * * *"
+    message: /triage
+"""
+
+# The live c_p006 fail-open shape: a non-iterable `schedules:`.
+_SCHEDULES_SCALAR = """\
+name: acme-bot
+description: does things
+schedules: 5
+"""
+
+_HOSTILE_TEMPLATES = [
+    _SCHEDULES_SCALAR,
+    "name: a\ndescription: d\nschedules: yes\n",
+    "name: a\ndescription: d\nschedules:\n  - null\n",
+    "name: a\ndescription: d\nschedules:\n  a: b\n",
+    "name: a\ndescription: d\nschedules:\n  - name: {z: 1}\n",
+    "name: a\ndescription: d\nschedules:\n  - name: x\n    cron: 5\n    message: m\n",
+    "name: a\ndescription: d\nschedules:\n  - name: x\n    cron: '* * * * *'\n"
+    "    message: m\n    timezone: 5\n",
+]
+
+
+class TestT018SchedulesWellFormed:
+    def test_passes_on_a_well_formed_block(self):
+        st, _msg, _detail = STATIC_CHECKS["T-018"](_template_snapshot(_SCHEDULES_OK))
+        assert st == "pass"
+
+    def test_passes_when_no_block_is_declared(self):
+        st, _msg, _detail = STATIC_CHECKS["T-018"](good_snapshot())
+        assert st == "pass"
+
+    def test_fails_on_a_missing_required_key(self):
+        st, _msg, detail = STATIC_CHECKS["T-018"](
+            _template_snapshot(_SCHEDULES_MALFORMED))
+        assert st == "fail"
+        assert any("name" in e for e in detail["errors"])
+
+    def test_fails_on_a_non_list_block(self):
+        st, _msg, _detail = STATIC_CHECKS["T-018"](
+            _template_snapshot(_SCHEDULES_SCALAR))
+        assert st == "fail"
+
+    def test_does_not_report_cron_syntax(self):
+        """A-002 owns cron. Two checks contradicting each other on the same
+        field is worse than either alone — and A-002 already ships."""
+        bad_cron = ("name: a\ndescription: d\nschedules:\n"
+                    "  - name: x\n    cron: '99 99 * * *'\n    message: /m\n")
+        st, _msg, detail = STATIC_CHECKS["T-018"](_template_snapshot(bad_cron))
+        assert st == "fail"
+        # It fires (the entry IS dropped at materialization), but the message is
+        # about the entry, and A-002 is the check that names cron validity.
+        a002, _m, _d = STATIC_CHECKS["A-002"](_template_snapshot(bad_cron))
+        assert a002 == "fail"
+
+    def test_fails_closed_when_the_reader_raises(self, monkeypatch):
+        """R4 — `run_static` turns a raise into `skipped`, and the report counts
+        only `fail`, so a raising SOFT check flips overall_status from `issues`
+        to `compatible` exactly when its finding was the only failure."""
+        import services.template_schedules as tsched
+
+        def _boom(_block):
+            raise RuntimeError("reader exploded")
+
+        monkeypatch.setattr(tsched, "schedule_shape_errors", _boom)
+        st, _msg, detail = STATIC_CHECKS["T-018"](
+            _template_snapshot(_SCHEDULES_MALFORMED))
+        assert st == "fail", "T-018 must not rely on the fail-open outer net"
+        assert detail == {"error_type": "RuntimeError"}
+
+    def test_failure_detail_never_echoes_the_exception_message(self, monkeypatch):
+        """`detail` is persisted to agent_compatibility_results.checks_json and
+        rendered in the UI; `str(e)` can carry untrusted template content."""
+        import services.template_schedules as tsched
+
+        def _boom(_block):
+            raise RuntimeError("SECRETTEMPLATECONTENT")
+
+        monkeypatch.setattr(tsched, "schedule_shape_errors", _boom)
+        _st, msg, detail = STATIC_CHECKS["T-018"](
+            _template_snapshot(_SCHEDULES_MALFORMED))
+        assert "SECRETTEMPLATECONTENT" not in repr(detail)
+        assert "SECRETTEMPLATECONTENT" not in msg
+
+    def test_run_static_does_not_convert_the_raise_to_skipped(self, monkeypatch):
+        import services.template_schedules as tsched
+
+        monkeypatch.setattr(
+            tsched, "schedule_shape_errors",
+            lambda _b: (_ for _ in ()).throw(RuntimeError("boom")))
+        out = run_static(_template_snapshot(_SCHEDULES_MALFORMED), ["T-018"])
+        assert out["T-018"][0] == "fail"
+
+
+class TestP006ScheduleGuard:
+    def test_non_list_schedules_no_longer_raises(self):
+        """The live instance of the fail-open class: `c_p006` iterated
+        `data.get("schedules") or []` with no list guard, unlike all four of its
+        siblings — so `schedules: 5` made a HARD check silently vanish from
+        hard_count."""
+        out = run_static(_template_snapshot(_SCHEDULES_SCALAR), ["P-006"])
+        st, _msg, detail = out["P-006"]
+        assert st != "skipped"
+        assert (detail or {}).get("skip_reason") != "check_error"
+
+
+class TestA002CronAuthority:
+    def test_accepts_a_named_day(self):
+        """`0 9 * * MON` is valid — the scheduler translates Unix day numbers to
+        APScheduler names and passes named days through. The old per-field
+        regex rejected it."""
+        tpl = ("name: a\ndescription: d\nschedules:\n"
+               "  - name: x\n    cron: '0 9 * * MON'\n    message: /m\n")
+        st, _msg, _detail = STATIC_CHECKS["A-002"](_template_snapshot(tpl))
+        assert st == "pass"
+
+    def test_rejects_an_out_of_range_field(self):
+        """The old regex accepted `99 99 * * *` — so the report said "cron
+        expressions are valid" for an expression creation silently drops."""
+        tpl = ("name: a\ndescription: d\nschedules:\n"
+               "  - name: x\n    cron: '99 99 * * *'\n    message: /m\n")
+        st, _msg, _detail = STATIC_CHECKS["A-002"](_template_snapshot(tpl))
+        assert st == "fail"
+
+    def test_rejects_macros_and_six_field_crons(self):
+        for cron in ("@daily", "0 9 * * * *"):
+            tpl = ("name: a\ndescription: d\nschedules:\n"
+                   f"  - name: x\n    cron: '{cron}'\n    message: /m\n")
+            st, _msg, _detail = STATIC_CHECKS["A-002"](_template_snapshot(tpl))
+            assert st == "fail", cron
+
+    def test_agrees_with_the_materializer(self):
+        """One cron authority: what A-002 blesses is what the reader keeps."""
+        from services.template_schedules import normalize_declared_schedules
+
+        for cron, expect_ok in [("0 9 * * MON", True), ("*/15 * * * 1-5", True),
+                                ("99 99 * * *", False), ("@daily", False)]:
+            tpl = ("name: a\ndescription: d\nschedules:\n"
+                   f"  - name: x\n    cron: '{cron}'\n    message: /m\n")
+            report_ok = STATIC_CHECKS["A-002"](_template_snapshot(tpl))[0] == "pass"
+            kept = bool(normalize_declared_schedules(
+                [{"name": "x", "cron": cron, "message": "/m"}]))
+            assert report_ok is expect_ok and kept is expect_ok, cron
+
+
+class TestNoCheckFailsOpenOnAHostileTemplate:
+    """R4.4 — asserted across the WHOLE static catalog, not just T-018.
+
+    A T-018-only assertion would never have caught `c_p006`, which had been
+    failing open on `schedules: 5` for months.
+    """
+
+    @pytest.mark.parametrize("template_yaml", _HOSTILE_TEMPLATES)
+    def test_no_static_check_lands_at_check_error(self, template_yaml):
+        out = run_static(_template_snapshot(template_yaml), list(spec.STATIC_IDS))
+        offenders = {
+            cid: res for cid, res in out.items()
+            if (res[2] or {}).get("skip_reason") == "check_error"
+        }
+        assert not offenders, offenders
+
+
+class TestReportDirectionOnAFailingValidator:
+    """Pins the DIRECTION, not just the absence of a raise: a broken validator
+    must not report a healthy agent."""
+
+    def test_build_report_stays_issues_when_the_reader_raises(self, monkeypatch):
+        import services.compatibility as svc
+        import services.template_schedules as tsched
+
+        snap = _template_snapshot(_SCHEDULES_MALFORMED)
+
+        async def fake_collect(_name):
+            return {"status": "ok", "snapshot": snap, "runtime": "claude-code"}
+
+        monkeypatch.setattr(svc, "collect", fake_collect)
+        monkeypatch.setattr(
+            tsched, "schedule_shape_errors",
+            lambda _b: (_ for _ in ()).throw(RuntimeError("boom")))
+
+        report = asyncio.run(svc.build_report("t018-agent", include_ai=False))
+        t018 = next(c for c in report["checks"] if c["check_id"] == "T-018")
+        assert t018["status"] == "fail"
+        assert report["soft_count"] >= 1
+        assert report["overall_status"] == "issues"
+
+    def test_persisted_check_error_does_not_replay_as_clean(self):
+        """`_report_from_persisted` recomputes counts from `checks_json`, so a
+        swallowed raise persisted once is replayed as a clean bill of health on
+        every stopped-agent read. This pins the shape of that recompute."""
+        import services.compatibility as svc
+
+        swallowed = {"checks": [{
+            "check_id": "T-018", "status": "skipped", "severity": "soft",
+            "skip_reason": "check_error",
+        }]}
+        failed = {"checks": [{
+            "check_id": "T-018", "status": "fail", "severity": "soft",
+            "skip_reason": None,
+        }]}
+
+        assert svc._counts(swallowed["checks"])["soft_count"] == 0
+        assert svc._counts(failed["checks"])["soft_count"] == 1
+
+        degraded = svc._report_from_persisted(
+            "a", failed, False, "stopped", "msg", "claude-code")
+        assert degraded["soft_count"] == 1
+
+
+class TestRunStaticLogsItsSwallow:
+    def test_a_raising_check_is_logged(self, monkeypatch, caplog):
+        """Before ent#89 this swallow left no trace anywhere, for all ~100
+        checks — a broken validator reported "healthy" and the logs were
+        silent."""
+        import logging
+
+        monkeypatch.setitem(
+            STATIC_CHECKS, "T-001",
+            lambda _s: (_ for _ in ()).throw(RuntimeError("kaboom")))
+        with caplog.at_level(logging.ERROR):
+            out = run_static(good_snapshot(), ["T-001"])
+
+        assert (out["T-001"][2] or {}).get("skip_reason") == "check_error"
+        assert any("T-001" in r.message or "T-001" in str(r.args)
+                   for r in caplog.records)
