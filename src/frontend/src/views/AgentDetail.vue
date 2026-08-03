@@ -12,10 +12,15 @@
           <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-action-primary-500 mx-auto"></div>
         </div>
 
-        <!-- Notification Toast -->
+        <!-- Notification Toast.
+             #1953: anchored bottom-right, NOT `top-20 right-4`. `top-20` is exactly
+             where AgentHeader's row-1 right cluster starts (NavBar h-16 + main py-2 +
+             inner py-2 = 80px), so the toast covered the Running toggle and Delete.
+             `bottom-24` clears the global HelpChatWidget FAB (bottom-6 + h-14 = 80px),
+             which is why this is not the `bottom-4 right-4` used elsewhere. -->
         <div v-if="notification"
           :class="[
-            'fixed top-20 right-4 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
+            'fixed bottom-24 right-6 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
             notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
           ]"
         >
