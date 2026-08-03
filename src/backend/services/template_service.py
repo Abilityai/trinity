@@ -19,6 +19,11 @@ from urllib.parse import urlsplit
 import httpx
 import yaml
 from config import DEFAULT_GITHUB_TEMPLATE_REPOS, GITHUB_PAT_CREDENTIAL_ID
+from utils.safe_yaml import (
+    TEMPLATE_YAML_MAX_BYTES,
+    HardenedYamlError,
+    load_template_yaml,
+)
 from services.credential_charset import (
     CREDENTIAL_DETECTOR_NAME_RE,
     CREDENTIAL_DETECTOR_REF_RE,
@@ -37,6 +42,15 @@ logger = logging.getLogger(__name__)
 
 _metadata_cache: Dict[str, tuple] = {}  # repo -> (timestamp, metadata_dict)
 _CACHE_TTL = 600  # 10 minutes
+
+
+# --- template.yaml hardening (ent#314) ------------------------------------
+#
+# The policy (BUDGET + the two budgets) lives in `utils/safe_yaml.py` so every
+# caller shares one decision and no consumer has to import a `services.*`
+# module to parse a template. This name is kept as the module-local spelling
+# the rest of this file already reads well with.
+parse_template_yaml = load_template_yaml
 
 
 def _fetch_template_yaml_result(
@@ -72,7 +86,21 @@ def _fetch_template_yaml_result(
 
         data = resp.json()
         content = base64.b64decode(data["content"]).decode("utf-8")
-        return (yaml.safe_load(content) or {}), None
+        # ent#314: this document is author-controlled — any `creator`-role user
+        # can point agent creation at an arbitrary PUBLIC repo (ent#123 made
+        # that tokenless), and `_build_template` runs unfenced inside
+        # `get_all_templates()`, so one hostile repo sits on the
+        # `/api/templates` path for everyone who lists templates. Bare
+        # `safe_load` leaves two holes: alias amplification that only blows up
+        # when the catalog is SERIALIZED (measured 416 B -> 110 MB via
+        # json.dumps, parse itself 0.001 s — so an input cap cannot close it),
+        # and silent last-wins duplicate keys, which let a template show one
+        # `credentials:` block to a human and declare another to Trinity.
+        return (parse_template_yaml(content) or {}), None
+    except HardenedYamlError as e:
+        # Named, so a refused template is distinguishable from a network error
+        # in the catalog's own error column.
+        return {}, f"{e.code}: {e}"
     except Exception as e:
         return {}, f"{type(e).__name__}: {e}"
 
@@ -1253,7 +1281,9 @@ def _build_local_template(template_dir: Path, *, is_bundled: bool) -> Optional[d
 
     try:
         with open(template_yaml) as f:
-            data = yaml.safe_load(f) or {}
+            # ent#314: hardened parse — the guards apply to bundled and cloned
+            # templates alike, since a `github:` template lands on disk here too.
+            data = parse_template_yaml(f.read()) or {}
     except Exception as e:  # noqa: BLE001 — one bad file must not empty the catalog
         # Deliberately broader than `(OSError, yaml.YAMLError)`: deeply nested
         # YAML raises RecursionError, which is a RuntimeError and therefore
@@ -1612,7 +1642,7 @@ def extract_credentials_from_template_yaml(file_path: Path) -> Dict:
 
     try:
         with open(file_path) as f:
-            data = yaml.safe_load(f)
+            data = parse_template_yaml(f.read())  # ent#314
     except Exception as e:
         print(f"Warning: Could not parse {file_path}: {e}")
         return {}
@@ -1903,7 +1933,7 @@ def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dic
 
     try:
         with open(template_path) as f:
-            template_data = yaml.safe_load(f)
+            template_data = parse_template_yaml(f.read())  # ent#314
     except Exception as e:
         return (False, f"Invalid template.yaml: {e}", None)
 
@@ -1966,7 +1996,7 @@ def get_name_from_template(path: Path) -> Optional[str]:
 
     try:
         with open(template_path) as f:
-            template_data = yaml.safe_load(f)
+            template_data = parse_template_yaml(f.read())  # ent#314
             return template_data.get("name") if template_data else None
     except Exception:
         return None

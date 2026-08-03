@@ -22,6 +22,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+from utils.safe_yaml import (
+    AliasPolicy,
+    HardenedYamlError,
+    load_hardened_yaml,
+)
+
 from services.credential_charset import (
     CREDENTIAL_DETECTOR_NAME_RE,
     CREDENTIAL_DETECTOR_REF_RE,
@@ -83,8 +89,15 @@ def _parse_yaml(content: Optional[str]) -> Tuple[Optional[Any], Optional[str]]:
     if content is None:
         return None, "content unavailable"
     try:
-        return yaml.safe_load(content), None
-    except yaml.YAMLError as e:
+        # ent#314: the snapshot is agent-authored workspace content. REJECT,
+        # because every check here walks the parsed structure and no legitimate
+        # workspace file needs an alias.
+        return load_hardened_yaml(
+            content, kind="workspace_yaml", alias_policy=AliasPolicy.REJECT
+        ), None
+    except (yaml.YAMLError, HardenedYamlError) as e:
+        # HardenedYamlError is a ValueError: without it a refused document would
+        # escape this helper instead of becoming the (None, reason) it promises.
         return None, str(e).splitlines()[0] if str(e) else "invalid YAML"
 
 

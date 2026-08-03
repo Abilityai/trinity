@@ -1419,6 +1419,17 @@
         "security"
       ],
       "description": "py/stack-trace-exposure leak guards for the ops / system-agent siblings PR #1912 left untouched (#1917), including open CodeQL alert #231. Each test drives the REAL router function with a sentinel planted in the exception message and asserts both halves: the sentinel is absent from the response AND the exception class name is present (a response that dropped the error entirely would pass a sentinel-only check while making the failure undiagnosable). Covers stop_fleet per-agent, _stop_agent_container (feeds emergency_stop), fleet health (previously str(e)[:50] \u2014 truncation bounds a leak, it does not remove one, and docker/httpx messages put the host FIRST), ops costs (the OTel collector URL), and system-agent health. Plus a static ban on str(e) in ops.py/system_agent.py and a window check on agents.py's three lifecycle details. All 8 fail against pre-fix code \u2014 verified, because the fleet-health test initially patched a get_agent_context_info that does not exist (raising=False made it silent), so it passed against the unpatched router until the pre-fix run exposed it; it now patches get_agent_client and asserts the probe ran."
+    },
+    {
+      "file": "unit/test_ent314_hardened_yaml.py",
+      "feature": "trinity-enterprise#314",
+      "added": "2026-08-03",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "Hardened parsing of author-controlled YAML (ent#314). template.yaml was on bare yaml.safe_load, leaving alias amplification (measured 416 B -> 110 MB at json.dumps time, parse itself 0.0011 s, so an input-size cap cannot close it) and silent last-wins duplicate keys, which let a template show one credentials: block to a human and declare another to Trinity. Reachable by any creator-role user via a public repo (ent#123 tokenless) since _build_template runs unfenced inside get_all_templates(). Covers: the fixture itself still amplifies under bare safe_load (so the suite cannot pass vacuously); level 4/5/6 bombs rejected under both policies; a small honest anchor STILL parses under BUDGET (the #1932 lesson \u2014 a guard that rejects the legitimate document is an outage that reads as hardened); REJECT refuses one alias and also gates at the scanner (skill_packaging's copy had both hooks); the issue's exact duplicate-credentials case and a nested duplicate; size cap; reject-not-truncate; ManifestError still a subclass so routers/systems.py's named 400 is unchanged and the manifest's published codes survive; and two consolidation guards \u2014 no module may grow a fourth SafeLoader subclass, and all four author-controlled readers must call the shared loader with no bare safe_load left. The four product-level guards fail against pre-fix code."
     }
   ]
 }

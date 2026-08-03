@@ -22,6 +22,11 @@ from database import db, AgentGitConfig, GitSyncResult
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, execute_command_in_container
 from utils.credential_sanitizer import scrub_secret_and_urls
+from utils.safe_yaml import (  # ent#314
+    AliasPolicy as _AliasPolicy,
+    HardenedYamlError as _HardenedYamlError,
+    load_hardened_yaml as _load_hardened_yaml,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -534,6 +539,7 @@ async def materialize_trinity_yaml_list(
     injection-safe (no shell expansion inside the body).
     """
     import yaml as _yaml
+
     body = _yaml.safe_dump({key: list(patterns)}, sort_keys=False)
     cmd = (
         f"mkdir -p /home/developer/.trinity && "
@@ -572,8 +578,11 @@ async def _read_trinity_yaml_list(
     if not raw:
         return list(default)
     try:
-        data = _yaml.safe_load(raw) or {}
-    except _yaml.YAMLError:
+        # ent#314: agent-written file read out of the container.
+        data = _load_hardened_yaml(
+            raw, kind="agent_yaml", alias_policy=_AliasPolicy.REJECT
+        ) or {}
+    except (_yaml.YAMLError, _HardenedYamlError):
         return list(default)
     patterns = data.get(key)
     if not isinstance(patterns, list) or not patterns:

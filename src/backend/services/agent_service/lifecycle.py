@@ -1320,8 +1320,15 @@ async def _read_template_yaml_from_volume(agent_name: str) -> dict:
             network_disabled=True,
         )
         text = out.decode("utf-8") if isinstance(out, (bytes, bytearray)) else str(out)
-        import yaml as _yaml
-        data = _yaml.safe_load(text)
+        # ent#314: template.yaml read straight out of the agent's own volume —
+        # agent-writable, so it gets the same guards as every other copy. The
+        # broad `except` below already degrades to {}, which is the right
+        # outcome for a refused document too.
+        from utils.safe_yaml import AliasPolicy, load_hardened_yaml
+
+        data = load_hardened_yaml(
+            text, kind="template", alias_policy=AliasPolicy.REJECT
+        )
         return data if isinstance(data, dict) else {}
     except Exception as e:  # noqa: BLE001 — best-effort; defaults cover the gap
         logger.warning(

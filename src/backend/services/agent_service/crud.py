@@ -47,6 +47,7 @@ from . import ephemeral as ephemeral_service
 from services.github_service import GitHubService, GitHubError
 from services.agent_auth import derive_agent_token
 from utils.helpers import parse_iso_timestamp, sanitize_agent_name, to_utc_iso, utc_now_iso
+from utils.safe_yaml import HardenedYamlError, load_template_yaml
 from .fork_to_own import fork_template_to_own_repo
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
@@ -909,8 +910,10 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
     if template_yaml.exists():
         try:
             with open(template_yaml) as f:
-                template_data = yaml.safe_load(f)
-        except (OSError, yaml.YAMLError) as e:
+                # ent#314: hardened parse — this is the create path for a
+                # template that may have come from any public repo.
+                template_data = load_template_yaml(f.read())
+        except (OSError, yaml.YAMLError, HardenedYamlError) as e:
             # #1759: previously swallowed by the broad `except Exception:
             # logger.warning(...)` below, which produced the *identical*
             # observable outcome as an absent template — blank agent, HTTP 200 —
