@@ -144,9 +144,40 @@ user-facing list hides them. Both `_build_local_template` and `_build_template`
 now surface a coerced-int `priority` (`_coerce_priority`; a present-but-null or
 string value would otherwise `TypeError` the router sort), so the step-5 sort
 actually orders the real starters (`scout`/`sage`/`scribe`, `priority: 20`)
-ahead of the rest. `Templates.vue` renders a **Starter Templates** (local)
-section in addition to GitHub, so it shows the same curated set as
-`CreateAgentModal`.
+ahead of the rest. `Library.vue` (the Agent Templates section; renamed from
+`Templates.vue` in ent#263) renders a **Starter Templates** (local) section in
+addition to GitHub, so it shows the same curated set as `CreateAgentModal`.
+
+**Since #1931 there is no "rest"**: the 11 `dd-*` VC-demo directories declare
+`hidden: true`, so the visible local catalog is exactly those three starters and
+the ordering clause guards nothing today. It is kept because it is the mechanism
+a fourth starter would rely on; what is now enforced instead is that each starter
+still declares `priority: 20`, and that every bundled directory declares `hidden:`
+at all (see requirements/core-agent.md §4.1).
+
+**Read-path containment (#1900).** `get_local_template("local:<name>")` — the
+single-template resolver behind `GET /api/templates/{template_id:path}` — routes
+`<name>` through the public `contained_template_dir(name, root)` before any
+filesystem call. That is the same two-step barrier the create path has had since
+#950 (name allowlist first, so CodeQL sees a `py/path-injection` barrier; then
+`resolve()` on **both** sides plus `is_relative_to`, which is what catches the
+sibling escape `<root>-evil` that a `str.startswith` check passes, and the
+root-escaping symlink the allowlist cannot see). Previously the id was joined
+onto the root unvalidated, and because `:path` captures `/`, `local:../<x>`,
+`local:/<abs>/<x>` and a symlink each disclosed any parseable `template.yaml` on
+the backend filesystem — including other tenants' uploads under
+`/data/deployed-templates` — to any authenticated caller of any role. A rejected
+id returns `None`, so the router's 404 is byte-identical to an unknown template
+(no error code, no path, no root name): a distinguishable rejection would be a
+new enumeration oracle, the thing #1759's single-sentence 404 exists to close.
+The barrier reads the *name*, never the `hidden` flag, so the #1513 contract
+above is preserved.
+
+*Known, deliberate asymmetry:* `get_local_templates()` enumerates via
+`iterdir()`, which follows symlinks, so a root-escaping symlink **planted inside
+the root** could still be listed while detail and create both refuse it. The
+listing is the outlier — create has rejected it since #950 — and planting one
+requires local filesystem write access, not a request.
 
 ### Template Response Schema
 ```json
@@ -222,10 +253,16 @@ _LOCAL_TEMPLATE_ROOTS = (
 )
 
 raw_name = config.template[6:]                   # strip "local:"
-template_path = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[0])
-if not (template_path / "template.yaml").exists():
-    template_path = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[1])
+template_path = _resolve_local_template_dir(raw_name)   # the ladder, extracted (#1900)
 template_yaml = template_path / "template.yaml"
+
+# _resolve_local_template_dir is the SINGLE definition of "where does
+# local:<name> live" — extracted in #1900 so the three seams below cannot drift:
+def _resolve_local_template_dir(raw_name: str) -> Path:
+    candidate = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[0])
+    if not (candidate / "template.yaml").exists():
+        candidate = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[1])
+    return candidate
 
 # The if/else shape is load-bearing — see "CodeQL" below. Do not flatten it.
 if template_yaml.exists():
@@ -273,11 +310,15 @@ filesystem path and no root name. Deploy-local templates are named after *agent*
 names, so a root-distinguishing message would let a `creator`-role caller probe
 another user's agents (#186 adjacency).
 
-**Two seams read `_LOCAL_TEMPLATE_ROOTS`** and must stay in agreement: this
-resolver, and the `/template` bind-mount decision in `_stage_config_files`
-(curated templates bind their host path read-only at `/template`; deploy-local
-ones do not, because `deploy.py` already pre-populated the workspace volume via
-`put_archive`). The bind source is
+**Three seams read `_LOCAL_TEMPLATE_ROOTS`** and must stay in agreement: this
+resolver, the `/template` bind-mount decision in `_stage_config_files` (curated
+templates bind their host path read-only at `/template`; deploy-local ones do
+not, because `deploy.py` already pre-populated the workspace volume via
+`put_archive`), and — since #1900 — the **credential-file stager**, which used
+to re-derive the directory from the template's own untrusted `name:` field
+instead of reusing this one (see `generate_credential_files` below). #1759 named
+the first two; extracting `_resolve_local_template_dir` makes the agreement
+structural across all three rather than a convention. The bind source is
 `os.getenv("HOST_TEMPLATES_PATH") or _default_host_templates_base()` — an
 **empty** env value would otherwise make `Path("") / name` collapse to a bare
 name, which Docker resolves as an empty *named volume* at `/template`.
@@ -334,7 +375,7 @@ def extract_credentials_from_env_example(file_path: Path) -> List[str]:
     # Parses KEY=value lines, returns list of uppercase variable names
 ```
 
-### generate_credential_files (`services/template_service.py:228-299`)
+### generate_credential_files (`services/template_service.py::generate_credential_files`)
 ```python
 def generate_credential_files(
     template_data: dict,
@@ -346,12 +387,57 @@ def generate_credential_files(
     Generate credential files (.mcp.json, .env, config files) with real values.
     Returns dict of {filepath: content} to write into container.
 
-    1. Generate .mcp.json with credentials (lines 241-276)
-       - Replace ${VAR_NAME} with actual credential values
-    2. Generate .env file (lines 278-285)
-    3. Generate config files from templates (lines 287-297)
+    1. Generate .mcp.json with credentials — replace ${VAR_NAME} with real values
+    2. Generate .env file
+    3. Generate config files from templates
     """
 ```
+
+**Where the `.mcp.json` template comes from (#1900).** `crud._stage_config_files`
+passes `template_base_path` = the directory `_resolve_local_template_dir`
+already validated, so the live path performs **no** derivation of its own.
+
+Before #1900 this arm joined the template.yaml's own `name:` field onto a
+hard-coded root and read the resulting `.mcp.json` **into the new agent's**
+credential files. `name:` is untrusted — any `creator` supplies one via
+`deploy_local_agent_logic` — so `name: ../../data/deployed-templates/<victim>`
+read another tenant's credential-bearing `.mcp.json` into the attacker's own
+agent. It was also wrong on its own terms: `name:` is a *display string* in 5
+shipped templates ("Test Echo Agent"), not a directory name, so
+`local:test-echo` looked for `<curated>/Test Echo Agent/.mcp.json`.
+
+The residual `template_base_path is None` arm has no caller today (`github:`
+templates never reach this function — their `template_data` stays `{}` and
+`_stage_config_files` guards on it) but is kept fail-closed for future callers
+of a public function: it resolves through `contained_template_dir`, which also
+absorbs a non-string `name:` that previously raised `TypeError` out of agent
+creation as an uncaught 500.
+
+*Behaviour delta — measured, not the flattering version.* A **deploy-local**
+template that both declares `credentials.mcp_servers` and ships a `.mcp.json`
+now has that file staged at all, where the old curated-root lookup always
+missed. Two consequences, and the second is a loss, not a gain:
+
+* the staged file **wins** over the archive's raw copy, because `startup.sh`
+  copies `/generated-creds/.mcp.json` unconditionally and *after* the
+  template-copy block (which is gated on `.trinity-initialized`);
+* the sole production caller — `crud._stage_config_files` — passes an **empty**
+  `agent_credentials` map (CRED-002: real values are injected after creation,
+  not at staging), so `agent_credentials.get(var_name, "")` rewrites every
+  `${VAR}` to `""`. The agent's `.mcp.json` therefore lands with blank env
+  values / blank `args` entries instead of the archive's placeholders.
+  Hardcoded (non-`${VAR}`) entries are preserved verbatim. This mirrors what
+  the `.env` arm of this same function has always done for a template
+  declaring `credentials.env_file`; it is the platform's staging model, not a
+  new one. The durable record of which variables a server needs is
+  `.mcp.json.template` (compatibility check S-009), which is pre-populated
+  untouched.
+
+Do **not** restate this as "deploy-local templates finally get `${VAR}`
+substitution" — nothing is substituted *in* at this seam. No curated template
+ships a `.mcp.json`, so those rows are unchanged either way.
+`tests/unit/test_ent128a_catalog_resilience.py::test_1900_staging_with_an_empty_credential_map_blanks_placeholders`
+pins the measured behaviour against exactly that drift.
 
 ### Malformed `credentials:` resilience (trinity-enterprise#128)
 

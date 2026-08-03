@@ -92,3 +92,39 @@ class TestGetTemplateDetails:
         response = api_client.get("/api/templates/nonexistent-template-xyz")
 
         assert_status(response, 404)
+
+    def test_get_template_rejects_path_traversal(self, api_client: TrinityApiClient):
+        """#1900: a `local:` id must not escape the templates root.
+
+        End-to-end complement to the CI-gated guard in
+        `tests/unit/test_1900_template_id_traversal.py`. ⚠️ This FILE HAS NO
+        AUTOMATED RUNNER AT ALL. It is root-level, and every automated stage
+        collects a subdirectory: CI runs `pytest unit/`, and `/verify-local`
+        runs `pytest unit/` then `pytest integration/`. None of them collect
+        `tests/*.py`. Run it MANUALLY against a live stack:
+
+            (cd tests && pytest test_templates.py)   # backend must be booted
+
+        Its value is exercising the genuine uvicorn path-unquoting + auth
+        stack, not coverage — the CI-gated guard above is what protects the
+        fix. Giving this file a runner (move under `tests/integration/`, or
+        add a job that collects root-level files) is a tracked follow-up.
+
+        `%2E%2E%2F` is required for the multi-level case: RFC 3986 dot-segment
+        removal, which the httpx-based client applies, collapses a literal
+        `../../` before it ever leaves the client, so that spelling would
+        silently test nothing. Single-level and absolute forms need no trick.
+        """
+        for template_id in [
+            "local:../../etc",                       # collapsed client-side unless encoded
+            "local:%2E%2E%2F%2E%2E%2Fetc",           # encoded — reaches the handler intact
+            "local:../config",                       # single level, no encoding needed
+            "local:/etc",                            # absolute RHS wins the join
+        ]:
+            response = api_client.get(f"/api/templates/{template_id}")
+
+            assert_status(response, 404)
+            # The rejection must disclose nothing an unknown id would not.
+            body = response.text
+            assert "deployed-templates" not in body
+            assert "agent-configs" not in body

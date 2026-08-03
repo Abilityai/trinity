@@ -10,7 +10,7 @@ from typing import Dict, List, Literal, Optional
 from datetime import datetime
 from enum import Enum
 
-from utils.helpers import to_utc_iso
+from utils.helpers import parse_iso_timestamp, to_utc_iso
 from db_models import WebFileUpload  # noqa: F401 — re-exported for router imports
 
 
@@ -2179,10 +2179,21 @@ class ReminderCreate(BaseModel):
     def _check_fire_at_iso(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
+        # Delegate to the SAME parser reminder_service._resolve_fire_at uses, so
+        # "the validator accepted it" implies "the parser can parse it" BY
+        # CONSTRUCTION (#1831). A local re-implementation diverged: this used
+        # v.replace("Z", "+00:00") (EVERY Z) against the parser's trailing-Z-only
+        # strip, so a mid-string Z passed here and then raised ValueError out of
+        # the unguarded service call — HTTP 500. Do not reintroduce a local
+        # normalization to match _validate_iso8601 above: that value is never
+        # re-parsed, so it has no parser to agree with. This one does.
         try:
-            datetime.fromisoformat(v.replace("Z", "+00:00"))
+            parse_iso_timestamp(v)
         except (ValueError, AttributeError):
             raise ValueError("fire_at must be an ISO-8601 timestamp")
+        # Return v UNCHANGED — never canonicalized. The create-idempotency key
+        # hashes raw_fire_spec() == f"fire_at={self.fire_at}" (Invariant #18), so
+        # rewriting it here forks the key and double-creates on a client retry.
         return v
 
     @model_validator(mode="after")

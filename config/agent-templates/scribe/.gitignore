@@ -79,6 +79,3 @@ __pycache__/
 *.local.json
 !.env.example
 !.mcp.json.template
-
-# Template-specific (preserved from this template's own .gitignore)
-outputs/

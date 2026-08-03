@@ -1,0 +1,136 @@
+# VC Due-Diligence Demo Fleet (#1931)
+#
+# Promoted from docs/demos/vc-due-diligence/system-manifest.yaml — the system
+# name and short names are carried over VERBATIM (see the warning below).
+#
+# The eleven `dd-*` templates carry `hidden: true`: deliberately out of the
+# default Library browse list (they are a demo, not a starter) but fully
+# creatable by id. This manifest deploys them as the fleet they were designed
+# to be. Same pattern as config/manifests/research-network.yaml, which deploys
+# the hidden demo-researcher/demo-analyst pair.
+#
+# What it deploys: dd-intake parses a pitch deck into structured data on the
+# shared folder, nine specialists each assess one dimension, and dd-lead
+# synthesizes a risk score and a go/no-go recommendation.
+#
+# -----------------------------------------------------------------------------
+# THE SYSTEM NAME AND SHORT NAMES ARE LOAD-BEARING — DO NOT "TIDY" THEM.
+# -----------------------------------------------------------------------------
+# Deployed agent names are f"{name}-{short_name}"
+# (services/system_service.py::resolve_agent_names), and
+# config/agent-templates/dd-lead/CLAUDE.md hardcodes its specialist roster as
+# `vc-due-diligence-dd-<x>` (13 occurrences: the table at lines 23-31, the
+# worked example at 39, and the delegation script at 155-157). Renaming the
+# system to something shorter, or the short names to `founder`/`market`/...,
+# deploys eleven healthy containers whose Deal Lead cannot reach a single
+# specialist — green tests, broken demo. The names below reproduce the roster
+# exactly, and tests/unit/test_1931_manifest_roster.py fails CI if they drift.
+#
+# Authoritative record of these names:
+# config/process-templates/vc-due-diligence/definition.yaml (a dead
+# Process-Engine artifact since #430, kept as the naming source of truth).
+#
+# -----------------------------------------------------------------------------
+# BEFORE YOU DEPLOY
+# -----------------------------------------------------------------------------
+# COST: eleven agent containers, 20 CPU and ~40 GB of combined declared memory
+#   limits (from each template.yaml). Do not run this on a small host.
+#
+# QUOTA: a non-admin `creator` is capped at max_agents_creator (default 10), and
+#   deploy_manifest is best-effort — so an 11th create lands in `failed[]` and
+#   the deploy reports `partial`. Raise the quota to >= 11 first (admins are
+#   exempt). dd-lead is listed FIRST below precisely so a quota-truncated deploy
+#   loses a specialist rather than silently losing the orchestrator.
+#
+# RE-DEPLOY: agent names collide-and-suffix (`vc-due-diligence-dd-founder_2`),
+#   which the hardcoded roster cannot reach. DELETE the existing fleet before
+#   re-deploying — do not stack a second copy.
+#
+# -----------------------------------------------------------------------------
+# DEPLOY (dry-run first; flip dry_run to false to actually create)
+# -----------------------------------------------------------------------------
+#   jq -Rs '{manifest: ., dry_run: true}' config/manifests/vc-due-diligence.yaml \
+#     | curl -X POST http://localhost:8000/api/systems/deploy \
+#         -H "Authorization: Bearer YOUR_TOKEN" \
+#         -H "Content-Type: application/json" -d @-
+#
+# The endpoint takes a JSON body ({manifest: "<yaml string>", dry_run, strict});
+# it does NOT accept a raw YAML upload. Or, from an MCP client: `deploy_system`.
+#
+# -----------------------------------------------------------------------------
+# What this manifest deliberately does NOT declare
+# -----------------------------------------------------------------------------
+# - No `resources:` — for a `local:` template, template.yaml's own `resources`
+#   block OVERWRITES the manifest value at creation
+#   (crud.py::_resolve_local_template: `config.resources =
+#   template_data.get("resources", config.resources)`), and all eleven dd-*
+#   templates declare one. Restating it here would be decorative and could
+#   silently drift. (Contrast default-system.yaml, which DOES declare
+#   resources — scout/sage/scribe declare none, so there the manifest value
+#   is what survives.)
+# - No `folders:` — each dd-* template.yaml already declares `shared_folders`
+#   (all expose; all consume except dd-intake), applied at creation. One source
+#   of truth.
+# - No `schedules:` — the demo is driven interactively; a zero-credential
+#   install must not accumulate failing cron executions.
+# - No `prompt:` — that key overwrites the platform-wide trinity_prompt.
+
+name: vc-due-diligence
+description: VC due-diligence demo fleet — intake, nine specialists, and a deal lead
+
+agents:
+  # The verdict. Listed FIRST so a quota-truncated deploy loses a specialist,
+  # not the orchestrator. The ONLY agent that delegates (see permissions).
+  dd-lead:
+    template: local:dd-lead
+
+  # Front door — parses a pitch deck into structured data on its shared folder.
+  dd-intake:
+    template: local:dd-intake
+
+  # The nine specialists. Each assesses one dimension and calls nobody.
+  dd-founder:
+    template: local:dd-founder
+  dd-market:
+    template: local:dd-market
+  dd-competitor:
+    template: local:dd-competitor
+  dd-tech:
+    template: local:dd-tech
+  dd-bizmodel:
+    template: local:dd-bizmodel
+  dd-traction:
+    template: local:dd-traction
+  dd-compliance:
+    template: local:dd-compliance
+  dd-captable:
+    template: local:dd-captable
+  dd-legal:
+    template: local:dd-legal
+
+# dd-lead is the sole orchestrator: its CLAUDE.md instructs it to
+# `chat_with_agent` each of the nine specialists. No other dd-* template
+# references a sibling (verified: zero cross-agent references in the other ten
+# CLAUDE.md files), so nine edges is the complete topology — not an omission.
+#
+# NOTE: `explicit` is a FULL REPLACEMENT. Every short name absent from this map
+# has its permissions CLEARED (system_service::_apply_permissions). The ten
+# agents with no entry below therefore end with zero outbound permissions BY
+# DESIGN. dd-intake is deliberately not among dd-lead's targets — it is not in
+# dd-lead's CLAUDE.md roster either.
+#
+# Configuring these permissions is the concrete value this manifest adds over
+# the docs/demos copy it was promoted from, whose header told the operator to
+# wire them up by hand after deploying.
+permissions:
+  explicit:
+    dd-lead:
+      - dd-founder
+      - dd-market
+      - dd-competitor
+      - dd-tech
+      - dd-bizmodel
+      - dd-traction
+      - dd-compliance
+      - dd-captable
+      - dd-legal

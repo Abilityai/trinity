@@ -203,3 +203,57 @@ def test_host_branch_base_is_absolute_so_docker_accepts_it(
     base = crud._default_host_templates_base()
     assert Path(base).is_absolute(), base
     assert base == str(crud._repo_local_templates_dir())
+
+
+def test_1900_local_template_name_regex_parity(real_modules):
+    """The read-path allowlist must stay byte-identical to the create path's.
+
+    `template_service._LOCAL_TEMPLATE_NAME_RE` (#1900) is DUPLICATED from
+    `crud._LOCAL_TEMPLATE_NAME_RE` (#950), not imported, in both directions:
+
+      * crud → template_service is forbidden *for a security gate* (crud does
+        import this module for `generate_credential_files` — the ban is on what
+        may be *gated* on it, not on the import edge): `services.template_service`
+        is MagicMocked by the #1484 characterization harness, so a gate calling
+        into it would be satisfied by a truthy mock and those tests would stay
+        green on the OLD behaviour (the same reasoning that makes
+        `crud._repo_local_templates_dir` hand-rolled, crud.py:73-87).
+      * template_service → crud would close an import cycle (crud imports
+        template_service).
+
+    Duplication is only safe while something pins the copies equal. This is it.
+    Note the shared `$`-matches-before-a-trailing-newline edge is deliberate on
+    both sides (D5): "fixing" one copy to `\\Z` silently breaks this guard.
+    """
+    crud, template_service = real_modules
+
+    assert (
+        template_service._LOCAL_TEMPLATE_NAME_RE.pattern
+        == crud._LOCAL_TEMPLATE_NAME_RE.pattern
+    )
+
+
+def test_1900_read_and_create_barriers_agree_on_the_same_names(real_modules, tmp_path):
+    """Same input, same verdict, across two independently-implemented barriers.
+
+    The read path returns `None` (→ 404, no oracle) where the create path
+    raises `HTTPException(400)`; the *decision* must not diverge, or a name
+    creatable by id would 404 on detail (or worse, vice-versa).
+    """
+    crud, template_service = real_modules
+    from fastapi import HTTPException
+
+    root = tmp_path / "templates"
+    root.mkdir()
+
+    hostile = ["..", "../evil", "/etc", ".hidden", "-lead", "_lead", "a/b", "a..b",
+               "sp ace", "", "a\\b"]
+    for name in hostile:
+        assert template_service.contained_template_dir(name, root) is None, name
+        with pytest.raises(HTTPException) as exc:
+            crud._safe_local_template_path(name, root)
+        assert exc.value.status_code == 400, name
+
+    for name in ["sage", "dd-compliance", "a.b", "a_b", "9lives", "trinity-system"]:
+        assert template_service.contained_template_dir(name, root) is not None, name
+        assert crud._safe_local_template_path(name, root) is not None, name
