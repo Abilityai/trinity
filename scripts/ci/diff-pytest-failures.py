@@ -1,8 +1,21 @@
 """JUnit XML regression diff for the unit-suite CI gate (issue #715).
 
 Compares the union of failing tests in --base XMLs against the union in --head
-XMLs. Exits 1 if --head introduces any new failing test ID OR if any input XML
-is missing/unparseable/empty (fail-closed on infrastructure failure).
+XMLs. Exits 1 if --head introduces any new failing test ID.
+
+Infrastructure resilience (per-side quorum): the seeds are redundant — they
+exist to sample different test orders, and the regression signal is the UNION
+across a side's seeds. So a single seed lost to a slow runner (a timeout that
+never uploads its JUnit XML) must NOT red-X the whole PR. A side's missing /
+unparseable / empty XMLs are tolerated **as long as that side still has at least
+one usable XML**; the loss is surfaced loudly in the summary as a warning, and
+the diff proceeds on the survivors.
+
+The fail-closed guarantee is preserved where it matters: if a WHOLE side has no
+usable XML (every seed crashed), the baseline for that side cannot be computed at
+all, so that stays exit 1 — you cannot crash your way to a green gate. (Original
+strict behaviour was #715; the quorum relaxation is the CI-flake fix — a base
+seed timing out at the 25-min cap was reddening unrelated PRs, #1910.)
 
 Test identity is (classname, name, kind) where kind is "failure" (assertion)
 or "error" (collection / fixture crash). Tracking kind separately matters
@@ -87,14 +100,29 @@ def _render_summary(
     head_summaries: list[XmlSummary],
     regressions: set[TestId],
     fixes: set[TestId],
-    infra_failures: list[str],
+    fatal_failures: list[str],
+    degraded_warnings: list[str],
 ) -> str:
     lines = ["# Backend unit-suite regression diff", ""]
 
-    if infra_failures:
-        lines.append("## ⚠️ Infrastructure failures")
+    if fatal_failures:
+        lines.append("## ❌ Infrastructure failure (gate cannot run)")
         lines.append("")
-        for msg in infra_failures:
+        for msg in fatal_failures:
+            lines.append(f"- {msg}")
+        lines.append("")
+
+    if degraded_warnings:
+        lines.append("## ⚠️ Degraded — proceeding on surviving seeds")
+        lines.append("")
+        lines.append(
+            "A seed's JUnit XML was missing/unusable (usually a runner timeout). "
+            "The regression signal is the union across a side's seeds, so the "
+            "check continues on the seeds that did report — but this run sampled "
+            "fewer test orders than usual:"
+        )
+        lines.append("")
+        for msg in degraded_warnings:
             lines.append(f"- {msg}")
         lines.append("")
 
@@ -148,24 +176,49 @@ def diff(
     base_summaries = [_parse_one(p) for p in base_paths]
     head_summaries = [_parse_one(p) for p in head_paths]
 
-    infra_failures: list[str] = []
-    for s in (*base_summaries, *head_summaries):
+    def _unusable_reason(s: XmlSummary) -> str | None:
         if s.parse_error is not None:
-            infra_failures.append(f"`{s.path}`: {s.parse_error}")
-        elif s.total == 0:
-            infra_failures.append(f"`{s.path}`: zero testcases — pytest likely crashed before collection")
+            return s.parse_error
+        if s.total == 0:
+            return "zero testcases — pytest likely crashed before collection"
+        return None
 
-    base_known: set[TestId] = set().union(*(s.failures for s in base_summaries)) if base_summaries else set()
-    head_known: set[TestId] = set().union(*(s.failures for s in head_summaries)) if head_summaries else set()
+    # Partition each side into usable / degraded. A side's failure-union is
+    # computed from its USABLE seeds; a partial loss degrades (warn), a total
+    # loss is fatal (can't establish that side's baseline at all).
+    degraded: list[str] = []       # partial seed loss — tolerated, surfaced
+    fatal: list[str] = []          # a whole side wiped, or a side with no inputs
+    side_usable: dict[str, list[XmlSummary]] = {}
+    for label, summaries in (("base", base_summaries), ("head", head_summaries)):
+        usable = [s for s in summaries if _unusable_reason(s) is None]
+        for s in summaries:
+            reason = _unusable_reason(s)
+            if reason is not None:
+                degraded.append(f"`{s.path.name}` ({label}): {reason}")
+        side_usable[label] = usable
+        if not usable:
+            # No usable XML for this side — the union is empty not because there
+            # were no failures but because we couldn't observe any. Fatal.
+            fatal.append(
+                f"{label}: no usable JUnit XML (all {len(summaries) or 0} input(s) "
+                "missing/unparseable/empty) — cannot establish this side's baseline"
+            )
+
+    base_known: set[TestId] = set().union(*(s.failures for s in side_usable["base"])) if side_usable["base"] else set()
+    head_known: set[TestId] = set().union(*(s.failures for s in side_usable["head"])) if side_usable["head"] else set()
 
     regressions = head_known - base_known
     fixes = base_known - head_known
 
+    # Only the partial losses that were NOT escalated to fatal are "warnings".
+    warnings = [] if fatal else degraded
+
     summary_md = _render_summary(
-        base_summaries, head_summaries, regressions, fixes, infra_failures
+        base_summaries, head_summaries, regressions, fixes,
+        fatal_failures=fatal, degraded_warnings=warnings,
     )
 
-    if infra_failures or regressions:
+    if fatal or regressions:
         return summary_md, 1
     return summary_md, 0
 
@@ -226,22 +279,63 @@ def _run_self_test() -> int:
         if "[E] t::bad" not in md:
             failures.append("case 4: regression list missing [E] t::bad")
 
-        # Case 5: missing XML → infra failure → exit 1
+        # Case 5: missing XML is the ONLY input for its side → that side has no
+        # usable baseline → still fatal → exit 1.
         _, code = diff([tmp_path / "does-not-exist.xml"], [tmp_path / "base1.xml"])
         if code != 1:
-            failures.append(f"case 5 (missing): expected 1, got {code}")
+            failures.append(f"case 5 (whole side missing): expected 1, got {code}")
 
-        # Case 6: unparseable XML → infra failure → exit 1
+        # Case 6: unparseable XML as a side's only input → fatal → exit 1.
         (tmp_path / "broken.xml").write_text("this is not xml <<<")
         _, code = diff([tmp_path / "broken.xml"], [tmp_path / "base1.xml"])
         if code != 1:
-            failures.append(f"case 6 (unparseable): expected 1, got {code}")
+            failures.append(f"case 6 (whole side unparseable): expected 1, got {code}")
 
-        # Case 7: zero testcases (pytest crashed before collection) → infra failure → exit 1
+        # Case 7: zero testcases as a side's only input → fatal → exit 1.
         (tmp_path / "empty.xml").write_text(_build_xml(""))
         _, code = diff([tmp_path / "empty.xml"], [tmp_path / "base1.xml"])
         if code != 1:
-            failures.append(f"case 7 (zero testcases): expected 1, got {code}")
+            failures.append(f"case 7 (whole side zero testcases): expected 1, got {code}")
+
+        # Case 9 (quorum): one of two base seeds missing, the other clean and
+        # matching head → tolerated → exit 0. This is the #1910 flake shape: a
+        # base seed timed out and never uploaded, but the surviving base seed +
+        # head agree, so there is no regression to gate on.
+        clean = _build_xml('<testcase classname="t" name="ok"/>')
+        (tmp_path / "base9.xml").write_text(clean)
+        (tmp_path / "head9.xml").write_text(clean)
+        _, code = diff(
+            [tmp_path / "base9.xml", tmp_path / "does-not-exist.xml"],
+            [tmp_path / "head9.xml"],
+        )
+        if code != 0:
+            failures.append(f"case 9 (partial base loss, no regression): expected 0, got {code}")
+
+        # Case 10 (quorum must NOT mask a real regression): a base seed is missing
+        # AND the surviving seeds show head introduces a new failure → exit 1.
+        base10 = _build_xml('<testcase classname="t" name="ok"/>')
+        head10 = _build_xml(
+            '<testcase classname="t" name="ok"/>'
+            '<testcase classname="t" name="newbad"><failure/></testcase>'
+        )
+        (tmp_path / "base10.xml").write_text(base10)
+        (tmp_path / "head10.xml").write_text(head10)
+        _, code = diff(
+            [tmp_path / "base10.xml", tmp_path / "does-not-exist.xml"],
+            [tmp_path / "head10.xml"],
+        )
+        if code != 1:
+            failures.append(f"case 10 (partial loss, real regression): expected 1, got {code}")
+
+        # Case 11: EVERY base seed unusable → no baseline at all → fatal → exit 1.
+        # The guarantee that you cannot crash your way to green.
+        (tmp_path / "empty11.xml").write_text(_build_xml(""))
+        _, code = diff(
+            [tmp_path / "does-not-exist.xml", tmp_path / "empty11.xml"],
+            [tmp_path / "head9.xml"],
+        )
+        if code != 1:
+            failures.append(f"case 11 (whole base side wiped): expected 1, got {code}")
 
         # Case 8: union de-noising — failure under base seed B is "known" → not a regression
         base8a = _build_xml('<testcase classname="t" name="flake"><failure/></testcase>')
@@ -261,7 +355,7 @@ def _run_self_test() -> int:
         for f in failures:
             print(f"  - {f}", file=sys.stderr)
         return 1
-    print("self-test OK (8/8 cases pass)")
+    print("self-test OK (11 cases pass)")
     return 0
 
 
