@@ -175,9 +175,14 @@ def test_oversize_document_is_refused_before_parsing():
 
 
 def test_template_service_applies_the_cap_to_fetched_yaml():
+    """Assert the BEHAVIOUR through template_service, and the constant at its
+    canonical home. An earlier draft read `ts.TEMPLATE_YAML_MAX_BYTES`, which
+    only existed as a re-export the test itself had caused — a constant kept
+    alive by its own assertion."""
     from services import template_service as ts
+    from utils.safe_yaml import TEMPLATE_YAML_MAX_BYTES
 
-    assert ts.TEMPLATE_YAML_MAX_BYTES == 256 * 1024
+    assert TEMPLATE_YAML_MAX_BYTES == 256 * 1024
     with pytest.raises(HardenedYamlError):
         ts.parse_template_yaml("name: x\nd: " + "a" * 300_000)
 

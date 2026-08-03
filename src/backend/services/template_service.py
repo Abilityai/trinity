@@ -19,11 +19,7 @@ from urllib.parse import urlsplit
 import httpx
 import yaml
 from config import DEFAULT_GITHUB_TEMPLATE_REPOS, GITHUB_PAT_CREDENTIAL_ID
-from utils.safe_yaml import (
-    TEMPLATE_YAML_MAX_BYTES,
-    HardenedYamlError,
-    load_template_yaml,
-)
+from utils.safe_yaml import HardenedYamlError, load_template_yaml
 from services.credential_charset import (
     CREDENTIAL_DETECTOR_NAME_RE,
     CREDENTIAL_DETECTOR_REF_RE,
