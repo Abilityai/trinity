@@ -105,6 +105,14 @@ REPLAY_NAME="conductor-fixture-replay-${RUN_SUFFIX}"
 MAIN_CONTAINER="agent-${MAIN_NAME}"
 REPLAY_CONTAINER="agent-${REPLAY_NAME}"
 TRINITY_ENV_FILE="${TRINITY_ENV_FILE:-.env}"
+# Compose is invoked directly here rather than through start.sh, so detect the
+# Docker socket's container-visible group for the non-root backend.
+DOCKER_GID=$(docker run --rm \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce \
+  stat -c '%g' /var/run/docker.sock | tr -dc '0-9')
+case "${DOCKER_GID}" in ''|*[!0-9]*) exit 64 ;; esac
+export DOCKER_GID
 COMPOSE=(docker compose --project-name "${FIXTURE_PROJECT}" --env-file "${TRINITY_ENV_FILE}")
 MAIN_CREATED=0
 REPLAY_CREATED=0
@@ -209,17 +217,36 @@ echo fixture-auth-ready
 
 create_agent() {
   name="$1"
-  response=$(curl -fsS --config - <<EOF
+  for attempt in $(seq 1 60); do
+    if response=$(curl -fsS --config - <<EOF
 url = "http://localhost:8000/api/agents"
 request = "POST"
 header = "Authorization: Bearer ${TOKEN}"
 header = "Content-Type: application/json"
 data = "{\"name\":\"${name}\",\"template\":\"local:delivery-conductor\"}"
 EOF
-  )
-  printf '%s' "${response}" | python3 -c \
-    'import json,sys; value=json.load(sys.stdin); assert isinstance(value, dict)'
-  unset response
+    ); then
+      printf '%s' "${response}" | python3 -c \
+        'import json,sys; value=json.load(sys.stdin); assert isinstance(value, dict)'
+      unset response
+      return 0
+    fi
+    # A committed POST may lose its response. Accept only this exact agent via
+    # the authenticated native API; otherwise wait for startup readiness.
+    if response=$(curl -fsS --config - <<EOF
+url = "http://localhost:8000/api/agents/${name}"
+header = "Authorization: Bearer ${TOKEN}"
+EOF
+    ); then
+      printf '%s' "${response}" | python3 -c \
+        'import json,sys; value=json.load(sys.stdin); assert isinstance(value, dict)'
+      unset response
+      return 0
+    fi
+    unset response
+    sleep 2
+  done
+  return 1
 }
 
 PHASE=create-agents
@@ -287,6 +314,21 @@ value = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert value["schema_version"] == 1
 assert value["status"] == sys.argv[2], value
 print(json.dumps({"reason_code": value["reason_code"], "status": value["status"]}, sort_keys=True))
+PY
+}
+
+assert_blocked_no_effect() {
+  file="$1"
+  python3 - "${file}" <<'PY'
+import json, pathlib, sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert value["schema_version"] == 1
+assert value["operation"] == "prepare"
+assert value["status"] == "blocked"
+assert value["reason_code"] == "breaker-open"
+for key in ("effect_tool", "effect_arguments", "action", "correlation", "reminder"):
+    assert value[key] is None, key
+print(json.dumps({"no_effect": True, "reason_code": value["reason_code"], "status": value["status"]}, sort_keys=True))
 PY
 }
 
@@ -396,6 +438,24 @@ assert_status "${CAPTURE_DIR}/worker.json" action-ready
 record_fixture_result "${MAIN_CONTAINER}" "${CAPTURE_DIR}/worker.json" \
   completed completed "${CAPTURE_DIR}/worker-result.json"
 
+# Two more odd source-event IDs deterministically propose unique effects under
+# distinct fixture signatures. Settle each captured correlation before the next
+# wake so the shared issue usage reaches exactly four units.
+prepare_tick "${MAIN_CONTAINER}" direct-3 manual - - "${CAPTURE_DIR}/budget-manual.json"
+assert_status "${CAPTURE_DIR}/budget-manual.json" action-ready
+record_fixture_result "${MAIN_CONTAINER}" "${CAPTURE_DIR}/budget-manual.json" \
+  completed completed "${CAPTURE_DIR}/budget-manual-result.json"
+
+prepare_tick "${MAIN_CONTAINER}" reminder-3 reminder - - "${CAPTURE_DIR}/budget-reminder.json"
+assert_status "${CAPTURE_DIR}/budget-reminder.json" action-ready
+record_fixture_result "${MAIN_CONTAINER}" "${CAPTURE_DIR}/budget-reminder.json" \
+  completed completed "${CAPTURE_DIR}/budget-reminder-result.json"
+
+# A fresh odd schedule wake observes the reconciled four-unit issue ceiling.
+# It returns no executable handoff; the durable checks below prove why.
+prepare_tick "${MAIN_CONTAINER}" hourly-3 schedule - - "${CAPTURE_DIR}/budget-blocked.json"
+assert_blocked_no_effect "${CAPTURE_DIR}/budget-blocked.json"
+
 # Replay agent: restart with the first correlation intentionally unresolved.
 prepare_tick "${REPLAY_CONTAINER}" restart-1 manual - - "${CAPTURE_DIR}/restart-before.json"
 assert_status "${CAPTURE_DIR}/restart-before.json" action-ready
@@ -418,29 +478,41 @@ An ambiguous result is terminal for that attempt and schedules investigation;
 the future investigation reminder is not an immediate second effect. Crash
 recovery may expose the same idempotent action key only after the old lease
 expires and fresh adapter observation returns the identical action. Duplicate
-wakes return `not-claimed`, and exhausted ceilings return `blocked` with no
-effect tool. The helper above does not contact the fake target: it validates one
-exact tool/argument bundle, hashes that simulated outcome, and records only the
+wakes return `not-claimed`. On the main agent, four settled effects consume
+exactly the fixture's four-unit issue ceiling; the fresh fifth proposal returns
+`blocked`/`breaker-open` with every effect and correlation field null. The
+helper above does not contact the fake target: it validates one exact
+tool/argument bundle, hashes that simulated outcome, and records only the
 captured correlation.
 
 ### Observable checks
 
 Inspect only the conductor's sanitized rows. The action query must return zero
-duplicate keys, journal fence tokens must be monotonic, and each unique proposed
-effect has one `action_journal` row. A replay may reserve its investigation
-reminder at the current fence, while the explicit restart comparison above
-proves the source action's fence increased. `budget_usage` reaches the fixture
-ceilings without authorizing another effect.
+duplicate keys. Fence tokens from the append-only `action_events` table must be
+monotonic in primary-key insertion order, rather than sorted by the value being
+tested. A replay may reserve its investigation reminder at the current fence,
+while the explicit restart comparison above proves the source action's fence
+increased. Main-agent ledger usage must be exactly `[4, 4, 4]`: this reaches the
+adapter's issue ceiling of four (not its daily ceiling of eight), opens the
+durable breaker with `issue-cost-budget-exhausted`, and authorizes no fifth
+effect.
 
 ```bash
 inspect_agent() {
   container="$1"
+  expected_usage="$2"
+  expected_breaker_state="$3"
+  expected_breaker_reason="$4"
   verify_fixture "${container}"
-  docker exec -i -u developer -w /home/developer "${container}" python - <<'PY'
-import json, sqlite3
+  docker exec -i -u developer -w /home/developer "${container}" \
+    python - "${expected_usage}" "${expected_breaker_state}" \
+    "${expected_breaker_reason}" <<'PY'
+import json, sqlite3, sys
+expected_usage = tuple(int(value) for value in sys.argv[1].split(','))
+expected_breaker = (sys.argv[2], sys.argv[3])
 with sqlite3.connect('data/delivery-conductor/control.sqlite3') as db:
     fences = [row[0] for row in db.execute(
-        'SELECT fence_token FROM action_journal ORDER BY fence_token')]
+        'SELECT fence_token FROM action_events ORDER BY id')]
     duplicate_keys = db.execute(
         'SELECT action_key, COUNT(*) FROM action_journal '
         'GROUP BY action_key HAVING COUNT(*) > 1').fetchall()
@@ -448,12 +520,35 @@ with sqlite3.connect('data/delivery-conductor/control.sqlite3') as db:
         'SELECT COALESCE(SUM(run_units),0), '
         'COALESCE(SUM(issue_units),0), COALESCE(SUM(daily_units),0) '
         'FROM budget_usage').fetchone()
+    breaker = db.execute(
+        'SELECT current.state, current.reason_code '
+        'FROM run_checkpoint AS checkpoint '
+        'JOIN conductor_wake_scope AS scope '
+        'ON scope.wake_id = checkpoint.acknowledged_wake_id '
+        'JOIN conductor_breaker_current AS current '
+        'ON current.run_id = scope.run_id '
+        'AND current.issue_id = scope.issue_id '
+        'AND current.signature = scope.signature '
+        'WHERE checkpoint.singleton = 1').fetchone()
+    checkpoint = db.execute(
+        'SELECT action_key, reason_code FROM run_checkpoint WHERE singleton = 1'
+    ).fetchone()
+    unsettled_prior = db.execute(
+        'SELECT action_key FROM action_journal '
+        'WHERE status = \'reserved\' AND action_key <> COALESCE(?, \'\')',
+        (checkpoint[0],),
+    ).fetchall()
 monotonic = all(a <= b for a, b in zip(fences, fences[1:]))
 assert duplicate_keys == []
 assert monotonic
+assert usage == expected_usage, (usage, expected_usage)
+assert breaker == expected_breaker, (breaker, expected_breaker)
+assert unsettled_prior == [], unsettled_prior
 print(json.dumps({
+    'breaker': breaker,
     'duplicate_action_keys': duplicate_keys,
-    'fences_monotonic': monotonic,
+    'event_fences_monotonic': monotonic,
+    'prior_actions_settled': True,
     'usage': usage,
 }, sort_keys=True))
 PY
@@ -462,8 +557,8 @@ PY
     .trinity/pipeline-state/delivery-conductor/current.json
 }
 
-inspect_agent "${MAIN_CONTAINER}"
-inspect_agent "${REPLAY_CONTAINER}"
+inspect_agent "${MAIN_CONTAINER}" 4,4,4 open issue-cost-budget-exhausted
+inspect_agent "${REPLAY_CONTAINER}" 1,1,1 open attempt-budget-exhausted
 ```
 
 The projection contains schema version, controller/checkpoint state, hashes,

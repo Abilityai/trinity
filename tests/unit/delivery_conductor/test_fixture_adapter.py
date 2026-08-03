@@ -289,17 +289,29 @@ def test_runbook_records_captured_correlations_and_cleans_exact_resources():
 
     assert "ACTION_KEY_FROM_PREPARE" not in runbook
     assert '"fence_token":1' not in runbook
+    assert "SELECT fence_token FROM action_journal ORDER BY fence_token" not in runbook
+    assert "(key, value[key])" not in runbook
     for required in (
         "record_fixture_result()",
+        "assert_blocked_no_effect()",
         'prepared["correlation"]',
         'prepared["effect_arguments"]',
         'assert_status "${CAPTURE_DIR}/hourly.json" action-ready',
         'assert_status "${CAPTURE_DIR}/worker.json" action-ready',
+        'assert_status "${CAPTURE_DIR}/budget-manual.json" action-ready',
+        'assert_status "${CAPTURE_DIR}/budget-reminder.json" action-ready',
+        'assert_blocked_no_effect "${CAPTURE_DIR}/budget-blocked.json"',
+        '"${MAIN_CONTAINER}" 4,4,4 open issue-cost-budget-exhausted',
+        '"${REPLAY_CONTAINER}" 1,1,1 open attempt-budget-exhausted',
+        "SELECT fence_token FROM action_events ORDER BY id",
+        "assert unsettled_prior == []",
         'ambiguous investigate "${CAPTURE_DIR}/restart-result.json"',
         'delete_agent "${MAIN_NAME}"',
         'delete_agent "${REPLAY_NAME}"',
         'docker container inspect "${resource}"',
         'docker volume inspect "${resource}"',
+        "alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce",
+        'url = "http://localhost:8000/api/agents/${name}"',
         "export ADMIN_PASSWORD='Aa1!'\"$(openssl rand -hex 24)\"",  # pragma: allowlist secret
         "MAIN_CREATED=1\ncreate_agent \"${MAIN_NAME}\"",
         "REPLAY_CREATED=1\ncreate_agent \"${REPLAY_NAME}\"",
