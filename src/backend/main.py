@@ -90,6 +90,7 @@ from routers.product_events import router as product_events_router
 from routers.reminders import router as reminders_router
 from services.report_service import set_websocket_manager as set_reports_ws_manager, set_filtered_websocket_manager as set_reports_filtered_ws_manager
 from routers.connector import router as connector_router  # per-agent MCP connector (ent#46, OSS-core #118)
+from routers.agent_mcp_key import router as agent_mcp_key_router  # per-agent Trinity MCP key (#1854)
 from routers.subscriptions import router as subscriptions_router
 from routers.monitoring import router as monitoring_router, set_websocket_manager as set_monitoring_ws_manager, set_filtered_websocket_manager as set_monitoring_filtered_ws_manager
 from routers.slack import public_router as slack_public_router, auth_router as slack_auth_router
@@ -1004,6 +1005,7 @@ app.include_router(reports_router)  # Agent Reports (#918)
 app.include_router(product_events_router)  # Local product-event capture (ent#184)
 app.include_router(reminders_router)  # Agent Self-Reminders (#1296)
 app.include_router(connector_router)  # Per-agent MCP connector (ent#46, OSS-core #118)
+app.include_router(agent_mcp_key_router)  # Per-agent Trinity MCP key: read/verify/rotate (#1854)
 app.include_router(messages_router)  # Proactive Messaging (#321)
 app.include_router(public_memory_router)  # MEM-001 write path (#888)
 app.include_router(subscriptions_router)  # Subscription Management (SUB-001)

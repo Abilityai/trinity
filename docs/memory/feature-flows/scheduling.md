@@ -173,6 +173,88 @@ emit('create-schedule', msg)     - Switch to 'schedules' tab       - Pre-fill fo
 - `src/frontend/src/components/SchedulesPanel.vue:487-490` - `initialMessage` prop definition
 - `src/frontend/src/components/SchedulesPanel.vue:790-802` - Watch handler for `initialMessage`
 
+### 1c. Template-Declared Schedules at Creation (trinity-enterprise#89)
+
+**Trigger:** an agent is created from a template whose `template.yaml` declares
+a `schedules:` block. No user action — this is the fourth schedule producer,
+alongside the router, MCP, and manifest deploy.
+
+```
+_resolve_template (crud.py)                       _materialize_agent_files (crud.py)
+---------------------------                       ---------------------------------
+github: branch                                    if declared and not config.ephemeral:
+  _declared_schedules_for_github(                   try:
+      repo, creation-resolved PAT, @ref)               reconcile_declared_schedules(
+    → template_service                                     name, declared, owner)
+      .fetch_template_metadata_for_create()          except: WARNING   ← non-fatal
+      (cache-bypassed, loud on failure)                    ↓
+    → normalize_declared_schedules()             seen = {s.name for s in
+local: branch                                            db.list_agent_schedules(name)}
+  normalize_declared_schedules(                  per entry not in seen:
+      tr.template_data["schedules"])                db.create_schedule(name, owner,
+    ↓                                                   ScheduleCreate(enabled=…))
+tr.declared_schedules  (ONE normalized carrier)     falsy return → WARNING + failed++
+```
+
+**Why a dedicated carrier rather than `template_data`.** `template_data` holds
+two different shapes: raw template YAML on the `local:` path and `{}` on the
+`github:` path — that branch has never populated it, which is why #383's
+`persistent_state` and #1169's `data_paths` are effectively `local:`-only. Its
+truthiness also gates `_stage_config_files`' credential-file generation, so
+merging the shapes would change credential generation for every GitHub agent.
+`declared_schedules` is normalized, symmetric, and consumed by exactly one step.
+
+**Non-fatality is the invariant.** Every step in `_materialize_agent_files` is
+non-fatal by design, and this function runs inside creation's destructive
+rollback fence — an escaping raise would roll back a successful creation over a
+schedule. The `try/except` therefore wraps the **entire** call including the
+`list_agent_schedules` read, and each entry additionally has its own guard so
+one bad entry never costs the rest.
+
+**`db.create_schedule` returns `None`; it does not raise** — on an unknown
+user, on no agent access, and on the #1445 `is_agent_live` no-orphan gate. A
+`try/except` alone catches none of those, so the return value is checked and a
+falsy result is counted as *failed*. The summary INFO line reports
+created / skipped-existing / failed from **actual outcomes**, never from
+`len(declared)`.
+
+**`enabled` is passed explicitly.** `ScheduleCreate.enabled` defaults to
+`True`; omitting it would arm every undeclared schedule and invert AC #3. A
+declared `enabled: true` **is** honored — safety rests on
+`agent_ownership.autonomy_enabled`, which is `INTEGER DEFAULT 0` with no
+`register_agent_owner()` parameter, so a newly created agent can never fire.
+(Caveat: `set_autonomy_status` force-enables *every* schedule on the first
+autonomy toggle, so per-schedule intent is erased there either way — that, not
+the flag, is the real control.)
+
+**Idempotency runs in three places** (AC #4), all required:
+1. **Creation** — name-match read-then-skip. No recreate hook: recreate goes
+   through `lifecycle.py`, and an eager re-materialize would resurrect
+   schedules an operator deliberately deleted.
+2. **Within the block** — the reader dedupes by name (first wins) and the
+   materializer's seen-set catches it again.
+3. **Manifest deploy** — `system_service.create_schedules` runs *after*
+   `create_agent_internal`, making it the second producer for the same agent.
+   It gained the same name-match skip; without it, a manifest declaring
+   `daily-briefing` on a template that also declares it yields **two** rows
+   (there is no `UNIQUE(agent_name, name)` index, and adding one is a
+   dual-track schema change that would fail on installs already holding
+   duplicates).
+
+Ghost agents are skipped at the caller — schedules on an ephemeral agent are a
+400 by ent#69 fleet hygiene, and a new caller must exclude ghosts itself.
+
+The reader, its tolerance matrix, and the catalog surface are in
+[template-processing.md](template-processing.md#declared-schedules-trinity-enterprise89).
+
+**Files:**
+- `src/backend/services/template_schedules.py` — the tolerant reader
+- `src/backend/services/agent_service/crud.py` — `_declared_schedules_for_github`,
+  `reconcile_declared_schedules`, `_materialize_agent_files`
+- `src/backend/services/system_service.py` — `create_schedules` name-match guard
+- `tests/unit/test_ent89_schedule_materialization.py`,
+  `tests/unit/test_ent89_manifest_no_duplicate.py`
+
 ### 2. Schedule Execution Flow (Automatic)
 
 **Trigger:** APScheduler cron trigger fires in **Dedicated Scheduler Service**

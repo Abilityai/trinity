@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import axios from 'axios'
 import { useAuthStore } from './auth'
 import { agentDisplayName } from '../utils/agentName'
+import api from '../api'
 
 // ent#260 composition contract: with the Agents page retired, the Dashboard's
 // List panel (AgentListPanel.vue) runs on networkStore as its data spine and
@@ -320,6 +321,16 @@ export const useAgentsStore = defineStore('agents', {
         {},
         { headers: authStore.authHeader }
       )
+      return response.data
+    },
+
+    // ent#127: written against `api.js` rather than the raw-axios idiom of its
+    // neighbours above. `api.js` is the single client (Invariant #7) — it owns
+    // the auth interceptor and the 401 -> login redirect — and the neighbours
+    // predate it (`Library.vue` and `CreateAgentModal.vue` have already
+    // migrated). Copying them would be citing Invariant #7 to violate it.
+    async getCredentialRequirements(name) {
+      const response = await api.get(`/api/agents/${name}/credential-requirements`)
       return response.data
     },
 

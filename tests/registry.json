@@ -1258,6 +1258,42 @@
       ]
     },
     {
+      "file": "unit/test_ent89_template_schedules.py",
+      "feature": "trinity-enterprise#89",
+      "added": "2026-08-02",
+      "categories": [
+        "backend",
+        "unit",
+        "templates",
+        "scheduling"
+      ],
+      "description": "The tolerant `schedules:` reader (ent#89): full tolerance matrix over untrusted template.yaml shapes (scalar/list/mapping blocks, non-string cron/timezone, length bounds, intra-block duplicates, the 20-entry cap), strict cron via the scheduler's own validator (named days accepted, macros/6-field/out-of-range rejected), enabled defaulting to False, error strings that never echo name/message values, a Hypothesis totality property, plus the catalog surface in BOTH builders, the GitHub list-path fence (R3), and the create-path metadata fetch (resolved PAT + ref, cache-bypassed, loud on failure)."
+    },
+    {
+      "file": "unit/test_ent89_schedule_materialization.py",
+      "feature": "trinity-enterprise#89",
+      "added": "2026-08-02",
+      "categories": [
+        "backend",
+        "unit",
+        "scheduling",
+        "agents"
+      ],
+      "description": "Creation-time schedule materialization (ent#89) against a REAL DB with row read-back: both resolver branches populate declared_schedules (the \u00a70/R2 regression \u2014 the github: branch never populated template_data), the github fetch uses the creation-resolved PAT and the parsed @branch ref, enabled honored/defaulted, cron->cron_expression, name-match and intra-block idempotency, the ghost skip, a falsy create_schedule return counted as failed (R6), and non-fatality of a raising create_schedule / list_agent_schedules inside the rollback fence."
+    },
+    {
+      "file": "unit/test_ent89_manifest_no_duplicate.py",
+      "feature": "trinity-enterprise#89",
+      "added": "2026-08-02",
+      "categories": [
+        "backend",
+        "unit",
+        "scheduling",
+        "systems"
+      ],
+      "description": "R5: deploy_manifest runs create_schedules AFTER create_agent_internal, so post-ent#89 it is the second schedule producer for the same agent. Asserts a manifest declaring a name the template already materialized yields ONE row (and does not overwrite it), that manifest-only schedules still land, within-block dedupe, redeploy idempotency, and fail-open on an unreadable existing set."
+    },
+    {
       "file": "unit/test_ent109_git_env_seam.py",
       "feature": "trinity-enterprise#109",
       "added": "2026-07-30",
@@ -1334,6 +1370,22 @@
         "security"
       ],
       "description": "422 bodies must not echo the value that failed validation (ent#109 /cso S1 follow-through). Pydantic v2 records the rejected value in errors()[i]['input'] and FastAPI's default handler returns exc.errors() verbatim, so a failed SecretStr validation returns the SECRET in the response body and in any log of it. Load-bearing rather than incidental: without error_handlers.validation_error_without_input, ent#109's PAT charset guard would RELOCATE the h11 leak from a 500 into a 422 instead of closing it. 'input' is dropped for every field rather than for names that look sensitive -- a name-matching allowlist is the new-producer-missing-from-the-consumer's-list class, and the caller already has the value they just sent. Includes a teeth test asserting FastAPI's default WOULD have leaked, so the suite fails loudly if the framework changes and the handler becomes redundant, rather than passing for an unrelated reason."
+    },
+    {
+      "file": "unit/test_1854_agent_mcp_key.py",
+      "feature": "#1854",
+      "added": "2026-08-02",
+      "categories": [
+        "backend",
+        "unit",
+        "mcp",
+        "auth",
+        "security",
+        "agents",
+        "lifecycle",
+        "credentials"
+      ],
+      "description": "Agent MCP key detect/self-heal/rotate (#1854). DB: create_agent_mcp_api_key born ACTIVE (tables.py has no column default -> NULL reads as revoked and cannot even deserialize); captured-id delete (not `id != new_id`, so a racing recreate_missing_container mint is not collateral), connector key survives, keep_id never removed, other agents unreachable; DELETE-not-deactivate proven durable across soft-delete -> recover (recover_agent_ownership reactivates every inactive per-agent row). spawned_by_key_id reconcile: `!= current` repairs a child stranded on an OLDER superseded id, leaves a foreign parent alone, idempotent, and enforce_agent_spawn_scope never 403s at any step of a rotation. Drift predicate: absent env, URL-missing (injection needs BOTH), hash-mismatch, system/ghost exempt, fail-safe on DB error. Headline AC: env_overrides carry BOTH TRINITY_MCP_API_KEY and TRINITY_MCP_URL, proven end-to-end through recreate_container_with_updated_config on an old container that had NEITHER, plus a source-order guard that overrides are applied LAST. Probe: ok/foreign_user_key/foreign_agent_key/unknown_key/not_configured/shadow_entry, stopped container -> unavailable not 500, only digests leave the container (no token, no .mcp.json body) plus a non-vacuous SOURCE guard that no future edit of the in-container script can start leaking one. Health `stale` fires when last_used_at predates recent executions; trinity-system reports exempt not a false missing. Rotation: system/ghost 409 BEFORE any mutation, Redis-down 503 (fail-CLOSED) and contention 409, stopped agent stays stopped on the DB-only path, post-removal failure keeps superseded keys and names the real state with no raw exception text, 409-adoption post-condition blocks deletion, clear_agent_breakers before the recreate, no plaintext or key hash in response/log/audit, rate limit 429. Plus the FR-7 guards on MCP key revoke/delete and connector key mint. Review additions: the self-heal BODY is pinned \u2014 it takes the SAME agent:mcp_key_regen lock as rotation and does NOTHING (no mint, no delete) when Redis is down or another heal/rotation holds it, because there is no per-agent start lock and an unserialised second heal deletes the key the first is about to bake in; it audits its own mint+DELETE; container-env health (env_absent/env_mismatch) outranks the usage-derived states and is fail-soft; `stale` survives a naive legacy timestamp; the 409-adoption post-condition is an EXACT constant-time key match, proven against a container carrying a same-20-char-prefix twin; and any non-`agent` scope (connector, portal_delegate, a future sixth) reads as foreign, never `unknown_key`."
     }
   ]
 }
