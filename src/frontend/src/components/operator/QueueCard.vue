@@ -21,7 +21,7 @@
               :title="agentNameTooltip(agentsStore.agentRefForSlug(item.agent_name))"
             >{{ item.agent_name }}</span>
             <span class="text-xs text-gray-400 dark:text-gray-500">&middot;</span>
-            <span class="text-xs text-gray-400 dark:text-gray-500">{{ timeAgo(item.created_at) }}</span>
+            <span class="text-xs text-gray-400 dark:text-gray-400">{{ timeAgo(item.created_at) }}</span>
           </div>
 
           <!-- Title -->
@@ -68,7 +68,7 @@
       <div v-if="item.context && Object.keys(item.context).length > 0" class="px-4 pb-4">
         <button
           @click.stop="showContext = !showContext"
-          class="text-xs text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 flex items-center gap-1"
+          class="text-xs text-gray-400 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 flex items-center gap-1"
         >
           <svg class="w-3.5 h-3.5 transition-transform" :class="showContext ? 'rotate-90' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
@@ -77,7 +77,7 @@
         </button>
         <div v-if="showContext" class="mt-2 bg-gray-50 dark:bg-gray-900/50 rounded-lg p-3">
           <div v-for="(value, key) in item.context" :key="key" class="flex gap-3 text-xs py-0.5">
-            <span class="text-gray-400 dark:text-gray-500 font-mono min-w-[100px]">{{ key }}</span>
+            <span class="text-gray-400 dark:text-gray-400 font-mono min-w-[100px]">{{ key }}</span>
             <a
               v-if="isUrl(String(value))"
               :href="String(value)"

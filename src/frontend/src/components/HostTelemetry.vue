@@ -98,7 +98,7 @@ onUnmounted(() => {
     <template v-if="!loading">
       <!-- Leading separator lives here (not in Dashboard.vue) so it disappears
            together with the meters when the ladder hides them (#1830). -->
-      <span class="text-gray-300 dark:text-gray-600">·</span>
+      <span class="text-gray-300 dark:text-gray-500">·</span>
 
       <!-- CPU -->
       <span class="stat-item" data-metric="cpu" :title="`CPU ${formatPercent(hostStats?.cpu?.percent)}%`">
@@ -116,7 +116,7 @@ onUnmounted(() => {
         <span class="stat-value" :class="getColorClass(hostStats?.cpu?.percent)">{{ formatPercent(hostStats?.cpu?.percent) }}%</span>
       </span>
 
-      <span class="text-gray-300 dark:text-gray-600" data-sep="mem">·</span>
+      <span class="text-gray-300 dark:text-gray-500" data-sep="mem">·</span>
 
       <!-- Memory -->
       <span
@@ -138,7 +138,7 @@ onUnmounted(() => {
         <span class="stat-value" :class="getColorClass(hostStats?.memory?.percent)">{{ formatMemory(hostStats?.memory?.used_gb, hostStats?.memory?.total_gb) }}</span>
       </span>
 
-      <span class="text-gray-300 dark:text-gray-600" data-sep="disk">·</span>
+      <span class="text-gray-300 dark:text-gray-500" data-sep="disk">·</span>
 
       <!-- Disk -->
       <span class="stat-item" data-metric="disk" :title="`Disk ${formatPercent(hostStats?.disk?.percent)}%`">

@@ -167,7 +167,7 @@
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
         </svg>
         <p class="mt-2 text-gray-500 dark:text-gray-400">No tasks yet</p>
-        <p class="text-sm text-gray-400 dark:text-gray-500">Run a task above or configure schedules</p>
+        <p class="text-sm text-gray-400 dark:text-gray-400">Run a task above or configure schedules</p>
       </div>
 
       <!-- Task List with vertical scroll (#1500: fills the card, no fixed cap) -->
@@ -449,7 +449,7 @@
                       <span>•</span>
                       <span>{{ entry.toolCount }} tools</span>
                     </div>
-                    <div v-if="entry.mcpServers.length" class="text-gray-400 dark:text-gray-500">
+                    <div v-if="entry.mcpServers.length" class="text-gray-400 dark:text-gray-400">
                       MCP: {{ entry.mcpServers.join(', ') }}
                     </div>
                   </div>
@@ -523,7 +523,7 @@
         v-if="queueStatus?.current_execution"
         @click="forceReleaseQueue"
         :disabled="releaseLoading"
-        class="text-xs text-gray-500 hover:text-status-danger-600 dark:hover:text-status-danger-400 mr-4"
+        class="text-xs text-gray-500 dark:text-gray-400 hover:text-status-danger-600 dark:hover:text-status-danger-400 mr-4"
       >
         {{ releaseLoading ? 'Releasing...' : 'Force Release Queue' }}
       </button>
@@ -531,7 +531,7 @@
         v-if="queueStatus?.queue_length > 0"
         @click="clearQueue"
         :disabled="clearLoading"
-        class="text-xs text-gray-500 hover:text-status-danger-600 dark:hover:text-status-danger-400"
+        class="text-xs text-gray-500 dark:text-gray-400 hover:text-status-danger-600 dark:hover:text-status-danger-400"
       >
         {{ clearLoading ? 'Clearing...' : 'Clear Queued' }}
       </button>

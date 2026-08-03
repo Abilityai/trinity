@@ -269,7 +269,7 @@
                   <CheckIcon class="w-3 h-3" />
                   Acknowledged
                 </span>
-                <span v-if="notification.status === 'dismissed'" class="text-gray-400 dark:text-gray-500">
+                <span v-if="notification.status === 'dismissed'" class="text-gray-400 dark:text-gray-400">
                   Dismissed
                 </span>
               </div>
@@ -312,7 +312,7 @@
 
         <!-- Empty State — only once a fetch has SUCCEEDED and returned zero -->
         <div v-if="displayedNotifications.length === 0" class="px-6 py-12 text-center">
-          <InboxIcon class="w-12 h-12 mx-auto mb-4 text-gray-300 dark:text-gray-600" />
+          <InboxIcon class="w-12 h-12 mx-auto mb-4 text-gray-300 dark:text-gray-500" />
           <p class="text-lg font-medium text-gray-900 dark:text-white">
             {{ hasActiveFilters ? 'No matching events' : 'No events yet' }}
           </p>
