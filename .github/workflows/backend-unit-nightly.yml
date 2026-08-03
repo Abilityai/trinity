@@ -85,7 +85,17 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: dev
-          fetch-depth: 1
+          # #1941: MUST be full history. With `fetch-depth: 1` on both sides,
+          # the merge below has no common ancestor to work from and git exits
+          # `fatal: refusing to merge unrelated histories` — which the `if !`
+          # recorded as `merge_conflict=true` for EVERY PR, mergeable or not.
+          # That killed the whole point of this job: the suite never ran, the
+          # regression signal defaulted to false, and reviewers were told to
+          # `git merge dev` for nothing. Do NOT reintroduce a depth here, and
+          # do NOT paper over it with `--allow-unrelated-histories` — that
+          # fabricates a merge of two unrelated trees, so the worktree the
+          # suite then runs against is not the real merge result.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Stash trusted diff script (pre-merge)
@@ -106,18 +116,33 @@ jobs:
         # for same-repo branches and could collide with base-repo branch
         # names. (Codex finding 5 / 11.)
         run: |
-          git fetch --depth=1 origin pull/${{ matrix.pr_number }}/head:pr-head
+          # #1941: no --depth. The PR head needs enough history to reach the
+          # ancestor it shares with dev, or the merge is "unrelated histories"
+          # again regardless of how deep the base side is.
+          git fetch origin pull/${{ matrix.pr_number }}/head:pr-head
 
       - name: Attempt merge into dev
         id: merge
         run: |
           git config user.email "ci@trinity.local"
           git config user.name  "trinity-ci"
-          if ! git merge --no-edit --no-ff pr-head; then
-            echo "merge_conflict=true" >> "$GITHUB_OUTPUT"
-            git merge --abort || true
-          else
+          if git merge --no-edit --no-ff pr-head; then
             echo "merge_conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            # #1941: a non-zero exit is not automatically "the PR conflicts".
+            # `refusing to merge unrelated histories` (the bug this replaced)
+            # and any other setup failure exit non-zero too, and reporting
+            # those as a content conflict is what made the signal useless.
+            # Only unmerged paths prove a real conflict; anything else fails
+            # the job loudly instead of posting a wrong verdict.
+            if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+              echo "merge_conflict=true" >> "$GITHUB_OUTPUT"
+              git merge --abort || true
+            else
+              git merge --abort || true
+              echo "::error::git merge failed with no conflicted paths — infrastructure failure, not a PR conflict"
+              exit 1
+            fi
           fi
 
       - uses: actions/setup-python@v7
