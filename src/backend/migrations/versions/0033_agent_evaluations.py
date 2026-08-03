@@ -5,14 +5,14 @@ and a separate `quality` axis, written ONLY by the platform/evaluator, never by
 the graded agent's key (the load-bearing rule of the eval epic). SQLite track
 creates the same shape via db/schema.py + db/migrations.py.
 
-Revision ID: 0031_agent_evaluations
-Revises: 0030_slack_channel_allow_proactive
+Revision ID: 0033_agent_evaluations
+Revises: 0032_telegram_progress_indicator
 Create Date: 2026-07-23
 """
 from alembic import op
 
-revision = "0031_agent_evaluations"
-down_revision = "0030_slack_channel_allow_proactive"
+revision = "0033_agent_evaluations"
+down_revision = "0032_telegram_progress_indicator"
 branch_labels = None
 depends_on = None
 

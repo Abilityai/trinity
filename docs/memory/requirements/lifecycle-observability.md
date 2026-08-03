@@ -527,7 +527,7 @@ boundary for a grade. This surface inverts it.
   independent), `checks_json` (Tier-0 deterministic results), `judge_json` (Tier-1
   output), `evaluator`, `created_at`. Indexes on `(agent_name, created_at DESC)` and
   `(execution_id)`. Dual-track migration (Invariant #3: SQLite `agent_evaluations_table`
-  + Alembic `0031_agent_evaluations`); registered in `AGENT_REFS` so rename re-keys and
+  + Alembic `0033_agent_evaluations`); registered in `AGENT_REFS` so rename re-keys and
   purge cascades, and canary L-03's orphan scan covers it.
 - **FR-2 — Write fence** (`POST /api/agents/{name}/evaluations`): **human-admin-only** —
   `require_admin` **AND** `reject_agent_principal`. The second gate is the load-bearing

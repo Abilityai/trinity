@@ -2507,7 +2507,7 @@ def _migrate_agent_evaluations_table(cursor, conn):
     and its separate quality score, written ONLY by the platform/evaluator, never
     by the graded agent's key. Also defined in db/schema.py for fresh installs;
     this handles existing installs. Idempotent. Mirrored by Alembic
-    0031_agent_evaluations for PostgreSQL (#1183 dual-track).
+    0033_agent_evaluations for PostgreSQL (#1183 dual-track).
     """
     cursor.execute("PRAGMA table_info(agent_evaluations)")
     if cursor.fetchall():

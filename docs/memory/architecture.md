@@ -1994,7 +1994,7 @@ CREATE INDEX idx_agent_reports_created ON agent_reports(created_at);  -- retenti
 The referee surface: written by the platform/evaluator, **never** by the graded agent
 (`require_admin` + `reject_agent_principal` on the single write route). `quality` is
 nullable — null means "not graded yet", not zero. Dual-track migration (SQLite
-`agent_evaluations_table` + Alembic `0031_agent_evaluations`); `AGENT_REFS` CASCADE:
+`agent_evaluations_table` + Alembic `0033_agent_evaluations`); `AGENT_REFS` CASCADE:
 ```sql
 CREATE TABLE agent_evaluations (
     id TEXT PRIMARY KEY,                 -- 'eval_<hex>'

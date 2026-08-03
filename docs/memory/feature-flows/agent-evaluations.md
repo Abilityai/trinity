@@ -68,7 +68,7 @@ agent principal to write, so a future endpoint can't quietly open one.
 ## Data layer
 
 `agent_evaluations` (dual-track per Invariant #3: `db/schema.py` +
-`db/migrations.py` for SQLite, Alembic `0031_agent_evaluations` for PostgreSQL;
+`db/migrations.py` for SQLite, Alembic `0033_agent_evaluations` for PostgreSQL;
 DDL in `db/tables.py` for fresh builds):
 
 | column | meaning |
@@ -121,7 +121,7 @@ is free, the AI/managed tier is not.
 |-------|------|
 | Router | `src/backend/routers/evaluations.py` |
 | DB | `src/backend/db/evaluations.py` (`EvaluationOperations`), facade in `database.py` |
-| Schema | `db/schema.py`, `db/tables.py`, `db/migrations.py`, `migrations/versions/0031_agent_evaluations.py` |
+| Schema | `db/schema.py`, `db/tables.py`, `db/migrations.py`, `migrations/versions/0033_agent_evaluations.py` |
 | Models | `models.py` (`EvaluationCreate`, `EvaluationResponse`) |
 | Cascade | `db/agent_cleanup.py` (`AGENT_REFS`) |
 | Frontend | `ExecutionsPanel.vue`, `OverviewPanel.vue`, `ScheduleAnalyticsCard.vue` (relabel only) |
