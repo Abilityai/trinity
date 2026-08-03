@@ -565,6 +565,10 @@ class DatabaseManager:
         """Deactivate an agent's agent/connector-scoped MCP keys (#1811)."""
         return self._agent_ops.deactivate_agent_mcp_keys(agent_name)
 
+    def reconcile_spawn_key_id(self, agent_name: str, current_key_id: str) -> int:
+        """#1854: re-point a parent's spawned children at its current key id."""
+        return self._agent_ops.reconcile_spawn_key_id(agent_name, current_key_id)
+
     def purge_agent_ownership(self, agent_name: str):
         return self._agent_ops.purge_agent_ownership(agent_name)
 
@@ -1077,6 +1081,18 @@ class DatabaseManager:
 
     def get_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.get_agent_mcp_api_key(agent_name)
+
+    def list_active_agent_key_ids(self, agent_name: str):
+        """#1854: ids of the agent's ACTIVE scope='agent' keys (rotation capture)."""
+        return self._mcp_key_ops.list_active_agent_key_ids(agent_name)
+
+    def delete_superseded_agent_keys(self, agent_name: str, keep_id: str, key_ids):
+        """#1854: DELETE the named superseded scope='agent' rows (connector-safe)."""
+        return self._mcp_key_ops.delete_superseded_agent_keys(agent_name, keep_id, key_ids)
+
+    def find_mcp_key_by_hash(self, key_hash: str):
+        """#1854: metadata-only key lookup by SHA-256 hash (probe + drift predicate)."""
+        return self._mcp_key_ops.find_mcp_key_by_hash(key_hash)
 
     def set_agent_keys_active(self, agent_name: str, active: bool) -> int:
         """#1745: activate/deactivate an agent's per-agent MCP keys."""
@@ -2246,6 +2262,10 @@ class DatabaseManager:
 
     def get_agent_execution_stats(self, agent_name: str, hours: int = 24):
         return self._schedule_ops.get_agent_execution_stats(agent_name, hours)
+
+    def get_agent_last_execution_at(self, agent_name: str):
+        """#1854: all-time MAX(started_at) for the agent (MCP-key `stale` health)."""
+        return self._schedule_ops.get_agent_last_execution_at(agent_name)
 
     def get_schedule_analytics(self, schedule_id: str, hours: int,
                                 agent_name: str):
