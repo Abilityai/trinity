@@ -47,6 +47,7 @@ Issue: https://github.com/abilityai/trinity/issues/1932
 Env + sys.path are configured by tests/unit/conftest.py.
 """
 
+import logging
 from unittest.mock import patch
 
 import httpx
@@ -366,6 +367,62 @@ class TestDownloadFileRedirectChain:
         result, calls = await _download(responses=[_Resp(200, content=exact)])
         assert result == exact
         assert len(calls) == 1
+
+
+class TestSourceTierRejectionsAreVisible:
+    """#1932's root cause was the LOG LEVEL, not the allowlist.
+
+    A fail-closed gate refused 100% of inbound media for three months and the
+    only trace was a WARNING nobody read. The two-tier split makes the SOURCE
+    tier *stricter* than the redirect tier, so it is now the gate most likely
+    to break on the next vendor change — exactly the #1932 signature. Both
+    SOURCE rejections must therefore be ERROR.
+
+    Pinned, not prose: `logger.error` is a one-word revert, and the observed
+    detection latency for getting it wrong is three months.
+    """
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_download_source_rejection_logs_at_error(self, caplog):
+        with caplog.at_level(logging.DEBUG, logger="adapters.whatsapp_adapter"):
+            result, calls = await _download(
+                responses=[_Resp(200, content=_PNG)], url="https://attacker.com/x"
+            )
+        assert result is None
+        assert calls == []
+        levels = {
+            r.levelno
+            for r in caplog.records
+            if "Refusing to download non-Twilio media URL" in r.getMessage()
+        }
+        assert levels == {logging.ERROR}, (
+            f"the credentialed-hop gate must log at ERROR, got {levels}"
+        )
+
+    @pytest.mark.unit
+    def test_parse_source_rejection_logs_at_error(self, caplog):
+        raw = {
+            "From": "whatsapp:+14155551234",
+            "To": "whatsapp:+14155238886",
+            "Body": "check this",
+            "NumMedia": "1",
+            # The CDN form: what Twilio would start sending if it moved the
+            # redirect target into MediaUrl{N} — the #1932 vendor-change class.
+            "MediaUrl0": "https://mms.twiliocdn.com/Accounts/AC00/Media/ME00",
+            "MediaContentType0": "image/jpeg",
+        }
+        with caplog.at_level(logging.DEBUG, logger="adapters.whatsapp_adapter"):
+            msg = WhatsAppAdapter().parse_message(raw)
+        assert msg is not None and msg.files == []
+        levels = {
+            r.levelno
+            for r in caplog.records
+            if "Rejecting non-Twilio media URL at parse time" in r.getMessage()
+        }
+        assert levels == {logging.ERROR}, (
+            f"the parse gate must log at ERROR, got {levels}"
+        )
 
 
 @pytest.mark.asyncio

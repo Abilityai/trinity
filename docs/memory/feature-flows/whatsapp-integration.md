@@ -14,7 +14,14 @@ no platform-level Twilio account required.
 - One Twilio sender per agent (AccountSid + AuthToken + WhatsApp from-number)
 - Inbound DMs → `WhatsAppAdapter` → `ChannelMessageRouter` → `TaskExecutionService`
 - Outbound responses via Twilio REST (`POST /Messages.json`, HTTP Basic auth)
-- Media in (images, audio, PDFs via Twilio-hosted URLs — SSRF-gated)
+- Media in via Twilio-hosted URLs — SSRF-gated, two-tier (#1932). Any type is
+  **fetched**, but only **images** (plus text/CSV/JSON) reach the workspace:
+  `upload_service.UNSUPPORTED_MIMES` rejects `application/pdf`, `audio/`,
+  `video/` and archives for **every** channel, so a PDF or voice note lands as
+  `"<name> — unsupported format"`. That is the policy gate, not a download
+  failure — and WhatsApp has **no** voice-transcription route
+  (`message_router._maybe_transcribe_voice` returns early for
+  `channel != "telegram"`)
 - AuthToken encrypted at rest (AES-256-GCM via `CredentialEncryptionService`)
 - Webhook HMAC-SHA1 verification via `twilio.request_validator.RequestValidator`
 - Twilio Sandbox auto-detected from the well-known number `whatsapp:+14155238886`

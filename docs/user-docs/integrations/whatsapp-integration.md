@@ -41,7 +41,7 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 
 Only needed if users will send your agent **images, documents, or voice notes**. Text-only agents can skip this.
 
-Enable **HTTP Basic Authentication for media** in the Twilio Console (Messaging → Settings → General). It is **opt-in** and off by default.
+**Most accounts already have this and need no action.** Twilio enabled HTTP Basic Authentication for media on all newly-created main accounts from **2023-07-31**, [without the option to disable it](https://www.twilio.com/en-us/changelog/upcoming-security-changes-enforcing-http-authentication-for-media). Only accounts created before that date can still have it off — check the Twilio Console (Messaging → Settings → General) if inbound attachments fail.
 
 Twilio never serves media from `api.twilio.com` directly — it redirects to a CDN, and *which* CDN depends on this setting:
 

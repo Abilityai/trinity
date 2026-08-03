@@ -311,8 +311,17 @@ class WhatsAppAdapter(ChannelAdapter):
             # Defense-in-depth: reject non-Twilio URLs at parse time. Narrow
             # (SOURCE) tier — a webhook MediaUrl{N} is always the api.twilio.com
             # form; the CDN is only ever a redirect *target* (#1932).
+            #
+            # ERROR, not WARNING: the request is already HMAC-verified, so this
+            # can only fire on an attack that beat the signature (impossible
+            # today) or on Twilio changing the MediaUrl{N} host — the exact
+            # vendor change that caused #1932. The SOURCE tier is deliberately
+            # STRICTER than the redirect tier, so it is now the asymmetry most
+            # likely to break next, and #1932's real root cause was a
+            # fail-closed gate logging a 100% outage at a level nobody reads
+            # (measured detection latency: three months).
             if not _is_twilio_media_source_url(media_url):
-                logger.warning(
+                logger.error(
                     "[WHATSAPP] Rejecting non-Twilio media URL at parse time: %s",
                     urlparse(media_url).hostname,
                 )
@@ -725,8 +734,12 @@ class WhatsAppAdapter(ChannelAdapter):
         # SOURCE tier: this hop carries the tenant's AccountSid:AuthToken, so it
         # stays narrow (*.twilio.com). The CDN is reachable only as a validated,
         # unauthenticated redirect target below (#1932).
+        #
+        # ERROR, not WARNING — same reasoning as the parse gate above: a
+        # rejection here means every attachment is failing, which is what #1932
+        # was, and it went unseen for three months at WARNING.
         if not _is_twilio_media_source_url(file.url):
-            logger.warning(
+            logger.error(
                 "[WHATSAPP] Refusing to download non-Twilio media URL (host=%s)",
                 urlparse(file.url).hostname,
             )
