@@ -43,6 +43,7 @@ FIXTURE = (
     / "examples"
     / "fixture-adapter.py"
 )
+RUNBOOK = REPO_ROOT / "docs" / "memory" / "feature-flows" / "delivery-conductor-runtime.md"
 
 
 def _wake(sequence: int):
@@ -281,3 +282,28 @@ def test_fixture_decision_is_independent_of_ambient_credentials_and_proxies():
     assert baseline.returncode == with_ambient_values.returncode == 0
     assert baseline.stdout == with_ambient_values.stdout
     assert baseline.stderr == with_ambient_values.stderr == ""
+
+
+def test_runbook_records_captured_correlations_and_cleans_exact_resources():
+    runbook = RUNBOOK.read_text()
+
+    assert "ACTION_KEY_FROM_PREPARE" not in runbook
+    assert '"fence_token":1' not in runbook
+    for required in (
+        "record_fixture_result()",
+        'prepared["correlation"]',
+        'prepared["effect_arguments"]',
+        'assert_status "${CAPTURE_DIR}/hourly.json" action-ready',
+        'assert_status "${CAPTURE_DIR}/worker.json" action-ready',
+        'ambiguous investigate "${CAPTURE_DIR}/restart-result.json"',
+        'delete_agent "${MAIN_NAME}"',
+        'delete_agent "${REPLAY_NAME}"',
+        'docker container inspect "${resource}"',
+        'docker volume inspect "${resource}"',
+        "export ADMIN_PASSWORD='Aa1!'\"$(openssl rand -hex 24)\"",  # pragma: allowlist secret
+        "MAIN_CREATED=1\ncreate_agent \"${MAIN_NAME}\"",
+        "REPLAY_CREATED=1\ncreate_agent \"${REPLAY_NAME}\"",
+        "docker volume inspect agent-trinity-system-workspace",
+        '"${COMPOSE[@]}" down -v --remove-orphans',
+    ):
+        assert required in runbook

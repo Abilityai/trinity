@@ -94,52 +94,172 @@ instance may use its normal `.env`; do not copy that file into the template or
 agent workspace.
 
 ```bash
-set -euo pipefail
+set -Eeuo pipefail
 set +x
-docker compose up -d --build
+PHASE=initialize
+trap 'status=$?; echo "fixture-failed-phase=${PHASE} status=${status}" >&2' ERR
+RUN_SUFFIX="$(date +%s)-$$"
+FIXTURE_PROJECT="conductor-fixture-${RUN_SUFFIX}"
+MAIN_NAME="conductor-fixture-main-${RUN_SUFFIX}"
+REPLAY_NAME="conductor-fixture-replay-${RUN_SUFFIX}"
+MAIN_CONTAINER="agent-${MAIN_NAME}"
+REPLAY_CONTAINER="agent-${REPLAY_NAME}"
+TRINITY_ENV_FILE="${TRINITY_ENV_FILE:-.env}"
+COMPOSE=(docker compose --project-name "${FIXTURE_PROJECT}" --env-file "${TRINITY_ENV_FILE}")
+MAIN_CREATED=0
+REPLAY_CREATED=0
+SYSTEM_CREATED=1
+
+if docker ps -a --format '{{.Names}}' | grep -Eq '^(trinity-|agent-trinity-system$)'; then
+  echo 'run this isolated verification without an existing Trinity stack' >&2
+  exit 64
+fi
+if docker network inspect trinity-agent-network >/dev/null 2>&1; then
+  echo 'refusing to reuse an existing Trinity agent network' >&2
+  exit 64
+fi
+if docker volume inspect agent-trinity-system-workspace >/dev/null 2>&1; then
+  echo 'refusing to reuse an existing Trinity system-agent workspace' >&2
+  exit 64
+fi
+for resource in "${MAIN_CONTAINER}" "${REPLAY_CONTAINER}"; do
+  if docker container inspect "${resource}" >/dev/null 2>&1; then
+    echo 'refusing to reuse an existing fixture container' >&2
+    exit 64
+  fi
+done
+for resource in "${MAIN_CONTAINER}-workspace" "${REPLAY_CONTAINER}-workspace"; do
+  if docker volume inspect "${resource}" >/dev/null 2>&1; then
+    echo 'refusing to reuse an existing fixture workspace' >&2
+    exit 64
+  fi
+done
+CAPTURE_DIR=$(mktemp -d)
+chmod 0700 "${CAPTURE_DIR}"
+
+delete_agent() {
+  name="$1"
+  curl -fsS --config - >/dev/null <<EOF
+url = "http://localhost:8000/api/agents/${name}"
+request = "DELETE"
+header = "Authorization: Bearer ${TOKEN}"
+EOF
+}
+
+cleanup() {
+  exit_status=$?
+  set +e
+  if [ "${MAIN_CREATED}" = 1 ] && [ -n "${TOKEN:-}" ]; then delete_agent "${MAIN_NAME}"; fi
+  if [ "${REPLAY_CREATED}" = 1 ] && [ -n "${TOKEN:-}" ]; then delete_agent "${REPLAY_NAME}"; fi
+  if [ "${MAIN_CREATED}" = 1 ]; then
+    docker container rm -f "${MAIN_CONTAINER}" >/dev/null 2>&1
+    docker volume rm "${MAIN_CONTAINER}-workspace" >/dev/null 2>&1
+  fi
+  if [ "${REPLAY_CREATED}" = 1 ]; then
+    docker container rm -f "${REPLAY_CONTAINER}" >/dev/null 2>&1
+    docker volume rm "${REPLAY_CONTAINER}-workspace" >/dev/null 2>&1
+  fi
+  if [ "${SYSTEM_CREATED}" = 1 ]; then
+    docker container rm -f agent-trinity-system >/dev/null 2>&1
+    docker volume rm agent-trinity-system-workspace >/dev/null 2>&1
+  fi
+  "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1
+  find "${CAPTURE_DIR}" -type f -delete
+  rmdir "${CAPTURE_DIR}" >/dev/null 2>&1
+  unset TOKEN ADMIN_USERNAME ADMIN_PASSWORD AGENT_AUTH_SECRET
+  set -e
+  return "${exit_status}"
+}
+trap cleanup EXIT
+
+# Override any configured development login with a strong, disposable local
+# credential. Values stay in the shell/container environment and stdin only.
+export ADMIN_USERNAME=admin
+export ADMIN_PASSWORD='Aa1!'"$(openssl rand -hex 24)"  # pragma: allowlist secret
+export AGENT_AUTH_SECRET="${AGENT_AUTH_SECRET:-$(openssl rand -hex 32)}"
+PHASE=stack
+"${COMPOSE[@]}" up -d --build
+for attempt in $(seq 1 60); do
+  if curl -fsS http://localhost:8000/health >/dev/null; then break; fi
+  sleep 1
+done
 curl -fsS http://localhost:8000/health
 # -> {"status":"healthy", ...}
+echo fixture-stack-healthy
 
-TOKEN_RESPONSE=$(python3 -c '
-import os, urllib.parse
-print(urllib.parse.urlencode({"username": "admin", "password": os.environ["ADMIN_PASSWORD"]}))
-' | curl -fsS -X POST --data-binary @- http://localhost:8000/api/token
+# Provision the disposable local admin from container environment references,
+# then close first-time setup. No credential value enters the command line.
+"${COMPOSE[@]}" exec -T backend python -c \
+  'import os; from database import db; from dependencies import authenticate_user, hash_password; assert db.update_user_password(os.environ["ADMIN_USERNAME"], hash_password(os.environ["ADMIN_PASSWORD"])); db.set_setting("setup_completed", "true"); assert authenticate_user(os.environ["ADMIN_USERNAME"], os.environ["ADMIN_PASSWORD"])' \
+  </dev/null
+echo fixture-setup-ready
+
+PHASE=authenticate
+TOKEN_RESPONSE=$(curl -fsS --config - <<EOF
+url = "http://localhost:8000/api/token"
+request = "POST"
+data-urlencode = "username=${ADMIN_USERNAME}"
+data-urlencode = "password=${ADMIN_PASSWORD}"
+EOF
 )
 TOKEN=$(printf '%s' "${TOKEN_RESPONSE}" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
-unset TOKEN_RESPONSE ADMIN_PASSWORD
+unset TOKEN_RESPONSE ADMIN_USERNAME ADMIN_PASSWORD
+echo fixture-auth-ready
 
-FIXTURE_NAME="conductor-fixture-$(date +%s)-$$"
-FIXTURE_CONTAINER="agent-${FIXTURE_NAME}"
-if docker container inspect "${FIXTURE_CONTAINER}" >/dev/null 2>&1; then
-  echo 'refusing to reuse an existing fixture container' >&2
-  exit 64
-fi
-
-curl -fsS --config - <<EOF
+create_agent() {
+  name="$1"
+  response=$(curl -fsS --config - <<EOF
 url = "http://localhost:8000/api/agents"
 request = "POST"
 header = "Authorization: Bearer ${TOKEN}"
 header = "Content-Type: application/json"
-data = "{\"name\":\"${FIXTURE_NAME}\",\"template\":\"local:delivery-conductor\"}"
+data = "{\"name\":\"${name}\",\"template\":\"local:delivery-conductor\"}"
 EOF
-unset TOKEN
+  )
+  printf '%s' "${response}" | python3 -c \
+    'import json,sys; value=json.load(sys.stdin); assert isinstance(value, dict)'
+  unset response
+}
+
+PHASE=create-agents
+MAIN_CREATED=1
+create_agent "${MAIN_NAME}"
+REPLAY_CREATED=1
+create_agent "${REPLAY_NAME}"
+echo fixture-agents-created
 
 FIXTURE_PATH=config/agent-templates/delivery-conductor/examples/fixture-adapter.py
 FIXTURE_SHA256=$(shasum -a 256 "${FIXTURE_PATH}" | cut -d' ' -f1)
-docker exec "${FIXTURE_CONTAINER}" test ! -e /home/developer/adapter.py
-docker cp "${FIXTURE_PATH}" "${FIXTURE_CONTAINER}:/tmp/fixture-adapter.py"
-docker exec -u root "${FIXTURE_CONTAINER}" sh -ceu '
-  test ! -e /home/developer/adapter.py
-  install -o root -g root -m 0444 /tmp/fixture-adapter.py /home/developer/adapter.py
-  rm /tmp/fixture-adapter.py'
+install_fixture() {
+  container="$1"
+  for attempt in $(seq 1 30); do
+    if docker exec "${container}" \
+      test -f /home/developer/examples/fixture-adapter.py >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+  docker exec -u root -e "FIXTURE_SHA256=${FIXTURE_SHA256}" \
+    "${container}" sh -ceu '
+    test ! -e /home/developer/adapter.py
+    actual=$(sha256sum /home/developer/examples/fixture-adapter.py | cut -d" " -f1)
+    test "${actual}" = "${FIXTURE_SHA256}"
+    install -o root -g root -m 0444 \
+      /home/developer/examples/fixture-adapter.py /home/developer/adapter.py'
+}
 
 verify_fixture() {
-  actual=$(docker exec "${FIXTURE_CONTAINER}" \
+  container="$1"
+  actual=$(docker exec "${container}" \
     sha256sum /home/developer/adapter.py | cut -d' ' -f1)
   test "${actual}" = "${FIXTURE_SHA256}"
 }
-verify_fixture
+PHASE=install-adapters
+install_fixture "${MAIN_CONTAINER}"
+install_fixture "${REPLAY_CONTAINER}"
+verify_fixture "${MAIN_CONTAINER}"
+verify_fixture "${REPLAY_CONTAINER}"
+echo fixture-adapters-verified
+PHASE=scenarios
 ```
 
 `local:delivery-conductor` is hidden from the starter catalog but remains
@@ -158,77 +278,165 @@ artifact. A normal agent turn receives `TRINITY_EXECUTION_ID` and the execution
 context from Trinity; the model must never synthesize or override them.
 
 ```bash
-run_tick() {
-  execution_id="$1"
-  triggered_by="$2"
-  event_type="$3"
-  event_id="$4"
-  case "${execution_id}" in
-    ''|*[!A-Za-z0-9._:-]*) return 64 ;;
-  esac
-  case "${triggered_by}:${event_type}:${event_id}" in
-    'manual:null:null'|'reminder:null:null'|'schedule:null:null'|
-      'event:"agent.task.completed":"worker-1"') ;;
-    *) return 64 ;;
-  esac
-  verify_fixture
-  docker exec -i -u developer -w /home/developer \
-    -e "TRINITY_EXECUTION_ID=${execution_id}" "${FIXTURE_CONTAINER}" \
-    ./bin/conductor-tick <<EOF
-{"event_id":${event_id},"event_type":${event_type},"execution_id":"${execution_id}","reminder_message":null,"schema_version":1,"triggered_by":"${triggered_by}"}
-EOF
+assert_status() {
+  file="$1"
+  expected="$2"
+  python3 - "${file}" "${expected}" <<'PY'
+import json, pathlib, sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert value["schema_version"] == 1
+assert value["status"] == sys.argv[2], value
+print(json.dumps({"reason_code": value["reason_code"], "status": value["status"]}, sort_keys=True))
+PY
 }
 
-# Direct no-op, then its at-least-once duplicate.
-run_tick direct-0 manual null null
-run_tick direct-0 manual null null
+prepare_tick() {
+  container="$1"
+  execution_id="$2"
+  triggered_by="$3"
+  event_type="$4"
+  event_id="$5"
+  output_file="$6"
+  request=$(python3 - "${execution_id}" "${triggered_by}" "${event_type}" "${event_id}" <<'PY'
+import json, re, sys
+execution_id, triggered_by, event_type, event_id = sys.argv[1:]
+assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", execution_id)
+assert triggered_by in {"manual", "reminder", "schedule", "event"}
+event_type = None if event_type == "-" else event_type
+event_id = None if event_id == "-" else event_id
+assert (event_type, event_id) in {(None, None), ("agent.task.completed", "worker-1")}
+print(json.dumps({
+    "event_id": event_id,
+    "event_type": event_type,
+    "execution_id": execution_id,
+    "reminder_message": None,
+    "schema_version": 1,
+    "triggered_by": triggered_by,
+}, separators=(",", ":"), sort_keys=True))
+PY
+  )
+  verify_fixture "${container}"
+  printf '%s\n' "${request}" | docker exec -i -u developer \
+    -w /home/developer -e "TRINITY_EXECUTION_ID=${execution_id}" \
+    "${container}" ./bin/conductor-tick >"${output_file}"
+  unset request
+}
 
-# Ordinary reminder no-op and hourly schedule effect.
-run_tick reminder-0 reminder null null
-run_tick hourly-1 schedule null null
+record_fixture_result() {
+  container="$1"
+  prepare_file="$2"
+  result_status="$3"
+  expected_status="$4"
+  output_file="$5"
+  request=$(python3 - "${prepare_file}" "${result_status}" <<'PY'
+import hashlib, json, pathlib, sys
+prepared = json.loads(pathlib.Path(sys.argv[1]).read_text())
+result_status = sys.argv[2]
+assert prepared["status"] in {"action-ready", "reminder-ready"}
+assert prepared["effect_tool"] in {
+    "mcp__trinity__chat_with_agent",
+    "mcp__trinity__set_reminder",
+}
+arguments = prepared["effect_arguments"]
+assert isinstance(arguments, dict)
+expected = (
+    {"agent_name", "message"}
+    if prepared["effect_tool"] == "mcp__trinity__chat_with_agent"
+    else {"fire_at", "message"}
+)
+assert set(arguments) == expected
+correlation = prepared["correlation"]
+assert set(correlation) == {"action_key", "fence_token"}
+assert prepared["action"]["action_key"] == correlation["action_key"]
+assert isinstance(correlation["fence_token"], int) and correlation["fence_token"] > 0
+assert result_status in {"completed", "ambiguous"}
+simulated = json.dumps({
+    "effect_arguments": arguments,
+    "effect_tool": prepared["effect_tool"],
+    "simulated": True,
+}, separators=(",", ":"), sort_keys=True).encode()
+print(json.dumps({
+    "action_key": correlation["action_key"],
+    "fence_token": correlation["fence_token"],
+    "operation": "record-result",
+    "reason_code": (
+        "fixture-simulated-success"
+        if result_status == "completed"
+        else "fixture-result-unknown"
+    ),
+    "result_sha256": hashlib.sha256(simulated).hexdigest(),
+    "schema_version": 1,
+    "status": result_status,
+}, separators=(",", ":"), sort_keys=True))
+PY
+  )
+  printf '%s\n' "${request}" | docker exec -i -u developer \
+    -w /home/developer "${container}" \
+    ./bin/conductor-tick record-result >"${output_file}"
+  unset request
+  assert_status "${output_file}" "${expected_status}"
+}
 
-# Worker completion effect. The backend event ID, not the execution ID,
-# distinguishes worker-completion wakes.
-run_tick worker-execution-1 event '"agent.task.completed"' '"worker-1"'
+# Main agent: every prepared effect is correlated and terminal before advancing.
+prepare_tick "${MAIN_CONTAINER}" direct-0 manual - - "${CAPTURE_DIR}/direct.json"
+assert_status "${CAPTURE_DIR}/direct.json" noop
+prepare_tick "${MAIN_CONTAINER}" direct-0 manual - - "${CAPTURE_DIR}/duplicate.json"
+assert_status "${CAPTURE_DIR}/duplicate.json" not-claimed
+prepare_tick "${MAIN_CONTAINER}" reminder-0 reminder - - "${CAPTURE_DIR}/reminder.json"
+assert_status "${CAPTURE_DIR}/reminder.json" noop
 
-# Crash/restart: prepare the odd direct wake, restart before record-result, then
-# re-run after the five-minute lease. The second prepare has a higher fence and
-# the same action key. Tests may inject a future trusted clock instead of waiting.
-run_tick restart-1 manual null null
-docker restart "${FIXTURE_CONTAINER}"
+prepare_tick "${MAIN_CONTAINER}" hourly-1 schedule - - "${CAPTURE_DIR}/hourly.json"
+assert_status "${CAPTURE_DIR}/hourly.json" action-ready
+record_fixture_result "${MAIN_CONTAINER}" "${CAPTURE_DIR}/hourly.json" \
+  completed completed "${CAPTURE_DIR}/hourly-result.json"
+
+prepare_tick "${MAIN_CONTAINER}" worker-execution-1 event \
+  agent.task.completed worker-1 "${CAPTURE_DIR}/worker.json"
+assert_status "${CAPTURE_DIR}/worker.json" action-ready
+record_fixture_result "${MAIN_CONTAINER}" "${CAPTURE_DIR}/worker.json" \
+  completed completed "${CAPTURE_DIR}/worker-result.json"
+
+# Replay agent: restart with the first correlation intentionally unresolved.
+prepare_tick "${REPLAY_CONTAINER}" restart-1 manual - - "${CAPTURE_DIR}/restart-before.json"
+assert_status "${CAPTURE_DIR}/restart-before.json" action-ready
+docker restart "${REPLAY_CONTAINER}" >/dev/null
 sleep 301
-run_tick restart-1 manual null null
-```
-
-Every `action-ready` or `reminder-ready` response contains one `effect_tool`,
-one closed `effect_arguments` object, and one correlation. Record only a
-sanitized result, using the returned action key and fence:
-
-```bash
-verify_fixture
-docker exec -i -u developer -w /home/developer "${FIXTURE_CONTAINER}" \
-  ./bin/conductor-tick record-result <<'EOF'
-{"action_key":"ACTION_KEY_FROM_PREPARE","fence_token":1,"operation":"record-result","reason_code":"fixture-result-unknown","result_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","schema_version":1,"status":"ambiguous"}
-EOF
+prepare_tick "${REPLAY_CONTAINER}" restart-1 manual - - "${CAPTURE_DIR}/restart-after.json"
+assert_status "${CAPTURE_DIR}/restart-after.json" action-ready
+python3 - "${CAPTURE_DIR}/restart-before.json" "${CAPTURE_DIR}/restart-after.json" <<'PY'
+import json, pathlib, sys
+before, after = (json.loads(pathlib.Path(path).read_text()) for path in sys.argv[1:])
+assert before["correlation"]["action_key"] == after["correlation"]["action_key"]
+assert before["correlation"]["fence_token"] < after["correlation"]["fence_token"]
+print(json.dumps({"fence_increased": True, "same_action_key": True}, sort_keys=True))
+PY
+record_fixture_result "${REPLAY_CONTAINER}" "${CAPTURE_DIR}/restart-after.json" \
+  ambiguous investigate "${CAPTURE_DIR}/restart-result.json"
 ```
 
 An ambiguous result is terminal for that attempt and schedules investigation;
-it is never an immediate second effect. Crash recovery may expose the same
-idempotent action key only after the old lease expires and fresh adapter
-observation returns the identical action. Duplicate wakes return `not-claimed`,
-and exhausted ceilings return `blocked` with no effect tool.
+the future investigation reminder is not an immediate second effect. Crash
+recovery may expose the same idempotent action key only after the old lease
+expires and fresh adapter observation returns the identical action. Duplicate
+wakes return `not-claimed`, and exhausted ceilings return `blocked` with no
+effect tool. The helper above does not contact the fake target: it validates one
+exact tool/argument bundle, hashes that simulated outcome, and records only the
+captured correlation.
 
 ### Observable checks
 
 Inspect only the conductor's sanitized rows. The action query must return zero
-duplicate keys, journal fence tokens must be strictly increasing, and each
-unique proposed effect has one `action_journal` row. `budget_usage` reaches the
-fixture ceilings without authorizing another effect.
+duplicate keys, journal fence tokens must be monotonic, and each unique proposed
+effect has one `action_journal` row. A replay may reserve its investigation
+reminder at the current fence, while the explicit restart comparison above
+proves the source action's fence increased. `budget_usage` reaches the fixture
+ceilings without authorizing another effect.
 
 ```bash
-verify_fixture
-docker exec -i -u developer -w /home/developer "${FIXTURE_CONTAINER}" \
-  python - <<'PY'
+inspect_agent() {
+  container="$1"
+  verify_fixture "${container}"
+  docker exec -i -u developer -w /home/developer "${container}" python - <<'PY'
 import json, sqlite3
 with sqlite3.connect('data/delivery-conductor/control.sqlite3') as db:
     fences = [row[0] for row in db.execute(
@@ -240,16 +448,22 @@ with sqlite3.connect('data/delivery-conductor/control.sqlite3') as db:
         'SELECT COALESCE(SUM(run_units),0), '
         'COALESCE(SUM(issue_units),0), COALESCE(SUM(daily_units),0) '
         'FROM budget_usage').fetchone()
+monotonic = all(a <= b for a, b in zip(fences, fences[1:]))
+assert duplicate_keys == []
+assert monotonic
 print(json.dumps({
     'duplicate_action_keys': duplicate_keys,
-    'fences_strictly_increase': all(a < b for a, b in zip(fences, fences[1:])),
+    'fences_monotonic': monotonic,
     'usage': usage,
 }, sort_keys=True))
 PY
+  docker exec -u developer -w /home/developer "${container}" \
+    python -m json.tool \
+    .trinity/pipeline-state/delivery-conductor/current.json
+}
 
-docker exec -u developer -w /home/developer "${FIXTURE_CONTAINER}" \
-  python -m json.tool \
-  .trinity/pipeline-state/delivery-conductor/current.json
+inspect_agent "${MAIN_CONTAINER}"
+inspect_agent "${REPLAY_CONTAINER}"
 ```
 
 The projection contains schema version, controller/checkpoint state, hashes,
@@ -262,11 +476,30 @@ outside the adapter contract. Verify the source-mode boundary without printing
 any value:
 
 ```bash
-docker exec "${FIXTURE_CONTAINER}" sh -lc '
-  test ! -e /home/developer/.env &&
-  ! env | cut -d= -f1 | grep -Eq \
-    "^(GH_TOKEN|GITHUB_TOKEN|GITLAB_TOKEN|AWS_ACCESS_KEY_ID|DEPLOY_TOKEN|ADMIN_PASSWORD)$"'
+for container in "${MAIN_CONTAINER}" "${REPLAY_CONTAINER}"; do
+  docker exec "${container}" sh -lc '
+    test ! -e /home/developer/.env &&
+    ! env | cut -d= -f1 | grep -Eq \
+      "^(GH_TOKEN|GITHUB_TOKEN|GITLAB_TOKEN|AWS_ACCESS_KEY_ID|DEPLOY_TOKEN|ADMIN_PASSWORD)$"'
+done
 # -> exit 0 with no output
+
+# Delete through the native API first, then remove only the exact resources
+# created by this disposable run. Disable the trap after successful cleanup.
+cleanup
+trap - EXIT
+test -z "$(docker ps -aq --filter "label=com.docker.compose.project=${FIXTURE_PROJECT}")"
+test -z "$(docker volume ls -q --filter "label=com.docker.compose.project=${FIXTURE_PROJECT}")"
+for resource in "${MAIN_CONTAINER}" "${REPLAY_CONTAINER}" agent-trinity-system; do
+  ! docker container inspect "${resource}" >/dev/null 2>&1
+done
+for resource in "${MAIN_CONTAINER}-workspace" "${REPLAY_CONTAINER}-workspace" \
+  agent-trinity-system-workspace; do
+  ! docker volume inspect "${resource}" >/dev/null 2>&1
+done
+! docker network inspect trinity-agent-network >/dev/null 2>&1
+echo fixture-cleanup-verified
+# -> fixture-cleanup-verified
 ```
 
 ## Boundaries
