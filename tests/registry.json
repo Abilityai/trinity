@@ -1248,6 +1248,18 @@
       "description": "Static guard: every durable container Trinity creates has a bounded log (#1871). Exists because of the named bug class in docs/memory/learnings.md (2026-07-10) - 'the create path is never one call site'. Scans BOTH docker-py creation entry points - containers_run(...) AND <client>.containers.create(...) - because covering only the first was the guard's own first blind spot (deploy.py already used the second). Rule: pass log_config (durable -> capped), or remove=True (ephemeral -> Docker deletes the log with the container), or be allowlisted with a stated reason (a create/teardown pair like deploy.py's finally: remove(force=True), which a static scan cannot distinguish from a durable create). Uses the AST, not a regex, so a MENTION of containers_run( in a comment or docstring is never a call site (lifecycle.py's own comments do exactly that, and a regex draft flagged them). A 'containers' substring pre-filter keeps the guard interpreter-agnostic - an unrelated file using syntax newer than the running Python (except* under a 3.9 venv) is skipped rather than reported - while staying fail-closed for any unparseable file that could contain a call; the token is deliberately 'containers' and not 'create', which matches half the codebase and re-lights those false positives. Meta-tested on the guard's own machinery: planted violations for both call forms, a capped create, an ephemeral helper, unrelated .create() on volumes/networks/services, a mixed file where only one of two calls is capped, prose/newer-syntax skips, pre-filter-covers-every-call-form, and allowlisted-paths-still-exist - so neither the scan nor its exemptions can rot into a no-op."
     },
     {
+      "file": "unit/test_297_ops_settings_validation.py",
+      "feature": "trinity-enterprise#297",
+      "added": "2026-07-30",
+      "categories": [
+        "backend",
+        "security",
+        "settings",
+        "unit"
+      ],
+      "description": "Retention-window write-path hardening (ent#297, the AC4/AC5 half; the root admin-gate fix is trinity#1890). Structural + behavioural: the generic PUT /api/settings/{key} now 422s all 8 RETENTION_OPS_KEYS and points at PUT /api/settings/ops/config, which type/range-validates every value all-or-nothing (nothing written when a sibling key fails) and audit-logs ops_settings_change naming the windows moved. Pins the counter-intuitive asymmetry the issue turns on: garbage FAILS SAFE (unparseable coerced to 0 = sweep disabled = retain forever) while a small valid integer is the catastrophic input, so \"1\" is deliberately still ACCEPTED - no range check separates it from a legitimate one-day window, and the attack is stopped by the admin gate + #1644 blast-radius guard, not by validation. Also pins that the #1039 community floor is NOT clamped here (seed + enterprise clamp, never an OSS hard limit), that 0 stays valid (disable), that the only live UI caller (the ssh_access_enabled toggle) still works, and two parity guards so a future retention window or ops setting cannot ship without a validation spec."
+    },
+    {
       "file": "unit/test_1860_fleet_restart_adoption.py",
       "feature": "#1860",
       "added": "2026-07-31",
