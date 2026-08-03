@@ -607,12 +607,12 @@ const detailsJson = computed(() => {
         <div v-show="heatmapsOpen" class="px-4 pb-4">
           <!-- Weekly (dow × hour) -->
           <div v-show="heatmapTab === 'weekly'" role="tabpanel" aria-label="Weekly pattern">
-            <div v-if="store.heatmapLoading" class="text-xs text-gray-500 py-4 text-center">
+            <div v-if="store.heatmapLoading" class="text-xs text-gray-500 dark:text-gray-400 py-4 text-center">
               Loading heatmap…
             </div>
             <div
               v-else-if="(store.heatmap?.total || 0) === 0"
-              class="text-xs text-gray-500 py-4 text-center"
+              class="text-xs text-gray-500 dark:text-gray-400 py-4 text-center"
             >
               No events in this window.
             </div>
@@ -655,12 +655,12 @@ const detailsJson = computed(() => {
 
           <!-- Calendar (per-day, GitHub-style) -->
           <div v-show="heatmapTab === 'calendar'" role="tabpanel" aria-label="Calendar">
-            <div v-if="store.calendarLoading" class="text-xs text-gray-500 py-4 text-center">
+            <div v-if="store.calendarLoading" class="text-xs text-gray-500 dark:text-gray-400 py-4 text-center">
               Loading calendar…
             </div>
             <div
               v-else-if="(store.calendar?.total || 0) === 0"
-              class="text-xs text-gray-500 py-4 text-center"
+              class="text-xs text-gray-500 dark:text-gray-400 py-4 text-center"
             >
               No events in this window.
             </div>
@@ -839,12 +839,12 @@ const detailsJson = computed(() => {
           class="flex-1 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 overflow-hidden"
           :class="store.selectedEntry ? 'lg:max-w-3xl' : ''"
         >
-          <div v-if="store.loading" class="p-6 text-sm text-gray-500 text-center">
+          <div v-if="store.loading" class="p-6 text-sm text-gray-500 dark:text-gray-400 text-center">
             Loading…
           </div>
           <div
             v-else-if="!store.entries.length"
-            class="p-6 text-sm text-gray-500 text-center"
+            class="p-6 text-sm text-gray-500 dark:text-gray-400 text-center"
           >
             {{
               store.total === 0

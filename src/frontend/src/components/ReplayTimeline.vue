@@ -34,7 +34,7 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
             </svg>
           </button>
-          <span class="text-xs text-gray-400 dark:text-gray-500 ml-1 w-8">{{ Math.round(zoomLevel * 100) }}%</span>
+          <span class="text-xs text-gray-400 dark:text-gray-400 ml-1 w-8">{{ Math.round(zoomLevel * 100) }}%</span>
         </div>
 
         <!-- Hide inactive toggle -->
@@ -172,7 +172,7 @@
                     </span>
                     <span
                       v-if="hasDistinctLabel({ name: row.name, display_label: row.displayLabel })"
-                      class="text-[10px] text-gray-400 dark:text-gray-500 truncate leading-none"
+                      class="text-[10px] text-gray-400 dark:text-gray-400 truncate leading-none"
                     >{{ row.name }}</span>
                   </div>
                   <span
@@ -207,7 +207,7 @@
                   class="text-[10px] font-medium w-7 text-right"
                   :class="getSuccessBarClass(getRowSuccessPercent(row)).replace('bg-', 'text-')"
                 >{{ getRowSuccessPercent(row) }}%</span>
-                <span v-else class="text-[10px] text-gray-400 dark:text-gray-500 w-7 text-right">&mdash;</span>
+                <span v-else class="text-[10px] text-gray-400 dark:text-gray-400 w-7 text-right">&mdash;</span>
               </div>
 
               <!-- Row 3: Stats (compact) -->
@@ -215,15 +215,15 @@
                 <template v-if="row.executionStats && row.executionStats.taskCount > 0">
                   <span class="font-medium text-gray-700 dark:text-gray-300">{{ row.executionStats.taskCount }}</span>
                   <span>tasks</span>
-                  <span class="text-gray-300 dark:text-gray-600">·</span>
+                  <span class="text-gray-300 dark:text-gray-500">·</span>
                   <span :class="getSuccessRateClass(row.executionStats.successRate)" class="font-medium">{{ Math.round(row.executionStats.successRate || 0) }}%</span>
                   <template v-if="row.executionStats.totalCost > 0">
-                    <span class="text-gray-300 dark:text-gray-600">·</span>
+                    <span class="text-gray-300 dark:text-gray-500">·</span>
                     <span class="font-medium">{{ formatCostCompact(row.executionStats.totalCost) }}</span>
                   </template>
                 </template>
                 <template v-else>
-                  <span class="text-gray-400 dark:text-gray-500">No tasks</span>
+                  <span class="text-gray-400 dark:text-gray-400">No tasks</span>
                 </template>
                 <span class="flex-1"></span>
                 <span class="text-gray-400">{{ row.memoryLimit || '4g' }}</span>
