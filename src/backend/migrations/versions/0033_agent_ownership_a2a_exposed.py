@@ -7,15 +7,15 @@ Edition-agnostic OSS primitive — the OSS routes read + enforce it; the WRITE i
 entitlement-gated by the enterprise A2A module. Mirrors the SQLite
 ``agent_ownership_a2a_exposed`` migration + ``db/schema.py`` / ``db/tables.py``.
 
-Revision ID: 0031_agent_ownership_a2a_exposed
-Revises: 0030_slack_channel_allow_proactive
+Revision ID: 0033_agent_ownership_a2a_exposed
+Revises: 0032_telegram_progress_indicator
 Create Date: 2026-07-15
 """
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0031_agent_ownership_a2a_exposed"
-down_revision = "0030_slack_channel_allow_proactive"
+revision = "0033_agent_ownership_a2a_exposed"
+down_revision = "0032_telegram_progress_indicator"
 branch_labels = None
 depends_on = None
 
