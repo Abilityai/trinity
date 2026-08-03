@@ -129,7 +129,13 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.11'
+          # Must equal the `FROM python:` pin in the image Dockerfiles (#1891) —
+          # a suite validated on an older minor cannot catch the stdlib-removal
+          # class of defect that has already shipped twice here. Guarded by
+          # tests/unit/test_1891_python_version_parity.py, which scans EVERY
+          # workflow precisely so a newly added one cannot drift in unnoticed.
+          # It caught this file at '3.11' before merge.
+          python-version: '3.13'
           cache: 'pip'
           cache-dependency-path: tests/requirements-test.txt
 
