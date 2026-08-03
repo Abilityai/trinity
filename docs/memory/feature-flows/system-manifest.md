@@ -415,6 +415,26 @@ def create_schedules(
     """
 ```
 
+**Name-match skip (trinity-enterprise#89).** `deploy_manifest` creates each agent
+(`create_agent_internal`) and calls `create_schedules` **afterwards**. Since ent#89,
+creation itself materializes the *template's* declared `schedules:` block — so this
+function is now the **second** schedule producer for the same agent, and a manifest
+declaring a name the template also declares would insert a duplicate row (there is no
+`UNIQUE(agent_name, name)` index on `agent_schedules`, and adding one is a dual-track
+schema change that would fail on installs already holding duplicates).
+
+It therefore reads the agent's existing schedule names once per agent and skips any
+manifest entry whose `name` already exists — the same read-then-skip the creation-time
+materializer uses — adding each created name to the set so a manifest that repeats a
+name within its own block also yields one row. The skip **does not overwrite**: the
+template's row survives, including its `enabled` value (manifest entries default
+`enabled=True`, template entries default `False`). An unreadable existing set **fails
+open** and creates unfiltered — dropping a manifest's schedules would be worse than the
+duplicate the guard prevents.
+
+Full flow: [scheduling.md](scheduling.md#1c-template-declared-schedules-at-creation-trinity-enterprise89).
+Coverage: `tests/unit/test_ent89_manifest_no_duplicate.py`.
+
 #### configure_tags() (Lines 429-480) - ORG-001 Phase 4
 ```python
 def configure_tags(

@@ -516,6 +516,58 @@ declaration (trinity-enterprise#128 PR-B) lands under its own top-level key
 precisely so an older Trinity reading a newer template is structurally
 untouched.
 
+### Declared `schedules:` (trinity-enterprise#89)
+
+The same tolerant-reader shape, applied to the second untrusted block Trinity
+now acts on. `services/template_schedules.py` is a **leaf** (stdlib +
+`services.schedule_validation`) with two public functions over one private
+`_parse`, so the reported errors and the accepted entries cannot drift:
+
+| Helper | Contract |
+|---|---|
+| `schedule_shape_errors(block)` | Named errors for a malformed block. Never raises. Absent / null / `[]` = no declared schedules, **not** an error |
+| `normalize_declared_schedules(block)` | Well-formed entries only, each `{name, cron, message, enabled, timezone, description}` — type-checked, bounded, cron/timezone-validated, name-deduped, capped at `MAX_DECLARED_SCHEDULES` (20) |
+
+**Totality is the contract, and three consumers depend on it.** A raise here
+would (a) empty the catalog, (b) enter creation's destructive rollback fence, or
+(c) fail-open compatibility check T-018. A 40-row matrix plus a Hypothesis
+property over recursive JSON-ish values pin it
+(`tests/unit/test_ent89_template_schedules.py`).
+
+Three things differ from the `credentials:` readers, each deliberate:
+
+- **The catalog surfaces the NORMALIZED list**, not the raw block (unlike
+  `data_paths`, which is surfaced raw). Normalizing at the builder is what makes
+  it safe for the frontend to render, and it matches
+  `credential_mcp_server_names`.
+- **Both GitHub list paths are now fenced.** ent#128 PR-A fenced
+  `_build_local_template` only; `get_all_templates`' two GitHub call sites were
+  bare list comprehensions. Adding a new untrusted-input reader inside
+  `_build_template` would have put a raise-capable call on an unfenced path —
+  re-opening the exact bug (#1835) this convention exists to prevent. Both now
+  route through `_safe_build_github_template` (log-and-skip per template).
+- **Creation does not read the catalog's copy.** `_get_cached_metadata` fetches
+  with the **global platform** PAT, off the **default branch**, through a
+  10-minute per-process cache. Creation resolves its PAT differently (per-agent
+  → per-user → global, ent#162) and may target `@branch`, so
+  `fetch_template_metadata_for_create(repo, pat, ref)` does a fresh, pinned,
+  authenticated read — and logs a WARNING naming the repo and reason on any
+  failure. A silently empty declaration on the `github:` path is precisely the
+  class this feature exists to close, and the catalog dict would have
+  reintroduced it one layer up.
+
+Errors carry the **entry index, the key, and a YAML type name** — never the
+`name`/`message`/`description` *value*, since the list is persisted into
+`agent_compatibility_results.checks_json`, rendered in the UI, and returned in
+the catalog response. The cron and timezone strings are the one echo, bounded
+and printable-filtered by a local twin of `_sanitize_for_warning` (the leaf
+cannot import it back without closing a cycle; the two are comment-linked).
+
+Consumption at creation is in
+[scheduling.md](scheduling.md#template-declared-schedules-at-creation-trinity-enterprise89);
+the compatibility check is T-018 in
+[agent-compatibility-validation.md](agent-compatibility-validation.md).
+
 ### Trinity-Compatible Validation (`services/template_service.py:608-728`)
 ```python
 def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dict]]:
@@ -821,8 +873,9 @@ A GitHub template can declare `fork_to_own: required` in its `template.yaml`; `_
 **Request**: `POST /api/agents` with `fork_to_own: {destination_repo: "owner/name", github_pat (SecretStr), private: true}`. Backend enforces the `required` flag (400 `FORK_TO_OWN_REQUIRED`), rejects `@branch` syntax and non-`github:` templates with the block, and pins `source_mode=True` + `source_branch=<template default branch>`.
 
 **Copy pipeline** (`services/agent_service/fork_to_own.py`, runs in the `github:` branch of `create_agent_internal` BEFORE the docker try-block so structured `FORK_*` errors reach the UI):
-1. `validate_token(user_pat)` → login; USER-owner mismatch → 400 `FORK_DESTINATION_FORBIDDEN`.
-2. Destination state: missing → `create_repository(private=…)` (user PAT) + REST visibility poll (≤10s); exists+empty → reuse; exists holding exactly the template tip (single branch, head SHA match) → idempotent reuse, skip push; else → 409 `FORK_DESTINATION_EXISTS`.
+1. `validate_destination_pat(user_pat)` → login; USER-owner mismatch → 400 `FORK_DESTINATION_FORBIDDEN`. Called **before** `_resolve_template_tip` so a bad PAT reports `FORK_PAT_INVALID` even when the template is also unreachable.
+2. Destination state via `inspect_or_create_destination_repo()` → `created | empty | branches`: missing → `create_repository(private=…)` (user PAT) + REST visibility poll (≤10s); exists+empty → reuse. The **reuse/refuse policy stays in this caller** — exists holding exactly the template tip (single branch, head SHA match) → idempotent reuse, skip push; else → 409 `FORK_DESTINATION_EXISTS`.
+   > **ent#109**: steps 1–2 are now the *shared* half, reused verbatim by the post-creation rebind ([agent-repo-binding.md](agent-repo-binding.md)). The seam is deliberately one level below the triage: the reuse branch **is** the template-tip SHA comparison, which is meaningless to a caller whose content source is an agent's workspace volume — so the primitive **reports** `created|empty|branches` and each caller decides. Behaviour here is unchanged and pinned by the 40 tests below.
 3. Bare single-branch full-history clone of the template (read auth: platform PAT or none) staged under `/data/agent-fork-tmp` (backend `/tmp` is a 100 MB tmpfs), push to destination with the **user PAT via `GIT_CONFIG_*` env** (`http.extraHeader` — token never on argv/URL), `git ls-remote` poll (≤15s) so the agent's startup clone can't race an empty repo (#1439 class). All output passes `scrub_secret` (plain + b64 forms) before logging.
 
 **Binding guard**: destination already referenced by any `agent_git_config` row → 409 `FORK_DESTINATION_IN_USE` (agent name disclosed only when the caller can access it, #186). Re-checked **after** `reserve_and_generate_instance_id` (source-mode rows bypass the partial UNIQUE index; the whole copy sits between check and act) — concurrent losers (all but the lexicographically-first name) roll back their row deterministically.
@@ -831,9 +884,9 @@ A GitHub template can declare `fork_to_own: required` in its `template.yaml`; `_
 
 **Frontend** (`CreateAgentModal.vue`): templates with `fork_to_own === 'required'` render as featured cards (tagline subtitle) above the standard list; selecting one reveals destination/PAT/visibility fields. Private is the default; Public sits behind a loud warning. PAT hint steers to a fine-grained single-repo token (the agent can read its own git credential — see `docs/security-reports/cso-2026-07-06.md`). The PAT ref is cleared after create.
 
-**Known limitations**: `fork_to_own: required` enforcement is fail-open when the template.yaml metadata fetch fails (advisory gate; empty metadata → flag unseen for that 10-min cache window). MCP `create_agent` deliberately does NOT accept `fork_to_own` (tool args are audit-logged — a PAT arg would persist in plaintext). Repos pre-created WITH a README are non-empty → 409. Soft-deleted agents keep their destination binding until purge (blocking is intentional — admin recovery would resurrect it). Upstream template flag for `Abilityai/cornelius` ships separately in that repo.
+**Known limitations**: `fork_to_own: required` enforcement is fail-open when the template.yaml metadata fetch fails (advisory gate; empty metadata → flag unseen for that 10-min cache window). MCP `create_agent` deliberately does NOT accept `fork_to_own` (tool args are audit-logged — a PAT arg would persist in plaintext). Repos pre-created WITH a README are non-empty → 409. Soft-deleted agents keep their destination binding until purge (blocking is intentional — admin recovery would resurrect it). Upstream template flag for `Abilityai/cornelius` ships separately in that repo. This is the **create-time** path only; retrofitting an already-created agent onto a user-owned repo is [agent-repo-binding.md](agent-repo-binding.md) (ent#109).
 
-Tests: `tests/unit/test_fork_to_own.py` (40 — model validation, orchestrator collision/scrub/timeout paths, crud gates, deep-slice env/PAT-persist/rollback, destination race, facade delegation, startup.sh static).
+Tests: `tests/unit/test_fork_to_own.py` (40 — model validation, orchestrator collision/scrub/timeout paths, crud gates, deep-slice env/PAT-persist/rollback, destination race, facade delegation, startup.sh static); `tests/unit/test_ent109_fork_to_own_extraction.py` (13 — the shared primitive's three states + error registry, and the validate-before-template ordering the split must preserve).
 
 ---
 

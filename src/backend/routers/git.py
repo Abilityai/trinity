@@ -7,12 +7,18 @@ Provides API endpoints for:
 - Viewing commit history
 - Pulling from GitHub
 """
+import contextlib
+import hashlib
 import logging
+import uuid
 from typing import Dict, Optional
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from models import (
     AutoSyncToggle,
+    BindAgentRepoRequest,
+    BindAgentRepoResponse,
     FreezeSchedulesToggle,
     GitHubPATRequest,
     GitInitializeRequest,
@@ -21,7 +27,12 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, AuthorizedAgentByName, OwnedAgentByName
+from dependencies import (
+    get_current_user,
+    reject_agent_principal,
+    AuthorizedAgentByName,
+    OwnedAgentByName,
+)
 from services import git_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
@@ -722,6 +733,338 @@ async def reset_to_main_preserve_state(
     )
 
     return {"success": True, **result}
+
+
+# ============================================================================
+# Post-creation repo binding (trinity-enterprise#109)
+# ============================================================================
+
+# Both locks carry a TTL comfortably above the worst-case end-to-end budget
+# (repo create + visibility poll + a full-history push + a container
+# replacement). A binding that genuinely outruns this has already failed in a
+# way the operator must see; the TTL is a backstop against a crashed worker
+# wedging a destination forever, not a deadline.
+_BIND_LOCK_TTL_S = 600
+
+
+@contextlib.asynccontextmanager
+async def _bind_locks(agent_name: str, destination_repo: str):
+    """Serialize a binding on BOTH axes, and FAIL CLOSED if Redis is unavailable.
+
+    Two locks, because they guard two different collisions:
+
+    ``agent:bind_dest:{sha256(lower(destination))}``
+        The one that actually matters. The race this feature can produce is
+        two DIFFERENT agents binding one destination repo, which no per-agent
+        lock ever serializes. Keyed on the destination, hashed so an arbitrary
+        `owner/name` can't shape the key, and lower-cased first because GitHub
+        slugs are case-insensitive — otherwise `Alice/Brain` and `alice/brain`
+        would take two different locks on one repo.
+
+    ``agent:bind_op:{agent}``
+        Guards double-submit on a single agent (an impatient second click
+        while the first request is mid-recreate).
+
+    **Fail closed (503), unlike ``_agent_data_op_lock``.** That lock's
+    fail-open is calibrated for a tar round-trip, where a lost lock costs a
+    duplicated read. Here a lost lock means two repo creations, two CAS
+    writes, and two concurrent recreates of one container — so a Redis outage
+    must stop the operation, not wave it through.
+    """
+    from routers.auth import get_redis_client
+
+    dest_key = (
+        "agent:bind_dest:"
+        + hashlib.sha256(destination_repo.strip().lower().encode()).hexdigest()
+    )
+    agent_key = f"agent:bind_op:{agent_name}"
+
+    try:
+        client = get_redis_client()
+        if client is None:
+            raise RuntimeError("no redis client")
+        # Cheap liveness probe: `set(nx=True)` returning False is ambiguous
+        # between "held" and "Redis is broken in a way that lies", so make the
+        # connection prove itself before any verdict is derived from it.
+        client.ping()
+    except Exception as e:  # noqa: BLE001 — fail CLOSED, see docstring
+        logger.warning("repo-bind: lock layer unavailable for %s: %s", agent_name, e)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": (
+                    "Repository binding is temporarily unavailable — the "
+                    "coordination service could not be reached. No changes were "
+                    "made. Please retry shortly."
+                ),
+                "code": "BIND_OP_IN_PROGRESS",
+            },
+            headers={"Retry-After": "30"},
+        )
+
+    held: list = []
+    try:
+        for key in (dest_key, agent_key):
+            token = uuid.uuid4().hex
+            try:
+                acquired = bool(client.set(key, token, nx=True, ex=_BIND_LOCK_TTL_S))
+            except Exception as e:  # noqa: BLE001 — fail CLOSED mid-acquire too
+                logger.warning("repo-bind: lock acquire failed for %s: %s", key, e)
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": (
+                            "Repository binding is temporarily unavailable. No "
+                            "changes were made. Please retry shortly."
+                        ),
+                        "code": "BIND_OP_IN_PROGRESS",
+                    },
+                    headers={"Retry-After": "30"},
+                )
+            if not acquired:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": (
+                            "Another repository binding is already in progress "
+                            "for this agent or this destination repository. No "
+                            "changes were made. Please retry shortly."
+                        ),
+                        "code": "BIND_OP_IN_PROGRESS",
+                    },
+                    headers={"Retry-After": "30"},
+                )
+            held.append((key, token))
+        yield
+    finally:
+        for key, token in held:
+            try:
+                # Ownership-checked release: never delete a lock the TTL already
+                # expired and a second caller re-took.
+                if client.get(key) == token:
+                    client.delete(key)
+            except Exception:  # noqa: BLE001 — the TTL is the backstop
+                pass
+
+
+@router.post("/{agent_name}/git/bind-to-own-repo", response_model=BindAgentRepoResponse)
+async def bind_agent_to_own_repo(
+    agent_name: OwnedAgentByName,
+    body: BindAgentRepoRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+):
+    """Bind this agent to a GitHub repository the caller owns (ent#109).
+
+    Creates the destination if needed, pushes the agent's CURRENT workspace
+    history into it, repoints `origin`, persists the per-agent PAT, and
+    re-bakes the container environment so the rebind survives a restart.
+
+    Owner-only (`OwnedAgentByName`, uniform 404) **and human-only**
+    (`reject_agent_principal`). The role gate alone is insufficient: an
+    agent-scoped key resolves to its owner CARRYING the owner's role, so on a
+    default admin-owned install any agent's injected `TRINITY_MCP_API_KEY`
+    would satisfy it (trinity-ops-agent#232; #1644/#1816 precedent). Blast
+    radius here is operator-scale — external GitHub state, a persisted
+    credential, and a container replacement.
+
+    A thin HTTP mapper by design: orchestration lives in
+    `services/agent_service/repo_binding.py` (Invariant #1). This function owns
+    only the locks, the idempotency claim, and the audit row.
+    """
+    from services import idempotency_service
+    from services.agent_service.repo_binding import (
+        BindError,
+        bind_agent_to_own_repo as _bind,
+    )
+    from utils.credential_sanitizer import scrub_secret_and_urls
+
+    reject_agent_principal(current_user)
+
+    destination = body.destination_repo
+    scope = idempotency_service.make_agent_scope(agent_name)
+    # Verb-folded key: a client reusing ONE Idempotency-Key across different
+    # actions on the same agent must not replay the wrong snapshot
+    # (learnings 2026-07-01). No key is derived when the caller omits the
+    # header — unlike a webhook retry, this is a deliberate human action, and
+    # a derived key would silently swallow an intentional re-bind to the same
+    # destination (the documented recovery from a partial failure).
+    folded_key = f"bind_to_own_repo:{idempotency_key}" if idempotency_key else None
+    idem = idempotency_service.begin(scope, folded_key)
+
+    async def _audit(success: bool, details: Dict) -> None:
+        await _audit_git(
+            action="bind_to_own_repo",
+            request=request,
+            current_user=current_user,
+            agent_name=agent_name,
+            success=success,
+            details=details,
+        )
+
+    if idem.replay:
+        # Audited like every other exit (#905). A replay is not a no-op from an
+        # operator's point of view — it is the visible trace of a client that
+        # retried a partially-irreversible external write, and reading the audit
+        # log without it makes one bind look like one attempt.
+        if idem.in_flight:
+            await _audit(False, {
+                "destination_repo": destination,
+                "private": body.private,
+                "code": "BIND_OP_IN_PROGRESS",
+                "status_code": 409,
+                "idempotent_replay": "in_flight",
+            })
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": (
+                        "A repository binding with this Idempotency-Key is "
+                        "already in flight for this agent."
+                    ),
+                    "code": "BIND_OP_IN_PROGRESS",
+                },
+            )
+        if idem.snapshot:
+            await _audit(True, {
+                "destination_repo": destination,
+                "private": body.private,
+                "idempotent_replay": "completed",
+            })
+            return JSONResponse(
+                content=idem.snapshot,
+                headers={"X-Idempotent-Replay": "true"},
+            )
+
+    try:
+        async with _bind_locks(agent_name, destination):
+            outcome = await _bind(
+                agent_name=agent_name,
+                destination_repo=destination,
+                user_pat=body.github_pat.get_secret_value(),
+                private=body.private,
+                owner_username=current_user.username,
+            )
+    except BindError as e:
+        # Audit BEFORE raising: #905 wants every exit path on a mutating,
+        # partially-irreversible operation traceable, not just the happy one.
+        await _audit(False, {
+            "destination_repo": destination,
+            "private": body.private,
+            "code": e.code,
+            "status_code": e.status_code,
+            "partial": e.partial,
+            **e.context,
+        })
+        with contextlib.suppress(Exception):
+            idempotency_service.fail(idem)
+        raise HTTPException(
+            status_code=e.status_code,
+            detail={"error": e.message, "code": e.code, "partial": e.partial},
+        )
+    except HTTPException as e:
+        # Lock contention / 503 — no agent state was touched.
+        await _audit(False, {
+            "destination_repo": destination,
+            "private": body.private,
+            "code": (e.detail or {}).get("code") if isinstance(e.detail, dict) else None,
+            "status_code": e.status_code,
+        })
+        with contextlib.suppress(Exception):
+            idempotency_service.fail(idem)
+        raise
+    except Exception as e:
+        # The ONE path that surfaces a raw exception string, so it is the one
+        # that must scrub. An httpx/h11 header-validation error echoes the
+        # offending header value verbatim — i.e. `Bearer <the user's PAT>` —
+        # and `logger.exception` would put it in the Vector-captured platform
+        # log while the detail put it in the response body. The model-level
+        # charset guard (`models._validate_pat_secret`) is the primary fix;
+        # this is the belt, because the next foreign exception type is not
+        # knowable in advance.
+        safe = scrub_secret_and_urls(str(e), body.github_pat.get_secret_value())
+        logger.error(
+            "repo-bind: unexpected failure for %s (%s): %s",
+            agent_name, type(e).__name__, safe,
+        )
+        await _audit(False, {
+            "destination_repo": destination,
+            "private": body.private,
+            "code": "BIND_UNEXPECTED_ERROR",
+            "status_code": 500,
+        })
+        with contextlib.suppress(Exception):
+            idempotency_service.fail(idem)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": f"Repository binding failed unexpectedly: {safe}",
+                "code": "BIND_UNEXPECTED_ERROR",
+            },
+        )
+
+    await _audit(True, outcome.audit)
+
+    response = BindAgentRepoResponse(
+        agent_name=agent_name,
+        github_repo=outcome.github_repo,
+        previous_repo=outcome.previous_repo,
+        default_branch=outcome.default_branch,
+        private=outcome.private,
+        created_repo=outcome.created_repo,
+        reused_existing=outcome.reused_existing,
+        recreated=outcome.recreated,
+        repo_url=f"https://github.com/{outcome.github_repo}",
+        message=(
+            f"This agent is now bound to {outcome.github_repo}. Its workspace "
+            f"history was pushed to the '{outcome.default_branch}' branch, and "
+            f"the previous repository is kept as the 'upstream' remote."
+        ),
+    )
+    with contextlib.suppress(Exception):
+        idempotency_service.complete(idem, None, response.model_dump())
+    return response
+
+
+@router.get("/{agent_name}/git/bind-to-own-repo/status")
+async def get_bind_to_own_repo_status(agent_name: AuthorizedAgentByName):
+    """Resolve the outcome of a binding whose HTTP response was lost (ent#109 §4.1).
+
+    The binding's worst case — repo create + visibility poll + a full-history
+    push + a container replacement — can outrun a proxy's idle timeout, and a
+    client that eats a 504 otherwise cannot tell a completed bind from a failed
+    one. This reports what the DB and the live container actually say, so the
+    answer comes from state rather than from a remembered request.
+
+    Read-only, and read-scoped (`AuthorizedAgentByName`) rather than
+    owner-only: it discloses nothing the Git tab does not already show.
+    """
+    config = db.get_git_config(agent_name)
+    if not config:
+        return {
+            "agent_name": agent_name,
+            "bound": False,
+            "message": "This agent has no GitHub sync configured.",
+        }
+
+    state = await git_service.inspect_container_git(agent_name)
+    configured = config.github_repo
+    observed = state.origin_repo
+    in_sync = bool(observed) and observed.lower() == (configured or "").lower()
+
+    return {
+        "agent_name": agent_name,
+        "bound": True,
+        "github_repo": configured,
+        "container_origin": observed,
+        "branch": state.branch,
+        "has_agent_pat": db.has_agent_github_pat(agent_name),
+        # False means the DB commit landed but the in-container rewire or the
+        # container rebuild did not — i.e. a partially applied bind. Retrying
+        # the bind is the documented fix; it is idempotent.
+        "origin_in_sync": in_sync,
+    }
 
 
 # ============================================================================

@@ -881,6 +881,18 @@ app = FastAPI(
 # Must be called after app creation but before middleware/routers
 _otel_enabled = setup_opentelemetry(app)
 
+
+# 422 bodies must not echo the value that failed validation (ent#109 /cso):
+# Pydantic v2 puts the rejected value in `input` and FastAPI's default handler
+# returns `exc.errors()` verbatim, so a failed `SecretStr` validation returns the
+# SECRET. Load-bearing for the ent#109 PAT charset guard — see the handler's own
+# docstring in `error_handlers.py`, which is where it lives so it is testable
+# without standing the whole app up.
+from fastapi.exceptions import RequestValidationError as _RequestValidationError
+from error_handlers import validation_error_without_input as _validation_error_without_input
+
+app.add_exception_handler(_RequestValidationError, _validation_error_without_input)
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
