@@ -295,10 +295,12 @@
       </div>
     </div>
 
-    <!-- Notification Toast -->
+    <!-- Notification Toast. #1953: same anchor as the AgentDetail toast — this
+         panel renders inside Agent Detail, so `top-20 right-4` collided with the
+         same header controls. See views/AgentDetail.vue for the full rationale. -->
     <div v-if="notification"
       :class="[
-        'fixed top-20 right-4 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
+        'fixed bottom-24 right-6 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
         notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
       ]"
     >
