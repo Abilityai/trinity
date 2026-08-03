@@ -25,6 +25,7 @@ import type {
   OperatorQueueListResponse,
   CompatibilityReport,
   AgentFileTreeResponse,
+  ReportSummary,
 } from "./types.js";
 
 /**
@@ -1392,6 +1393,60 @@ export class TrinityClient {
       `/api/agents/${encodeURIComponent(agentName)}/reports`,
       data
     );
+  }
+
+  /**
+   * List reports across accessible agents — METADATA only, no payload (#1538).
+   * The backend scopes to the caller's accessible agents; an agent-scoped key is
+   * narrowed further to {self} ∪ permitted by the tool layer.
+   */
+  async listReports(params: {
+    report_type?: string;
+    hours?: number;
+    search?: string;
+    agent?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<ReportSummary[]> {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== "") qs.append(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return this.request("GET", `/api/reports${suffix}`);
+  }
+
+  /**
+   * List one agent's reports (metadata only) (#1538).
+   */
+  async listAgentReports(
+    agentName: string,
+    params: {
+      report_type?: string;
+      hours?: number;
+      search?: string;
+      limit?: number;
+      offset?: number;
+    }
+  ): Promise<ReportSummary[]> {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== "") qs.append(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/reports${suffix}`
+    );
+  }
+
+  /**
+   * Fetch one report INCLUDING its payload (#1538). The backend answers 404 —
+   * not 403 — when the caller cannot access the owning agent, so an id cannot be
+   * probed for existence.
+   */
+  async getReport(reportId: string): Promise<Record<string, unknown>> {
+    return this.request("GET", `/api/reports/${encodeURIComponent(reportId)}`);
   }
 
   // ============================================================================

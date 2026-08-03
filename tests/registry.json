@@ -1397,6 +1397,17 @@
         "security"
       ],
       "description": "Slack inbound file-download SSRF gate (#1951) \u2014 the third channel to get the #1932 two-tier treatment. download_file previously fetched url_private_download with no host allowlist, no scheme check and follow_redirects=True. Covers: the legitimate files.slack.com download still succeeds (the #1932 lesson \u2014 an allowlist that rejects the real host reads as 'allowlist present' while being 100% broken); a validated CDN redirect is followed WITHOUT the bot token; hop-1 refusals for unrelated/lookalike/apex-lookalike hosts, the dotless-suffix bypass (evil-slack-files.com), plaintext http, file://, loopback and a platform-network address; off-domain and downgrade redirects refused after exactly one hop; cloud metadata (169.254.169.254) as a redirect target; bounded redirect budget; refusal logged at ERROR not WARNING; source tier proven narrower than the redirect tier; and a static backstop that follow_redirects=True never returns. EVERY negative test asserts the recorded call log, not `is None` \u2014 download_file returns None on every failure path and its bare except swallows AssertionError, so a return-value assertion passes against a completely unpatched seam."
+    },
+    {
+      "file": "unit/test_1917_stack_trace_exposure.py",
+      "feature": "#1917",
+      "added": "2026-08-03",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "py/stack-trace-exposure leak guards for the ops / system-agent siblings PR #1912 left untouched (#1917), including open CodeQL alert #231. Each test drives the REAL router function with a sentinel planted in the exception message and asserts both halves: the sentinel is absent from the response AND the exception class name is present (a response that dropped the error entirely would pass a sentinel-only check while making the failure undiagnosable). Covers stop_fleet per-agent, _stop_agent_container (feeds emergency_stop), fleet health (previously str(e)[:50] \u2014 truncation bounds a leak, it does not remove one, and docker/httpx messages put the host FIRST), ops costs (the OTel collector URL), and system-agent health. Plus a static ban on str(e) in ops.py/system_agent.py and a window check on agents.py's three lifecycle details. All 8 fail against pre-fix code \u2014 verified, because the fleet-health test initially patched a get_agent_context_info that does not exist (raising=False made it silent), so it passed against the unpatched router until the pre-fix run exposed it; it now patches get_agent_client and asserts the probe ran."
     }
   ]
 }

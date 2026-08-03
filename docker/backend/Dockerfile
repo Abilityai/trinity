@@ -69,6 +69,14 @@ RUN pip install --no-cache-dir \
     psutil==6.1.1 \
     payments-py==1.2.1 \
     Pillow==11.1.0 \
+    # #1536 report export. Both are pure-Python wheels — no system libraries, so
+    # the image build is unchanged beyond these two lines (WeasyPrint was
+    # rejected for exactly that reason: cairo/pango would have made a PDF button
+    # a container-build concern). The export endpoint degrades to 503 when they
+    # are absent, so an instance that upgrades code without rebuilding the image
+    # (#1814) gets a clear message instead of a 500.
+    openpyxl==3.1.5 \
+    reportlab==4.2.5 \
     google-genai==1.63.0 \
     "slack_sdk[socket-mode]==3.41.0" \
     aiohttp \
