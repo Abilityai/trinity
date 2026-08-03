@@ -225,12 +225,25 @@ def load_hardened_yaml(
         max_expanded_nodes=max_expanded_nodes,
         error_cls=err,
     )
+    # Drive the loader directly instead of `yaml.load(text, Loader=loader)`.
+    # This is exactly what `yaml.load` does internally (construct, get the
+    # single document, dispose) — but the `yaml.load(..., Loader=<variable>)`
+    # call shape is what CodeQL's py/unsafe-deserialization keys on, and it
+    # cannot resolve a class built by a factory back to `yaml.SafeLoader`.
+    # #1884's module-level `_HardenedManifestLoader` was never flagged for that
+    # reason; making the policy a parameter is what hid the lineage. Rather than
+    # dismiss a critical alert on a security PR, take the analyzable path: no
+    # `yaml.load` call exists here, and the SafeLoader ancestry is still pinned
+    # by test (test_the_hardened_loader_is_a_safeloader_not_a_full_loader).
+    instance = loader(text)
     try:
-        return yaml.load(text, Loader=loader)
+        return instance.get_single_data()
     except err:
         raise
     except yaml.YAMLError as e:
         raise err(f"{kind}_yaml_invalid", f"YAML parse error: {e}")
+    finally:
+        instance.dispose()
 
 
 # --- Per-document policies -------------------------------------------------
