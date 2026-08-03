@@ -19,7 +19,14 @@
             notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
           ]"
         >
-          {{ notification.message }}
+          <span>{{ notification.message }}</span>
+          <button
+            v-if="notification.type === 'error'"
+            type="button"
+            class="ml-3 font-medium opacity-70 hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-status-danger-500/40 rounded"
+            aria-label="Dismiss notification"
+            @click="dismissNotification"
+          >✕</button>
         </div>
 
         <div v-if="error && !agent" class="bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300 px-4 py-3 rounded mb-4">
@@ -470,7 +477,7 @@ function toggleChatMode() {
 }
 
 // Initialize composables
-const { notification, showNotification } = useNotification()
+const { notification, showNotification, dismissNotification } = useNotification()
 
 // Agent lifecycle composable
 const {

@@ -153,7 +153,39 @@
         </div>
       </div>
 
-      <div class="divide-y divide-gray-200 dark:divide-gray-700">
+      <!-- Action failure (#1926) — acknowledge / dismiss / bulk failures used to
+           go to console only, so the row stayed put and the verb looked like it
+           had simply done nothing. Errors persist here until dismissed
+           (principle 18: toasts are for completed verbs). -->
+      <div v-if="actionError" class="px-6 pt-4">
+        <InlineError
+          :message="actionError"
+          :detail="actionErrorDetail"
+          @dismiss="clearActionError"
+        />
+      </div>
+
+      <!-- Loading state (#1926) — the body used to render blank during the
+           first fetch: neither list, nor empty state, nor spinner. -->
+      <div v-if="firstLoad" class="px-6 py-12 text-center" aria-busy="true">
+        <svg class="w-8 h-8 mx-auto mb-4 animate-spin text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+        </svg>
+        <p class="text-sm text-gray-500 dark:text-gray-400">Loading notifications…</p>
+      </div>
+
+      <!-- Failed state (#1926) — previously there was none at all. -->
+      <LoadFailed
+        v-else-if="loadFailed"
+        title="Couldn't load notifications"
+        message="We can't show what your agents have sent. Check your connection and try again."
+        :detail="notificationsStore.error"
+        :retrying="loading"
+        @retry="fetchNotifications"
+      />
+
+      <div v-else class="divide-y divide-gray-200 dark:divide-gray-700">
         <div
           v-for="notification in displayedNotifications"
           :key="notification.id"
@@ -264,8 +296,8 @@
           </div>
         </div>
 
-        <!-- Empty State -->
-        <div v-if="displayedNotifications.length === 0 && !loading" class="px-6 py-12 text-center">
+        <!-- Empty State — only once a fetch has SUCCEEDED and returned zero -->
+        <div v-if="displayedNotifications.length === 0" class="px-6 py-12 text-center">
           <InboxIcon class="w-12 h-12 mx-auto mb-4 text-gray-300 dark:text-gray-600" />
           <p class="text-lg font-medium text-gray-900 dark:text-white">
             {{ hasActiveFilters ? 'No matching events' : 'No events yet' }}
@@ -302,6 +334,9 @@ import { ref, computed, onMounted } from 'vue'
 import { useNotificationsStore } from '../../stores/notifications'
 import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip, agentOptionLabel } from '../../utils/agentName'
+import LoadFailed from '../LoadFailed.vue'
+import InlineError from '../InlineError.vue'
+import { apiErrorMessage } from '../../utils/apiError'
 import {
   XMarkIcon,
   CheckIcon,
@@ -319,6 +354,10 @@ const agentsStore = useAgentsStore()
 
 // State
 const loading = ref(false)
+// #1926: failures of the row verbs (acknowledge / dismiss / bulk) surface here,
+// next to the controls, and persist until dismissed.
+const actionError = ref('')
+const actionErrorDetail = ref('')
 const statusFilter = ref('pending')
 const priorityFilter = ref('')
 const agentFilter = ref('')
@@ -370,6 +409,36 @@ onMounted(() => {
 })
 
 // Methods
+// #1926 loading / failed / empty triad. `hasLoaded` flips only on a succeeded
+// fetch, so an empty list before the first response reads as loading, and a
+// failed first fetch reads as failed — not as "No events yet".
+const firstLoad = computed(() => !notificationsStore.hasLoaded && !notificationsStore.error)
+const loadFailed = computed(() => !notificationsStore.hasLoaded && !!notificationsStore.error)
+
+function clearActionError() {
+  actionError.value = ''
+  actionErrorDetail.value = ''
+}
+
+// The store's bulk helpers use Promise.allSettled, so they RESOLVE even when
+// every item failed — a try/catch alone would report success on a total
+// failure (#1926). Inspect the settlement and say how many did not apply.
+function reportSettled(results, attempted, verb, past) {
+  const rejected = (results || []).filter(r => r.status === 'rejected')
+  if (!rejected.length) return
+  const failed = rejected.length
+  actionError.value = failed === attempted
+    ? `Couldn't ${verb} the ${attempted} selected notification(s) — none were changed. Try again.`
+    : `${failed} of ${attempted} notification(s) couldn't be ${past} and are unchanged. Try again.`
+  actionErrorDetail.value = apiErrorMessage(rejected[0].reason, 'Request failed')
+}
+
+function reportActionFailure(err, what) {
+  console.error(`Failed to ${what}:`, err)
+  actionError.value = `Couldn't ${what}. Nothing was changed — try again.`
+  actionErrorDetail.value = apiErrorMessage(err, 'Request failed')
+}
+
 async function fetchNotifications() {
   loading.value = true
   try {
@@ -405,34 +474,50 @@ function clearFilters() {
 }
 
 async function acknowledge(notificationId) {
+  clearActionError()
   try {
     await notificationsStore.acknowledgeNotification(notificationId)
   } catch (err) {
-    console.error('Failed to acknowledge notification:', err)
+    reportActionFailure(err, 'acknowledge this notification')
   }
 }
 
 async function dismiss(notificationId) {
+  clearActionError()
   try {
     await notificationsStore.dismissNotification(notificationId)
   } catch (err) {
-    console.error('Failed to dismiss notification:', err)
+    reportActionFailure(err, 'dismiss this notification')
   }
 }
 
 async function bulkAcknowledge() {
+  clearActionError()
+  const count = notificationsStore.selectedIds.length
   try {
-    await notificationsStore.bulkAcknowledge(notificationsStore.selectedIds)
+    reportSettled(
+      await notificationsStore.bulkAcknowledge(notificationsStore.selectedIds),
+      count,
+      'acknowledge',
+      'acknowledged'
+    )
   } catch (err) {
-    console.error('Failed to bulk acknowledge:', err)
+    reportActionFailure(err, 'acknowledge the selected notifications')
   }
 }
 
 async function bulkDismiss() {
+  clearActionError()
+  const count = notificationsStore.selectedIds.length
   try {
-    await notificationsStore.bulkDismiss(notificationsStore.selectedIds)
+    reportSettled(
+      await notificationsStore.bulkDismiss(notificationsStore.selectedIds),
+      count,
+      'dismiss',
+      'dismissed'
+    )
   } catch (err) {
-    console.error('Failed to bulk dismiss:', err)
+    reportActionFailure(err, 'dismiss the selected notifications')
   }
 }
 
