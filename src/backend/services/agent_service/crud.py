@@ -23,13 +23,14 @@ from database import db
 from services.docker_service import (
     docker_client,
     get_agent_by_name,
+    get_agent_container,
     get_next_available_port,
     get_agent_status_from_container,
 )
 from services.docker_utils import (
-    volume_get, volume_create, containers_run
+    volume_get, volume_create, containers_run, container_remove
 )
-from services.agent_runtime_state import clear_agent_breakers
+from services.agent_runtime_state import clear_agent_breakers, clear_agent_runtime_state
 from services.template_service import (
     CredentialDeclarationError,
     credential_mcp_server_names,
@@ -45,7 +46,7 @@ from services import rate_limiter
 from . import ephemeral as ephemeral_service
 from services.github_service import GitHubService, GitHubError
 from services.agent_auth import derive_agent_token
-from utils.helpers import sanitize_agent_name, to_utc_iso, utc_now_iso
+from utils.helpers import parse_iso_timestamp, sanitize_agent_name, to_utc_iso, utc_now_iso
 from .fork_to_own import fork_template_to_own_repo
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
@@ -345,6 +346,11 @@ class _RollbackHandles:
     github_repo_for_agent: Optional[str] = None
     ephemeral_slot_reserved: bool = False
     ephemeral_owner_id: Optional[int] = None
+    # ent#313: wall-clock instant captured immediately BEFORE the docker block.
+    # A container carrying a `trinity.created` label older than this existed
+    # before this attempt, so this attempt did not create it and must not
+    # remove it. See `_reclaim_failed_creation_container`.
+    container_floor_ts: Optional[str] = None
 
 
 def _apply_ephemeral_pregates(config: AgentConfig, current_user: User) -> Optional[str]:
@@ -2006,10 +2012,17 @@ async def _materialize_agent_files(
 
 
 def _rollback_failed_creation(handles: _RollbackHandles) -> None:
-    """The except-path rollback (AC #3, PRESERVED exactly): roll back the
-    agent_git_config reservation, the ephemeral quota slot, and the agent MCP
-    key — each guarded, each best-effort. Deliberately does NOT stop/remove the
-    container or its volumes (left for the cleanup watchdog)."""
+    """The except-path DB/quota rollback: the agent_git_config reservation, the
+    ephemeral quota slot, and the agent MCP key — each guarded, each
+    best-effort.
+
+    Scope note (ent#313): this function stays DB/quota-only, but its old
+    docstring justified the omission by saying the container and volumes were
+    "left for the cleanup watchdog". No such watchdog exists for a
+    non-ephemeral agent, so that deferral leaked a running, ownerless
+    container. The container is now reclaimed by
+    ``_reclaim_failed_creation_container``, called right after this one.
+    """
     # S7 Layer 0 (#382): if anything after the reservation fails,
     # roll back the agent_git_config row so the working branch is
     # released and a retry can claim it fresh.
@@ -2048,6 +2061,176 @@ def _rollback_failed_creation(handles: _RollbackHandles) -> None:
                 handles.agent_name,
                 cleanup_exc,
             )
+
+
+def _is_container_name_conflict(exc: BaseException) -> bool:
+    """True when the failure is Docker refusing a duplicate container name.
+
+    On a 409 the daemon created NOTHING, so any `agent-{name}` container that
+    exists belongs to somebody else — a live agent of this install, or (on a
+    shared Docker daemon: git worktrees, a second stack) another install's
+    agent entirely. Removing it would be catastrophic, so this is the first
+    thing the reclaim checks.
+    """
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        # Duck-typed on purpose: `isinstance(exc, docker.errors.APIError)` raises
+        # `TypeError: isinstance() arg 2 must be a type` wherever the docker
+        # module is a test double, which would propagate out of a function whose
+        # whole contract is "never raises" and REPLACE the creation error the
+        # caller is trying to report. Any exception carrying a 409 response is
+        # the signal we want, whatever its class.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 409:
+            return True
+        text = str(exc).lower()
+        if "already in use" in text or "conflict" in text:
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def _created_by_this_attempt(container, floor_ts: Optional[str]) -> bool:
+    """True only if the container's own `trinity.created` label is at or after
+    the instant this creation attempt entered the docker block.
+
+    Fail-closed: a missing floor, a missing label, or an unparseable value all
+    return False. The cost of a false negative is one orphan an operator removes
+    by hand; the cost of a false positive is deleting a running agent.
+    """
+    if not floor_ts:
+        return False
+    try:
+        labels = (container.attrs or {}).get("Config", {}).get("Labels") or {}
+        created = labels.get("trinity.created")
+        if not created:
+            return False
+        return parse_iso_timestamp(created) >= parse_iso_timestamp(floor_ts)
+    except Exception as exc:  # noqa: BLE001 — unparseable ⇒ not ours
+        logger.warning(
+            "ent#313: could not establish creation provenance for a container: %s",
+            exc,
+        )
+        return False
+
+
+async def _reclaim_failed_creation_container(
+    handles: _RollbackHandles, container, exc: BaseException
+) -> None:
+    """ent#313 — remove the container a failed creation left behind, and clear
+    the per-agent Redis keyspace.
+
+    Before this, `_rollback_failed_creation` rolled back only DB/quota handles
+    and deferred the container to "the cleanup watchdog" — which does not exist
+    for a non-ephemeral agent (`_sweep_ephemeral_agents` is gated on the
+    `trinity.ephemeral` label). The two guards deadlocked: nothing removed the
+    container, and because the container kept its workspace volume mounted, the
+    #1581 orphan-volume sweep could never advance its unattached-strike counter
+    either. The agent still appeared in the fleet listing, which is
+    Docker-as-truth (Invariant #11) — a phantom with no `agent_ownership` row.
+
+    Two arrival shapes, because the reported failure has no handle:
+
+    * `container` is not None — the create returned and a later step raised.
+      Ownership is unambiguous; remove by handle.
+    Both shapes first require that the name has NO `agent_ownership` row: the
+    create registers the row before the last step, so a late failure must not
+    strip the container off an agent the DB already considers created.
+
+    * `container` is None — the failure happened INSIDE `containers.run`
+      (the observed case: a 60s Docker read timeout). The daemon may still have
+      created it, so re-derive by name — under three fail-closed gates, since a
+      lookup by name can resolve to a container this attempt did not create:
+      not a name conflict (above), no `agent_ownership` row (a concurrent
+      creation that won the name has already registered one), and the
+      `trinity.created` provenance check.
+
+    Never raises: this runs inside the creation except-path, which must keep
+    reporting the original failure.
+    """
+    agent_name = handles.agent_name
+    target = container
+
+    # Gate BOTH arrival shapes on ownership. Registration happens inside the
+    # same try, so a failure in a LATER step (file materialization) arrives here
+    # with the row already written — and this is the one case where removing the
+    # container makes things worse: the agent would become a row with no
+    # container, still holding its name, where before it was at least present
+    # and deletable through the normal path. It also covers the no-handle race
+    # where a concurrent creation won the name and registered it.
+    try:
+        if db.is_agent_name_reserved(agent_name):
+            logger.warning(
+                "ent#313: %s already has an ownership row — leaving its "
+                "container in place (delete the agent to remove both)",
+                agent_name,
+            )
+            return
+    except Exception as lookup_exc:  # noqa: BLE001 — fail closed
+        logger.warning(
+            "ent#313: ownership lookup failed for %s; leaving any container in "
+            "place: %s",
+            agent_name,
+            lookup_exc,
+        )
+        return
+
+    if target is None:
+        if _is_container_name_conflict(exc):
+            logger.info(
+                "ent#313: creation of %s hit a container-name conflict — the "
+                "existing container is not ours, leaving it untouched",
+                agent_name,
+            )
+            return
+        try:
+            target = get_agent_container(agent_name)
+        except Exception as lookup_exc:  # noqa: BLE001
+            logger.warning(
+                "ent#313: container lookup failed for %s: %s", agent_name, lookup_exc
+            )
+            return
+        if target is not None and not _created_by_this_attempt(
+            target, handles.container_floor_ts
+        ):
+            logger.warning(
+                "ent#313: a container named agent-%s exists but predates this "
+                "attempt — leaving it untouched",
+                agent_name,
+            )
+            return
+
+    if target is not None:
+        try:
+            await container_remove(target, force=True)
+            logger.info(
+                "ent#313: removed the orphaned container for %s after a failed "
+                "creation",
+                agent_name,
+            )
+        except Exception as remove_exc:  # noqa: BLE001
+            # Leave the Redis keyspace alone: the container is still up, so the
+            # slot ZSET is not provably idle.
+            logger.warning(
+                "ent#313: could not remove the orphaned container for %s — it "
+                "needs manual `docker rm -f agent-%s`: %s",
+                agent_name,
+                agent_name,
+                remove_exc,
+            )
+            return
+
+    # Reached only when the container is provably gone (removed just now, or
+    # never created). #1560: the keyspace is name-keyed and TTL-less, so a
+    # later agent reusing this name would otherwise inherit stale breaker
+    # verdicts and be fast-failed as unhealthy without ever being contacted.
+    try:
+        await clear_agent_runtime_state(agent_name)
+    except Exception as clear_exc:  # noqa: BLE001
+        logger.warning(
+            "ent#313: Redis state clear failed for %s: %s", agent_name, clear_exc
+        )
 
 
 def _release_ephemeral_on_no_docker(handles: _RollbackHandles) -> None:
@@ -2338,9 +2521,17 @@ async def create_agent_internal(
         github_repo_for_agent=tr.github_repo_for_agent,
         ephemeral_slot_reserved=ephemeral_slot_reserved,
         ephemeral_owner_id=ephemeral_owner_id,
+        # ent#313: stamped before anything can create a container, so the
+        # rollback can tell a container THIS attempt created from one that was
+        # already there.
+        container_floor_ts=utc_now_iso(),
     )
 
     if docker_client:
+        # ent#313: the except-path needs whatever handle we got. It stays None
+        # when the failure happens inside container creation itself — the
+        # reclaim re-derives it by name under provenance gates.
+        created_container = None
         try:
             # Persist the resolved PAT as the per-agent PAT (#347) onto the
             # agent_git_config row the reservation above just created. Inside
@@ -2366,6 +2557,7 @@ async def create_agent_internal(
             container = await _create_agent_container(
                 config, volumes, env_vars, current_user, ephemeral_expires_at
             )
+            created_container = container
             agent_status = get_agent_status_from_container(container)
             await _broadcast_agent_created(agent_status, ws_manager)
             _register_agent(
@@ -2387,6 +2579,10 @@ async def create_agent_internal(
             return agent_status
         except Exception as e:
             _rollback_failed_creation(handles)
+            # ent#313: and the container + its name-keyed Redis state, which the
+            # DB/quota rollback above deliberately left to a watchdog that only
+            # covers ephemeral agents.
+            await _reclaim_failed_creation_container(handles, created_container, e)
             logger.error(f"Failed to create agent {config.name}: {e}")
             raise HTTPException(status_code=500, detail="Failed to create agent. Please try again.")
     else:

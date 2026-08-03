@@ -102,6 +102,8 @@ def _load_crud(monkeypatch, docker_available=True):
     docker_utils.volume_get = AsyncMock(side_effect=_NotFound("no such volume"))
     docker_utils.volume_create = AsyncMock()
     docker_utils.containers_run = AsyncMock(return_value=MagicMock())
+    # ent#313: the failed-creation rollback now removes the container.
+    docker_utils.container_remove = AsyncMock()
 
     template_service = MagicMock()
     template_service.generate_credential_files = MagicMock(return_value={})
@@ -166,6 +168,8 @@ def _load_crud(monkeypatch, docker_available=True):
 
     runtime_state_mod = MagicMock()
     runtime_state_mod.clear_agent_breakers = MagicMock()
+    # ent#313: cleared on the failed-creation path (async).
+    runtime_state_mod.clear_agent_runtime_state = AsyncMock()
 
     helpers_mod = MagicMock()
     helpers_mod.validate_base_image = MagicMock()
@@ -927,9 +931,16 @@ async def test_case15_local_rollback_mcp_key_only(crud_env, monkeypatch):
     ctx["db"].delete_agent_mcp_api_key.assert_called_once_with("rb-local")
     ctx["db"].delete_git_config.assert_not_called()      # no git handle (local)
     ctx["ephemeral"].release_ephemeral_slot.assert_not_called()
-    # The orphaned container is left for the cleanup watchdog (PRESERVED).
-    container_mock.stop.assert_not_called()
-    container_mock.remove.assert_not_called()
+    # ent#313: the container is now removed inline. This assertion used to read
+    # `remove.assert_not_called()` with the comment "left for the cleanup
+    # watchdog (PRESERVED)" — characterizing the leak, because no watchdog
+    # covers a non-ephemeral orphan. `container_remove(force=True)` reaches
+    # `.remove(force=True)`; the graceful stop is deliberately skipped (nothing
+    # is running yet to shut down cleanly).
+    ctx["docker_utils"].container_remove.assert_awaited_once_with(
+        container_mock, force=True)
+    ctx["runtime_state"].clear_agent_runtime_state.assert_awaited_once_with("rb-local")
+    container_mock.stop.assert_not_called()  # nothing running yet to stop gracefully
 
 
 @pytest.mark.asyncio
