@@ -205,9 +205,19 @@ async def get_fleet_health(
                         "recommendation": "Check agent server"
                     })
             except Exception as e:
+                # py/stack-trace-exposure (#1917, the PR #1912 pattern): the
+                # 50-char truncation bounded the leak, it did not remove it —
+                # docker/httpx messages put the host, socket path or URL first.
+                logger.warning(
+                    f"Fleet health: {agent_name} context probe failed: {e}",
+                    exc_info=True,
+                )
                 warnings.append({
                     "agent": agent_name,
-                    "issue": f"Agent not responding: {str(e)[:50]}",
+                    "issue": (
+                        f"Agent not responding ({e.__class__.__name__} — "
+                        f"details in backend logs)"
+                    ),
                     "recommendation": "Check if agent is stuck"
                 })
         else:
@@ -643,10 +653,17 @@ async def stop_fleet(
                 })
                 failures += 1
         except Exception as e:
+            logger.warning(
+                f"Fleet stop: {agent_name} failed: {e}", exc_info=True
+            )
             results.append({
                 "agent": agent_name,
                 "result": "failed",
-                "error": str(e)
+                # py/stack-trace-exposure (#1917, the PR #1912 pattern).
+                "error": (
+                    f"stop failed ({e.__class__.__name__} — "
+                    f"details in backend logs)"
+                ),
             })
             failures += 1
 
@@ -833,7 +850,18 @@ def _stop_agent_container(agent_name: str, timeout: int = 10) -> dict:
             return {"agent": agent_name, "result": "stopped"}
         return {"agent": agent_name, "result": "not_found"}
     except Exception as e:
-        return {"agent": agent_name, "result": "error", "error": str(e)}
+        logger.warning(
+            f"Emergency stop: {agent_name} failed: {e}", exc_info=True
+        )
+        return {
+            "agent": agent_name,
+            "result": "error",
+            # py/stack-trace-exposure (#1917, the PR #1912 pattern).
+            "error": (
+                f"stop failed ({e.__class__.__name__} — "
+                f"details in backend logs)"
+            ),
+        }
 
 
 @router.post("/emergency-stop")
@@ -1134,11 +1162,16 @@ async def get_ops_costs(
             "timestamp": utc_now_iso()
         }
     except Exception as e:
-        logger.error(f"Failed to fetch cost metrics: {e}")
+        logger.error(f"Failed to fetch cost metrics: {e}", exc_info=True)
         return {
             "enabled": True,
             "available": False,
-            "error": f"Failed to fetch metrics: {str(e)}",
+            # py/stack-trace-exposure (#1917, the PR #1912 pattern). The
+            # collector URL and its internal host live in this message.
+            "error": (
+                f"Failed to fetch metrics ({e.__class__.__name__} — "
+                f"details in backend logs)"
+            ),
             "timestamp": utc_now_iso()
         }
 
