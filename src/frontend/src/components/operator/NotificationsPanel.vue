@@ -165,6 +165,20 @@
         />
       </div>
 
+      <!-- Failed REFRESH (#1926) — the first load succeeded, so the list below
+           is real but stale (it may even be the previous filter's rows).
+           Say so rather than presenting stale data as fresh; the list stays
+           put, since blanking it would lose data we do have. -->
+      <div v-if="refreshFailed" class="px-6 pt-4">
+        <InlineError
+          message="Couldn't refresh notifications — showing the last results that loaded."
+          :detail="notificationsStore.error"
+          retryable
+          @retry="fetchNotifications"
+          @dismiss="notificationsStore.error = null"
+        />
+      </div>
+
       <!-- Loading state (#1926) — the body used to render blank during the
            first fetch: neither list, nor empty state, nor spinner. -->
       <div v-if="firstLoad" class="px-6 py-12 text-center" aria-busy="true">
@@ -414,6 +428,9 @@ onMounted(() => {
 // failed first fetch reads as failed — not as "No events yet".
 const firstLoad = computed(() => !notificationsStore.hasLoaded && !notificationsStore.error)
 const loadFailed = computed(() => !notificationsStore.hasLoaded && !!notificationsStore.error)
+// Distinct from loadFailed: we HAVE data, but the newest attempt to update it
+// failed, so what's rendered is stale (possibly for a different filter).
+const refreshFailed = computed(() => notificationsStore.hasLoaded && !!notificationsStore.error)
 
 function clearActionError() {
   actionError.value = ''

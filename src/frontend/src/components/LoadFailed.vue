@@ -38,7 +38,7 @@
     <p class="text-sm mt-1 text-gray-600 dark:text-gray-400">{{ message }}</p>
 
     <button
-      v-if="onRetry !== false"
+      v-if="showRetry"
       type="button"
       class="mt-4 text-sm font-medium text-action-primary-600 dark:text-action-primary-400 hover:text-action-primary-800 dark:hover:text-action-primary-300 focus:outline-none focus:ring-2 focus:ring-action-primary-500/40 rounded px-2 py-1 disabled:opacity-45 disabled:cursor-wait"
       :disabled="retrying"
@@ -85,9 +85,11 @@ defineProps({
     type: Boolean,
     default: false
   },
-  // Pass `:on-retry="false"` for the rare surface with nothing to retry.
-  onRetry: {
-    type: [Boolean, String],
+  // `:show-retry="false"` for the rare surface with nothing to retry.
+  // NOT named `onRetry`: Vue compiles the parent's `@retry` into an `onRetry`
+  // prop, so a prop of that name collides with this component's own emit.
+  showRetry: {
+    type: Boolean,
     default: true
   },
   // Compact variant for small panels and rows.

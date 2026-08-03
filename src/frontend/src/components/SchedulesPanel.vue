@@ -1276,6 +1276,7 @@ function deleteSchedule(schedule) {
   confirmDialog.variant = 'danger'
   confirmDialog.onConfirm = async () => {
     deleteLoading.value = schedule.id
+    clearActionError()
     try {
       await axios.delete(`/api/agents/${props.agentName}/schedules/${schedule.id}`, {
         headers: authStore.authHeader
@@ -1326,6 +1327,7 @@ async function toggleSchedule(schedule) {
 // Trigger schedule manually
 async function triggerSchedule(schedule) {
   triggerLoading.value = schedule.id
+  clearActionError()
   try {
     await axios.post(`/api/agents/${props.agentName}/schedules/${schedule.id}/trigger`, {}, {
       headers: authStore.authHeader

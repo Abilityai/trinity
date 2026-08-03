@@ -134,6 +134,19 @@
 
       <!-- Needs Response Tab (narrow card feed) -->
       <div v-if="activeTab === 'needs-response'" class="max-w-3xl mx-auto">
+        <!-- Failed REFRESH (#1926) — the 5s poll stopped landing. The cards
+             below are real but stale, and an operator reading a queue must
+             know that; blanking them would be worse. -->
+        <InlineError
+          v-if="queueRefreshFailed"
+          class="mb-3"
+          message="Couldn't refresh the queue — showing the last items that loaded."
+          :detail="operatorQueueStore.error"
+          retryable
+          @retry="operatorQueueStore.fetchItems"
+          @dismiss="operatorQueueStore.error = null"
+        />
+
         <!-- Loading state (#1926) — before the first poll returns we do NOT
              know the queue is empty; claiming "All caught up" is optimistic
              success (principle 15). -->
@@ -254,6 +267,7 @@ import MonitoringPanel from '../components/MonitoringPanel.vue'
 import ExecutionsPanel from '../components/ExecutionsPanel.vue'
 import ReportsPanelFleet from '../components/ReportsPanelFleet.vue'
 import LoadFailed from '../components/LoadFailed.vue'
+import InlineError from '../components/InlineError.vue'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useNotificationsStore } from '../stores/notifications'
 import { useAgentsStore } from '../stores/agents'
@@ -279,6 +293,10 @@ const queueFirstLoad = computed(
 )
 const queueLoadFailed = computed(
   () => !operatorQueueStore.hasLoaded && !!operatorQueueStore.error
+)
+// We have items, but the newest poll failed — the feed is stale, not wrong.
+const queueRefreshFailed = computed(
+  () => operatorQueueStore.hasLoaded && !!operatorQueueStore.error
 )
 
 // Health is admin-only; non-admins must not reach it even via deep link.
