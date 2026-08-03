@@ -266,12 +266,10 @@ Store action (network.js/agents.js toggleAutonomy)
 PUT /api/agents/{name}/autonomy
     |
     v
-Backend updates agent_ownership.autonomy_enabled
-    |
-    +-- Enable/disable all schedules for agent
-    |
+Backend updates agent_ownership.autonomy_enabled  (#1945: the ONLY write —
+    |                                                  per-schedule `enabled` is untouched)
     v
-Response: { enabled, schedules_updated }
+Response: { autonomy_enabled, total_schedules, enabled_schedules, message }
     |
     v
 Update local state (reactive)
@@ -290,8 +288,9 @@ Response: {
   status: "updated",
   agent_name: "my-agent",
   autonomy_enabled: true,
-  schedules_updated: 3,
-  message: "Autonomy enabled. 3 schedule(s) updated."
+  total_schedules: 3,
+  enabled_schedules: 2,
+  message: "Autonomy enabled. 2 of 3 schedule(s) will run; per-schedule settings unchanged."
 }
 ```
 
