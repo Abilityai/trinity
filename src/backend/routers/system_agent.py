@@ -98,7 +98,15 @@ async def get_system_agent_status(
                 if response.status_code == 200:
                     result["health"] = response.json()
         except Exception as e:
-            result["health_error"] = str(e)
+            # py/stack-trace-exposure (CodeQL alert #231, #1917 — the PR #1912
+            # pattern): an httpx failure here names the internal container host.
+            logger.warning(
+                f"System agent health probe failed: {e}", exc_info=True
+            )
+            result["health_error"] = (
+                f"health probe failed ({e.__class__.__name__} — "
+                f"details in backend logs)"
+            )
 
     return result
 
@@ -165,7 +173,11 @@ async def reinitialize_system_agent(
             else:
                 errors.append(f"Workspace cleanup warning: {cleanup_result.output.decode()}")
         except Exception as e:
-            errors.append(f"Workspace cleanup error: {str(e)}")
+            logger.warning(f"System agent workspace cleanup failed: {e}", exc_info=True)
+            errors.append(
+                f"Workspace cleanup error ({e.__class__.__name__} — "
+                f"details in backend logs)"
+            )
 
         # Step 3: Container is already running from step 2
         steps_completed.append("started")
@@ -183,7 +195,11 @@ async def reinitialize_system_agent(
             else:
                 errors.append(f"Template copy warning: {copy_result.output.decode()}")
         except Exception as e:
-            errors.append(f"Template copy error: {str(e)}")
+            logger.warning(f"System agent template copy failed: {e}", exc_info=True)
+            errors.append(
+                f"Template copy error ({e.__class__.__name__} — "
+                f"details in backend logs)"
+            )
 
         # NOTE: Trinity platform instructions are now injected at runtime via
         # --append-system-prompt on every chat/task request (Issue #136).
@@ -200,7 +216,10 @@ async def reinitialize_system_agent(
         logger.error(f"Failed to re-initialize system agent: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to re-initialize system agent: {str(e)}"
+            detail=(
+                f"Failed to re-initialize system agent "
+                f"({e.__class__.__name__} — details in backend logs)"
+            )
         )
 
 
@@ -275,7 +294,10 @@ async def restart_system_agent(
         logger.error(f"Failed to restart system agent: {e}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to restart system agent: {str(e)}"
+            detail=(
+                f"Failed to restart system agent "
+                f"({e.__class__.__name__} — details in backend logs)"
+            )
         )
 
 
@@ -532,7 +554,11 @@ async def system_agent_terminal(
         try:
             await websocket.send_text(json.dumps({
                 "type": "error",
-                "message": str(e)
+                # py/stack-trace-exposure (#1917): the frame reaches a browser.
+                "message": (
+                    f"terminal session error ({e.__class__.__name__} — "
+                    f"details in backend logs)"
+                ),
             }))
         except:
             pass

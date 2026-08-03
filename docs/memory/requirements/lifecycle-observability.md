@@ -303,7 +303,7 @@ endpoint — reports flow agent → MCP → backend.
   the retention sweep. Dual-track migration (SQLite `migrations.py` + Alembic `0006`).
 - **FR-3 — Backend API** (access control mirrors `/api/executions`): self-gated `POST
   /api/agents/{name}/reports` (agent-scoped key must equal the path agent; payload capped at
-  256 KB → 413; fields strictly validated), `GET /api/agents/{name}/reports` (metadata only),
+  5 MiB → 413; fields strictly validated), `GET /api/agents/{name}/reports` (metadata only),
   `GET /api/reports` (fleet, accessible-agent filtered; `agent`/`report_type`/`hours`/`search`),
   `GET /api/reports/stats` (total / by_type / agents KPI counts), `GET /api/reports/{id}`
   (full payload; 404 on no-access), `DELETE /api/agents/{name}/reports/{id}` (owner; scoped by
@@ -317,6 +317,80 @@ endpoint — reports flow agent → MCP → backend.
   the JSON viewer on mismatch. List shows metadata; full payload lazy-loads on expand.
 - **FR-6 — Retention**: cleanup sweep deletes `agent_reports` older than
   `agent_reports_retention_days` (default 90; `0` disables), chunked like the #772 sweeps.
+- **FR-8 — Agent read-back** (#1538, epic #1534): MCP `list_reports` (metadata; filters
+  `agent_name`/`report_type`/`hours`/`search`, paged) and `get_report` (full payload by id)
+  over the **existing** FR-3 endpoints — no new endpoint, no new tenant-boundary logic. The
+  MCP layer adds the one gate the backend structurally cannot: an agent-scoped key resolves to
+  its **owner**, so the backend scopes reads to everything the owner sees; the tool narrows a
+  broad listing to `{self} ∪ permitted` (the #1104 operator-queue rule) and re-checks the
+  owning agent on `get_report`. A denied `get_report` returns the backend's own
+  `Report not found` shape, so the deliberate 404-not-403 id-privacy choice (FR-3) is not
+  widened for agent keys. Closes the write-only loop: an agent can see what it already filed
+  and continue a series rather than duplicate or contradict it. The FR-7 prompt block points
+  at it, so read-back is discoverable in the same breath as publishing.
+- **FR-9 — Search & filter, per-agent parity** (#1539, epic #1534): the per-agent list
+  (`GET /api/agents/{name}/reports`) gains `hours` + `search`, matching the fleet list it
+  had drifted from — the Agent Detail Reports tab was a flat unfilterable list, and any
+  caller scoping to one agent (including FR-8's `list_reports`) had both filters silently
+  dropped. Both routes build their WHERE through the SAME `_fleet_conditions`, with one
+  parameterized difference: `search` matches `agent_name` on the fleet list (that is how
+  you find "everything scout published") but NOT on a single-agent list, where every row
+  carries that name and a matching term would return the whole history looking like search
+  was ignored. `hours` is whitelist-validated (`_VALID_HOURS`) on both, falling back to the
+  7-day default rather than erroring so an old client keeps working. UI: the same filter
+  bar as the fleet view minus the agent picker, with the empty state distinguishing "no
+  reports yet" from "no reports match these filters". **Payload contents are deliberately
+  NOT searched** — a `LIKE` over a multi-MiB TEXT blob with no index degrades exactly as the
+  feature succeeds; an FTS answer belongs with #1537's storage rework.
+- **FR-10 — Large payloads: raised ceiling + row windowing** (#1537, epic #1534):
+  `REPORT_PAYLOAD_MAX_BYTES` 256 KiB → **5 MiB**, and `GET /api/reports/{id}/rows`
+  (`offset`/`limit`, default 100, max 1000) returns a WINDOW of a `table` payload —
+  columns once, a slice of rows, and the true `total` — so expanding a card never ships
+  the whole blob. The frontend fetches `table` reports through it (branching on the
+  `display_hint` already in the summary, so no extra request decides) with a
+  "Showing N of M · Load more" footer; every other hint is a bounded document and still
+  fetches whole. Create gains a Content-Length pre-check that refuses an oversized body on
+  the header before the parsed payload is re-serialized; the exact byte check still
+  enforces. Non-tabular payloads answer **400** on the rows route (no row axis to slice)
+  and no-access answers **404**, matching `GET /reports/{id}` so an id stays unprobeable.
+  **Storage is unchanged — single TEXT blob, no migration.** That is a measured decision,
+  not a deferral by default: on a live fleet the existing reports averaged 201 bytes and
+  the largest was 683, so an off-row rows table would have been a schema commitment made
+  against a hypothetical. The honest residual: the row slice happens in Python after the
+  whole blob is read, so it bounds the RESPONSE, not the read — moving the slice into SQL
+  requires the off-row model, and the trigger for that should be a payload distribution
+  that actually approaches this ceiling.
+- **FR-11 — Export to .xlsx / .pdf** (#1536, epic #1534):
+  `GET /api/reports/{id}/export?format=xlsx|pdf` renders a stored report as a real
+  spreadsheet (cells, typed values, `{columns, rows}` honouring both positional and
+  column-keyed rows) or a formatted PDF (table stays a table, markdown stays prose).
+  Builders live in `services/report_export.py` as pure `(payload, hint, title) -> bytes`
+  functions; the router owns access, format validation and headers.
+  **Shape mismatch degrades, never 500s**: `kpi` → label/value/unit sheet, `timeline` →
+  event columns, anything unrecognized → pretty-printed JSON in one cell. Access reuses the
+  detail route's **404-not-403**, so an export URL cannot become the existence oracle that
+  route refuses to be; `Content-Disposition` is built from a sanitized title (quotes,
+  newlines and separators stripped, not escaped) and carries `X-Content-Type-Options:
+  nosniff` like the FILES-001 download. PDF caps at `PDF_MAX_ROWS` (2000) **with a visible
+  note** pointing at the spreadsheet — a 12,000-row PDF is not a document anyone reads.
+  Agent-authored text is escaped before reportlab parses its mini-HTML dialect.
+  **Dependencies** (`openpyxl`, `reportlab`) are pure-Python wheels — no system libraries,
+  so the image build is otherwise unchanged (WeasyPrint was rejected for exactly that
+  reason). They are imported **lazily**, so an instance that upgrades code without
+  rebuilding the image (#1814) gets **503 with a rebuild hint** on that one endpoint
+  instead of an import error taking the whole reports router down.
+- **FR-7 — Discoverability via the platform prompt** (#1535, epic #1534): `PLATFORM_INSTRUCTIONS`
+  carries a "Publishing Reports" block, so reporting is a default fleet behaviour instead of
+  something only agents whose own CLAUDE.md mentions it ever do. Documents the call, when to
+  reach for it (results a human re-reads: scheduled-run findings, batch summaries, KPI
+  snapshots), the payload shape per `display_hint` — the shapes FR-5's renderers dispatch on,
+  since a mismatch fails silently as a raw-JSON fallback — the aggregate-before-publishing
+  expectation given the FR-3 cap, and the reports-are-one-way boundary against §26's operator
+  queue. Runtime-aware for free via `_adapt_instructions_for_runtime` (#1187: Codex gets bare
+  `report`, not `mcp__trinity__report`), and the Codex orientation note lists the tool.
+  Additive — templates that already instruct reporting are unaffected. Budget: the block ships
+  on every turn of every agent, so it is capped (~1.3 KB) and CI-pinned to the MCP tool's
+  `display_hint` enum and the renderers' payload keys, which is where silent drift would live.
 
 **Deferred**: effect-guard dedup on `report()` for at-least-once pull-mode re-delivery
 (#1084/Epic #1045); audit-log entry on write; per-report sharing distinct from agent access.
