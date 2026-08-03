@@ -532,15 +532,14 @@ def test_a13_exact_cutoff_row_is_not_expired(ops, monkeypatch):
     class _FrozenDatetime(datetime):
         @classmethod
         def now(cls, tz=None):
-            return frozen if tz else frozen.replace(tzinfo=None)
+            # `queue.py` calls `datetime.now(timezone.utc)` at both of its sites,
+            # so the bare-call path is unreachable. Trip rather than model it:
+            # a naive return would need local-time semantics this double does
+            # not implement, and silently wrong is worse than loudly absent.
+            assert tz is not None, "double models only datetime.now(tz)"
+            return frozen
 
     monkeypatch.setattr(queue_mod, "datetime", _FrozenDatetime)
-    # Patch-took-effect guard: if `queue.py` ever aliases its datetime import,
-    # `setattr` silently binds a name nothing reads and the test drifts back to
-    # sampling two clocks. That degrades to the #1909 flake, not to a false
-    # pass — but a flake is exactly what this asserts we no longer have, so
-    # fail loudly here instead of intermittently three months from now.
-    assert queue_mod.datetime.now(timezone.utc) == frozen
 
     exact = (frozen - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S") + ".000000Z"
     older = _iso(frozen - timedelta(hours=24, seconds=5))
@@ -552,6 +551,26 @@ def test_a13_exact_cutoff_row_is_not_expired(ops, monkeypatch):
     assert status_of("a13-exact") == "queued"
     assert status_of("a13-older") == "failed"
     assert "24" in (column_of("a13-older", "error") or "")
+
+    # Prove the frozen clock is LOAD-BEARING, not merely installed. Advancing it
+    # an hour must move the threshold past `a13-exact`, expiring the row the
+    # assertions above just showed surviving. If a refactor stops the threshold
+    # reading this module global — the likely one being a move to `iso_cutoff()`,
+    # which Invariant #16 pushes ISO-Z cutoff comparisons toward — both calls
+    # observe the same real instant, the row survives, and this fires.
+    #
+    # It replaces an `assert queue_mod.datetime.now(...) == frozen` that could
+    # not fail: that asserted the name just `setattr`'d returns what it was set
+    # to, never that the implementation READS it. Verified by mutation — under a
+    # threshold that bypasses the patched name, the old guard passed with 0/40
+    # natural failures (silent, flake fully restored at 20/20 forced) while this
+    # one fails 30/30 on natural runs, with 0/30 false positives on correct code.
+    # Residual: if the wall second happens to roll over between the two calls,
+    # a bypassing implementation expires the row anyway and this passes — ~0.3%,
+    # unobserved in 30 runs, and it costs a detection, never a false failure.
+    frozen = frozen + timedelta(hours=1)
+    assert ops.expire_stale_queued(24) == 1
+    assert status_of("a13-exact") == "failed"
 
 
 @pytest.mark.parametrize(
