@@ -11,9 +11,10 @@ only (schedules), so the two must be decoupled.
 Two guards here, both of which fail against the pre-#1557 source:
 
 1. **Structural** — ``autonomy.py`` no longer writes the breaker, and still
-   disables schedules (the real, and only, proactive-suppression mechanism).
-   This is the direct regression guard: the old code contained
-   ``force_circuit_dormant`` and the test would fail on it.
+   writes the agent-level autonomy gate (since #1945 that flag alone is the
+   proactive-suppression mechanism; the old per-schedule fan-out was itself a
+   bug and is now forbidden here). This is the direct regression guard: the old
+   code contained ``force_circuit_dormant`` and the test would fail on it.
 
 2. **Message honesty** — the fast-fail reason now names *which* breaker fired
    (transport = unreachable, dispatch = auth-dead) instead of a blanket
@@ -55,10 +56,21 @@ def test_autonomy_toggle_never_resets_the_circuit_either():
     assert "reset_circuit" not in _AUTONOMY_SRC
 
 
-def test_autonomy_still_suppresses_proactive_work_via_schedules():
-    """Guard against over-deletion: pausing must still disable schedules — that
-    is how proactive work is actually stopped, independent of the breaker."""
-    assert "set_schedule_enabled" in _AUTONOMY_SRC
+def test_autonomy_still_suppresses_proactive_work_via_the_agent_gate():
+    """Guard against over-deletion: pausing must still stop proactive work.
+
+    #1945 moved the mechanism rather than removing it — the toggle now writes
+    ONLY the agent-level flag, and the scheduler's cron-fire gate
+    (``src/scheduler/service.py::_execute_schedule_with_lock``) reads it. The
+    old fan-out over ``set_schedule_enabled`` was the bug: it erased
+    per-schedule owner intent in both directions. So the surviving guard is
+    that the gate is written and the fan-out is not reintroduced.
+    """
+    assert "set_autonomy_enabled" in _AUTONOMY_SRC
+    assert "db.set_schedule_enabled" not in _AUTONOMY_SRC, (
+        "autonomy must not rewrite per-schedule `enabled` — that erases owner "
+        "intent in both directions (#1945)"
+    )
 
 
 # ---------------------------------------------------------------------------

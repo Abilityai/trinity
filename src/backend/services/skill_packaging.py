@@ -317,3 +317,39 @@ def compute_prune(
     if len(stale) > PRUNE_CAP_PER_SKILL:
         return stale[:PRUNE_CAP_PER_SKILL], True
     return stale, False
+
+
+def compute_removal(
+    previous_manifest: Optional[List[str]], skill_name: str
+) -> Tuple[List[str], bool]:
+    """Every path a prior injection wrote, for removal-on-unassign (ent#236).
+
+    The unassign counterpart of :func:`compute_prune`, and deliberately built
+    ON it rather than beside it: "delete everything the platform wrote" is
+    exactly "prune against an empty new manifest", so the confinement,
+    ``..``-rejection, and cap live in ONE place and cannot drift apart. The
+    caller deletes only these paths, so agent-authored files and runtime
+    artifacts inside the skill directory survive by construction — the same
+    guarantee prune states.
+
+    The generated ``.trinity-skill.json`` is appended LAST (prune filters it
+    out, because a re-injection rewrites it). Ordering matters for the same
+    reason ``build_injection_tar`` writes it last: while it exists the package
+    is still platform-managed, so an interrupted removal is resumable.
+
+    The meta is included even when the manifest is missing or unusable. Callers
+    only reach this function for a package that HAS a meta (an unmanaged
+    directory is filtered out one level up), so the meta file provably exists
+    and is the marker that makes the directory removable at all — leaving it
+    behind would keep the skill in every future reconcile's inventory with
+    nothing left to delete, i.e. an unremovable package retried on every agent
+    start. The one exception is truncation: there, files definitely remain, and
+    dropping the meta would strand them as unmanaged orphans no later prune
+    could reach, so the marker stays and the caller warns.
+
+    Returns ``(paths_to_delete, truncated)``.
+    """
+    paths, truncated = compute_prune(previous_manifest, [], skill_name)
+    if not truncated:
+        paths = paths + [f".claude/skills/{skill_name}/{META_FILENAME}"]
+    return paths, truncated

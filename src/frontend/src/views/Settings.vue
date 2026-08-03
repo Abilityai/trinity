@@ -1861,8 +1861,10 @@ Example:
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">GitHub Templates</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
                 Configure which GitHub repositories appear as agent templates.
+                <!-- #1931: "Using defaults" is a lie about an empty set — the
+                     shipped default list is now []. Say what is actually true. -->
                 <span v-if="githubTemplatesSource === 'defaults'" class="inline-flex items-center ml-2 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300">
-                  Using defaults
+                  No defaults configured
                 </span>
                 <span v-else class="inline-flex items-center ml-2 px-2 py-0.5 rounded-full text-xs font-medium bg-action-primary-100 text-action-primary-700 dark:bg-action-primary-900 dark:text-action-primary-300">
                   Custom config
@@ -1924,9 +1926,16 @@ Example:
                           <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-action-primary-600 mx-auto"></div>
                         </td>
                       </tr>
+                      <!-- #1931: dropped "or reset to defaults" — the Reset
+                           button is :disabled in exactly this state, and the
+                           shipped default list is now empty, so resetting
+                           would land right back here. Naming an action the
+                           user cannot take is the dead end this issue is
+                           about, one click from the Library that sends them
+                           here. -->
                       <tr v-else-if="githubTemplates.length === 0">
                         <td colspan="3" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
-                          No templates configured. Add a GitHub repo above or reset to defaults.
+                          No GitHub templates configured. Trinity ships no defaults — add an <span class="font-mono">owner/repo</span> above to publish it to the Library.
                         </td>
                       </tr>
                       <tr v-else v-for="(tmpl, index) in githubTemplates" :key="tmpl.github_repo" class="hover:bg-gray-50 dark:hover:bg-gray-700">
@@ -2133,6 +2142,10 @@ Example:
                 <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                   Use format: <code>github.com/owner/repo</code> or <code>https://github.com/owner/repo</code>
                 </p>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  Public repositories need no credentials. A <strong>private</strong> repository
+                  requires a GitHub PAT — set one in the GitHub PAT section above.
+                </p>
               </div>
 
               <!-- Branch -->
@@ -2168,6 +2181,94 @@ Example:
                   <span v-if="skillsLibraryStatus.last_sync" class="text-gray-500 dark:text-gray-400">
                     Last synced: {{ formatDate(skillsLibraryStatus.last_sync) }}
                   </span>
+                </div>
+              </div>
+
+              <!-- Sync failure (ent#236) — a failing auto-sync must be visible
+                   here, not only in the backend log. -->
+              <div
+                v-if="skillsLibraryStatus.last_sync_status === 'failed'"
+                class="bg-status-danger-50 dark:bg-status-danger-900/20 border border-status-danger-200 dark:border-status-danger-800 rounded-lg p-3"
+              >
+                <p class="text-sm font-medium text-status-danger-800 dark:text-status-danger-300">
+                  Last sync failed
+                </p>
+                <p v-if="skillsLibraryStatus.last_sync_error" class="mt-1 text-xs text-status-danger-700 dark:text-status-danger-400 break-all">
+                  {{ skillsLibraryStatus.last_sync_error }}
+                </p>
+              </div>
+
+              <!-- Lifecycle automation (ent#236) -->
+              <div class="border-t border-gray-200 dark:border-gray-700 pt-4 space-y-3">
+                <h3 class="text-sm font-medium text-gray-900 dark:text-white">Automation</h3>
+
+                <label class="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    v-model="skillsAutomation.auto_sync_enabled"
+                    class="mt-0.5 h-4 w-4 rounded border-gray-300 dark:border-gray-600 text-action-primary-600 focus:ring-action-primary-500"
+                  />
+                  <span class="text-sm">
+                    <span class="font-medium text-gray-700 dark:text-gray-300">Scheduled auto-sync</span>
+                    <span class="block text-xs text-gray-500 dark:text-gray-400">
+                      Pull the library on a schedule instead of clicking Sync Library.
+                    </span>
+                  </span>
+                </label>
+
+                <div v-if="skillsAutomation.auto_sync_enabled" class="pl-7">
+                  <label for="skills-sync-interval" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    Interval (seconds)
+                  </label>
+                  <input
+                    type="number"
+                    id="skills-sync-interval"
+                    v-model.number="skillsAutomation.auto_sync_interval_seconds"
+                    :min="skillsAutomation.interval_min"
+                    :max="skillsAutomation.interval_max"
+                    class="mt-1 block w-40 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
+                  />
+                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    Between {{ skillsAutomation.interval_min }} and {{ skillsAutomation.interval_max }} seconds.
+                  </p>
+                </div>
+
+                <label class="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    v-model="skillsAutomation.auto_reinject_enabled"
+                    class="mt-0.5 h-4 w-4 rounded border-gray-300 dark:border-gray-600 text-action-primary-600 focus:ring-action-primary-500"
+                  />
+                  <span class="text-sm">
+                    <span class="font-medium text-gray-700 dark:text-gray-300">Re-inject across the fleet after a sync</span>
+                    <span class="block text-xs text-gray-500 dark:text-gray-400">
+                      When the library commit changes, push updated skills to running agents.
+                      Stopped agents update on their next start.
+                    </span>
+                  </span>
+                </label>
+
+                <!-- Last fleet run -->
+                <div
+                  v-if="skillsAutomation.last_fleet_reinject"
+                  class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3 text-xs text-gray-600 dark:text-gray-300"
+                >
+                  <div class="font-medium text-gray-700 dark:text-gray-200">Last fleet re-inject</div>
+                  <div class="mt-1">
+                    {{ formatDate(skillsAutomation.last_fleet_reinject.finished_at) }} —
+                    {{ skillsAutomation.last_fleet_reinject.agents_injected }} updated,
+                    {{ skillsAutomation.last_fleet_reinject.agents_skipped }} skipped,
+                    <span :class="skillsAutomation.last_fleet_reinject.agents_failed > 0 ? 'text-status-danger-600 dark:text-status-danger-400 font-medium' : ''">
+                      {{ skillsAutomation.last_fleet_reinject.agents_failed }} failed
+                    </span>
+                    of {{ skillsAutomation.last_fleet_reinject.agents_total }}
+                  </div>
+                  <div
+                    v-if="skillsAutomation.last_fleet_reinject.agents_failed > 0"
+                    class="mt-1 text-status-danger-600 dark:text-status-danger-400 break-all"
+                  >
+                    Affected: {{ Object.keys(skillsAutomation.last_fleet_reinject.failures || {}).join(', ') }}
+                  </div>
                 </div>
               </div>
 
@@ -2822,10 +2923,23 @@ const skillsLibraryStatus = ref({
   cloned: false,
   skill_count: 0,
   commit_sha: null,
-  last_sync: null
+  last_sync: null,
+  last_sync_status: null,
+  last_sync_error: null
 })
 const syncingSkillsLibrary = ref(false)
 const savingSkillsLibrary = ref(false)
+
+// Skills library lifecycle automation (ent#236). Defaults mirror the backend's
+// (OFF / 3600s) so the panel renders correctly before the fetch resolves.
+const skillsAutomation = ref({
+  auto_sync_enabled: false,
+  auto_sync_interval_seconds: 3600,
+  auto_reinject_enabled: false,
+  interval_min: 300,
+  interval_max: 86400,
+  last_fleet_reinject: null
+})
 
 // Default Avatars state (AVATAR-003)
 const generatingDefaultAvatars = ref(false)
@@ -3862,6 +3976,17 @@ async function loadSkillsLibrarySettings() {
   } catch (e) {
     console.error('Failed to load skills library status:', e)
   }
+
+  // ent#236 automation config — a separate ADMIN-only endpoint, so its failure
+  // must not blank the library status above (which any authed user can read).
+  try {
+    const automation = await axios.get('/api/settings/skills-library', {
+      headers: authStore.authHeader
+    })
+    skillsAutomation.value = { ...skillsAutomation.value, ...automation.data }
+  } catch (e) {
+    console.error('Failed to load skills automation settings:', e)
+  }
 }
 
 async function saveSkillsLibrarySettings() {
@@ -3882,6 +4007,14 @@ async function saveSkillsLibrarySettings() {
     } else {
       await settingsStore.deleteSetting('skills_library_branch')
     }
+
+    // ent#236 automation — its own validated endpoint (the generic settings PUT
+    // rejects these keys), so a bad interval surfaces as a real 400 here.
+    await axios.put('/api/settings/skills-library', {
+      auto_sync_enabled: skillsAutomation.value.auto_sync_enabled,
+      auto_sync_interval_seconds: skillsAutomation.value.auto_sync_interval_seconds,
+      auto_reinject_enabled: skillsAutomation.value.auto_reinject_enabled
+    }, { headers: authStore.authHeader })
 
     showSuccess.value = true
     setTimeout(() => {
@@ -3915,6 +4048,11 @@ async function syncSkillsLibrary() {
       showSuccess.value = false
     }, 3000)
   } catch (e) {
+    // The settings save above already set showSuccess; a failed sync must clear
+    // it, or the panel shows "Settings saved successfully!" and "Clone failed"
+    // at the same time. Both are individually true, which is exactly why the
+    // pair is untrustworthy to read.
+    showSuccess.value = false
     error.value = e.response?.data?.detail || 'Failed to sync skills library'
   } finally {
     syncingSkillsLibrary.value = false

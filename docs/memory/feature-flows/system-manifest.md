@@ -415,6 +415,26 @@ def create_schedules(
     """
 ```
 
+**Name-match skip (trinity-enterprise#89).** `deploy_manifest` creates each agent
+(`create_agent_internal`) and calls `create_schedules` **afterwards**. Since ent#89,
+creation itself materializes the *template's* declared `schedules:` block — so this
+function is now the **second** schedule producer for the same agent, and a manifest
+declaring a name the template also declares would insert a duplicate row (there is no
+`UNIQUE(agent_name, name)` index on `agent_schedules`, and adding one is a dual-track
+schema change that would fail on installs already holding duplicates).
+
+It therefore reads the agent's existing schedule names once per agent and skips any
+manifest entry whose `name` already exists — the same read-then-skip the creation-time
+materializer uses — adding each created name to the set so a manifest that repeats a
+name within its own block also yields one row. The skip **does not overwrite**: the
+template's row survives, including its `enabled` value (manifest entries default
+`enabled=True`, template entries default `False`). An unreadable existing set **fails
+open** and creates unfiltered — dropping a manifest's schedules would be worse than the
+duplicate the guard prevents.
+
+Full flow: [scheduling.md](scheduling.md#1c-template-declared-schedules-at-creation-trinity-enterprise89).
+Coverage: `tests/unit/test_ent89_manifest_no_duplicate.py`.
+
 #### configure_tags() (Lines 429-480) - ORG-001 Phase 4
 ```python
 def configure_tags(
@@ -2063,9 +2083,26 @@ installs must not accumulate failing crons), no `prompt:` (never mutates the
 platform-wide `trinity_prompt`). Content is data — ent#137's curated public
 fleet replaces the manifest without touching the mechanism.
 
+**Other bundled manifests are inert** — `system_seed_service.BUNDLED_MANIFEST_PATH`
+is hard-coded to `default-system.yaml` and nothing globs the directory, so
+adding a manifest to `config/manifests/` ships **data, not a trigger**. #1931
+added `vc-due-diligence.yaml` (the eleven `hidden: true` `dd-*` demo templates,
+~40 GB of declared memory limits) on exactly that basis: it can only be
+incurred by a deliberate authenticated `POST /api/systems/deploy`.
+
 **Tests**: `tests/unit/test_ent124_default_system_seed.py` (includes
 executor's-own-parser validation of the real bundled manifest + in-tree
-template existence — learnings 2026-07-23 blank-agent trap).
+template existence — learnings 2026-07-23 blank-agent trap). #1931 widened the
+two on-disk checks (`local:` → `template.yaml` + `CLAUDE.md`; declared
+`commands:` → `.claude/commands/<n>.md`) from `default-system.yaml` to a
+**glob** over `config/manifests/*.yaml`, parametrised so a failure names the
+manifest — they are properties of any bundled manifest, and this is what
+auto-enrols the next one. `tests/unit/test_1931_manifest_roster.py` adds
+`validate_manifest` over the same glob plus the roster check: a template's
+CLAUDE.md may name its collaborators literally (`acme-scout`,
+`research-network-researcher`, `vc-due-diligence-dd-founder`), and since
+deployed names are `f"{manifest.name}-{short}"`, a renamed system or short name
+deploys a healthy fleet that cannot talk to itself.
 
 ## Revision History
 

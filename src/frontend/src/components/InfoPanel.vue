@@ -5,7 +5,21 @@
       <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500"></div>
     </div>
 
-    <!-- No Template State -->
+    <!-- Failed State (#1926) — a failed /info fetch used to be dressed up as
+         has_template:false, i.e. "This agent was created without a template",
+         which is a claim about the agent rather than about the request. -->
+    <LoadFailed
+      v-else-if="loadError"
+      title="Couldn't load template info"
+      :message="agentStatus === 'running'
+        ? 'The agent did not return its template information. Try again.'
+        : 'The agent is not running, so its template information is unavailable. Start the agent and try again.'"
+      :detail="loadError"
+      :retrying="loading"
+      @retry="loadTemplateInfo"
+    />
+
+    <!-- No Template State — the agent answered, and has no template -->
     <div v-else-if="!templateInfo?.has_template" class="text-center py-8">
       <div class="mx-auto w-16 h-16 bg-gray-100 dark:bg-gray-700 rounded-full flex items-center justify-center mb-4">
         <svg class="w-8 h-8 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -22,7 +36,7 @@
     </div>
 
     <!-- Template Info Display -->
-    <div v-else>
+    <div v-else class="space-y-6">
       <!-- Header Section -->
       <div class="bg-gradient-to-r from-action-primary-50 to-accent-purple-50 dark:from-action-primary-900/30 dark:to-accent-purple-900/30 rounded-lg p-6 border border-action-primary-100 dark:border-action-primary-800">
         <div class="flex items-start justify-between">
@@ -294,6 +308,8 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
+import LoadFailed from './LoadFailed.vue'
+import { apiErrorMessage } from '../utils/apiError'
 
 const props = defineProps({
   agentName: {
@@ -311,6 +327,9 @@ const emit = defineEmits(['item-click'])
 const agentsStore = useAgentsStore()
 const templateInfo = ref(null)
 const loading = ref(true)
+// #1926: "the request failed" is a different state from "the agent has no
+// template" — the old code collapsed the first into the second.
+const loadError = ref('')
 
 // #1107: whether any technical-metadata section has content (gates the
 // collapsible "Technical details" disclosure).
@@ -331,15 +350,17 @@ const hasTechnicalDetails = computed(() => {
 
 const loadTemplateInfo = async () => {
   loading.value = true
+  loadError.value = ''
   try {
     const response = await agentsStore.getAgentInfo(props.agentName)
     templateInfo.value = response
+    loadError.value = ''
   } catch (error) {
     console.error('Failed to load template info:', error)
-    templateInfo.value = {
-      has_template: false,
-      message: 'Failed to load template information'
-    }
+    // Do NOT synthesize a has_template:false payload here — that renders the
+    // failure as the empty state (#1926). Keep the last good value (if any)
+    // and let the failed state own the surface.
+    loadError.value = apiErrorMessage(error, 'Request failed')
   } finally {
     loading.value = false
   }

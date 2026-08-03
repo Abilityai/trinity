@@ -565,6 +565,10 @@ class DatabaseManager:
         """Deactivate an agent's agent/connector-scoped MCP keys (#1811)."""
         return self._agent_ops.deactivate_agent_mcp_keys(agent_name)
 
+    def reconcile_spawn_key_id(self, agent_name: str, current_key_id: str) -> int:
+        """#1854: re-point a parent's spawned children at its current key id."""
+        return self._agent_ops.reconcile_spawn_key_id(agent_name, current_key_id)
+
     def purge_agent_ownership(self, agent_name: str):
         return self._agent_ops.purge_agent_ownership(agent_name)
 
@@ -1078,6 +1082,18 @@ class DatabaseManager:
     def get_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.get_agent_mcp_api_key(agent_name)
 
+    def list_active_agent_key_ids(self, agent_name: str):
+        """#1854: ids of the agent's ACTIVE scope='agent' keys (rotation capture)."""
+        return self._mcp_key_ops.list_active_agent_key_ids(agent_name)
+
+    def delete_superseded_agent_keys(self, agent_name: str, keep_id: str, key_ids):
+        """#1854: DELETE the named superseded scope='agent' rows (connector-safe)."""
+        return self._mcp_key_ops.delete_superseded_agent_keys(agent_name, keep_id, key_ids)
+
+    def find_mcp_key_by_hash(self, key_hash: str):
+        """#1854: metadata-only key lookup by SHA-256 hash (probe + drift predicate)."""
+        return self._mcp_key_ops.find_mcp_key_by_hash(key_hash)
+
     def set_agent_keys_active(self, agent_name: str, active: bool) -> int:
         """#1745: activate/deactivate an agent's per-agent MCP keys."""
         return self._mcp_key_ops.set_agent_keys_active(agent_name, active)
@@ -1204,6 +1220,7 @@ class DatabaseManager:
         source_channel: str = None,
         source_channel_chat_id: str = None,
         source_channel_thread: str = None,
+        source_channel_agent: str = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule)."""
         return self._schedule_ops.create_task_execution(
@@ -1220,6 +1237,9 @@ class DatabaseManager:
             source_channel=source_channel,
             source_channel_chat_id=source_channel_chat_id,
             source_channel_thread=source_channel_thread,
+            # ent#265: binding-agent for channel report-back (set only at the
+            # /task inheritance point; None for direct rows).
+            source_channel_agent=source_channel_agent,
         )
 
     def create_schedule_execution(
@@ -1349,6 +1369,36 @@ class DatabaseManager:
 
     def get_freeze_schedules_if_sync_failing(self, agent_name: str):
         return self._schedule_ops.get_freeze_schedules_if_sync_failing(agent_name)
+
+    def rebind_git_config(
+        self,
+        agent_name: str,
+        *,
+        new_github_repo: str,
+        expected_github_repo: str,
+        source_branch: str,
+    ):
+        return self._schedule_ops.rebind_git_config(
+            agent_name,
+            new_github_repo=new_github_repo,
+            expected_github_repo=expected_github_repo,
+            source_branch=source_branch,
+        )
+
+    def restore_git_config_binding(
+        self,
+        agent_name: str,
+        *,
+        github_repo: str,
+        source_branch: str,
+        auto_sync_enabled: bool,
+    ):
+        return self._schedule_ops.restore_git_config_binding(
+            agent_name,
+            github_repo=github_repo,
+            source_branch=source_branch,
+            auto_sync_enabled=auto_sync_enabled,
+        )
 
     def delete_git_config(self, agent_name: str):
         return self._schedule_ops.delete_git_config(agent_name)
@@ -2213,6 +2263,10 @@ class DatabaseManager:
     def get_agent_execution_stats(self, agent_name: str, hours: int = 24):
         return self._schedule_ops.get_agent_execution_stats(agent_name, hours)
 
+    def get_agent_last_execution_at(self, agent_name: str):
+        """#1854: all-time MAX(started_at) for the agent (MCP-key `stale` health)."""
+        return self._schedule_ops.get_agent_last_execution_at(agent_name)
+
     def get_schedule_analytics(self, schedule_id: str, hours: int,
                                 agent_name: str):
         return self._schedule_ops.get_schedule_analytics(
@@ -2366,6 +2420,15 @@ class DatabaseManager:
     def get_telegram_bot_token(self, agent_name):
         return self._telegram_channel_ops.get_decrypted_bot_token(agent_name)
 
+    def decrypt_telegram_bot_token(self, encrypted):
+        # ent#264: decrypt from a binding row already in hand (single binding
+        # read per turn in the adapter's indicate_processing).
+        return self._telegram_channel_ops.decrypt_bot_token(encrypted)
+
+    def set_telegram_progress_indicator(self, agent_name, enabled):
+        # ent#264: per-binding in-progress indicator toggle (default ON).
+        return self._telegram_channel_ops.set_progress_indicator_enabled(agent_name, enabled)
+
     def get_all_telegram_bindings(self):
         return self._telegram_channel_ops.get_all_bindings()
 
@@ -2393,6 +2456,11 @@ class DatabaseManager:
     def clear_telegram_verified_email(self, binding_id, telegram_user_id):
         return self._telegram_channel_ops.clear_verified_email(binding_id, telegram_user_id)
 
+    def get_telegram_chat_link(self, binding_id, telegram_user_id):
+        # ent#265: DM destination check for the completion reporter (a chat link
+        # proves the user cold-started this bot — consent-by-construction).
+        return self._telegram_channel_ops.get_chat_link(binding_id, telegram_user_id)
+
     def get_telegram_chat_link_by_verified_email(self, binding_id, email):
         """Reverse lookup: find chat link by verified email for proactive messaging (#321)."""
         return self._telegram_channel_ops.get_chat_link_by_verified_email(binding_id, email)
@@ -2408,8 +2476,19 @@ class DatabaseManager:
     def get_telegram_groups_for_agent(self, agent_name):
         return self._telegram_channel_ops.get_groups_for_agent(agent_name)
 
-    def update_telegram_group_config(self, group_config_id, trigger_mode=None, welcome_enabled=None, welcome_text=None):
-        return self._telegram_channel_ops.update_group_config(group_config_id, trigger_mode, welcome_enabled, welcome_text)
+    def update_telegram_group_config(
+        self, group_config_id, trigger_mode=None, welcome_enabled=None,
+        welcome_text=None, allow_proactive=None,
+    ):
+        # Keyword passthrough (ent#265 / eng M3): a positional append here risks a
+        # silent allow_proactive→welcome_text swap if the ops signature ever moves.
+        return self._telegram_channel_ops.update_group_config(
+            group_config_id,
+            trigger_mode=trigger_mode,
+            welcome_enabled=welcome_enabled,
+            welcome_text=welcome_text,
+            allow_proactive=allow_proactive,
+        )
 
     def deactivate_telegram_group_config(self, binding_id, chat_id):
         return self._telegram_channel_ops.deactivate_group_config(binding_id, chat_id)

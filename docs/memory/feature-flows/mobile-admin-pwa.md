@@ -39,6 +39,7 @@ Browser (/m)
 - **Manual PWA** (no vite-plugin-pwa): Service worker + manifest injected dynamically in `onMounted`, cleaned up in `onUnmounted`. Follows Sparky PWA reference pattern
 - **Dark-only**: Forces `dark` class on `<html>`, OLED-friendly `#111827` background
 - **401 handling**: `main.js` axios interceptor skips redirect to `/login` when on `/m`
+- **Restart All is a real upgrade path (#1860)**: `POST /api/ops/fleet/restart` routes each running agent through the canonical stop→`start_agent_internal` path, so it applies pending config drift and adopts a rebuilt base image (container ids change). A slow fleet can outlast the proxy timeout — the loop keeps running server-side and the outcome lands in the audit log (`fleet_restart`); a second tap while one is in flight gets 409 `fleet_restart_in_progress`. **#1919**: the response `summary` now carries `processed` + `stopped_early` (`"lease_lost_foreign"` when a concurrent caller took the lock mid-run and the loop stopped with a partial fleet — HTTP 200 no longer implies completion). The PWA toast reads only a generic message today and does not surface these fields — client-side follow-up
 
 ## Files
 

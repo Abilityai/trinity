@@ -18,6 +18,7 @@ from models import (
     CredentialInjectResponse,
     CredentialExportResponse,
     CredentialImportResponse,
+    CredentialRequirementsResponse,
 )
 from config import OAUTH_CONFIGS, BACKEND_URL
 from dependencies import get_current_user, require_admin, get_authorized_agent_by_name, get_owned_agent_by_name, reject_agent_principal
@@ -25,6 +26,8 @@ from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, get_agent_status_from_container
 from services.mcp_validator import validate_mcp_config, McpValidationError
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from services.rate_limiter import enforce as enforce_rate_limit
+from services import credential_requirements_service
 # Curated credential-path policy (#11) — widens the original exact allowlist
 # (#183/#590/#598) to a vetted set of credential file *types* while still
 # blocking anything executed/sourced at startup. Single source of truth, also
@@ -77,6 +80,90 @@ async def get_agent_credentials_status(
             status_code=503,
             detail=f"Failed to connect to agent: {str(e)}"
         )
+
+
+# ============================================================================
+# Guided Credential Setup (trinity-enterprise#127)
+# ============================================================================
+
+@router.get(
+    "/agents/{agent_name}/credential-requirements",
+    response_model=CredentialRequirementsResponse,
+)
+async def get_agent_credential_requirements(
+    request: Request,
+    # OWNER-ONLY and HUMAN-ONLY, deliberately stricter than the coarse
+    # `/credentials/status` above.
+    #
+    # `get_authorized_agent_by_name` resolves an agent-scoped MCP key to the
+    # OWNER USER carrying the owner's role — only *connector* principals are
+    # fenced — so under the read gate an agent's own injected
+    # `TRINITY_MCP_API_KEY` would reach this for every sibling its owner can
+    # access, and on the default admin-owned install that is the entire fleet
+    # including other users' agents. What it would disclose is a targeting map,
+    # not a status light: it names `STRIPE_SECRET_KEY` per agent and says which
+    # are populated (worth stealing) and which are empty (whose operator is
+    # about to paste one). A prompt-injected agent gets it with one curl.
+    #
+    # `/credentials/status` gets away with the read gate because it returns a
+    # COUNT and names zero variables. Every sibling route that names or writes
+    # credentials — inject, export, import — is already owner + human-only, and
+    # a read gate must equal the write gate it drives: a shared user cannot
+    # submit anyway (`injectCredentials` is owner-gated), so under the looser
+    # gate they would get a checklist of dead inputs whose only working function
+    # is disclosing which of the owner's secrets are missing.
+    #
+    # `get_owned_agent_by_name` also keeps Invariant #8 self-uniformity (uniform
+    # 404 for absent AND unowned) and closes ghost agents as a side effect.
+    agent_name: str = Depends(get_owned_agent_by_name),
+    current_user: User = Depends(get_current_user),
+):
+    """Which credentials this agent needs, and which are actually set.
+
+    Read-only, additive, and answers for a STOPPED agent too (200 with a
+    degraded body — never 4xx/5xx for an expected state, mirroring
+    `/credentials/status`'s `agent_not_running`).
+    """
+    reject_agent_principal(current_user)
+
+    # Every uncached call spawns a container process against the backend's
+    # shared 4-slot Docker pool, so this read needs backpressure the
+    # compatibility report never did. The service adds a cross-worker
+    # single-flight lock and a short generation-checked cache behind this.
+    enforce_rate_limit(
+        f"credreq:{current_user.username}:{agent_name}",
+        limit=10,
+        window_seconds=60,
+        detail="Too many credential-requirements refreshes.",
+    )
+
+    try:
+        report = await credential_requirements_service.get_report(agent_name)
+    except credential_requirements_service.CredentialRequirementsBusy as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    # SEC-001: every sibling credential route logs one, and silence on the route
+    # that enumerates an agent's credential inventory reads as an oversight.
+    # COUNTS ONLY — never the variable names.
+    await platform_audit_service.log(
+        event_type=AuditEventType.CREDENTIALS,
+        event_action="requirements_read",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={
+            "state": report["state"],
+            "requirements_source": report["requirements_source"],
+            "total": report["summary"]["total"],
+            "blocking": report["summary"]["blocking"],
+        },
+    )
+
+    return CredentialRequirementsResponse(**report)
 
 
 # ============================================================================
@@ -289,6 +376,14 @@ async def inject_credentials(
         details={"files": list(request_body.files.keys()) + list(request_body.files_b64.keys())},
     )
 
+    # ent#127: the checklist's own write path lands here, and its refetch is
+    # immediate. The cached report is per-worker while the POST lands on
+    # whichever worker served it, so invalidation bumps a Redis generation too —
+    # otherwise the other worker keeps reporting "missing" for a variable the
+    # operator just set, which is the single most confusing outcome this
+    # feature could produce.
+    credential_requirements_service.invalidate_report_cache(agent_name)
+
     all_paths = list(request_body.files.keys()) + list(request_body.files_b64.keys())
     return CredentialInjectResponse(
         status="success",
@@ -402,6 +497,9 @@ async def import_credentials(
     try:
         encryption_service = get_credential_encryption_service()
         files = await encryption_service.import_to_agent(agent_name)
+
+        # ent#127: the other `.env` writer.
+        credential_requirements_service.invalidate_report_cache(agent_name)
 
         # SEC-001: audit credential import
         await platform_audit_service.log(

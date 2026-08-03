@@ -62,4 +62,10 @@ paths = [
 regexes = [
   '''your-api-key''',                # CLAUDE.md-sanctioned placeholders
   '''your-domain\.com''',
+  '''YOUR_TOKEN''',                  # same class: the sanctioned `Authorization: Bearer YOUR_TOKEN`
+                                     # placeholder in the config/manifests/*.yaml deploy examples
+                                     # (pre-existing convention — research-network.yaml). Trips the
+                                     # default curl-auth-header rule. A `regexes` entry, NOT `paths`:
+                                     # per the pre-scan note above a path block would stop
+                                     # config/manifests being scanned for REAL secrets.
 ]

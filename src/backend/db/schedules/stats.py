@@ -11,6 +11,25 @@ from ._common import _norm_ts
 class ScheduleStatsMixin:
     """Execution stat rollups + fleet queries."""
 
+    def get_agent_last_execution_at(self, agent_name: str) -> Optional[str]:
+        """All-time ``MAX(started_at)`` for the agent, or None (#1854).
+
+        Backs the `stale` MCP-key health state: a key whose ``last_used_at``
+        materially predates the agent's most recent execution is the motivating
+        incident's exact signature ("the agent-scoped key sat unused for
+        months") — non-NULL but old, which a binary used/unused predicate
+        renders as green. Deliberately unwindowed: the comparison is
+        key-vs-agent, not "in the last N hours".
+        """
+        with get_engine().connect() as conn:
+            return conn.execute(
+                text(
+                    "SELECT MAX(started_at) FROM schedule_executions "
+                    "WHERE agent_name = :agent_name"
+                ),
+                {"agent_name": agent_name},
+            ).scalar()
+
     def get_agent_execution_stats(self, agent_name: str, hours: int = 24) -> Dict:
         """Get execution statistics for a single agent.
 

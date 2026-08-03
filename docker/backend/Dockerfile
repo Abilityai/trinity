@@ -29,6 +29,15 @@ ENV VERSION=${VERSION} \
     GIT_BRANCH=${GIT_BRANCH} \
     BUILD_DATE=${BUILD_DATE}
 
+# `idna` is pinned explicitly even though httpx already pulls it in:
+# services/setup_url_display.py canonicalises author-supplied `setup_url`
+# hosts with UTS-46 nontransitional IDNA (browser semantics — the stdlib
+# `str.encode("idna")` codec is IDNA2003 and disagrees on exactly the
+# deviation set that matters, e.g. `fass.de` vs `xn--fa-hia.de`). A
+# transitive pin is one dependency resolution away from vanishing, and the
+# #1033 class of bug is invisible to /verify-local because the source
+# imports fine on the host. (trinity-enterprise#127)
+#
 # cryptography is pinned explicitly: the 49.x line's bundled OpenSSL triggers a
 # SIGILL (illegal instruction) when loaded in the same process as grpcio's
 # BoringSSL (pulled in transitively by the OTLP gRPC exporter) on
@@ -47,6 +56,7 @@ RUN pip install --no-cache-dir \
     websockets==14.1 \
     redis==5.2.1 \
     httpx==0.28.1 \
+    idna==3.10 \
     pyyaml==6.0.2 \
     sqlalchemy==2.0.36 \
     alembic==1.18.4 \

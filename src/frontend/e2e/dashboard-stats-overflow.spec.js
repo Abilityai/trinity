@@ -25,7 +25,10 @@ import { test, expect } from '@playwright/test'
  */
 
 const WIDTHS = [640, 768, 900, 1024, 1170, 1366, 1600]
-const MODES = ['timeline', 'grid']
+// ent#260 added the List mode — its toolbar lives inside the pane, but the
+// third toggle button + the chassis Create Agent button widen the CONTROLS
+// cluster in every mode, so the sweep runs list too.
+const MODES = ['timeline', 'grid', 'list']
 const ROW = 'main .border-b .flex.items-center.justify-between'
 
 // Geometry probe. Compares every leaf box of the left (stats) cluster against

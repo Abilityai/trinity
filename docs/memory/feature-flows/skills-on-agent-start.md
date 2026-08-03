@@ -59,7 +59,7 @@ Return result with skills_injection status
 
 ### Entry Points
 
-**Agents List Page** - `src/frontend/src/views/Agents.vue:200`
+**Dashboard List rows** - `src/frontend/src/components/AgentListPanel.vue` (ent#260 — the Agents page retired into the Dashboard List mode; Run control is `RunningStateToggle` via `networkStore.toggleAgentRunning`, not the historical button below)
 ```html
 <button
   v-if="agent.status === 'stopped'"

@@ -30,7 +30,25 @@ python-dotenv>=1.0.1
 docker>=7.1.0
 apscheduler>=3.11.0
 pydantic[email]>=2.10.0
-fastapi>=0.115.0
+# Cap fastapi to prod's 0.115.x line. `docker/backend/Dockerfile` pins
+# `fastapi==0.115.6` EXACTLY, so an unbounded floor here resolved 0.140.13 —
+# ~25 minor versions ahead of what production actually ships, i.e. the unit
+# suite was validating against a different FastAPI than the one that runs.
+#
+# It surfaced as `test_1069_voip_call_path_param` failing with
+# `ImportError: cannot import name 'get_flat_dependant'`. Note the ceiling is
+# NOT `<0.141`: `0.140.13 < 0.141` is true, so that bound still admits the
+# breaking version. Bisected against the real wheels, the symbol is present in
+# 0.140.6 and gone in 0.140.7 — a PRIVATE api dropped in a PATCH release, so no
+# minor-level bound is trustworthy. Tracking prod's line is the durable fix.
+#
+# CI was green only because of a warm pip cache: backend-unit-test.yml keys
+# `cache-dependency-path` on THIS file, and 0.140.13 allows py3.11, so the next
+# edit to this file for any reason would have busted the key, re-resolved, and
+# broken CI for everyone. Capping is therefore the safe way to bust that cache.
+# Verified: full `tests/unit` suite is 5861 passed / 0 failed at 0.115.14
+# (it is 1 failed / 5860 passed at 0.140.13).
+fastapi>=0.115.0,<0.116
 pyyaml>=6.0.0
 python-jose[cryptography]>=3.3.0
 python-multipart>=0.0.20
@@ -57,6 +75,12 @@ croniter>=5.0.0
 psutil>=6.1.0
 aiofiles>=24.1.0
 python-magic>=0.4.27
+# idna: UTS-46 host canonicalisation in services/setup_url_display.py, which
+# tests/unit/test_ent127_setup_url.py imports directly. httpx pulls it in
+# transitively, but an undeclared direct import is exactly the dependency a
+# resolver change drops silently. Floor matches docker/backend/Dockerfile's
+# exact pin. (trinity-enterprise#127)
+idna>=3.10
 slack_sdk[socket-mode]>=3.41.0
 slackify-markdown>=0.2.0
 twilio>=9.10.0

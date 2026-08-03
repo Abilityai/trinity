@@ -35,9 +35,21 @@ done
 
 ### 2. Deploy the Agent Fleet
 
+> **The manifest moved (#1931).** The canonical, permission-wired manifest is
+> now **[`config/manifests/vc-due-diligence.yaml`](../../../config/manifests/vc-due-diligence.yaml)**,
+> alongside the other bundled manifests and covered by CI. It deploys the same
+> eleven agents under the same names, and additionally wires the `dd-lead` →
+> specialist permissions, so **step 3 below is no longer required** when you
+> deploy it. The copy in this directory is kept for reference only — read its
+> header before using it.
+>
+> The eleven `dd-*` templates are `hidden: true` since #1931 (a demo, not a
+> starter), so they no longer appear in the Library. They remain fully
+> creatable by id (`local:dd-lead`) and deployable as a set by this manifest.
+
 ```bash
 TOKEN="YOUR_TOKEN"
-MANIFEST=$(cat docs/demos/vc-due-diligence/system-manifest.yaml)
+MANIFEST=$(cat config/manifests/vc-due-diligence.yaml)
 
 curl -s -X POST "http://localhost:8000/api/systems/deploy" \
   -H "Authorization: Bearer $TOKEN" \
@@ -58,9 +70,13 @@ This deploys 11 agents (all auto-started):
 - `vc-due-diligence-dd-legal` - Legal review
 - `vc-due-diligence-dd-lead` - **Deal lead (orchestrator)**
 
-### 3. Configure Permissions (Required!)
+### 3. Configure Permissions (only if you deployed the legacy copy)
+
+**Skip this step** if you deployed `config/manifests/vc-due-diligence.yaml` (step 2) — it declares the permissions itself.
 
 **This step is critical for agent-to-agent communication.** Without permissions, dd-lead cannot call other agents.
+
+Note the difference in scope: the canonical manifest grants **nine** edges — `dd-lead` → each of the nine specialists — because that is the only delegation any template's prompt actually performs (`dd-lead/CLAUDE.md` is the sole file containing `chat_with_agent`; the other ten contain none). The wider set below (`dd-intake` → specialists, `dd-legal` → `dd-lead`) is aspirational: no prompt exercises it.
 
 ```bash
 TOKEN="YOUR_TOKEN"
@@ -388,7 +404,7 @@ Skills are in `docs/demos/vc-due-diligence/skills/`.
 ```
 docs/demos/vc-due-diligence/
 ├── README.md                    # This file
-├── system-manifest.yaml         # Agent fleet deployment
+├── system-manifest.yaml         # Legacy copy — canonical is config/manifests/vc-due-diligence.yaml (#1931)
 └── skills/                      # Optional methodology skills
     ├── dd-verification/
     ├── dd-sourcing/

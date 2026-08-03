@@ -12,12 +12,13 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import yaml
 from fastapi import HTTPException, Request
 
 from models import AgentConfig, AgentStatus, User
+from db_models import ScheduleCreate
 from database import db
 from services.docker_service import (
     docker_client,
@@ -31,9 +32,12 @@ from services.docker_utils import (
 from services.agent_runtime_state import clear_agent_breakers
 from services.template_service import (
     CredentialDeclarationError,
+    credential_mcp_server_names,
+    fetch_template_metadata_for_create,
     get_github_template,
     generate_credential_files,
 )
+from services.template_schedules import normalize_declared_schedules
 from services import git_service
 from services.settings_service import get_anthropic_api_key, resolve_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
@@ -133,9 +137,14 @@ def _default_host_templates_base() -> str:
 
 
 # Roots that a resolved local-template path must stay within (#950). Read at
-# TWO seams — `_resolve_local_template` and the `/template` bind decision in
-# `_stage_config_files` — which must always agree (#1759). Kept a module-level
-# tuple: it is the single monkeypatch point the create tests use.
+# THREE seams — `_resolve_local_template`, the `/template` bind decision in
+# `_stage_config_files`, and (since #1900) the credential-file stager in the
+# same function — which must always agree (#1759). The first two were named by
+# #1759; the third existed all along and did NOT agree, because it re-derived
+# the directory from the template's untrusted `name:` field. Two of the three
+# now share `_resolve_local_template_dir`, which is what makes the agreement
+# structural rather than a convention. Kept a module-level tuple: it is the
+# single monkeypatch point the create tests use.
 _LOCAL_TEMPLATE_ROOTS = (
     _curated_templates_root(),
     Path("/data/deployed-templates").resolve(),
@@ -313,6 +322,16 @@ class _TemplateResolution:
     git_working_branch: Optional[str] = None
     fork_upstream_repo: Optional[str] = None
     template_shared_folders: Optional[dict] = None
+    # trinity-enterprise#89: NORMALIZED declared `schedules:`, fed by BOTH
+    # resolver branches. Deliberately NOT folded into `template_data`, which
+    # carries two different shapes: raw template YAML on the `local:` path and
+    # `{}` on the `github:` path (which has never populated it — hence #383's
+    # `persistent_state` and #1169's `data_paths` being silently `local:`-only).
+    # `_stage_config_files` gates credential-file generation on
+    # `if template_data:`, and the `github:` catalog dict has no `credentials`
+    # key at all, so merging the two would change credential generation for
+    # every GitHub agent. One normalized carrier, two producers.
+    declared_schedules: list = field(default_factory=list)
 
 
 @dataclass
@@ -488,6 +507,27 @@ def _parse_github_ref(config: AgentConfig) -> tuple[str, str, Optional[str]]:
     # Reconstruct template ID without branch for lookup
     template_lookup = f"github:{template_str}" if url_branch else config.template
     return template_lookup, template_str, url_branch
+
+
+def _declared_schedules_for_github(
+    repo: str, pat: Optional[str], ref: Optional[str]
+) -> list:
+    """Normalized `schedules:` for a `github:` template, read at CREATION time.
+
+    Deliberately NOT the catalog's `gh_template["schedules"]`
+    (trinity-enterprise#89 R2): that dict comes from `_get_cached_metadata`,
+    which reads with the **global platform** PAT off the **default branch**
+    through a 10-minute per-process cache. Creation resolves its PAT
+    completely differently (per-agent -> per-user -> global, ent#162), so a
+    user creating from their own private repo with their own token would clone
+    successfully and then get zero schedules with no signal at all — the exact
+    silent-ignore class this feature exists to close, reintroduced one layer up.
+
+    Non-fatal by construction: `fetch_template_metadata_for_create` returns
+    `{}` and logs a WARNING on any failure, and the normalizer is total.
+    """
+    metadata = fetch_template_metadata_for_create(repo, pat=pat, ref=ref)
+    return normalize_declared_schedules(metadata.get("schedules"))
 
 
 def _gate_tokenless_request(
@@ -809,6 +849,25 @@ async def _reserve_git_instance(
     return git_instance_id, git_working_branch
 
 
+def _resolve_local_template_dir(raw_name: str) -> Path:
+    """Curated root first, then the deploy-local store (#950) — the single
+    definition of "where does `local:<raw_name>` live".
+
+    Every candidate is `_safe_local_template_path`-validated (regex barrier +
+    `is_relative_to` barrier) before any filesystem access, so the returned path
+    is proven to be inside one of `_LOCAL_TEMPLATE_ROOTS`.
+
+    Extracted in #1900 so the THREE seams that must agree cannot drift: the
+    resolver, the `/template` bind decision, and the credential-file stager.
+    #1759 named the first two; the third existed and re-derived the directory
+    from the template's own untrusted `name:` field instead of reusing this.
+    """
+    candidate = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[0])
+    if not (candidate / "template.yaml").exists():
+        candidate = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[1])
+    return candidate
+
+
 def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
     """Load a `local:`-prefixed template's `template.yaml` (curated catalog then
     deploy-local store, #950). Mutates `config` runtime/type/resources/tools/
@@ -831,13 +890,7 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
     # is validated + resolved to prove it stays under the root before
     # any filesystem access (regex barrier + is_relative_to barrier).
     raw_name = config.template[6:]
-    template_path = _safe_local_template_path(
-        raw_name, _LOCAL_TEMPLATE_ROOTS[0]
-    )
-    if not (template_path / "template.yaml").exists():
-        template_path = _safe_local_template_path(
-            raw_name, _LOCAL_TEMPLATE_ROOTS[1]
-        )
+    template_path = _resolve_local_template_dir(raw_name)
 
     template_yaml = template_path / "template.yaml"
 
@@ -899,8 +952,14 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
             config.type = template_data.get("type", config.type)
             config.resources = template_data.get("resources", config.resources)
             config.tools = template_data.get("tools", config.tools)
-            creds = template_data.get("credentials", {})
-            mcp_servers = list(creds.get("mcp_servers", {}).keys())
+            # Read through the tolerant accessor rather than reaching straight
+            # through the block. `creds.get("mcp_servers", {}).keys()` raises
+            # AttributeError on a null / list / string `credentials:`, and the
+            # broad `except` below then silently drops this template's `runtime:`
+            # and `shared_folders:` config alongside the credential parse — one
+            # malformed key costing the agent three unrelated ones.
+            # (trinity-enterprise#128)
+            mcp_servers = credential_mcp_server_names(template_data.get("credentials"))
             if mcp_servers:
                 config.mcp_servers = mcp_servers
             # Multi-runtime support - extract runtime config from template
@@ -1013,6 +1072,13 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             ) = _resolve_github_repo_and_pat(
                 config, current_user, template_lookup, repo_path
             )
+            # Read the SOURCE template's declarations here, before
+            # `_apply_fork_to_own` swaps in the user's fork + PAT: this pairing
+            # (source repo, PAT resolved to read it) is the one that can
+            # actually see a private template.
+            tr.declared_schedules = _declared_schedules_for_github(
+                tr.github_repo_for_agent, tr.github_pat_for_agent, url_branch
+            )
             (
                 tr.github_repo_for_agent,
                 tr.github_pat_for_agent,
@@ -1037,24 +1103,44 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             )
         elif config.template.startswith("local:"):
             tr.template_data, tr.template_shared_folders = _resolve_local_template(config)
+            # Same normalizer as the `github:` branch above — symmetric by
+            # construction, so neither source can quietly diverge.
+            tr.declared_schedules = normalize_declared_schedules(
+                tr.template_data.get("schedules")
+            )
     return tr
 
 
 def _stage_config_files(
-    config: AgentConfig, template_data: dict, github_template_path: Optional[str]
+    config: AgentConfig, template_data: dict,
+    github_template_path: Optional[Union[Path, str]]
 ) -> tuple[Path, Path, Optional[dict], Optional[dict]]:
     """CRED-002: write the agent-config.yaml + empty credentials.json + template
     cred files under /tmp and compute the template/cred bind specs. Also
     normalizes + writes back the resource fields (#1197) so container labels +
     limits use canonical values. Returns
     `(config_path, credentials_path, template_volume, cred_files_volume)`."""
+    # #1900: hand `generate_credential_files` the directory we ALREADY validated
+    # rather than letting it re-derive one from the template's untrusted `name:`
+    # field (a traversal into any readable `.mcp.json`). This is the same
+    # `_safe_local_template_path`-validated ladder the `/template` bind decision
+    # below uses, so all three seams agree by construction (#1759).
+    local_template_base = None
+    if config.template and config.template.startswith("local:"):
+        # Cannot newly raise: `_resolve_local_template` already ran this exact
+        # `raw_name` through the same barrier before `template_data` could be
+        # non-empty, and a templateless agent has a falsy `config.template`.
+        local_template_base = _resolve_local_template_dir(config.template[6:])
+
     generated_files = {}
     if template_data:
         # Generate empty credential files structure from template
         try:
             generated_files = generate_credential_files(
                 template_data, {}, config.name,
-                template_base_path=github_template_path
+                # `github_template_path` first so the field's eventual revival
+                # wins; it has zero writers today (#1900 follow-up).
+                template_base_path=github_template_path or local_template_base
             )
         except CredentialDeclarationError as e:
             # Invariant #1: the service raises an HTTP-free domain error and
@@ -1757,16 +1843,95 @@ def _register_agent(
     # a Layer 2 conflict.
 
 
+def reconcile_declared_schedules(
+    agent_name: str, declared: list, owner_username: str
+) -> None:
+    """Create a template's declared schedules on `agent_name`, skipping by name.
+
+    Shaped as a RECONCILE primitive — it takes `agent_name`, not `AgentConfig`,
+    so an operator-triggered "re-apply template" can call it unchanged. It is
+    NOT hooked into container recreate today, deliberately: an eager
+    re-materialize would resurrect schedules an operator deliberately deleted,
+    which is strictly worse than the gap it would close. (ent#89 D2/D2b)
+
+    Non-fatal by contract — the caller wraps the whole call, so a failure here
+    (including the `list_agent_schedules` read) costs the schedules, never the
+    agent.
+
+    Counts come from ACTUAL outcomes, never from `len(declared)`:
+    `db.create_schedule` returns **None** — it does not raise — on three silent
+    paths (unknown user, no agent access, and the #1445 `is_agent_live`
+    no-orphan gate), so a length-derived counter would report schedules that
+    were never written.
+    """
+    if not declared:
+        return
+
+    # Name-match idempotency (AC #4). Known blind spot: `list_agent_schedules`
+    # excludes soft-deleted rows (#834), so a soft-deleted schedule of the same
+    # name does not suppress a re-create. Accepted and documented.
+    seen = {s.name for s in db.list_agent_schedules(agent_name)}
+    created = skipped = failed = 0
+
+    for entry in declared:
+        name = entry["name"]
+        if name in seen:
+            skipped += 1
+            continue
+        try:
+            # `enabled` is passed EXPLICITLY: `ScheduleCreate.enabled` defaults
+            # to True, so omitting it would arm every undeclared schedule and
+            # invert AC #3.
+            schedule = db.create_schedule(
+                agent_name=agent_name,
+                username=owner_username,
+                schedule_data=ScheduleCreate(
+                    name=name,
+                    cron_expression=entry["cron"],
+                    message=entry["message"],
+                    enabled=entry["enabled"],
+                    timezone=entry["timezone"],
+                    description=entry["description"],
+                ),
+            )
+        except Exception as e:  # noqa: BLE001 — one bad entry never costs the rest
+            failed += 1
+            logger.warning(
+                "[ent#89] Failed to create declared schedule %r for %s: %s",
+                name, agent_name, e,
+            )
+            continue
+        if not schedule:
+            failed += 1
+            logger.warning(
+                "[ent#89] Declared schedule %r for %s was not created "
+                "(no user, no access, or the agent is not live)",
+                name, agent_name,
+            )
+            continue
+        seen.add(name)
+        created += 1
+
+    logger.info(
+        "[ent#89] Declared schedules for %s: %d created, %d already existed, "
+        "%d failed (%d declared)",
+        agent_name, created, skipped, failed, len(declared),
+    )
+
+
 async def _materialize_agent_files(
     config: AgentConfig,
     template_data: dict,
     github_repo_for_agent: Optional[str],
     fork_upstream_repo: Optional[str],
     github_pat_for_agent: Optional[str] = None,
+    declared_schedules: Optional[list] = None,
+    owner_username: str = "",
 ) -> None:
-    """Materialize the S4 persistent-state allowlist (#383) and the declared
-    data_paths (#1169) into the agent, then opt non-source-mode GitHub agents
-    into the auto-sync heartbeat (#389). All three are non-fatal."""
+    """Materialize the S4 persistent-state allowlist (#383), the declared
+    data_paths (#1169) and the declared `schedules:` (trinity-enterprise#89)
+    into the agent, then opt non-source-mode GitHub agents into the auto-sync
+    heartbeat (#389). All four are non-fatal."""
     # S4 (#383): Materialize persistent-state allowlist into the agent.
     # Runtime sync/reset paths read `.trinity/persistent-state.yaml`;
     # template.yaml is only read at creation (10-min cache), so this
@@ -1805,6 +1970,24 @@ async def _materialize_agent_files(
             f"[#1169] Failed to materialize data-paths.yaml for "
             f"{config.name}: {e}"
         )
+
+    # trinity-enterprise#89: materialize the template's declared `schedules:`.
+    # The ghost skip lives HERE rather than in the helper: schedules on an
+    # ephemeral agent are a 400 by ent#69 fleet hygiene, and a new caller must
+    # exclude ghosts itself. The try/except wraps the ENTIRE call, including
+    # the helper's `list_agent_schedules` read — this whole function sits inside
+    # the destructive rollback fence, so a raise that escapes here would roll
+    # back a successful creation over a schedule.
+    if declared_schedules and not config.ephemeral:
+        try:
+            reconcile_declared_schedules(
+                config.name, declared_schedules, owner_username
+            )
+        except Exception as e:
+            logger.warning(
+                f"[ent#89] Failed to materialize declared schedules for "
+                f"{config.name}: {e}"
+            )
 
     # #389 S1a: opt non-source-mode GitHub-template agents into the
     # auto-sync heartbeat by default. Source-mode agents stay opt-in
@@ -2198,6 +2381,8 @@ async def create_agent_internal(
                 tr.github_repo_for_agent,
                 tr.fork_upstream_repo,
                 tr.github_pat_for_agent,
+                tr.declared_schedules,
+                current_user.username,
             )
             return agent_status
         except Exception as e:

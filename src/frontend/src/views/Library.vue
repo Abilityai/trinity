@@ -6,22 +6,35 @@
       <div class="px-4 sm:px-0">
         <div class="flex justify-between items-center mb-8">
           <div>
-            <h1 class="text-3xl font-bold text-gray-900 dark:text-white">Agent Templates</h1>
+            <h1 class="text-3xl font-bold text-gray-900 dark:text-white">Library</h1>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              Pre-configured agent templates with MCP servers and credentials
+              Installable assets for your fleet — agent templates and skills
             </p>
           </div>
-          <div class="flex items-center gap-2">
-            <button
-              @click="fetchTemplates"
-              class="p-2 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-colors"
-              title="Refresh templates"
-            >
-              <svg class="w-5 h-5" :class="{ 'animate-spin': loading }" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
-            </button>
-          </div>
+          <!-- In-page jump anchors — deliberately NOT ?kind= filter pills:
+               two disjoint section shapes, stacked (ent#263). -->
+          <nav class="hidden sm:flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+            <a href="#agent-templates" class="hover:text-gray-700 dark:hover:text-gray-200 hover:underline">Agent templates</a>
+            <span aria-hidden="true">·</span>
+            <a href="#skills" class="hover:text-gray-700 dark:hover:text-gray-200 hover:underline">Skills</a>
+          </nav>
+        </div>
+
+        <!-- Agent Templates section (ent#263: the Library's first asset kind).
+             Owns its own loading/error/empty states so a templates failure
+             never blanks the skills section below. -->
+        <section id="agent-templates" class="mb-12">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-xl font-semibold text-gray-900 dark:text-white">Agent Templates</h2>
+          <button
+            @click="fetchTemplates"
+            class="p-2 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-colors"
+            title="Refresh templates"
+          >
+            <svg class="w-5 h-5" :class="{ 'animate-spin': loading }" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          </button>
         </div>
 
         <!-- Loading state -->
@@ -53,13 +66,13 @@
           <!-- Starter (local) Templates Section — same curated set as the
                Create Agent modal; real starters first (#1513). -->
           <div v-if="localTemplates.length > 0" class="mb-8">
-            <h2 class="text-lg font-semibold text-gray-800 dark:text-gray-200 mb-4 flex items-center">
+            <h3 class="text-lg font-semibold text-gray-800 dark:text-gray-200 mb-4 flex items-center">
               <svg class="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
               </svg>
               Starter Templates
               <span class="ml-2 text-sm font-normal text-gray-500 dark:text-gray-400">({{ localTemplates.length }})</span>
-            </h2>
+            </h3>
             <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
               <div
                 v-for="template in localTemplates"
@@ -119,16 +132,29 @@
             </div>
           </div>
 
-          <!-- GitHub Templates Section -->
-          <div v-if="githubTemplates.length > 0" class="mb-8">
-            <h2 class="text-lg font-semibold text-gray-800 dark:text-gray-200 mb-4 flex items-center">
+          <!-- GitHub Templates Section
+
+               #1931: renders whenever the catalog has anything at all, not
+               only when there are GitHub entries. With DEFAULT_GITHUB_TEMPLATE_REPOS
+               emptied, a default install has zero of them, and the old
+               `v-if="githubTemplates.length > 0"` made the whole section
+               VANISH — honouring "empty states teach the next action" only by
+               accident (it had never been zero before).
+
+               The condition is just `!noTemplatesAtAll`: githubTemplates is a
+               filter over `templates`, so `githubTemplates.length > 0` already
+               implies `!noTemplatesAtAll`. The wholly-empty case belongs to
+               the page-level empty state below — the two are mutually
+               exclusive by construction and can never stack. -->
+          <div v-if="!noTemplatesAtAll" class="mb-8">
+            <h3 class="text-lg font-semibold text-gray-800 dark:text-gray-200 mb-4 flex items-center">
               <svg class="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 24 24">
                 <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
               </svg>
               GitHub Templates
-              <span class="ml-2 text-sm font-normal text-gray-500 dark:text-gray-400">({{ githubTemplates.length }})</span>
-            </h2>
-            <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+              <span v-if="githubTemplates.length > 0" class="ml-2 text-sm font-normal text-gray-500 dark:text-gray-400">({{ githubTemplates.length }})</span>
+            </h3>
+            <div v-if="githubTemplates.length > 0" class="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
               <div
                 v-for="template in githubTemplates"
                 :key="template.id"
@@ -185,16 +211,64 @@
                 </button>
               </div>
             </div>
+
+            <!-- #1931: zero GitHub templates. Marketplace first — the
+                 abilityai/abilities wizards are the recommended way to build an
+                 agent and they exist today; a fresh install's Settings panel
+                 does not. The owner/repo action is the secondary "I already
+                 have a repo" path, offered to BOTH roles so a non-admin is
+                 never left with only an action they cannot take. Only the
+                 curation hint branches on role, mirroring
+                 LibrarySkillsSection.vue on this same page. -->
+            <div v-else class="grid grid-cols-1 gap-6">
+              <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg p-6 border-2 border-dashed border-gray-300 dark:border-gray-600">
+                <div class="text-center py-4 max-w-2xl mx-auto">
+                  <div class="mx-auto w-12 h-12 rounded-full bg-gray-100 dark:bg-gray-700 flex items-center justify-center mb-4">
+                    <svg class="w-6 h-6 text-gray-400 dark:text-gray-500" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                    </svg>
+                  </div>
+                  <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">No GitHub templates configured</h3>
+                  <p class="text-gray-600 dark:text-gray-300 text-sm mb-4">
+                    Trinity ships none by default. The recommended way to build an agent is the
+                    <a
+                      href="https://github.com/abilityai/abilities"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="text-action-primary-600 dark:text-action-primary-400 hover:underline font-medium"
+                    >abilityai/abilities</a>
+                    marketplace — install its <code class="text-xs px-1 py-0.5 rounded bg-gray-100 dark:bg-gray-700">create-agent</code>
+                    plugin in Claude Code and its wizards scaffold a Trinity-ready agent repository for you.
+                  </p>
+                  <p class="text-gray-500 dark:text-gray-400 text-sm mb-6">
+                    Already have a repository? Create an agent from it directly.
+                  </p>
+                  <button
+                    @click="useTemplate({ id: 'github-custom' })"
+                    class="w-full sm:w-auto sm:px-8 bg-action-primary-600 hover:bg-action-primary-700 text-white font-bold py-2 px-4 rounded transition-colors"
+                  >
+                    Create from a GitHub repository
+                  </button>
+                  <p v-if="isAdmin" class="mt-6 text-xs text-gray-500 dark:text-gray-400">
+                    To list repositories here for everyone, curate them under
+                    <router-link to="/settings?tab=agents" class="text-action-primary-600 dark:text-action-primary-400 hover:underline">Settings → GitHub Templates</router-link>.
+                  </p>
+                  <p v-else class="mt-6 text-xs text-gray-500 dark:text-gray-400">
+                    To list repositories here for everyone, ask an admin to add them under Settings → GitHub Templates.
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
 
           <!-- Create Custom Agent Card -->
           <div class="mb-8">
-            <h2 class="text-lg font-semibold text-gray-800 dark:text-gray-200 mb-4 flex items-center">
+            <h3 class="text-lg font-semibold text-gray-800 dark:text-gray-200 mb-4 flex items-center">
               <svg class="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
               </svg>
               Custom Agent
-            </h2>
+            </h3>
             <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
               <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg p-6 border-2 border-dashed border-gray-300 dark:border-gray-600 hover:border-action-primary-300 dark:hover:border-action-primary-500 transition-colors">
                 <div class="text-center py-4">
@@ -224,9 +298,22 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
             </svg>
             <p class="text-gray-500 dark:text-gray-400 text-lg mb-2">No templates configured</p>
-            <p class="text-gray-400 dark:text-gray-500 text-sm">Configure GitHub templates in config.py or add local templates to config/agent-templates/</p>
+            <!-- #1931: was "Configure GitHub templates in config.py …" — config.py
+                 is not an operator surface, and its default list is now empty by
+                 design. Name the two actions an operator can actually take. -->
+            <p class="text-gray-400 dark:text-gray-500 text-sm">Add a GitHub repository under Settings → GitHub Templates, or add a template directory to <code>config/agent-templates/</code>.</p>
           </div>
         </div>
+        </section>
+
+        <!-- Skills section (ent#263): fleet-level browse over the shared
+             skills library. Assignment stays on each agent's Skills tab
+             (ent#182: one skill model, no parallel mechanisms); this section
+             owns its own loading/error/empty states, isolated from the
+             templates fetch above. -->
+        <section id="skills" class="mb-8">
+          <LibrarySkillsSection />
+        </section>
       </div>
     </main>
 
@@ -243,13 +330,17 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import axios from 'axios'
 import NavBar from '../components/NavBar.vue'
 import CreateAgentModal from '../components/CreateAgentModal.vue'
-import { useAuthStore } from '../stores/auth'
+import LibrarySkillsSection from '../components/LibrarySkillsSection.vue'
+import { useRole } from '../composables/useRole'
+import api from '../api'
 
 const router = useRouter()
-const authStore = useAuthStore()
+// #1931: same convention as LibrarySkillsSection.vue on this page — the
+// templates half must not ship the opposite empty-state convention to the
+// skills half. Store-backed (auth), so no page-level fetch is involved.
+const { isAdmin } = useRole()
 
 const templates = ref([])
 const loading = ref(false)
@@ -258,9 +349,9 @@ const showCreateModal = ref(false)
 const selectedTemplateId = ref('')
 
 // Computed properties to separate GitHub and local templates. Both sections
-// render from the single `/api/templates` fetch so the Templates tab shows the
-// same curated set as CreateAgentModal — the backend already excludes hidden
-// test/canary/demo fixtures (#1513).
+// render from the single `/api/templates` fetch so the Library's templates
+// section shows the same curated set as CreateAgentModal — the backend already
+// excludes hidden test/canary/demo fixtures (#1513).
 const githubTemplates = computed(() => {
   return templates.value.filter(t => t.source === 'github')
 })
@@ -268,6 +359,21 @@ const githubTemplates = computed(() => {
 const localTemplates = computed(() => {
   return templates.value.filter(t => t.source === 'local' || !t.source)
 })
+
+// #1931: with DEFAULT_GITHUB_TEMPLATE_REPOS empty, a default install has zero
+// GitHub templates. NOTE: `templates` is the raw /api/templates response — it
+// holds BOTH sources, so this is "the whole catalog is empty", not "no local
+// templates". Named `noTemplatesAtAll` for that reason: a reviewer misread an
+// earlier `catalogEmpty` as local-only and derived a stacking bug from it.
+// The page-level "No templates configured" block below owns this case
+// exclusively; the GitHub placeholder owns "catalog non-empty, GitHub empty".
+// They can never both render:
+//   local github | length | page-level | github section / inner
+//     3      0   |   3    |    no      |  yes / placeholder   <- default install
+//     3      6   |   9    |    no      |  yes / grid
+//     0      6   |   6    |    no      |  yes / grid
+//     0      0   |   0    |   YES      |   no / --
+const noTemplatesAtAll = computed(() => templates.value.length === 0)
 
 // Extract display name without "(GitHub)" suffix for cleaner display
 const getDisplayName = (template) => {
@@ -279,9 +385,9 @@ const fetchTemplates = async () => {
   loading.value = true
   error.value = ''
   try {
-    const response = await axios.get('/api/templates', {
-      headers: authStore.authHeader
-    })
+    // Invariant #7 — shared api client (auth interceptor, in-flight GET dedup,
+    // 401 → /login). This page previously called axios with a hand-built header.
+    const response = await api.get('/api/templates')
     templates.value = response.data
   } catch (err) {
     console.error('Failed to fetch templates:', err)
@@ -301,7 +407,9 @@ const onAgentCreated = (agent) => {
   if (agent?.name) {
     router.push(`/agents/${agent.name}`)
   } else {
-    router.push('/agents')
+    // ent#260: Agents page retired — fall back to the Dashboard (bare `/`;
+    // see useAgentLifecycle.js for the no-?view rationale).
+    router.push('/')
   }
 }
 

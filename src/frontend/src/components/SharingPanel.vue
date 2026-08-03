@@ -215,6 +215,13 @@
       </div>
     </div>
 
+    <!-- Portal clients (ent#281) — people who sign in by email, with the
+         operator's per-client controls. Entitlement-gated inside the component,
+         so an OSS build renders nothing here. Sits above the channel roster
+         because the two answer different questions: this one is "who can sign
+         in", that one is "who has messaged". -->
+    <PortalClientsPanel :agent-name="agentName" />
+
     <!-- Client Roster (#20) — external channel users (read-only) -->
     <div>
       <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">
@@ -298,6 +305,7 @@ import TelegramChannelPanel from './TelegramChannelPanel.vue'
 import WhatsAppChannelPanel from './WhatsAppChannelPanel.vue'
 import VoipChannelPanel from './VoipChannelPanel.vue'
 import ConnectorChannelPanel from './ConnectorChannelPanel.vue'
+import PortalClientsPanel from './PortalClientsPanel.vue'
 import FileSharingPanel from './FileSharingPanel.vue'
 
 const props = defineProps({

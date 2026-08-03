@@ -5,6 +5,7 @@ Provides endpoints for managing system-wide configuration like the Trinity promp
 Admin-only access for modification, read access for all authenticated users.
 """
 import asyncio
+import json
 import logging
 import os
 import re
@@ -29,6 +30,7 @@ from models import (
     McpUrlUpdate,
     OpsSettingsUpdate,
     RetentionAcknowledge,
+    SkillsLibraryAutomationUpdate,
     SlackConnectRequest,
     SlackSettingsUpdate,
     TelemetrySharingUpdate,
@@ -66,7 +68,21 @@ from services.settings_service import (
     PROACTIVE_RATE_LIMIT_DESCRIPTIONS,
     PROACTIVE_RATE_LIMIT_MAX,
     get_proactive_rate_limit,
+    SKILLS_AUTO_REINJECT_ENABLED_KEY,
+    SKILLS_AUTO_SYNC_ENABLED_KEY,
+    SKILLS_AUTO_SYNC_INTERVAL_KEY,
+    SKILLS_AUTO_SYNC_INTERVAL_DEFAULT,
+    SKILLS_AUTO_SYNC_INTERVAL_MIN,
+    SKILLS_AUTO_SYNC_INTERVAL_MAX,
 )
+
+# ent#236: the three keys the dedicated /skills-library route owns. Blocked on
+# the generic PUT /{key} so they can only ever be written range-validated.
+SKILLS_AUTOMATION_KEYS = {
+    SKILLS_AUTO_SYNC_ENABLED_KEY,
+    SKILLS_AUTO_SYNC_INTERVAL_KEY,
+    SKILLS_AUTO_REINJECT_ENABLED_KEY,
+}
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -1809,6 +1825,152 @@ async def update_max_parallel_tasks_ceiling_setting(
     }
 
 
+@router.get("/skills-library")
+async def get_skills_library_automation_setting(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Skills-library lifecycle automation config + last-run status (ent#236).
+
+    Admin-only. Registered before the `/{key}` catch-all (Invariant #4).
+
+    Also reports the durable sync status and the last fleet re-inject report, so
+    the panel can show a FAILING auto-sync — the AC's "never silent" half. Both
+    read from `system_settings` rather than service memory because the loop runs
+    on ONE leader worker and this request usually lands on a different one.
+    """
+    assert_admin(current_user)
+
+    from services.settings_service import (
+        get_skills_auto_sync_interval,
+        is_skills_auto_reinject_enabled,
+        is_skills_auto_sync_enabled,
+    )
+    from services.skill_service import (
+        SKILLS_LAST_ERROR_KEY, SKILLS_LAST_STATUS_KEY, SKILLS_LAST_SYNC_KEY,
+    )
+    from services.skills_sync_service import FLEET_LAST_RUN_KEY
+
+    last_run = None
+    try:
+        raw = db.get_setting_value(FLEET_LAST_RUN_KEY, None)
+        if raw:
+            last_run = json.loads(raw)
+    except Exception:  # noqa: BLE001 — a malformed blob must not 500 the panel
+        last_run = None
+
+    return {
+        "auto_sync_enabled": is_skills_auto_sync_enabled(),
+        "auto_sync_interval_seconds": get_skills_auto_sync_interval(),
+        "auto_reinject_enabled": is_skills_auto_reinject_enabled(),
+        "interval_default": SKILLS_AUTO_SYNC_INTERVAL_DEFAULT,
+        "interval_min": SKILLS_AUTO_SYNC_INTERVAL_MIN,
+        "interval_max": SKILLS_AUTO_SYNC_INTERVAL_MAX,
+        "last_sync": db.get_setting_value(SKILLS_LAST_SYNC_KEY, None),
+        "last_sync_status": db.get_setting_value(SKILLS_LAST_STATUS_KEY, None),
+        "last_sync_error": db.get_setting_value(SKILLS_LAST_ERROR_KEY, None) or None,
+        "last_fleet_reinject": last_run,
+    }
+
+
+@router.put("/skills-library")
+async def update_skills_library_automation_setting(
+    body: SkillsLibraryAutomationUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Set skills-library automation flags + interval (ent#236).
+
+    Admin **and human-only**, partial update — every field is optional, and an
+    omitted field is left untouched (so toggling re-inject can't silently reset
+    the interval). Interval is range-validated here with a 400 rather than being
+    clamped silently: an operator who typed 30 should be told the floor exists,
+    not quietly given 300.
+
+    `reject_agent_principal` is load-bearing, not decoration. `assert_admin`
+    answers "what role", never "is this a human": an agent-scoped MCP key
+    resolves to its owner *carrying the owner's role*, so on a default
+    admin-owned install every agent's injected `TRINITY_MCP_API_KEY` satisfies
+    it. This endpoint is the ON-SWITCH for an unattended, fleet-wide write into
+    every running agent's `~/.claude/skills/` — and a `SKILL.md` is instructions
+    Claude executes, not data. Pre-#236 that write needed two deliberate human
+    actions (click Sync, then inject per agent); automating it removed the human,
+    so the gate has to put one back. Third occurrence of the
+    trinity-ops-agent#232 class (see #1644, #1816), and the rule from
+    learnings.md applies directly: the endpoint that USES a capability may be
+    agent-callable, the endpoint that GRANTS it must be human-only.
+
+    The GET stays role-only: it reads non-secret config, and its error string is
+    PAT-scrubbed at the write.
+    """
+    from dependencies import reject_agent_principal
+
+    reject_agent_principal(current_user)
+    assert_admin(current_user)
+
+    from services.settings_service import (
+        SKILLS_AUTO_REINJECT_ENABLED_KEY,
+        SKILLS_AUTO_SYNC_ENABLED_KEY,
+        SKILLS_AUTO_SYNC_INTERVAL_KEY,
+        get_skills_auto_sync_interval,
+        is_skills_auto_reinject_enabled,
+        is_skills_auto_sync_enabled,
+    )
+
+    changed: Dict[str, Any] = {}
+
+    if body.auto_sync_interval_seconds is not None:
+        value = body.auto_sync_interval_seconds
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < SKILLS_AUTO_SYNC_INTERVAL_MIN
+            or value > SKILLS_AUTO_SYNC_INTERVAL_MAX
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"auto_sync_interval_seconds must be an integer between "
+                    f"{SKILLS_AUTO_SYNC_INTERVAL_MIN} and {SKILLS_AUTO_SYNC_INTERVAL_MAX}"
+                ),
+            )
+        db.set_setting(SKILLS_AUTO_SYNC_INTERVAL_KEY, str(value))
+        changed["auto_sync_interval_seconds"] = value
+
+    if body.auto_sync_enabled is not None:
+        db.set_setting(
+            SKILLS_AUTO_SYNC_ENABLED_KEY, "true" if body.auto_sync_enabled else "false"
+        )
+        changed["auto_sync_enabled"] = bool(body.auto_sync_enabled)
+
+    if body.auto_reinject_enabled is not None:
+        db.set_setting(
+            SKILLS_AUTO_REINJECT_ENABLED_KEY,
+            "true" if body.auto_reinject_enabled else "false",
+        )
+        changed["auto_reinject_enabled"] = bool(body.auto_reinject_enabled)
+
+    if changed:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="settings_change",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            details={"setting": "skills_library_automation", "changed": changed},
+        )
+
+    return {
+        "success": True,
+        "auto_sync_enabled": is_skills_auto_sync_enabled(),
+        "auto_sync_interval_seconds": get_skills_auto_sync_interval(),
+        "auto_reinject_enabled": is_skills_auto_reinject_enabled(),
+        "changed": changed,
+    }
+
+
 @router.get("/proactive-rate-limits")
 async def get_proactive_rate_limits_setting(
     request: Request,
@@ -2243,6 +2405,22 @@ async def update_setting(
                 "PUT /api/settings/ops/config (type- and range-validated, "
                 "audit-logged). See GET /api/settings/retention for the "
                 "effective values (ent#297)"
+            ),
+        )
+
+    # ent#236: the automation keys go through the dedicated validated route.
+    # The interval especially: this generic PUT takes `Dict[str, str]` with no
+    # type or range check, so "10" would be accepted verbatim and the auto-sync
+    # loop would fork `git fetch` six times a minute against GitHub forever.
+    # (The read-side clamp in `get_skills_auto_sync_interval` is the second
+    # layer; this is the first — validate at the boundary AND at the sink, #1525.)
+    if key in SKILLS_AUTOMATION_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/skills-library "
+                f"(range-validated; interval {SKILLS_AUTO_SYNC_INTERVAL_MIN}–"
+                f"{SKILLS_AUTO_SYNC_INTERVAL_MAX}s)"
             ),
         )
 
