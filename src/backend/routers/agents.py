@@ -678,7 +678,14 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to start agent: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            # py/stack-trace-exposure (#1917, the PR #1912 pattern).
+            detail=(
+                f"Failed to start agent "
+                f"({e.__class__.__name__} — details in backend logs)"
+            ),
+        )
 
 
 @router.post("/{agent_name}/stop")
@@ -721,7 +728,14 @@ async def stop_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reques
 
         return {"message": f"Agent {agent_name} stopped"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to stop agent: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            # py/stack-trace-exposure (#1917, the PR #1912 pattern).
+            detail=(
+                f"Failed to stop agent "
+                f"({e.__class__.__name__} — details in backend logs)"
+            ),
+        )
 
 
 # ============================================================================
@@ -744,7 +758,14 @@ async def get_agent_logs_endpoint(
 
         return {"logs": logs}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get logs: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            # py/stack-trace-exposure (#1917, the PR #1912 pattern).
+            detail=(
+                f"Failed to get logs "
+                f"({e.__class__.__name__} — details in backend logs)"
+            ),
+        )
 
 
 @router.get("/{agent_name}/stats")
