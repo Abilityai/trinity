@@ -80,6 +80,8 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from utils.safe_yaml import AliasPolicy, load_hardened_yaml
+
 from redis_breaker_util import get_breaker_redis, lock_token_matches
 
 from services.credential_charset import (
@@ -430,27 +432,19 @@ async def collect_agent_credential_facts(agent_name: str) -> Dict[str, Any]:
 _MAX_ADVISORY = 50
 
 
-class _NoAliasSafeLoader(yaml.SafeLoader):
-    """`SafeLoader` that refuses YAML *aliases*.
-
-    `template.yaml` here comes from a LIVE, agent-writable workspace, and alias
-    expansion is a documented amplifier in this very codebase — `_clean_field`
-    measures 443 B expanding to 52 MB in 1.5 s, x10 per alias level. Rejecting
-    at compose time is precise: it costs a template nothing unless it actually
-    *uses* an alias, unlike a textual `&`/`*` scan, which would false-reject any
-    description containing an asterisk.
-    """
-
-    def compose_node(self, parent, index):
-        if self.check_event(yaml.events.AliasEvent):
-            raise yaml.YAMLError("YAML aliases are not permitted in template.yaml")
-        return super().compose_node(parent, index)
-
-
 def _parse_template_text(text: str) -> Optional[dict]:
     """Parse a live `template.yaml`. `None` for anything that isn't a mapping."""
     try:
-        data = yaml.load(text, Loader=_NoAliasSafeLoader)
+        # ent#314: was a local `_NoAliasSafeLoader`; now the shared loader.
+        # REJECT is preserved — this reads the LIVE, agent-writable copy and
+        # `_clean_field` measures 443 B expanding to 52 MB, so a budget would be
+        # a security regression shipped as a refactor. The size cap and
+        # duplicate-key guard are new here.
+        data = load_hardened_yaml(
+            text,
+            kind="template",
+            alias_policy=AliasPolicy.REJECT,
+        )
     except Exception:  # noqa: BLE001 — untrusted YAML; unreadable is a state, not a 500
         return None
     return data if isinstance(data, dict) else None

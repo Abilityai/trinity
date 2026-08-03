@@ -43,6 +43,7 @@ from services.agent_service.lifecycle import (
 from services.agent_service.capabilities import normalize_cpu, normalize_memory
 from utils.credential_sanitizer import sanitize_text
 from utils.helpers import utc_now_iso
+from utils.safe_yaml import load_template_yaml  # ent#314
 
 logger = logging.getLogger(__name__)
 
@@ -341,7 +342,9 @@ class SystemAgentService:
             raise FileNotFoundError(f"System agent template not found: {template_yaml}")
 
         with open(template_yaml) as f:
-            template_data = yaml.safe_load(f)
+            # ent#314: same guards as every other template.yaml. Bundled, so a
+            # refusal here means the shipped template is malformed — fail loudly.
+            template_data = load_template_yaml(f.read())
 
         # Get configuration from template
         agent_type = template_data.get("type", SYSTEM_AGENT_TYPE)

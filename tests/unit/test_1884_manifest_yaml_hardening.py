@@ -247,8 +247,19 @@ def test_the_hardened_loader_is_a_safeloader_not_a_full_loader():
     """
     import yaml
 
-    svc = _svc()
-    mro = svc._HardenedManifestLoader.__mro__
+    # ent#314 moved the mechanism into utils/safe_yaml.py (one loader for every
+    # author-controlled document) and builds a fresh class per parse so the
+    # budget counters stay per-document. The safety property is unchanged and
+    # still worth pinning — only its address moved.
+    from utils.safe_yaml import AliasPolicy, HardenedYamlError, _make_loader
+
+    loader_cls = _make_loader(
+        kind="manifest",
+        alias_policy=AliasPolicy.BUDGET,
+        max_expanded_nodes=100_000,
+        error_cls=HardenedYamlError,
+    )
+    mro = loader_cls.__mro__
     assert yaml.SafeLoader in mro
     unsafe = {"FullLoader", "UnsafeLoader", "Loader", "CLoader", "CFullLoader"}
     assert not {c.__name__ for c in mro} & unsafe
