@@ -23,14 +23,44 @@
         </tr>
       </tbody>
     </table>
+    <!-- #1537: a tabular report is fetched a page at a time, so the card shows
+         how much of the set it is holding and can pull the next window. -->
+    <div v-if="meta && meta.total > rows.length" class="mt-2 flex items-center gap-3">
+      <span class="text-xs text-gray-500">
+        Showing {{ rows.length.toLocaleString() }} of {{ meta.total.toLocaleString() }} rows
+      </span>
+      <button
+        class="text-xs px-2 py-0.5 rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
+        :disabled="loadingMore"
+        @click="onLoadMore"
+      >{{ loadingMore ? 'Loading…' : 'Load more' }}</button>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 // Expected payload shape: { columns: string[], rows: Array<object|array> }
-const props = defineProps({ payload: { type: Object, default: () => ({}) } })
+// `meta`/`onLoadMore` are optional (#1537): supplied when the parent fetched
+// this report through the paginated row reader. Absent for a whole-payload
+// fetch, in which case the footer never renders and this behaves as before.
+const props = defineProps({
+  payload: { type: Object, default: () => ({}) },
+  meta: { type: Object, default: null },
+  loadMore: { type: Function, default: null },
+})
+
+const loadingMore = ref(false)
+async function onLoadMore() {
+  if (!props.loadMore || loadingMore.value) return
+  loadingMore.value = true
+  try {
+    await props.loadMore()
+  } finally {
+    loadingMore.value = false
+  }
+}
 
 const columns = computed(() => (Array.isArray(props.payload?.columns) ? props.payload.columns : []))
 const rows = computed(() => (Array.isArray(props.payload?.rows) ? props.payload.rows : []))

@@ -119,3 +119,8 @@ tzdata>=2024.1
 # release. The local run-*.sh wrappers install the editable CLI via
 # tests/setup-env.sh instead; unit/ (the #660 one-liner contract) never imports
 # trinity_cli, so CI — which only runs unit/ — is unaffected.
+
+# #1536 report export — the builders are exercised for real (a mocked workbook
+# would prove nothing about cell mapping). Mirrors the backend image pins.
+openpyxl==3.1.5
+reportlab==4.2.5

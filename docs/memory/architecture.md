@@ -306,7 +306,7 @@ FastMCP, Streamable HTTP transport, port 8080. API-key auth via `Authorization: 
 | `loops.ts` (3) | `run_agent_loop`, `get_loop_status`, `stop_loop` | Sequential bounded task execution (#740) |
 | `reminders.ts` (3) | `set_reminder`, `list_reminders`, `cancel_reminder` | Durable one-shot deferred self-trigger; self-scoped; fires a normal execution of the same agent (`triggered_by="reminder"`) via the scheduler (#1296) |
 | `memory.ts` (1) | `write_user_memory` | Per-user memory blob; user email resolved server-side from execution_id (MEM-001, #888) |
-| `reports.ts` (1) | `report` | Publish a structured report; agent resolved from auth context (self-only), backend self-gates the path agent (#918) |
+| `reports.ts` (3) | `report`, `list_reports`, `get_report` | Publish a structured report (self-only, backend self-gates the path agent, #918); read back what was reported (#1538) — `list_reports` returns metadata, `get_report` the payload, mirroring the REST split. Read is gated at the MCP layer to `{self} ∪ permitted` (an agent key resolves to its OWNER, so the backend's scoping is wider than the calling agent); a non-permitted `get_report` returns the backend's own not-found shape rather than a distinguishable 403 |
 | `voip.ts` (1) | `call_user` | Outbound phone call via Twilio Media Streams; server-gated + rate-limited (VOIP-001, #1056) |
 | `operator_queue.ts` (3) | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue` | Read the Operating Room queue (broad or `agent_name`-scoped) and **resolve** a pending item — answer / approve / deny via `POST /{id}/respond`. The respond tool resolves the item's `agent_name`, then applies the same MCP-layer gate before writing (non-`pending` → structured error). Agent-scoped keys gated to `{self} ∪ permitted`. `cancel` deferred. (OPS-001, #1101 read / #1104 respond) |
 | `git.ts` (6) | `get_git_status`, `git_sync`, `get_git_log`, `git_pull`, `get_git_sync_state`, `reset_to_main_preserve_state` | Direct, deterministic (non-LLM) git operations — bypass `chat_with_agent` for status/sync/log/pull/sync-state and the destructive `reset_to_main_preserve_state` recovery. Conflicts stay LLM-mediated: a 409 surfaces `X-Conflict-Type`/`X-Conflict-Class` verbatim + a `chat_with_agent` hint (except `no_write_credentials` — a credentials gap chat can't fix; the hint says fork-to-own/add-a-token instead, ent#123). Mutating ops (`git_sync`/`reset`) are `OwnedAgentByName` (owner-only; a shared key gets read+pull only); agent-scoped keys gated to `{self} ∪ permitted` at the MCP layer. Each call mints a `requestId` it stamps on its `mcp_operation` audit row AND forwards as `X-Request-ID`, so the paired backend `git_operation` row joins via `GET /api/audit-log?request_id=` (#905) |
@@ -581,10 +581,19 @@ without reading chat. Three-surface clone of `agent_activities`: `routers/report
 `services/report_service.py` (create + broadcast only; reads go router→`db/reports.py`
 directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{name}/reports`.
 
+- **Prompt discoverability** (#1535): `PLATFORM_INSTRUCTIONS` carries a "Publishing Reports"
+  block (`services/platform_prompt_service.py`) — the call, when to reach for it, and the
+  payload shape per `display_hint` — so reporting is a fleet-wide default instead of a
+  per-template opt-in. Runtime-aware for free via `_adapt_instructions_for_runtime` (#1187:
+  Codex gets the bare `report` name). The documented shapes are CI-pinned to the MCP tool's
+  `display_hint` enum and the `components/reports/` renderer keys
+  (`tests/unit/test_1535_report_prompt_guidance.py`) because that drift is silent — the write
+  succeeds and the report falls back to the raw JSON viewer.
 - **Self-gated create**: `AuthorizedAgent` checks owner-access to the path agent, but an
   agent-scoped key could otherwise report as a *sibling* agent the owner shares; the endpoint
   additionally requires `current_user.agent_name == name` for agent-scoped callers (mirrors
-  `authorize_heartbeat`). Payload capped at 256 KB → 413; fields strictly validated in
+  `authorize_heartbeat`). Payload capped at `REPORT_PAYLOAD_MAX_BYTES` (5 MiB, #1537) → 413;
+  fields strictly validated in
   `ReportCreate`. Create is rate-limited per agent (`REPORT_RATE_LIMIT`/30 per 60s, shared
   `services/rate_limiter.py`, fail-open) so a runaway agent can't flood the table between
   retention sweeps → 429.
@@ -593,11 +602,36 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   (which can be sensitive). The frontend store refetches via the access-controlled REST
   endpoints (the `notifications` pattern). Regression-guarded by
   `tests/unit/test_918_report_broadcast.py`.
+- **Search & filter parity** (#1539): the per-agent list takes `report_type`/`hours`/
+  `search` like the fleet list, both built from the same `_fleet_conditions`. One
+  parameterized difference: `search` matches `agent_name` on the fleet list but not on a
+  single-agent list, where every row carries that name and a matching term would return
+  the agent's whole history. Payload contents are not searched — that needs the #1537
+  storage rework, not an unindexed `LIKE` over a multi-MiB blob.
+- **Large payloads** (#1537): cap raised to 5 MiB (measured first — the fleet's reports
+  averaged 201 bytes, so the old 256 KiB cap was the wall the first real table would hit,
+  not one agents were meeting). `GET /api/reports/{id}/rows` windows a `table` payload
+  (`offset`/`limit`, true `total`); the UI fetches tabular reports through it, so expanding
+  a 1.2 MB report transfers ~8 KB. Storage stays a single TEXT blob — no migration — and
+  the slice is Python-side, so it bounds the response, not the read; off-row storage waits
+  on a payload distribution that justifies it.
+- **Export** (#1536): `GET /api/reports/{id}/export?format=xlsx|pdf` →
+  `services/report_export.py` (pure builders, lazily-imported `openpyxl`/`reportlab`, both
+  pure-Python wheels). Shape mismatch degrades to a sensible sheet or JSON rather than
+  erroring; access reuses the detail route's 404-not-403; missing libraries answer **503**
+  with a rebuild hint so an un-rebuilt image (#1814) fails legibly on one endpoint instead
+  of at router import.
 - **List = metadata, detail = payload**: list endpoints return `ReportSummary` (no payload);
   `GET /api/reports/{id}` returns the full payload, lazy-loaded when a card expands.
 - **Fleet access**: `GET /api/reports` + `GET /api/reports/stats` filter via
   `accessible_agent_names` + `_narrow_to_agent` (admin = all). Renderers (`components/reports/`)
   pick by `display_hint` → `report_type` prefix → JSON, with shape-validation fallback to JSON.
+- **Agent read-back** (#1538): `list_reports` / `get_report` MCP tools over the existing
+  access-controlled REST endpoints — no new endpoint, no new tenant-boundary logic. The
+  MCP layer adds the narrowing the backend cannot do (agent key → owner scope → `{self} ∪
+  permitted`, the #1104 rule), and a denied `get_report` returns "Report not found" so the
+  backend's deliberate 404-not-403 id-privacy choice isn't widened for agent keys. Closes
+  the write-only loop: an agent can continue a series instead of duplicating it.
 - **Retention**: `cleanup_service` `_sweep_retention_772` prunes rows past
   `agent_reports_retention_days` (default 90, `0` disables) via `db.prune_agent_reports`
   (chunked, `idx_agent_reports_created`). Table `agent_reports`; dual migration (SQLite
@@ -1945,7 +1979,7 @@ CREATE TABLE agent_reports (
     user_id INTEGER,                     -- author = MCP-key owner (current_user.id)
     report_type TEXT NOT NULL,           -- namespaced, e.g. 'recon.weekly_summary'
     title TEXT NOT NULL,
-    payload TEXT NOT NULL,               -- arbitrary JSON, ≤256 KB (413 over cap)
+    payload TEXT NOT NULL,               -- arbitrary JSON, ≤5 MiB (413 over cap, #1537)
     display_hint TEXT,                   -- table|kpi|markdown|timeline|json|NULL
     schema_version INTEGER DEFAULT 1,
     period_start TEXT,
