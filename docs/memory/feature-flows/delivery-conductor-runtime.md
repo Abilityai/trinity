@@ -340,14 +340,26 @@ pathlib.Path(sys.argv[1]).write_text(json.dumps({
 }, separators=(",", ":")))
 PY
 chmod 0600 "${CAPTURE_DIR}/actual-chat-request.json"
-curl -fsS --max-time 300 --config - \
-  --data-binary "@${CAPTURE_DIR}/actual-chat-request.json" \
-  >"${CAPTURE_DIR}/actual-chat-response.json" <<EOF
+ACTUAL_CHAT_STATUS=
+for attempt in $(seq 1 60); do
+  if ACTUAL_CHAT_STATUS=$(curl -sS --max-time 300 --config - \
+    --output "${CAPTURE_DIR}/actual-chat-response.json" \
+    --write-out '%{http_code}' \
+    --data-binary "@${CAPTURE_DIR}/actual-chat-request.json" <<EOF
 url = "http://localhost:8000/api/agents/${ACTUAL_NAME}/chat"
 request = "POST"
 header = "Authorization: Bearer ${TOKEN}"
 header = "Content-Type: application/json"
+header = "Idempotency-Key: fixture-actual-${RUN_SUFFIX}"
 EOF
+  ); then
+    if [ "${ACTUAL_CHAT_STATUS}" = 200 ]; then break; fi
+    case "${ACTUAL_CHAT_STATUS}" in 409|429|503) ;; *) exit 22 ;; esac
+  fi
+  sleep 2
+done
+test "${ACTUAL_CHAT_STATUS}" = 200
+unset ACTUAL_CHAT_STATUS
 
 # Reconstruct only the exact sanitized effect arguments from the agent-owned
 # ledger. A completed reminder reservation proves the model called the normal
