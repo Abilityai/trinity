@@ -134,8 +134,45 @@
 
       <!-- Needs Response Tab (narrow card feed) -->
       <div v-if="activeTab === 'needs-response'" class="max-w-3xl mx-auto">
-        <!-- Empty state -->
-        <div v-if="operatorQueueStore.openItems.length === 0" class="text-center py-16">
+        <!-- Failed REFRESH (#1926) — the 5s poll stopped landing. The cards
+             below are real but stale, and an operator reading a queue must
+             know that; blanking them would be worse. -->
+        <InlineError
+          v-if="queueRefreshFailed"
+          class="mb-3"
+          message="Couldn't refresh the queue — showing the last items that loaded."
+          :detail="operatorQueueStore.error"
+          retryable
+          @retry="operatorQueueStore.fetchItems"
+          @dismiss="operatorQueueStore.error = null"
+        />
+
+        <!-- Loading state (#1926) — before the first poll returns we do NOT
+             know the queue is empty; claiming "All caught up" is optimistic
+             success (principle 15). -->
+        <div v-if="queueFirstLoad" class="text-center py-16" aria-busy="true">
+          <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gray-100 dark:bg-gray-800 mb-4">
+            <svg class="w-8 h-8 animate-spin text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+          </div>
+          <h3 class="text-lg font-medium text-gray-900 dark:text-white">Checking the queue…</h3>
+          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Loading items that need your response.</p>
+        </div>
+
+        <!-- Failed state (#1926) -->
+        <LoadFailed
+          v-else-if="queueLoadFailed"
+          title="Couldn't load the queue"
+          message="We can't tell whether your agents need you. Check your connection and try again."
+          :detail="operatorQueueStore.error"
+          :retrying="operatorQueueStore.loading"
+          @retry="operatorQueueStore.fetchItems"
+        />
+
+        <!-- Empty state — a fetch succeeded and returned zero -->
+        <div v-else-if="operatorQueueStore.openItems.length === 0" class="text-center py-16">
           <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-status-success-100 dark:bg-status-success-900/20 mb-4">
             <svg class="w-8 h-8 text-status-success-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
@@ -177,7 +214,20 @@
 
       <!-- Resolved Items Tab (narrow card feed) -->
       <div v-if="activeTab === 'resolved'" class="max-w-3xl mx-auto">
-        <div v-if="operatorQueueStore.resolvedItems.length === 0" class="text-center py-16">
+        <div v-if="queueFirstLoad" class="text-center py-16" aria-busy="true">
+          <p class="text-sm text-gray-500 dark:text-gray-400">Loading resolved items…</p>
+        </div>
+
+        <LoadFailed
+          v-else-if="queueLoadFailed"
+          title="Couldn't load resolved items"
+          message="The queue didn't load. Check your connection and try again."
+          :detail="operatorQueueStore.error"
+          :retrying="operatorQueueStore.loading"
+          @retry="operatorQueueStore.fetchItems"
+        />
+
+        <div v-else-if="operatorQueueStore.resolvedItems.length === 0" class="text-center py-16">
           <p class="text-sm text-gray-500 dark:text-gray-400">No resolved items yet</p>
         </div>
 
@@ -216,6 +266,8 @@ import NotificationsPanel from '../components/operator/NotificationsPanel.vue'
 import MonitoringPanel from '../components/MonitoringPanel.vue'
 import ExecutionsPanel from '../components/ExecutionsPanel.vue'
 import ReportsPanelFleet from '../components/ReportsPanelFleet.vue'
+import LoadFailed from '../components/LoadFailed.vue'
+import InlineError from '../components/InlineError.vue'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useNotificationsStore } from '../stores/notifications'
 import { useAgentsStore } from '../stores/agents'
@@ -229,6 +281,23 @@ const agentsStore = useAgentsStore()
 const authStore = useAuthStore()
 
 const isAdmin = computed(() => authStore.role === 'admin')
+
+// #1926 — the loading / failed / empty triad for the operator-queue tabs.
+// `hasLoaded` flips only on a SUCCEEDED fetch, so an empty list before the
+// first poll returns reads as loading, and a failed first poll reads as failed
+// (it used to read as "All caught up" — optimistic success).
+// A background poll failing after a good load keeps the stale list visible
+// rather than blanking the surface (principle 13: refresh is invisible).
+const queueFirstLoad = computed(
+  () => !operatorQueueStore.hasLoaded && !operatorQueueStore.error
+)
+const queueLoadFailed = computed(
+  () => !operatorQueueStore.hasLoaded && !!operatorQueueStore.error
+)
+// We have items, but the newest poll failed — the feed is stale, not wrong.
+const queueRefreshFailed = computed(
+  () => operatorQueueStore.hasLoaded && !!operatorQueueStore.error
+)
 
 // Health is admin-only; non-admins must not reach it even via deep link.
 const VALID_TABS = ['needs-response', 'notifications', 'health', 'executions', 'reports', 'resolved']

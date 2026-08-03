@@ -149,7 +149,19 @@
         <p class="text-sm text-gray-500 dark:text-gray-400 mt-2">Loading tasks...</p>
       </div>
 
-      <!-- Empty State -->
+      <!-- Failed State (#1926) — "No tasks yet" on a failed fetch is a lie that
+           tells the user to run a task when the real fix is to retry. -->
+      <div v-else-if="loadError && allTasks.length === 0" class="flex-1 flex flex-col justify-center">
+        <LoadFailed
+          title="Couldn't load task history"
+          message="The execution list didn't load. Check your connection and try again."
+          :detail="loadError"
+          :retrying="loading"
+          @retry="loadAllData"
+        />
+      </div>
+
+      <!-- Empty State — fetch succeeded and returned zero -->
       <div v-else-if="allTasks.length === 0" class="text-center py-12 flex-1 flex flex-col justify-center">
         <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
@@ -534,6 +546,8 @@ import { parseUTC } from '@/utils/timestamps'
 import { useAuthStore } from '../stores/auth'
 import { formatCost, formatCostCompact } from '../composables/useFormatters'
 import ModelSelector from './ModelSelector.vue'
+import LoadFailed from './LoadFailed.vue'
+import { apiErrorMessage } from '../utils/apiError'
 
 // Template ref for highlighted task element
 const highlightedTaskRef = ref(null)
@@ -566,6 +580,8 @@ const executions = ref([])
 const pendingTasks = ref([]) // Local tasks we've submitted
 const queueStatus = ref(null)
 const loading = ref(true)
+// #1926: a failed executions fetch renders as failed, not as "No tasks yet".
+const loadError = ref('')
 const newTaskMessage = ref('')
 const taskLoading = ref(false)
 const releaseLoading = ref(false)
@@ -675,6 +691,7 @@ async function loadAllData() {
 
 // Load executions from server
 async function loadExecutions() {
+  loadError.value = ''
   try {
     const response = await axios.get(`/api/agents/${props.agentName}/executions?limit=100`, {
       headers: authStore.authHeader
@@ -687,6 +704,7 @@ async function loadExecutions() {
     }
   } catch (error) {
     console.error('Failed to load executions:', error)
+    loadError.value = apiErrorMessage(error, 'Request failed')
   }
 }
 

@@ -10,7 +10,14 @@
         class="px-4 py-3 rounded-md text-sm"
         :class="notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'"
       >
-        {{ notification.message }}
+        <span>{{ notification.message }}</span>
+        <button
+          v-if="notification.type === 'error'"
+          type="button"
+          class="ml-3 font-medium opacity-70 hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-status-danger-500/40 rounded"
+          aria-label="Dismiss notification"
+          @click="dismissNotification"
+        >✕</button>
       </div>
     </div>
 
@@ -282,6 +289,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useAgentsStore } from '@/stores/agents'
+import { useNotification } from '@/composables/useNotification'
 import { agentOptionLabel } from '@/utils/agentName'
 import NavBar from '@/components/NavBar.vue'
 import FileTreeNode from '@/components/file-manager/FileTreeNode.vue'
@@ -289,14 +297,11 @@ import FilePreview from '@/components/file-manager/FilePreview.vue'
 
 const agentsStore = useAgentsStore()
 
-// Notification system
-const notification = ref(null)
-const showNotification = (message, type = 'success') => {
-  notification.value = { message, type }
-  setTimeout(() => {
-    notification.value = null
-  }, 4000)
-}
+// #1926: was a local copy of the toast helper with a hardcoded 4s
+// auto-dismiss, so an error toast vanished before it could be read or acted
+// on. Now the shared composable, which keeps errors up until dismissed
+// (principle 18).
+const { notification, showNotification, dismissNotification } = useNotification()
 
 // State
 const selectedAgentName = ref(localStorage.getItem('fileManager.selectedAgent') || '')
