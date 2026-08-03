@@ -138,9 +138,16 @@ event-stream parser attached and breaks on a bare JSON body.
 
 `_run_a2a_task` → `task_execution_service.execute_task(triggered_by="a2a")` —
 the standard stack, so A2A tasks get slots, capacity admission, the dispatch
-breaker, activity rows, and cost tracking like any other trigger. `triggered_by="a2a"`
-buckets into the analytics `_TRIGGER_BUCKETS` catch-all until it earns its own
-bucket.
+breaker, activity rows, and cost tracking like any other trigger.
+
+**All three trigger constants are wired** (the class in `learnings.md`
+2026-07-30 — the one that degrades to "no filter" fails silently and lies):
+
+| Constant | File | Value | Why |
+|---|---|---|---|
+| `_TRIGGER_BUCKETS` | `db/schedules/analytics.py` | `"Agent-to-agent"` | an inbound A2A task IS agent-to-agent work; it shares the bucket with `agent`/`self_task` rather than landing in `Other` |
+| `_VALID_TRIGGERS` | `routers/executions.py` | listed | an unlisted value degrades to **no filter**, so `?triggered_by=a2a` would return every execution on the install |
+| `_AUTONOMOUS_TRIGGERS` | `services/task_execution_service.py` | listed | **the judgement call.** The set means "no human is watching the reply", so an unresolved slash-command run earns an Operating Room alert (#1410). A2A is dispatched by a remote *machine* caller — structurally the same as `agent`, which is already in the set — so nobody on this install sees the "Unknown command" text come back. The interactive-ish triggers deliberately left out (`manual`, `mcp`, `public`, `chat`, `session`) all have a person reading the reply. |
 
 ## Schema / migration
 
@@ -149,7 +156,7 @@ bucket.
 | Track | Artifact |
 |-------|----------|
 | SQLite | `db/migrations.py` → `_migrate_agent_ownership_a2a_exposed` |
-| PostgreSQL | `migrations/versions/0024_agent_ownership_a2a_exposed.py` (`down_revision = "0023_agent_sync_state_gc_signals"`) |
+| PostgreSQL | `migrations/versions/0033_agent_ownership_a2a_exposed.py` (`down_revision = "0032_telegram_progress_indicator"` — re-chained onto the dev head at the 2026-08-03 rebase; the branch must carry exactly ONE Alembic head or `alembic upgrade head` refuses the branched graph) |
 | Fresh DDL | `db/schema.py` + `db/tables.py` |
 
 ## Open-core split
