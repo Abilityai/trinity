@@ -496,7 +496,7 @@ def test_a12_fail_all_nonterminal_covers_three_states(ops):
 # ===========================================================================
 
 
-def test_a13_exact_cutoff_row_is_not_expired(ops):
+def test_a13_exact_cutoff_row_is_not_expired(ops, monkeypatch):
     """A13 — a row queued at *exactly* the cutoff second survives. DOCUMENTED,
     not a bug.
 
@@ -510,10 +510,40 @@ def test_a13_exact_cutoff_row_is_not_expired(ops):
     pinning precisely because it is the kind of Invariant-#16 mismatch that
     looks like a bug to the next reader. Backend-agnostic: ASCII ISO-8601
     collation is identical on SQLite and PostgreSQL.
+
+    ⏱  ONE clock sample, deliberately (#1909). This case pins a **zero-width
+    boundary**, so it cannot be de-raced by widening a margin the way its
+    siblings are (``test_backlog.py`` calls that the "time-mock-free pattern",
+    and every other clock site in this file carries a 24-min-to-23-hour cushion).
+    Before the fix the test read ``datetime.now()`` here and
+    ``expire_stale_queued`` read it *again* at query time: when the wall second
+    rolled over between the two, the threshold advanced, ``exact`` became
+    strictly older, the row was expired, and the assertions flipped — measured
+    at 3.3% on CI-class hardware and 100% when the rollover is forced into the
+    window. Freezing the clock the implementation reads makes setup and query
+    observe the same instant, so the race is gone *by construction* rather than
+    made less likely. Do NOT "fix" a future recurrence by nudging ``exact`` off
+    the boundary — that silently deletes the property this test exists to pin.
     """
-    now = datetime.now(timezone.utc)
-    exact = (now - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S") + ".000000Z"
-    older = _iso(now - timedelta(hours=24, seconds=5))
+    import db.schedules.queue as queue_mod
+
+    frozen = datetime.now(timezone.utc)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen if tz else frozen.replace(tzinfo=None)
+
+    monkeypatch.setattr(queue_mod, "datetime", _FrozenDatetime)
+    # Patch-took-effect guard: if `queue.py` ever aliases its datetime import,
+    # `setattr` silently binds a name nothing reads and the test drifts back to
+    # sampling two clocks. That degrades to the #1909 flake, not to a false
+    # pass — but a flake is exactly what this asserts we no longer have, so
+    # fail loudly here instead of intermittently three months from now.
+    assert queue_mod.datetime.now(timezone.utc) == frozen
+
+    exact = (frozen - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%S") + ".000000Z"
+    older = _iso(frozen - timedelta(hours=24, seconds=5))
 
     insert_execution("a13-exact", status="queued", queued_at=exact)
     insert_execution("a13-older", status="queued", queued_at=older)
