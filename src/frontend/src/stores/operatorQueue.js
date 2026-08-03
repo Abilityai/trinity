@@ -10,6 +10,7 @@ import { ref, computed } from 'vue'
 import axios from 'axios'
 import api from '../api'
 import { useAuthStore } from './auth'
+import { apiErrorMessage } from '../utils/apiError'
 
 // Agent display helpers
 const AGENT_COLORS = [
@@ -34,6 +35,10 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
   const expandedItemId = ref(null)
   const loading = ref(false)
   const error = ref(null)
+  // #1926: "the list is empty" is only true once a fetch has SUCCEEDED and
+  // returned zero. Before the first success, `items.length === 0` means
+  // "loading" or "failed" — consumers must gate their empty state on this.
+  const hasLoaded = ref(false)
   const activeTab = ref('open') // 'open' or 'resolved'
   let _pollTimer = null
 
@@ -93,8 +98,9 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
         headers: authStore.authHeader
       })
       items.value = response.data.items || []
+      hasLoaded.value = true
     } catch (err) {
-      error.value = err.response?.data?.detail || err.message
+      error.value = apiErrorMessage(err, 'Request failed')
       // Don't clear items on error — keep stale data visible
     } finally {
       loading.value = false
@@ -132,7 +138,7 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
         error.value = 'This item was cancelled or answered by another operator — your response was not recorded.'
         fetchItems()
       } else {
-        error.value = err.response?.data?.detail || err.message
+        error.value = apiErrorMessage(err, 'Request failed')
       }
     }
   }
@@ -146,7 +152,7 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
       await fetchItems()
       return response.data
     } catch (err) {
-      error.value = err.response?.data?.detail || err.message
+      error.value = apiErrorMessage(err, 'Request failed')
       throw err
     }
   }
@@ -160,7 +166,7 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
       await fetchItems()
       return response.data
     } catch (err) {
-      error.value = err.response?.data?.detail || err.message
+      error.value = apiErrorMessage(err, 'Request failed')
       throw err
     }
   }
@@ -218,6 +224,7 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
     expandedItemId,
     loading,
     error,
+    hasLoaded,
     activeTab,
     openItems,
     resolvedItems,

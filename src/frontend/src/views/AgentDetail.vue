@@ -19,7 +19,14 @@
             notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
           ]"
         >
-          {{ notification.message }}
+          <span>{{ notification.message }}</span>
+          <button
+            v-if="notification.type === 'error'"
+            type="button"
+            class="ml-3 font-medium opacity-70 hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-status-danger-500/40 rounded"
+            aria-label="Dismiss notification"
+            @click="dismissNotification"
+          >✕</button>
         </div>
 
         <div v-if="error && !agent" class="bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300 px-4 py-3 rounded mb-4">
@@ -470,7 +477,7 @@ function toggleChatMode() {
 }
 
 // Initialize composables
-const { notification, showNotification } = useNotification()
+const { notification, showNotification, dismissNotification } = useNotification()
 
 // Agent lifecycle composable
 const {
@@ -558,10 +565,12 @@ async function toggleAutonomy() {
     // Update local state
     agent.value.autonomy_enabled = newState
 
+    // #1945: the server authors this line — the toggle no longer "activates"
+    // schedules, it gates them, and the message names the case (no schedules /
+    // all disabled / N of M will run) that the raw count used to hide.
     showNotification(
-      newState
-        ? `Autonomy enabled. ${result.schedules_updated} schedule(s) activated.`
-        : `Autonomy disabled. ${result.schedules_updated} schedule(s) paused.`,
+      result.message ||
+        `Autonomy ${newState ? 'enabled' : 'disabled'}.`,
       'success'
     )
   } catch (error) {

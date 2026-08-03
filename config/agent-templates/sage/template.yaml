@@ -50,3 +50,16 @@ metrics:
   - name: analysis_status
     type: status
     description: Current analysis status
+
+# ent#128 — the zero-credential contract, stated explicitly.
+#
+# An EMPTY block and an ABSENT block mean the same thing to Trinity ("this agent
+# needs no credentials"), and neither is an error. It is written out here because
+# absent is ambiguous to a HUMAN reading the template: it could equally mean the
+# author forgot. `{}` says "considered, and there are none", so the catalog shows a
+# 0-credential badge that an operator can trust.
+#
+# A Trinity-installable agent must run with nothing configured. This one does: it
+# uses the platform's own model credentials, which Trinity injects into the
+# container at creation, so there is nothing for an operator to paste.
+credentials: {}

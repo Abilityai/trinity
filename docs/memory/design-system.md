@@ -227,10 +227,39 @@ The existing `OverflowTabs` component (#1114, `docs/memory/feature-flows/agent-d
 - **Do:** "No schedules yet — Schedules run this agent automatically on a cron cadence. [New schedule]"
 - **Don't:** a blank region, or "No data" with no next action (principle 16).
 
+### Failed states — the third member of the triad (#1926)
+
+**Recipe:** the two shipped primitives are `components/LoadFailed.vue` (a failed
+*fetch* — owns the surface where the list would be) and `components/InlineError.vue`
+(a failed *verb* — sits next to the control that was pressed). Both name what
+happened in user vocabulary, offer the next action, and keep the raw error
+(status code, server message) behind a "Technical detail" disclosure
+(principle 25). `LoadFailed` shares the centered footprint of the sibling
+loading/empty blocks so nothing shifts when the state resolves (principle 4).
+
+**The rule the audit found broken across ten surfaces:** an empty state may only
+render once a fetch has **succeeded and returned zero**. `list.length === 0` is
+not that condition — before the first response it means *loading*, and after a
+rejection it means *failed*. Stores therefore expose a `hasLoaded` flag that
+flips only on success (`stores/operatorQueue.js`, `stores/notifications.js`),
+and components gate on `hasLoaded` + `error`, never on length alone. Failed must
+never borrow the empty state's copy: "No templates found" on a network error
+sends the user to create a template when the fix is to retry.
+
+**Verb failures are never console-only.** A `console.error` is invisible — the
+row snaps back to its server value and the verb looks like it simply did
+nothing. Neither is `alert()` acceptable: it blocks the page and leaves no
+record once dismissed. Use `InlineError`, and say what did NOT happen ("Nothing
+was changed — try again").
+
+**Watch `Promise.allSettled`:** a bulk helper built on it *resolves* even when
+every item failed, so a `try/catch` around it reports success on a total
+failure. Inspect the settlement and report the count that did not apply.
+
 ### Alerts & toasts
 
 **Alert recipe:** tinted ground per token family (light token-100 bg + token-700 text; dark token-500/16% + token-300), radius 8, padding 12×14, 13.5, 16px stroke icon, bold lead sentence, plain-language body. Errors say what went wrong **and how to fix it** ("Execution failed — exit 137 (out of memory). Raise the agent's memory limit in Settings → Resources."). Warnings carry their action inline.
-**Toast recipe:** surface bg + border-strong + shadow-lg, radius 8, padding 10×16. Toasts confirm **completed verbs** and include the fact you'd check next ("Schedule created — next run Mon 09:00 UTC"); auto-dismiss ~5s; **never used for errors** (principle 18) — errors persist until acknowledged.
+**Toast recipe:** surface bg + border-strong + shadow-lg, radius 8, padding 10×16. Toasts confirm **completed verbs** and include the fact you'd check next ("Schedule created — next run Mon 09:00 UTC"); auto-dismiss ~5s; **never used for errors** (principle 18) — errors persist until acknowledged. Enforced in `composables/useNotification.js` (#1926): a `type: 'error'` notification does not start the dismiss timer and stays until the user closes it, so every toast host renders a dismiss control for it. A failure that belongs next to a control should not be a toast at all — use `InlineError`/`LoadFailed` above.
 
 ## 6. Motion — the data-loading standard
 

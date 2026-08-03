@@ -13,10 +13,21 @@
 - **Flow**: `docs/memory/feature-flows/scheduling.md`
 
 ### 10.2 Autonomy Mode
-- **Status**: ✅ Implemented (2026-01-01)
-- **Description**: Master toggle for agent autonomous operation
-- **Key Features**: Dashboard toggle, enables/disables all schedules
+- **Status**: ✅ Implemented (2026-01-01); gate semantics corrected 2026-08-03 (#1945)
+- **Description**: Master gate for agent autonomous operation
+- **Key Features**: Dashboard toggle; gates every cron fire for the agent
 - **Flow**: `docs/memory/feature-flows/autonomy-mode.md`
+
+#### 10.2.1 Autonomy is a Gate, Not a Bulk Edit (#1945)
+- **Status**: ✅ Implemented (2026-08-03)
+- **GitHub Issue**: #1945
+- **Description**: `set_autonomy_status_logic` used to loop `db.set_schedule_enabled(id, enabled)` over every schedule on the agent, unfiltered and in both directions — so the agent-level gate and the per-schedule `enabled` flag shared one write path and only one survived. The first toggle destroyed per-schedule intent: an owner-disabled (or template-authored `enabled: false`) schedule was silently re-armed on the next autonomy-on, and autonomy-off was a set-all rather than a pause. Since a template can materialize up to 20 declared schedules at creation, one unrelated toggle could arm all of them at once (LLM cost amplification).
+- **Requirement**: the autonomy toggle MUST write only `agent_ownership.autonomy_enabled`. Per-schedule `enabled` is owner intent — nothing may rewrite it except an explicit per-schedule change (Schedules tab / `POST .../schedules/{id}/enable|disable` / `update_schedule`) or an explicit admin fleet op (`/api/ops/schedules/pause|resume`, `emergency_stop`).
+- **Enforcement**: the scheduler's cron-only gate (`src/scheduler/service.py::_execute_schedule_with_lock` → `get_autonomy_enabled`) is authoritative and unchanged — it now carries the whole load, so an enabled schedule on a paused agent is a normal state: skipped, no execution row, `next_run_at` projection advanced (#1472), shown in the UI as "Will not fire — autonomy off" (#1796). A manual trigger still bypasses autonomy by design.
+- **No schema change**: the fix is the removal of a write — no new column, no migration, nothing to keep in dual track.
+- **Upgrade behavior**: existing rows are never rewritten. An agent already flattened to all-disabled by a pre-#1945 toggle stays that way (the erased intent is unrecoverable); the toggle response says so explicitly instead of silently re-arming.
+- **API**: `PUT /api/agents/{name}/autonomy` drops `schedules_updated` (a count of a write that no longer happens) in favor of `total_schedules`, `enabled_schedules`, and a server-authored `message`.
+- **Tests**: `tests/unit/test_1945_autonomy_preserves_schedule_intent.py` (AC5 off→on cycle, no-write proof via unchanged `updated_at`/`next_run_at`, response contract, scheduler-gate source pin); `tests/unit/test_1557_autonomy_breaker_decoupled.py` updated — its "still suppresses proactive work" guard now pins the gate write and forbids the fan-out.
 
 ### 10.3 Execution Queue
 - **Status**: ✅ Implemented

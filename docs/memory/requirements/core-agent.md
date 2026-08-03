@@ -152,6 +152,16 @@
 - **Description**: Read template.yaml for display name, description, resources, credentials
 - **`credentials.mcp_servers` template lookup resolves from the validated path, not from `name:` (#1900)**: `generate_credential_files` used to locate the shipped `.mcp.json` by joining the template.yaml's own `name:` field onto a hard-coded curated root — an unvalidated join whose result is read into the new agent's `.mcp.json`. Two things were wrong with it: `name:` is **untrusted** (through `deploy_local_agent` any `creator` supplies it, so `name: ../../data/deployed-templates/<victim>` read another tenant's credential-bearing `.mcp.json` into the attacker's own agent), and it is **not a directory name at all** — it is a display string in 5 shipped templates ("Test Echo Agent"). The create path now passes the directory it already validated via `_safe_local_template_path` (extracted as `crud._resolve_local_template_dir`, the single ladder shared by the resolver, the `/template` bind decision and the credential stager), so the derivation is gone from the live path. The residual `template_base_path is None` arm (no caller today; `github:` templates never reach this function, their `template_data` stays empty) is fail-closed and contained through the same barrier as the id, which also absorbs a non-string `name:` that previously raised `TypeError` out of agent creation as an uncaught 500.
   - **Consequence worth knowing (stated precisely, because the flattering version is false):** a deploy-local template that both declares `credentials.mcp_servers` and ships a `.mcp.json` now has that file **staged at all**, where the old curated-root lookup always missed — and the staged copy **wins** over the archive's raw one, because `startup.sh` copies `/generated-creds/.mcp.json` unconditionally and *after* the template-copy block (gated on `.trinity-initialized`). It is **not** true that such templates "now get `${VAR}` substitution": the sole production caller, `crud._stage_config_files`, passes an **empty** `agent_credentials` map (CRED-002 — real values are injected after creation, not at staging), so every `${VAR}` is rewritten to `""` while hardcoded entries survive verbatim. That mirrors the `.env` arm of the same function, which has always blanked an un-supplied `credentials.env_file` variable; the durable record of a server's required variables is `.mcp.json.template` (compatibility check S-009), pre-populated untouched.
+- **Per-variable credential setup metadata (ent#128)**: `credentials:` declares
+  variable NAMES (frozen — it will never accept per-variable objects, so an
+  older Trinity reading an enriched template cannot break while writing the
+  agent's `.env`); the optional sibling `credential_setup:` describes each one
+  (title / description / required / secret / format / setup_url / default) and is
+  joined back BY NAME, so it can only decorate a declared variable and the pair
+  cannot drift. Surfaced as `credential_requirements` on every catalog entry.
+  A legacy bare name normalizes to `required: "unknown"` — no authorial intent.
+  See `docs/memory/requirements/credentials.md` §3.5 and
+  [`docs/schemas/trinity-agent-credentials.schema.json`](../../schemas/trinity-agent-credentials.schema.json).
 
 ### 4.4 Fork-to-Own Templates (trinity-enterprise#93)
 - **Status**: ✅ Implemented (2026-07-06)

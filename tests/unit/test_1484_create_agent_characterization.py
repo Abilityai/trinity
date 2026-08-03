@@ -108,6 +108,22 @@ def _load_crud(monkeypatch, docker_available=True):
     # Dynamic-vs-predefined dispatch keys on this: a truthy return picks the
     # predefined branch. Default None ⇒ dynamic github:owner/repo path.
     template_service.get_github_template = MagicMock(return_value=None)
+    # ent#128: `_resolve_local_template` reads the template's declared MCP servers
+    # through this tolerant accessor instead of reaching through `credentials:`
+    # raw (a null/list/string block raised AttributeError, and that read sits
+    # FIRST in a run of `config` mutations under one broad `except` — so it cost
+    # the agent its `runtime:` and `shared_folders:` too). This harness MagicMocks
+    # the whole module, so an unstubbed call returns a truthy Mock that lands in
+    # `config.mcp_servers` and later blows up in a `yaml.dump`. Stubbed with a
+    # faithful mirror rather than a fixed `[]` so a fixture that DOES declare
+    # credentials cannot be silently masked.
+    def _mcp_server_names(block):
+        servers = block.get("mcp_servers") if isinstance(block, dict) else None
+        return [str(n) for n in servers] if isinstance(servers, dict) else []
+
+    template_service.credential_mcp_server_names = MagicMock(
+        side_effect=_mcp_server_names
+    )
 
     git_service = MagicMock()
     git_service.DEFAULT_PERSISTENT_STATE = ["memory/"]

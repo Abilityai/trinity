@@ -97,6 +97,22 @@ def _load_crud(monkeypatch):
     template_service = MagicMock()
     template_service.generate_credential_files = MagicMock(return_value={})
     template_service.get_github_template = MagicMock(return_value=None)
+    # ent#128: `_resolve_local_template` reads the template's declared MCP servers
+    # through this tolerant accessor instead of reaching through `credentials:`
+    # raw (a null/list/string block raised AttributeError, and that read sits
+    # FIRST in a run of `config` mutations under one broad `except` — so it cost
+    # the agent its `runtime:` and `shared_folders:` too). This harness MagicMocks
+    # the whole module, so an unstubbed call returns a truthy Mock that lands in
+    # `config.mcp_servers` and later blows up in a `yaml.dump`. Stubbed with a
+    # faithful mirror rather than a fixed `[]` so a fixture that DOES declare
+    # credentials cannot be silently masked.
+    def _mcp_server_names(block):
+        servers = block.get("mcp_servers") if isinstance(block, dict) else None
+        return [str(n) for n in servers] if isinstance(servers, dict) else []
+
+    template_service.credential_mcp_server_names = MagicMock(
+        side_effect=_mcp_server_names
+    )
 
     git_service = MagicMock()
     git_service.DEFAULT_PERSISTENT_STATE = ["memory/"]
@@ -746,11 +762,21 @@ async def test_malformed_field_still_creates_and_names_the_template(
     """#1759 narrowed the PARSE, not the field mutation.
 
     A `template.yaml` that parses to a dict but carries a malformed FIELD
-    (`credentials: "a string"` → `creds.get(...)` raises `AttributeError`) is
+    (`shared_folders: "a string"` → `.get(...)` raises `AttributeError`) is
     still swallowed into a warning, on purpose: the file is valid YAML, the
     agent gets its template files, and only some `config` mutations are
     skipped. Tightening that to a 400 would reject templates that deploy today
     and is outside this issue's ACs.
+
+    NOTE (ent#128): the trigger field was `credentials: "a string"` until
+    `_resolve_local_template` started reading that block through the tolerant
+    `credential_mcp_server_names()`. `credentials:` is no longer a trigger *by
+    design* — it used to raise FIRST in this run of mutations, so one malformed
+    key also cost the agent its `runtime:` and `shared_folders:` config. That is
+    now covered by
+    `test_ent128b2_credential_setup.py::test_malformed_credentials_does_not_cost_runtime_and_shared_folders`.
+    `shared_folders:` is the surviving trigger and keeps this degrade path — and
+    the two identifiers in its warning — under test.
 
     This pins two things the swallow must never lose:
 
@@ -765,7 +791,7 @@ async def test_malformed_field_still_creates_and_names_the_template(
     _write_template(
         curated,
         "badfield-1759",
-        "type: business-assistant\ncredentials: not-a-mapping\n",
+        "type: business-assistant\nshared_folders: not-a-mapping\n",
     )
 
     with caplog.at_level("WARNING"):
