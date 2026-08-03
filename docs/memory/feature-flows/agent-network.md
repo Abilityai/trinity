@@ -626,7 +626,9 @@ async function toggleAutonomy(agentName) {
   const response = await axios.put(`/api/agents/${agentName}/autonomy`, { enabled: newState })
   node.data.autonomy_enabled = newState  // Update reactively
 
-  return { success: true, enabled: newState, schedulesUpdated: response.data.schedules_updated }
+  // #1945: the toggle changes no schedule row — these are counts of what will run
+  return { success: true, enabled: newState, totalSchedules: response.data.total_schedules,
+           enabledSchedules: response.data.enabled_schedules, message: response.data.message }
 }
 ```
 Toggles autonomy mode for an agent and updates the node data reactively.

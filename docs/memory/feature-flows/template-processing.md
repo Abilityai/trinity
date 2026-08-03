@@ -187,12 +187,33 @@ requires local filesystem write access, not a request.
   "source": "github",
   "resources": {"cpu": "2", "memory": "4g"},
   "mcp_servers": ["heygen", "twitter-mcp"],
-  "required_credentials": [
-    {"name": "HEYGEN_API_KEY", "source": "mcp:heygen"}
+  "required_credentials": ["HEYGEN_API_KEY", "TWITTER_API_KEY"],
+  "credential_requirements": [
+    {
+      "name": "HEYGEN_API_KEY",
+      "title": "HeyGen API key",
+      "description": "Renders the avatar videos.",
+      "required": true,
+      "secret": true,
+      "format": "secret",
+      "setup_url": "https://app.heygen.com/settings/api",
+      "default": null,
+      "source": "template:mcp:heygen",
+      "platform_injected": false
+    }
   ],
   "credential_errors": []
 }
 ```
+
+**Two shapes, two owners — this is the reconciliation** (ent#128). The doc used to
+show objects here and strings further down, which read as a contradiction:
+
+| field | shape | owner |
+|---|---|---|
+| `required_credentials` (**catalog**) | list of **names** | `operator_supplied_credential_names()` — declared minus platform-injected. `Templates.vue` reads only `.length`, so this is the "N credentials" badge feed |
+| `credential_requirements` (**catalog**) | list of **objects** | `normalize_credential_requirements()` — the ent#128 per-variable records |
+| `required_credentials` (**extractor**) | list of `{name, source}` | `extract_agent_credentials()`, a repo-scanning helper with **no production caller**. Same key name, different function, different shape — do not conflate them |
 
 `credential_errors` (trinity-enterprise#128) carries one named message per
 structural problem in the template's `credentials:` block — empty on a healthy
@@ -344,8 +365,16 @@ def extract_agent_credentials(repo_path: Path) -> Dict:
             "env_file_vars": ["VAR3"]
         }
     """
-    pattern = r'\$\{([A-Z][A-Z0-9_]*)\}'  # Matches ${VAR_NAME}
+    pattern = CREDENTIAL_DETECTOR_REF_RE  # \$\{([A-Za-z_][A-Za-z0-9_]*)\}
 ```
+
+The pattern is **no longer uppercase-only** (ent#128). Trinity's substitution
+engines impose no charset — `${my_var}` IS substituted at runtime — so an
+uppercase-only *detector* read narrower than what it audits, which HARD-failed
+K-001 on a template that documented every variable it referenced. The shared
+constant and its NON-MEMBERS list (patterns that must NOT adopt it, notably the
+fail-closed `mcp_validator._ENV_VAR_REF_RE`) live in
+`services/credential_charset.py`.
 
 ### extract_env_vars_from_mcp_json (`services/template_service.py:64-103`)
 ```python
@@ -353,7 +382,7 @@ def extract_env_vars_from_mcp_json(file_path: Path) -> Dict[str, List[str]]:
     # Parse JSON and extract ${VAR_NAME} patterns from:
     # - env section of each MCP server config (lines 88-92)
     # - args array of each MCP server config (lines 94-98)
-    pattern = r'\$\{([A-Z][A-Z0-9_]*)\}'
+    pattern = CREDENTIAL_DETECTOR_REF_RE  # shared detector charset (ent#128)
     for server_name, server_config in mcp_servers.items():
         if "env" in server_config:
             matches = re.findall(pattern, value)  # ${VAR_NAME}
@@ -705,6 +734,9 @@ GITHUB_TEMPLATES = [
         "resources": {"cpu": "2", "memory": "4g"},
         "mcp_servers": [],
         "required_credentials": ["HEYGEN_API_KEY", "TWITTER_API_KEY", "CLOUDINARY_API_KEY"]
+        # ^ the CATALOG shape: a list of names (the badge feed). The objects shape
+        #   belongs to `credential_requirements` / the caller-less extractor — see
+        #   "Two shapes, two owners" above (ent#128).
     },
     # ... more templates (cornelius, corbin, ruby multi-agent system)
 ]
@@ -841,8 +873,9 @@ A GitHub template can declare `fork_to_own: required` in its `template.yaml`; `_
 **Request**: `POST /api/agents` with `fork_to_own: {destination_repo: "owner/name", github_pat (SecretStr), private: true}`. Backend enforces the `required` flag (400 `FORK_TO_OWN_REQUIRED`), rejects `@branch` syntax and non-`github:` templates with the block, and pins `source_mode=True` + `source_branch=<template default branch>`.
 
 **Copy pipeline** (`services/agent_service/fork_to_own.py`, runs in the `github:` branch of `create_agent_internal` BEFORE the docker try-block so structured `FORK_*` errors reach the UI):
-1. `validate_token(user_pat)` → login; USER-owner mismatch → 400 `FORK_DESTINATION_FORBIDDEN`.
-2. Destination state: missing → `create_repository(private=…)` (user PAT) + REST visibility poll (≤10s); exists+empty → reuse; exists holding exactly the template tip (single branch, head SHA match) → idempotent reuse, skip push; else → 409 `FORK_DESTINATION_EXISTS`.
+1. `validate_destination_pat(user_pat)` → login; USER-owner mismatch → 400 `FORK_DESTINATION_FORBIDDEN`. Called **before** `_resolve_template_tip` so a bad PAT reports `FORK_PAT_INVALID` even when the template is also unreachable.
+2. Destination state via `inspect_or_create_destination_repo()` → `created | empty | branches`: missing → `create_repository(private=…)` (user PAT) + REST visibility poll (≤10s); exists+empty → reuse. The **reuse/refuse policy stays in this caller** — exists holding exactly the template tip (single branch, head SHA match) → idempotent reuse, skip push; else → 409 `FORK_DESTINATION_EXISTS`.
+   > **ent#109**: steps 1–2 are now the *shared* half, reused verbatim by the post-creation rebind ([agent-repo-binding.md](agent-repo-binding.md)). The seam is deliberately one level below the triage: the reuse branch **is** the template-tip SHA comparison, which is meaningless to a caller whose content source is an agent's workspace volume — so the primitive **reports** `created|empty|branches` and each caller decides. Behaviour here is unchanged and pinned by the 40 tests below.
 3. Bare single-branch full-history clone of the template (read auth: platform PAT or none) staged under `/data/agent-fork-tmp` (backend `/tmp` is a 100 MB tmpfs), push to destination with the **user PAT via `GIT_CONFIG_*` env** (`http.extraHeader` — token never on argv/URL), `git ls-remote` poll (≤15s) so the agent's startup clone can't race an empty repo (#1439 class). All output passes `scrub_secret` (plain + b64 forms) before logging.
 
 **Binding guard**: destination already referenced by any `agent_git_config` row → 409 `FORK_DESTINATION_IN_USE` (agent name disclosed only when the caller can access it, #186). Re-checked **after** `reserve_and_generate_instance_id` (source-mode rows bypass the partial UNIQUE index; the whole copy sits between check and act) — concurrent losers (all but the lexicographically-first name) roll back their row deterministically.
@@ -851,9 +884,9 @@ A GitHub template can declare `fork_to_own: required` in its `template.yaml`; `_
 
 **Frontend** (`CreateAgentModal.vue`): templates with `fork_to_own === 'required'` render as featured cards (tagline subtitle) above the standard list; selecting one reveals destination/PAT/visibility fields. Private is the default; Public sits behind a loud warning. PAT hint steers to a fine-grained single-repo token (the agent can read its own git credential — see `docs/security-reports/cso-2026-07-06.md`). The PAT ref is cleared after create.
 
-**Known limitations**: `fork_to_own: required` enforcement is fail-open when the template.yaml metadata fetch fails (advisory gate; empty metadata → flag unseen for that 10-min cache window). MCP `create_agent` deliberately does NOT accept `fork_to_own` (tool args are audit-logged — a PAT arg would persist in plaintext). Repos pre-created WITH a README are non-empty → 409. Soft-deleted agents keep their destination binding until purge (blocking is intentional — admin recovery would resurrect it). Upstream template flag for `Abilityai/cornelius` ships separately in that repo.
+**Known limitations**: `fork_to_own: required` enforcement is fail-open when the template.yaml metadata fetch fails (advisory gate; empty metadata → flag unseen for that 10-min cache window). MCP `create_agent` deliberately does NOT accept `fork_to_own` (tool args are audit-logged — a PAT arg would persist in plaintext). Repos pre-created WITH a README are non-empty → 409. Soft-deleted agents keep their destination binding until purge (blocking is intentional — admin recovery would resurrect it). Upstream template flag for `Abilityai/cornelius` ships separately in that repo. This is the **create-time** path only; retrofitting an already-created agent onto a user-owned repo is [agent-repo-binding.md](agent-repo-binding.md) (ent#109).
 
-Tests: `tests/unit/test_fork_to_own.py` (40 — model validation, orchestrator collision/scrub/timeout paths, crud gates, deep-slice env/PAT-persist/rollback, destination race, facade delegation, startup.sh static).
+Tests: `tests/unit/test_fork_to_own.py` (40 — model validation, orchestrator collision/scrub/timeout paths, crud gates, deep-slice env/PAT-persist/rollback, destination race, facade delegation, startup.sh static); `tests/unit/test_ent109_fork_to_own_extraction.py` (13 — the shared primitive's three states + error registry, and the validate-before-template ordering the split must preserve).
 
 ---
 

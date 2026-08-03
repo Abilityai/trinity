@@ -19,7 +19,7 @@ Load this before writing any code under `src/frontend/`. It is the condensed, bi
 
 ## Primitives first
 
-- Compose `BaseButton`, `BaseInput`, `BaseSelect`, `BaseToggle`, `BaseTextarea`, `BaseBadge`, `BaseCard`, the modal shell (`ConfirmDialog`), `OverflowTabs`, and the bounded data table. Never hand-roll a lookalike — identical pixels from a class string is still a defect.
+- Compose `BaseButton`, `BaseInput`, `BaseSelect`, `BaseToggle`, `BaseTextarea`, `BaseBadge`, `BaseCard`, the modal shell (`ConfirmDialog`), `OverflowTabs`, the bounded data table, and the failed-state pair `LoadFailed` (failed fetch) / `InlineError` (failed verb). Never hand-roll a lookalike — identical pixels from a class string is still a defect.
 - BaseButton: 4 variants (primary/secondary/danger/ghost) × 2 sizes (md 13.5 pad 7×14 · sm 12.5 pad 4×10), radius 6px. Disabled = opacity .45. In-flight = 16px spinner + progressive label. Focus ring on all variants.
 - BaseInput/BaseSelect: field bg, border-strong, radius 6px, pad 8×11; focus = accent border + 3px ring; errors name the problem, the fix, and an example — never a bare red border.
 - BaseTextarea: min-height 84px, `resize: vertical` only, mono variant for prompts/config, same focus/error as inputs.
@@ -69,10 +69,10 @@ Data loading:
 14. Loading = "no data yet"; cache hits skip animation; reduced motion honored.
 
 Honest state:
-15. Loading ≠ empty ≠ failed ≠ partial — visually distinct, never optimistic success.
+15. Loading ≠ empty ≠ failed ≠ partial — visually distinct, never optimistic success. An empty state requires a fetch that **succeeded and returned zero** (`store.hasLoaded`), never `list.length === 0`; a failed fetch renders `LoadFailed`, never the empty copy (#1926).
 16. No dead ends: empty states name the purpose and the next action.
 17. Validation errors are named, actionable, with an example; pre-validate client-side where known.
-18. Verbs acknowledge in ~100ms and confirm completion; toasts for completed verbs, never errors.
+18. Verbs acknowledge in ~100ms and confirm completion; toasts for completed verbs, never errors. A failed verb surfaces an `InlineError` next to its control and persists until dismissed — never `console.error` alone, never `alert()` (#1926).
 19. Destructive actions: named verb, restated consequence, safe action focused first.
 22. Times are honest: relative for recency, absolute + timezone on hover/detail.
 23. Keyboard baseline: visible focus, Esc closes overlays, modal focus trap, tab order = visual order.
@@ -94,7 +94,8 @@ Before requesting review, verify:
 - [ ] Every button/input/select/toggle/textarea/badge/card/modal/tab/table is a Base* primitive, not hand-rolled
 - [ ] Verified in light AND dark; dark meta text is gray-300/400, never gray-500
 - [ ] Spacing on the 4px grid; radii 6px controls / 8–10px surfaces; type within the six-size scale
-- [ ] Loading/empty/failed states all exist, visually distinct, sharing one footprint — no layout shift on arrival
+- [ ] Loading/empty/failed states all exist, visually distinct, sharing one footprint — no layout shift on arrival; the empty branch gates on a succeeded fetch (`hasLoaded`), not on list length
+- [ ] Every action failure has a user-visible home (`InlineError` near the control); no `console.error`-only catch, no `alert()`, and `Promise.allSettled` bulk helpers report their rejected count
 - [ ] Data loading uses the scanline primitive keyed off store state; background refresh is invisible (no re-flash, no scroll reset)
 - [ ] `prefers-reduced-motion` handled on any animation touched
 - [ ] Empty states name purpose + one next action; errors name problem + fix + example

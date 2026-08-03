@@ -1292,6 +1292,84 @@
         "systems"
       ],
       "description": "R5: deploy_manifest runs create_schedules AFTER create_agent_internal, so post-ent#89 it is the second schedule producer for the same agent. Asserts a manifest declaring a name the template already materialized yields ONE row (and does not overwrite it), that manifest-only schedules still land, within-block dedupe, redeploy idempotency, and fail-open on an unreadable existing set."
+    },
+    {
+      "file": "unit/test_ent109_git_env_seam.py",
+      "feature": "trinity-enterprise#109",
+      "added": "2026-07-30",
+      "categories": [
+        "backend",
+        "agents",
+        "git",
+        "unit",
+        "reliability",
+        "security"
+      ],
+      "description": "Single-owner git env derivation across both container-rebuild paths (ent#109 PR 1). recreate_container_with_updated_config seeds env from the OLD container and re-derived only GITHUB_PAT, replaying whatever GITHUB_REPO / GIT_SYNC_* each container carried; its one production caller is start_agent_internal, fired by nine config-drift predicates AND base-image drift at cold start, so a base-image rebuild arms that replay fleet-wide. 22 tests over the 1484-shape purge-and-mock harness (copied from test_ent123_tokenless_clone, deliberately not shared - sys.modules leaks). (1) PAT gate is a REQUIRED per-call-site parameter: the ent#162 regression verbatim - a tokenless agent plus a configured GLOBAL platform PAT must NOT get GITHUB_PAT under pat_gate='per_agent_only' (a verbatim lift would have swapped #211's per-agent gate for the 2-tier per-agent->global resolver, configure_push_remote clears the push blackhole, and Cornelius can push a private KB to the shared public upstream) - plus the contrast case proving pat_gate='effective' DOES resolve it (so the assertion is the gate's doing, not a dead resolver), the per-agent-row and already-tokened-container arms, an unknown gate rejected, and an AST static guard pinning the WRITER SET, not just the two known sites: `{recreate_container_with_updated_config: per_agent_only, _apply_persisted_auth_env: effective}` exactly, so a THIRD writer on any container-seeded path fails CI (ent#109's bug WAS that git env had two writers and one was wrong; the earlier source-grep version stayed green through a planted third `effective` writer - proved by mutation). The AST also fails loud on a non-literal `pat_gate`, which would make the guard vacuous, and ignores the module's two prose mentions of the helper that a substring count read as writers (the #1871 guard's own first blind spot). (2) GIT_SYNC_AUTO = DB flag OR baked env, DERIVE-ONLY: baked-true/DB-0 keeps auto-push (crud.py's two writers genuinely disagree - 'and not config.ephemeral' sits inside a swallowing try/except on the DB side only, column default 0 - so DB-only derivation silently stops auto-push for that slice of the fleet), but the column is NEVER written back: 'baked true / DB 0' is ALSO exactly what an owner's explicit PUT /{agent}/git/auto-sync {enabled:false} looks like (that endpoint writes the row and nothing else, while the agent gates on container env), so a backfill would re-enable the flag, erase the only record of the intent, and cross a privilege boundary - PUT .../auto-sync is OwnedAgentByName while POST .../start, which triggers the recreate, is AuthorizedAgentByName, and an agent-scoped key resolves to its owner carrying the owner's role (trinity-ops-agent#232). DB-only enables; neither source clears a stale flag. (2b) Correct, never introduce, on the config-drift path: the block is repo-gated while the PAT is per-agent-gated, and those two disagree for an agent bound post-creation via POST /{agent}/git/initialize on the GLOBAL platform PAT (no baked git env, no per-agent PAT row, credential only in .git/config, not covered by startup.sh's #1264 .env fallback) - introducing GIT_SYNC_ENABLED=true with no GITHUB_PAT makes the restart branch rewrite origin to the credential-less CLONE_URL and configure_push_remote blackhole the push remote, silently and fleet-wide on the same base-image drift this fix exists for. So per_agent_only writes the block only when the old container already carried GITHUB_REPO or a PAT resolves; a carried repo is still corrected; effective is exempt (no old container - not introducing there is the #843/#1439 silently-empty-agent bug); the no-row clear sweep is unaffected. (3) Set-or-clear: a deleted agent_git_config row pops every var in _GIT_ENV_KEYS from a carried-forward dict and touches nothing else, a source_mode flip clears the mode/branch pair, TRINITY_GIT_BASE_URL refreshes from the CURRENT backend env, the owned key set is complete, and the one deliberate divergence from a verbatim lift is asserted (a container with a baked PAT and NO git binding loses it rather than having it refreshed from the global platform PAT - the per-agent PAT is a column ON that row). (4) Idempotence: two passes produce an identical env dict and the DB row is never mutated, so the writer can never feed a config-drift matcher into an infinite recreate loop. Every one of the four behaviours was proved to have teeth by mutation (un-gate the PAT, flip the call site to 'effective', derive GIT_SYNC_AUTO DB-only, drop the clear sweep, drop the source-mode clear, diverge the GIT_SYNC_AUTO literal, restore the DB backfill, remove the introduce-guard: all eight go red). No Docker, no backend, no Redis."
+    },
+    {
+      "file": "unit/test_ent109_repo_binding.py",
+      "feature": "trinity-enterprise#109",
+      "added": "2026-08-02",
+      "categories": [
+        "backend",
+        "agents",
+        "git",
+        "unit",
+        "reliability",
+        "security"
+      ],
+      "description": "Post-creation repo binding engine (ent#109 PR 2). Classification refuses every unsupported shape BY NAME and partitions on source_mode (the column idx_git_config_repo_branch_unique keys on) rather than on write credentials, which is orthogonal: a credential-less source_mode=0 row would pass a credentials gate and be rebound INSIDE that index. An already-writable agent is an ORDINARY rebind, and trinity-system is refused through the no-git-config path so it never reaches a container recreate. The CAS is the commit point: a row that moved yields 409 with nothing partial, and the post-commit loser is RESTORED to captured previous values, never deleted (delete_git_config on a pre-existing row strips a live agent's binding so its next recreate drops GITHUB_REPO -- #843/#1439). Ordering: the PAT is persisted after the rewire and strictly before the recreate. Resumption (review C1): the fixture tracks the container's origin INDEPENDENTLY of the DB row, because that divergence is the whole subject -- deriving one from the other made the retry regression test pass against code that refused the retry with BIND_STATE_UNCLASSIFIED. Both post-commit shapes are covered: push-failed (row moved, origin did not) and recreate-failed (both name the destination, but it now holds our own pushed history, which the destination policy read as foreign data). A resume does not repoint upstream at the destination, and a row naming a THIRD repo is still unclassified. Secret hygiene: the PAT is absent from the outcome, the audit and every error path, and a stale baked token in git output is redacted too (it is not user_pat, so scrub_secret alone misses it)."
+    },
+    {
+      "file": "unit/test_ent109_bind_endpoint.py",
+      "feature": "trinity-enterprise#109",
+      "added": "2026-08-02",
+      "categories": [
+        "backend",
+        "api",
+        "git",
+        "unit",
+        "security"
+      ],
+      "description": "The bind ENDPOINT surface (ent#109 PR 2). Human-only: an agent-scoped key is 403 even when it resolves to an admin owner (trinity-ops-agent#232 -- an agent key carries its owner's role, so a role gate alone is satisfied on a default admin-owned install), with a getsource guard proving reject_agent_principal is CALLED and not merely imported. Route wiring (#1069 class): both routes registered, path param matches the handler parameter, methods as documented. Locks fail CLOSED (503) unlike _agent_data_op_lock's tar-calibrated fail-open -- a lost lock here means two repo creates and two concurrent recreates of one container; the destination lock is keyed by sha256 of the LOWER-CASED destination, not by agent, because the collision is two DIFFERENT agents targeting one repo. Idempotency key is verb-folded; an absent header derives no key (a deliberate human action must not have an intentional re-bind swallowed). Audit on EVERY exit path incl. both idempotency replays. PAT charset guard (/cso S1): a token carrying CR/LF is rejected at the model boundary because h11 echoes an illegal header value verbatim, putting the raw PAT in a 500 body and the Vector-captured platform log; surrounding whitespace is STRIPPED not rejected (a trailing newline from a paste is the commonest real input); the same guard is asserted on ForkToOwnRequest, whose create path feeds the same GitHubService constructor. Invariant #8 wiring: `agent_name` is bound to the enumeration-safe dependency by callable IDENTITY -- get_owned_agent_by_name on the mutating verb, get_authorized_agent_by_name on the read-only status verb. The uniform-404 behaviour (nonexistent and inaccessible are byte-identical) is proven parametrically in test_186_enumeration_uniformity.py; what no dependency-level test can see is whether THIS endpoint routes through it rather than a hand-rolled lookup with a 404-then-403 split, which is how the enumeration oracle gets reintroduced."
+    },
+    {
+      "file": "unit/test_ent109_fork_to_own_extraction.py",
+      "feature": "trinity-enterprise#109",
+      "added": "2026-08-02",
+      "categories": [
+        "backend",
+        "agents",
+        "git",
+        "unit"
+      ],
+      "description": "Behaviour preservation across the ent#109 AC #4 extraction: fork_template_to_own_repo keeps create / reuse-empty / template-tip SHA-match fast path / refuse-with-data unchanged once the destination half moves into inspect_or_create_destination_repo. The seam is deliberately lower-level than the plan's first draft: the create path's reuse branch IS the template-tip SHA comparison, so the triage cannot be lifted wholesale -- the primitive REPORTS (created|empty|branches) and each caller keeps its own reuse/refuse POLICY. validate_destination_pat stays a sibling rather than being folded in, so a bad PAT still reports FORK_PAT_INVALID even when the template is also unreachable (folding it would silently reorder that into a template error)."
+    },
+    {
+      "file": "unit/test_ent109_no_write_credentials_message.py",
+      "feature": "trinity-enterprise#109",
+      "added": "2026-08-02",
+      "categories": [
+        "backend",
+        "mcp",
+        "git",
+        "unit",
+        "docs"
+      ],
+      "description": "Retirement of the no_write_credentials workaround string (ent#109 AC #6 / ent#230). The backend message and the MCP 409 hint must both point at binding THIS agent and must no longer teach create-a-new-agent-and-import, which discarded the agent's identity, container, 180-day name reservation and history to keep a directory. Invariant #13 parity across the two surfaces via a source-grep guard over mcp-server/src/tools/git.ts that asserts its anchor was FOUND before slicing -- a find() returning -1 silently slices to nothing and the guard then passes forever while checking nothing. Also confirms the startup.sh blackhole sentinel is deliberately out of scope: it already says the right thing."
+    },
+    {
+      "file": "unit/test_ent109_validation_error_no_input.py",
+      "feature": "trinity-enterprise#109",
+      "added": "2026-08-02",
+      "categories": [
+        "backend",
+        "api",
+        "unit",
+        "security"
+      ],
+      "description": "422 bodies must not echo the value that failed validation (ent#109 /cso S1 follow-through). Pydantic v2 records the rejected value in errors()[i]['input'] and FastAPI's default handler returns exc.errors() verbatim, so a failed SecretStr validation returns the SECRET in the response body and in any log of it. Load-bearing rather than incidental: without error_handlers.validation_error_without_input, ent#109's PAT charset guard would RELOCATE the h11 leak from a 500 into a 422 instead of closing it. 'input' is dropped for every field rather than for names that look sensitive -- a name-matching allowlist is the new-producer-missing-from-the-consumer's-list class, and the caller already has the value they just sent. Includes a teeth test asserting FastAPI's default WOULD have leaked, so the suite fails loudly if the framework changes and the handler becomes redundant, rather than passing for an unrelated reason."
     }
   ]
 }

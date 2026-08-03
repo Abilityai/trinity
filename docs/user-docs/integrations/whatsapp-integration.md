@@ -12,7 +12,7 @@ Connect agents to WhatsApp via Twilio. Users can send direct messages to the age
 
 ## Prerequisites
 
-Before connecting a Twilio account, two platform-level prerequisites must be in place:
+Before connecting a Twilio account, two platform-level prerequisites must be in place — plus one Twilio Console setting if you want **inbound** attachments to work.
 
 ### 1. Public URL
 
@@ -36,6 +36,21 @@ curl -s -o /dev/null -w "%{http_code}\n" \
   -X POST https://your-domain.com/api/whatsapp/webhook/test
 # Should return 200, not 404
 ```
+
+### 3. HTTP Basic Authentication for Media (required for inbound attachments)
+
+Only needed if users will send your agent **images, documents, or voice notes**. Text-only agents can skip this.
+
+**Most accounts already have this and need no action.** Twilio enabled HTTP Basic Authentication for media on all newly-created main accounts from **2023-07-31**, [without the option to disable it](https://www.twilio.com/en-us/changelog/upcoming-security-changes-enforcing-http-authentication-for-media). Only accounts created before that date can still have it off — check the Twilio Console (Messaging → Settings → General) if inbound attachments fail.
+
+Twilio never serves media from `api.twilio.com` directly — it redirects to a CDN, and *which* CDN depends on this setting:
+
+| Media auth | Redirect target | Trinity |
+|---|---|---|
+| **Enabled** | `mms.twiliocdn.com` (short-lived signed URL) | ✅ Supported |
+| Disabled | `s3-external-1.amazonaws.com` | ❌ Refused |
+
+Trinity refuses the S3 target on purpose: that hostname serves *every* S3 bucket in the world under one name, so allowing it would let any URL claiming that host pull arbitrary content through Trinity's media fetcher. There is no setting to override this — enable media auth in Twilio instead.
 
 ## Getting Twilio Credentials
 
@@ -221,6 +236,32 @@ This means the URL Twilio signed does not match the URL Trinity sees. Check that
 ### Credentials rejected
 
 Twilio returns 401 if the AccountSid/AuthToken combination is invalid. Re-copy the Auth Token from the Twilio Console — it resets when you click "regenerate" in Twilio.
+
+### Inbound images arrive as "— download failed"
+
+The agent got your message, but not the file. Check the backend log for:
+
+```
+[WHATSAPP] Refusing off-domain media redirect to host=s3-external-1.amazonaws.com
+```
+
+That host means **HTTP Basic Authentication for media is not enabled** on your Twilio account — see [Prerequisites → 3](#3-http-basic-authentication-for-media-required-for-inbound-attachments). Turn it on in the Twilio Console; no Trinity restart is needed, the next attachment will work.
+
+Any other host in that warning means Twilio changed its media CDN — that needs a Trinity fix, not a config change (the allowlist is intentionally not operator-configurable, because that fetch carries your Twilio Auth Token). Please open an issue with the logged hostname.
+
+If the log shows no `Refusing…` line at all, the failure is elsewhere:
+
+| Log line | Meaning |
+|---|---|
+| `No credentials to download media for agent=…` | The binding lost its Auth Token — re-save it |
+| `Media download failed (status=…)` | Twilio-side error (401 = bad Auth Token, 404 = media expired) |
+| `Media redirect budget exhausted` | Twilio chained more than 3 redirects — please open an issue |
+| `Media exceeds transport cap` | The file is larger than 16 MB |
+| `Error downloading media …: ConnectError` (or another type name) | Network/TLS failure reaching Twilio. Only the exception **type** is logged, deliberately: the signed media URL is a live credential for ~4 hours and some exception messages embed it |
+
+### Attachment says "unsupported format"
+
+This is different from "download failed" — the file **was** fetched successfully, then rejected by Trinity's file-type policy. PDFs, archives, video, and audio (including WhatsApp voice notes) are not accepted into agent workspaces on any channel. Text, CSV, JSON, and images are.
 
 ## See Also
 

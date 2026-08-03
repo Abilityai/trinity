@@ -32,6 +32,7 @@ from services.docker_utils import (
 from services.agent_runtime_state import clear_agent_breakers
 from services.template_service import (
     CredentialDeclarationError,
+    credential_mcp_server_names,
     fetch_template_metadata_for_create,
     get_github_template,
     generate_credential_files,
@@ -951,8 +952,14 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
             config.type = template_data.get("type", config.type)
             config.resources = template_data.get("resources", config.resources)
             config.tools = template_data.get("tools", config.tools)
-            creds = template_data.get("credentials", {})
-            mcp_servers = list(creds.get("mcp_servers", {}).keys())
+            # Read through the tolerant accessor rather than reaching straight
+            # through the block. `creds.get("mcp_servers", {}).keys()` raises
+            # AttributeError on a null / list / string `credentials:`, and the
+            # broad `except` below then silently drops this template's `runtime:`
+            # and `shared_folders:` config alongside the credential parse — one
+            # malformed key costing the agent three unrelated ones.
+            # (trinity-enterprise#128)
+            mcp_servers = credential_mcp_server_names(template_data.get("credentials"))
             if mcp_servers:
                 config.mcp_servers = mcp_servers
             # Multi-runtime support - extract runtime config from template

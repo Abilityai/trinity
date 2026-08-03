@@ -593,6 +593,34 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // Post-creation repo binding (ent#109)
+    async bindAgentToOwnRepo(name, payload) {
+      const authStore = useAuthStore()
+      // Follows the surrounding raw-axios idiom rather than the shared `api.js`
+      // instance, whose 30s instance-wide timeout is FAR below this call's
+      // worst case (repo create + GitHub visibility poll + a full-history push
+      // + a container replacement). Aborting the client mid-bind lands the user
+      // after the commit point with no response, which is exactly the case the
+      // GET .../bind-to-own-repo/status companion exists to rescue — so don't
+      // manufacture it. 300s is generous against `initializeGitHub`'s 120s
+      // because binding does strictly more work.
+      const response = await axios.post(
+        `/api/agents/${name}/git/bind-to-own-repo`,
+        payload,
+        { headers: authStore.authHeader, timeout: 300000 }
+      )
+      return response.data
+    },
+
+    async getBindToOwnRepoStatus(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(
+        `/api/agents/${name}/git/bind-to-own-repo/status`,
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
     // Per-agent GitHub PAT methods (#347)
     async getGitHubPATStatus(name) {
       const authStore = useAuthStore()
@@ -737,7 +765,11 @@ export const useAgentsStore = defineStore('agents', {
         return {
           success: true,
           enabled: newState,
-          schedulesUpdated: response.data.schedules_updated
+          // #1945: autonomy is a gate, not a bulk edit — it no longer rewrites
+          // per-schedule `enabled`. These are counts, not "how many we changed".
+          totalSchedules: response.data.total_schedules,
+          enabledSchedules: response.data.enabled_schedules,
+          message: response.data.message
         }
       } catch (error) {
         console.error('Failed to toggle autonomy:', error)

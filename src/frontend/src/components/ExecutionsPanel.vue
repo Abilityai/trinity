@@ -30,6 +30,20 @@
       </button>
     </div>
 
+    <!-- Stop failure (#1926) — a failed stop used to navigate the user to the
+         detail page with no message, so a stop that never happened looked like
+         a deliberate hand-off. -->
+    <InlineError
+      v-if="stopError"
+      class="mb-4"
+      :message="stopError"
+      :detail="stopErrorDetail"
+      retryable
+      retry-label="Open the execution"
+      @retry="openFailedStopTarget"
+      @dismiss="clearStopError"
+    />
+
     <!-- Stat cards -->
     <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
       <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2">
@@ -312,11 +326,18 @@ import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
 import { agentNameTooltip, agentOptionLabel } from '../utils/agentName'
 import { useWebSocket } from '../utils/websocket'
+import InlineError from './InlineError.vue'
+import { apiErrorMessage } from '../utils/apiError'
 
 const router = useRouter()
 const store = useExecutionsStore()
 const authStore = useAuthStore()
 const agentsStore = useAgentsStore()
+
+// #1926: a failed stop is reported here instead of silently redirecting.
+const stopError = ref('')
+const stopErrorDetail = ref('')
+const stopTarget = ref(null)
 const { isConnected } = useWebSocket()
 
 const agentNames = computed(() =>
@@ -417,8 +438,9 @@ function goToDetail(row) {
   router.push(`/agents/${row.agent_name}/executions/${row.id}`)
 }
 
-// --- stop execution (navigates to agent detail where stop is handled) ---
+// --- stop execution ---
 async function stopExecution(row) {
+  clearStopError()
   try {
     await axios.post(
       `/api/agents/${row.agent_name}/schedules/stop-execution/${row.id}`,
@@ -426,10 +448,26 @@ async function stopExecution(row) {
       { headers: authStore.authHeader }
     )
     store.refresh()
-  } catch {
-    // stop endpoint may not exist; fall back to opening detail page
-    goToDetail(row)
+  } catch (err) {
+    // #1926: the old handler swallowed the error and silently routed to the
+    // detail page — the execution kept running while the UI implied the stop
+    // had been handed off. Say it failed, keep the user where they are, and
+    // offer the detail page as an explicit next step rather than a redirect.
+    console.error('Failed to stop execution:', err)
+    stopTarget.value = row
+    stopError.value = `Couldn't stop ${row.agent_name}'s execution — it is still running. Try again, or open it for more detail.`
+    stopErrorDetail.value = apiErrorMessage(err, 'Request failed')
   }
+}
+
+function clearStopError() {
+  stopError.value = ''
+  stopErrorDetail.value = ''
+  stopTarget.value = null
+}
+
+function openFailedStopTarget() {
+  if (stopTarget.value) goToDetail(stopTarget.value)
 }
 
 // --- search debounce ---

@@ -1724,7 +1724,11 @@ export const useNetworkStore = defineStore('network', () => {
       return {
         success: true,
         enabled: newState,
-        schedulesUpdated: response.data.schedules_updated
+        // #1945: the toggle no longer rewrites per-schedule `enabled` — these
+        // report what the agent's schedules will do under the new gate.
+        totalSchedules: response.data.total_schedules,
+        enabledSchedules: response.data.enabled_schedules,
+        message: response.data.message
       }
     } catch (error) {
       console.error('[Network] Failed to toggle autonomy:', error)
