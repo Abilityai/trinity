@@ -4,8 +4,8 @@
   "mode": "daily",
   "scope": "--diff",
   "branch": "codex/ent317-delivery-conductor-runtime",
-  "merge_base": "4c96a80af817cc69597b7b3f1e6ea1e786d4ab7b",
-  "audited_head": "ede7ba12991f",
+  "merge_base": "37d2ebb45932efdb8e315f96975d4819eb5f015a",
+  "audited_head": "c93060072255",
   "issue": "trinity-enterprise#317",
   "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
   "attack_surface": {
@@ -44,7 +44,7 @@
   ],
   "verification": {
     "conductor_tests_passed": 288,
-    "template_catalog_tests_passed": 186,
+    "template_catalog_tests_passed": 314,
     "fixture_tests_passed": 21,
     "mcp_tests_passed": 93,
     "typescript_build": "passed",
@@ -54,7 +54,11 @@
     "detect_secrets_verified_secrets": 0,
     "deployed_durability_fixture": "passed",
     "deployed_normal_model_effect": "blocked_empty_provider_credentials",
-    "cleanup_after_attempts": "verified"
+    "cleanup_after_attempts": "verified",
+    "repository_wide_collected": 9022,
+    "repository_wide_collection_errors": 41,
+    "repository_wide_skipped": 4,
+    "final_dev_refresh_reviewed": true
   },
   "supply_chain_summary": {
     "python_deps_changed": 0,

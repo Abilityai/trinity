@@ -1,7 +1,7 @@
 # CSO Diff Audit — trinity-enterprise#317 delivery-conductor runtime
 
 **Date:** 2026-08-02 · **Mode:** daily (8/10 gate) · **Scope:** `--diff`,
-`codex/ent317-delivery-conductor-runtime` vs merge-base `4c96a80a` (`dev`)
+`codex/ent317-delivery-conductor-runtime` vs merge-base `37d2ebb4` (`dev`)
 
 **Verdict:** **PASS — zero findings.** No CRITICAL, HIGH, MEDIUM, or LOW
 security finding met the reporting gate.
@@ -53,7 +53,7 @@ runbook defects were then corrected and locked by fixture tests.
 ## Verification evidence
 
 - Delivery-conductor unit suite: **288 passed**.
-- Static template/catalog suite: **186 passed**.
+- Static template/catalog suite: **314 passed**.
 - Fixture/runbook suite: **21 passed**.
 - MCP tests: **93 passed**; TypeScript build passed.
 - Changed-Python Ruff check, runbook `bash -n`, and `git diff --check`: passed.
@@ -67,6 +67,13 @@ runbook defects were then corrected and locked by fixture tests.
   the model because local `ANTHROPIC_API_KEY` and `GEMINI_API_KEY` values were empty and
   Claude Code was not logged in. Every disposable resource was removed. This is a
   verification-environment prerequisite, not a diff-introduced security finding.
+- The final `dev` refresh added template-schedule materialization, MCP-key self-healing,
+  and guided credential setup. Those upstream changes were reviewed after the clean
+  merge: this template declares no schedules or credentials, and no conductor runtime
+  file overlaps them, so the audit conclusion is unchanged.
+- Repository-wide `python -m pytest -v --tb=short` collected **9,022 items** but stopped
+  with **41 pre-existing import/stub-isolation collection errors** and **4 skips**.
+  The focused conductor, template, fixture, and MCP surfaces above remain green.
 
 ## Candidates discarded
 
