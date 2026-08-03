@@ -114,6 +114,7 @@
 - `alerts.py` - Cost threshold alerts
 - `notifications.py` - Agent notifications
 - `reports.py` - Agent-published structured reports (#918) — see [Agent Reports](#agent-reports-918)
+- `evaluations.py` - Behavioral-evaluation referee surface (ent#206): write is human-admin-only (`require_admin` + `reject_agent_principal`), read is access-scoped — see [Agent Evaluations](#agent-evaluations--the-referee-surface-ent206)
 - `operator_queue.py` - Operating Room queue (OPS-001)
 - `ops.py` - Operating Room sync service
 - `logs.py` - Container log endpoints
@@ -638,6 +639,37 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   `agent_reports_retention_days` (default 90, `0` disables) via `db.prune_agent_reports`
   (chunked, `idx_agent_reports_created`). Table `agent_reports`; dual migration (SQLite
   `agent_reports_table` + Alembic `0006_agent_reports`).
+
+### Agent Evaluations — the referee surface (ent#206)
+
+The `quality` axis for agent work, kept structurally apart from `completion` (a clean
+process exit). Router `routers/evaluations.py` → `db/evaluations.py` → table
+`agent_evaluations`; dual-track migration (SQLite `agent_evaluations_table` + Alembic
+`0031`), `AGENT_REFS`-registered so rename re-keys and purge cascades.
+
+- **The rule**: *a score is only trustworthy if the graded agent cannot write it.*
+  `agent_reports` (#918) was rejected as the surface precisely because its create is
+  self-gated — right for an agent's own output, wrong for a grade.
+- **Write fence** (`POST /api/agents/{name}/evaluations`): `require_admin` **AND**
+  `reject_agent_principal`. The second gate carries the weight — an agent-scoped key
+  resolves to its owner and inherits the owner's role, so on a default admin-owned
+  install `require_admin` alone would let a graded agent grade itself (the
+  trinity-ops-agent#232 trap). The surface has exactly one write route and no
+  agent-writable path.
+- **Read is access-scoped, deliberately unfenced**: `AuthorizedAgentByName` for an
+  agent's own evaluations, `accessible_agent_names` for the fleet list. An agent seeing
+  its own bad score is the feedback loop; read ≠ write.
+- **`quality` is nullable and null ≠ 0** — the axes are independent, so a run can carry
+  `completion` before anything has graded it. The Tier-0 evaluator that populates
+  `quality` is a later child; this is the surface it writes to.
+- **Completion relabel**: Overview (#1107), schedules rollup (#1115) and fleet stats
+  (EXEC-022) now say "Completion", not "Success rate". Additive — the `success_rate`
+  API field is unchanged; only the label moved.
+- **OSS-core by decision** (strategy gate ent#206 §10): the enforcement primitive and
+  the deterministic tier are edition-agnostic; the managed grading experience is the
+  paid layer, mirroring #668.
+
+See [agent-evaluations.md](feature-flows/agent-evaluations.md).
 
 ### Agent Runtime Data — `data_paths` + Snapshot/Export (#1169)
 
@@ -1992,6 +2024,29 @@ CREATE TABLE agent_reports (
 CREATE INDEX idx_agent_reports_agent   ON agent_reports(agent_name, created_at DESC);
 CREATE INDEX idx_agent_reports_type    ON agent_reports(report_type, created_at DESC);
 CREATE INDEX idx_agent_reports_created ON agent_reports(created_at);  -- retention sweep
+```
+
+**agent_evaluations** (ent#206 — see [Agent Evaluations](#agent-evaluations--the-referee-surface-ent206)).
+The referee surface: written by the platform/evaluator, **never** by the graded agent
+(`require_admin` + `reject_agent_principal` on the single write route). `quality` is
+nullable — null means "not graded yet", not zero. Dual-track migration (SQLite
+`agent_evaluations_table` + Alembic `0033_agent_evaluations`); `AGENT_REFS` CASCADE:
+```sql
+CREATE TABLE agent_evaluations (
+    id TEXT PRIMARY KEY,                 -- 'eval_<hex>'
+    agent_name TEXT NOT NULL,
+    execution_id TEXT,                   -- nullable: may grade the agent, not one run
+    archetype TEXT,                      -- what "good" means here (per-archetype rubric)
+    completion INTEGER,                  -- mirror of the clean-exit axis
+    quality REAL,                        -- the graded axis (nullable, independent)
+    checks_json TEXT,                    -- Tier-0 deterministic check results
+    judge_json TEXT,                     -- Tier-1 judge output (enterprise layer)
+    evaluator TEXT NOT NULL,             -- 'tier0' | judge id | admin username
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (execution_id) REFERENCES schedule_executions(id)
+);
+CREATE INDEX idx_agent_evaluations_agent ON agent_evaluations(agent_name, created_at DESC);
+CREATE INDEX idx_agent_evaluations_execution ON agent_evaluations(execution_id);
 ```
 
 ### Redis

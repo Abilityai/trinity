@@ -171,6 +171,7 @@ AGENT_REFS: List[AgentRef] = [
     # delete and re-key on rename so a reused agent name can't inherit another
     # tenant's reports (cross-tenant disclosure).
     AgentRef("agent_reports",                "agent_name",        Policy.CASCADE),
+    AgentRef("agent_evaluations",            "agent_name",        Policy.CASCADE),
 
     # Per-agent MCP connector config (ent#46, OSS-core #118). The scoped
     # connector KEY is an mcp_api_keys row (scope='connector') already covered
