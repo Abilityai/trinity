@@ -16,13 +16,20 @@ Secret-bearing values are NEVER echoed: S-003 / S-009 / K-004 report the file an
 line and a pattern label, never the matched secret.
 """
 
+import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from services.template_service import _is_platform_injected
+from services.credential_charset import (
+    CREDENTIAL_DETECTOR_NAME_RE,
+    CREDENTIAL_DETECTOR_REF_RE,
+)
+from services.template_service import _is_platform_injected, declared_credential_names
 from services.git_service import _GITIGNORE_PATTERNS
+
+logger = logging.getLogger(__name__)
 
 # A check result: (status, message, detail)
 Result = Tuple[str, str, Optional[Dict[str, Any]]]
@@ -92,7 +99,12 @@ def _template(snap: Dict[str, Any]) -> Tuple[Optional[dict], Optional[str]]:
     return (data if isinstance(data, dict) else {}), None
 
 
-_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# The shared detector charset (services/credential_charset.py). This finder was
+# already the wide one; naming the constant is what stops a future "align the
+# regexes" pass from narrowing it to match `_env_example_vars` — the wrong
+# direction, because the substitution engines accept the wide form. Read that
+# module's NON-MEMBERS list before touching any sibling pattern.
+_VAR_RE = CREDENTIAL_DETECTOR_REF_RE
 
 
 def _mcp_vars(snap: Dict[str, Any]) -> List[str]:
@@ -124,8 +136,14 @@ def _env_example_vars(snap: Dict[str, Any]) -> List[str]:
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        # The shared detector charset, NOT uppercase-only. This reader is the
+        # `provided` side of K-001 (HARD) and the `has_vars` precondition of
+        # K-003 (SOFT): an uppercase-only view made a correctly documented
+        # `my_var=` invisible, so K-001 HARD-failed a template that documents
+        # every variable it references. `.strip()` above is load-bearing — the
+        # validator anchors with `\Z`. (ent#128)
         name = line.split("=", 1)[0].strip()
-        if re.match(r"^[A-Z][A-Z0-9_]*$", name):
+        if CREDENTIAL_DETECTOR_NAME_RE.match(name):
             out.append(name)
     return out
 
@@ -495,6 +513,19 @@ def c_t012(snap):
     return _with_template(snap, f)
 
 
+# The `credentials:` SECTION names — structure, never variable names. `listed`
+# used to be a bare `set(creds.keys())`, i.e. "whichever section names this
+# template happens to use", so `${env_file}` and `${mcp_servers}` PASSED the gate
+# while a genuinely-declared variable one level deeper did not. A blind spot that
+# depends on the template's own contents is the worst kind: it cannot be found by
+# reading the check.
+#
+# The remaining keys are deliberately still admitted — a flat
+# `credentials: {STRIPE_API_KEY: '...'}` mapping is a legitimate legacy shape and
+# must keep passing.
+_CREDENTIAL_SECTION_KEYS = frozenset({"mcp_servers", "env_file", "config_files"})
+
+
 def c_t015(snap):
     def f(d):
         mcp_vars = set(_mcp_vars(snap))
@@ -503,13 +534,37 @@ def c_t015(snap):
         creds = d.get("credentials") or {}
         listed = set()
         if isinstance(creds, dict):
-            listed = set(creds.keys())
+            listed = set(creds.keys()) - _CREDENTIAL_SECTION_KEYS
         elif isinstance(creds, list):
             for c in creds:
                 if isinstance(c, dict) and c.get("name"):
                     listed.add(c["name"])
                 elif isinstance(c, str):
                     listed.add(c)
+        # The STRUCTURED form is the documented one, and it declares variables one
+        # level deeper than `creds.keys()` ever looked — so
+        # `credentials.mcp_servers.stripe.env_vars: [STRIPE_API_KEY]` satisfied
+        # nothing and this HARD gate failed a correctly-declared template.
+        #
+        # Fails CLOSED, and only this term is wrapped. A raise degrades to the
+        # narrower set above — which makes `missing` LARGER, i.e. errs toward
+        # failing — and never to `skipped`. That direction is the whole point: a
+        # HARD gate that cannot evaluate must not become indistinguishable from a
+        # HARD gate that passed, and `c_k002` delegates here, so one raise would
+        # otherwise take BOTH gates dark together on four lines of untrusted YAML.
+        # The `isinstance` filter is redundant against
+        # `declared_credential_names`' own contract, deliberately: the gate must
+        # not depend on that contract holding.
+        try:
+            listed |= {
+                name for name in declared_credential_names(creds) if isinstance(name, str)
+            }
+        except Exception as e:  # noqa: BLE001 — fail CLOSED, keep the narrow verdict
+            logger.warning(
+                "T-015: credential declaration unreadable (%s); comparing against "
+                "section names only",
+                e,
+            )
         missing = sorted(v for v in mcp_vars if v not in listed and not _is_platform_injected(v))
         if missing:
             return _fail("MCP ${VAR}s not listed in template.yaml credentials", {"missing": missing})
@@ -1104,8 +1159,23 @@ STATIC_CHECKS = {
 def run_static(snapshot: Dict[str, Any], check_ids: List[str]) -> Dict[str, Result]:
     """Run the requested static checks against a snapshot. Returns {id: result}.
 
-    A check that raises is captured as a "skipped" result with the error reason
-    rather than failing the whole report.
+    A check that raises is captured rather than propagated — one bad check must
+    never break the whole report — but it is captured as a **FAIL**, not a skip.
+
+    It used to be a skip, and `_counts` counts only `status == "fail"`, so a raise
+    inside a HARD check DROPPED `hard_count` and could flip `overall_status` from
+    `issues` to `compatible` on an agent with a real problem. Four lines of
+    untrusted `template.yaml` were enough (`env_vars: [{K: v}]` → the gate's set
+    comprehension raises `TypeError: unhashable type: 'dict'`), and because
+    `c_k002` delegates to `c_t015` one raise took both HARD gates dark together —
+    a result indistinguishable from a clean pass. `template.yaml` is read from the
+    agent's own workspace, so that is a self-attestation bypass on the surface
+    whose job is to police it.
+
+    A check that could not evaluate is not a check that passed. Individual checks
+    that CAN degrade meaningfully do so themselves and fail closed (see `c_t015`);
+    reaching this handler means an unanticipated shape, which is exactly what
+    should be visible.
     """
     out: Dict[str, Result] = {}
     for cid in check_ids:
@@ -1116,5 +1186,8 @@ def run_static(snapshot: Dict[str, Any], check_ids: List[str]) -> Dict[str, Resu
         try:
             out[cid] = fn(snapshot)
         except Exception as e:  # noqa: BLE001 — one bad check never breaks the report
-            out[cid] = _skip(f"check error: {e}", "check_error")
+            logger.warning("compatibility check %s raised: %s", cid, e)
+            out[cid] = _fail(
+                f"check could not be evaluated: {e}", {"check_error": str(e)}
+            )
     return out

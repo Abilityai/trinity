@@ -149,7 +149,8 @@
 *Core:*
 - `docker_service.py` - Docker container management (single point of Docker interaction, Invariant #11)
 - `docker_utils.py` - Docker utility helpers
-- `template_service.py` - GitHub template cloning and processing; owns the tolerant `credentials:` readers (`credential_shape_errors` / `credential_mcp_server_names` / `credential_env_file_names`) — read paths degrade + surface `credential_errors`, the `.env` writer raises `CredentialDeclarationError` → 400 (ent#128) — see [template-processing.md](feature-flows/template-processing.md)
+- `template_service.py` - GitHub template cloning and processing; owns the tolerant `credentials:` readers (`credential_shape_errors` / `credential_mcp_server_names` / `credential_env_file_names` / `credential_mcp_env_vars` / `declared_credential_names`) — read paths degrade + surface `credential_errors`, the `.env` writer raises `CredentialDeclarationError` → 400 (ent#128) — see [template-processing.md](feature-flows/template-processing.md)
+- "credential declaration standard" (ent#128): `credentials:` is FROZEN names-only; the sibling `credential_setup:` enriches it per variable and `normalize_credential_requirements(data, *, source_trust)` emits base-set-plus-overlay records as `credential_requirements` (never raises, never mutates — `_build_template` runs unfenced in `get_all_templates()`). Contract: [docs/schemas/trinity-agent-credentials.schema.json](../schemas/trinity-agent-credentials.schema.json)
 - `agent_client.py` - HTTP client for agent container communication (chat, session, injection); hosts the transport circuit breaker — see [Circuit Breakers](#circuit-breakers-transport--dispatch-526)
 - `settings_service.py` - Centralized settings retrieval (API keys, ops config, agent quotas)
 - `operator_intake_service.py` - Fire-and-forget, once-per-install opt-in operator intake POST at first-run; owns `installation_id` (trinity-enterprise#38)

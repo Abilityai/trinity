@@ -185,10 +185,10 @@ def test_per_template_fence_survives_an_unguarded_field(tmp_path, monkeypatch):
     ts = _load_template_service(monkeypatch, tmp_path)
     real_builder = ts._build_local_template
 
-    def exploding_builder(template_dir: Path):
+    def exploding_builder(template_dir: Path, **kwargs):
         if template_dir.name == "boom":
             raise RuntimeError("a future field reached through without a guard")
-        return real_builder(template_dir)
+        return real_builder(template_dir, **kwargs)
 
     monkeypatch.setattr(ts, "_build_local_template", exploding_builder)
 

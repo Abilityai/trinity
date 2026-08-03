@@ -187,12 +187,33 @@ requires local filesystem write access, not a request.
   "source": "github",
   "resources": {"cpu": "2", "memory": "4g"},
   "mcp_servers": ["heygen", "twitter-mcp"],
-  "required_credentials": [
-    {"name": "HEYGEN_API_KEY", "source": "mcp:heygen"}
+  "required_credentials": ["HEYGEN_API_KEY", "TWITTER_API_KEY"],
+  "credential_requirements": [
+    {
+      "name": "HEYGEN_API_KEY",
+      "title": "HeyGen API key",
+      "description": "Renders the avatar videos.",
+      "required": true,
+      "secret": true,
+      "format": "secret",
+      "setup_url": "https://app.heygen.com/settings/api",
+      "default": null,
+      "source": "template:mcp:heygen",
+      "platform_injected": false
+    }
   ],
   "credential_errors": []
 }
 ```
+
+**Two shapes, two owners — this is the reconciliation** (ent#128). The doc used to
+show objects here and strings further down, which read as a contradiction:
+
+| field | shape | owner |
+|---|---|---|
+| `required_credentials` (**catalog**) | list of **names** | `operator_supplied_credential_names()` — declared minus platform-injected. `Templates.vue` reads only `.length`, so this is the "N credentials" badge feed |
+| `credential_requirements` (**catalog**) | list of **objects** | `normalize_credential_requirements()` — the ent#128 per-variable records |
+| `required_credentials` (**extractor**) | list of `{name, source}` | `extract_agent_credentials()`, a repo-scanning helper with **no production caller**. Same key name, different function, different shape — do not conflate them |
 
 `credential_errors` (trinity-enterprise#128) carries one named message per
 structural problem in the template's `credentials:` block — empty on a healthy
@@ -344,8 +365,16 @@ def extract_agent_credentials(repo_path: Path) -> Dict:
             "env_file_vars": ["VAR3"]
         }
     """
-    pattern = r'\$\{([A-Z][A-Z0-9_]*)\}'  # Matches ${VAR_NAME}
+    pattern = CREDENTIAL_DETECTOR_REF_RE  # \$\{([A-Za-z_][A-Za-z0-9_]*)\}
 ```
+
+The pattern is **no longer uppercase-only** (ent#128). Trinity's substitution
+engines impose no charset — `${my_var}` IS substituted at runtime — so an
+uppercase-only *detector* read narrower than what it audits, which HARD-failed
+K-001 on a template that documented every variable it referenced. The shared
+constant and its NON-MEMBERS list (patterns that must NOT adopt it, notably the
+fail-closed `mcp_validator._ENV_VAR_REF_RE`) live in
+`services/credential_charset.py`.
 
 ### extract_env_vars_from_mcp_json (`services/template_service.py:64-103`)
 ```python
@@ -353,7 +382,7 @@ def extract_env_vars_from_mcp_json(file_path: Path) -> Dict[str, List[str]]:
     # Parse JSON and extract ${VAR_NAME} patterns from:
     # - env section of each MCP server config (lines 88-92)
     # - args array of each MCP server config (lines 94-98)
-    pattern = r'\$\{([A-Z][A-Z0-9_]*)\}'
+    pattern = CREDENTIAL_DETECTOR_REF_RE  # shared detector charset (ent#128)
     for server_name, server_config in mcp_servers.items():
         if "env" in server_config:
             matches = re.findall(pattern, value)  # ${VAR_NAME}
@@ -653,6 +682,9 @@ GITHUB_TEMPLATES = [
         "resources": {"cpu": "2", "memory": "4g"},
         "mcp_servers": [],
         "required_credentials": ["HEYGEN_API_KEY", "TWITTER_API_KEY", "CLOUDINARY_API_KEY"]
+        # ^ the CATALOG shape: a list of names (the badge feed). The objects shape
+        #   belongs to `credential_requirements` / the caller-less extractor — see
+        #   "Two shapes, two owners" above (ent#128).
     },
     # ... more templates (cornelius, corbin, ruby multi-agent system)
 ]
