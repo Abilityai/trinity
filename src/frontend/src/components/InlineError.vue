@@ -25,10 +25,8 @@
 
     <div class="min-w-0 flex-1">
       <p class="break-words">{{ message }}</p>
-      <details v-if="detail" class="mt-1">
-        <summary class="text-xs opacity-80 cursor-pointer select-none">Technical detail</summary>
-        <p class="mt-1 text-xs font-mono break-words opacity-90">{{ detail }}</p>
-      </details>
+      <!-- Action before disclosure: the next step the user should take must
+           come before the optional trace, not after it. -->
       <button
         v-if="retryable"
         type="button"
@@ -37,6 +35,10 @@
       >
         {{ retryLabel }}
       </button>
+      <details v-if="detail" class="mt-1">
+        <summary class="text-xs opacity-80 cursor-pointer select-none">Technical detail</summary>
+        <p class="mt-1 text-xs font-mono break-words opacity-90">{{ detail }}</p>
+      </details>
     </div>
 
     <button
