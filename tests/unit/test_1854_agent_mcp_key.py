@@ -542,7 +542,27 @@ def test_07c_env_overrides_are_applied_last(monkeypatch):
 # 18 — verify probe verdicts (pure interpretation, no Docker)
 # --------------------------------------------------------------------------- #
 def _digest(token: str) -> str:
+    """Digest of a *literal* fixture string the platform never minted."""
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _stored_digest(key_id: str) -> str:
+    """The digest the platform itself stored for a minted key.
+
+    The probe's comparand is `mcp_api_keys.key_hash`, so reading the stored
+    hash pins the real one instead of re-deriving it here — the exact
+    re-spelling of the hashing convention that `db.mcp_keys.hash_mcp_api_key`
+    exists to own. Re-hashing the plaintext also made the assertion agree with
+    a *copy* of the scheme rather than with what the row holds, so a drift
+    between mint and probe would have cancelled out and stayed green.
+    """
+    from sqlalchemy import select
+    from db.engine import get_engine
+    from db.tables import mcp_api_keys
+    with get_engine().connect() as conn:
+        return conn.execute(
+            select(mcp_api_keys.c.key_hash).where(mcp_api_keys.c.id == key_id)
+        ).scalar_one()
 
 
 def test_18_probe_verdicts(keys_db):
@@ -559,7 +579,7 @@ def test_18_probe_verdicts(keys_db):
         return {"schema": 1, "present": present, "entries": entries}
 
     ok = svc.interpret_probe_payload(
-        _probe([{"name": "trinity", "is_trinity": True, "digest": _digest(mine.api_key)}]),
+        _probe([{"name": "trinity", "is_trinity": True, "digest": _stored_digest(mine.id)}]),
         "scout",
     )
     assert ok.verdict == "ok"
@@ -572,7 +592,7 @@ def test_18_probe_verdicts(keys_db):
     assert "permissions matrix" in (foreign_user.message or "").lower()
 
     foreign_agent = svc.interpret_probe_payload(
-        _probe([{"name": "trinity", "is_trinity": True, "digest": _digest(theirs.api_key)}]),
+        _probe([{"name": "trinity", "is_trinity": True, "digest": _stored_digest(theirs.id)}]),
         "scout",
     )
     assert foreign_agent.verdict == "foreign_agent_key"
@@ -588,7 +608,7 @@ def test_18_probe_verdicts(keys_db):
 
     shadow = svc.interpret_probe_payload(
         _probe([
-            {"name": "trinity", "is_trinity": True, "digest": _digest(mine.api_key)},
+            {"name": "trinity", "is_trinity": True, "digest": _stored_digest(mine.id)},
             {"name": "trinity-platform", "is_trinity": True, "digest": _digest("trinity_mcp_userkey")},
         ]),
         "scout",
