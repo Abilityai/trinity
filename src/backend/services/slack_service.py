@@ -13,7 +13,7 @@ import json
 import logging
 import time
 from typing import Optional, Tuple
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 
@@ -29,6 +29,63 @@ from services.settings_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# SSRF allowlist for INBOUND file downloads (#1951). TWO tiers, mirroring the
+# #1932 WhatsApp split — same bug class, third channel:
+#
+#   SOURCE  — hosts we will send the workspace's `Bearer {bot_token}` to (hop 1).
+#             This is the credential's blast radius, so it stays Slack-owned.
+#   ALLOWED — hosts a *validated* 30x may point at (hop 2+, fetched WITHOUT the
+#             token). Superset: Slack serves file bytes from its own CDN domains.
+#
+# Why `.slack.com` rather than an exact `files.slack.com`: the URL comes from
+# `url_private_download` on a signature-verified Slack event, and Slack has
+# historically served files from more than one host under its apex. #1932's
+# lesson is that an allowlist which rejects the LEGITIMATE host scores as
+# "allowlist present" in an audit while being 100% broken — WhatsApp media was
+# dead for three months that way. A Slack-apex suffix cannot break on a
+# `files-N.slack.com` variant, and it still confines the bot token to Slack.
+#
+# Every entry MUST start with a dot. `_host_matches_suffixes` treats a dotless
+# entry as `endswith("slack-files.com")`, which `evil-slack-files.com` satisfies
+# — a bypass. The leading dot plus the apex equality check is the safe form.
+_SLACK_FILE_SOURCE_HOST_SUFFIXES = (".slack.com",)
+_SLACK_FILE_ALLOWED_HOST_SUFFIXES = (".slack.com", ".slack-edge.com", ".slack-files.com")
+
+# Bounded redirect budget (#1951). `follow_redirects=True` used to blind-follow
+# to ANY host; each hop is now re-validated before it is issued. A budget rather
+# than exactly one hop means a future Slack 302→302 chain degrades to "still
+# works" instead of silently reproducing this bug.
+_MAX_FILE_REDIRECTS = 3
+
+
+def _host_matches_suffixes(url: str, suffixes: tuple) -> bool:
+    """Suffix match on the URL host, https-only.
+
+    Takes the suffix tuple as a REQUIRED argument (the #1932 shape): a default
+    would let a call site silently get the permissive tier.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    return any(host == s.lstrip(".") or host.endswith(s) for s in suffixes)
+
+
+def _is_slack_file_source_url(url: str) -> bool:
+    """Hop 1 — the request that carries the bot token."""
+    return _host_matches_suffixes(url, _SLACK_FILE_SOURCE_HOST_SUFFIXES)
+
+
+def _is_slack_file_url(url: str) -> bool:
+    """Hop 2+ — a validated redirect target, fetched without credentials."""
+    return _host_matches_suffixes(url, _SLACK_FILE_ALLOWED_HOST_SUFFIXES)
 
 
 class SlackService:
@@ -748,15 +805,55 @@ class SlackService:
         Returns:
             File bytes, or None on failure.
         """
+        # #1951: refuse before any request is issued. The URL arrives on a
+        # signature-verified Slack event, but that trust is transitive — it holds
+        # only while Slack's field stays trustworthy. This backend sits on BOTH
+        # Docker networks, so an arbitrary-host fetch from here reaches internal
+        # services agents deliberately cannot route to, and the bytes are handed
+        # back to the caller and written into an agent workspace — a non-blind
+        # primitive. ERROR, not WARNING: a fail-closed media gate that goes quiet
+        # is exactly how #1932 hid a 100% outage for three months.
+        if not _is_slack_file_source_url(url):
+            logger.error(
+                "[SLACK] Refusing to download file from non-Slack URL (host=%s, scheme=%s)",
+                urlparse(url).hostname, urlparse(url).scheme,
+            )
+            return None
+
         try:
             response = await self.client.get(
                 url,
                 headers={"Authorization": f"Bearer {bot_token}"},
-                follow_redirects=True,
+                follow_redirects=False,
             )
+            # Re-validate every hop before issuing it; never blind-follow. The
+            # follow carries NO Authorization header — httpx already strips it
+            # cross-origin, and re-sending the bot token to a CDN host would
+            # widen the credential's blast radius on purpose rather than by
+            # accident.
+            redirects = 0
+            while response.status_code in (301, 302, 303, 307, 308):
+                if redirects >= _MAX_FILE_REDIRECTS:
+                    logger.error(
+                        "[SLACK] File redirect budget exhausted after %d hops", redirects
+                    )
+                    return None
+                location = response.headers.get("location", "")
+                if not _is_slack_file_url(location):
+                    logger.error(
+                        "[SLACK] Refusing off-domain file redirect (host=%s)",
+                        urlparse(location).hostname,
+                    )
+                    return None
+                redirects += 1
+                response = await self.client.get(location)
+
             if response.status_code != 200:
                 logger.error(f"Slack file download failed: HTTP {response.status_code}")
                 return None
+            # Honest limit: the body is already resident when len() runs, so this
+            # bounds what we ACCEPT, not what we buffer — same as both siblings.
+            # A true streaming bound is the filed follow-up on #1951.
             if len(response.content) > max_size:
                 logger.warning(f"Slack file too large ({len(response.content)} bytes, max {max_size})")
                 return None
