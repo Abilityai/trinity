@@ -737,7 +737,11 @@ export const useAgentsStore = defineStore('agents', {
         return {
           success: true,
           enabled: newState,
-          schedulesUpdated: response.data.schedules_updated
+          // #1945: autonomy is a gate, not a bulk edit — it no longer rewrites
+          // per-schedule `enabled`. These are counts, not "how many we changed".
+          totalSchedules: response.data.total_schedules,
+          enabledSchedules: response.data.enabled_schedules,
+          message: response.data.message
         }
       } catch (error) {
         console.error('Failed to toggle autonomy:', error)

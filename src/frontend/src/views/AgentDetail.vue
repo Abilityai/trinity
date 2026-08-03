@@ -558,10 +558,12 @@ async function toggleAutonomy() {
     // Update local state
     agent.value.autonomy_enabled = newState
 
+    // #1945: the server authors this line — the toggle no longer "activates"
+    // schedules, it gates them, and the message names the case (no schedules /
+    // all disabled / N of M will run) that the raw count used to hide.
     showNotification(
-      newState
-        ? `Autonomy enabled. ${result.schedules_updated} schedule(s) activated.`
-        : `Autonomy disabled. ${result.schedules_updated} schedule(s) paused.`,
+      result.message ||
+        `Autonomy ${newState ? 'enabled' : 'disabled'}.`,
       'success'
     )
   } catch (error) {

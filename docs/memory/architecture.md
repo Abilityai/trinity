@@ -848,7 +848,7 @@ Full flow: [cornelius-default-agent.md](feature-flows/cornelius-default-agent.md
 | GET/PUT | `/api/agents/{name}/folders` | Get/update shared folder config |
 | GET | `/api/agents/{name}/folders/available` | Mountable folders from permitted agents |
 | GET | `/api/agents/{name}/folders/consumers` | Agents that will mount this folder |
-| GET/PUT | `/api/agents/{name}/autonomy` | Get / enable-disable autonomy (toggles all schedules) |
+| GET/PUT | `/api/agents/{name}/autonomy` | Get / enable-disable autonomy — the agent-level gate the scheduler checks on every cron fire. **Writes only `agent_ownership.autonomy_enabled`**; per-schedule `enabled` is owner intent and is never rewritten, so an off→on cycle restores the prior per-schedule state (#1945). Response: `total_schedules`/`enabled_schedules`/`message` |
 | POST | `/api/agents/{name}/ssh-access` | Ephemeral **key-based** SSH credentials (admin-only; BYOK — the caller supplies `public_key`, the server never handles private keys #175). `auth_method` accepts only `"key"`; password auth returned 400 since #1615 (it never worked — agent sshd runs `PasswordAuthentication no`, and host-side hashing used the `crypt` module removed in Python 3.13) |
 | GET/PUT | `/api/agents/{name}/read-only` | Read-only mode status / toggle (blocks source file writes) |
 | GET/PUT | `/api/agents/{name}/timeout` | Execution timeout (60–7200s, default 3600s, #665). PUT 400 `agent_timeout_below_active_schedules` if the new cap drops below any non-deleted schedule's `timeout_seconds` (#929) |
