@@ -329,6 +329,7 @@ def test_runbook_records_captured_correlations_and_cleans_exact_resources():
         "assert status == 'completed'",
         'url = "http://localhost:8000/api/agents/${ACTUAL_NAME}/reminders"',
         "assert first['id'] == second['id'] == original_id",
+        "instant(item['fire_at']) == instant(arguments['fire_at'])",
         "assert len(matching) == 1, matching",
         "'actual_effect': 'set_reminder'",
         "'duplicate_effects': 0",
@@ -351,6 +352,8 @@ def test_runbook_records_captured_correlations_and_cleans_exact_resources():
         'delete_agent "${ACTUAL_NAME}"',
         'docker container inspect "${resource}"',
         'docker volume inspect "${resource}"',
+        '"${MAIN_CONTAINER}" "${REPLAY_CONTAINER}" "${ACTUAL_CONTAINER}"',
+        '"${ACTUAL_CONTAINER}-workspace" agent-trinity-system-workspace',
         "alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce",
         'url = "http://localhost:8000/api/agents/${name}"',
         "export ADMIN_PASSWORD='Aa1!'\"$(openssl rand -hex 24)\"",  # pragma: allowlist secret

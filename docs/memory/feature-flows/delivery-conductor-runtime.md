@@ -388,12 +388,18 @@ python3 - \
   "${CAPTURE_DIR}/actual-reminders-before-replay.json" \
   >"${CAPTURE_DIR}/actual-reminder-original-id" <<'PY'
 import json, pathlib, sys
+from datetime import datetime, timezone
+
+def instant(value):
+    parsed = datetime.fromisoformat(value[:-1] + '+00:00' if value.endswith('Z') else value)
+    return parsed.astimezone(timezone.utc)
+
 arguments, reminders = (
     json.loads(pathlib.Path(path).read_text()) for path in sys.argv[1:]
 )
 matching = [item for item in reminders
             if item['message'] == arguments['message']
-            and item['fire_at'] == arguments['fire_at']]
+            and instant(item['fire_at']) == instant(arguments['fire_at'])]
 assert len(matching) == 1, matching
 print(matching[0]['id'])
 PY
@@ -419,6 +425,12 @@ python3 - \
   "${CAPTURE_DIR}/actual-reminders.json" \
   "${CAPTURE_DIR}/actual-reminder-original-id" <<'PY'
 import json, pathlib, sys
+from datetime import datetime, timezone
+
+def instant(value):
+    parsed = datetime.fromisoformat(value[:-1] + '+00:00' if value.endswith('Z') else value)
+    return parsed.astimezone(timezone.utc)
+
 arguments, first, second, reminders = (
     json.loads(pathlib.Path(path).read_text()) for path in sys.argv[1:5]
 )
@@ -427,7 +439,7 @@ assert original_id
 assert first['id'] == second['id'] == original_id
 matching = [item for item in reminders
             if item['message'] == arguments['message']
-            and item['fire_at'] == arguments['fire_at']]
+            and instant(item['fire_at']) == instant(arguments['fire_at'])]
 assert len(matching) == 1, matching
 assert matching[0]['id'] == first['id']
 print(json.dumps({
@@ -715,7 +727,7 @@ outside the adapter contract. Verify the source-mode boundary without printing
 any value:
 
 ```bash
-for container in "${MAIN_CONTAINER}" "${REPLAY_CONTAINER}"; do
+for container in "${MAIN_CONTAINER}" "${REPLAY_CONTAINER}" "${ACTUAL_CONTAINER}"; do
   docker exec "${container}" sh -lc '
     test ! -e /home/developer/.env &&
     ! env | cut -d= -f1 | grep -Eq \
@@ -729,11 +741,12 @@ cleanup
 trap - EXIT
 test -z "$(docker ps -aq --filter "label=com.docker.compose.project=${FIXTURE_PROJECT}")"
 test -z "$(docker volume ls -q --filter "label=com.docker.compose.project=${FIXTURE_PROJECT}")"
-for resource in "${MAIN_CONTAINER}" "${REPLAY_CONTAINER}" agent-trinity-system; do
+for resource in "${MAIN_CONTAINER}" "${REPLAY_CONTAINER}" "${ACTUAL_CONTAINER}" \
+  agent-trinity-system; do
   ! docker container inspect "${resource}" >/dev/null 2>&1
 done
 for resource in "${MAIN_CONTAINER}-workspace" "${REPLAY_CONTAINER}-workspace" \
-  agent-trinity-system-workspace; do
+  "${ACTUAL_CONTAINER}-workspace" agent-trinity-system-workspace; do
   ! docker volume inspect "${resource}" >/dev/null 2>&1
 done
 ! docker network inspect trinity-agent-network >/dev/null 2>&1
