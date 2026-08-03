@@ -1354,6 +1354,36 @@ class DatabaseManager:
     def get_freeze_schedules_if_sync_failing(self, agent_name: str):
         return self._schedule_ops.get_freeze_schedules_if_sync_failing(agent_name)
 
+    def rebind_git_config(
+        self,
+        agent_name: str,
+        *,
+        new_github_repo: str,
+        expected_github_repo: str,
+        source_branch: str,
+    ):
+        return self._schedule_ops.rebind_git_config(
+            agent_name,
+            new_github_repo=new_github_repo,
+            expected_github_repo=expected_github_repo,
+            source_branch=source_branch,
+        )
+
+    def restore_git_config_binding(
+        self,
+        agent_name: str,
+        *,
+        github_repo: str,
+        source_branch: str,
+        auto_sync_enabled: bool,
+    ):
+        return self._schedule_ops.restore_git_config_binding(
+            agent_name,
+            github_repo=github_repo,
+            source_branch=source_branch,
+            auto_sync_enabled=auto_sync_enabled,
+        )
+
     def delete_git_config(self, agent_name: str):
         return self._schedule_ops.delete_git_config(agent_name)
 

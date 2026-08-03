@@ -598,8 +598,16 @@ class TestWriteCredentialGuard:
             result = _run(gs.sync_to_github("a1"))
         assert result.success is False
         assert result.conflict_type == "no_write_credentials"
-        assert "fork-to-own" in result.message
-        assert "create a new agent" in result.message
+        # Anchored on the CONSTANT, not on its current wording: this test used
+        # to assert the literal "fork-to-own"/"create a new agent" phrasing and
+        # broke when ent#109 retired that workaround. What ent#123 actually
+        # requires is that the refusal carries the platform's named message and
+        # stays actionable — the exact copy is owned by
+        # test_ent109_no_write_credentials_message.py.
+        assert result.message == gs.NO_WRITE_CREDENTIALS_MESSAGE
+        low = result.message.lower()
+        assert "no write credentials" in low
+        assert "token" in low, "the refusal must still name a remedy"
 
     def test_sync_to_github_passes_credentialed_agent(self, git_service_env):
         gs, _db = git_service_env

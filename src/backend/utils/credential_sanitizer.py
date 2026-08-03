@@ -8,6 +8,7 @@ Note: The primary sanitization should happen on the agent side. This backend
 layer is a safety net for cases where the agent may not have sanitized properly.
 """
 
+import base64
 import re
 import json
 import logging
@@ -118,6 +119,41 @@ def redact_url_userinfo(text: str) -> str:
     if not text:
         return text
     return _URL_USERINFO_RE.sub('://***@', text)
+
+
+def scrub_secret(text: str, secret: str) -> str:
+    """Replace every occurrence of ``secret`` (and its b64 form) in ``text``.
+
+    Home for the primitive fork-to-own introduced (trinity-enterprise#93); it
+    lives here rather than in a service so the post-creation repo binding
+    (ent#109) and any future caller share ONE implementation. ``fork_to_own``
+    re-exports it for its existing importers.
+    """
+    if not text:
+        return text or ""
+    if secret:
+        text = text.replace(secret, "***")
+        b64 = base64.b64encode(f"x-access-token:{secret}".encode()).decode()
+        text = text.replace(b64, "***")
+    return text
+
+
+def scrub_secret_and_urls(text: str, secret: str) -> str:
+    """Both passes, because they cover DIFFERENT secrets (ent#109).
+
+    ``scrub_secret`` removes the token the caller is holding right now.
+    ``redact_url_userinfo`` removes whatever userinfo is embedded in a remote
+    URL the text happens to echo — which on a rebind can be a *stale baked*
+    token that is not the caller's at all (learnings 2026-07-14). Dropping
+    either pass leaks a real credential into an HTTP error body, the audit
+    trail, or the Vector-captured platform log.
+
+    Every path that builds a message out of FOREIGN text — git output, a docker
+    exception, GitHub's own error string, an httpx header-validation error that
+    echoes the ``Authorization`` value verbatim — goes through this, and there
+    is exactly one implementation so a new call site cannot get half of it.
+    """
+    return redact_url_userinfo(scrub_secret(text or "", secret))
 
 
 def sanitize_text(text: str) -> str:

@@ -22,6 +22,39 @@ _FORK_DESTINATION_RE = re.compile(
 )
 
 
+# A GitHub PAT is sent as an `Authorization: Bearer <pat>` header
+# (`services/github_service.py`) and embedded in a git remote URL. h11 rejects an
+# illegal header value by ECHOING it, so a token carrying `\r` or `\n` — what a
+# paste from a terminal or clipboard routinely picks up — surfaces the RAW token
+# in the exception message, which then reaches an error response and the platform
+# log (Vector-captured, operator-readable). Validating the charset HERE closes
+# that at the boundary, once, for every consumer — rather than scrubbing each
+# error handler downstream and hoping none is missed.
+#
+# `\x21-\x7E` is printable ASCII minus space: a superset of every GitHub PAT
+# format (classic `ghp_*` and fine-grained `github_pat_*` are `[A-Za-z0-9_]`) and
+# exactly the set that is safe in both a header value and a URL userinfo field.
+# Deliberately permissive about WHICH printable characters, so a future token
+# format is not rejected; strict about whitespace and control characters, which
+# is where the leak lives.
+_PAT_SAFE_RE = re.compile(r"^[\x21-\x7E]+$")
+
+
+def _validate_pat_secret(v: SecretStr) -> SecretStr:
+    """Strip surrounding whitespace and reject a header-unsafe GitHub token."""
+    raw = v.get_secret_value().strip()
+    if not raw:
+        raise ValueError("github_pat must not be empty")
+    if not _PAT_SAFE_RE.match(raw):
+        # Never echo the value — that is the leak this guard exists to prevent.
+        raise ValueError(
+            "github_pat contains characters that are not valid in a GitHub "
+            "token (whitespace, line breaks or control characters). Copy the "
+            "token again without surrounding whitespace."
+        )
+    return SecretStr(raw)
+
+
 class ForkToOwnRequest(BaseModel):
     """Fork-to-own creation parameters (trinity-enterprise#93).
 
@@ -55,9 +88,77 @@ class ForkToOwnRequest(BaseModel):
     @field_validator("github_pat")
     @classmethod
     def _validate_pat(cls, v: SecretStr) -> SecretStr:
-        if not v.get_secret_value().strip():
-            raise ValueError("github_pat must not be empty")
+        return _validate_pat_secret(v)
+
+
+class BindAgentRepoRequest(BaseModel):
+    """Post-creation repo binding parameters (trinity-enterprise#109).
+
+    Points a LIVE agent at a GitHub repo the user owns, creating it if needed,
+    from the agent's *current workspace* — not from its template. Same three
+    fields as :class:`ForkToOwnRequest` and the same destination validator, but
+    a distinct model because the two are distinct API contracts (a create-time
+    sub-object vs a standalone request body) and #654/Invariant #14 wants the
+    contract visible here rather than aliased.
+
+    ``github_pat`` is the USER's token: it creates/validates the destination,
+    authenticates the in-container push, and is then persisted as the agent's
+    per-agent PAT (#347). SecretStr keeps it out of reprs/logs; unwrap exactly
+    once at the service boundary.
+    """
+
+    destination_repo: str = Field(
+        ...,
+        description="Destination repo as owner/name in the user's account or org",
+    )
+    github_pat: SecretStr = Field(
+        ...,
+        description=(
+            "User's GitHub PAT — creates/authorizes the repo and becomes the "
+            "agent's git identity"
+        ),
+    )
+    private: bool = Field(
+        True, description="Destination repo visibility (private by default)"
+    )
+
+    @field_validator("destination_repo")
+    @classmethod
+    def _validate_destination(cls, v: str) -> str:
+        v = v.strip()
+        if ".." in v or not _FORK_DESTINATION_RE.match(v):
+            raise ValueError(
+                "destination_repo must be 'owner/name' (GitHub owner and repo "
+                "name characters only)"
+            )
         return v
+
+    @field_validator("github_pat")
+    @classmethod
+    def _validate_pat(cls, v: SecretStr) -> SecretStr:
+        return _validate_pat_secret(v)
+
+
+class BindAgentRepoResponse(BaseModel):
+    """Result of a successful post-creation repo binding (trinity-enterprise#109).
+
+    Carries no token and no repo URL containing one. ``previous_repo`` is
+    echoed so the UI can state what the agent moved *from* without a second
+    round-trip, and ``recreated`` tells the operator whether the container env
+    was actually re-baked — the step that makes the rebind survive a restart.
+    """
+
+    success: bool = True
+    agent_name: str
+    github_repo: str
+    previous_repo: str
+    default_branch: str
+    private: bool
+    created_repo: bool
+    reused_existing: bool
+    recreated: bool
+    repo_url: str
+    message: str
 
 
 class EphemeralConfig(BaseModel):

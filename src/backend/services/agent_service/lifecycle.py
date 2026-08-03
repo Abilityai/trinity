@@ -539,9 +539,12 @@ def _apply_git_env_from_db(
 
     Before ent#109 this block existed only in `_apply_persisted_auth_env`
     (`recreate_missing_container`, the rebuild-from-nothing path).
-    `recreate_container_with_updated_config` — whose one production caller is
+    `recreate_container_with_updated_config` — whose production callers are
     `start_agent_internal`, fired by nine config-drift predicates **and by
-    base-image drift at cold start** — seeded env from the OLD container and
+    base-image drift at cold start**, and (ent#109) `repo_binding`'s bind path,
+    which calls it directly and therefore owes the same `clear_agent_breakers`
+    that `start_agent_internal` runs immediately before its own call — seeded
+    env from the OLD container and
     re-derived only `GITHUB_PAT`. So a fleet-wide base-image rebuild replayed
     whatever git env each container happened to be carrying.
 

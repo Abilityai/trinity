@@ -432,9 +432,13 @@ a clearer message, never block a working push.
 - `sync_to_github` returns a named failure **before contacting the agent**:
   `conflict_type: "no_write_credentials"`, `conflict_class: "AUTH_FAILURE"`,
   message `NO_WRITE_CREDENTIALS_MESSAGE` ("This agent has no write
-  credentials — it tracks a public template read-only. To keep your changes,
-  create a new agent with fork-to-own and import your data…, or add a GitHub
-  token.").
+  credentials — it tracks a public template read-only. Use 'Bind to your own
+  repo' in this agent's Git tab to point it at a GitHub repository you own
+  (keeping everything it has learned), or add a GitHub token."). **ent#109**
+  retired the workaround this used to teach (create a new agent with
+  fork-to-own and import your data), which discarded the agent's identity,
+  its 180-day name reservation and its history — the retrofit now exists in
+  place; see [agent-repo-binding.md](agent-repo-binding.md).
 - `reset_to_main_preserve_state` refuses up front with
   `{"error": "no_write_credentials", "message": NO_WRITE_CREDENTIALS_MESSAGE}`
   (the recovery ends in a force-with-lease push); `routers/git.py` maps it
