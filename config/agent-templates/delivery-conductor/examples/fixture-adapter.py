@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -50,7 +50,7 @@ def _wake(value: object) -> dict[str, Any]:
     return wake
 
 
-def _utc_timestamp(value: object) -> None:
+def _utc_timestamp(value: object) -> datetime:
     if not isinstance(value, str) or _UTC.fullmatch(value) is None:
         raise FixtureInputError("timestamp is invalid")
     try:
@@ -59,6 +59,7 @@ def _utc_timestamp(value: object) -> None:
         raise FixtureInputError("timestamp is invalid") from error
     if parsed.tzinfo != timezone.utc:
         raise FixtureInputError("timestamp is invalid")
+    return parsed
 
 
 def _request() -> dict[str, Any]:
@@ -154,6 +155,29 @@ def _decision(request: dict[str, Any]) -> dict[str, Any]:
         raise FixtureInputError("budget is invalid")
 
     event_id = wake["source_event_id"]
+    runtime_execution = re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+        event_id,
+    )
+    if runtime_execution is not None:
+        observed_at = _utc_timestamp(request["now_utc"])
+        due_day = (observed_at + timedelta(days=2)).date()
+        reminder_id = "fixture-actual-" + hashlib.sha256(
+            wake["wake_id"].encode("utf-8")
+        ).hexdigest()[:32]
+        return {
+            "schema_version": 1,
+            "observed_revision": "fixture-v1",
+            "decision": "remind",
+            "reason_code": "fixture-actual-reminder",
+            "target_id": None,
+            "proposed_action": None,
+            "next_reminder": {
+                "reminder_id": reminder_id,
+                "due_at_utc": due_day.isoformat() + "T00:00:00Z",
+                "reason_code": "fixture-actual-effect",
+            },
+        }
     suffix = re.search(r"(\d+)$", event_id)
     sequence = (
         int(suffix.group(1))

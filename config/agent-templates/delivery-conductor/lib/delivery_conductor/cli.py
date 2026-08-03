@@ -688,7 +688,7 @@ def _record_result(
         )
         output = _record_output(result, handoff.lease.fence_token)
     _record_result_safety(safety, scope, parsed, now)
-    safety.assess(scope, now, safety.load_limits(scope))
+    safety.assess(scope, now, safety.load_limits(scope, now))
     _store_receipt_and_clear_handoff(ledger.database_path, parsed, output)
     publish_current_projection(workspace, ledger.database_path, now)
     return output
@@ -736,7 +736,7 @@ class _ProcessJsonLinesExchange:
         deadline_seconds: float,
     ) -> None:
         self._process = subprocess.Popen(
-            [sys.executable, str(adapter_path)],
+            [sys.executable, "-I", "-u", "-X", "utf8", str(adapter_path)],
             cwd=workspace,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,

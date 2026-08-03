@@ -69,15 +69,22 @@ an authoritative platform workflow record.
 
 The template ships a deterministic example at
 `examples/fixture-adapter.py`. It is verification policy, not a production
-adapter. For source-event identifiers ending in a decimal number, even values
-produce a no-op and odd values propose one `chat` effect. Re-observing the same
-wake produces the same action key and byte-identical decision. The effect
-targets the generic `delivery-conductor-fixture-sink` identifier; operators may
-record a sanitized fake result without creating or contacting that target.
+adapter. For synthetic source-event identifiers ending in a decimal number,
+even values produce a no-op and odd values propose one `chat` effect.
+Re-observing the same wake produces the same action key and byte-identical
+decision. Those synthetic effects target the generic
+`delivery-conductor-fixture-sink` identifier and are settled with explicitly
+simulated results to exercise durability only. A real backend-generated UUID
+from a normal model-mediated chat turn instead proposes one far-future self
+reminder; the deployed verification below invokes that actual Trinity effect.
 
 The adapter is trusted policy code: an operator reviews and installs it; wakes,
 checkpoints, and adapter output remain untrusted data and must pass the
-runtime's closed schemas. Mode `0444` only protects against accidental writes.
+runtime's closed schemas. The runtime starts the fixed adapter with Python's
+isolated-path mode and a scrubbed environment, so modules and startup hooks in
+the writable workspace are not import candidates. That import isolation does
+not sandbox the trusted adapter itself. Mode `0444` only protects against
+accidental writes.
 This disposable local procedure verifies the reviewed file's hash immediately
 before each tick, but the agent workspace is still owned by `developer`; file
 mode alone is not an OS-enforced trust boundary. A production adapter must
@@ -102,8 +109,10 @@ RUN_SUFFIX="$(date +%s)-$$"
 FIXTURE_PROJECT="conductor-fixture-${RUN_SUFFIX}"
 MAIN_NAME="conductor-fixture-main-${RUN_SUFFIX}"
 REPLAY_NAME="conductor-fixture-replay-${RUN_SUFFIX}"
+ACTUAL_NAME="conductor-fixture-actual-${RUN_SUFFIX}"
 MAIN_CONTAINER="agent-${MAIN_NAME}"
 REPLAY_CONTAINER="agent-${REPLAY_NAME}"
+ACTUAL_CONTAINER="agent-${ACTUAL_NAME}"
 TRINITY_ENV_FILE="${TRINITY_ENV_FILE:-.env}"
 # Compose is invoked directly here rather than through start.sh, so detect the
 # Docker socket's container-visible group for the non-root backend.
@@ -116,6 +125,7 @@ export DOCKER_GID
 COMPOSE=(docker compose --project-name "${FIXTURE_PROJECT}" --env-file "${TRINITY_ENV_FILE}")
 MAIN_CREATED=0
 REPLAY_CREATED=0
+ACTUAL_CREATED=0
 SYSTEM_CREATED=1
 
 if docker ps -a --format '{{.Names}}' | grep -Eq '^(trinity-|agent-trinity-system$)'; then
@@ -130,13 +140,13 @@ if docker volume inspect agent-trinity-system-workspace >/dev/null 2>&1; then
   echo 'refusing to reuse an existing Trinity system-agent workspace' >&2
   exit 64
 fi
-for resource in "${MAIN_CONTAINER}" "${REPLAY_CONTAINER}"; do
+for resource in "${MAIN_CONTAINER}" "${REPLAY_CONTAINER}" "${ACTUAL_CONTAINER}"; do
   if docker container inspect "${resource}" >/dev/null 2>&1; then
     echo 'refusing to reuse an existing fixture container' >&2
     exit 64
   fi
 done
-for resource in "${MAIN_CONTAINER}-workspace" "${REPLAY_CONTAINER}-workspace"; do
+for resource in "${MAIN_CONTAINER}-workspace" "${REPLAY_CONTAINER}-workspace" "${ACTUAL_CONTAINER}-workspace"; do
   if docker volume inspect "${resource}" >/dev/null 2>&1; then
     echo 'refusing to reuse an existing fixture workspace' >&2
     exit 64
@@ -159,6 +169,7 @@ cleanup() {
   set +e
   if [ "${MAIN_CREATED}" = 1 ] && [ -n "${TOKEN:-}" ]; then delete_agent "${MAIN_NAME}"; fi
   if [ "${REPLAY_CREATED}" = 1 ] && [ -n "${TOKEN:-}" ]; then delete_agent "${REPLAY_NAME}"; fi
+  if [ "${ACTUAL_CREATED}" = 1 ] && [ -n "${TOKEN:-}" ]; then delete_agent "${ACTUAL_NAME}"; fi
   if [ "${MAIN_CREATED}" = 1 ]; then
     docker container rm -f "${MAIN_CONTAINER}" >/dev/null 2>&1
     docker volume rm "${MAIN_CONTAINER}-workspace" >/dev/null 2>&1
@@ -166,6 +177,10 @@ cleanup() {
   if [ "${REPLAY_CREATED}" = 1 ]; then
     docker container rm -f "${REPLAY_CONTAINER}" >/dev/null 2>&1
     docker volume rm "${REPLAY_CONTAINER}-workspace" >/dev/null 2>&1
+  fi
+  if [ "${ACTUAL_CREATED}" = 1 ]; then
+    docker container rm -f "${ACTUAL_CONTAINER}" >/dev/null 2>&1
+    docker volume rm "${ACTUAL_CONTAINER}-workspace" >/dev/null 2>&1
   fi
   if [ "${SYSTEM_CREATED}" = 1 ]; then
     docker container rm -f agent-trinity-system >/dev/null 2>&1
@@ -254,6 +269,8 @@ MAIN_CREATED=1
 create_agent "${MAIN_NAME}"
 REPLAY_CREATED=1
 create_agent "${REPLAY_NAME}"
+ACTUAL_CREATED=1
+create_agent "${ACTUAL_NAME}"
 echo fixture-agents-created
 
 FIXTURE_PATH=config/agent-templates/delivery-conductor/examples/fixture-adapter.py
@@ -283,8 +300,10 @@ verify_fixture() {
 PHASE=install-adapters
 install_fixture "${MAIN_CONTAINER}"
 install_fixture "${REPLAY_CONTAINER}"
+install_fixture "${ACTUAL_CONTAINER}"
 verify_fixture "${MAIN_CONTAINER}"
 verify_fixture "${REPLAY_CONTAINER}"
+verify_fixture "${ACTUAL_CONTAINER}"
 echo fixture-adapters-verified
 PHASE=scenarios
 ```
@@ -300,9 +319,131 @@ filesystem isolation.
 
 ### Scenario commands
 
-These commands are an operator-only deterministic harness for the deployed
-artifact. A normal agent turn receives `TRINITY_EXECUTION_ID` and the execution
-context from Trinity; the model must never synthesize or override them.
+First run one actual effect through a normal model-mediated agent turn. The
+fixture recognizes only Trinity's backend-generated UUID execution identity for
+this path and proposes a far-future `set_reminder` effect. The agent must call
+the exact returned tool and arguments once and record only its sanitized result.
+The subsequent two native create requests replay the exact tool-side payload;
+Trinity's reminder idempotency gate must return the original reminder rather
+than creating another effect.
+
+```bash
+PHASE=actual-model-effect
+python3 - "${CAPTURE_DIR}/actual-chat-request.json" <<'PY'
+import json, pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "message": (
+        "Execute exactly one delivery-conductor turn using only the trusted "
+        "Execution Context and the installed template protocol. Invoke the "
+        "single returned effect if allowed, record its sanitized result, then stop."
+    )
+}, separators=(",", ":")))
+PY
+chmod 0600 "${CAPTURE_DIR}/actual-chat-request.json"
+curl -fsS --max-time 300 --config - \
+  --data-binary "@${CAPTURE_DIR}/actual-chat-request.json" \
+  >"${CAPTURE_DIR}/actual-chat-response.json" <<EOF
+url = "http://localhost:8000/api/agents/${ACTUAL_NAME}/chat"
+request = "POST"
+header = "Authorization: Bearer ${TOKEN}"
+header = "Content-Type: application/json"
+EOF
+
+# Reconstruct only the exact sanitized effect arguments from the agent-owned
+# ledger. A completed reminder reservation proves the model called the normal
+# Trinity tool and then correlated record-result before its turn returned.
+docker exec -i -u developer -w /home/developer "${ACTUAL_CONTAINER}" \
+  python - >"${CAPTURE_DIR}/actual-reminder-arguments.json" <<'PY'
+import hashlib, json, sqlite3
+with sqlite3.connect('data/delivery-conductor/control.sqlite3') as db:
+    rows = db.execute(
+        "SELECT action_key, payload_json, status FROM action_journal "
+        "WHERE capability_name = 'reminders'"
+    ).fetchall()
+    assert len(rows) == 1, rows
+    action_key, payload_json, status = rows[0]
+    assert status == 'completed', rows[0]
+    receipt = db.execute(
+        'SELECT reminder_due_at_utc FROM conductor_cli_receipts '
+        'WHERE action_key = ?', (action_key,)
+    ).fetchone()
+    assert receipt is not None and receipt[0]
+references = json.loads(payload_json)
+message = json.dumps({
+    'action_key': action_key,
+    'payload_sha256': hashlib.sha256(payload_json.encode()).hexdigest(),
+    'references': references,
+}, ensure_ascii=True, separators=(',', ':'), sort_keys=True, allow_nan=False)
+print(json.dumps({'fire_at': receipt[0], 'message': message}, separators=(',', ':')))
+PY
+
+# The effect must already exist before any operator replay. This check prevents
+# the replay request itself from manufacturing the evidence it is meant to test.
+curl -fsS --config - >"${CAPTURE_DIR}/actual-reminders-before-replay.json" <<EOF
+url = "http://localhost:8000/api/agents/${ACTUAL_NAME}/reminders"
+header = "Authorization: Bearer ${TOKEN}"
+EOF
+python3 - \
+  "${CAPTURE_DIR}/actual-reminder-arguments.json" \
+  "${CAPTURE_DIR}/actual-reminders-before-replay.json" \
+  >"${CAPTURE_DIR}/actual-reminder-original-id" <<'PY'
+import json, pathlib, sys
+arguments, reminders = (
+    json.loads(pathlib.Path(path).read_text()) for path in sys.argv[1:]
+)
+matching = [item for item in reminders
+            if item['message'] == arguments['message']
+            and item['fire_at'] == arguments['fire_at']]
+assert len(matching) == 1, matching
+print(matching[0]['id'])
+PY
+
+for replay in 1 2; do
+  curl -fsS --config - \
+    --data-binary "@${CAPTURE_DIR}/actual-reminder-arguments.json" \
+    >"${CAPTURE_DIR}/actual-reminder-replay-${replay}.json" <<EOF
+url = "http://localhost:8000/api/agents/${ACTUAL_NAME}/reminders"
+request = "POST"
+header = "Authorization: Bearer ${TOKEN}"
+header = "Content-Type: application/json"
+EOF
+done
+curl -fsS --config - >"${CAPTURE_DIR}/actual-reminders.json" <<EOF
+url = "http://localhost:8000/api/agents/${ACTUAL_NAME}/reminders"
+header = "Authorization: Bearer ${TOKEN}"
+EOF
+python3 - \
+  "${CAPTURE_DIR}/actual-reminder-arguments.json" \
+  "${CAPTURE_DIR}/actual-reminder-replay-1.json" \
+  "${CAPTURE_DIR}/actual-reminder-replay-2.json" \
+  "${CAPTURE_DIR}/actual-reminders.json" \
+  "${CAPTURE_DIR}/actual-reminder-original-id" <<'PY'
+import json, pathlib, sys
+arguments, first, second, reminders = (
+    json.loads(pathlib.Path(path).read_text()) for path in sys.argv[1:5]
+)
+original_id = pathlib.Path(sys.argv[5]).read_text().strip()
+assert original_id
+assert first['id'] == second['id'] == original_id
+matching = [item for item in reminders
+            if item['message'] == arguments['message']
+            and item['fire_at'] == arguments['fire_at']]
+assert len(matching) == 1, matching
+assert matching[0]['id'] == first['id']
+print(json.dumps({
+    'actual_effect': 'set_reminder',
+    'duplicate_effects': 0,
+    'recorded_result': 'completed',
+    'tool_replay_same_id': True,
+}, sort_keys=True))
+PY
+```
+
+The commands below are a separate operator-only deterministic durability
+harness for the deployed artifact. They intentionally do not invoke their
+synthetic `chat` effects. A normal agent turn receives `TRINITY_EXECUTION_ID`
+and the execution context from Trinity; the model must never synthesize or
+override them.
 
 ```bash
 assert_status() {
@@ -475,15 +616,18 @@ record_fixture_result "${REPLAY_CONTAINER}" "${CAPTURE_DIR}/restart-after.json" 
 ```
 
 An ambiguous result is terminal for that attempt and schedules investigation;
-the future investigation reminder is not an immediate second effect. Crash
-recovery may expose the same idempotent action key only after the old lease
-expires and fresh adapter observation returns the identical action. Duplicate
-wakes return `not-claimed`. On the main agent, four settled effects consume
-exactly the fixture's four-unit issue ceiling; the fresh fifth proposal returns
-`blocked`/`breaker-open` with every effect and correlation field null. The
-helper above does not contact the fake target: it validates one exact
-tool/argument bundle, hashes that simulated outcome, and records only the
-captured correlation.
+the future investigation reminder is not an immediate second effect. The
+recovery replay shown above occurs **before** any ambiguous result is recorded:
+only an unresolved reservation may expose the same idempotent action key after
+the old lease expires. Once ambiguity is durably recorded, that attempt is not
+replayed. Duplicate wakes return `not-claimed`. On the main agent, four
+synthetically settled reservations consume exactly the fixture's four-unit
+issue ceiling; the fresh fifth proposal returns `blocked`/`breaker-open` with
+every effect and correlation field null. The deterministic helper does not
+contact the fake target: it validates one exact tool/argument bundle, hashes
+that explicitly simulated outcome, and records only the captured correlation.
+The separate normal chat procedure above is the observable proof of one actual
+Trinity effect and tool-side replay deduplication.
 
 ### Observable checks
 

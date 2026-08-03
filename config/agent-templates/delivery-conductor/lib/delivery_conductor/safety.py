@@ -300,6 +300,30 @@ class SafetyController:
                     PRIMARY KEY (run_id, issue_id, signature)
                 );
 
+                CREATE TABLE IF NOT EXISTS conductor_run_controls (
+                    run_id TEXT NOT NULL,
+                    issue_id TEXT NOT NULL,
+                    started_at_utc TEXT NOT NULL,
+                    last_observed_at_utc TEXT NOT NULL,
+                    max_repair_cycles INTEGER NOT NULL CHECK (max_repair_cycles >= 0),
+                    max_run_seconds INTEGER NOT NULL CHECK (max_run_seconds >= 0),
+                    max_stale_leases INTEGER NOT NULL CHECK (max_stale_leases >= 0),
+                    max_orphaned_workers INTEGER NOT NULL CHECK (max_orphaned_workers >= 0),
+                    max_safety_events INTEGER NOT NULL CHECK (max_safety_events >= 0),
+                    max_no_work_ticks INTEGER NOT NULL CHECK (max_no_work_ticks >= 0),
+                    PRIMARY KEY (run_id, issue_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS conductor_issue_controls (
+                    issue_id TEXT PRIMARY KEY,
+                    max_issue_units INTEGER NOT NULL CHECK (max_issue_units >= 0)
+                );
+
+                CREATE TABLE IF NOT EXISTS conductor_daily_controls (
+                    utc_day TEXT PRIMARY KEY,
+                    max_daily_units INTEGER NOT NULL CHECK (max_daily_units >= 0)
+                );
+
                 CREATE TABLE IF NOT EXISTS conductor_safety_events (
                     event_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_key TEXT NOT NULL UNIQUE,
@@ -796,21 +820,32 @@ class SafetyController:
             raise SafetyValidationError("safety usage has not been assessed")
         return SafetyUsage(*row)
 
-    def load_limits(self, scope: SafetyScope) -> SafetyLimits:
+    def load_limits(self, scope: SafetyScope, now: datetime) -> SafetyLimits:
         """Load the effective durable ceilings for a previously assessed scope."""
         _require_scope(scope)
+        utc_day = _utc_text(now)[:10]
         with self._connect() as connection:
             connection.execute("PRAGMA query_only = ON")
             row = connection.execute(
                 """
-                SELECT max_attempts_per_signature, max_repair_cycles,
-                       max_run_seconds, max_issue_units, max_daily_units,
-                       max_stale_leases, max_orphaned_workers,
-                       max_safety_events, max_no_work_ticks
-                FROM conductor_safety_limits
-                WHERE run_id = ? AND issue_id = ? AND signature = ?
+                SELECT signature.max_attempts_per_signature,
+                       run.max_repair_cycles, run.max_run_seconds,
+                       issue.max_issue_units,
+                       COALESCE(day.max_daily_units, signature.max_daily_units),
+                       run.max_stale_leases, run.max_orphaned_workers,
+                       run.max_safety_events, run.max_no_work_ticks
+                FROM conductor_safety_limits AS signature
+                JOIN conductor_run_controls AS run
+                  ON run.run_id = signature.run_id
+                 AND run.issue_id = signature.issue_id
+                JOIN conductor_issue_controls AS issue
+                  ON issue.issue_id = signature.issue_id
+                LEFT JOIN conductor_daily_controls AS day
+                  ON day.utc_day = ?
+                WHERE signature.run_id = ? AND signature.issue_id = ?
+                  AND signature.signature = ?
                 """,
-                _scope_values(scope),
+                (utc_day, *_scope_values(scope)),
             ).fetchone()
         if row is None:
             raise SafetyValidationError("safety limits have not been assessed")
@@ -849,10 +884,157 @@ class SafetyController:
                 """,
                 (*_scope_values(scope), now_text, now_text, *requested_values),
             )
-            return requested, now_text
+            signature_effective = requested
+        else:
+            if now_text < row[1]:
+                raise SafetyValidationError("safety observation time cannot move backwards")
+            stored_values = tuple(row[2:])
+            if any(
+                requested_value > stored
+                for requested_value, stored in zip(
+                    requested_values, stored_values, strict=True
+                )
+            ):
+                raise SafetyValidationError("a durable safety ceiling cannot be increased")
+            effective_values = tuple(
+                min(requested_value, stored)
+                for requested_value, stored in zip(
+                    requested_values, stored_values, strict=True
+                )
+            )
+            connection.execute(
+                """
+                UPDATE conductor_safety_limits SET
+                    last_observed_at_utc = ?,
+                    max_attempts_per_signature = ?, max_repair_cycles = ?,
+                    max_run_seconds = ?, max_issue_units = ?, max_daily_units = ?,
+                    max_stale_leases = ?, max_orphaned_workers = ?,
+                    max_safety_events = ?, max_no_work_ticks = ?
+                WHERE run_id = ? AND issue_id = ? AND signature = ?
+                """,
+                (now_text, *effective_values, *_scope_values(scope)),
+            )
+            signature_effective = SafetyLimits(*effective_values)
+
+        run_effective, started_at = self._bind_run_controls(
+            connection,
+            scope,
+            now_text,
+            signature_effective,
+        )
+        issue_ceiling = self._bind_scalar_ceiling(
+            connection,
+            table="conductor_issue_controls",
+            key_name="issue_id",
+            key_value=scope.issue_id,
+            ceiling_name="max_issue_units",
+            requested=signature_effective.max_issue_units,
+        )
+        utc_day = now_text[:10]
+        daily_ceiling = self._bind_scalar_ceiling(
+            connection,
+            table="conductor_daily_controls",
+            key_name="utc_day",
+            key_value=utc_day,
+            ceiling_name="max_daily_units",
+            requested=signature_effective.max_daily_units,
+        )
+        effective = SafetyLimits(
+            max_attempts_per_signature=signature_effective.max_attempts_per_signature,
+            max_repair_cycles=run_effective[0],
+            max_run_seconds=run_effective[1],
+            max_issue_units=issue_ceiling,
+            max_daily_units=daily_ceiling,
+            max_stale_leases=run_effective[2],
+            max_orphaned_workers=run_effective[3],
+            max_safety_events=run_effective[4],
+            max_no_work_ticks=run_effective[5],
+        )
+        return effective, started_at
+
+    @staticmethod
+    def _bind_scalar_ceiling(
+        connection: sqlite3.Connection,
+        *,
+        table: str,
+        key_name: str,
+        key_value: str,
+        ceiling_name: str,
+        requested: int,
+    ) -> int:
+        allowed = {
+            ("conductor_issue_controls", "issue_id", "max_issue_units"),
+            ("conductor_daily_controls", "utc_day", "max_daily_units"),
+        }
+        if (table, key_name, ceiling_name) not in allowed:
+            raise AssertionError("unsupported durable ceiling dimension")
+        row = connection.execute(
+            f"SELECT {ceiling_name} FROM {table} WHERE {key_name} = ?",
+            (key_value,),
+        ).fetchone()
+        if row is None:
+            connection.execute(
+                f"INSERT INTO {table} ({key_name}, {ceiling_name}) VALUES (?, ?)",
+                (key_value, requested),
+            )
+            return requested
+        stored = int(row[0])
+        if requested > stored:
+            raise SafetyValidationError("a durable safety ceiling cannot be increased")
+        effective = min(requested, stored)
+        if effective != stored:
+            connection.execute(
+                f"UPDATE {table} SET {ceiling_name} = ? WHERE {key_name} = ?",
+                (effective, key_value),
+            )
+        return effective
+
+    @staticmethod
+    def _bind_run_controls(
+        connection: sqlite3.Connection,
+        scope: SafetyScope,
+        now_text: str,
+        requested: SafetyLimits,
+    ) -> tuple[tuple[int, int, int, int, int, int], str]:
+        requested_values = (
+            requested.max_repair_cycles,
+            requested.max_run_seconds,
+            requested.max_stale_leases,
+            requested.max_orphaned_workers,
+            requested.max_safety_events,
+            requested.max_no_work_ticks,
+        )
+        row = connection.execute(
+            """
+            SELECT started_at_utc, last_observed_at_utc,
+                   max_repair_cycles, max_run_seconds, max_stale_leases,
+                   max_orphaned_workers, max_safety_events, max_no_work_ticks
+            FROM conductor_run_controls
+            WHERE run_id = ? AND issue_id = ?
+            """,
+            (scope.run_id, scope.issue_id),
+        ).fetchone()
+        if row is None:
+            connection.execute(
+                """
+                INSERT INTO conductor_run_controls
+                    (run_id, issue_id, started_at_utc, last_observed_at_utc,
+                     max_repair_cycles, max_run_seconds, max_stale_leases,
+                     max_orphaned_workers, max_safety_events, max_no_work_ticks)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scope.run_id,
+                    scope.issue_id,
+                    now_text,
+                    now_text,
+                    *requested_values,
+                ),
+            )
+            return requested_values, now_text
         if now_text < row[1]:
             raise SafetyValidationError("safety observation time cannot move backwards")
-        stored_values = tuple(row[2:])
+        stored_values = tuple(int(value) for value in row[2:])
         if any(
             requested_value > stored
             for requested_value, stored in zip(
@@ -860,7 +1042,7 @@ class SafetyController:
             )
         ):
             raise SafetyValidationError("a durable safety ceiling cannot be increased")
-        effective_values = tuple(
+        effective = tuple(
             min(requested_value, stored)
             for requested_value, stored in zip(
                 requested_values, stored_values, strict=True
@@ -868,17 +1050,16 @@ class SafetyController:
         )
         connection.execute(
             """
-            UPDATE conductor_safety_limits SET
-                last_observed_at_utc = ?,
-                max_attempts_per_signature = ?, max_repair_cycles = ?,
-                max_run_seconds = ?, max_issue_units = ?, max_daily_units = ?,
-                max_stale_leases = ?, max_orphaned_workers = ?,
-                max_safety_events = ?, max_no_work_ticks = ?
-            WHERE run_id = ? AND issue_id = ? AND signature = ?
+            UPDATE conductor_run_controls SET
+                last_observed_at_utc = ?, max_repair_cycles = ?,
+                max_run_seconds = ?, max_stale_leases = ?,
+                max_orphaned_workers = ?, max_safety_events = ?,
+                max_no_work_ticks = ?
+            WHERE run_id = ? AND issue_id = ?
             """,
-            (now_text, *effective_values, *_scope_values(scope)),
+            (now_text, *effective, scope.run_id, scope.issue_id),
         )
-        return SafetyLimits(*effective_values), row[0]
+        return effective, row[0]
 
     def _reconcile_result_observations(
         self,
@@ -1036,10 +1217,9 @@ class SafetyController:
                 row = connection.execute(
                     """
                     SELECT COALESCE(SUM(units), 0) FROM conductor_safety_events
-                    WHERE run_id = ? AND issue_id = ? AND signature = ?
-                          AND event_kind = ?
+                    WHERE run_id = ? AND issue_id = ? AND event_kind = ?
                     """,
-                    (*_scope_values(scope), kind),
+                    (scope.run_id, scope.issue_id, kind),
                 ).fetchone()
             return int(row[0])
 

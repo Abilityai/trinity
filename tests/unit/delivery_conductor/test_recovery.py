@@ -626,6 +626,96 @@ def test_adapter_cannot_raise_a_durable_ceiling_to_reset_usage(tmp_path: Path):
     assert assessment.breaker.reason_code == "attempt-budget-exhausted"
 
 
+def test_signature_change_preserves_run_clock_and_run_scoped_counters(
+    tmp_path: Path,
+):
+    """A new failure signature must not mint a fresh run or run-scoped budget."""
+    _, safety = _safety_controller(tmp_path)
+    first = SafetyScope("shared-run", "shared-issue", "signature-a")
+    second = SafetyScope("shared-run", "shared-issue", "signature-b")
+    limits = _limits(max_repair_cycles=2, max_run_seconds=60)
+    safety.assess(first, NOW, limits)
+    safety.record_event("repair-a", "repair-cycle", first, NOW)
+
+    assessment = safety.assess(second, NOW + timedelta(seconds=60), limits)
+
+    assert assessment.usage.run_seconds == 60
+    assert assessment.usage.repair_cycles == 1
+    assert assessment.breaker.state == "open"
+    assert assessment.breaker.reason_code == "run-time-budget-exhausted"
+
+
+@pytest.mark.parametrize(
+    ("first_scope", "second_scope", "field"),
+    (
+        (
+            SafetyScope("same-run", "same-issue", "signature-a"),
+            SafetyScope("same-run", "same-issue", "signature-b"),
+            "max_run_seconds",
+        ),
+        (
+            SafetyScope("run-a", "same-issue", "signature-a"),
+            SafetyScope("run-b", "same-issue", "signature-b"),
+            "max_issue_units",
+        ),
+        (
+            SafetyScope("run-a", "issue-a", "signature-a"),
+            SafetyScope("run-b", "issue-b", "signature-b"),
+            "max_daily_units",
+        ),
+    ),
+)
+def test_fresh_signature_or_run_cannot_raise_dimensional_ceiling(
+    tmp_path: Path,
+    first_scope: SafetyScope,
+    second_scope: SafetyScope,
+    field: str,
+):
+    """Run, issue, and UTC-day ceilings are durable beyond one signature row."""
+    _, safety = _safety_controller(tmp_path)
+    safety.assess(first_scope, NOW, _limits(**{field: 2}))
+
+    with pytest.raises(SafetyValidationError, match="cannot be increased"):
+        safety.assess(
+            second_scope,
+            NOW + timedelta(seconds=1),
+            _limits(**{field: 20}),
+        )
+
+
+def test_fresh_signature_cannot_reset_issue_or_daily_cost_usage(tmp_path: Path):
+    """Cost accounting remains issue/day scoped when policy signature changes."""
+    ledger, safety = _safety_controller(tmp_path)
+    first = SafetyScope("shared-run", "shared-issue", "signature-a")
+    second = SafetyScope("shared-run", "shared-issue", "signature-b")
+    limits = _limits(max_issue_units=2, max_daily_units=2)
+    wake = normalize_wake("direct", "signature-cost", "c" * 64)
+    safety.bind_wake(wake.wake_id, first, NOW)
+    lease = ledger.claim_wake(wake, NOW, 60)
+    assert lease is not None
+    safety.record_result_observation(
+        lease.fence_token,
+        wake.wake_id,
+        first,
+        NOW,
+        action_key="signature-cost-action",
+        result_status="completed",
+        result_sha256="d" * 64,
+        reason_code="completed",
+        run_units=1,
+        issue_units=1,
+        daily_units=1,
+    )
+    ledger.release(lease, TickOutcome(True, "completed", 1, 1, 1))
+
+    assessment = safety.assess(second, NOW + timedelta(seconds=1), limits)
+
+    assert assessment.usage.issue_units == 1
+    assert assessment.usage.daily_units == 1
+    assert assessment.budget_view.issue_units_remaining == 1
+    assert assessment.budget_view.daily_units_remaining == 1
+
+
 @pytest.mark.parametrize(
     ("event_kind", "limit_field", "usage_field", "reason_code"),
     (
@@ -1655,6 +1745,33 @@ def test_fixed_adapter_entrypoint_rejects_missing_and_symlinked_files(tmp_path: 
     (workspace / "adapter.py").symlink_to(outside)
     with pytest.raises(CliValidationError, match="fixed adapter entrypoint"):
         run_cli(_prepare_message("direct", "symlink-1"), workspace, clock=lambda: NOW)
+
+
+def test_fixed_adapter_interpreter_ignores_writable_workspace_import_hooks(
+    tmp_path: Path,
+):
+    """Workspace shadow modules and startup customization never run in the adapter."""
+    workspace = tmp_path / "workspace"
+    _write_fixed_adapter(workspace)
+    json_marker = workspace / "json-shadow-ran"
+    site_marker = workspace / "sitecustomize-ran"
+    (workspace / "json.py").write_text(
+        f"from pathlib import Path\nPath({str(json_marker)!r}).write_text('ran')\n"
+        "raise RuntimeError('workspace json shadow executed')\n"
+    )
+    (workspace / "sitecustomize.py").write_text(
+        f"from pathlib import Path\nPath({str(site_marker)!r}).write_text('ran')\n"
+    )
+
+    prepared = run_cli(
+        _prepare_message("direct", "isolated-adapter-1"),
+        workspace,
+        clock=lambda: NOW,
+    )
+
+    assert prepared["status"] == "action-ready"
+    assert not json_marker.exists()
+    assert not site_marker.exists()
 
 
 def test_capability_resolution_is_a_closed_two_tool_map():

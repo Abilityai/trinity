@@ -109,6 +109,30 @@ def test_fixture_alternates_noop_and_one_idempotent_chat_effect():
     assert repeated_wire == first_wire
 
 
+def test_fixture_runtime_uuid_proposes_one_stable_far_future_reminder():
+    execution_id = "123e4567-e89b-42d3-a456-426614174000"
+    wake = normalize_wake("direct", execution_id, "a" * 64)
+    request = AdapterRequest(
+        1,
+        wake,
+        "2026-08-03T23:59:59Z",
+        None,
+        BudgetView(4, 4, 8),
+    )
+
+    first = _exchange(serialize_adapter_request(request))
+    second = _exchange(serialize_adapter_request(request))
+
+    assert first.returncode == second.returncode == 0
+    assert first.stdout == second.stdout
+    decision = parse_adapter_decision_json(first.stdout.rstrip("\n"))
+    assert decision.decision == "remind"
+    assert decision.proposed_action is None
+    assert decision.next_reminder is not None
+    assert decision.next_reminder.due_at_utc == "2026-08-05T00:00:00Z"
+    assert decision.next_reminder.reason_code == "fixture-actual-effect"
+
+
 def test_fixture_returns_one_closed_safety_policy_for_the_same_wake_scope():
     wake = _wake(1)
     request = SafetyPolicyRequest(1, wake, "2026-08-03T12:00:00Z")
@@ -288,12 +312,28 @@ def test_runbook_records_captured_correlations_and_cleans_exact_resources():
     runbook = RUNBOOK.read_text()
 
     assert "ACTION_KEY_FROM_PREPARE" not in runbook
+    assert "operators may record a sanitized fake result" not in runbook
+    assert "Crash recovery may expose the same idempotent action key" not in runbook
     assert '"fence_token":1' not in runbook
     assert "SELECT fence_token FROM action_journal ORDER BY fence_token" not in runbook
     assert "(key, value[key])" not in runbook
     for required in (
         "record_fixture_result()",
         "assert_blocked_no_effect()",
+        "PHASE=actual-model-effect",
+        'url = "http://localhost:8000/api/agents/${ACTUAL_NAME}/chat"',
+        '"${CAPTURE_DIR}/actual-reminder-arguments.json"',
+        '"${CAPTURE_DIR}/actual-reminders-before-replay.json"',
+        '"${CAPTURE_DIR}/actual-reminder-original-id"',
+        "WHERE capability_name = 'reminders'",
+        "assert status == 'completed'",
+        'url = "http://localhost:8000/api/agents/${ACTUAL_NAME}/reminders"',
+        "assert first['id'] == second['id'] == original_id",
+        "assert len(matching) == 1, matching",
+        "'actual_effect': 'set_reminder'",
+        "'duplicate_effects': 0",
+        "only an unresolved reservation may expose the same idempotent action key",
+        "Once ambiguity is durably recorded, that attempt is not",
         'prepared["correlation"]',
         'prepared["effect_arguments"]',
         'assert_status "${CAPTURE_DIR}/hourly.json" action-ready',
@@ -308,6 +348,7 @@ def test_runbook_records_captured_correlations_and_cleans_exact_resources():
         'ambiguous investigate "${CAPTURE_DIR}/restart-result.json"',
         'delete_agent "${MAIN_NAME}"',
         'delete_agent "${REPLAY_NAME}"',
+        'delete_agent "${ACTUAL_NAME}"',
         'docker container inspect "${resource}"',
         'docker volume inspect "${resource}"',
         "alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce",
@@ -315,6 +356,7 @@ def test_runbook_records_captured_correlations_and_cleans_exact_resources():
         "export ADMIN_PASSWORD='Aa1!'\"$(openssl rand -hex 24)\"",  # pragma: allowlist secret
         "MAIN_CREATED=1\ncreate_agent \"${MAIN_NAME}\"",
         "REPLAY_CREATED=1\ncreate_agent \"${REPLAY_NAME}\"",
+        "ACTUAL_CREATED=1\ncreate_agent \"${ACTUAL_NAME}\"",
         "docker volume inspect agent-trinity-system-workspace",
         '"${COMPOSE[@]}" down -v --remove-orphans',
     ):

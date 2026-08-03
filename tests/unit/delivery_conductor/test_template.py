@@ -368,7 +368,7 @@ def test_cli_starts_only_the_fixed_workspace_adapter(template_root: Path):
     source = (template_root / "lib" / "delivery_conductor" / "cli.py").read_text()
 
     assert '_ADAPTER_FILENAME = "adapter.py"' in source
-    assert "[sys.executable, str(adapter_path)]" in source
+    assert '[sys.executable, "-I", "-u", "-X", "utf8", str(adapter_path)]' in source
     assert 'env={\n                "PYTHONIOENCODING": "utf-8",' in source
     assert "os.environ" not in source
     assert "os.getenv" not in source
