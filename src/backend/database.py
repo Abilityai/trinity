@@ -1555,8 +1555,20 @@ class DatabaseManager:
         return self._report_ops.get_report(report_id)
 
     def get_reports_for_agent(self, agent_name: str, report_type: str = None,
+                              hours: int = None, search: str = None,
                               limit: int = 50, offset: int = 0):
-        return self._report_ops.get_reports_for_agent(agent_name, report_type, limit, offset)
+        # Keyword-forwarded on purpose: this facade previously passed the tail
+        # positionally, so adding `hours`/`search` to the ops signature (#1539)
+        # silently rebound `limit`→`hours`. Positional delegation makes every
+        # future parameter an ordering hazard.
+        return self._report_ops.get_reports_for_agent(
+            agent_name,
+            report_type=report_type,
+            hours=hours,
+            search=search,
+            limit=limit,
+            offset=offset,
+        )
 
     def get_fleet_reports(self, agent_names, report_type: str = None, hours: int = None,
                           search: str = None, limit: int = 50, offset: int = 0):

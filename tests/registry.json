@@ -1397,6 +1397,17 @@
         "reliability"
       ],
       "description": "Failed-creation container reclaim (ent#313): a create that fails after containers.run must leave no orphan container, no unreclaimable volume and no name-keyed Redis state. Covers both arrival shapes \u2014 handle in hand (later step raised) and NO handle (the reported 60s Docker read timeout, where the daemon created the container and the client never got it, so it is re-derived by name). Pins every fail-closed gate on that re-derived path, because a name resolves to another install's live agent on a shared Docker daemon: 409 name conflict (daemon created nothing) \u2192 refuse; existing agent_ownership row (a concurrent creation won the name) \u2192 refuse; trinity.created label older than the attempt's floor, missing, or unparseable \u2192 refuse; missing floor \u2192 refuse; DB or Docker lookup error \u2192 refuse. Also: Redis cleared when the container is provably gone (removed or never created) and NOT when removal failed (the slot ZSET isn't idle); every failure swallowed so the original creation error is what the caller reports; and an AST guard that create_agent_internal actually AWAITS the reclaim, so the unit tests can't stay green while nothing calls it. Also pins the never-raises contract under a stubbed docker module: the first version used isinstance(exc, docker.errors.APIError), which raises TypeError wherever docker is a test double and replaced the real creation error with an unrelated one (caught by the full suite via test_fork_to_own / test_1484); the 409 check is duck-typed on .response.status_code now."
+    },
+    {
+      "file": "unit/test_1917_stack_trace_exposure.py",
+      "feature": "#1917",
+      "added": "2026-08-03",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "py/stack-trace-exposure leak guards for the ops / system-agent siblings PR #1912 left untouched (#1917), including open CodeQL alert #231. Each test drives the REAL router function with a sentinel planted in the exception message and asserts both halves: the sentinel is absent from the response AND the exception class name is present (a response that dropped the error entirely would pass a sentinel-only check while making the failure undiagnosable). Covers stop_fleet per-agent, _stop_agent_container (feeds emergency_stop), fleet health (previously str(e)[:50] \u2014 truncation bounds a leak, it does not remove one, and docker/httpx messages put the host FIRST), ops costs (the OTel collector URL), and system-agent health. Plus a static ban on str(e) in ops.py/system_agent.py and a window check on agents.py's three lifecycle details. All 8 fail against pre-fix code \u2014 verified, because the fleet-health test initially patched a get_agent_context_info that does not exist (raising=False made it silent), so it passed against the unpatched router until the pre-fix run exposed it; it now patches get_agent_client and asserts the probe ran."
     }
   ]
 }

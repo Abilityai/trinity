@@ -21,7 +21,7 @@ import json
 import os
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from database import db
 from dependencies import get_current_user, AuthorizedAgent, OwnedAgent
@@ -31,9 +31,11 @@ from models import (
     ReportCreate,
     ReportSummary,
     REPORT_PAYLOAD_MAX_BYTES,
+    REPORT_ROWS_PAGE_DEFAULT,
+    REPORT_ROWS_PAGE_MAX,
     User,
 )
-from services import rate_limiter, report_service
+from services import rate_limiter, report_export, report_service
 from services.agent_service.helpers import accessible_agent_names, narrow_to_agent
 
 router = APIRouter(prefix="/api", tags=["reports"])
@@ -53,10 +55,43 @@ REPORT_RATE_WINDOW = 60  # seconds
 # Agent-scoped endpoints  (/api/agents/{name}/reports)
 # ============================================================================
 
+
+def _report_or_404(report_id: str, current_user: User) -> dict:
+    """Fetch a report and gate it, or 404.
+
+    ONE gate for all three read routes (detail / rows / export). It answers
+    **404, never 403**, for a missing report AND for one the caller cannot
+    reach: a 403 would confirm the id exists, turning any of these routes into
+    an existence oracle for another tenant's reports.
+
+    Extracted per review of #1838: the three routes each carried a byte-identical
+    copy of this check, which is exactly the duplication Invariant #8's static
+    guard (`test_1310_auth_wiring`) proxies for — three copies are three chances
+    for one to drift into a 403, or to lose the access half entirely. The
+    allowlist entry is now this single helper rather than one per route.
+    """
+    report = db.get_report(report_id)
+    if not report or not db.can_user_access_agent(current_user.username, report["agent_name"]):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+    return report
+
+
 @router.post("/agents/{name}/reports", response_model=Report, status_code=201)
 async def create_report(
     data: ReportCreate,
     name: AuthorizedAgent,
+    # Defaulted so a direct in-process call (tests, any future internal caller)
+    # keeps working; FastAPI injects it regardless of the default, and the
+    # header guard below already treats absence as "no hint available".
+    #
+    # Deliberately NOT `Optional[Request]` (raised in #1838 review, verified
+    # wrong): FastAPI special-cases the BARE `Request` annotation as an ASGI
+    # injection. Wrapping it in Optional loses that, so FastAPI tries to build a
+    # Pydantic field for it and the module fails to import:
+    #   FastAPIError: Invalid args for response field! ... typing.Optional[
+    #   starlette.requests.Request] is a valid Pydantic field type
+    # The annotation is a framework contract here, not a nullability claim.
+    request: Request = None,
     current_user: User = Depends(get_current_user),
 ):
     """Publish a report for an agent (called by the agent via MCP).
@@ -77,6 +112,29 @@ async def create_report(
         REPORT_RATE_WINDOW,
         detail="Report rate limit exceeded for this agent.",
     )
+
+    # Two-stage size guard (#1537). The declared Content-Length is checked first
+    # so an oversized body is refused on the cheap header rather than after
+    # serializing the parsed payload back to JSON — at a 5 MiB ceiling that
+    # round-trip is the expensive part. It is a HINT, not the enforcement: a
+    # missing or lying header falls through to the exact check below, which is
+    # what actually bounds what reaches the DB and every later read.
+    #
+    # Honest limit: Starlette has already buffered the body by the time this
+    # handler runs, so this bounds STORAGE and response size, not peak memory.
+    # A true streaming guard needs the body off the typed-model path (the
+    # webhooks.py pattern) — worth doing only if reports ever move to the
+    # multi-megabyte norm this ceiling merely permits.
+    declared = request.headers.get("content-length") if request else None
+    if declared:
+        try:
+            if int(declared) > REPORT_PAYLOAD_MAX_BYTES:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"payload exceeds {REPORT_PAYLOAD_MAX_BYTES} bytes",
+                )
+        except ValueError:
+            pass  # unparseable header — the exact check below still applies
 
     # Bound the payload before it hits the DB / every list response (review A2).
     if len(json.dumps(data.payload).encode("utf-8")) > REPORT_PAYLOAD_MAX_BYTES:
@@ -103,11 +161,29 @@ async def create_report(
 async def list_agent_reports(
     name: AuthorizedAgent,
     report_type: Optional[str] = Query(None),
+    hours: int = Query(168, description="Time window in hours; 0 = all-time"),
+    search: Optional[str] = Query(None, max_length=200),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    """List one agent's reports (metadata only, newest first)."""
-    rows = db.get_reports_for_agent(name, report_type=report_type, limit=limit, offset=offset)
+    """List one agent's reports (metadata only, newest first).
+
+    `hours`/`search` (#1539) bring this route to parity with the fleet list.
+    They were absent, which made the per-agent Reports tab a flat unfilterable
+    list and silently dropped both filters for any caller that scoped to one
+    agent. `hours` is whitelist-validated exactly like the fleet route — an
+    unlisted value falls back to the 7-day default rather than erroring, so an
+    old client keeps working.
+    """
+    effective_hours = hours if hours in _VALID_HOURS else 168
+    rows = db.get_reports_for_agent(
+        name,
+        report_type=report_type,
+        hours=effective_hours or None,
+        search=search,
+        limit=limit,
+        offset=offset,
+    )
     return [ReportSummary(**r) for r in rows]
 
 
@@ -164,10 +240,113 @@ async def list_fleet_reports(
     return [ReportSummary(**r) for r in rows]
 
 
+@router.get("/reports/{report_id}/export")
+async def export_report(
+    report_id: str,
+    format: str = Query("xlsx", pattern="^(xlsx|pdf)$"),
+    current_user: User = Depends(get_current_user),
+):
+    """Download a report as a spreadsheet or a PDF (#1536).
+
+    Access is the same gate as the detail route, including its 404-not-403 for a
+    report the caller cannot reach — an export URL must not become the oracle the
+    detail route refuses to be.
+
+    Shape mismatches degrade rather than fail: a `kpi` payload exports as a
+    two-column sheet, an unrecognized one as pretty-printed JSON. The only 4xx
+    here is an unknown `format`.
+
+    Missing libraries answer **503, not 500**: they are pinned in the backend
+    image, but an instance that upgrades code without rebuilding (#1814) would
+    otherwise see an opaque crash instead of "rebuild the image".
+    """
+    report = _report_or_404(report_id, current_user)
+
+    title = report.get("title") or "report"
+    try:
+        if format == "xlsx":
+            content = report_export.build_xlsx(report.get("payload"), report.get("display_hint"), title)
+            media = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        else:
+            content = report_export.build_pdf(report.get("payload"), report.get("display_hint"), title)
+            media = "application/pdf"
+    except report_export.ExportUnavailable as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                f"Report export is unavailable on this instance ({e}). "
+                "Rebuild the backend image so the export dependencies are installed."
+            ),
+        )
+
+    filename = _export_filename(title, report_id, format)
+    return Response(
+        content=content,
+        media_type=media,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            # The report body is agent-authored; keep browsers from sniffing it
+            # into something executable, matching the FILES-001 download route.
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+def _export_filename(title: str, report_id: str, fmt: str) -> str:
+    """A safe, recognizable filename. The title is agent-authored, so anything
+    that could break out of the quoted Content-Disposition value — quotes,
+    newlines, separators — is stripped rather than escaped."""
+    safe = "".join(ch if (ch.isalnum() or ch in " -_") else "-" for ch in (title or ""))
+    safe = "-".join(safe.split()).strip("-")[:60] or "report"
+    return f"{safe}-{report_id[:8]}.{fmt}"
+
+
+@router.get("/reports/{report_id}/rows")
+async def get_report_rows(
+    report_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(REPORT_ROWS_PAGE_DEFAULT, ge=1, le=REPORT_ROWS_PAGE_MAX),
+    current_user: User = Depends(get_current_user),
+):
+    """A PAGE of a tabular report's rows, so a large table is never shipped whole
+    (#1537).
+
+    `GET /reports/{id}` returns the entire payload — fine at 201 bytes (the fleet
+    average when this was measured), wrong at the 5 MiB the cap now permits. This
+    gives the renderer a window instead: columns once, then `limit` rows from
+    `offset`, plus the true `total` so the UI can show "100 of 12,431".
+
+    Only `table`-shaped payloads (`{columns, rows}`) paginate — every other
+    display_hint is a bounded document (a KPI tile set, a markdown body) with no
+    row axis to slice, and answering 400 for those is clearer than inventing one.
+
+    Honest limit: the row slice happens in Python after the whole blob is read
+    from the column, so this bounds the RESPONSE, not the read. Slicing in the
+    database needs the rows off-row — deliberately not built until real payloads
+    justify the migration (see REPORT_PAYLOAD_MAX_BYTES).
+    """
+    report = _report_or_404(report_id, current_user)
+
+    payload = report.get("payload")
+    columns = payload.get("columns") if isinstance(payload, dict) else None
+    rows = payload.get("rows") if isinstance(payload, dict) else None
+    if not isinstance(rows, list) or not isinstance(columns, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Report payload is not tabular ({columns, rows}); fetch it whole via GET /api/reports/{id}",
+        )
+
+    return {
+        "report_id": report_id,
+        "columns": columns,
+        "total": len(rows),
+        "offset": offset,
+        "limit": limit,
+        "rows": rows[offset : offset + limit],
+    }
+
+
 @router.get("/reports/{report_id}", response_model=Report)
 async def get_report(report_id: str, current_user: User = Depends(get_current_user)):
     """Full report incl. payload. 404 (not 403) on no-access to avoid id leak."""
-    report = db.get_report(report_id)
-    if not report or not db.can_user_access_agent(current_user.username, report["agent_name"]):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
-    return Report(**report)
+    return Report(**_report_or_404(report_id, current_user))
