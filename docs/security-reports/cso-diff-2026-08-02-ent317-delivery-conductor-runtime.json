@@ -1,0 +1,72 @@
+{
+  "version": "1.1",
+  "date": "2026-08-02",
+  "mode": "daily",
+  "scope": "--diff",
+  "branch": "codex/ent317-delivery-conductor-runtime",
+  "merge_base": "4c96a80af817cc69597b7b3f1e6ea1e786d4ab7b",
+  "audited_head": "ede7ba12991f",
+  "issue": "trinity-enterprise#317",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "attack_surface": {
+    "files_changed": 29,
+    "lines_added": 15857,
+    "lines_removed": 0,
+    "new_endpoints": 0,
+    "modified_endpoints": 0,
+    "new_unauthenticated_inputs": 0,
+    "new_dependencies": 0,
+    "ci_workflow_changes": 0,
+    "docker_infra_changes": 0,
+    "schema_changes": 0,
+    "allowed_effect_tools": 2
+  },
+  "findings": [],
+  "review_findings_resolved": [
+    {
+      "severity": "IMPORTANT",
+      "title": "Workspace import resolution preceded fixed-adapter execution",
+      "status": "RESOLVED",
+      "commit": "92e7f583"
+    },
+    {
+      "severity": "IMPORTANT",
+      "title": "Signature rotation reset non-signature safety dimensions",
+      "status": "RESOLVED",
+      "commit": "92e7f583"
+    },
+    {
+      "severity": "IMPORTANT",
+      "title": "Deployed harness did not execute a real capability effect",
+      "status": "PROCEDURE_ADDED_ENVIRONMENT_BLOCKED",
+      "commits": ["92e7f583", "a796a385", "ede7ba12"]
+    }
+  ],
+  "verification": {
+    "conductor_tests_passed": 288,
+    "template_catalog_tests_passed": 186,
+    "fixture_tests_passed": 21,
+    "mcp_tests_passed": 93,
+    "typescript_build": "passed",
+    "ruff": "passed",
+    "runbook_bash_syntax": "passed",
+    "detect_secrets_candidates": 7,
+    "detect_secrets_verified_secrets": 0,
+    "deployed_durability_fixture": "passed",
+    "deployed_normal_model_effect": "blocked_empty_provider_credentials",
+    "cleanup_after_attempts": "verified"
+  },
+  "supply_chain_summary": {
+    "python_deps_changed": 0,
+    "node_deps_changed": 0,
+    "lockfile_changes": 0,
+    "new_install_scripts": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "verdict": "PASS"
+}
