@@ -674,8 +674,11 @@ class TestReportDirectionOnAFailingValidator:
 
     def test_persisted_check_error_does_not_replay_as_clean(self):
         """`_report_from_persisted` recomputes counts from `checks_json`, so a
-        swallowed raise persisted once is replayed as a clean bill of health on
-        every stopped-agent read. This pins the shape of that recompute."""
+        swallowed raise persisted once used to be replayed as a clean bill of
+        health on every stopped-agent read. ent#128 closed that at the sink:
+        `_did_not_pass` counts a `skipped` row carrying `check_error` as a
+        finding, so a row persisted by an OLDER build — before the swallow
+        started returning `fail` — still cannot replay as clean."""
         import services.compatibility as svc
 
         swallowed = {"checks": [{
@@ -687,7 +690,7 @@ class TestReportDirectionOnAFailingValidator:
             "skip_reason": None,
         }]}
 
-        assert svc._counts(swallowed["checks"])["soft_count"] == 0
+        assert svc._counts(swallowed["checks"])["soft_count"] == 1
         assert svc._counts(failed["checks"])["soft_count"] == 1
 
         degraded = svc._report_from_persisted(
@@ -699,7 +702,8 @@ class TestRunStaticLogsItsSwallow:
     def test_a_raising_check_is_logged(self, monkeypatch, caplog):
         """Before ent#89 this swallow left no trace anywhere, for all ~100
         checks — a broken validator reported "healthy" and the logs were
-        silent."""
+        silent. Both halves are now closed: ent#128 makes the result a FAIL so
+        `_counts` sees it, and ent#89 logs it so it is diagnosable."""
         import logging
 
         monkeypatch.setitem(
@@ -708,6 +712,10 @@ class TestRunStaticLogsItsSwallow:
         with caplog.at_level(logging.ERROR):
             out = run_static(good_snapshot(), ["T-001"])
 
-        assert (out["T-001"][2] or {}).get("skip_reason") == "check_error"
+        status, _msg, detail = out["T-001"]
+        # FAIL, not a skip: a check that could not evaluate is not a check that
+        # passed, and only a counted status reaches `hard_count`/`soft_count`.
+        assert status == "fail"
+        assert (detail or {}).get("check_error") == "kaboom"
         assert any("T-001" in r.message or "T-001" in str(r.args)
                    for r in caplog.records)

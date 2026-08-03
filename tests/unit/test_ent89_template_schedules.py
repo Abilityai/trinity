@@ -342,7 +342,9 @@ class TestCatalogSurface:
             "name: demo\ndescription: d\n"
             "schedules:\n  - name: daily\n    cron: '0 9 * * *'\n    message: /m\n"
         )
-        entry = self._ts()._build_local_template(tmp_path)
+        # `is_bundled` is keyword-only and required (ent#128): it selects the
+        # credential-metadata trust label, which is orthogonal to `schedules:`.
+        entry = self._ts()._build_local_template(tmp_path, is_bundled=True)
         assert [s["name"] for s in entry["schedules"]] == ["daily"]
         assert entry["schedule_errors"] == []
 
@@ -354,7 +356,8 @@ class TestCatalogSurface:
         ts = self._ts()
         assert ts._build_template("owner/repo", {"schedules": 5})["schedules"] == []
         (tmp_path / "template.yaml").write_text("name: d\nschedules: 5\n")
-        assert ts._build_local_template(tmp_path)["schedules"] == []
+        assert ts._build_local_template(
+            tmp_path, is_bundled=True)["schedules"] == []
 
     def test_malformed_block_logs_exactly_one_warning_naming_the_template(
             self, caplog):
