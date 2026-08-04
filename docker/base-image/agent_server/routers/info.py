@@ -12,6 +12,7 @@ from typing import Optional, Dict, Any, List
 from fastapi import APIRouter
 
 from ..models import AgentInfo
+from ..safe_yaml import AliasPolicy, load_hardened_yaml
 from ..state import agent_state
 
 logger = logging.getLogger(__name__)
@@ -130,10 +131,19 @@ async def get_agent_info():
 
     if os.path.exists(config_path):
         try:
-            import yaml
-            with open(config_path) as f:
-                config = yaml.safe_load(f)
-                mcp_servers = config.get("agent", {}).get("mcp_servers", [])
+            # #1965: BUDGET, and deliberately the odd one out in this file.
+            # `/config/agent-config.yaml` is written by the platform
+            # (`agent_service/crud.py`) and bind-mounted `mode: 'ro'`, so the
+            # agent cannot author it — it is not the surface ent#314 is about.
+            # REJECT could refuse a legitimate document here, since `yaml.dump`
+            # emits an anchor for any shared object reference. The size and
+            # duplicate-key guards still apply.
+            config = load_hardened_yaml(
+                Path(config_path).read_text(),
+                kind="agent_config",
+                alias_policy=AliasPolicy.BUDGET,
+            )
+            mcp_servers = (config or {}).get("agent", {}).get("mcp_servers", [])
         except Exception as e:
             logger.error(f"Failed to read agent config: {e}")
 
@@ -198,9 +208,17 @@ async def get_template_info():
 
     if template_path.exists():
         try:
-            import yaml
-            with open(template_path) as f:
-                template_data = yaml.safe_load(f)
+            # #1965: REJECT, matching the backend policy for the SAME document
+            # read from a live container (`credential_requirements_service`).
+            # This copy of `template.yaml` sits in the agent's own workspace and
+            # is agent-writable, and the backend proxies this endpoint — so the
+            # graph walk that turns a 416 B level-6 anchor bomb into ~110 MB
+            # happens here first, then again across the wire.
+            template_data = load_hardened_yaml(
+                template_path.read_text(),
+                kind="template",
+                alias_policy=AliasPolicy.REJECT,
+            )
         except Exception as e:
             logger.warning(f"Failed to read template.yaml: {e}")
 
@@ -283,8 +301,12 @@ async def get_metrics():
         }
 
     try:
-        import yaml
-        template_data = yaml.safe_load(template_path.read_text())
+        # #1965: same document, same REJECT policy as `/api/template-info`.
+        template_data = load_hardened_yaml(
+            template_path.read_text(),
+            kind="template",
+            alias_policy=AliasPolicy.REJECT,
+        )
     except Exception as e:
         logger.warning(f"Failed to read template.yaml: {e}")
         return {
