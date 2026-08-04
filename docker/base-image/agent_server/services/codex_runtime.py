@@ -180,7 +180,16 @@ def _load_api_key_with_source() -> Tuple[Optional[str], Optional[str]]:
             return value, var
     env_path = Path(_AGENT_HOME) / ".env"
     try:
-        for raw in env_path.read_text().splitlines():
+        # `errors="replace"`, found by /edge-cases: `.env` is hand-edited and
+        # credentials get pasted, so a single non-UTF-8 byte (a Latin-1 value, a
+        # smart quote from the wrong encoding) is entirely plausible — and a
+        # bare `read_text()` raises UnicodeDecodeError there. That is a
+        # ValueError, NOT an OSError, so the except below never caught it and
+        # the error escaped all the way out of `_execute_codex`, failing the
+        # dispatch instead of resolving the key or giving the honest 503.
+        # Replacing the bad byte lets a valid key line on another row still be
+        # found; a key that itself contains non-UTF-8 bytes was never usable.
+        for raw in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
             line = raw.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
