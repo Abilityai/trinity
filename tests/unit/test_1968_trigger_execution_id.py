@@ -406,6 +406,43 @@ def test_lock_released_when_row_creation_returns_none(tmp_path):
     assert app.scheduler_service.lock_manager.lock.release_count == 1
 
 
+def test_the_spawned_task_is_strongly_referenced(tmp_path):
+    """The event loop keeps only a WEAK reference to a task, so a bare
+    `create_task(...)` nobody holds can be collected mid-flight (asyncio says
+    so outright).
+
+    That was survivable before this change — a dropped task meant the run
+    silently didn't happen. It is not survivable now: the lock and the row are
+    created BEFORE the task, so a collected task strands a `running` execution
+    whose id the caller already holds and pins the lock until its TTL. Same
+    `_inflight` shape as the #1083 result-callback path.
+    """
+    import asyncio
+
+    db_path = tmp_path / "t.db"
+    _seed_db(db_path)
+    app = _app(db_path)
+
+    seen = {}
+
+    async def _drive():
+        # Look BEFORE the task has run — that is the window where a weakly
+        # referenced task can be collected.
+        await app._trigger_handler(_FakeRequest("sch-1"))
+        seen["held"] = len(app._inflight_triggers)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        seen["after"] = len(app._inflight_triggers)
+
+    asyncio.run(_drive())
+
+    assert seen["held"] == 1, "the spawned trigger task is not strongly referenced"
+    assert seen["after"] == 0, (
+        "the done-callback does not discard the task — the set grows without "
+        "bound for the life of the process"
+    )
+
+
 def test_no_lock_acquired_for_an_unknown_schedule(tmp_path):
     """The 404 gate must stay ahead of the lock — locking a schedule that does
     not exist would block nothing and leak a key."""

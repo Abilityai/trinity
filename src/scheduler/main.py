@@ -64,6 +64,10 @@ class SchedulerApp:
         self.health_app: Optional[web.Application] = None
         self.health_runner: Optional[web.AppRunner] = None
         self._shutdown_event = asyncio.Event()
+        # #1968: strong refs to the fire-and-forget trigger tasks. The loop keeps
+        # only a weak one, and these tasks now own a held lock and a live
+        # execution row — see `_trigger_handler` for why that matters.
+        self._inflight_triggers: set = set()
 
     async def start(self):
         """Start the scheduler application."""
@@ -266,7 +270,18 @@ class SchedulerApp:
 
         # Execute in background, handing over the lock we already hold and the
         # row we already created.
-        asyncio.create_task(
+        #
+        # The strong reference is load-bearing, not defensive tidiness. The
+        # event loop holds only a WEAK reference to a task, so a bare
+        # `create_task(...)` whose result nobody keeps can be garbage-collected
+        # mid-flight (the asyncio docs say so outright). That was survivable
+        # before this change — a dropped task meant the run silently didn't
+        # happen. It is not survivable now: the row and the lock are created
+        # BEFORE the task, so a collected task strands a `running` execution
+        # whose id the caller already holds and pins the schedule's lock until
+        # its TTL. Same `_inflight` shape the #1083 result-callback path uses
+        # (`agent_server/services/result_callback.py`).
+        task = asyncio.create_task(
             self._execute_manual_trigger(
                 schedule_id,
                 triggered_by=triggered_by,
@@ -275,6 +290,8 @@ class SchedulerApp:
                 execution=execution,
             )
         )
+        self._inflight_triggers.add(task)
+        task.add_done_callback(self._inflight_triggers.discard)
 
         return web.json_response({
             "status": "triggered",
