@@ -27,17 +27,23 @@ ONLY the two non-secret pull knobs below.
 from __future__ import annotations
 
 import os
-from typing import Dict, Set
+from typing import Dict
 
-
-def _pilot_allowlist() -> Set[str]:
-    raw = os.getenv("PULL_MODE_PILOT_AGENTS", "")
-    return {name.strip() for name in raw.split(",") if name.strip()}
-
-
-def is_pull_pilot_agent(agent_name: str) -> bool:
-    """True when ``agent_name`` is in the ``PULL_MODE_PILOT_AGENTS`` allowlist."""
-    return agent_name in _pilot_allowlist()
+# The predicates live in the LEAF module `services/pull_pilot.py` and are
+# re-exported here so every existing importer keeps working. They CANNOT live in
+# this file: `services/agent_service/__init__.py` eagerly imports the whole
+# agent-lifecycle stack (helpers/lifecycle/crud/deploy/terminal → models), so a
+# dispatch-path module doing `from services.agent_service.pull_mode import ...`
+# drags all of it in. See the docstring in `services/pull_pilot.py`.
+#
+# Dispatch-path callers (`capacity_manager`, `backlog_service`, `routers/internal`)
+# import from `services.pull_pilot` DIRECTLY — importing them from here would
+# reintroduce exactly the dependency this split removes.
+from services.pull_pilot import (  # noqa: F401 — re-exported for back-compat
+    _pilot_allowlist,
+    is_pull_pilot_agent,
+    pull_owns_dispatch,
+)
 
 
 # The container env keys this module manages. Recreate (``lifecycle.py``) pops
