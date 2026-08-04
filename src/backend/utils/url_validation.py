@@ -322,3 +322,104 @@ def validate_skills_library_url(url: str) -> str:
         raise  # Re-raise our own ValueError
 
     return url
+
+
+# ============================================================================
+# Remote template registry (TMPL-002, trinity-enterprise#14)
+# ============================================================================
+
+#: Fixed refusal reasons. The registry settings endpoint echoes the message of
+#: a rejected URL back to an admin, so the text must never be built from a
+#: resolved address or a server-supplied string.
+_REGISTRY_URL_MAX_LEN = 2048
+
+
+def validate_template_registry_url(url: str) -> str:
+    """Validate a remote template-registry URL, SSRF-gated.
+
+    Sibling of `validate_skills_library_url`, deliberately NOT a reuse of it:
+    that one is `github.com`-only, which is right for a git clone target and
+    wrong here — an operator may self-host a registry on their own domain. The
+    rules that stay are the ones that bound where the backend will connect:
+
+    1. **HTTPS only.** No `http:`, no `file:`, no `gopher:`, nothing else. An
+       unencrypted registry is a trivially-tampered catalog of repos users are
+       invited to trust.
+    2. **No userinfo** (`https://user:token@host/...`). Rejected outright rather
+       than stripped, so a credential can never be persisted into a
+       `system_settings` row or echoed back through the status payload. Silently
+       dropping it would be worse: the operator would think it was in use.
+    3. **Resolve and reject private / loopback / link-local / reserved
+       destinations**, so the registry URL cannot be turned into a probe of the
+       platform network (Redis, the Docker socket proxy, cloud metadata).
+
+    Returns the normalized URL. Raises `ValueError` with an operator-readable
+    message otherwise.
+
+    Known residual, accepted for v1 and recorded in requirements §4.2.2: this
+    pre-resolves, so it does not close DNS rebinding (a TOCTOU between validate
+    and connect). It is tolerable *here* because the URL is admin-AND-human-set,
+    the response is parsed into a display-only allowlisted record, and the body
+    never reaches an eval/exec/deserialize sink. The fetcher's
+    `follow_redirects=False` closes the adjacent bypass — a validated URL that
+    redirects is a fetch failure, not a hop to re-validate.
+    """
+    if not url or not url.strip():
+        raise ValueError("Template registry URL cannot be empty")
+
+    url = url.strip()
+
+    if len(url) > _REGISTRY_URL_MAX_LEN:
+        raise ValueError(
+            f"Template registry URL is too long (max {_REGISTRY_URL_MAX_LEN} characters)"
+        )
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        raise ValueError("Invalid URL format")
+
+    if parsed.scheme != "https":
+        raise ValueError("Template registry URL must use HTTPS")
+
+    # `username`/`password` are None when absent. Check the raw netloc too: a
+    # malformed authority can carry an `@` that urlparse folds into the host.
+    if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
+        raise ValueError(
+            "Template registry URL must not embed credentials "
+            "(user:password@host). Host a public document, or put the "
+            "registry behind a network boundary instead."
+        )
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("Template registry URL must have a valid hostname")
+
+    # Defense-in-depth: refuse anything that resolves inside the perimeter.
+    # A DNS failure is NOT treated as a pass-through here (unlike the skills
+    # validator, whose target is a later `git clone` that will fail loudly on
+    # its own): an unresolvable registry host is simply a URL that cannot work,
+    # and accepting it stores a setting that silently never fetches.
+    try:
+        resolved = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        raise ValueError(
+            f"Template registry hostname could not be resolved ({hostname})"
+        )
+
+    for _family, _type, _proto, _canonname, sockaddr in resolved:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_reserved
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise ValueError(
+                "Template registry URL resolves to an internal address. "
+                "The registry must be reachable on the public internet."
+            )
+
+    return url
