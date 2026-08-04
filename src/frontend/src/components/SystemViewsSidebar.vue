@@ -72,7 +72,7 @@
 
         <template v-if="!isCollapsed">
           <span class="truncate flex-1 text-left">{{ view.name }}</span>
-          <span class="ml-2 text-xs text-gray-400 dark:text-gray-500">{{ view.agent_count }}</span>
+          <span class="ml-2 text-xs text-gray-400 dark:text-gray-400">{{ view.agent_count }}</span>
 
           <!-- Edit/Delete on hover -->
           <div class="hidden group-hover:flex items-center ml-1 space-x-1">

@@ -275,7 +275,25 @@ def test_create_path_clears_breakers_before_the_container_exists():
     src = _src("services/agent_service/crud.py")
 
     assert "clear_agent_breakers(config.name)" in src
-    assert "clear_agent_runtime_state" not in src
+    # ent#313 narrowed this from a blanket ban. The ban encoded the real rule —
+    # the full sweep drops the slot ZSET, which would strip an in-flight async
+    # execution (#1083) off a LIVE container — and crud.py used to touch only
+    # live containers. `_reclaim_failed_creation_container` is the first place
+    # in this file where the container is provably GONE (it just removed it, or
+    # proved none exists), which is exactly where the full sweep is correct and
+    # where a recycled name's stale slots must be cleared. So: the sweep may
+    # appear ONLY inside that function; every other path here stays on
+    # clear_agent_breakers.
+    reclaim_start = src.index("async def _reclaim_failed_creation_container(")
+    reclaim_end = src.index("\ndef ", reclaim_start)
+    reclaim_body = src[reclaim_start:reclaim_end]
+    outside = src[:reclaim_start] + src[reclaim_end:]
+    assert "clear_agent_runtime_state(" not in outside, (
+        "crud.py must use clear_agent_breakers everywhere the container is or "
+        "may be live — the full sweep belongs only to the failed-creation "
+        "reclaim, after the container is provably gone (#1560 / ent#313)"
+    )
+    assert "clear_agent_runtime_state(" in reclaim_body
     # #1484 decomposed create_agent_internal into phase helpers, so the raw
     # `containers_run(` calls now live in helper defs ABOVE the orchestrator —
     # a whole-file `src.index("await containers_run(")` no longer reflects the

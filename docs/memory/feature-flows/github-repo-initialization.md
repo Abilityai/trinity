@@ -6,6 +6,15 @@ Allows users to initialize GitHub synchronization for any existing agent by conf
 ## User Story
 As a **Trinity platform user**, I want to **enable GitHub synchronization for an existing agent** so that **I can version-control the agent's workspace and collaborate via GitHub without recreating the agent**.
 
+> **Sibling flow — [agent-repo-binding.md](agent-repo-binding.md) (ent#109).** This
+> doc covers an agent with **no** `agent_git_config` row: it creates the repo,
+> `git init`s the workspace, and writes the row, resolving the PAT through the
+> platform ladder (so the repo can land under the *admin's* account). Once an
+> agent HAS a row, "bind to your own repo" is the flow that moves it — a CAS
+> rebind under a destination-scoped lock, taking the user's own PAT, keeping the
+> existing history and container. The two do not overlap: binding refuses a
+> row-less agent with 400 `BIND_NO_GIT_CONFIG` and points here.
+
 ---
 
 ## Revision History

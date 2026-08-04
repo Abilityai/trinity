@@ -568,9 +568,8 @@ Major UI overhaul to align Agents page with Dashboard (AgentNode.vue) tiles. Cha
 
 2. **PUT /api/agents/{name}/autonomy** (`agents.py` lines 775-790)
    - Body: `{ enabled: boolean }`
-   - When enabled: activates all schedules for the agent
-   - When disabled: pauses all schedules
-   - Response: `{ enabled, schedules_updated }`
+   - Writes ONLY `agent_ownership.autonomy_enabled` — the agent-level gate the scheduler reads on every cron fire. Per-schedule `enabled` is never rewritten (#1945)
+   - Response: `{ autonomy_enabled, total_schedules, enabled_schedules, message }`
 
 3. **GET /api/agents/context-stats** (`agents.py` lines 138-141)
    - Returns context window usage and activity state for all agents

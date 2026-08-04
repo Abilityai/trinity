@@ -477,6 +477,14 @@ services:
       # gate (the backend reads the same key only for feature-flags observability).
       # Must be wired here or the flag is un-flippable on deploy (#1056/#1039 class).
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # ent#328: `ask_trinity` POSTs here for grounded Trinity docs answers.
+      # Empty = the public Cloud Function default baked into the client. Wired
+      # through compose because an env var the container never receives is not
+      # actually configurable — the same "un-flippable on deploy" trap called
+      # out for the flag above. Point it at an internal mirror, or at an
+      # unreachable value to effectively disable the tool (it degrades to a
+      # structured error, never a crash).
+      - ASK_TRINITY_ENDPOINT=${ASK_TRINITY_ENDPOINT:-}
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}  # SEC-001: for audit logging to backend
     depends_on:
       - backend

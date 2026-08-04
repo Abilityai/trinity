@@ -25,6 +25,7 @@ import type {
   OperatorQueueListResponse,
   CompatibilityReport,
   AgentFileTreeResponse,
+  ReportSummary,
 } from "./types.js";
 
 /**
@@ -184,7 +185,8 @@ export class TrinityClient {
     path: string,
     body?: unknown,
     isRetry: boolean = false,
-    requestId?: string
+    requestId?: string,
+    extraHeaders?: Record<string, string>
   ): Promise<Response> {
     if (!this.token) {
       throw new Error("Not authenticated. Call authenticate() first or setToken().");
@@ -196,6 +198,17 @@ export class TrinityClient {
 
     if (body) {
       headers["Content-Type"] = "application/json";
+    }
+
+    // #1970: per-call attribution headers (X-Source-Agent / X-MCP-Key-*).
+    // Authorization is skipped explicitly: this parameter exists to add
+    // metadata, and letting it replace the bearer token would turn an audit
+    // convenience into an auth-substitution surface.
+    if (extraHeaders) {
+      for (const [key, value] of Object.entries(extraHeaders)) {
+        if (key.toLowerCase() === "authorization") continue;
+        headers[key] = value;
+      }
     }
 
     // #905: forward a caller-supplied correlation id. The backend's
@@ -224,7 +237,7 @@ export class TrinityClient {
       const success = await this.reauthenticate();
       if (success) {
         console.log("Re-authentication successful, retrying request...");
-        return this._fetch(method, path, body, true, requestId);
+        return this._fetch(method, path, body, true, requestId, extraHeaders);
       }
     }
 
@@ -284,9 +297,10 @@ export class TrinityClient {
     path: string,
     body?: unknown,
     isRetry: boolean = false,
-    requestId?: string
+    requestId?: string,
+    extraHeaders?: Record<string, string>
   ): Promise<T> {
-    const response = await this._fetch(method, path, body, isRetry, requestId);
+    const response = await this._fetch(method, path, body, isRetry, requestId, extraHeaders);
 
     // Handle 204 No Content (e.g., successful DELETE)
     if (response.status === 204) {
@@ -1191,14 +1205,39 @@ export class TrinityClient {
 
   /**
    * Manually trigger a schedule execution
+   *
+   * @param sourceAgent - Triggering agent, for agent-scoped keys
+   * @param mcpKeyInfo - MCP key identity (AUDIT-001 / #1970 execution origin)
    */
   async triggerAgentSchedule(
     agentName: string,
-    scheduleId: string
+    scheduleId: string,
+    sourceAgent?: string,
+    mcpKeyInfo?: { keyId?: string; keyName?: string }
   ): Promise<ScheduleTriggerResult> {
+    // #1970: send the same origin headers `chat()` does. The backend forwards
+    // them to the scheduler, which persists them on the execution row. Without
+    // this an MCP-triggered run attributes to the key OWNER but not to which
+    // key or which agent pulled the trigger — the part that identifies the
+    // actor when one human owns many keys and many agents.
+    const headers: Record<string, string> = {};
+    if (sourceAgent) {
+      headers["X-Source-Agent"] = sourceAgent;
+    }
+    if (mcpKeyInfo?.keyId) {
+      headers["X-MCP-Key-ID"] = mcpKeyInfo.keyId;
+    }
+    if (mcpKeyInfo?.keyName) {
+      headers["X-MCP-Key-Name"] = mcpKeyInfo.keyName;
+    }
+
     return this.request<ScheduleTriggerResult>(
       "POST",
-      `/api/agents/${encodeURIComponent(agentName)}/schedules/${encodeURIComponent(scheduleId)}/trigger`
+      `/api/agents/${encodeURIComponent(agentName)}/schedules/${encodeURIComponent(scheduleId)}/trigger`,
+      undefined,
+      false,
+      undefined,
+      headers
     );
   }
 
@@ -1392,6 +1431,60 @@ export class TrinityClient {
       `/api/agents/${encodeURIComponent(agentName)}/reports`,
       data
     );
+  }
+
+  /**
+   * List reports across accessible agents — METADATA only, no payload (#1538).
+   * The backend scopes to the caller's accessible agents; an agent-scoped key is
+   * narrowed further to {self} ∪ permitted by the tool layer.
+   */
+  async listReports(params: {
+    report_type?: string;
+    hours?: number;
+    search?: string;
+    agent?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<ReportSummary[]> {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== "") qs.append(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return this.request("GET", `/api/reports${suffix}`);
+  }
+
+  /**
+   * List one agent's reports (metadata only) (#1538).
+   */
+  async listAgentReports(
+    agentName: string,
+    params: {
+      report_type?: string;
+      hours?: number;
+      search?: string;
+      limit?: number;
+      offset?: number;
+    }
+  ): Promise<ReportSummary[]> {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== "") qs.append(k, String(v));
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/reports${suffix}`
+    );
+  }
+
+  /**
+   * Fetch one report INCLUDING its payload (#1538). The backend answers 404 —
+   * not 403 — when the caller cannot access the owning agent, so an id cannot be
+   * probed for existence.
+   */
+  async getReport(reportId: string): Promise<Record<string, unknown>> {
+    return this.request("GET", `/api/reports/${encodeURIComponent(reportId)}`);
   }
 
   // ============================================================================

@@ -16,6 +16,9 @@ export const useNotificationsStore = defineStore('notifications', () => {
   const pendingCount = ref(0)
   const loading = ref(false)
   const error = ref(null)
+  // #1926: only a SUCCEEDED fetch licenses the empty state. Before this flips,
+  // an empty `notifications` means "loading" or "failed", never "no events".
+  const hasLoaded = ref(false)
   const totalCount = ref(0)
   const hasMore = ref(true)
 
@@ -108,6 +111,7 @@ export const useNotificationsStore = defineStore('notifications', () => {
 
       // Update pending count from filtered results
       updatePendingCount()
+      hasLoaded.value = true
     } catch (err) {
       console.error('Failed to fetch notifications:', err)
       error.value = err.response?.data?.detail || 'Failed to load notifications'
@@ -304,6 +308,7 @@ export const useNotificationsStore = defineStore('notifications', () => {
     pendingCount,
     loading,
     error,
+    hasLoaded,
     totalCount,
     hasMore,
     filters,

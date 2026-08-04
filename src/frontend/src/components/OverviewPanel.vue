@@ -117,7 +117,7 @@ function fmtDateTime(iso) {
 const dates = computed(() => (analytics.value?.timeline || []).map((p) => p.date))
 
 const successSeries = computed(() => [{
-  label: 'Success rate',
+  label: 'Completion',  // ent#206: exit-based, not answer quality
   color: SUCCESS_COLOR,
   fill: true,
   data: (analytics.value?.timeline || []).map((p) =>
@@ -360,7 +360,7 @@ onMounted(() => {
         <!-- success rate -->
         <div>
           <div class="flex items-baseline justify-between mb-2">
-            <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300">Execution success rate</h4>
+            <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300" title="Runs that finished without erroring — completion, not answer quality (ent#206)">Execution completion rate</h4>
             <span class="text-sm font-semibold text-status-success-600 dark:text-status-success-400">{{ Math.round(analytics.success_rate * 100) }}%</span>
           </div>
           <TrendLineChart :dates="dates" :series="successSeries" :y-min="0" :y-max="100" :value-format="(v) => (v == null ? '—' : v + '%')" :axis-format="(v) => v + '%'" />

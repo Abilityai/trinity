@@ -7,6 +7,12 @@ import json
 import os
 import stat
 import yaml
+
+from utils.safe_yaml import (
+    AliasPolicy,
+    HardenedYamlError,
+    load_hardened_yaml,
+)
 import re
 import logging
 from pathlib import Path
@@ -46,131 +52,58 @@ _KNOWN_MANIFEST_KEYS = frozenset({
 })
 
 
-# --- Manifest YAML hardening (#1884) -------------------------------------
+# --- Manifest YAML hardening (#1884, shared since ent#314) ----------------
 #
-# `yaml.safe_load` blocks arbitrary object construction but not two other
-# things, and the MCP pipeline reader (#919) already set the house standard for
-# this class — "size cap + duplicate-key guard + alias guard". This mirrors that
-# rather than inventing a second approach; PyYAML simply has no equivalent of
-# the JS `yaml` library's `uniqueKeys` / `maxAliasCount` options, so both are
-# implemented here.
+# The guards themselves now live in `utils/safe_yaml.py`, which ent#314 made the
+# single implementation for every author-controlled document (this manifest,
+# `template.yaml`, skills frontmatter). Three near-copies had accumulated; the
+# catalog path had none at all, which is what ent#314 fixes. Everything below is
+# the manifest's POLICY — its budgets, its error type, its published codes — not
+# a second copy of the mechanism.
 
 # Bounds the INPUT. Deliberately not sufficient on its own: alias expansion is
 # bounded by the budget below, because a few hundred bytes can expand to
-# gigabytes ("billion laughs") while sitting comfortably under any size cap.
+# hundreds of MB while sitting comfortably under any size cap.
 #
-# Defined ONCE, in `models.py`, and imported above (ent#126 + #1884 merge): the
-# same number bounds the wire request, this parse cap, and the bundled-catalog
-# file read. A second local definition here would shadow the import silently and
-# let the three drift apart — which is precisely the failure the shared constant
+# Defined ONCE, in `models.py`, and imported above (ent#126 + #1884 + ent#314
+# merge): the same number bounds this parse cap and the bundled-catalog file
+# read below. A second local definition here would shadow the import silently
+# and let the two drift apart — precisely the failure the shared constant
 # exists to prevent.
 
-# Bounds the EXPANSION COST, not the alias count.
-#
-# A naive `maxAliasCount` is the wrong shape for a bomb: the classic
-# billion-laughs uses ~45 aliases across a few levels and would sail under any
-# count-based budget, because the blow-up is MULTIPLICATIVE per level, not
-# linear in aliases. So this budget is the total number of logical nodes the
-# document would have if every alias were written out — which is exactly the
-# quantity that explodes.
-#
-# Measured, not assumed: PyYAML itself does NOT expand aliases into copies (it
-# memoises constructed objects per node, so a bomb yields a shared-reference
-# DAG at ~20 KB, not gigabytes). The DoS the issue describes is therefore not
-# reachable through `safe_load` alone. The guard stays because the DAG re-expands
-# the moment anything walks or serialises it — `json.dumps`, a deep copy, or an
-# echo of the manifest back to a client — and a parser that gains this guard is
-# cheaper than auditing every future consumer.
+# Bounds the EXPANSION COST, not the alias count — see utils/safe_yaml.py for
+# why a `maxAliasCount` is the wrong shape for a bomb, and for the measurements.
 MANIFEST_MAX_EXPANDED_NODES = 100_000
 
 
-class ManifestError(ValueError):
+class ManifestError(HardenedYamlError):
     """A manifest the platform refuses to parse.
 
     A distinct type so the router can answer a NAMED 400 instead of letting a
     bomb surface as a request timeout or an unnamed 500 — which is the
     difference between "your manifest is malformed" and "Trinity is broken".
+
+    ent#314: now a `HardenedYamlError` subclass, so the shared loader can raise
+    exactly this type and every existing `except ManifestError` (and the
+    router's code-to-400 mapping) keeps working unchanged.
     """
-
-    def __init__(self, code: str, message: str):
-        self.code = code
-        super().__init__(message)
-
-
-class _HardenedManifestLoader(yaml.SafeLoader):
-    """SafeLoader + an expansion-cost budget + duplicate-key rejection."""
-
-    def __init__(self, stream):
-        super().__init__(stream)
-        self._expanded_nodes = 0
-        self._anchor_cost: dict = {}
-
-    def compose_node(self, parent, index):
-        # An alias contributes the FULL logical size of what it points at, so a
-        # pyramid of anchors costs what it would cost written out.
-        if self.check_event(yaml.events.AliasEvent):
-            anchor = self.peek_event().anchor
-            cost = self._anchor_cost.get(anchor, 1)
-            self._expanded_nodes += cost
-            if self._expanded_nodes > MANIFEST_MAX_EXPANDED_NODES:
-                raise ManifestError(
-                    "manifest_alias_budget_exceeded",
-                    f"Manifest expands to more than {MANIFEST_MAX_EXPANDED_NODES:,} "
-                    "nodes once its YAML aliases are resolved. This is the shape of "
-                    "an expansion bomb; if the manifest is genuine, write the "
-                    "repeated block out instead of anchoring it.",
-                )
-            return super().compose_node(parent, index)
-
-        before = self._expanded_nodes
-        self._expanded_nodes += 1
-        event = self.peek_event()
-        anchor = getattr(event, "anchor", None)
-        node = super().compose_node(parent, index)
-        if anchor:
-            # Cost of this subtree = everything composed while inside it.
-            self._anchor_cost[anchor] = self._expanded_nodes - before
-        return node
-
-    def construct_mapping(self, node, deep=False):
-        # `safe_load` silently keeps the LAST duplicate, so a manifest with two
-        # `agents:` blocks deploys only the second one with no signal at all —
-        # the real footgun now that the manifest is hand-editable in a textarea.
-        # Applied at EVERY mapping depth, so a duplicate inside one agent's
-        # config is caught too, not just the two levels the issue names.
-        seen = set()
-        for key_node, _ in node.value:
-            try:
-                key = self.construct_object(key_node, deep=deep)
-            except yaml.constructor.ConstructorError:
-                continue
-            try:
-                if key in seen:
-                    raise ManifestError(
-                        "manifest_duplicate_key",
-                        f"Duplicate key {key!r} at line {key_node.start_mark.line + 1}. "
-                        "YAML would silently keep only the last one.",
-                    )
-                seen.add(key)
-            except TypeError:
-                # Unhashable key — malformed, but not this guard's business.
-                continue
-        return super().construct_mapping(node, deep=deep)
 
 
 def _load_manifest_yaml(yaml_str: str):
-    """Parse manifest YAML with the three guards applied."""
-    if len(yaml_str.encode("utf-8")) > MANIFEST_MAX_BYTES:
-        raise ManifestError(
-            "manifest_too_large",
-            f"Manifest exceeds the {MANIFEST_MAX_BYTES}-byte parse cap.",
-        )
-    try:
-        return yaml.load(yaml_str, Loader=_HardenedManifestLoader)
-    except ManifestError:
-        raise
-    except yaml.YAMLError as e:
-        raise ManifestError("manifest_yaml_invalid", f"YAML parse error: {e}")
+    """Parse manifest YAML with the three guards applied.
+
+    BUDGET rather than REJECT: a manifest may legitimately anchor a repeated
+    agent block, and the measured budget already refuses the bomb (level 4 and
+    up) while admitting the small honest anchor.
+    """
+    return load_hardened_yaml(
+        yaml_str,
+        kind="manifest",
+        alias_policy=AliasPolicy.BUDGET,
+        max_bytes=MANIFEST_MAX_BYTES,
+        max_expanded_nodes=MANIFEST_MAX_EXPANDED_NODES,
+        error_cls=ManifestError,
+    )
 
 
 def parse_manifest(yaml_str: str) -> SystemManifest:
@@ -563,6 +496,18 @@ def resolve_schedule_previews(
     the model rejects (e.g. a non-string `name`), which `validate_manifest`'s
     presence-only checks let through.
 
+    **Nor does it model ent#89's duplicate-name skip.** `create_agent_internal`
+    now materializes the TEMPLATE's own declared `schedules:`, and the writer
+    skips any manifest schedule whose name already exists on the agent. This
+    resolver is pure over the manifest and never reads a template, so a manifest
+    schedule colliding with a template-declared one is previewed as "will be
+    created" and is then skipped at deploy. The **armed** end state is still what
+    the preview showed — the template created a schedule of that name — so what
+    diverges is provenance and the report's `schedules_created` count, not
+    whether the fleet ends up running that schedule. Closing it properly means
+    resolving templates inside the preview, which is deferred rather than
+    half-fixed here.
+
     Pinned by `tests/unit/test_ent126_schedule_characterization.py`; both the
     caught and the uncaught case are pinned in `test_ent126_dry_run_preview.py`.
     """
@@ -710,10 +655,40 @@ def create_schedules(
         if not final_name or not config.schedules:
             continue
 
+        # trinity-enterprise#89: this runs AFTER `create_agent_internal`, which
+        # now materializes the TEMPLATE's declared `schedules:`. Without a
+        # name-match skip, a manifest declaring `daily-briefing` on a template
+        # that also declares it yields TWO rows — there is no
+        # UNIQUE(agent_name, name) index (and adding one is a dual-track schema
+        # change that would fail on installs already holding duplicates), so
+        # idempotency has to be an explicit read-then-skip in the caller that
+        # runs second. Failing open on a read error preserves the pre-#89
+        # behaviour (create everything) rather than silently dropping a
+        # manifest's schedules.
+        try:
+            existing_names = {
+                s.name for s in db.list_agent_schedules(final_name)
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"Could not read existing schedules for {final_name} "
+                f"({e}); manifest schedules will be created unfiltered"
+            )
+            existing_names = set()
+
         for schedule_data in config.schedules:
+            if schedule_data["name"] in existing_names:
+                logger.info(
+                    f"Skipping schedule '{schedule_data['name']}' for "
+                    f"{final_name}: a schedule of that name already exists"
+                )
+                continue
+
             # ent#126: the manifest -> ScheduleCreate mapping is shared with
             # `resolve_schedule_previews`, so the dry-run preview shows exactly
             # the schedules (and `enabled` states) this writer will create.
+            # NOTE (ent#89 merge): the skip above is a DEPLOY-side check the
+            # preview cannot make — see `resolve_schedule_previews`.
             schedule_create = _build_schedule_create(schedule_data)
 
             # Create schedule in database
@@ -725,6 +700,7 @@ def create_schedules(
 
             if schedule:
                 schedules_count += 1
+                existing_names.add(schedule_data["name"])
                 logger.info(f"Created schedule '{schedule_data['name']}' for {final_name}")
                 # Dedicated scheduler syncs from database automatically
             else:

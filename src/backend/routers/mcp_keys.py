@@ -8,6 +8,7 @@ from models import User
 from database import db, McpApiKeyCreate, McpApiKey, McpApiKeyWithSecret
 from dependencies import (
     PORTAL_DELEGATE_SCOPE,
+    _reject_connector_principal,
     assert_admin,
     get_current_user,
     reject_agent_principal,
@@ -161,6 +162,16 @@ async def revoke_mcp_api_key_endpoint(
     current_user: User = Depends(get_current_user)
 ):
     """Revoke (deactivate) an MCP API key."""
+    # #1854: `db.revoke_mcp_api_key` SKIPS the ownership check entirely for
+    # admins, and an agent-scoped key resolves to its OWNER carrying the owner's
+    # role — so on a default admin-owned install any prompt-injected agent could
+    # revoke EVERY MCP key in the instance in one request: a fleet-wide auth
+    # wipe, including its siblings' and the platform orchestrator's. Key
+    # lifecycle is a human decision (same rule as minting a portal_delegate key
+    # above, trinity-ops-agent#232).
+    reject_agent_principal(current_user)
+    _reject_connector_principal(current_user)
+
     success = db.revoke_mcp_api_key(key_id, current_user.username)
 
     if not success:
@@ -188,6 +199,11 @@ async def delete_mcp_api_key_endpoint(
     current_user: User = Depends(get_current_user)
 ):
     """Permanently delete an MCP API key."""
+    # #1854: same admin ownership-check bypass as revoke above, one step more
+    # destructive — this DELETEs the row rather than deactivating it.
+    reject_agent_principal(current_user)
+    _reject_connector_principal(current_user)
+
     success = db.delete_mcp_api_key(key_id, current_user.username)
 
     if not success:

@@ -67,37 +67,47 @@ As a platform user, I want to add credentials to my agent so that MCP servers an
 ### Overview
 User pastes KEY=VALUE text, which gets merged into the agent's `.env` file.
 
-### Frontend (`src/frontend/src/composables/useAgentCredentials.js:177-237`)
+### Frontend (`src/frontend/src/components/CredentialsPanel.vue`)
+
+> **Doc correction (ent#127).** This section previously cited
+> `composables/useAgentCredentials.js:177-237`. That file still exists and is
+> re-exported from `composables/index.js`, but **no component imports it** — the
+> live implementation is `CredentialsPanel.vue`, and the composable is a dead
+> duplicate carrying the pre-ent#127 versions of both defects fixed below. Do
+> not "restore" the live path from it.
+
 ```javascript
-const quickAddCredentials = async () => {
-  if (!agentRef.value || agentRef.value.status !== 'running') return
-  if (!quickAddText.value.trim()) return
+// Parse .env-style text to key-value pairs
+const credentials = parseEnvText(quickInjectText.value)
 
-  // Parse .env-style text to key-value pairs
-  const newCredentials = parseEnvText(quickAddText.value)
+// Merge onto the CURRENT file. `formatEnvContent` rewrites `.env` wholesale,
+// so a merge base we failed to read is NOT "start fresh" — it silently wipes
+// every credential already configured. Only a genuine 404 (the agent server's
+// own "File not found") means the file is absent; anything else aborts with a
+// named error and writes nothing. (ent#127)
+const existingEnv = await readExistingEnv()
 
-  // Get existing .env content and merge
-  let existingEnv = {}
-  try {
-    const content = await agentsStore.downloadAgentFile(
-      agentRef.value.name,
-      '/home/developer/.env'
-    )
-    existingEnv = parseEnvText(content)
-  } catch (e) {
-    // File doesn't exist, start fresh
-  }
+// Merge new credentials (overwrite existing keys)
+const merged = { ...existingEnv, ...credentials }
+const envContent = formatEnvContent(merged)
 
-  // Merge new credentials (overwrite existing keys)
-  const merged = { ...existingEnv, ...newCredentials }
-  const envContent = formatEnvContent(merged)
-
-  // Inject the merged .env file
-  await agentsStore.injectCredentials(agentRef.value.name, {
-    '.env': envContent
-  })
-}
+// Inject the merged .env file
+await agentsStore.injectCredentials(props.agentName, { '.env': envContent })
 ```
+
+**Round-trip (ent#127).** `formatEnvContent` writes `${key}="${value}"` with `"`
+escaped as `\"`; `parseEnvText` strips the surrounding quotes **and unescapes**.
+Before ent#127 it did not, so a value containing a quote grew one backslash per
+submit — for every other credential in the file, not just the one being edited.
+Latent while Quick Inject was a rare bulk paste; the ent#127 per-row checklist
+makes read-merge-write the normal interaction, which is why both defects were
+fixed there.
+
+**Residual, deliberately unchanged:** the AGENT's own reader strips quote
+characters and does not unescape, so a value containing `"` reaches the agent
+with the backslash. Escaping for a format nobody unescapes is a pre-existing
+defect in its own right; widening the escaping would make the agent-side
+mismatch worse. `formatEnvContent` also still drops author comments.
 
 ### Store Action (`src/frontend/src/stores/agents.js`)
 ```javascript
@@ -150,6 +160,13 @@ async def inject_credentials(request: CredentialInjectRequest):
 ```
 
 ---
+
+> **ent#127:** both `.env` writers (inject and import) call
+> `credential_requirements_service.invalidate_report_cache(agent_name)`, which drops
+> the local cached checklist AND bumps a Redis generation counter — the cache is
+> per-worker while the POST lands on whichever worker served it, so a purely local
+> invalidation would leave the other worker reporting "missing" for a variable the
+> operator just set. See [guided-credential-setup.md](guided-credential-setup.md).
 
 ## Flow 2: Export to Encrypted File
 
@@ -608,3 +625,14 @@ Returns:
   "note": "Store securely. Never commit to git."
 }
 ```
+
+---
+
+## Related Flows
+
+- [guided-credential-setup.md](guided-credential-setup.md) — ent#127: which credentials an
+  agent needs, which are actually set, and where to get each. It writes through the Flow 1
+  path documented above (one writer, no new backend write surface) and is the reason both
+  of that path's latent defects were fixed.
+- [template-processing.md](template-processing.md) — where `credentials:` / `credential_setup:`
+  are declared and staged at creation time.

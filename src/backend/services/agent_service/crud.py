@@ -12,28 +12,33 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import yaml
 from fastapi import HTTPException, Request
 
 from models import AgentConfig, AgentStatus, User
+from db_models import ScheduleCreate
 from database import db
 from services.docker_service import (
     docker_client,
     get_agent_by_name,
+    get_agent_container,
     get_next_available_port,
     get_agent_status_from_container,
 )
 from services.docker_utils import (
-    volume_get, volume_create, containers_run
+    volume_get, volume_create, containers_run, container_remove
 )
-from services.agent_runtime_state import clear_agent_breakers
+from services.agent_runtime_state import clear_agent_breakers, clear_agent_runtime_state
 from services.template_service import (
     CredentialDeclarationError,
+    credential_mcp_server_names,
+    fetch_template_metadata_for_create,
     get_github_template,
     generate_credential_files,
 )
+from services.template_schedules import normalize_declared_schedules
 from services import git_service
 from services.settings_service import get_anthropic_api_key, resolve_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
@@ -41,7 +46,8 @@ from services import rate_limiter
 from . import ephemeral as ephemeral_service
 from services.github_service import GitHubService, GitHubError
 from services.agent_auth import derive_agent_token
-from utils.helpers import sanitize_agent_name, to_utc_iso, utc_now_iso
+from utils.helpers import parse_iso_timestamp, sanitize_agent_name, to_utc_iso, utc_now_iso
+from utils.safe_yaml import HardenedYamlError, load_template_yaml
 from .fork_to_own import fork_template_to_own_repo
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
@@ -133,9 +139,14 @@ def _default_host_templates_base() -> str:
 
 
 # Roots that a resolved local-template path must stay within (#950). Read at
-# TWO seams — `_resolve_local_template` and the `/template` bind decision in
-# `_stage_config_files` — which must always agree (#1759). Kept a module-level
-# tuple: it is the single monkeypatch point the create tests use.
+# THREE seams — `_resolve_local_template`, the `/template` bind decision in
+# `_stage_config_files`, and (since #1900) the credential-file stager in the
+# same function — which must always agree (#1759). The first two were named by
+# #1759; the third existed all along and did NOT agree, because it re-derived
+# the directory from the template's untrusted `name:` field. Two of the three
+# now share `_resolve_local_template_dir`, which is what makes the agreement
+# structural rather than a convention. Kept a module-level tuple: it is the
+# single monkeypatch point the create tests use.
 _LOCAL_TEMPLATE_ROOTS = (
     _curated_templates_root(),
     Path("/data/deployed-templates").resolve(),
@@ -313,6 +324,16 @@ class _TemplateResolution:
     git_working_branch: Optional[str] = None
     fork_upstream_repo: Optional[str] = None
     template_shared_folders: Optional[dict] = None
+    # trinity-enterprise#89: NORMALIZED declared `schedules:`, fed by BOTH
+    # resolver branches. Deliberately NOT folded into `template_data`, which
+    # carries two different shapes: raw template YAML on the `local:` path and
+    # `{}` on the `github:` path (which has never populated it — hence #383's
+    # `persistent_state` and #1169's `data_paths` being silently `local:`-only).
+    # `_stage_config_files` gates credential-file generation on
+    # `if template_data:`, and the `github:` catalog dict has no `credentials`
+    # key at all, so merging the two would change credential generation for
+    # every GitHub agent. One normalized carrier, two producers.
+    declared_schedules: list = field(default_factory=list)
 
 
 @dataclass
@@ -326,6 +347,11 @@ class _RollbackHandles:
     github_repo_for_agent: Optional[str] = None
     ephemeral_slot_reserved: bool = False
     ephemeral_owner_id: Optional[int] = None
+    # ent#313: wall-clock instant captured immediately BEFORE the docker block.
+    # A container carrying a `trinity.created` label older than this existed
+    # before this attempt, so this attempt did not create it and must not
+    # remove it. See `_reclaim_failed_creation_container`.
+    container_floor_ts: Optional[str] = None
 
 
 def _apply_ephemeral_pregates(config: AgentConfig, current_user: User) -> Optional[str]:
@@ -488,6 +514,27 @@ def _parse_github_ref(config: AgentConfig) -> tuple[str, str, Optional[str]]:
     # Reconstruct template ID without branch for lookup
     template_lookup = f"github:{template_str}" if url_branch else config.template
     return template_lookup, template_str, url_branch
+
+
+def _declared_schedules_for_github(
+    repo: str, pat: Optional[str], ref: Optional[str]
+) -> list:
+    """Normalized `schedules:` for a `github:` template, read at CREATION time.
+
+    Deliberately NOT the catalog's `gh_template["schedules"]`
+    (trinity-enterprise#89 R2): that dict comes from `_get_cached_metadata`,
+    which reads with the **global platform** PAT off the **default branch**
+    through a 10-minute per-process cache. Creation resolves its PAT
+    completely differently (per-agent -> per-user -> global, ent#162), so a
+    user creating from their own private repo with their own token would clone
+    successfully and then get zero schedules with no signal at all — the exact
+    silent-ignore class this feature exists to close, reintroduced one layer up.
+
+    Non-fatal by construction: `fetch_template_metadata_for_create` returns
+    `{}` and logs a WARNING on any failure, and the normalizer is total.
+    """
+    metadata = fetch_template_metadata_for_create(repo, pat=pat, ref=ref)
+    return normalize_declared_schedules(metadata.get("schedules"))
 
 
 def _gate_tokenless_request(
@@ -809,6 +856,25 @@ async def _reserve_git_instance(
     return git_instance_id, git_working_branch
 
 
+def _resolve_local_template_dir(raw_name: str) -> Path:
+    """Curated root first, then the deploy-local store (#950) — the single
+    definition of "where does `local:<raw_name>` live".
+
+    Every candidate is `_safe_local_template_path`-validated (regex barrier +
+    `is_relative_to` barrier) before any filesystem access, so the returned path
+    is proven to be inside one of `_LOCAL_TEMPLATE_ROOTS`.
+
+    Extracted in #1900 so the THREE seams that must agree cannot drift: the
+    resolver, the `/template` bind decision, and the credential-file stager.
+    #1759 named the first two; the third existed and re-derived the directory
+    from the template's own untrusted `name:` field instead of reusing this.
+    """
+    candidate = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[0])
+    if not (candidate / "template.yaml").exists():
+        candidate = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[1])
+    return candidate
+
+
 def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
     """Load a `local:`-prefixed template's `template.yaml` (curated catalog then
     deploy-local store, #950). Mutates `config` runtime/type/resources/tools/
@@ -831,13 +897,7 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
     # is validated + resolved to prove it stays under the root before
     # any filesystem access (regex barrier + is_relative_to barrier).
     raw_name = config.template[6:]
-    template_path = _safe_local_template_path(
-        raw_name, _LOCAL_TEMPLATE_ROOTS[0]
-    )
-    if not (template_path / "template.yaml").exists():
-        template_path = _safe_local_template_path(
-            raw_name, _LOCAL_TEMPLATE_ROOTS[1]
-        )
+    template_path = _resolve_local_template_dir(raw_name)
 
     template_yaml = template_path / "template.yaml"
 
@@ -850,8 +910,10 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
     if template_yaml.exists():
         try:
             with open(template_yaml) as f:
-                template_data = yaml.safe_load(f)
-        except (OSError, yaml.YAMLError) as e:
+                # ent#314: hardened parse — this is the create path for a
+                # template that may have come from any public repo.
+                template_data = load_template_yaml(f.read())
+        except (OSError, yaml.YAMLError, HardenedYamlError) as e:
             # #1759: previously swallowed by the broad `except Exception:
             # logger.warning(...)` below, which produced the *identical*
             # observable outcome as an absent template — blank agent, HTTP 200 —
@@ -899,8 +961,14 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
             config.type = template_data.get("type", config.type)
             config.resources = template_data.get("resources", config.resources)
             config.tools = template_data.get("tools", config.tools)
-            creds = template_data.get("credentials", {})
-            mcp_servers = list(creds.get("mcp_servers", {}).keys())
+            # Read through the tolerant accessor rather than reaching straight
+            # through the block. `creds.get("mcp_servers", {}).keys()` raises
+            # AttributeError on a null / list / string `credentials:`, and the
+            # broad `except` below then silently drops this template's `runtime:`
+            # and `shared_folders:` config alongside the credential parse — one
+            # malformed key costing the agent three unrelated ones.
+            # (trinity-enterprise#128)
+            mcp_servers = credential_mcp_server_names(template_data.get("credentials"))
             if mcp_servers:
                 config.mcp_servers = mcp_servers
             # Multi-runtime support - extract runtime config from template
@@ -1013,6 +1081,13 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             ) = _resolve_github_repo_and_pat(
                 config, current_user, template_lookup, repo_path
             )
+            # Read the SOURCE template's declarations here, before
+            # `_apply_fork_to_own` swaps in the user's fork + PAT: this pairing
+            # (source repo, PAT resolved to read it) is the one that can
+            # actually see a private template.
+            tr.declared_schedules = _declared_schedules_for_github(
+                tr.github_repo_for_agent, tr.github_pat_for_agent, url_branch
+            )
             (
                 tr.github_repo_for_agent,
                 tr.github_pat_for_agent,
@@ -1037,24 +1112,44 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             )
         elif config.template.startswith("local:"):
             tr.template_data, tr.template_shared_folders = _resolve_local_template(config)
+            # Same normalizer as the `github:` branch above — symmetric by
+            # construction, so neither source can quietly diverge.
+            tr.declared_schedules = normalize_declared_schedules(
+                tr.template_data.get("schedules")
+            )
     return tr
 
 
 def _stage_config_files(
-    config: AgentConfig, template_data: dict, github_template_path: Optional[str]
+    config: AgentConfig, template_data: dict,
+    github_template_path: Optional[Union[Path, str]]
 ) -> tuple[Path, Path, Optional[dict], Optional[dict]]:
     """CRED-002: write the agent-config.yaml + empty credentials.json + template
     cred files under /tmp and compute the template/cred bind specs. Also
     normalizes + writes back the resource fields (#1197) so container labels +
     limits use canonical values. Returns
     `(config_path, credentials_path, template_volume, cred_files_volume)`."""
+    # #1900: hand `generate_credential_files` the directory we ALREADY validated
+    # rather than letting it re-derive one from the template's untrusted `name:`
+    # field (a traversal into any readable `.mcp.json`). This is the same
+    # `_safe_local_template_path`-validated ladder the `/template` bind decision
+    # below uses, so all three seams agree by construction (#1759).
+    local_template_base = None
+    if config.template and config.template.startswith("local:"):
+        # Cannot newly raise: `_resolve_local_template` already ran this exact
+        # `raw_name` through the same barrier before `template_data` could be
+        # non-empty, and a templateless agent has a falsy `config.template`.
+        local_template_base = _resolve_local_template_dir(config.template[6:])
+
     generated_files = {}
     if template_data:
         # Generate empty credential files structure from template
         try:
             generated_files = generate_credential_files(
                 template_data, {}, config.name,
-                template_base_path=github_template_path
+                # `github_template_path` first so the field's eventual revival
+                # wins; it has zero writers today (#1900 follow-up).
+                template_base_path=github_template_path or local_template_base
             )
         except CredentialDeclarationError as e:
             # Invariant #1: the service raises an HTTP-free domain error and
@@ -1757,16 +1852,95 @@ def _register_agent(
     # a Layer 2 conflict.
 
 
+def reconcile_declared_schedules(
+    agent_name: str, declared: list, owner_username: str
+) -> None:
+    """Create a template's declared schedules on `agent_name`, skipping by name.
+
+    Shaped as a RECONCILE primitive — it takes `agent_name`, not `AgentConfig`,
+    so an operator-triggered "re-apply template" can call it unchanged. It is
+    NOT hooked into container recreate today, deliberately: an eager
+    re-materialize would resurrect schedules an operator deliberately deleted,
+    which is strictly worse than the gap it would close. (ent#89 D2/D2b)
+
+    Non-fatal by contract — the caller wraps the whole call, so a failure here
+    (including the `list_agent_schedules` read) costs the schedules, never the
+    agent.
+
+    Counts come from ACTUAL outcomes, never from `len(declared)`:
+    `db.create_schedule` returns **None** — it does not raise — on three silent
+    paths (unknown user, no agent access, and the #1445 `is_agent_live`
+    no-orphan gate), so a length-derived counter would report schedules that
+    were never written.
+    """
+    if not declared:
+        return
+
+    # Name-match idempotency (AC #4). Known blind spot: `list_agent_schedules`
+    # excludes soft-deleted rows (#834), so a soft-deleted schedule of the same
+    # name does not suppress a re-create. Accepted and documented.
+    seen = {s.name for s in db.list_agent_schedules(agent_name)}
+    created = skipped = failed = 0
+
+    for entry in declared:
+        name = entry["name"]
+        if name in seen:
+            skipped += 1
+            continue
+        try:
+            # `enabled` is passed EXPLICITLY: `ScheduleCreate.enabled` defaults
+            # to True, so omitting it would arm every undeclared schedule and
+            # invert AC #3.
+            schedule = db.create_schedule(
+                agent_name=agent_name,
+                username=owner_username,
+                schedule_data=ScheduleCreate(
+                    name=name,
+                    cron_expression=entry["cron"],
+                    message=entry["message"],
+                    enabled=entry["enabled"],
+                    timezone=entry["timezone"],
+                    description=entry["description"],
+                ),
+            )
+        except Exception as e:  # noqa: BLE001 — one bad entry never costs the rest
+            failed += 1
+            logger.warning(
+                "[ent#89] Failed to create declared schedule %r for %s: %s",
+                name, agent_name, e,
+            )
+            continue
+        if not schedule:
+            failed += 1
+            logger.warning(
+                "[ent#89] Declared schedule %r for %s was not created "
+                "(no user, no access, or the agent is not live)",
+                name, agent_name,
+            )
+            continue
+        seen.add(name)
+        created += 1
+
+    logger.info(
+        "[ent#89] Declared schedules for %s: %d created, %d already existed, "
+        "%d failed (%d declared)",
+        agent_name, created, skipped, failed, len(declared),
+    )
+
+
 async def _materialize_agent_files(
     config: AgentConfig,
     template_data: dict,
     github_repo_for_agent: Optional[str],
     fork_upstream_repo: Optional[str],
     github_pat_for_agent: Optional[str] = None,
+    declared_schedules: Optional[list] = None,
+    owner_username: str = "",
 ) -> None:
-    """Materialize the S4 persistent-state allowlist (#383) and the declared
-    data_paths (#1169) into the agent, then opt non-source-mode GitHub agents
-    into the auto-sync heartbeat (#389). All three are non-fatal."""
+    """Materialize the S4 persistent-state allowlist (#383), the declared
+    data_paths (#1169) and the declared `schedules:` (trinity-enterprise#89)
+    into the agent, then opt non-source-mode GitHub agents into the auto-sync
+    heartbeat (#389). All four are non-fatal."""
     # S4 (#383): Materialize persistent-state allowlist into the agent.
     # Runtime sync/reset paths read `.trinity/persistent-state.yaml`;
     # template.yaml is only read at creation (10-min cache), so this
@@ -1806,6 +1980,24 @@ async def _materialize_agent_files(
             f"{config.name}: {e}"
         )
 
+    # trinity-enterprise#89: materialize the template's declared `schedules:`.
+    # The ghost skip lives HERE rather than in the helper: schedules on an
+    # ephemeral agent are a 400 by ent#69 fleet hygiene, and a new caller must
+    # exclude ghosts itself. The try/except wraps the ENTIRE call, including
+    # the helper's `list_agent_schedules` read — this whole function sits inside
+    # the destructive rollback fence, so a raise that escapes here would roll
+    # back a successful creation over a schedule.
+    if declared_schedules and not config.ephemeral:
+        try:
+            reconcile_declared_schedules(
+                config.name, declared_schedules, owner_username
+            )
+        except Exception as e:
+            logger.warning(
+                f"[ent#89] Failed to materialize declared schedules for "
+                f"{config.name}: {e}"
+            )
+
     # #389 S1a: opt non-source-mode GitHub-template agents into the
     # auto-sync heartbeat by default. Source-mode agents stay opt-in
     # (auto-pushing to main would clobber protected branches) —
@@ -1823,10 +2015,17 @@ async def _materialize_agent_files(
 
 
 def _rollback_failed_creation(handles: _RollbackHandles) -> None:
-    """The except-path rollback (AC #3, PRESERVED exactly): roll back the
-    agent_git_config reservation, the ephemeral quota slot, and the agent MCP
-    key — each guarded, each best-effort. Deliberately does NOT stop/remove the
-    container or its volumes (left for the cleanup watchdog)."""
+    """The except-path DB/quota rollback: the agent_git_config reservation, the
+    ephemeral quota slot, and the agent MCP key — each guarded, each
+    best-effort.
+
+    Scope note (ent#313): this function stays DB/quota-only, but its old
+    docstring justified the omission by saying the container and volumes were
+    "left for the cleanup watchdog". No such watchdog exists for a
+    non-ephemeral agent, so that deferral leaked a running, ownerless
+    container. The container is now reclaimed by
+    ``_reclaim_failed_creation_container``, called right after this one.
+    """
     # S7 Layer 0 (#382): if anything after the reservation fails,
     # roll back the agent_git_config row so the working branch is
     # released and a retry can claim it fresh.
@@ -1865,6 +2064,176 @@ def _rollback_failed_creation(handles: _RollbackHandles) -> None:
                 handles.agent_name,
                 cleanup_exc,
             )
+
+
+def _is_container_name_conflict(exc: BaseException) -> bool:
+    """True when the failure is Docker refusing a duplicate container name.
+
+    On a 409 the daemon created NOTHING, so any `agent-{name}` container that
+    exists belongs to somebody else — a live agent of this install, or (on a
+    shared Docker daemon: git worktrees, a second stack) another install's
+    agent entirely. Removing it would be catastrophic, so this is the first
+    thing the reclaim checks.
+    """
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        # Duck-typed on purpose: `isinstance(exc, docker.errors.APIError)` raises
+        # `TypeError: isinstance() arg 2 must be a type` wherever the docker
+        # module is a test double, which would propagate out of a function whose
+        # whole contract is "never raises" and REPLACE the creation error the
+        # caller is trying to report. Any exception carrying a 409 response is
+        # the signal we want, whatever its class.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 409:
+            return True
+        text = str(exc).lower()
+        if "already in use" in text or "conflict" in text:
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def _created_by_this_attempt(container, floor_ts: Optional[str]) -> bool:
+    """True only if the container's own `trinity.created` label is at or after
+    the instant this creation attempt entered the docker block.
+
+    Fail-closed: a missing floor, a missing label, or an unparseable value all
+    return False. The cost of a false negative is one orphan an operator removes
+    by hand; the cost of a false positive is deleting a running agent.
+    """
+    if not floor_ts:
+        return False
+    try:
+        labels = (container.attrs or {}).get("Config", {}).get("Labels") or {}
+        created = labels.get("trinity.created")
+        if not created:
+            return False
+        return parse_iso_timestamp(created) >= parse_iso_timestamp(floor_ts)
+    except Exception as exc:  # noqa: BLE001 — unparseable ⇒ not ours
+        logger.warning(
+            "ent#313: could not establish creation provenance for a container: %s",
+            exc,
+        )
+        return False
+
+
+async def _reclaim_failed_creation_container(
+    handles: _RollbackHandles, container, exc: BaseException
+) -> None:
+    """ent#313 — remove the container a failed creation left behind, and clear
+    the per-agent Redis keyspace.
+
+    Before this, `_rollback_failed_creation` rolled back only DB/quota handles
+    and deferred the container to "the cleanup watchdog" — which does not exist
+    for a non-ephemeral agent (`_sweep_ephemeral_agents` is gated on the
+    `trinity.ephemeral` label). The two guards deadlocked: nothing removed the
+    container, and because the container kept its workspace volume mounted, the
+    #1581 orphan-volume sweep could never advance its unattached-strike counter
+    either. The agent still appeared in the fleet listing, which is
+    Docker-as-truth (Invariant #11) — a phantom with no `agent_ownership` row.
+
+    Two arrival shapes, because the reported failure has no handle:
+
+    * `container` is not None — the create returned and a later step raised.
+      Ownership is unambiguous; remove by handle.
+    Both shapes first require that the name has NO `agent_ownership` row: the
+    create registers the row before the last step, so a late failure must not
+    strip the container off an agent the DB already considers created.
+
+    * `container` is None — the failure happened INSIDE `containers.run`
+      (the observed case: a 60s Docker read timeout). The daemon may still have
+      created it, so re-derive by name — under three fail-closed gates, since a
+      lookup by name can resolve to a container this attempt did not create:
+      not a name conflict (above), no `agent_ownership` row (a concurrent
+      creation that won the name has already registered one), and the
+      `trinity.created` provenance check.
+
+    Never raises: this runs inside the creation except-path, which must keep
+    reporting the original failure.
+    """
+    agent_name = handles.agent_name
+    target = container
+
+    # Gate BOTH arrival shapes on ownership. Registration happens inside the
+    # same try, so a failure in a LATER step (file materialization) arrives here
+    # with the row already written — and this is the one case where removing the
+    # container makes things worse: the agent would become a row with no
+    # container, still holding its name, where before it was at least present
+    # and deletable through the normal path. It also covers the no-handle race
+    # where a concurrent creation won the name and registered it.
+    try:
+        if db.is_agent_name_reserved(agent_name):
+            logger.warning(
+                "ent#313: %s already has an ownership row — leaving its "
+                "container in place (delete the agent to remove both)",
+                agent_name,
+            )
+            return
+    except Exception as lookup_exc:  # noqa: BLE001 — fail closed
+        logger.warning(
+            "ent#313: ownership lookup failed for %s; leaving any container in "
+            "place: %s",
+            agent_name,
+            lookup_exc,
+        )
+        return
+
+    if target is None:
+        if _is_container_name_conflict(exc):
+            logger.info(
+                "ent#313: creation of %s hit a container-name conflict — the "
+                "existing container is not ours, leaving it untouched",
+                agent_name,
+            )
+            return
+        try:
+            target = get_agent_container(agent_name)
+        except Exception as lookup_exc:  # noqa: BLE001
+            logger.warning(
+                "ent#313: container lookup failed for %s: %s", agent_name, lookup_exc
+            )
+            return
+        if target is not None and not _created_by_this_attempt(
+            target, handles.container_floor_ts
+        ):
+            logger.warning(
+                "ent#313: a container named agent-%s exists but predates this "
+                "attempt — leaving it untouched",
+                agent_name,
+            )
+            return
+
+    if target is not None:
+        try:
+            await container_remove(target, force=True)
+            logger.info(
+                "ent#313: removed the orphaned container for %s after a failed "
+                "creation",
+                agent_name,
+            )
+        except Exception as remove_exc:  # noqa: BLE001
+            # Leave the Redis keyspace alone: the container is still up, so the
+            # slot ZSET is not provably idle.
+            logger.warning(
+                "ent#313: could not remove the orphaned container for %s — it "
+                "needs manual `docker rm -f agent-%s`: %s",
+                agent_name,
+                agent_name,
+                remove_exc,
+            )
+            return
+
+    # Reached only when the container is provably gone (removed just now, or
+    # never created). #1560: the keyspace is name-keyed and TTL-less, so a
+    # later agent reusing this name would otherwise inherit stale breaker
+    # verdicts and be fast-failed as unhealthy without ever being contacted.
+    try:
+        await clear_agent_runtime_state(agent_name)
+    except Exception as clear_exc:  # noqa: BLE001
+        logger.warning(
+            "ent#313: Redis state clear failed for %s: %s", agent_name, clear_exc
+        )
 
 
 def _release_ephemeral_on_no_docker(handles: _RollbackHandles) -> None:
@@ -2155,9 +2524,17 @@ async def create_agent_internal(
         github_repo_for_agent=tr.github_repo_for_agent,
         ephemeral_slot_reserved=ephemeral_slot_reserved,
         ephemeral_owner_id=ephemeral_owner_id,
+        # ent#313: stamped before anything can create a container, so the
+        # rollback can tell a container THIS attempt created from one that was
+        # already there.
+        container_floor_ts=utc_now_iso(),
     )
 
     if docker_client:
+        # ent#313: the except-path needs whatever handle we got. It stays None
+        # when the failure happens inside container creation itself — the
+        # reclaim re-derives it by name under provenance gates.
+        created_container = None
         try:
             # Persist the resolved PAT as the per-agent PAT (#347) onto the
             # agent_git_config row the reservation above just created. Inside
@@ -2183,6 +2560,7 @@ async def create_agent_internal(
             container = await _create_agent_container(
                 config, volumes, env_vars, current_user, ephemeral_expires_at
             )
+            created_container = container
             agent_status = get_agent_status_from_container(container)
             await _broadcast_agent_created(agent_status, ws_manager)
             _register_agent(
@@ -2198,10 +2576,16 @@ async def create_agent_internal(
                 tr.github_repo_for_agent,
                 tr.fork_upstream_repo,
                 tr.github_pat_for_agent,
+                tr.declared_schedules,
+                current_user.username,
             )
             return agent_status
         except Exception as e:
             _rollback_failed_creation(handles)
+            # ent#313: and the container + its name-keyed Redis state, which the
+            # DB/quota rollback above deliberately left to a watchdog that only
+            # covers ephemeral agents.
+            await _reclaim_failed_creation_container(handles, created_container, e)
             logger.error(f"Failed to create agent {config.name}: {e}")
             raise HTTPException(status_code=500, detail="Failed to create agent. Please try again.")
     else:

@@ -28,12 +28,12 @@
                   <span>agents</span>
                 </span>
                 <!-- Working-now count (trinity-enterprise#47) -->
-                <span class="text-gray-300 dark:text-gray-600" data-sep="working">·</span>
+                <span class="text-gray-300 dark:text-gray-500" data-sep="working">·</span>
                 <span class="flex items-center space-x-1" data-stat="working">
                   <span class="font-medium text-status-info-600 dark:text-status-info-400">{{ workingNowCount }}</span>
                   <span>working now</span>
                 </span>
-                <span class="text-gray-300 dark:text-gray-600" data-sep="messages">·</span>
+                <span class="text-gray-300 dark:text-gray-500" data-sep="messages">·</span>
                 <span class="flex items-center space-x-1" data-stat="messages">
                   <span class="font-medium text-status-info-600 dark:text-status-info-400">{{ totalCollaborationCount }}</span>
                   <span>messages ({{ timeRangeHours }}h)</span>
@@ -105,7 +105,7 @@
                     ]"
                   >
                     <span>#{{ tagInfo.tag }}</span>
-                    <span class="text-gray-400 dark:text-gray-500 text-[10px]">{{ tagInfo.count }}</span>
+                    <span class="text-gray-400 dark:text-gray-400 text-[10px]">{{ tagInfo.count }}</span>
                   </button>
                 </div>
               </div>
@@ -123,7 +123,7 @@
                 </option>
               </select>
 
-              <span v-if="availableTags.length > 0 || availableOwners.length > 1" class="text-gray-300 dark:text-gray-600">|</span>
+              <span v-if="availableTags.length > 0 || availableOwners.length > 1" class="text-gray-300 dark:text-gray-500">|</span>
 
               <!-- Type-to-filter hint (ent#261) — mouse/touch parity for the
                    `/` hotkey. TOGGLES: opens the pill when closed,

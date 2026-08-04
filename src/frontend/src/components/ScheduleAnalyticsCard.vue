@@ -43,7 +43,7 @@
           </div>
         </div>
         <div class="px-3 py-2 rounded bg-gray-50 dark:bg-gray-800/50">
-          <div class="text-xs text-gray-500 dark:text-gray-400">Success</div>
+          <div class="text-xs text-gray-500 dark:text-gray-400" title="Runs that finished without erroring — completion, not answer quality (ent#206)">Completion</div>
           <div :class="['text-sm font-semibold', successRateColor]">
             {{ successRatePercent }}
           </div>

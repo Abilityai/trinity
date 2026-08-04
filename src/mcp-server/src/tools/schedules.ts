@@ -534,7 +534,16 @@ export function createScheduleTools(
           }, null, 2);
         }
 
-        const result = await apiClient.triggerAgentSchedule(agent_name, schedule_id);
+        // #1970: carry the caller identity through so the resulting execution
+        // row is attributable to this key/agent, not just to the key owner.
+        const result = await apiClient.triggerAgentSchedule(
+          agent_name,
+          schedule_id,
+          authContext?.agentName,
+          authContext
+            ? { keyId: authContext.keyId, keyName: authContext.keyName }
+            : undefined
+        );
 
         console.log(`[trigger_agent_schedule] Triggered schedule '${schedule_id}' for agent '${agent_name}', execution_id: ${result.execution_id}`);
 

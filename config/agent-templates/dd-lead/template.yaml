@@ -1,4 +1,8 @@
 name: dd-lead
+# Excluded from the user-facing template catalog (GET /api/templates). See
+# README "Not starting points". Demo fleet, not a starter — deploy the whole
+# set with config/manifests/vc-due-diligence.yaml. (#1931)
+hidden: true
 display_name: DD Deal Lead Agent
 description: Synthesize all due diligence findings, calculate risk score, and make investment recommendation
 tagline: The verdict

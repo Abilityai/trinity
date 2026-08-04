@@ -18,7 +18,14 @@
         notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
       ]"
     >
-      {{ notification.message }}
+      <span>{{ notification.message }}</span>
+      <button
+        v-if="notification.type === 'error'"
+        type="button"
+        class="ml-3 font-medium opacity-70 hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-status-danger-500/40 rounded"
+        aria-label="Dismiss notification"
+        @click="dismissNotification"
+      >✕</button>
     </div>
 
     <!-- Filter toolbar (name / status / sort — tag + owner filters live in the
@@ -680,6 +687,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { formatCostCompact } from '../composables/useFormatters'
+import { useNotification } from '../composables/useNotification'
 import { useAgentsStore } from '../stores/agents'
 import { useNetworkStore } from '../stores/network'
 import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
@@ -722,7 +730,6 @@ const emit = defineEmits(['tags-changed', 'clear-chassis-filters'])
 const agentsStore = useAgentsStore()
 const networkStore = useNetworkStore()
 
-const notification = ref(null)
 const autonomyLoading = ref(null)
 const readOnlyLoading = ref(null)
 
@@ -821,12 +828,11 @@ const commonTagsInSelection = computed(() => {
   return Array.from(allTags).sort()
 })
 
-const showNotification = (message, type = 'success') => {
-  notification.value = { message, type }
-  setTimeout(() => {
-    notification.value = null
-  }, 3000)
-}
+// #1926: was a local copy of the toast helper with a hardcoded 3s
+// auto-dismiss, so an error toast vanished before it could be read or acted
+// on. Now the shared composable, which keeps errors up until dismissed
+// (principle 18).
+const { notification, showNotification, dismissNotification } = useNotification()
 
 // #389 sync-health: mount fetch + 60s visibility-aware refresh while the List
 // mode is active (mirrors the grid's chip-poll discipline — a parked List tab

@@ -617,6 +617,9 @@ services:
       # #946 pull-pilot routing gate — see docker-compose.yml. Without this the
       # flag cannot be enabled in prod (the #1056/#1039 packaging-gap class).
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # ent#328: `ask_trinity` POSTs here for grounded Trinity docs answers.
+      # Empty = the public Cloud Function default baked into the client.
+      - ASK_TRINITY_ENDPOINT=${ASK_TRINITY_ENDPOINT:-}
       # INTERNAL_API_SECRET (SEC-001) — shared secret for POST /api/internal/audit
       # so MCP tool-call audit reaches the backend. Mirrors docker-compose.yml;
       # without it audit.ts (postAudit) early-returns and ALL MCP tool-call audit

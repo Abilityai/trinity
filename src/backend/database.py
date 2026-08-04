@@ -114,6 +114,7 @@ from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.reports import ReportOperations
 from db.product_events import ProductEventOperations
+from db.evaluations import EvaluationOperations
 from db.reminders import RemindersOperations
 from db.connector import ConnectorOperations
 from db.permissions import PermissionOperations
@@ -434,6 +435,7 @@ class DatabaseManager:
         self._activity_ops = ActivityOperations()
         self._report_ops = ReportOperations()
         self._product_event_ops = ProductEventOperations()
+        self._evaluation_ops = EvaluationOperations()
         self._reminder_ops = RemindersOperations()
         self._connector_ops = ConnectorOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
@@ -564,6 +566,10 @@ class DatabaseManager:
     def deactivate_agent_mcp_keys(self, agent_name: str) -> int:
         """Deactivate an agent's agent/connector-scoped MCP keys (#1811)."""
         return self._agent_ops.deactivate_agent_mcp_keys(agent_name)
+
+    def reconcile_spawn_key_id(self, agent_name: str, current_key_id: str) -> int:
+        """#1854: re-point a parent's spawned children at its current key id."""
+        return self._agent_ops.reconcile_spawn_key_id(agent_name, current_key_id)
 
     def purge_agent_ownership(self, agent_name: str):
         return self._agent_ops.purge_agent_ownership(agent_name)
@@ -1078,6 +1084,18 @@ class DatabaseManager:
     def get_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.get_agent_mcp_api_key(agent_name)
 
+    def list_active_agent_key_ids(self, agent_name: str):
+        """#1854: ids of the agent's ACTIVE scope='agent' keys (rotation capture)."""
+        return self._mcp_key_ops.list_active_agent_key_ids(agent_name)
+
+    def delete_superseded_agent_keys(self, agent_name: str, keep_id: str, key_ids):
+        """#1854: DELETE the named superseded scope='agent' rows (connector-safe)."""
+        return self._mcp_key_ops.delete_superseded_agent_keys(agent_name, keep_id, key_ids)
+
+    def find_mcp_key_by_hash(self, key_hash: str):
+        """#1854: metadata-only key lookup by SHA-256 hash (probe + drift predicate)."""
+        return self._mcp_key_ops.find_mcp_key_by_hash(key_hash)
+
     def set_agent_keys_active(self, agent_name: str, active: bool) -> int:
         """#1745: activate/deactivate an agent's per-agent MCP keys."""
         return self._mcp_key_ops.set_agent_keys_active(agent_name, active)
@@ -1354,6 +1372,36 @@ class DatabaseManager:
     def get_freeze_schedules_if_sync_failing(self, agent_name: str):
         return self._schedule_ops.get_freeze_schedules_if_sync_failing(agent_name)
 
+    def rebind_git_config(
+        self,
+        agent_name: str,
+        *,
+        new_github_repo: str,
+        expected_github_repo: str,
+        source_branch: str,
+    ):
+        return self._schedule_ops.rebind_git_config(
+            agent_name,
+            new_github_repo=new_github_repo,
+            expected_github_repo=expected_github_repo,
+            source_branch=source_branch,
+        )
+
+    def restore_git_config_binding(
+        self,
+        agent_name: str,
+        *,
+        github_repo: str,
+        source_branch: str,
+        auto_sync_enabled: bool,
+    ):
+        return self._schedule_ops.restore_git_config_binding(
+            agent_name,
+            github_repo=github_repo,
+            source_branch=source_branch,
+            auto_sync_enabled=auto_sync_enabled,
+        )
+
     def delete_git_config(self, agent_name: str):
         return self._schedule_ops.delete_git_config(agent_name)
 
@@ -1509,8 +1557,20 @@ class DatabaseManager:
         return self._report_ops.get_report(report_id)
 
     def get_reports_for_agent(self, agent_name: str, report_type: str = None,
+                              hours: int = None, search: str = None,
                               limit: int = 50, offset: int = 0):
-        return self._report_ops.get_reports_for_agent(agent_name, report_type, limit, offset)
+        # Keyword-forwarded on purpose: this facade previously passed the tail
+        # positionally, so adding `hours`/`search` to the ops signature (#1539)
+        # silently rebound `limit`→`hours`. Positional delegation makes every
+        # future parameter an ordering hazard.
+        return self._report_ops.get_reports_for_agent(
+            agent_name,
+            report_type=report_type,
+            hours=hours,
+            search=search,
+            limit=limit,
+            offset=offset,
+        )
 
     def get_fleet_reports(self, agent_names, report_type: str = None, hours: int = None,
                           search: str = None, limit: int = 50, offset: int = 0):
@@ -1945,6 +2005,22 @@ class DatabaseManager:
         return self._public_chat_ops.delete_link_sessions(link_id)
 
     # Public User Memory (MEM-001 + #895 split storage)
+    # --- Behavioral evaluations (ent#206) — referee surface ---------------
+    def create_agent_evaluation(self, agent_name, **kw):
+        return self._evaluation_ops.create_evaluation(agent_name, **kw)
+
+    def get_agent_evaluation(self, eval_id):
+        return self._evaluation_ops.get_evaluation(eval_id)
+
+    def list_agent_evaluations(self, agent_name, limit=50):
+        return self._evaluation_ops.list_evaluations_for_agent(agent_name, limit)
+
+    def list_fleet_evaluations(self, agent_names, limit=100):
+        return self._evaluation_ops.list_evaluations_for_agents(agent_names, limit)
+
+    def latest_evaluation_for_execution(self, execution_id):
+        return self._evaluation_ops.latest_for_execution(execution_id)
+
     def get_or_create_public_user_memory(self, agent_name: str, user_email: str) -> dict:
         return self._public_link_ops.get_or_create_user_memory(agent_name, user_email)
 
@@ -2216,6 +2292,10 @@ class DatabaseManager:
 
     def get_agent_execution_stats(self, agent_name: str, hours: int = 24):
         return self._schedule_ops.get_agent_execution_stats(agent_name, hours)
+
+    def get_agent_last_execution_at(self, agent_name: str):
+        """#1854: all-time MAX(started_at) for the agent (MCP-key `stale` health)."""
+        return self._schedule_ops.get_agent_last_execution_at(agent_name)
 
     def get_schedule_analytics(self, schedule_id: str, hours: int,
                                 agent_name: str):
