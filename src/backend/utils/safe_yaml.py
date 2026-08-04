@@ -37,10 +37,23 @@ TWO ALIAS POLICIES, DELIBERATELY
 alias at all. Both exist because the callers genuinely differ, and unifying them
 would mean loosening somebody's gate:
 
-- A **manifest** or a **template catalog entry** may legitimately anchor a
+- A **manifest** or a **per-repo `template.yaml`** may legitimately anchor a
   repeated block, and rejecting that outright would break real documents for no
   security gain — the measured budget already refuses level 4 and up while
-  admitting the small, honest anchor (level 3 serializes to ~0.1 MB).
+  admitting the small, honest anchor (level 3 serializes to ~0.1 MB). Read
+  "template catalog entry" as *the rich per-template payload read during
+  catalog assembly*, NOT as the remote index that lists which templates exist:
+  those are different documents with different shapes and different threat
+  models, and this clause has already been misread once as an argument for
+  giving the index a budget (trinity-enterprise#14).
+- The **remote template registry** is the opposite case, and gets REJECT. It is
+  a flat index of unique entries — one repo pointer plus three display scalars
+  each — so no repeated block exists to anchor; and it is the most exposed
+  document here: network-fetched from a URL, unsigned, its parsed output cached
+  process-wide and serialized into `/api/templates` for every authenticated
+  user. Admitting amplification there to buy a feature the schema cannot use is
+  the wrong trade. If a v2 registry ever needs anchors, add a versioned parser
+  deliberately — never a runtime toggle.
 - A **live agent-writable** `template.yaml` read for credential advisories has
   its own walk-based amplifier and already refuses aliases; relaxing it to a
   budget would be a security regression shipped as a refactor.
@@ -269,4 +282,39 @@ def load_template_yaml(content: str):
         alias_policy=AliasPolicy.BUDGET,
         max_bytes=TEMPLATE_YAML_MAX_BYTES,
         max_expanded_nodes=TEMPLATE_YAML_MAX_EXPANDED_NODES,
+    )
+
+
+#: The remote template registry (trinity-enterprise#14) — REJECT, because a flat
+#: index of `{repo, display_name, description, priority}` entries has no
+#: legitimate anchor, and this is the one author-controlled document Trinity
+#: fetches over the network from a configurable URL with no signature check.
+#:
+#: 256 KiB is the same DoS bound `DEFAULT_MAX_BYTES` sets. At ~200 B/entry that
+#: is ~1300 entries, far above `template_registry_service.MAX_REGISTRY_TEMPLATES`
+#: — deliberately: the byte cap bounds the *parse*, the entry cap bounds the
+#: *semantics*, and neither substitutes for the streaming ceiling the fetcher
+#: applies before this function is ever reached.
+TEMPLATE_REGISTRY_MAX_BYTES = 256 * 1024
+
+
+def load_template_registry_yaml(content: str):
+    """Parse a remote `registry.yaml` with the ent#314 guards, aliases refused.
+
+    A named helper rather than an inline `load_hardened_yaml(...)` at the call
+    site so the REJECT decision is pinned at the `utils/` layer and cannot be
+    quietly relitigated by the next consumer — the same reason
+    `load_template_yaml` exists. Error codes are prefixed `template_registry_`
+    (`_alias_not_permitted`, `_duplicate_key`, `_too_large`, `_yaml_invalid`),
+    which the registry service maps onto its fixed status vocabulary.
+
+    Duplicate-key rejection is load-bearing here specifically: a registry with
+    two `templates:` keys would silently last-wins, i.e. show one catalog to the
+    human editing the file and serve another to Trinity.
+    """
+    return load_hardened_yaml(
+        content,
+        kind="template_registry",
+        alias_policy=AliasPolicy.REJECT,
+        max_bytes=TEMPLATE_REGISTRY_MAX_BYTES,
     )
