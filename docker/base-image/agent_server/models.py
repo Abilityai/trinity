@@ -109,6 +109,16 @@ class ExecutionMetadata(BaseModel):
     error_message: Optional[str] = None  # Human-readable error message from Claude Code
     compact_events: List[CompactEvent] = []  # Auto-compact events observed mid-turn
     recovered_from_jsonl: bool = False  # Stdout race + JSONL fallback fired (response from disk, not stream)
+    # #1870: a turn the runtime REPORTED AS FAILED (`error_during_execution`)
+    # was recovered as a success because the transcript showed it completed.
+    # Deliberately separate from `recovered_from_jsonl`, which #678 already
+    # sets whenever mere *telemetry* is back-filled from disk — overloading it
+    # would make "a reported failure became a success" unmeasurable, which is
+    # precisely the thing that needs watching (a recovered answer can be a
+    # mid-turn checkpoint rather than the final deliverable). Agent-side only:
+    # additive, defaulted, rides the existing metadata.model_dump(); the
+    # backend ignores unknown metadata keys, so old-backend/new-image is safe.
+    recovered_terminal: bool = False
     model_name: Optional[str] = None  # Actual model id from assistant.message.model (e.g., "claude-sonnet-4-5") — #678
     # #1187: typed terminal-result seed (the #945 taxonomy). Populated by
     # newer runtimes (Codex) and currently UNUSED by the backend in the MVP —
