@@ -31,6 +31,17 @@ response. What breaks is session resumption, conversation continuity,
 and the observability link to the JSONL file in the container. Real
 operational problem, but not the lights-out kind S-01/S-02/E-01 flag.
 
+## Pull-claimed rows are excluded (#1766)
+
+A `#1081` pull-CLAIMED row (`lease_expires_at IS NOT NULL`) is `running`
+with a NULL `claude_session_id` by design — the claim is a pure SQL
+UPDATE and the worker reports its session id back only with the terminal.
+`mark_no_session_executions_failed`, the very sweep this invariant
+watches, already carries `lease_expires_at IS NULL` for that reason, so
+without the same exclusion here E-05 fires on every pull turn older than
+60s: flagging rows the sweep is deliberately leaving alone, and burying a
+real #106 regression under noise for a whole soak window.
+
 Tier B, severity major.
 """
 
@@ -62,6 +73,18 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
 
     for agent in snapshot.agents:
         for eid in sorted(agent.running_exec_ids):
+            # #1766: exclude pull-CLAIMED rows (mirrors S-01's exclusion and,
+            # decisively, the very sweep this invariant watches —
+            # `mark_no_session_executions_failed` already carries
+            # `lease_expires_at IS NULL` for exactly this reason). A leased row
+            # is `running` with a NULL claude_session_id BY DESIGN: the claim is
+            # a pure SQL UPDATE and the worker reports its session id back only
+            # with the terminal. Without this, E-05 fires on every pull turn
+            # older than 60s — flagging the rows the sweep is deliberately
+            # leaving alone, and drowning a real #106 regression in noise for
+            # the whole soak window (#1081 Phase 3 / T3.6).
+            if agent.running_lease_expires_at.get(eid) is not None:
+                continue
             session_id = agent.running_claude_session_ids.get(eid)
             if session_id:
                 continue

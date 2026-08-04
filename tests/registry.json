@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_1870_completed_turn_recovery.py",
+      "feature": "#1870",
+      "added": "2026-08-02",
+      "categories": [
+        "agent-server",
+        "unit",
+        "reliability",
+        "recovery"
+      ],
+      "description": "Completed-turn recovery on error_during_execution (#1870): the runtime reports a finished turn as failed when a background subagent's <task-notification> lands after stop_reason=end_turn. Drives the REAL _finalize_headless_result against a committed REAL captured CC 2.1.220 transcript tail (tests/unit/fixtures/). Covers the reproduction; the message.id-group rule with fail-closed no-text (the E1 pin - 40.6% of real markers are thinking-only, so a window rule returns narration without the answer as a 200 the moment the tail line drops); 17 boundary shapes A-Q incl. the isSidechain/isMeta sub-thread gate, the since_iso staleness guard on both ends, and last-qualifying-must-itself-be-end_turn strictness; truncation; hostile session ids + malformed records; exception isolation (502 not 500); replace-not-append; the Option C signals (recovered_terminal kept SEPARATE from recovered_from_jsonl, the recovery notice, {{previous_response}} flow); sanitization; and decline-reason logging (reasons split by the ACTION they imply - a format change must not read as stale_marker; the untrusted stop_reason is echoed only when shape-validated). Also pins that the message.id-less window fallback cannot launder the turn's earlier narration into an answer: the marker record must carry text before the window is consulted."
+    },
+    {
       "file": "unit/test_77_webhook_signature.py",
       "feature": "trinity-enterprise#77",
       "added": "2026-07-06",
@@ -1454,6 +1466,31 @@
         "observability"
       ],
       "description": "A cron tick suppressed by the Redis distributed lock must leave an audit record (#1969). Suppression is correct behaviour; the evidence was missing - the lock-denial branch of _execute_schedule logged at INFO and returned bare, so no schedule_executions row was written and a denied tick was indistinguishable from a tick that never fired, while APScheduler still reported the job successful. Trinity already audited the OTHER suppression path (APScheduler max_instances -> _on_job_max_instances -> a skipped row), so this was a missing call, not a design gap. The two never overlap: a max_instances refusal means the job never started, so _execute_schedule is never entered and no lock is attempted; reaching the lock branch means APScheduler already let it start. The gap bit hardest on the common case, since a MANUAL trigger bypasses APScheduler entirely (_trigger_handler dispatches via asyncio.create_task) and its collision with the cron tick lands one layer down in exactly the unaudited branch. Covers: a denied tick records exactly one skipped row; the reason names the LOCK, not max_instances, so the two causes stay tellable apart in the record; the audited tick still does NOT run the schedule (auditing suppression must not undo it); the granted-lock path stays silent (a skipped row per successful tick would invert the status for every consumer); the pre-existing lock release survives on both the success and raise paths and no release is attempted when no lock was handed out. #91 regression shape: exactly one row per denial, three denials -> three rows, plus a source guard that the max_instances listener still never routes through _execute_schedule (which would audit one tick twice) and that the audit helper still swallows its own errors, now load-bearing because it is called from the cron execution path. Ends with an end-to-end pass against a real temp SQLite DB proving a status='skipped' row actually lands - the wiring tests alone would still pass with a broken write path."
+    },
+    {
+      "file": "unit/test_1971_codex_subscription_auth.py",
+      "feature": "#1971",
+      "added": "2026-08-04",
+      "categories": [
+        "agent-server",
+        "unit",
+        "reliability",
+        "codex"
+      ],
+      "description": "Codex subscription auth must survive Trinity's dispatch (#1971). _execute_codex set BOTH OPENAI_API_KEY and CODEX_API_KEY from the same resolved value, described in-source as harmless defence ('some Codex builds also read CODEX_API_KEY'). It is not harmless: the mere PRESENCE of CODEX_API_KEY flips the Codex CLI into API-key auth mode and makes it discard a valid subscription auth.json, so every subscription agent 401'd against api.openai.com, retried 5x and failed the turn - while the same auth.json worked when the CLI was invoked directly. Through /task that was the only reachable behaviour. A SECOND defect is visible in the reporter's own repro but was not filed: their working case is 'only a placeholder OPENAI_API_KEY set', a placeholder because _execute_codex raised 503 before invoking the CLI whenever no API key was found - and a ChatGPT-plan container has no API key by design. Fixing only the reported half leaves subscription agents working provided they know to set a fake key. Covers: source tracking (which variable the key came from, incl. the cold-start .env parse) with an explicit guard that _load_openai_api_key remains the patchable seam _execute_codex calls - the first attempt moved it and turned 127 existing Codex tests red; subscription detection that is existence+non-empty ONLY (a zero-byte file and a directory are both rejected, but invalid JSON is accepted, because validating is the CLI's job and a stale token must surface as the CLI's auth error rather than a Trinity 503 falsely claiming no credentials); the env actually handed to the child - CODEX_API_KEY no longer synthesized from an OPENAI_API_KEY, still forwarded when the operator supplied it UNDER THAT NAME (the only case the original rationale covers), neither variable fabricated for a subscription agent, CODEX_HOME (#1098) still exported; and the gate - subscription auth alone now dispatches, no credentials at all still fails fast so the gate is not a no-op, and the 503 names BOTH remedies since the old message said only 'inject OPENAI_API_KEY' and thereby pointed subscription users at the placeholder workaround that caused this issue."
+    },
+    {
+      "file": "unit/test_codex_credentials_properties.py",
+      "feature": "#1971",
+      "added": "2026-08-04",
+      "categories": [
+        "agent-server",
+        "unit",
+        "properties",
+        "edge-cases",
+        "codex"
+      ],
+      "description": "/edge-cases boundary + property analysis of the Codex credential resolvers (#1971): _parse_env_value, _load_api_key_with_source, _has_subscription_auth. These are parsing/auth boundaries whose output now decides whether CODEX_API_KEY is exported (and therefore whether a subscription auth.json survives) and whether dispatch is refused - a promotion from what _parse_env_value was originally for. 32 boundary rows (quoting, inline-comment vs in-value '#', empty/whitespace values that must not resolve to '', export prefix, missing/unreadable .env, auth.json absent/zero-byte/directory/broken-symlink) plus 4 Hypothesis properties (parse is total and never grows its input; resolution is total and self-consistent - a (value, None) or (None, source) pair would make the export decision incoherent; subscription detection is total). Found a REAL PRE-EXISTING bug, fixed here: a .env holding non-UTF-8 bytes (a Latin-1 credential, a mis-encoded smart quote - both plausible in a hand-edited file) made read_text() raise UnicodeDecodeError, which is a ValueError and NOT an OSError, so the except (IOError, OSError) around the loop never caught it; the error escaped _execute_codex and failed the dispatch instead of resolving the key or returning the honest 503. Fixed with errors='replace' so a bad byte on an unrelated line cannot hide a valid key. Also documents (not asserts as correct) that .env resolution is by LINE ORDER while the process-env branch is by _API_KEY_VARS priority - harmless while the source only chose a value, but after #1971 it also decides the auth mode. One Hypothesis finding was classified a WRONG TEST and recorded as such: lone surrogates cannot be written to a real file, so that input is unproducible."
     }
   ]
 }
