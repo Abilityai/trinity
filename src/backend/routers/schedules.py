@@ -8,8 +8,8 @@ defined BEFORE dynamic routes like /{name}/schedules to avoid FastAPI matching
 "scheduler" as an agent name.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from typing import List
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from typing import List, Optional
 from datetime import datetime
 import json
 import os
@@ -418,7 +418,10 @@ async def disable_schedule(
 async def trigger_schedule(
     name: AuthorizedAgent,
     schedule_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    x_source_agent: Optional[str] = Header(None),
+    x_mcp_key_id: Optional[str] = Header(None),
+    x_mcp_key_name: Optional[str] = Header(None),
 ):
     """
     Manually trigger a schedule execution.
@@ -436,12 +439,37 @@ async def trigger_schedule(
             detail="Schedule not found"
         )
 
+    # #1970: the authenticated caller is in scope HERE and nowhere downstream —
+    # the scheduler hop carried only the schedule id, so every manually
+    # triggered run landed with all five source_* columns NULL and "who ran
+    # this?" was answerable only from logs, until they rolled.
+    #
+    # `current_user` is authenticated, so user_id/email are trustworthy. The
+    # three X-* headers are the same MCP-server-set attribution headers
+    # `routers/chat.py` already consumes; they are raw client headers, so they
+    # are attribution only — nothing authorizes on them (`AuthorizedAgent`
+    # above is what actually gates this endpoint).
+    #
+    # Precedence for the agent name is deliberately the REVERSE of chat.py's:
+    # `current_user.agent_name` comes from the VALIDATED agent-scoped key, so
+    # where it exists it wins and a caller cannot pin its run on a sibling
+    # agent by setting the header. The header fills only the case where it is
+    # the sole signal — a user-scoped key, whose `agent_name` is None.
+    source_payload = {
+        "source_user_id": current_user.id,
+        "source_user_email": current_user.email,
+        "source_agent_name": current_user.agent_name or x_source_agent,
+        "source_mcp_key_id": x_mcp_key_id,
+        "source_mcp_key_name": x_mcp_key_name,
+    }
+
     # Call dedicated scheduler service for manual trigger
     # The scheduler handles locking, activity tracking, and execution
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{SCHEDULER_URL}/api/schedules/{schedule_id}/trigger",
+                json=source_payload,
                 timeout=10.0
             )
 

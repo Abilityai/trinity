@@ -381,6 +381,8 @@ const detailsJson = computed(() => {
                 store.verifyState === 'valid',
               'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-200':
                 store.verifyState === 'invalid',
+              'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200':
+                store.verifyState === 'unverifiable',
               'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-200':
                 store.verifyState === 'error',
             }"
@@ -388,7 +390,22 @@ const detailsJson = computed(() => {
             <span v-if="store.verifyState === 'idle'">Hash chain · not verified</span>
             <span v-else-if="store.verifyState === 'verifying'">Verifying…</span>
             <span v-else-if="store.verifyState === 'valid'">
-              ✓ Valid · {{ store.verifyResult?.checked || 0 }} entries
+              ✓ Valid · {{ store.verifyResult?.checked || 0 }} entries<template
+                v-if="store.verifyResult?.skipped_unhashed"
+              >
+                · {{ store.verifyResult.skipped_unhashed }} unhashed (not covered)</template>
+            </span>
+            <!-- #1984: previously rendered as a green "✓ Valid · 0 entries" —
+                 a verified verdict over a range nothing had been hashed in. -->
+            <span v-else-if="store.verifyState === 'unverifiable'">
+              <template v-if="store.verifyResult?.status === 'empty_range'">
+                — Nothing in range to verify
+              </template>
+              <template v-else>
+                ⚠ Unverifiable · no hashes on
+                {{ store.verifyResult?.total_in_range || 0 }} entries — hash
+                chain was never enabled
+              </template>
             </span>
             <span v-else-if="store.verifyState === 'invalid'">
               ✗ Tamper detected · first invalid id #{{ store.verifyResult?.first_invalid_id }}

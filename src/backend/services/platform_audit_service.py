@@ -203,36 +203,87 @@ class PlatformAuditService:
     async def verify_chain(self, start_id: int, end_id: int) -> Dict[str, Any]:
         """Verify hash chain integrity between two row IDs (inclusive).
 
+        `valid` is deliberately TRI-STATE (#1984):
+
+          * ``True``  — entries were hashed and the chain checks out
+          * ``False`` — a hash mismatch: tampering or corruption
+          * ``None``  — **unverifiable**: there was nothing to check
+
+        The third state is the fix. Skipping an unhashed entry is right on its
+        own (a chain enabled midway legitimately has an unhashed prefix), but
+        when EVERY entry was skipped the old code still answered ``valid: True``
+        — so an install that never enabled hashing, which is the default,
+        reported its audit log verified-intact across thousands of rows. One
+        answer for three different states: verified, empty, and "no integrity
+        data exists". An operator asking "was this tampered with?" during an
+        incident got a green tick meaning "unanswerable".
+
+        ``None`` rather than ``False``: ``False`` claims tampering, which is an
+        equally wrong and considerably louder lie. A caller doing a plain
+        truthiness test degrades to "not verified" — the safe direction.
+
         Returns:
-            {"valid": bool, "checked": int, "first_invalid_id": int | None}
+            {"valid": bool | None, "status": str, "checked": int,
+             "skipped_unhashed": int, "total_in_range": int,
+             "hash_chain_enabled": bool, "first_invalid_id": int | None}
         """
         entries = db.get_audit_entries_range(start_id, end_id)
+        base: Dict[str, Any] = {
+            "checked": 0,
+            "skipped_unhashed": 0,
+            "total_in_range": len(entries),
+            "hash_chain_enabled": self._hash_chain_enabled,
+            "first_invalid_id": None,
+        }
+
         if not entries:
-            return {"valid": True, "checked": 0, "first_invalid_id": None}
+            # Distinct from "rows exist but none are hashed": the caller asked
+            # about a range holding nothing, which is not a statement about
+            # integrity in either direction.
+            return {**base, "valid": None, "status": "empty_range"}
 
         checked = 0
+        skipped = 0
         for i, entry in enumerate(entries):
             if not entry.get("entry_hash"):
-                # Entry was written before hash chain was enabled — skip
+                # Written before hash chain was enabled — skipped, and now
+                # COUNTED, so the verdict below can tell "some" from "none".
+                skipped += 1
                 continue
             expected = self._compute_hash(entry)
             if entry["entry_hash"] != expected:
                 return {
-                    "valid": False,
-                    "checked": checked + 1,
+                    **base, "valid": False, "status": "tampered",
+                    "checked": checked + 1, "skipped_unhashed": skipped,
                     "first_invalid_id": entry["id"],
                 }
             if i > 0 and entry.get("previous_hash"):
                 prev = entries[i - 1]
                 if prev.get("entry_hash") and entry["previous_hash"] != prev["entry_hash"]:
                     return {
-                        "valid": False,
-                        "checked": checked + 1,
+                        **base, "valid": False, "status": "tampered",
+                        "checked": checked + 1, "skipped_unhashed": skipped,
                         "first_invalid_id": entry["id"],
                     }
             checked += 1
 
-        return {"valid": True, "checked": checked, "first_invalid_id": None}
+        if checked == 0:
+            # Rows exist; none carry a hash. THE reported bug (#1984).
+            return {
+                **base, "valid": None, "status": "unverifiable",
+                "skipped_unhashed": skipped,
+            }
+
+        return {
+            **base,
+            "valid": True,
+            # Named apart so a partially-hashed range cannot pass for a fully
+            # verified one — the unhashed prefix is permanent on any install
+            # that enabled hashing later.
+            "status": "verified_partial" if skipped else "verified",
+            "checked": checked,
+            "skipped_unhashed": skipped,
+        }
 
     @staticmethod
     def _compute_hash(entry: Dict[str, Any]) -> str:

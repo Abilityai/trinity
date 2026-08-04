@@ -23,7 +23,10 @@ import redis
 import httpx
 
 from .config import config
-from .models import Schedule, ScheduleExecution, ExecutionStatus, SchedulerStatus, ProcessSchedule
+from .models import (
+    Schedule, ScheduleExecution, ExecutionStatus, SchedulerStatus, ProcessSchedule,
+    ExecutionOrigin,
+)
 from .database import SchedulerDatabase
 from .locking import get_lock_manager, LockManager
 # Shared SUB-003 auth-class classifier (#1088). The scheduler uses it for
@@ -817,6 +820,30 @@ class SchedulerService:
         lock = self.lock_manager.try_acquire_schedule_lock(schedule_id)
         if not lock:
             logger.info(f"Schedule {schedule_id} already being executed by another instance")
+            # #1969: a suppressed tick must leave a record. Suppression is the
+            # correct behaviour — what was missing is the evidence it happened.
+            # With only the INFO line above, a tick denied by the lock is
+            # indistinguishable from a tick that never fired, in the execution
+            # history, the UI, and monitoring alike.
+            #
+            # There are two ways a run gets suppressed and only one was
+            # audited. APScheduler's `max_instances=1` refusal writes a
+            # `skipped` row via _on_job_max_instances; this branch returned
+            # bare. They do not overlap — a max_instances refusal means the job
+            # never started, so _execute_schedule is never entered and no lock
+            # is attempted; conversely reaching this line means APScheduler
+            # already let the job start. Exactly one of the two fires per tick.
+            #
+            # The gap mattered most for the common case: a MANUAL trigger
+            # bypasses APScheduler entirely (_trigger_handler dispatches via
+            # asyncio.create_task), so its instance counter stays at zero, the
+            # cron job starts normally, and the collision is caught one layer
+            # down — here.
+            self._record_skipped_agent_schedule(
+                schedule_id,
+                skip_reason="Previous execution still running (distributed lock held)",
+                event_reason="Previous execution still running",
+            )
             return
 
         try:
@@ -824,12 +851,20 @@ class SchedulerService:
         finally:
             lock.release()
 
-    async def _execute_schedule_with_lock(self, schedule_id: str, triggered_by: str = "schedule"):
+    async def _execute_schedule_with_lock(
+        self,
+        schedule_id: str,
+        triggered_by: str = "schedule",
+        origin: Optional[ExecutionOrigin] = None,
+    ):
         """Execute schedule after acquiring lock.
 
         Args:
             schedule_id: ID of the schedule to execute
             triggered_by: Source of trigger - "schedule" (cron) or "manual"
+            origin: Who initiated the run (#1970). None for a cron tick — there
+                is no caller, and the execution row records that honestly as
+                NULLs rather than inventing an owner.
         """
         schedule = self.db.get_schedule(schedule_id)
         if not schedule:
@@ -894,12 +929,18 @@ class SchedulerService:
         logger.info(f"Executing schedule: {schedule.name} for agent {schedule.agent_name} (triggered_by={triggered_by})")
 
         # Create execution record
+        origin = origin or ExecutionOrigin()
         execution = self.db.create_execution(
             schedule_id=schedule.id,
             agent_name=schedule.agent_name,
             message=effective_message,
             triggered_by=triggered_by,
-            model_used=schedule.model
+            model_used=schedule.model,
+            source_user_id=origin.user_id,
+            source_user_email=origin.user_email,
+            source_agent_name=origin.agent_name,
+            source_mcp_key_id=origin.mcp_key_id,
+            source_mcp_key_name=origin.mcp_key_name
         )
 
         if not execution:
@@ -1585,6 +1626,33 @@ class SchedulerService:
             )
             return
 
+        # #1970: a retry inherits the original run's attribution. The retry has
+        # no caller of its own, but it is not anonymous — it exists only because
+        # someone (or a cron tick) started the original, and a chain of retries
+        # that drops the initiator makes the very first attempt the only
+        # attributable one.
+        #
+        # Fail-open around the READ, not merely around a missing row: this is a
+        # brand-new DB call on the retry path, and letting it raise would trade
+        # "the retry is unattributed" for "the retry never runs". A row already
+        # purged by retention lands in the same place — no origin, still fires.
+        origin = ExecutionOrigin()
+        try:
+            original = self.db.get_execution(original_execution_id)
+            if original:
+                origin = ExecutionOrigin(
+                    user_id=original.source_user_id,
+                    user_email=original.source_user_email,
+                    agent_name=original.source_agent_name,
+                    mcp_key_id=original.source_mcp_key_id,
+                    mcp_key_name=original.source_mcp_key_name,
+                )
+        except Exception as exc:
+            logger.warning(
+                f"Could not read the origin of {original_execution_id} for its "
+                f"retry — the retry proceeds unattributed: {exc}"
+            )
+
         # Create a new execution record for the retry
         retry_execution = self.db.create_execution(
             schedule_id=schedule_id,
@@ -1593,7 +1661,12 @@ class SchedulerService:
             triggered_by="retry",
             model_used=model,
             attempt_number=next_attempt_number,
-            retry_of_execution_id=original_execution_id
+            retry_of_execution_id=original_execution_id,
+            source_user_id=origin.user_id,
+            source_user_email=origin.user_email,
+            source_agent_name=origin.agent_name,
+            source_mcp_key_id=origin.mcp_key_id,
+            source_mcp_key_name=origin.mcp_key_name
         )
 
         if not retry_execution:
@@ -1738,6 +1811,20 @@ class SchedulerService:
         reminder = self.db.get_reminder_by_id(reminder_id)
         attempts = reminder.fire_attempts if reminder else 1
 
+        # #1970: a reminder fires with no live caller, but it is not anonymous —
+        # #1296 already persisted who set it. Carry that provenance onto the
+        # execution row so "who caused this run?" is answerable from the DB.
+        origin = (
+            ExecutionOrigin(
+                user_id=reminder.owner_id,
+                user_email=reminder.created_by_email,
+                agent_name=reminder.source_agent_name or agent_name,
+                mcp_key_id=reminder.source_mcp_key_id,
+            )
+            if reminder
+            else ExecutionOrigin(agent_name=agent_name)
+        )
+
         execution_id = None
         try:
             # 2. Create the execution row up-front (REAL id, __manual__ marker —
@@ -1750,6 +1837,11 @@ class SchedulerService:
                 message=message,
                 triggered_by="reminder",
                 model_used=model,
+                source_user_id=origin.user_id,
+                source_user_email=origin.user_email,
+                source_agent_name=origin.agent_name,
+                source_mcp_key_id=origin.mcp_key_id,
+                source_mcp_key_name=origin.mcp_key_name,
             )
             if not execution:
                 raise Exception("failed to create reminder execution row")
