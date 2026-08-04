@@ -200,6 +200,28 @@ def test_no_bare_safe_load_remains_in_the_agent_server():
     assert not offenders, f"bare yaml.safe_load in the agent server: {offenders}"
 
 
+def test_standalone_loadable_routers_keep_their_imports_function_local():
+    """#1795 invariant, re-broken by this issue's first attempt.
+
+    `files.py` must load via `spec_from_file_location` with NO package context —
+    two tests do exactly that to check its protected-path logic. A module-level
+    `from ..safe_yaml import …` raises `attempted relative import with no known
+    parent package`, which is how the first version of this fix went red in CI
+    against a rule that predates it by 170 issues.
+
+    Asserted by actually loading the file standalone, not by grepping for
+    `from ..` — the sibling routers legitimately use module-level relative
+    imports, so the rule is "this file loads bare", not "nobody uses relative
+    imports".
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_test1965_standalone_files", _AGENT_SERVER / "routers" / "files.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # must not raise
+    assert hasattr(mod, "_read_persistent_state")
+
+
 def test_hardened_error_is_caught_where_yamlerror_was():
     """`HardenedYamlError` is a **ValueError**, not a `yaml.YAMLError`.
 

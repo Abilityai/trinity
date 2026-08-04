@@ -11,8 +11,6 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse, FileResponse
 from pydantic import BaseModel
 
-from ..safe_yaml import AliasPolicy, HardenedYamlError, load_hardened_yaml
-
 
 class FileUpdateRequest(BaseModel):
     """Request body for file updates."""
@@ -251,6 +249,18 @@ _DEFAULT_PERSISTENT_STATE = [
 def _read_persistent_state() -> list[str]:
     """Read the persistent-state allowlist from disk, with defaults."""
     import yaml
+
+    # #1965 + #1795: imported HERE, not at module scope. `files.py` must stay
+    # loadable by `spec_from_file_location` with NO package context — a
+    # module-level `from ..safe_yaml import …` raises `attempted relative import
+    # with no known parent package` and breaks
+    # `test_files_router_stays_standalone_importable` and the ent#183
+    # protected-path test. That constraint is why this file duplicates
+    # `_iso_z_from_mtime` instead of importing it, and why `yaml` is already
+    # function-local above. In production the package context always exists, so
+    # the deferred import is free.
+    from ..safe_yaml import AliasPolicy, HardenedYamlError, load_hardened_yaml
+
     if not _PERSISTENT_STATE_PATH.exists():
         return list(_DEFAULT_PERSISTENT_STATE)
     try:
