@@ -988,6 +988,12 @@ class AgentPropagationStatus(BaseModel):
     # "updated", "skipped_per_agent_pat", "skipped_no_pat", "failed"
     status: str
     error: Optional[str] = None
+    # #1967: whether the LIVE git remote was re-templated. The `.env` write only
+    # takes effect on the next restart, so this is the field that says whether
+    # fetch/push work *now*. Optional with a None default: it is genuinely
+    # unknown on the pre-skip and failure paths, and "unknown" must stay
+    # distinguishable from "attempted and did not happen".
+    remote_updated: Optional[bool] = None
 
 
 class GithubPatPropagationResult(BaseModel):
@@ -996,6 +1002,11 @@ class GithubPatPropagationResult(BaseModel):
     updated: List[str]
     skipped: List[AgentPropagationStatus]
     failed: List[AgentPropagationStatus]
+    # #1967: how many of `updated` also got their live remote re-templated.
+    # `updated` alone overstates the fix — an agent whose `.env` was rewritten
+    # but whose remote was not is still authenticating with the revoked token
+    # until it restarts, which is the silent failure this issue reports.
+    remotes_updated: int = 0
 
 
 # =============================================================================
