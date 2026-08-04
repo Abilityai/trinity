@@ -816,8 +816,26 @@
                       </div>
                     </template>
                     <template v-else>
-                      <div :class="githubPatPropagation.failed.length ? 'text-status-warning-700 dark:text-status-warning-400' : 'text-status-success-600 dark:text-status-success-400'">
+                      <!-- #1967: "0 of N" used to render success-green whenever
+                           nothing outright failed, so a rotation that reached
+                           no agent at all looked identical to one that worked.
+                           Reaching nothing is the loudest state here, not the
+                           quietest. -->
+                      <div v-if="!githubPatPropagation.updated.length" class="text-status-danger-600 dark:text-status-danger-400">
+                        PAT saved, but applied to <strong>0 of {{ githubPatPropagation.total_running }}</strong> running agent{{ githubPatPropagation.total_running === 1 ? '' : 's' }} — they keep using the previous token until restarted.
+                      </div>
+                      <div v-else :class="githubPatPropagation.failed.length ? 'text-status-warning-700 dark:text-status-warning-400' : 'text-status-success-600 dark:text-status-success-400'">
                         PAT updated and applied to {{ githubPatPropagation.updated.length }} of {{ githubPatPropagation.total_running }} running agent{{ githubPatPropagation.total_running === 1 ? '' : 's' }}.
+                      </div>
+                      <!-- The .env write only lands on the next restart; the
+                           remote rewrite is what makes git work NOW. Surfaced
+                           because "applied" without it is the silent half of
+                           this bug. -->
+                      <div
+                        v-if="githubPatPropagation.updated.length && (githubPatPropagation.remotes_updated ?? 0) < githubPatPropagation.updated.length"
+                        class="mt-1 text-status-warning-700 dark:text-status-warning-400"
+                      >
+                        Git remotes re-templated on {{ githubPatPropagation.remotes_updated ?? 0 }} of {{ githubPatPropagation.updated.length }} — the rest pick the token up for git on their next restart.
                       </div>
                       <div v-if="githubPatPropagation.failed.length" class="mt-1 text-status-danger-600 dark:text-status-danger-400">
                         Failed: {{ githubPatPropagation.failed.map(a => a.agent_name).join(', ') }}

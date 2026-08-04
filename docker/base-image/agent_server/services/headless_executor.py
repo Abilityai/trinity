@@ -45,6 +45,7 @@ from .error_classifier import (
 )
 from .jsonl_recovery import (
     _extract_compact_events_from_jsonl,
+    _recover_completed_turn_from_jsonl,
     _recover_metadata_from_jsonl,
     _recover_response_from_jsonl,
 )
@@ -236,6 +237,81 @@ def _attempt_empty_result_recovery(
     # sanitize_dict is idempotent over the recovered fields.
     body["metadata"] = sanitize_dict(metadata.model_dump())
     return (status_code, body)
+
+
+# #1870 (§2.5 C2): the human-visible half of the distinguishing signal. A
+# recovered turn is stored as SUCCESS, so without this an operator reading the
+# deliverable cannot tell it apart from a clean one — and the recovered text
+# can legitimately be a mid-turn checkpoint ("waiting for the remaining arms")
+# rather than the final answer. The wording names that risk deliberately.
+# Carried inside `response_parts` so the existing sanitize_text over the joined
+# parts covers it: no new egress path, no second sanitization call.
+_RECOVERY_NOTICE = (
+    "> ⚠️ Recovered transcript: the runtime reported this turn as failed, but "
+    "the session transcript shows it completed. The answer below was salvaged "
+    "from that transcript and may be a checkpoint rather than the final "
+    "deliverable. (#1870)"
+)
+
+
+def _try_recover_completed_turn(ctx: "HeadlessRunContext") -> bool:
+    """#1870: salvage a turn Claude Code mislabelled `error_during_execution`.
+
+    Returns True when the transcript carries positive evidence that the turn
+    finished and its answer was recovered — in which case ``ctx`` has been
+    mutated and the caller must fall through to the success path. False means
+    "no evidence"; the caller raises exactly the 502 it raises today.
+
+    Never raises: a defect in the new parsing must degrade to today's 502,
+    never to a 500.
+    """
+    # Same session-id resolution as the #678 sibling path: the id Claude echoed
+    # back wins; fall back to the UUID we put on the command line (unset when
+    # the race wedged the reader before init, and empty on a --resume run).
+    effective_session_id = ctx.metadata.session_id or ctx.claude_session_uuid or None
+    try:
+        recovered = _recover_completed_turn_from_jsonl(
+            effective_session_id, since_iso=ctx.task_start_iso
+        )
+    except Exception as e:  # noqa: BLE001 — must never mask the 502 with a 500
+        # `%r` on the session id, not `%s`: `resume_session_id` reaches
+        # `claude_session_uuid` straight from the /task request body, the agent
+        # server logs plain text (`logging.basicConfig`), and Vector splits on
+        # newlines — so an unescaped value here is a log-forging primitive.
+        # Same reason `_read_jsonl_records` already reports it with `!r`.
+        logger.warning(
+            "event=completed_turn_recovery_declined reason=exception exc=%s "
+            "session_id=%r — failing as before",
+            type(e).__name__,
+            effective_session_id,
+        )
+        return False
+    if not recovered:
+        return False
+
+    # REPLACE, don't append. `stream_parser` only clears `response_parts` when
+    # the result line carries text, and on this subtype it is empty — so a
+    # partial stdout fragment can already be sitting there. The JSONL is
+    # authoritative for this turn's assistant text and that fragment is a
+    # subset of it; appending would duplicate it. Mirrors the parser's own
+    # `if result_text: clear(); append()` idiom.
+    #
+    # (#1025) `ctx` is a parameter, not a closure, so this correctly targets
+    # the finalize snapshot when one was taken. On the non-snapshot path this
+    # mutates the list `execute_headless_task` still holds — harmless, and the
+    # same aliasing every other recovery step here already relies on.
+    ctx.response_parts[:] = [_RECOVERY_NOTICE, recovered]
+    ctx.metadata.recovered_from_jsonl = True   # #678 continuity
+    ctx.metadata.recovered_terminal = True     # §2.5 C1 — the precise signal
+    logger.warning(
+        "event=completed_turn_recovered_from_jsonl session_id=%r chars=%d "
+        "task=%r — runtime reported error_during_execution but the transcript "
+        "shows stop_reason=end_turn; surfacing the recovered answer as success",
+        effective_session_id,
+        len(recovered),
+        ctx.task_session_id,
+    )
+    return True
 
 
 def _timeout_504_detail(
@@ -1025,12 +1101,24 @@ def _finalize_headless_result(
     # classified there (signal/auth/rate-limit), and preempting that would
     # misread a #516 signal termination as a generic execution error.
     if ctx.metadata.error_type == "execution_error":
-        err = sanitize_text(ctx.metadata.error_message or "Execution error")
-        logger.error(f"[Headless Task] Claude Code execution error: {err[:300]}")
-        raise HTTPException(
-            status_code=502,
-            detail=f"Execution error: {err[:300]}",
-        )
+        # #1870: the CLI can report `error_during_execution` for a turn that
+        # actually FINISHED — a background subagent's <task-notification>
+        # lands after stop_reason=end_turn and the follow-on turn is
+        # interrupted, so the CLI's terminal-state check sees a non-terminal
+        # last message and reports the whole turn as failed. Consult the
+        # transcript for positive evidence of completion before discarding a
+        # completed answer.
+        #
+        # Evidence-gated ONLY — never the accumulated stdout text (that would
+        # re-open #1673). The gate is on-disk `stop_reason`, never the error
+        # MESSAGE: that text is not a stable contract.
+        if not _try_recover_completed_turn(ctx):
+            err = sanitize_text(ctx.metadata.error_message or "Execution error")
+            logger.error(f"[Headless Task] Claude Code execution error: {err[:300]}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Execution error: {err[:300]}",
+            )
 
     # Issue #520 + Session-tab pipe race recovery: clean exit
     # (return_code == 0) but the final `result` JSON line never reached
