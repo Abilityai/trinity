@@ -3132,6 +3132,19 @@ class GitHubTemplatesUpdate(BaseModel):
     templates: List[GitHubTemplateEntry]
 
 
+class TemplateRegistryUpdate(BaseModel):
+    """PUT body for the remote template registry (TMPL-002, ent#14).
+
+    Partial update: an omitted field is left untouched (the
+    `/api/settings/skills-library` shape), so an admin can flip the toggle
+    without re-typing the URL. `url` is validated by
+    `utils.url_validation.validate_template_registry_url` at the route — SSRF
+    gating needs DNS resolution, which does not belong in a Pydantic model.
+    """
+    url: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
 class McpUrlUpdate(BaseModel):
     """Request body for updating the MCP server URL."""
     url: str
