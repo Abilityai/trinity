@@ -360,7 +360,7 @@ The post-create `db.set_git_auto_sync_enabled` opt-in in
 `crud.py::_materialize_agent_files` carries the same PAT requirement (new
 `github_pat_for_agent` param threaded from the orchestrator).
 
-### Rebuild-missing-container recovery — `lifecycle.py::_apply_persisted_auth_env` (#1559)
+### Container-rebuild env — `lifecycle.py::_apply_git_env_from_db` (#1559, ent#109)
 
 Gate flipped from `if pat and repo:` to `if repo:` — a tokenless agent rebuilt
 after container loss still gets `GITHUB_REPO` + `GIT_SYNC_ENABLED`
@@ -368,6 +368,27 @@ after container loss still gets `GITHUB_REPO` + `GIT_SYNC_ENABLED`
 health, the #843/#1439 class). The PAT is injected only when present;
 source-mode rows also re-derive `GIT_SOURCE_MODE`/`GIT_SOURCE_BRANCH` so a
 volume-loss rebuild re-clones the right branch.
+
+**ent#109 — one owner, two rebuild paths.** That block used to live *only* in
+`_apply_persisted_auth_env` (`recreate_missing_container`, the
+rebuild-from-nothing path). The other rebuild path,
+`recreate_container_with_updated_config`, seeds `env_vars` from the **old
+container** and re-derived only `GITHUB_PAT` — so it replayed whatever
+`GITHUB_REPO` / `GIT_SYNC_*` that container happened to be carrying. Its one
+production caller is `start_agent_internal`, fired by nine config-drift
+predicates **and by base-image drift at cold start**, so a base-image rebuild
+arms the replay for the whole fleet. `_apply_git_env_from_db` is now the sole
+writer for both, over the `_GIT_ENV_KEYS` set (`GITHUB_REPO`, `GITHUB_PAT`,
+`GIT_SYNC_ENABLED`, `GIT_SOURCE_MODE`, `GIT_SOURCE_BRANCH`, `GIT_SYNC_AUTO`,
+`TRINITY_GIT_BASE_URL`).
+
+| Property | Behaviour |
+|---|---|
+| **PAT gate** | A **required keyword parameter**, never a shared default. `recreate_missing_container` passes `pat_gate="effective"` (2-tier per-agent → global — there is no old container to inherit a token from). The config-drift recreate passes `pat_gate="per_agent_only"`, which preserves #211 verbatim: resolve only when the container **already carries** a token or a **per-agent** PAT row exists. Sharing one gate would bake the global platform PAT into every tokenless container; `configure_push_remote` then clears the push blackhole (below) and a private KB can reach the shared public upstream — the ent#162 class. A static guard in `tests/unit/test_ent109_git_env_seam.py` fails CI if either call site flips. |
+| **Correct, never introduce** | Config-drift path only. The block is repo-gated (ent#123) while the PAT is per-agent-gated (#211), and those two disagree for one real row shape: an agent bound post-creation via `POST /{agent}/git/initialize` on the **global** platform PAT. That path writes an `agent_git_config` row and pushes, but never recreates the container, never bakes any git env, never persists a per-agent PAT row, and never writes the token into the workspace `.env` — so its only credential is the one embedded in `.git/config`'s origin URL, and startup.sh's #1264 `.env` fallback does not cover it. Handing startup.sh `GIT_SYNC_ENABLED=true` with **no** `GITHUB_PAT` is exactly what it reads as "deliberately tokenless": the restart branch rewrites origin to the credential-less `CLONE_URL` (destroying that token) and `configure_push_remote` blackholes the push remote — silently, fleet-wide, on the same base-image drift this helper exists to fix. So `per_agent_only` writes the block only when the old container already carried `GITHUB_REPO` **or** a PAT resolves; it corrects a stale repo, a flipped `source_mode` or a deleted row (every case the fix is about — a tokenless ent#123 agent carries `GITHUB_REPO` from creation, so the flagship is unaffected). `effective` is exempt: with no old container, *not* introducing the block is the #843/#1439 silently-empty-agent bug. |
+| **Set-or-clear** | Every repo-derived var is cleared when it stops applying, because the config-drift path writes into a carried-forward dict. No `agent_git_config` row (reachable from the `routers/git.py` orphan cleanup and `_rollback_failed_creation`) ⇒ the whole set pops, including an orphaned `GITHUB_PAT` — the per-agent token is a column *on* that row, so no row means no per-agent credential and no repo to push to. A `source_mode` flip clears the mode/branch pair. While a repo **is** bound, `GITHUB_PAT` stays set-only. |
+| **`GIT_SYNC_AUTO`** | `DB auto_sync_enabled` **OR** the baked env — derive-only, **never written back**: a backfill cannot distinguish a creation-time discrepancy from an owner's explicit `PUT .../git/auto-sync {enabled:false}`, so it would erase that intent and cross an `OwnedAgentByName` → `AuthorizedAgentByName` privilege boundary through Start. The two creation writers genuinely disagree — `crud.py`'s DB opt-in carries `and not config.ephemeral` inside a swallowing `try/except` while `_apply_github_env` does not, and the column defaults to `0` — so DB-only derivation would silently stop auto-push for that slice of the fleet. See [git-sync-health.md](git-sync-health.md). |
+| **Not owned** | `GIT_WORKING_BRANCH` (only read by startup.sh's *clone* branch, which a recreate never reaches — the volume and its `.git` are carried forward; `GIT_SOURCE_MODE=true` outranks it there anyway) and `GIT_UPSTREAM_REPO` (no DB column — the `upstream` remote lives in `.git/config` on the pinned workspace volume and survives every recreate). |
 
 ### Container start — `docker/base-image/startup.sh`
 
@@ -411,9 +432,13 @@ a clearer message, never block a working push.
 - `sync_to_github` returns a named failure **before contacting the agent**:
   `conflict_type: "no_write_credentials"`, `conflict_class: "AUTH_FAILURE"`,
   message `NO_WRITE_CREDENTIALS_MESSAGE` ("This agent has no write
-  credentials — it tracks a public template read-only. To keep your changes,
-  create a new agent with fork-to-own and import your data…, or add a GitHub
-  token.").
+  credentials — it tracks a public template read-only. Use 'Bind to your own
+  repo' in this agent's Git tab to point it at a GitHub repository you own
+  (keeping everything it has learned), or add a GitHub token."). **ent#109**
+  retired the workaround this used to teach (create a new agent with
+  fork-to-own and import your data), which discarded the agent's identity,
+  its 180-day name reservation and its history — the retrofit now exists in
+  place; see [agent-repo-binding.md](agent-repo-binding.md).
 - `reset_to_main_preserve_state` refuses up front with
   `{"error": "no_write_credentials", "message": NO_WRITE_CREDENTIALS_MESSAGE}`
   (the recovery ends in a force-with-lease push); `routers/git.py` maps it

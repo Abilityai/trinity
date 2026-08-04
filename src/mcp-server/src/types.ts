@@ -78,8 +78,18 @@ export interface McpAuthContext extends Record<string, unknown> {
   // user=human, agent=regular agent, system=bypasses all permissions,
   // connector=end-user consumption key bound to one agent (ent#46),
   // anonymous=keyless pre-login session that may only call the inline-auth
-  // tools until verify_login upgrades it (#848).
-  scope: "user" | "agent" | "system" | "connector" | "anonymous";
+  // tools until verify_login upgrades it (#848),
+  // portal_delegate=trusted issuer that exchanges an end-user email for a portal
+  // session and nothing else (ent#163).
+  //
+  // #1854: `portal_delegate` was missing here, so a fifth live value arrived as
+  // a runtime string outside the declared union — the backend column is
+  // free-text with no CHECK constraint, and every scope check in this codebase
+  // is an equality test, so an unlisted value silently falls through to the
+  // "user-scoped keys see all accessible agents" branch. Keep this union
+  // exhaustive against `mcp_api_keys.scope`; anything not listed must be
+  // treated as least-privileged, never as `user`.
+  scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous";
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
 
   // --- #848 inline email auth (anonymous scope only) ---------------------
@@ -397,4 +407,21 @@ export interface AgentFileTreeResponse {
   tree: AgentFileNode[];
   total_files: number;
   show_hidden: boolean;
+}
+
+/**
+ * Agent report metadata — the list-response shape (#918/#1538). Deliberately
+ * carries NO `payload`: list is metadata, detail fetches the body, mirroring the
+ * REST split so a broad listing can't dump every report's contents.
+ */
+export interface ReportSummary {
+  id: string;
+  agent_name: string;
+  report_type: string;
+  title: string;
+  display_hint?: string | null;
+  schema_version?: number;
+  period_start?: string | null;
+  period_end?: string | null;
+  created_at: string;
 }

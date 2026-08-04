@@ -25,6 +25,8 @@ from dependencies import (
     get_current_user,
     OwnedAgentByName,
     AuthorizedAgentByName,
+    reject_agent_principal,
+    _reject_connector_principal,
 )
 from models import (
     User,
@@ -96,7 +98,16 @@ async def regenerate_connector_key(
     """Mint/regenerate the scoped key — returns the secret once; old key invalidated.
 
     Enabling the connector too, so a freshly-keyed connector is usable.
+
+    Human-only (#1854): this is the one route in the file that returns a live
+    key PLAINTEXT, and an agent-scoped principal resolves to the owner — so on
+    an owner who owns several agents (and unconditionally for an admin) an agent
+    could mint and read a sibling's connector credential. A connector key
+    minting another connector key is likewise consumption-only breach.
     """
+    reject_agent_principal(current_user)
+    _reject_connector_principal(current_user)
+
     secret = db.regenerate_connector_key(agent_name, current_user.id)
     cfg = db.get_connector_config(agent_name)
     if not cfg or not cfg["enabled"]:

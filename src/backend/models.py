@@ -6,11 +6,11 @@ import re
 import unicodedata
 
 from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 from datetime import datetime
 from enum import Enum
 
-from utils.helpers import to_utc_iso
+from utils.helpers import parse_iso_timestamp, to_utc_iso
 from db_models import WebFileUpload  # noqa: F401 — re-exported for router imports
 
 
@@ -20,6 +20,39 @@ from db_models import WebFileUpload  # noqa: F401 — re-exported for router imp
 _FORK_DESTINATION_RE = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9._-]+$"
 )
+
+
+# A GitHub PAT is sent as an `Authorization: Bearer <pat>` header
+# (`services/github_service.py`) and embedded in a git remote URL. h11 rejects an
+# illegal header value by ECHOING it, so a token carrying `\r` or `\n` — what a
+# paste from a terminal or clipboard routinely picks up — surfaces the RAW token
+# in the exception message, which then reaches an error response and the platform
+# log (Vector-captured, operator-readable). Validating the charset HERE closes
+# that at the boundary, once, for every consumer — rather than scrubbing each
+# error handler downstream and hoping none is missed.
+#
+# `\x21-\x7E` is printable ASCII minus space: a superset of every GitHub PAT
+# format (classic `ghp_*` and fine-grained `github_pat_*` are `[A-Za-z0-9_]`) and
+# exactly the set that is safe in both a header value and a URL userinfo field.
+# Deliberately permissive about WHICH printable characters, so a future token
+# format is not rejected; strict about whitespace and control characters, which
+# is where the leak lives.
+_PAT_SAFE_RE = re.compile(r"^[\x21-\x7E]+$")
+
+
+def _validate_pat_secret(v: SecretStr) -> SecretStr:
+    """Strip surrounding whitespace and reject a header-unsafe GitHub token."""
+    raw = v.get_secret_value().strip()
+    if not raw:
+        raise ValueError("github_pat must not be empty")
+    if not _PAT_SAFE_RE.match(raw):
+        # Never echo the value — that is the leak this guard exists to prevent.
+        raise ValueError(
+            "github_pat contains characters that are not valid in a GitHub "
+            "token (whitespace, line breaks or control characters). Copy the "
+            "token again without surrounding whitespace."
+        )
+    return SecretStr(raw)
 
 
 class ForkToOwnRequest(BaseModel):
@@ -55,9 +88,77 @@ class ForkToOwnRequest(BaseModel):
     @field_validator("github_pat")
     @classmethod
     def _validate_pat(cls, v: SecretStr) -> SecretStr:
-        if not v.get_secret_value().strip():
-            raise ValueError("github_pat must not be empty")
+        return _validate_pat_secret(v)
+
+
+class BindAgentRepoRequest(BaseModel):
+    """Post-creation repo binding parameters (trinity-enterprise#109).
+
+    Points a LIVE agent at a GitHub repo the user owns, creating it if needed,
+    from the agent's *current workspace* — not from its template. Same three
+    fields as :class:`ForkToOwnRequest` and the same destination validator, but
+    a distinct model because the two are distinct API contracts (a create-time
+    sub-object vs a standalone request body) and #654/Invariant #14 wants the
+    contract visible here rather than aliased.
+
+    ``github_pat`` is the USER's token: it creates/validates the destination,
+    authenticates the in-container push, and is then persisted as the agent's
+    per-agent PAT (#347). SecretStr keeps it out of reprs/logs; unwrap exactly
+    once at the service boundary.
+    """
+
+    destination_repo: str = Field(
+        ...,
+        description="Destination repo as owner/name in the user's account or org",
+    )
+    github_pat: SecretStr = Field(
+        ...,
+        description=(
+            "User's GitHub PAT — creates/authorizes the repo and becomes the "
+            "agent's git identity"
+        ),
+    )
+    private: bool = Field(
+        True, description="Destination repo visibility (private by default)"
+    )
+
+    @field_validator("destination_repo")
+    @classmethod
+    def _validate_destination(cls, v: str) -> str:
+        v = v.strip()
+        if ".." in v or not _FORK_DESTINATION_RE.match(v):
+            raise ValueError(
+                "destination_repo must be 'owner/name' (GitHub owner and repo "
+                "name characters only)"
+            )
         return v
+
+    @field_validator("github_pat")
+    @classmethod
+    def _validate_pat(cls, v: SecretStr) -> SecretStr:
+        return _validate_pat_secret(v)
+
+
+class BindAgentRepoResponse(BaseModel):
+    """Result of a successful post-creation repo binding (trinity-enterprise#109).
+
+    Carries no token and no repo URL containing one. ``previous_repo`` is
+    echoed so the UI can state what the agent moved *from* without a second
+    round-trip, and ``recreated`` tells the operator whether the container env
+    was actually re-baked — the step that makes the rebind survive a restart.
+    """
+
+    success: bool = True
+    agent_name: str
+    github_repo: str
+    previous_repo: str
+    default_branch: str
+    private: bool
+    created_repo: bool
+    reused_existing: bool
+    recreated: bool
+    repo_url: str
+    message: str
 
 
 class EphemeralConfig(BaseModel):
@@ -214,6 +315,19 @@ class User(BaseModel):
     # rather than on the resolved user: the whole point of the request is that
     # it concerns somebody other than the owner.
     portal_delegate: bool = False
+    # #1854: the raw `mcp_api_keys.scope` this principal authenticated with, or
+    # None on the JWT (interactive human) branch. `scope` is a free-text column
+    # with NO CHECK constraint and already carries five live values
+    # (user/agent/system/connector/portal_delegate), so the two flags above are a
+    # DENYlist over an open space: `scope='system'` sets neither `agent_name`
+    # (only for scope='agent') nor `connector_agent` (only for
+    # scope='connector'), walks through both guards, and resolves to the key
+    # OWNER carrying the owner's role. This field is what lets a guard be an
+    # ALLOWlist ("is this a human?") instead — fail-closed against a sixth scope
+    # a future PR invents. Also the missing audit dimension: without it a
+    # credential-rotation row cannot distinguish "the owner from a browser" from
+    # "the owner's leaked MCP key".
+    mcp_scope: Optional[str] = None
 
 
 class Token(BaseModel):
@@ -348,7 +462,26 @@ class Activity(BaseModel):
 
 # Max serialized-JSON byte length of a report payload. Enforced at the router
 # (oversize → HTTP 413) to bound SQLite growth and list-response weight.
-REPORT_PAYLOAD_MAX_BYTES = 256 * 1024  # 256 KiB
+# #1537: raised from 256 KiB. Measured on a live fleet before choosing: the
+# reports in existence were 201 bytes on average, 683 at the largest — four
+# orders of magnitude under the old cap. So the cap was never the thing agents
+# hit; it was the thing that would reject the FIRST real tabular report (a lead
+# list, a scan result) the moment one appeared. 5 MiB is a deliberate middle:
+# comfortably past "thousands of rows" of ordinary tabular JSON, and still small
+# enough that one row is a sane thing to hold in memory while rendering.
+#
+# The blob stays in one TEXT column. Off-row storage was considered and NOT
+# built: with no payload anywhere near the old cap, a migration + a rows table
+# would be a schema commitment made against a hypothetical. The paginated row
+# reader below is what keeps a large payload off the wire; if real payloads ever
+# approach this ceiling, THAT measurement is what should justify moving them
+# off-row.
+REPORT_PAYLOAD_MAX_BYTES = 5 * 1024 * 1024  # 5 MiB
+
+# Rows returned per page by the tabular row reader (#1537). Bounds the response
+# even when a payload carries tens of thousands of rows.
+REPORT_ROWS_PAGE_DEFAULT = 100
+REPORT_ROWS_PAGE_MAX = 1000
 
 # Renderer hints the frontend understands; an unknown/absent hint falls back to
 # the report_type prefix map, then the JSON viewer.
@@ -749,6 +882,101 @@ class InternalDecryptInjectRequest(BaseModel):
     """Request for internal decrypt-and-inject (startup.sh)."""
     agent_name: str
 
+# ============================================================================
+# Guided Credential Setup (trinity-enterprise#127)
+# ============================================================================
+
+class CredentialRequirement(BaseModel):
+    """One credential variable an agent needs, with its live status.
+
+    RENDERING CONTRACT — binding, and enforced by component tests rather than by
+    this model, because it is about the DOM the fields land in:
+
+    * `title`, `description`, `source`, `default` and `errors[]` are
+      author-controlled text that reaches an operator. Interpolate them as TEXT
+      only. Do NOT route them through `utils/markdown.js`: for these fields
+      markdown is a WIDENING, since it hands the template author an arbitrary
+      `[label](url)` surface immediately beside a credential input, which defeats
+      the point of having one validated `setup_url`. `v-html` stays banned
+      (H-005).
+    * The anchor text for `setup_url` MUST be `setup_url_display_host`, never
+      `title`. `<a href="https://evil.tld">OpenAI API keys</a>` recreates the
+      userinfo attack in pure HTML with no validator in the way — and
+      `_setup_url_error` rejects `user@host` precisely to stop label/destination
+      divergence.
+    * `setup_url_display_host is None` means the host could not be verified:
+      render the URL as INERT TEXT, not a link.
+    * `secret is True` (the default) MUST mask the input.
+    * `format` is an OPEN vocabulary — never map an unrecognised value onto a DOM
+      attribute (`type`, `pattern`) without a client-side allowlist.
+    """
+
+    name: str
+    title: str
+    description: Optional[str] = None
+    # Tri-state: True | False | "unknown". `"unknown"` means the template author
+    # never opted in (a bare `- FOO`), and rendering it as required cries wolf on
+    # every legacy template. It never counts toward `summary.blocking`.
+    required: Union[bool, str] = "unknown"
+    # Fail-safe default: mask until an author says otherwise.
+    secret: bool = True
+    format: Optional[str] = None
+    # A PLACEHOLDER, never a prefilled value, and suppressed entirely by the UI
+    # unless `secret is False`. Nothing enforces the schema's "NEVER put a real
+    # credential here", so an author — or a prompt-injected agent rewriting its
+    # own template.yaml — could set `default: "sk-attacker-controlled"`; prefilling
+    # it turns author YAML into a one-click credential write, and `secret: true`
+    # would MASK the field, making it less likely the operator reads what they
+    # submit. `default` exists for `"./Brain"`-style paths, i.e. the
+    # `secret: false` case.
+    default: Optional[str] = None
+    source: Optional[str] = None
+    # True for a name observed in `.mcp.json.template` / `.env.example` but never
+    # declared (`state: "declaration_incomplete"`). Advisory rows are never
+    # required and never blocking.
+    advisory: bool = False
+    status: str  # "set" | "missing" | "unknown"
+    setup_url: Optional[str] = None
+    setup_url_display_host: Optional[str] = None
+    setup_url_registrable: Optional[str] = None
+    setup_url_verified: bool = False
+
+
+class CredentialRequirementsSummary(BaseModel):
+    """Server-computed counts, so a badge and its headline cannot drift."""
+
+    total: int = 0
+    set: int = 0
+    missing: int = 0
+    unknown: int = 0
+    # `required is True AND status == "missing"`. Excludes `required == "unknown"`
+    # and every advisory row by construction.
+    blocking: int = 0
+    # Platform-injected variables are dropped from `requirements` (they are never
+    # the operator's to set) but counted here, so the exclusion stays visible.
+    platform_injected_excluded: int = 0
+    advisory: int = 0
+
+
+class CredentialRequirementsResponse(BaseModel):
+    """Per-agent credential checklist (trinity-enterprise#127)."""
+
+    agent_name: str
+    # `degraded` DOMINATES `no_credentials_required` unconditionally — a degraded
+    # lookup and a genuinely credential-free agent produce an identical empty
+    # requirement set, and "Ready" is the one state nobody investigates.
+    state: str  # ok | no_credentials_required | declaration_incomplete | degraded
+    requirements_source: str  # live_workspace | catalog | none
+    status_source: str  # live | unavailable
+    degraded_reason: Optional[str] = None
+    requirements: List[CredentialRequirement] = []
+    summary: CredentialRequirementsSummary = CredentialRequirementsSummary()
+    # The normalizer's sanitized messages: non-printables stripped and
+    # length-capped, but NOT HTML-escaped. Text-interpolate only.
+    errors: List[str] = []
+
+
+
 
 # ============================================================================
 # GitHub PAT Propagation Models (#211)
@@ -868,6 +1096,19 @@ class AgentDefaultResourcesUpdate(BaseModel):
 class AgentDefaultAccessPolicyUpdate(BaseModel):
     """Body for PUT /api/settings/agent-defaults/access-policy (#1129)."""
     require_email: Optional[bool] = None
+
+
+class SkillsLibraryAutomationUpdate(BaseModel):
+    """Body for PUT /api/settings/skills-library (trinity-enterprise#236).
+
+    Partial update — every field optional, an omitted field is left untouched,
+    so toggling one flag can never silently reset the interval. The interval's
+    range (300–86400) is enforced in the router so an out-of-range value returns
+    a descriptive 400 rather than a generic 422.
+    """
+    auto_sync_enabled: Optional[bool] = None
+    auto_sync_interval_seconds: Optional[int] = None
+    auto_reinject_enabled: Optional[bool] = None
 
 
 class MaxParallelTasksCeilingUpdate(BaseModel):
@@ -1005,6 +1246,31 @@ class FleetExecutionStats(BaseModel):
     deleted_agent_cost: float = 0.0
 
 
+class EvaluationCreate(BaseModel):
+    """Body for a manual/admin evaluation write (ent#206). The graded agent is
+    the path `{name}`; the caller is fenced human-admin-only at the router, so
+    a graded agent can never write its own grade."""
+    execution_id: Optional[str] = None
+    archetype: Optional[str] = Field(default=None, max_length=40)
+    completion: Optional[bool] = None
+    quality: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    checks: Optional[dict] = None
+    judge: Optional[dict] = None
+
+
+class EvaluationResponse(BaseModel):
+    id: str
+    agent_name: str
+    execution_id: Optional[str] = None
+    archetype: Optional[str] = None
+    completion: Optional[bool] = None
+    quality: Optional[float] = None
+    checks: Optional[Any] = None
+    judge: Optional[Any] = None
+    evaluator: str
+    created_at: str
+
+
 class CircuitBreakerConfigUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/circuit-breaker (RELIABILITY-007, #526).
 
@@ -1140,6 +1406,72 @@ class McpInlineChatResponse(BaseModel):
     agent: str
     response: str
     execution_id: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Agent MCP key — detection, self-heal & rotation (#1854)
+# ---------------------------------------------------------------------------
+
+class AgentMcpKeyStatus(BaseModel):
+    """Response for GET /api/agents/{name}/mcp-key (owner view).
+
+    Metadata only — the agent-key plaintext is unrecoverable by design (only its
+    SHA-256 hash is stored) and has never been exposed over HTTP.
+    """
+    agent_name: str
+    exists: bool = False
+    key_id: Optional[str] = None
+    key_prefix: Optional[str] = None
+    scope: Optional[str] = None
+    created_at: Optional[datetime] = None
+    last_used_at: Optional[datetime] = None
+    usage_count: int = 0
+    # missing | env_absent | env_mismatch | never_used | stale | active | exempt
+    health: str = "missing"
+    health_detail: Optional[str] = None
+    rotatable: bool = True
+
+
+class AgentMcpKeyVerifyEntry(BaseModel):
+    """One `.mcp.json` server entry as the CONTAINER reports it.
+
+    Carries no secret: the bearer token is hashed inside the container and only
+    the resolved key's public metadata (scope / prefix / bound agent) appears
+    here.
+    """
+    server_name: str
+    # ok | foreign_user_key | foreign_agent_key | unknown_key
+    verdict: str
+    key_scope: Optional[str] = None
+    key_prefix: Optional[str] = None
+    key_agent_name: Optional[str] = None
+
+
+class AgentMcpKeyVerifyResult(BaseModel):
+    """Response for POST /api/agents/{name}/mcp-key/verify — container truth."""
+    agent_name: str
+    # ok | foreign_user_key | foreign_agent_key | unknown_key | not_configured
+    # | shadow_entry | unavailable
+    verdict: str
+    message: Optional[str] = None
+    entries: List[AgentMcpKeyVerifyEntry] = Field(default_factory=list)
+
+
+class AgentMcpKeyRegenerateResult(BaseModel):
+    """Response for POST /api/agents/{name}/mcp-key/regenerate.
+
+    Deliberately carries **no plaintext**. Nobody outside the container has any
+    use for an agent key — it is minted, baked into ``Config.Env``, and read by
+    the agent — so returning it would add a credential-exfiltration primitive on
+    an owner-reachable route and buy nothing.
+    """
+    agent_name: str
+    key_id: str
+    key_prefix: str
+    delivery: str            # recreated | db_only
+    superseded_deleted: int = 0
+    children_repointed: int = 0
+    message: Optional[str] = None
 
 
 class VoiceRepliesUpdate(BaseModel):
@@ -2235,10 +2567,21 @@ class ReminderCreate(BaseModel):
     def _check_fire_at_iso(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
+        # Delegate to the SAME parser reminder_service._resolve_fire_at uses, so
+        # "the validator accepted it" implies "the parser can parse it" BY
+        # CONSTRUCTION (#1831). A local re-implementation diverged: this used
+        # v.replace("Z", "+00:00") (EVERY Z) against the parser's trailing-Z-only
+        # strip, so a mid-string Z passed here and then raised ValueError out of
+        # the unguarded service call — HTTP 500. Do not reintroduce a local
+        # normalization to match _validate_iso8601 above: that value is never
+        # re-parsed, so it has no parser to agree with. This one does.
         try:
-            datetime.fromisoformat(v.replace("Z", "+00:00"))
+            parse_iso_timestamp(v)
         except (ValueError, AttributeError):
             raise ValueError("fire_at must be an ISO-8601 timestamp")
+        # Return v UNCHANGED — never canonicalized. The create-idempotency key
+        # hashes raw_fire_spec() == f"fire_at={self.fire_at}" (Invariant #18), so
+        # rewriting it here forks the key and double-creates on a client retry.
         return v
 
     @model_validator(mode="after")
@@ -2771,6 +3114,8 @@ class TelegramBindingResponse(BaseModel):
     configured: bool = False
     group_count: int = 0
     warning: Optional[str] = None
+    # ent#264: in-progress indicator toggle (default ON); None when unconfigured.
+    progress_indicator_enabled: Optional[bool] = None
 
 
 class TelegramConfigureRequest(BaseModel):
@@ -2791,17 +3136,27 @@ class TelegramGroupConfigResponse(BaseModel):
     welcome_enabled: bool = False
     welcome_text: Optional[str] = None
     is_active: bool = True
+    # ent#265: per-group consent for completion reports (default allow; the
+    # model IS the field allowlist for the GET's `Response(**row)` build).
+    allow_proactive: bool = True
 
 
 class TelegramGroupConfigUpdateRequest(BaseModel):
     trigger_mode: Optional[str] = None
     welcome_enabled: Optional[bool] = None
     welcome_text: Optional[str] = None
+    # ent#265: human-only arm — the router calls reject_agent_principal when set.
+    allow_proactive: Optional[bool] = None
 
 
 class TelegramGroupMessageRequest(BaseModel):
     """Request model for proactive group messaging (Issue #349)."""
     message: str
+
+
+class TelegramProgressIndicatorRequest(BaseModel):
+    """ent#264 — toggle the in-progress status indicator on a Telegram binding."""
+    enabled: bool
 
 
 class SlackChannelProactiveRequest(BaseModel):

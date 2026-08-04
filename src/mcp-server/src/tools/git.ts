@@ -117,10 +117,14 @@ export function createGitTools(client: TrinityClient, requireApiKey: boolean) {
         // ent#123: `no_write_credentials` is a credentials gap, not a git
         // conflict — an LLM turn cannot fix it, so don't send the caller to
         // chat_with_agent. Surface the backend's actionable detail verbatim.
+        // ent#109: the hint no longer teaches the create-a-new-agent-and-import
+        // workaround — the in-place retrofit exists now. Kept in sync with
+        // `git_service.NO_WRITE_CREDENTIALS_MESSAGE` (Invariant #13) by
+        // `tests/unit/test_ent109_no_write_credentials_message.py`.
         const hint =
           error.conflictType === "no_write_credentials"
             ? "This agent has no push credentials. A chat turn cannot fix this — " +
-              "fork-to-own a new agent (importing this agent's data) or add a GitHub token."
+              "bind this agent to a repo you own from its Git tab, or add a GitHub token."
             : "This git operation hit a conflict that can't be resolved deterministically. " +
               `Resolve it via chat_with_agent(agent_name="${agentName}", ...).`;
         return JSON.stringify(

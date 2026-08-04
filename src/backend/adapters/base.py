@@ -148,6 +148,18 @@ class ChannelAdapter(ABC):
         """
         return None
 
+    # -------------------------------------------------------------------------
+    # In-flight progress indicator seam (ent#264): start / progress / resolve
+    # -------------------------------------------------------------------------
+    # Capability declaration for the router's per-turn progress driver. The
+    # router arms a driver task only when `progress_threshold_seconds` is set,
+    # so channels without a progress implementation behave byte-identically
+    # (no task created, no extra calls). All per-turn indicator state rides
+    # `NormalizedMessage.metadata` — adapters are long-lived singletons
+    # handling concurrent turns, so turn state must never live on the adapter.
+    progress_threshold_seconds: Optional[float] = None  # None ⇒ driver never armed
+    progress_interval_seconds: float = 60.0             # tick cadence past threshold
+
     async def indicate_processing(self, message: NormalizedMessage) -> None:
         """
         Show a processing indicator to the user.
@@ -155,20 +167,49 @@ class ChannelAdapter(ABC):
         Called when the agent starts working on a message.
         Each channel implements this differently:
         - Slack: add ⏳ reaction to the user's message
-        - Telegram: send typing action
+        - Telegram: send typing action + 👀 reaction ack on the triggering
+          message (ent#264 — gated by the per-binding toggle and, in groups,
+          on @mention/reply triggers or `all` trigger mode); stashes the
+          per-turn indicator config on ``message.metadata``
         - Discord: trigger typing indicator
+
+        Must be best-effort: a raise here would abort the turn, so concrete
+        implementations wrap their whole body (the router also wraps the call
+        as a second layer). Default: no-op. Override in concrete adapters.
+        """
+        pass
+
+    async def indicate_progress(
+        self, message: NormalizedMessage, elapsed_seconds: float
+    ) -> None:
+        """
+        Show in-flight progress for a long-running turn (ent#264).
+
+        Called by the router's progress driver on each tick once the run has
+        crossed ``progress_threshold_seconds`` (never called when that is
+        None). The adapter owns what "progress" looks like — Telegram sends an
+        elapsed-time placeholder message on the first tick and then edits it
+        in place with a fresh elapsed time.
+
+        Must be fail-soft (never raise past its own boundary, except letting
+        CancelledError propagate) and must keep all per-turn state on
+        ``message.metadata``.
 
         Default: no-op. Override in concrete adapters.
         """
-        pass
+        return None
 
     async def indicate_done(self, message: NormalizedMessage) -> None:
         """
         Remove the processing indicator / show completion.
 
-        Called when the agent finishes (success or error).
+        Called when the agent finishes (success or error). The router resolves
+        the ent#264 progress driver (cancelled and awaited dead) BEFORE this
+        hook runs, so an implementation may safely tear down anything
+        ``indicate_progress`` created.
         - Slack: remove ⏳, add ✅
-        - Telegram: no-op (typing auto-expires)
+        - Telegram: clear the 👀 reaction; delete the elapsed-time placeholder
+          (fallback: edit it to a short neutral terminal line) — ent#264
 
         Default: no-op. Override in concrete adapters.
         """

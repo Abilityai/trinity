@@ -13,8 +13,10 @@ Supports:
 - Member events (bot added/removed, user join/leave)
 """
 
+import asyncio
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -33,6 +35,22 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 
 # Group chat types
 _GROUP_CHAT_TYPES = {"group", "supergroup"}
+
+# In-flight progress indicator (ent#264). Threshold before the elapsed-time
+# placeholder appears, and the edit cadence once it has (well under Telegram's
+# ≈1 msg/s per-chat / ≈20 msg/min group budget). Tunable constants, not config
+# — a per-binding threshold surface is deliberate scope-out.
+_PROGRESS_THRESHOLD_SECONDS = 30.0
+_PROGRESS_INTERVAL_SECONDS = 60.0
+
+# 👀 is in Telegram's allowed bot reaction set (⚙️ and ✅ are NOT — the Slack
+# ⏳→✅ pattern does not port to Telegram reactions).
+_PROGRESS_ACK_EMOJI = "👀"
+
+# Consecutive failed progress HTTP attempts (placeholder sends, edits, and
+# timeouts alike) before the per-turn degraded flag stops all further progress
+# HTTP — a fleet-wide Telegram outage must quiesce, not retry per-turn-per-minute.
+_PROGRESS_MAX_CONSECUTIVE_FAILURES = 2
 
 # Pending login TTL in seconds (matches code expiry)
 _PENDING_LOGIN_TTL = 600  # 10 minutes
@@ -79,6 +97,13 @@ def _clear_pending_login(binding_id: int, user_id: str) -> None:
 
 class TelegramAdapter(ChannelAdapter):
     """Telegram implementation of ChannelAdapter with per-agent bot routing."""
+
+    # ent#264 — progress-driver capability declaration (see base.py): the
+    # router arms its per-turn ticker off these. All indicator state rides
+    # `message.metadata` (this adapter is a long-lived singleton handling
+    # concurrent turns — never store per-turn state on the instance).
+    progress_threshold_seconds = _PROGRESS_THRESHOLD_SECONDS
+    progress_interval_seconds = _PROGRESS_INTERVAL_SECONDS
 
     # =========================================================================
     # ChannelAdapter interface — identity & routing
@@ -148,10 +173,18 @@ class TelegramAdapter(ChannelAdapter):
         agent_name = raw_event.get("_agent_name", "")
         is_group = chat_type in _GROUP_CHAT_TYPES
 
-        # Group chat filtering: only process @mentions or replies to bot
+        # Group chat filtering: only process @mentions or replies to bot.
+        # ent#264: stash the ack-eligibility gate while the trigger facts are
+        # in hand — the progress indicator (👀 reaction + placeholder) fires
+        # only for turns that will visibly reply: DMs, @mention/reply-triggered
+        # group turns, and `all`-trigger-mode groups (the bot replies to
+        # everything there). Observe mode stays excluded so the indicator
+        # never reveals a silently-observing bot.
+        progress_ack_eligible = True
         if is_group:
             is_mentioned = self._is_bot_mentioned(message, bot_username)
             is_reply = self._is_reply_to_bot(message, bot_id)
+            progress_ack_eligible = is_mentioned or is_reply
 
             if not is_mentioned and not is_reply:
                 # Check trigger mode — if "all" or "observe", process anyway
@@ -162,6 +195,7 @@ class TelegramAdapter(ChannelAdapter):
                     trigger_mode = group_config.get("trigger_mode") if group_config else None
                     if trigger_mode not in ("all", "observe"):
                         return None
+                    progress_ack_eligible = trigger_mode == "all"
                 else:
                     return None
 
@@ -206,6 +240,10 @@ class TelegramAdapter(ChannelAdapter):
                 "has_photo": "photo" in message,
                 "has_document": "document" in message,
                 "raw_message": message,
+                # ent#264: True for DMs, mention/reply-triggered group turns,
+                # and `all`-trigger-mode groups; False for observe-mode
+                # un-mentioned turns (typing only — no visible indicator).
+                "progress_ack_eligible": progress_ack_eligible,
             }
         )
 
@@ -373,10 +411,196 @@ class TelegramAdapter(ChannelAdapter):
         return agent_name
 
     async def indicate_processing(self, message: NormalizedMessage) -> None:
-        """Send typing indicator to Telegram chat."""
-        bot_token = db.get_telegram_bot_token(message.metadata.get("agent_name", ""))
-        if bot_token:
+        """Telegram processing ack (ent#264): typing garnish + 👀 reaction.
+
+        Resolves the binding ONCE, stashes the per-turn indicator config on
+        ``message.metadata["_progress_cfg"]`` for the later hooks (single
+        binding read per turn), sends the typing action (existing behavior,
+        preserved for every turn including observe-mode), and — when the
+        per-binding toggle is on and the turn is ack-eligible — sets the 👀
+        reaction on the triggering message.
+
+        NEVER raises: the entire body (including the DB read) is wrapped —
+        a raise here would abort the turn with no user-visible error. Toggle
+        reads are per-turn: flipping the toggle mid-run takes effect on the
+        NEXT turn (documented behavior).
+        """
+        try:
+            agent_name = message.metadata.get("agent_name", "")
+            binding = db.get_telegram_binding(agent_name) if agent_name else None
+            bot_token: Optional[str] = None
+            enabled = False
+            if binding:
+                # Decrypt from the row already in hand — do NOT also call
+                # get_telegram_bot_token(), which re-reads the binding.
+                bot_token = db.decrypt_telegram_bot_token(
+                    binding.get("bot_token_encrypted") or ""
+                )
+                # Default-ON predicate, evaluated in Python (never SQL —
+                # NULL != 0 is NULL there): only an explicit 0 disables.
+                v = binding.get("progress_indicator_enabled")
+                enabled = v is None or v != 0
+            message.metadata["_progress_cfg"] = {
+                "enabled": enabled,
+                "bot_token": bot_token,
+            }
+
+            if not bot_token:
+                return
+
+            # Typing garnish — existing behavior preserved verbatim (fires on
+            # every turn, including observe-mode group turns).
             await self._send_chat_action(bot_token, message.channel_id, "typing")
+
+            # 👀 reaction ack — the persistent pre-threshold signal. Failure
+            # (reactions disabled per-chat, permissions, old chat → 400) is
+            # swallowed: the ladder continues with typing + placeholder.
+            if (
+                enabled
+                and message.metadata.get("progress_ack_eligible", True)
+                and message.thread_id
+            ):
+                ok = await self._set_message_reaction(
+                    bot_token,
+                    message.channel_id,
+                    message.thread_id,
+                    _PROGRESS_ACK_EMOJI,
+                )
+                if ok:
+                    message.metadata["_indicator_reaction_set"] = True
+        except Exception as e:  # noqa: BLE001 — must never abort the turn
+            logger.debug(f"[TELEGRAM] indicate_processing failed (non-fatal): {e}")
+
+    async def indicate_progress(
+        self, message: NormalizedMessage, elapsed_seconds: float
+    ) -> None:
+        """ent#264 tick: send the elapsed-time placeholder on the first call,
+        edit it in place on subsequent calls. Same gate as the reaction ack
+        (toggle + ack-eligibility), read from the per-turn metadata stash — no
+        DB call per tick. Fail-soft; lets CancelledError propagate."""
+        try:
+            cfg = message.metadata.get("_progress_cfg") or {}
+            bot_token = cfg.get("bot_token")
+            if (
+                not bot_token
+                or not cfg.get("enabled")
+                or not message.metadata.get("progress_ack_eligible", True)
+                or message.metadata.get("_indicator_degraded")
+            ):
+                return
+
+            text = self._format_progress_text(elapsed_seconds)
+
+            placeholder_id = message.metadata.get("_indicator_placeholder_id")
+            if placeholder_id:
+                ok = await self._edit_message_text(
+                    bot_token, message.channel_id, placeholder_id, text
+                )
+                self._track_indicator_failure(message, ok)
+                return
+
+            # First tick — send the placeholder inside its OWN future so a
+            # terminal resolve landing mid-send can still record the
+            # message_id (the id write lives INSIDE the shielded coroutine:
+            # code after `await shield(fut)` never runs on cancellation).
+            fut = asyncio.ensure_future(
+                self._send_and_record_placeholder(message, bot_token, text)
+            )
+            message.metadata["_indicator_inflight"] = fut
+            try:
+                await asyncio.shield(fut)
+            except asyncio.CancelledError:
+                # fut stays in metadata — _resolve_indicator settles it.
+                raise
+            message.metadata.pop("_indicator_inflight", None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — a tick must never fail the turn
+            logger.debug(f"[TELEGRAM] indicate_progress failed (non-fatal): {e}")
+
+    async def indicate_done(self, message: NormalizedMessage) -> None:
+        """ent#264 terminal resolve: clear the 👀 reaction and delete the
+        elapsed-time placeholder (fallback: edit it to a short neutral
+        terminal line). The router cancels-and-awaits the progress driver
+        BEFORE calling this, so no tick can land after the teardown.
+
+        Cleared at EVERY terminal — no success-👍 swap (✅ is not in
+        Telegram's allowed bot reaction set; the reply itself is the
+        completion signal). No-op when nothing was armed. Never raises."""
+        try:
+            cfg = message.metadata.get("_progress_cfg") or {}
+            bot_token = cfg.get("bot_token")
+            if not bot_token:
+                return
+
+            if message.metadata.pop("_indicator_reaction_set", None):
+                await self._set_message_reaction(
+                    bot_token, message.channel_id, message.thread_id, None
+                )
+
+            placeholder_id = message.metadata.pop("_indicator_placeholder_id", None)
+            if placeholder_id:
+                deleted = await self._delete_message(
+                    bot_token, message.channel_id, placeholder_id
+                )
+                if not deleted:
+                    # Neutral fallback — deliberately NOT "see reply below"
+                    # (a [NO_REPLY] turn has no reply below). Static template
+                    # text only, never agent/error content.
+                    fallback = (
+                        "✔ Done."
+                        if message.metadata.get("_indicator_terminal_ok", True)
+                        else "⚠️ Finished with an error."
+                    )
+                    await self._edit_message_text(
+                        bot_token, message.channel_id, placeholder_id, fallback
+                    )
+        except Exception as e:  # noqa: BLE001 — never mask the terminal path
+            logger.debug(f"[TELEGRAM] indicate_done failed (non-fatal): {e}")
+
+    async def _send_and_record_placeholder(
+        self, message: NormalizedMessage, bot_token: str, text: str
+    ) -> None:
+        """Send the first placeholder AND record its message_id — both inside
+        this coroutine, which runs shielded from driver cancellation, so the
+        id is recorded even when a resolve cancels the tick mid-send."""
+        reply_to = message.thread_id if message.metadata.get("is_group") else None
+        result = await self._send_placeholder_message(
+            bot_token, message.channel_id, text, reply_to
+        )
+        ok = bool(result and result.get("message_id"))
+        if ok:
+            message.metadata["_indicator_placeholder_id"] = str(result["message_id"])
+        self._track_indicator_failure(message, ok)
+
+    @staticmethod
+    def _track_indicator_failure(message: NormalizedMessage, ok: bool) -> None:
+        """Count consecutive failed progress HTTP attempts (sends, edits, and
+        timeouts alike); at the cap, set the per-turn degraded flag that stops
+        all further progress HTTP. Success resets the streak."""
+        if ok:
+            message.metadata["_indicator_failures"] = 0
+            return
+        failures = int(message.metadata.get("_indicator_failures", 0)) + 1
+        message.metadata["_indicator_failures"] = failures
+        if failures >= _PROGRESS_MAX_CONSECUTIVE_FAILURES:
+            message.metadata["_indicator_degraded"] = True
+            logger.debug(
+                "[TELEGRAM] progress indicator degraded after "
+                f"{failures} consecutive failed attempts"
+            )
+
+    @staticmethod
+    def _format_progress_text(elapsed_seconds: float) -> str:
+        """Static elapsed-time template ONLY — never agent/error content (the
+        ent#224 egress class is closed by construction). The UTC stamp makes a
+        restart-stranded placeholder self-dating instead of an unresolvable lie."""
+        now_utc = datetime.now(timezone.utc).strftime("%H:%M")
+        if elapsed_seconds < 60:
+            elapsed = f"{int(elapsed_seconds)}s"
+        else:
+            elapsed = f"{int(elapsed_seconds // 60)} min"
+        return f"⏳ Working on it — {elapsed} elapsed · updated {now_utc} UTC"
 
     # =========================================================================
     # Group chat helpers (TGRAM-GROUP)
@@ -769,6 +993,143 @@ class TelegramAdapter(ChannelAdapter):
                 await client.post(url, json={"chat_id": chat_id, "action": action})
         except Exception as e:
             logger.debug(f"Failed to send chat action: {e}")
+
+    # -------------------------------------------------------------------------
+    # In-flight indicator primitives (ent#264) — _send_message-shaped: httpx,
+    # fail-soft, log status + response body only (NEVER the URL, which embeds
+    # the bot token).
+    # -------------------------------------------------------------------------
+
+    async def _set_message_reaction(
+        self,
+        bot_token: str,
+        chat_id: str,
+        message_id: str,
+        emoji: Optional[str],
+    ) -> bool:
+        """setMessageReaction — set one emoji, or clear with ``emoji=None``
+        (empty reaction list). Single attempt, no retry: a missed reaction is
+        cosmetic, and a 400 here is the reactions-disabled-per-chat case."""
+        url = f"{TELEGRAM_API_BASE}/bot{bot_token}/setMessageReaction"
+        payload = {
+            "chat_id": chat_id,
+            "message_id": int(message_id),
+            "reaction": [{"type": "emoji", "emoji": emoji}] if emoji else [],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(url, json=payload)
+                if resp.status_code != 200:
+                    logger.debug(
+                        f"Telegram setMessageReaction failed ({resp.status_code}): "
+                        f"{resp.text[:200]}"
+                    )
+                    return False
+                return True
+        except Exception as e:  # noqa: BLE001 — fail-soft primitive
+            logger.debug(f"Telegram setMessageReaction error: {e}")
+            return False
+
+    async def _edit_message_text(
+        self, bot_token: str, chat_id: str, message_id: str, text: str
+    ) -> bool:
+        """editMessageText — one 429 retry honoring retry_after (capped 30s);
+        'message is not modified' counts as success. Explicit HTML parse mode
+        (never MarkdownV2, whose reserved —/·/. would 400 on our template)."""
+        url = f"{TELEGRAM_API_BASE}/bot{bot_token}/editMessageText"
+        payload = {
+            "chat_id": chat_id,
+            "message_id": int(message_id),
+            "text": text,
+            "parse_mode": "HTML",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(url, json=payload)
+                if resp.status_code == 429:
+                    retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+                    logger.debug(
+                        f"Telegram editMessageText rate limited, retry_after={retry_after}s"
+                    )
+                    await asyncio.sleep(min(retry_after, 30))
+                    resp = await client.post(url, json=payload)
+                if resp.status_code == 200:
+                    return True
+                if "message is not modified" in resp.text.lower():
+                    return True
+                logger.debug(
+                    f"Telegram editMessageText failed ({resp.status_code}): {resp.text[:200]}"
+                )
+                return False
+        except Exception as e:  # noqa: BLE001 — fail-soft primitive
+            logger.debug(f"Telegram editMessageText error: {e}")
+            return False
+
+    async def _delete_message(
+        self, bot_token: str, chat_id: str, message_id: str
+    ) -> bool:
+        """deleteMessage — single attempt, fail-soft (caller falls back to an
+        edit-to-done on failure)."""
+        url = f"{TELEGRAM_API_BASE}/bot{bot_token}/deleteMessage"
+        payload = {"chat_id": chat_id, "message_id": int(message_id)}
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(url, json=payload)
+                if resp.status_code != 200:
+                    logger.debug(
+                        f"Telegram deleteMessage failed ({resp.status_code}): "
+                        f"{resp.text[:200]}"
+                    )
+                    return False
+                return True
+        except Exception as e:  # noqa: BLE001 — fail-soft primitive
+            logger.debug(f"Telegram deleteMessage error: {e}")
+            return False
+
+    async def _send_placeholder_message(
+        self,
+        bot_token: str,
+        chat_id: str,
+        text: str,
+        reply_to_message_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        """sendMessage for the ent#264 progress placeholder — _send_message-
+        shaped (one 429 retry honoring retry_after) plus
+        ``disable_notification`` (a "working…" ping must not push-notify; the
+        real reply is the notification) and explicit HTML parse mode. Static
+        template text only — no HTML-fallback path needed."""
+        url = f"{TELEGRAM_API_BASE}/bot{bot_token}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_notification": True,
+        }
+        if reply_to_message_id:
+            payload["reply_parameters"] = {
+                "message_id": int(reply_to_message_id),
+                "allow_sending_without_reply": True,
+            }
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(url, json=payload)
+                if resp.status_code == 429:
+                    retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
+                    logger.debug(
+                        f"Telegram placeholder send rate limited, retry_after={retry_after}s"
+                    )
+                    await asyncio.sleep(min(retry_after, 30))
+                    resp = await client.post(url, json=payload)
+                if resp.status_code != 200:
+                    logger.debug(
+                        f"Telegram placeholder send failed ({resp.status_code}): "
+                        f"{resp.text[:200]}"
+                    )
+                    return None
+                return resp.json().get("result")
+        except Exception as e:  # noqa: BLE001 — fail-soft primitive
+            logger.debug(f"Telegram placeholder send error: {e}")
+            return None
 
     # =========================================================================
     # Message formatting

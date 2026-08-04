@@ -304,3 +304,225 @@ Distinct from the main Trinity MCP server (`src/mcp-server/`, requires a Trinity
 passthrough (the endpoint returns no citations today — the adapter forwards a `citations`
 field if it ever appears); #1460 (`ask_trinity` inside the main Trinity MCP server —
 shares the same tool name/schema and endpoint-client contract).
+
+---
+
+## Agent MCP Key — Detection, Self-Heal & Rotation (#1854)
+
+- **Status**: ✅ Implemented
+- **GitHub Issue**: #1854 (Parts 1 + the container-truth half of Part 2)
+- **Area**: MCP key scope + per-agent credential lifecycle. The auth-fence primitive it
+  adds (`reject_non_interactive_principal`) is cross-linked from
+  [auth.md](auth.md) but owned here.
+
+### Problem
+
+Nothing validated that an agent container authenticates to the Trinity MCP server with
+**its own** `scope='agent'` key. If the `trinity` entry in an agent's `.mcp.json` carries a
+**user-scoped** key, the platform accepts it and the agent operates with the *owner's*
+identity: `list_agents` returns the owner's whole accessible set and the `agent_permissions`
+matrix is silently bypassed (both gates are `scope === "agent"`-conditional and live in the
+MCP server). No surface showed which key an agent actually presents, and the platform had no
+way to mint or rotate an agent-scoped key — the only recovery was hand-editing a protected
+file inside the container.
+
+The agent server re-injects the `trinity` entry from env on **every** start, but the
+injection early-returns unless **both** `TRINITY_MCP_URL` **and** `TRINITY_MCP_API_KEY` are
+present — and the creation-time mint is `try/except`-swallowed, so a failed mint drops both
+and the self-heal never runs. Three live drift causes therefore exist: key absent from env,
+container never restarted, and a *second* Trinity-pointing entry under a non-`trinity`
+server name (which the injection never touches and which no credential rotation can fix).
+
+### FR-1 — Detect: container config-truth probe
+
+- `POST /api/agents/{name}/mcp-key/verify` asks the **running container** what it is
+  configured with, rather than reporting what the platform believes.
+- One `docker exec` (`execute_command_in_container`, the established primitive) runs a
+  base64-injected Python script that reads `~/.mcp.json`, extracts each server entry's
+  bearer token, and emits **only `sha256(token)`** — the token itself, and the file body,
+  never cross the container boundary. Server names are truncated/sanitised.
+- The digest is matched against `mcp_api_keys.key_hash` (plain unsalted SHA-256), yielding a
+  per-entry verdict: `ok` · `foreign_user_key` ("this agent authenticates as user X — the
+  permissions matrix is not in effect") · `foreign_agent_key` · `unknown_key` ·
+  `not_configured` · `shadow_entry` (a second Trinity-pointing entry under a non-`trinity`
+  name) · `unavailable` (stopped container / exec failure — degrade, never 500).
+- Deliberately a separate explicit route, not folded into the GET: a `docker exec` per panel
+  load would be slow. The panel calls it on mount when the agent is running.
+
+### FR-2 — Self-heal: start-time drift predicate
+
+- `check_agent_mcp_key_matches(container, agent_name)` joins the eight existing
+  `check_*_matches` predicates in `start_agent_internal`. Drift when `TRINITY_MCP_API_KEY`
+  **or** `TRINITY_MCP_URL` is absent from the container env, or when `sha256(env value)`
+  matches no **active** `scope='agent'` row for the agent.
+- On drift the recreate mints a fresh key and bakes **both** `TRINITY_MCP_API_KEY` and
+  `TRINITY_MCP_URL` (plus `TRINITY_BACKEND_URL`) so the agent-server injection actually
+  runs. A successful mint satisfies the predicate on the next evaluation, so the recreate
+  converges in one pass; starts are manual, never timed, so a failed mint costs at most one
+  extra recreate per start.
+- `trinity-system` and ephemeral ghosts are **exempt** (the system key is `scope='system'` —
+  minting an agent-scoped replacement is an irreversible privilege downgrade; ghosts are
+  volume-less and "never recreate").
+- The heal takes the **same** `agent:mcp_key_regen:{name}` lock as FR-3 and does **nothing**
+  when it cannot hold it. It runs the identical capture→mint→DELETE sequence, and there is no
+  per-agent start lock, so two concurrent starts both observe the drift; if the second
+  captures after the first's mint but before its delete, it removes the key the first is
+  about to bake in and the surviving container 401s all four readers. A mint taken outside
+  the lock can still be captured-and-deleted by the holder, so the three steps are atomic as
+  a unit. Failure is **silent and inert** here (nothing minted, nothing deleted, the recreate
+  proceeds on the existing env, the next start retries) — the opposite of FR-3's loud
+  503/409, because nobody asked for a heal.
+- The heal writes an `agent_key_self_heal` audit row (metadata only, actor `system`): it
+  mints and deletes credentials fleet-wide with no human in the loop, and an INFO log is not
+  an audit trail for a feature premised on the platform not knowing what its agents
+  authenticate with.
+- The env plaintext is hashed and discarded — never logged.
+
+### FR-3 — Rotate: owner-visible key + deliberate regeneration
+
+- `GET /api/agents/{name}/mcp-key` → `{exists, key_id, key_prefix, scope, created_at,
+  last_used_at, usage_count, health, health_detail}`. Never the secret.
+- `POST /api/agents/{name}/mcp-key/regenerate` → mint → reconcile → deliver → delete
+  superseded, in that order, returning **metadata only — no plaintext**. The agent-key
+  plaintext has never been exposed over HTTP and nobody outside the container has any use
+  for it; returning it would create a credential-exfiltration primitive on an
+  owner-reachable route.
+- Ordering and concurrency:
+  1. refuse `trinity-system` / ephemeral ghosts (**409**), before any mutation;
+  2. acquire `agent:mcp_key_regen:{name}` — **fail-CLOSED**: Redis unavailable ⇒ **503**
+     (two interleaved rotations under a failed-open lock end at "container holds K1, the
+     only active row is K2", permanently 401-ing the heartbeat, result callback, pull
+     worker and MCP client, with the surviving plaintext unrecoverable);
+  3. **capture** the active `scope='agent'` id set *before* the mint;
+  4. mint (`is_active=1` set explicitly);
+  5. reconcile `spawned_by_key_id` (FR-4) — before delivery;
+  6. deliver — **running** agent: `clear_agent_breakers` then container recreate with an
+     `env_overrides` payload carrying key + URL + backend URL; **stopped** agent: DB-only,
+     no recreate (a recreate would silently start a deliberately-stopped, possibly
+     quarantined agent — the drift predicate bakes the key on its next start);
+  7. delete the **captured** superseded ids (not "everything except the new id" — there is
+     no per-agent start lock, so a concurrent `recreate_missing_container` mint must not
+     become collateral damage);
+  8. audit; return metadata.
+- Superseded keys are **DELETEd, not deactivated**: `recover_agent_ownership` reactivates
+  every inactive per-agent row, so a deactivated rotated-out key would come back alive after
+  a soft-delete/recover cycle — rotation would not be durable.
+- Deletion is `scope='agent'`-only. The existing `deactivate_agent_mcp_keys` /
+  `set_agent_keys_active` helpers span `('agent','connector')` and must **not** be reused —
+  they would silently revoke the owner's MCP **connector** key.
+- 409-adoption post-condition: `recreate_container_with_updated_config` can adopt a
+  container someone else created on a name conflict. After the recreate the container is
+  reloaded and its `TRINITY_MCP_API_KEY` compared **in full, constant-time** against the
+  plaintext just minted; if it differs, **nothing is deleted** and the call fails. Not a
+  `key_prefix` comparison — the prefix is `api_key[:20]` and its first 12 characters are the
+  constant `trinity_mcp_`, so that would put an eight-character assertion between a
+  stranger's container and the DELETE of every superseded key.
+- Honest failure semantics: the old container is stopped and removed *before* the
+  replacement is created, so a post-removal failure leaves the agent with no container. The
+  response says exactly that ("the container was replaced and failed to start; press Start
+  to rebuild") and claims no continuity; superseded keys are left in place so the drift
+  predicate / `recreate_missing_container` heal on the next start.
+
+### FR-4 — `spawned_by_key_id` reconcile (idempotent)
+
+`enforce_agent_spawn_scope` 403s unless `get_agent_mcp_api_key(parent).id ==
+child.spawned_by_key_id`, so rotation would silently and unrecoverably sever parenthood for
+every child. `reconcile_spawn_key_id(agent, current_id)` re-points children with
+`spawned_by_agent = :agent AND spawned_by_key_id IS NOT NULL AND spawned_by_key_id !=
+:current_id`. Keyed on `!= current`, **not** `= old_id`: `get_agent_mcp_api_key` is
+`ORDER BY created_at DESC LIMIT 1`, so an `= old_id` form is a no-op the instant the mint
+commits, and children stranded by an earlier crashed rotation could never be repaired. Runs
+*before* delivery — otherwise a 403 window spans the whole recreate and a crash mid-flight
+makes it permanent. The gate itself is **not** relaxed (that would widen a security
+boundary whose purpose is a precise single-identity match); the predicate is scoped to rows
+whose provenance already names this parent, so it cannot grant parenthood over an agent this
+parent never spawned.
+
+### FR-5 — Auth
+
+- Path auth is `OwnedAgentByName` (uniform 404, Invariant #8/#186 — no 404-then-403 split).
+- **Allowlist, not denylist**: `User.mcp_scope` is populated for every MCP-key principal and
+  `reject_non_interactive_principal` 403s whenever it is not `None`. A two-item denylist
+  (`reject_agent_principal` + `_reject_connector_principal`) leaves `scope='system'` walking
+  through both (`agent_name` and `connector_agent` are both `None` for it) — and
+  `can_user_share_agent` returns `True` fleet-wide on an admin-owned install. `scope` is
+  free-text with no CHECK constraint, so only an allowlist is fail-closed against a sixth
+  scope.
+- Rate-limited per agent and per actor (`services/rate_limiter.enforce`) — for an admin,
+  ownership is fleet-wide, so an unthrottled loop is a scripted fleet-wide
+  container-recreate storm.
+- Audited (`AuditEventType.MCP_OPERATION`, success **and** failure) with
+  `{new_key_id, new_key_prefix, superseded_key_ids, delivery, children_repointed}` plus the
+  actor's `mcp_key_id`/`mcp_scope`. **Never** the plaintext, the key hash, `env_vars`, the
+  probe output, or a raw exception string — `audit_log` is append-only with a 365-day
+  no-delete trigger and an unsanitised `details` column, so anything written there is
+  permanent.
+
+### FR-6 — Health signal
+
+| State | Predicate | Tone |
+|---|---|---|
+| `missing` | no active `scope='agent'` row | Warning |
+| `env_absent` | the container env has no `TRINITY_MCP_API_KEY` / `TRINITY_MCP_URL` | Warning |
+| `env_mismatch` | the env key matches no active `scope='agent'` row for this agent | Warning |
+| `never_used` | row exists, `last_used_at IS NULL` | Neutral (Warning when corroborated) |
+| `stale` | `last_used_at` materially older than the agent's most recent execution | Warning |
+| `active` | recently used | Info |
+
+The two `env_*` states **outrank** every usage-derived state: a key row that exists and was
+used last week says nothing about what the container runs with *now*, and reporting `active`
+over an env with no key at all is the green-during-the-incident failure this feature exists to
+remove. They cost a Docker **inspect**, not the FR-1 docker **exec**, so the panel is honest on
+load; the match verdict is delegated to `check_agent_mcp_key_matches` so the panel and the
+start-time recreate decision cannot disagree; and any error falls back to the usage-derived
+state rather than claiming unobserved drift.
+
+`stale` is load-bearing: the motivating incident's signature is literally *"the agent-scoped
+key sat unused for months"* — non-NULL but old — which a binary used/unused predicate renders
+as green. `last_used_at` is a genuine signal because the high-frequency agent paths
+(heartbeat, result callback, internal) deliberately pass `track_usage=False`, so the field
+tracks real MCP tool use.
+
+Wording is **discriminating, not quiet**: bare `never_used` with no corroboration renders
+neutral (a legitimately non-collaborating agent must not be accused), but `never_used`/`stale`
+**plus** executed turns **plus** a non-`ok` FR-1 verdict renders as a warning.
+`trinity-system` is exempt from the health status entirely (its key is `scope='system'`, so
+it would report a permanent false `missing` on the platform orchestrator).
+
+### FR-7 — Adjacent principal guards (in blast radius)
+
+`db.revoke_mcp_api_key` / `db.delete_mcp_api_key` skip the ownership check entirely for
+admins, so on a default admin-owned install *any* agent-scoped key could delete **every** MCP
+key in the instance — a one-request fleet-wide auth wipe. `POST /connector/key` likewise
+returns a sibling's plaintext to an agent principal. All three now run
+`reject_agent_principal` + `_reject_connector_principal`.
+
+### Still exploitable after this change (stated plainly)
+
+- An agent whose `.mcp.json` carries a user-scoped key still authenticates as the owner and
+  still bypasses `agent_permissions`. This **detects and repairs**; it does not **prevent**.
+- The foreign user key itself is not revoked by rotation — FR-1 surfaces *which* key row the
+  container presents so the owner can revoke it in Settings → MCP Keys.
+- A compromised agent presenting a sibling's key is still undetectable at request time
+  (needs request-origin attribution, deferred).
+
+### Deferred
+
+- **Part 2b — request-origin attribution.** No reliable "this request came from agent
+  container X" signal reaches the backend on the MCP path (the MCP server forwards no origin
+  marker, and client IP cannot substitute: port 8080 is published on all interfaces and the
+  frontend also lives on `trinity-agent-network`). Best candidate is the #1159 derived
+  `X-Trinity-Agent-Token`. Explicitly **not** the "unpublished second listener" trick — that
+  is a self-declared origin, bypassed by editing the same `.mcp.json` line above the header.
+- **Part 3 — enforcement flag** (default OFF), strictly downstream of 2b. Must be an
+  explicit **allowlist over all five scopes** (`user`, `agent`, `system`, `connector`,
+  `portal_delegate`) — "reject non-agent" breaks the system agent, the connector and
+  portal_delegate.
+- **`.mcp.json` re-clobber by git sync**: gitignore does not untrack an already-committed
+  file, so an auto-sync `git pull` can restore a bad `.mcp.json` after startup.
+  `git rm --cached` on the repair path is a follow-up.
+
+**Schema**: no change — `agent_name`, `scope` and `spawned_by_key_id` all exist, health is
+derived, and `User.mcp_scope` is a Pydantic field, not a column.
+
+**Flow**: `docs/memory/feature-flows/agent-mcp-key.md`

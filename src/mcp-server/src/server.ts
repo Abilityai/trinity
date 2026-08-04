@@ -73,7 +73,11 @@ export interface McpApiKeyValidationResult {
   user_email?: string;
   key_name?: string;
   agent_name?: string;  // Agent name if scope is 'agent' or 'system'
-  scope?: "user" | "agent" | "system";  // Key scope: user=human, agent=regular agent, system=system agent (bypasses permissions)
+  // Key scope, as the backend's free-text `mcp_api_keys.scope` column reports
+  // it. #1854: kept in step with `McpAuthContext["scope"]` — declaring a
+  // narrower set here (it named only user/agent/system) makes the cast below
+  // launder two live values, which is how `portal_delegate` went unnoticed.
+  scope?: McpAuthContext["scope"];
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +318,10 @@ export async function createServer(config: ServerConfig = {}) {
               keyId: result.key_id,  // MCP API key ID (AUDIT-001)
               keyName: result.key_name || "unknown",
               agentName: result.agent_name,  // Agent name if scope is 'agent' or 'system'
-              scope: scope as "user" | "agent" | "system" | "connector",
+              // #1854: keep this cast in step with the McpAuthContext union —
+              // `mcp_api_keys.scope` is free-text with no CHECK constraint, so a
+              // value the union does not name arrives here as a plain string.
+              scope: scope as McpAuthContext["scope"],
               mcpApiKey: apiKey,  // Store the actual API key for user-scoped requests
             };
             return authContext;

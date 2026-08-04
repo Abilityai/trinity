@@ -73,6 +73,11 @@ services:
       # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
       # Must reach the container or the .env lever is inert in prod (the #1039 packaging class).
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
+      # Skills library lifecycle automation (ent#236). The reconcile cap is named in the
+      # refusal alarm's own remediation text, so it must be tunable from .env or the
+      # operator is told to raise a lever that never reaches the container.
+      - SKILLS_RECONCILE_MAX_REMOVALS=${SKILLS_RECONCILE_MAX_REMOVALS:-10}   # per-agent blast-radius cap
+      - SKILLS_FLEET_INJECT_CONCURRENCY=${SKILLS_FLEET_INJECT_CONCURRENCY:-5}  # parallel agents per sweep
       # Public webhook trigger hardening (#1023, #1424) — 60s windows fixed in code.
       # Must reach the container or the .env lever is inert (the #1056/#1039 packaging class).
       - WEBHOOK_RATE_LIMIT=${WEBHOOK_RATE_LIMIT:-10}             # triggers per token per 60s

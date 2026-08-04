@@ -104,7 +104,8 @@ class TestPhoneMasking:
 
 
 class TestTwilioMediaUrlAllowlist:
-    """SSRF defense: only *.twilio.com hosts allowed."""
+    """SSRF defense: CDN hosts allowed as redirect targets; credentialed/source
+    hosts stay *.twilio.com only (#1932 two-tier allowlist)."""
 
     @pytest.mark.unit
     def test_accepts_api_twilio_com(self):
@@ -142,6 +143,126 @@ class TestTwilioMediaUrlAllowlist:
         from adapters.whatsapp_adapter import _is_twilio_media_url
         assert not _is_twilio_media_url("not-a-url")
         assert not _is_twilio_media_url("")
+
+    # --- #1932: the media CDN is a legitimate redirect target ---------------
+
+    @pytest.mark.unit
+    def test_accepts_mms_twiliocdn_com(self):
+        """The host api.twilio.com actually 302s to — refused before #1932."""
+        from adapters.whatsapp_adapter import _is_twilio_media_url
+        assert _is_twilio_media_url(
+            "https://mms.twiliocdn.com/Accounts/AC00/Messages/MM00/Media/ME00"
+        )
+
+    @pytest.mark.unit
+    def test_accepts_media_twiliocdn_com(self):
+        from adapters.whatsapp_adapter import _is_twilio_media_url
+        assert _is_twilio_media_url("https://media.twiliocdn.com/x")
+
+    @pytest.mark.unit
+    def test_accepts_bare_apex(self):
+        """Pins the `host == suffix.lstrip('.')` branch, not the endswith one."""
+        from adapters.whatsapp_adapter import _is_twilio_media_url
+        assert _is_twilio_media_url("https://twiliocdn.com/x")
+        assert _is_twilio_media_url("https://twilio.com/x")
+
+    @pytest.mark.unit
+    def test_accepts_cdn_host_case_insensitively(self):
+        from adapters.whatsapp_adapter import _is_twilio_media_url
+        assert _is_twilio_media_url("https://MMS.TWILIOCDN.COM/x")
+
+    # --- #1932: CDN-shaped spoofs must still be refused ---------------------
+
+    @pytest.mark.unit
+    def test_rejects_cdn_domain_suffix_spoof(self):
+        """The leading dot anchors the suffix — no lookalike registrable domain."""
+        from adapters.whatsapp_adapter import _is_twilio_media_url
+        assert not _is_twilio_media_url("https://eviltwiliocdn.com/evil")
+        assert not _is_twilio_media_url("https://twiliocdn.com.evil.com/evil")
+        assert not _is_twilio_media_url("https://mms.twiliocdn.com.evil.com/evil")
+
+    @pytest.mark.unit
+    def test_rejects_http_scheme_on_cdn(self):
+        from adapters.whatsapp_adapter import _is_twilio_media_url
+        assert not _is_twilio_media_url("http://mms.twiliocdn.com/x")
+
+    @pytest.mark.unit
+    def test_rejects_userinfo_host_spoof(self):
+        """`parsed.hostname` returns the real host, not the userinfo segment."""
+        from adapters.whatsapp_adapter import _is_twilio_media_url
+        assert not _is_twilio_media_url("https://mms.twiliocdn.com@evil.com/x")
+        assert not _is_twilio_media_url("https://api.twilio.com@evil.com/x")
+
+    @pytest.mark.unit
+    def test_rejects_trailing_dot_fqdn(self):
+        """Fail-closed: the absolute-FQDN form doesn't match the suffix."""
+        from adapters.whatsapp_adapter import _is_twilio_media_url
+        assert not _is_twilio_media_url("https://mms.twiliocdn.com./x")
+
+    @pytest.mark.unit
+    def test_rejects_punycode_lookalike(self):
+        from adapters.whatsapp_adapter import _is_twilio_media_url
+        assert not _is_twilio_media_url("https://xn--mms-twiliocdn.com/x")
+
+    @pytest.mark.unit
+    def test_rejects_scheme_relative_url(self):
+        from adapters.whatsapp_adapter import _is_twilio_media_url
+        assert not _is_twilio_media_url("//mms.twiliocdn.com/x")
+        assert not _is_twilio_media_url("/relative/path")
+
+    @pytest.mark.unit
+    def test_rejects_s3_redirect_target(self):
+        """D2 (#1932): S3 is deliberately NOT allowlisted.
+
+        `s3-external-1.amazonaws.com` is path-style — allowlisting it, even as a
+        single exact host, admits arbitrary buckets under an allowlisted name.
+        Accounts without "HTTP Basic Authentication for media" enabled redirect
+        there and are an unsupported configuration by decision, not oversight.
+        """
+        from adapters.whatsapp_adapter import _is_twilio_media_url
+        assert not _is_twilio_media_url("https://s3-external-1.amazonaws.com/bucket/key")
+        assert not _is_twilio_media_url("https://mybucket.s3.amazonaws.com/key")
+
+    # --- #1932: the two tiers are genuinely different -----------------------
+
+    @pytest.mark.unit
+    def test_source_predicate_excludes_cdn(self):
+        """D3: the CDN is fetchable as a redirect target but never credentialed."""
+        from adapters.whatsapp_adapter import (
+            _is_twilio_media_source_url,
+            _is_twilio_media_url,
+        )
+        assert _is_twilio_media_url("https://mms.twiliocdn.com/x") is True
+        assert _is_twilio_media_source_url("https://mms.twiliocdn.com/x") is False
+
+    @pytest.mark.unit
+    def test_source_predicate_accepts_api_host(self):
+        from adapters.whatsapp_adapter import _is_twilio_media_source_url
+        assert _is_twilio_media_source_url("https://api.twilio.com/x") is True
+
+    @pytest.mark.unit
+    def test_source_predicate_keeps_the_spoof_properties(self):
+        """The narrow tier shares the matcher, so it inherits every guard."""
+        from adapters.whatsapp_adapter import _is_twilio_media_source_url
+        assert not _is_twilio_media_source_url("https://eviltwilio.com/evil")
+        assert not _is_twilio_media_source_url("https://api.twilio.com.evil.com/evil")
+        assert not _is_twilio_media_source_url("http://api.twilio.com/x")
+        assert not _is_twilio_media_source_url("https://api.twilio.com@evil.com/x")
+        assert not _is_twilio_media_source_url("")
+
+    @pytest.mark.unit
+    def test_allowlist_constants_are_the_documented_tiers(self):
+        """Pins the named constants AC #2 and D3 both refer to."""
+        from adapters.whatsapp_adapter import (
+            _TWILIO_MEDIA_ALLOWED_HOST_SUFFIXES,
+            _TWILIO_MEDIA_SOURCE_HOST_SUFFIXES,
+        )
+        assert _TWILIO_MEDIA_SOURCE_HOST_SUFFIXES == (".twilio.com",)
+        assert _TWILIO_MEDIA_ALLOWED_HOST_SUFFIXES == (".twilio.com", ".twiliocdn.com")
+        # The source tier must never grow past the redirect tier.
+        assert set(_TWILIO_MEDIA_SOURCE_HOST_SUFFIXES) <= set(
+            _TWILIO_MEDIA_ALLOWED_HOST_SUFFIXES
+        )
 
 
 class TestMessageSplit:
@@ -340,6 +461,26 @@ class TestParseMessage:
         }
         msg = self._adapter().parse_message(raw)
         # Body survived, but attacker URL was dropped
+        assert msg is not None
+        assert msg.files == []
+
+    @pytest.mark.unit
+    def test_twiliocdn_media_url_rejected_at_parse_time(self):
+        """#1932 D3: the parse gate is the NARROW tier.
+
+        A webhook `MediaUrl{N}` is always the api.twilio.com form; the CDN is
+        only ever a redirect target. Widening the redirect tier must not widen
+        what we accept straight off the wire.
+        """
+        raw = {
+            "From": "whatsapp:+14155551234",
+            "To": "whatsapp:+14155238886",
+            "Body": "check this",
+            "NumMedia": "1",
+            "MediaUrl0": "https://mms.twiliocdn.com/Accounts/AC00/Media/ME00",
+            "MediaContentType0": "image/jpeg",
+        }
+        msg = self._adapter().parse_message(raw)
         assert msg is not None
         assert msg.files == []
 

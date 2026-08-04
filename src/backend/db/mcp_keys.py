@@ -44,6 +44,18 @@ _KEY_JOIN_COLUMNS = (
 )
 
 
+def hash_mcp_api_key(api_key: str) -> str:
+    """Public alias for the key-hashing convention (#1854).
+
+    The container config-truth probe and the start-time drift predicate both
+    compare a digest against ``mcp_api_keys.key_hash``. Routing them through
+    this one helper (rather than re-spelling ``hashlib.sha256``) means a future
+    change to the hashing scheme cannot silently make both of them report
+    "no matching row" for every healthy agent in the fleet.
+    """
+    return McpKeyOperations._hash_api_key(api_key)
+
+
 class McpKeyOperations:
     """MCP API key database operations."""
 
@@ -192,6 +204,21 @@ class McpKeyOperations:
                     user_id=user["id"],
                     agent_name=agent_name,
                     scope="agent",
+                    # #1854: set explicitly, exactly as `create_mcp_api_key`
+                    # does and for the same reason — `schema.py` declares
+                    # `is_active INTEGER DEFAULT 1` but `db/tables.py` (the
+                    # Core/Alembic source) declares a bare
+                    # `Column("is_active", Integer)` with no default, so a table
+                    # built from the metadata yields NULL, and
+                    # `validate_mcp_api_key` treats a falsy is_active as
+                    # revoked. At creation that is a visibly-broken new agent;
+                    # on the ROTATION path (#1854) it is a brick — the new key
+                    # is born revoked while the old one has just been deleted.
+                    # `usage_count` is the same defect one column up: NULL there
+                    # makes `_row_to_mcp_api_key` raise a Pydantic
+                    # ValidationError, so the row cannot even be READ back.
+                    is_active=1,
+                    usage_count=0,
                 )
             )
 
@@ -228,6 +255,92 @@ class McpKeyOperations:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
             return self._row_to_mcp_api_key(row) if row else None
+
+    def list_active_agent_key_ids(self, agent_name: str) -> List[str]:
+        """Ids of the agent's ACTIVE ``scope='agent'`` keys (#1854).
+
+        Captured BEFORE a rotation mint so the delete step can name exactly the
+        rows it superseded. Deliberately ``scope='agent'``-only: the sibling
+        helpers (`set_agent_keys_active`, `_deactivate_agent_keys_in_txn`) span
+        ``('agent','connector')`` and reusing either here would sweep the
+        owner's MCP **connector** key into a rotation it has nothing to do with.
+        """
+        stmt = (
+            select(mcp_api_keys.c.id)
+            .where(
+                mcp_api_keys.c.agent_name == agent_name,
+                mcp_api_keys.c.scope == "agent",
+                mcp_api_keys.c.is_active == 1,
+            )
+            .order_by(mcp_api_keys.c.created_at.desc())
+        )
+        with get_engine().connect() as conn:
+            return [row[0] for row in conn.execute(stmt)]
+
+    def delete_superseded_agent_keys(
+        self, agent_name: str, keep_id: str, key_ids
+    ) -> int:
+        """DELETE the named superseded ``scope='agent'`` rows for `agent_name` (#1854).
+
+        Three deliberate narrowings, each load-bearing:
+
+        * **DELETE, not deactivate.** ``recover_agent_ownership`` reactivates
+          every inactive per-agent row with no notion of "suspended by
+          soft-delete" vs "superseded by rotation", so a deactivated rotated-out
+          key comes back ALIVE after a soft-delete/recover cycle — rotation
+          would not be durable. Deleting also drops the ``key_hash`` of a
+          credential just declared compromised. Matches the connector precedent
+          (delete+insert in one transaction).
+        * **Only the CAPTURED id set**, never ``id != keep_id``. There is no
+          per-agent start lock, so a concurrent ``recreate_missing_container``
+          can mint K3 mid-rotation; an ``id != new_id`` form would delete K3 —
+          the key actually baked into the live container.
+        * **``scope='agent'`` only**, and ``keep_id`` is excluded belt-and-braces
+          so a caller that mis-captured the new id still cannot brick the agent.
+
+        Returns the number of rows removed.
+        """
+        ids = [k for k in set(key_ids or ()) if k and k != keep_id]
+        if not ids:
+            return 0
+        stmt = delete(mcp_api_keys).where(
+            mcp_api_keys.c.agent_name == agent_name,
+            mcp_api_keys.c.scope == "agent",
+            mcp_api_keys.c.id.in_(ids),
+            mcp_api_keys.c.id != keep_id,
+        )
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount or 0
+
+    def find_mcp_key_by_hash(self, key_hash: str) -> Optional[Dict]:
+        """Look a key row up by its SHA-256 hash — metadata only, no secret (#1854).
+
+        Backs the container config-truth probe and the start-time drift
+        predicate: the digest is computed inside the container (probe) or from
+        the container env (predicate) and matched against ``key_hash``, which is
+        a plain unsalted ``sha256(api_key)``. Returns inactive rows too — the
+        caller decides what an inactive match means (the probe wants to say
+        "this is a revoked key", the predicate wants to call it drift).
+        """
+        if not key_hash:
+            return None
+        stmt = select(
+            mcp_api_keys.c.id,
+            mcp_api_keys.c.name,
+            mcp_api_keys.c.key_prefix,
+            mcp_api_keys.c.agent_name,
+            mcp_api_keys.c.scope,
+            mcp_api_keys.c.is_active,
+            mcp_api_keys.c.user_id,
+        ).where(mcp_api_keys.c.key_hash == key_hash)
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        if not row:
+            return None
+        out = dict(row)
+        out["scope"] = out.get("scope") or "user"
+        out["is_active"] = bool(out.get("is_active"))
+        return out
 
     def delete_agent_mcp_api_key(self, agent_name: str) -> bool:
         """Delete all MCP API keys for an agent (called when agent is deleted)."""

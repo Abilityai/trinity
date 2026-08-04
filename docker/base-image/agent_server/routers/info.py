@@ -18,6 +18,33 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _credential_mcp_server_names(block) -> List[str]:
+    """Server names under `credentials.mcp_servers`, tolerant of any shape.
+
+    A DUPLICATE of `services.template_service.credential_mcp_server_names`
+    (trinity-enterprise#128), not an import: the agent server ships in its own
+    image and structurally cannot import `src/backend`. The two copies must
+    agree on every malformed shape, so a BEHAVIOURAL parity test drives one
+    shared table through both — see
+    `tests/unit/test_ent128b2_credential_setup.py`. (The vendored-byte-identical
+    variant of this pattern is `services/credential_paths.py` and
+    `services/model_context.py`; a 6-line reader does not earn a whole vendored
+    module, but it does earn the same guard, because before ent#128 NO parity
+    test covered this file and the copies could diverge freely.)
+
+    Returns `[]` — never raises — for a null, list, string or scalar block at
+    either level. `template.yaml` here is read from the agent's own workspace,
+    which the agent itself can rewrite, so a crash is reachable without an
+    operator ever touching it.
+    """
+    if not isinstance(block, dict):
+        return []
+    servers = block.get("mcp_servers")
+    if not isinstance(servers, dict):
+        return []
+    return [str(name) for name in servers]
+
+
 def _diagnostics() -> Dict[str, Any]:
     """Lightweight runtime gauges for spotting accumulator leaks. #333."""
     try:
@@ -163,7 +190,10 @@ async def get_template_info():
     Get template metadata from template.yaml if available.
     Returns information about what this agent is, its capabilities, commands, etc.
     """
-    template_path = Path("/home/developer/template.yaml")
+    # Via the shared helper (as `/api/metrics` already does) rather than a second
+    # copy of the literal, so the tolerant-reader regression below is testable
+    # without patching `Path` itself. (trinity-enterprise#128)
+    template_path = get_template_path()
     template_data = None
 
     if template_path.exists():
@@ -187,8 +217,13 @@ async def get_template_info():
     # Handle mcp_servers - can be in new format (list of {name, description}) or old format (in credentials)
     mcp_servers_raw = template_data.get("mcp_servers", [])
     if not mcp_servers_raw:
-        # Fallback to old format: extract from credentials.mcp_servers keys
-        mcp_servers_raw = list(template_data.get("credentials", {}).get("mcp_servers", {}).keys())
+        # Fallback to old format: extract from credentials.mcp_servers keys.
+        # Read through the tolerant accessor — the raw
+        # `.get("credentials", {}).get("mcp_servers", {}).keys()` chain raises
+        # AttributeError on a null / list / string block at EITHER level, and
+        # the `try/except` above wraps only the YAML load, so the crash escaped
+        # as a 500 on this endpoint. (trinity-enterprise#128)
+        mcp_servers_raw = _credential_mcp_server_names(template_data.get("credentials"))
 
     return {
         "has_template": True,

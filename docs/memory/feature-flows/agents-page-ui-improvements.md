@@ -1,6 +1,13 @@
 # Feature: Agents Page UI Improvements
 
-> **Status**: Implemented (2025-12-07, Enhanced 2026-01-09, System Agent Consolidation 2026-01-13, Toggle UX 2026-01-26, Component Standardization 2026-02-12, Horizontal Row Tiles 2026-03-03, Two-Row Tiles + Persistent Filter 2026-03-03, Full Filtering 2026-03-03, Success Rate Bar 2026-03-03, Capacity Meter + Fixed Grid 2026-03-03, Agent Avatars 2026-03-07, Owner Filter 2026-04-08)
+> **⚠️ SUPERSEDED (2026-07-31, trinity-enterprise#260)**: the standalone
+> Agents page (`views/Agents.vue`) was retired — its list lives on as the
+> Dashboard's **List** mode (`components/AgentListPanel.vue`); `/agents`
+> redirects to `/?view=list`. Every capability below was migrated or
+> consciously re-homed (parity disposition in the ent#260 plan). Current doc:
+> [dashboard-list-view.md](dashboard-list-view.md). Kept as historical record.
+
+> **Status**: Superseded by trinity-enterprise#260 (previously: Implemented 2025-12-07, Enhanced 2026-01-09, System Agent Consolidation 2026-01-13, Toggle UX 2026-01-26, Component Standardization 2026-02-12, Horizontal Row Tiles 2026-03-03, Two-Row Tiles + Persistent Filter 2026-03-03, Full Filtering 2026-03-03, Success Rate Bar 2026-03-03, Capacity Meter + Fixed Grid 2026-03-03, Agent Avatars 2026-03-07, Owner Filter 2026-04-08)
 > **Tested**: All features verified working
 > **Last Updated**: 2026-04-08 - Owner Filter (#69): Added owner dropdown filter to Agents page header bar. Derives distinct owners from full agent list, filters with AND logic alongside name/status/tag filters. Hidden when ≤1 distinct owner. Persisted to localStorage (`trinity-agents-filter-owner`). Supports "Unassigned" option for orphaned agents.
 >
@@ -561,9 +568,8 @@ Major UI overhaul to align Agents page with Dashboard (AgentNode.vue) tiles. Cha
 
 2. **PUT /api/agents/{name}/autonomy** (`agents.py` lines 775-790)
    - Body: `{ enabled: boolean }`
-   - When enabled: activates all schedules for the agent
-   - When disabled: pauses all schedules
-   - Response: `{ enabled, schedules_updated }`
+   - Writes ONLY `agent_ownership.autonomy_enabled` — the agent-level gate the scheduler reads on every cron fire. Per-schedule `enabled` is never rewritten (#1945)
+   - Response: `{ autonomy_enabled, total_schedules, enabled_schedules, message }`
 
 3. **GET /api/agents/context-stats** (`agents.py` lines 138-141)
    - Returns context window usage and activity state for all agents

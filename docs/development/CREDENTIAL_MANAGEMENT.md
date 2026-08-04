@@ -201,23 +201,7 @@ The content field accepts `.env`-style format:
 - Values can be quoted with single or double quotes
 - Existing credentials with the same name are skipped (not overwritten)
 
-### Get Template Env Template
-```http
-GET /api/templates/env-template?template_id=ruby-social-media-agent
-Authorization: Bearer <token>
-
-Response:
-{
-  "template_id": "ruby-social-media-agent",
-  "env_template": "# Credentials for ruby-social-media-agent\nHEYGEN_API_KEY=\nTWITTER_API_KEY=\n...",
-  "variables": ["HEYGEN_API_KEY", "TWITTER_API_KEY", "TWITTER_API_SECRET", ...]
-}
-```
-
-Returns all required credential variables for a template, extracted from:
-- `.mcp.json` or `.mcp.json.template` (`${VAR}` patterns in env and args)
-- `template.yaml` (credentials section)
-- `.env.example` (if present)
+> **Note**: the former `GET /api/templates/env-template` endpoint (pre-filled `.env` skeleton for a template) no longer exists. A template's required credential variables are extracted at agent-creation time by `template_service.extract_agent_credentials()` from `.mcp.json`/`.mcp.json.template` (`${VAR}` patterns), `template.yaml` (credentials section), and `.env.example`, and surfaced per template via `GET /api/templates` / `GET /api/templates/{id}` (`required_credentials`).
 
 ## OAuth Flows
 

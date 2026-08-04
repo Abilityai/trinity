@@ -7,17 +7,21 @@
 
 ## Overview
 
-One of the Dashboard's two view modes alongside **Timeline** (waterfall
-activity). The legacy **Graph** mode (Vue Flow topology) was decommissioned in
-#1689. Grid is a **magnetic tile canvas**: richer 384×216 landscape agent tiles
+One of the Dashboard's three view modes alongside **Timeline** (waterfall
+activity) and **List** (the retired Agents page consolidated in
+trinity-enterprise#260 — see
+[dashboard-list-view.md](dashboard-list-view.md)). The legacy **Graph** mode
+(Vue Flow topology) was decommissioned in #1689. Grid is a **magnetic tile
+canvas**: richer 384×216 landscape agent tiles
 that snap to a sparse, **unbounded** integer lattice (negative coordinates
 included) the operator arranges freely — islands, gaps, parked loners — with
 iPhone-style drag and live snap preview, on a pan/zoom dotted-canvas.
 
-- Mode toggle: `Grid / Timeline` in the Dashboard header; selection persists to
-  `localStorage['trinity-dashboard-view']`. **Timeline stays the default** for
-  users with no saved preference (and a stale `'graph'` preference degrades to
-  it via the `VIEW_MODES.includes()` guard).
+- Mode toggle: `Timeline / Grid / List` in the Dashboard header; selection
+  persists to `localStorage['trinity-dashboard-view']`. **Timeline stays the
+  default** for users with no saved preference (and a stale mode — `'graph'`,
+  or `'list'` on an older bundle — degrades to it via the
+  `VIEW_MODES.includes()` guard).
 - **No Vue Flow dependency** in this mode, and **no new backend endpoints**.
 
 ## Components & Data Flow
@@ -74,7 +78,11 @@ explains the colors once — never repeated per tile.
 - **Filters never destroy layout**: persisting merges the active layout over
   the full saved map, so agents hidden by an owner/tag filter keep their
   saved cells (filtering is indistinguishable from deletion client-side, so
-  absence is never treated as deletion).
+  absence is never treated as deletion). The `/` type-to-filter (ent#261)
+  rides this same absence-as-filtering path: matching tiles stay at their
+  lattice cells (gaps preserved — no tidy/re-layout on filter), and a
+  zero-match keeps FleetGrid mounted under the chassis query-empty overlay,
+  so pan/zoom and layout state survive transient zero-matches while typing.
 - **Tidy up** compacts row-by-row (3 columns) preserving reading order,
   anchored at the layout's own top-left, clamped to the coordinate bound.
   **Reset** restores the deterministic default (system agent first,
