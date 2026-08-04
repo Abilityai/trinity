@@ -45,15 +45,21 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-# Bootstrap src/backend on sys.path (mirrors test_capacity_manager.py).
+# Bootstrap src/backend on sys.path.
+#
+# Deliberately WITHOUT the `sys.modules.pop("utils", ...)` preamble that
+# test_capacity_manager.py carries: tests/unit/conftest.py already installs
+# src/backend/utils as the canonical `utils` package via an importlib file
+# loader, so evicting it leaves `utils` unbound and pytest's prepend import mode
+# rebinds it to the tests/ helper package (the failure mode spelled out in
+# test_1081_physical_meter.py). Every backend module here is imported lazily
+# inside a test or fixture, so the path insert is all this file needs — and it
+# keeps the file clean under tests/lint_sys_modules.py.
 _THIS = Path(__file__).resolve()
 _BACKEND = _THIS.parent.parent.parent / "src" / "backend"
 _BACKEND_STR = str(_BACKEND)
-for _shadow in ("utils", "utils.api_client", "utils.assertions", "utils.cleanup"):
-    sys.modules.pop(_shadow, None)
-while _BACKEND_STR in sys.path:
-    sys.path.remove(_BACKEND_STR)
-sys.path.insert(0, _BACKEND_STR)
+if _BACKEND_STR not in sys.path:
+    sys.path.insert(0, _BACKEND_STR)
 
 pytestmark = pytest.mark.unit
 

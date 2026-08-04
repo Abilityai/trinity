@@ -163,7 +163,7 @@ class BacklogService:
         # to measure. One guard here covers every drain path, since the release
         # callback, the orphan sweep, and `drain_on_release` all funnel through
         # this method.
-        from services.agent_service.pull_mode import is_pull_pilot_agent
+        from services.pull_pilot import is_pull_pilot_agent
 
         if is_pull_pilot_agent(agent_name):
             logger.debug(

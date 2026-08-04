@@ -354,7 +354,7 @@ class CapacityManager:
         # (#1081 Phase 5, pilot-scoped). `pull_owns_dispatch` excludes
         # interactive triggers (Open Question 7 scope cut) and fails safe to
         # push, so a non-pilot's path is byte-for-byte unchanged.
-        from services.agent_service.pull_mode import pull_owns_dispatch
+        from services.pull_pilot import pull_owns_dispatch
 
         pull_exclusive = (
             overflow_policy == "queue_persistent"
@@ -540,7 +540,7 @@ class CapacityManager:
         # Gated on the EXISTING pilot allowlist; empty allowlist (the default)
         # short-circuits to the unchanged ZSET-only path — inert, zero added
         # cost/delta. Metering ONLY: acquire/release are not touched.
-        from services.agent_service.pull_mode import _pilot_allowlist
+        from services.pull_pilot import _pilot_allowlist
 
         pilots = _pilot_allowlist() & set(clamped)
         if pilots:
@@ -579,7 +579,7 @@ class CapacityManager:
         # short-circuits per-agent, so a non-pilot pays nothing and its output
         # is byte-for-byte identical whether the allowlist is set or not.
         # Metering ONLY: acquire/release are not touched.
-        from services.agent_service.pull_mode import is_pull_pilot_agent
+        from services.pull_pilot import is_pull_pilot_agent
 
         if is_pull_pilot_agent(agent_name):
             from database import db
