@@ -1442,6 +1442,18 @@
         "security"
       ],
       "description": "Hardened parsing of author-controlled YAML (ent#314). template.yaml was on bare yaml.safe_load, leaving alias amplification (measured 416 B -> 110 MB at json.dumps time, parse itself 0.0011 s, so an input-size cap cannot close it) and silent last-wins duplicate keys, which let a template show one credentials: block to a human and declare another to Trinity. Reachable by any creator-role user via a public repo (ent#123 tokenless) since _build_template runs unfenced inside get_all_templates(). Covers: the fixture itself still amplifies under bare safe_load (so the suite cannot pass vacuously); level 4/5/6 bombs rejected under both policies; a small honest anchor STILL parses under BUDGET (the #1932 lesson \u2014 a guard that rejects the legitimate document is an outage that reads as hardened); REJECT refuses one alias and also gates at the scanner (skill_packaging's copy had both hooks); the issue's exact duplicate-credentials case and a nested duplicate; size cap; reject-not-truncate; ManifestError still a subclass so routers/systems.py's named 400 is unchanged and the manifest's published codes survive; and two consolidation guards \u2014 no module may grow a fourth SafeLoader subclass, and all four author-controlled readers must call the shared loader with no bare safe_load left. The four product-level guards fail against pre-fix code."
+    },
+    {
+      "file": "unit/test_1969_lock_denied_tick_audit.py",
+      "feature": "#1969",
+      "added": "2026-08-04",
+      "categories": [
+        "scheduler",
+        "unit",
+        "reliability",
+        "observability"
+      ],
+      "description": "A cron tick suppressed by the Redis distributed lock must leave an audit record (#1969). Suppression is correct behaviour; the evidence was missing - the lock-denial branch of _execute_schedule logged at INFO and returned bare, so no schedule_executions row was written and a denied tick was indistinguishable from a tick that never fired, while APScheduler still reported the job successful. Trinity already audited the OTHER suppression path (APScheduler max_instances -> _on_job_max_instances -> a skipped row), so this was a missing call, not a design gap. The two never overlap: a max_instances refusal means the job never started, so _execute_schedule is never entered and no lock is attempted; reaching the lock branch means APScheduler already let it start. The gap bit hardest on the common case, since a MANUAL trigger bypasses APScheduler entirely (_trigger_handler dispatches via asyncio.create_task) and its collision with the cron tick lands one layer down in exactly the unaudited branch. Covers: a denied tick records exactly one skipped row; the reason names the LOCK, not max_instances, so the two causes stay tellable apart in the record; the audited tick still does NOT run the schedule (auditing suppression must not undo it); the granted-lock path stays silent (a skipped row per successful tick would invert the status for every consumer); the pre-existing lock release survives on both the success and raise paths and no release is attempted when no lock was handed out. #91 regression shape: exactly one row per denial, three denials -> three rows, plus a source guard that the max_instances listener still never routes through _execute_schedule (which would audit one tick twice) and that the audit helper still swallows its own errors, now load-bearing because it is called from the cron execution path. Ends with an end-to-end pass against a real temp SQLite DB proving a status='skipped' row actually lands - the wiring tests alone would still pass with a broken write path."
     }
   ]
 }
