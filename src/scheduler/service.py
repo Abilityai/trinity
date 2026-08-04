@@ -817,6 +817,30 @@ class SchedulerService:
         lock = self.lock_manager.try_acquire_schedule_lock(schedule_id)
         if not lock:
             logger.info(f"Schedule {schedule_id} already being executed by another instance")
+            # #1969: a suppressed tick must leave a record. Suppression is the
+            # correct behaviour — what was missing is the evidence it happened.
+            # With only the INFO line above, a tick denied by the lock is
+            # indistinguishable from a tick that never fired, in the execution
+            # history, the UI, and monitoring alike.
+            #
+            # There are two ways a run gets suppressed and only one was
+            # audited. APScheduler's `max_instances=1` refusal writes a
+            # `skipped` row via _on_job_max_instances; this branch returned
+            # bare. They do not overlap — a max_instances refusal means the job
+            # never started, so _execute_schedule is never entered and no lock
+            # is attempted; conversely reaching this line means APScheduler
+            # already let the job start. Exactly one of the two fires per tick.
+            #
+            # The gap mattered most for the common case: a MANUAL trigger
+            # bypasses APScheduler entirely (_trigger_handler dispatches via
+            # asyncio.create_task), so its instance counter stays at zero, the
+            # cron job starts normally, and the collision is caught one layer
+            # down — here.
+            self._record_skipped_agent_schedule(
+                schedule_id,
+                skip_reason="Previous execution still running (distributed lock held)",
+                event_reason="Previous execution still running",
+            )
             return
 
         try:
