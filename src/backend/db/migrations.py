@@ -2586,7 +2586,7 @@ def _migrate_skill_sources_table(cursor, conn):
 
     Multi-source skills library: one row per git repo the platform syncs
     skills from, replacing the single `skills_library_url` system setting.
-    Mirrored by Alembic 0031_skill_sources and the DDL in `db/schema.py` /
+    Mirrored by Alembic 0034_skill_sources and the DDL in `db/schema.py` /
     MetaData in `db/tables.py`. Kept consistent across all four.
 
     The pre-existing `skills_library_url` row is NOT read here — adopting it

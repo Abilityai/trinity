@@ -21,16 +21,25 @@ done here — the legacy clone at /data/skills-library/ must move into a
 per-source subdir in the same operation, so it lives in ``skill_service``
 where both halves succeed or fail together.
 
-Revision ID: 0031_skill_sources
-Revises: 0030_slack_channel_allow_proactive
+Revision ID: 0034_skill_sources
+Revises: 0033_agent_evaluations
 Create Date: 2026-07-29
+
+Renumbered 0031 -> 0034 when dev was merged in: this branch cut its revision off
+0030, and dev independently cut 0031_channel_report_back off the same parent, so
+the two files (which never conflict textually — they are separate paths) forked
+the revision graph into TWO heads. `alembic upgrade head` refuses a multi-head
+argument, so PostgreSQL boot would fail in `init_database()`. Re-parented onto
+the current dev head rather than merged with an Alembic merge revision: this
+table has no relationship to the channel/telegram/evaluations chain, and a
+linear history is what the `schema-parity` and `pg-migrations` jobs assert.
 """
 from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
-revision = "0031_skill_sources"
-down_revision = "0030_slack_channel_allow_proactive"
+revision = "0034_skill_sources"
+down_revision = "0033_agent_evaluations"
 branch_labels = None
 depends_on = None
 

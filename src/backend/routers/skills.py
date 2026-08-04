@@ -549,7 +549,19 @@ async def sync_skill_source(
     if db.get_skill_source(source_id) is None:
         raise HTTPException(status_code=404, detail="Skill source not found")
 
-    result = skill_service.sync_library(source_id=source_id)
+    # Off the event loop, same as the full sweep: this is synchronous git
+    # subprocess work bounded only by the clone timeout, so running it inline in
+    # an async handler stalls every other request on this worker for as long as
+    # a clone takes.
+    result = await asyncio.to_thread(skill_service.sync_library, source_id)
     if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("error", "Sync failed"))
+        # 409 on contention, mirroring the full-sweep route. ent#237 moved the
+        # ent#236 sync lock into the shared `sync_library`, so this route can
+        # now come back `busy` too — reporting that as a 400 would tell the
+        # caller their request was bad when the library is simply being updated
+        # by someone else, and is retryable.
+        raise HTTPException(
+            status_code=409 if result.get("busy") else 400,
+            detail=result.get("error", "Sync failed"),
+        )
     return result

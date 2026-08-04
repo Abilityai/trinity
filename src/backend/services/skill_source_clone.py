@@ -92,6 +92,10 @@ class SkillSourceClone:
                 result = self._update(expected_sha)
             else:
                 result = self._clone(auth_url)
+                if result.get("success"):
+                    refused = self._refuse_moved_pin_after_clone(expected_sha)
+                    if refused is not None:
+                        result = refused
         except subprocess.TimeoutExpired:
             return {"success": False, "error": "git operation timed out"}
         except Exception as exc:  # noqa: BLE001 — one bad source must not
@@ -102,6 +106,49 @@ class SkillSourceClone:
         if result["success"]:
             result["commit_sha"] = self.current_commit()
         return result
+
+    def _refuse_moved_pin_after_clone(
+        self, expected_sha: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """Apply the tag pin to a FRESH clone. Returns a refusal, or None if OK.
+
+        `_update_tag` enforces the pin two ways, and BOTH are properties of an
+        existing checkout: the no-`--force` fetch needs a local tag ref to
+        refuse to clobber, and its SHA comparison only runs on the update path.
+        A clone resolves the tag name upstream with nothing local to conflict,
+        so without this the pin is bypassed in exactly the case it matters —
+        the checkout was lost (this class's own quarantine rename, a restored
+        `/data` backup, a recreated volume) while upstream moved the tag.
+
+        That is not a theoretical ordering: the sync then reports success with
+        a changed commit, so ent#236's fleet re-inject pushes the moved tag's
+        executables to every running agent with no human in the loop, which is
+        the entire scenario AC#5's pinning exists to prevent.
+
+        No `expected_sha` means this source has never synced — the genuine
+        first clone, where there is nothing to compare and any tag is the pin.
+        """
+        if self.ref_type != "tag" or not expected_sha:
+            return None
+
+        resolved = self._resolve("HEAD")
+        if resolved and resolved.startswith(expected_sha):
+            return None
+
+        # Delete the checkout, don't just report failure: `list_skills` reads
+        # the working tree, so leaving it would serve the moved tag's content
+        # to the merged listing (and to injection) even though sync "failed".
+        shutil.rmtree(self.path, ignore_errors=True)
+        return {
+            "success": False,
+            "error": (
+                f"refusing tag {self.ref!r}: a fresh clone resolves to "
+                f"{(resolved or 'unknown')[:12]} but {expected_sha} was recorded "
+                "at the last sync. A pinned tag must not move — verify upstream, "
+                "then point this source at a new tag."
+            ),
+            "moved_tag": True,
+        }
 
     def _quarantine_non_repo_dir(self) -> None:
         """Move a non-repository source directory aside so a clone can proceed.

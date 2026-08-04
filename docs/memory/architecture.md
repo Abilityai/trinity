@@ -227,7 +227,7 @@
 - `image_generation_service.py` / `image_generation_prompts.py` - Platform image generation via Gemini (IMG-001)
 
 *Skills & System:*
-- `skill_service.py` - Skills library sync + full-directory package injection (ent#183): `git archive`-sourced tars via the existing agent-server restore primitive, tree-SHA versioning, manifest prune, declaration-only dep check — see [skill-injection.md](feature-flows/skill-injection.md). **ent#236** adds the removal half — `remove_skills` (manifest-driven, takes the same per-agent inject lock) and `reconcile_agent_skills` (start-path diff of the agent's platform-managed skill dirs against the assignment set, so a removal reaches an agent that was stopped when it happened), plus durable sync status in `system_settings` (the in-process `_last_sync` is invisible to the other uvicorn worker)
+- `skill_service.py` - Skills library sync + full-directory package injection (ent#183): `git archive`-sourced tars via the existing agent-server restore primitive, tree-SHA versioning, manifest prune, declaration-only dep check — see [skill-injection.md](feature-flows/skill-injection.md). **ent#236** adds the removal half — `remove_skills` (manifest-driven, takes the same per-agent inject lock) and `reconcile_agent_skills` (start-path diff of the agent's platform-managed skill dirs against the assignment set, so a removal reaches an agent that was stopped when it happened), plus durable sync status in `system_settings` (the in-process `_last_sync` is invisible to the other uvicorn worker). **ent#237** makes it multi-source: `sync_library` iterates every enabled `skill_sources` row under ONE library-wide lock, one failing source never blinds the others (per-source outcomes, aggregate succeeds if any synced), and `commit_changed` — the gate ent#236's fleet re-inject fires on — is computed per source against that source's own durable `last_commit_sha` and OR'd. `services/skill_source_clone.py` owns one checkout's git lifecycle (clone/fetch/reset/checkout, tag-pin refusal on **both** the update and clone paths, non-repo quarantine); `skill_service` orchestrates N of them
 - `skill_packaging.py` - Pure skill-package primitives (ent#183): hardened frontmatter contract parse, archive member vetting, injection-tar assembly, prune diff; `compute_removal` (ent#236) is `compute_prune` against an empty new manifest, so confinement + cap live in one place
 - `skills_sync_service.py` - Scheduled skills-library auto-sync + fleet-wide re-inject (ent#236). Leader-locked (`skills:sync:leader`), both flags default OFF; sweeps only when the library commit actually changed, over **running** non-ghost agents at bounded concurrency with skip-and-report on inject-lock contention. Backend-hosted rather than in the standalone scheduler because the sweep must reach agent containers and the scheduler is platform-network-only
 - `system_agent_service.py` - System agent lifecycle. **#1816:** `ensure_deployed` is read-only when the container is running (3-state `check_base_image_state` → `base_image_state`, WARNING + an edge-triggered `base-image-stale-` operator alarm on `stale` only, **never** on `unknown`) and delegates to `start_agent_internal` when it is stopped, so the cold boundary adopts a rebuilt base image through the shared lifecycle instead of a bare `container_start`. Creation converges on the recreate path's contract (`TRINITY_AGENT_AUTH_TOKEN`, `trinity.full-capabilities`) so no predicate is permanently false. The generic `recreate_missing_container` rebuild **refuses** `trinity-system` (409, ADOPT-006) — it reconstructs a *regular* agent and would irreversibly downgrade the orchestrator (system-scoped MCP key deactivated for an agent-scoped one); `ensure_deployed`'s create branch is the only supported rebuild
@@ -1194,6 +1194,9 @@ Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request
 | GET/PUT | `/api/settings/agent-defaults/resources` | Fleet-wide default CPU/memory for new containers (admin-only; CPU 1/2/4/8/16, memory 1g–32g) (RES-001) |
 | GET/PUT | `/api/settings/agent-defaults/access-policy` | Fleet-wide default `require_email` for new agents (admin-only, #1129). Stored in `system_settings`, **secure-by-default ON** (code fallback when unset — no migration); seeds `agent_ownership.require_email` at creation (`register_agent_owner`) for **new** agents only, never rewrites existing rows; owners still override per agent via `PUT /api/agents/{name}/access-policy` |
 | GET/PUT | `/api/settings/max-parallel-tasks-ceiling` | Fleet-wide ceiling on per-agent `max_parallel_tasks` (admin-only, #506). Returns `{value, default, min, max}`; PUT range-validated 1–32 (400 otherwise), audit-logged. Stored in `system_settings` (no migration). The generic catch-all `PUT /{key}` is blocked for this key (422 → dedicated route). Clamp is runtime/clamp-on-use — see [Capacity & Backlog](#capacity--backlog-428) |
+| GET/POST | `/api/skills/sources` | List / register skill sources (ent#237). Admin-only **and human-only** — `reject_agent_principal` on the mutations *and on the LIST read*, since the rows carry private repo URLs and an agent-scoped key resolves to its owner carrying the owner's role (ent#293). URLs locked to github.com and rejected for embedded credentials on write. See [Database Schema → skill_sources](#sqlite-datatrinitydb) |
+| PUT/DELETE | `/api/skills/sources/{source_id}` | Patch (name/url/ref/ref_type/enabled/priority) / remove a source. Admin + `reject_agent_principal`. Deleting a source does not cascade to assignments — the skill keeps resolving through whatever source still provides it (ent#237) |
+| POST | `/api/skills/sources/{source_id}/sync` | Sync ONE source, leaving the others untouched. Admin-only (syncing an already-configured source is *use*, not *grant*). Runs off the event loop; **409** on lock contention, mirroring the full-sweep route (ent#237) |
 | GET/PUT | `/api/settings/skills-library` | Skills-library lifecycle automation (admin-only, ent#236). GET: `auto_sync_enabled` / `auto_sync_interval_seconds` / `auto_reinject_enabled` + interval bounds, **plus** the durable sync status (`last_sync`, `last_sync_status`, `last_sync_error`) and the last fleet-re-inject report — the panel must be able to show a *failing* auto-sync. PUT: partial update (an omitted field is untouched), interval range-validated 300–86400 with a descriptive 400 rather than a silent clamp; audit-logged. The three keys are blocked on the generic `PUT /{key}` (unvalidated `Dict[str,str]`; `"10"` would be accepted verbatim and fetch GitHub six times a minute — #1644 class). Registered before `/{key}` (Invariant #4) |
 | GET/PUT | `/api/settings/brain-orb` | Brain Orb platform flags (admin-only, trinity-enterprise#85). GET: per-flag `{value, source: override\|env\|default}` + `gemini_key_configured` (boolean only — never the key). PUT: partial booleans (`enabled`/`voice_enabled`/`write_enabled`) and/or `clear: [flag,…]` reverting a flag to its env/default (400 on unknown name or set+clear conflict); audit-logged with per-flag old→new. Stored in `system_settings` (no migration); route gates resolve at request time — no restart. Registered before `/{key}` (Invariant #4) — see [Brain Orb](#brain-orb--self-rendering-mind-page-58-trinity-enterprise) |
 | GET/PUT | `/api/settings/elevenlabs` | ElevenLabs / voice platform settings (admin-only, ent#117). GET: `{key_configured, key_source: override\|env\|none, default_voice_id}` — the key value is never echoed. PUT: partial `{api_key?, default_voice_id?, clear: ["api_key"\|"default_voice_id"]}`; key stored AES-256-GCM encrypted (Invariant #12) in `system_settings`; runtime-resolved (no restart); audit-logged masked. Registered before `/{key}` (Invariant #4) |
@@ -2050,6 +2053,51 @@ CREATE INDEX idx_agent_evaluations_agent ON agent_evaluations(agent_name, create
 CREATE INDEX idx_agent_evaluations_execution ON agent_evaluations(execution_id);
 ```
 
+**skill_sources** (ent#237 — the multi-source skills library). **Replaces** the single
+`skills_library_url` system setting: the platform syncs from a bundled public community
+catalog plus any number of admin-added custom repos, each with its own checkout at
+`/data/skills-library/<source_id>/`. Resolution across sources is `priority` ASC then
+`created_at` ASC — custom sources default to 100 and the community source to 1000, so
+**custom wins** a name clash and names stay bare. Dual-track migration (SQLite
+`skill_sources_table` + Alembic `0034_skill_sources`):
+```sql
+CREATE TABLE skill_sources (
+    id TEXT PRIMARY KEY,                 -- 'src_<hex8>' (server-minted; also the checkout dir name)
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,                   -- github.com only (SSRF allowlist, SEC-179), validated on write AND at sync
+    ref TEXT NOT NULL,                   -- branch name or tag name
+    ref_type TEXT NOT NULL,              -- 'branch' | 'tag'
+    is_default INTEGER DEFAULT 0,        -- the bundled community source
+    enabled INTEGER DEFAULT 1,
+    priority INTEGER NOT NULL,           -- resolution order; lower wins
+    last_sync_at TEXT,
+    last_sync_status TEXT,               -- 'never' | 'success' | 'failed'
+    last_commit_sha TEXT,                -- the pin comparison's durable side (tag sources)
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    created_by TEXT
+);
+CREATE UNIQUE INDEX idx_skill_sources_url_ref ON skill_sources(url, ref);
+```
+
+`agent_skills.source_id` records which source an assignment resolved from — recorded, not
+keyed (the UNIQUE stays `(agent_name, skill_name)`, since two sources' copies cannot
+coexist on disk). Deleting a source does **not** cascade to assignments.
+
+**Tag pinning is the supply-chain control (AC#5).** Skills carry executable `scripts/`
+that the ent#139 runner executes and ent#236 re-injects fleet-wide unattended, so the
+community source — which takes public PRs — pins to a **tag we bump**, never a branch
+head; custom sources, whose write access the operator controls, track a branch. A pinned
+tag that resolves to a different commit than the last sync is **refused**
+(`moved_tag`), never adopted. The refusal covers **both** materialization paths, which is
+the whole of it: the update path via a `fetch` without `--force` plus an explicit SHA
+comparison, and the **clone** path via `_refuse_moved_pin_after_clone`, which also deletes
+the checkout (a failed sync that leaves the tree on disk would still serve the moved tag's
+content to `list_skills` and to injection). Enforcing only the update path leaves the pin
+bypassed exactly when the checkout was lost — a quarantine rename, a restored `/data`
+backup, a recreated volume — and a moved tag would then reach every running agent behind a
+successful-looking sync. Revocation = cut a new tag without the offending skill.
+
 ### Redis
 
 - **Credential storage (DEPRECATED — CRED-002)**: credentials moved to encrypted files in agent workspaces (`.env` + `.credentials.enc`); legacy keys (`credentials:{id}:*`, `user:{id}:credentials`, `agent:{name}:credentials`) kept for backward compatibility only.
@@ -2057,6 +2105,7 @@ CREATE INDEX idx_agent_evaluations_execution ON agent_evaluations(execution_id);
 - **Heartbeat keys**: see [Heartbeat Liveness](#heartbeat-liveness-reliability-004-307). All heartbeat ops are within the backend Redis ACL (`-@dangerous`) and follow the `agent:*` naming convention.
 - **Capacity/breaker keys**: `agent:slots:{name}` (ZSET) + `agent:slot:{name}:{eid}` (HASH), `agent:circuit:{name}`, `agent:dispatch:{name}`, `canary:drain_tick_at` — see the respective subsystem blocks. Every **name-keyed** per-agent keyspace is enumerated once in `services/agent_runtime_state.py` (`CLEARED_KEYSPACES` / `EXEMPT_KEYSPACES`) and cleared across the agent lifecycle, so a recycled name never inherits its predecessor's state (#1560); a parity test fails CI on an unregistered `agent:*` key.
 - **Session tab keys**: `session_lock:*`, `session_inflight:*` — see [Session Tab](#session-tab).
+- **Skills library sync lock**: `skills:library:sync` (SET NX + TTL, fail-open, check-and-delete release) serialises clone/pull across workers (ent#236). ent#237 keeps it covering the **whole sweep** rather than one lock per source: per-source locking would let two workers interleave and each publish a merged listing built from a half-updated set of checkouts, and the listing, the cache invalidation and the durable status are all library-wide. Contention returns `busy` (409), never a failure — a contended manual click must not overwrite the panel with "Last sync failed". Deliberately outside `agent:*` (the `compat_fix` precedent), so the #1560 name-keyed registry doesn't apply.
 - **JWT / portal-session revocation**: `jwt:revoked:{jti}` (per-token blacklist, TTL = the token's remaining life, #187) and `portal:revoked_before:{email}` (a single per-email *cutoff* timestamp; `decode_portal_session` rejects a portal token whose `iat` is at or before it, TTL = the max portal-session lifetime). The cutoff form exists because `jti` is random per token and nothing indexes email → issued jtis, so "revoke every session this address holds" is O(1) instead of an index maintained at every mint — and it therefore cannot be forgotten on a new mint path. Both fail open on Redis; an edition-agnostic primitive (`dependencies.revoke_portal_sessions_for_email`), with the policy for *when* to call it owned by the entitled module that mints portal sessions.
 - **Repo-binding locks** (ent#109): `agent:bind_op:{name}` (SET NX + TTL, double-submit guard) and `agent:bind_dest:{sha256(lower(destination_repo))}` — the latter keyed by **destination, not agent name**, because the collision is between two *different* agents targeting one repo. Both **fail closed** (503 + `Retry-After`), unlike `agent:data_op:`. Registered in `agent_runtime_state.EXEMPT_KEYSPACES` with reasons (clearing either mid-operation would unserialize the very operation that asked for the recreate).
 - **Compatibility fix lock**: `compat_fix:{name}` (SET NX, 30s TTL) serialises the per-agent gitignore auto-fix read-modify-write (#668).
