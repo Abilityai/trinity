@@ -23,6 +23,7 @@ explicit admin action.
 import logging
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -102,8 +103,44 @@ class SkillSourceClone:
             result["commit_sha"] = self.current_commit()
         return result
 
+    def _quarantine_non_repo_dir(self) -> None:
+        """Move a non-repository source directory aside so a clone can proceed.
+
+        Ported from ent#236, which fixed this for the single shared library and
+        whose reasoning applies unchanged per source. `sync` decides clone-vs-
+        update on `.git` alone, so a path that exists but holds no repository —
+        a clone interrupted by a full disk or a crash, a stray `mkdir`, a
+        restored backup — takes the clone branch; but `git clone` refuses a
+        destination that exists and is non-empty, so without this the source
+        fails forever and the only recovery is shell access. ent#236 put sync on
+        an unattended timer, where "forever" means every scheduled sync fails and
+        the fleet re-inject silently never runs.
+
+        Renamed, never deleted. The platform owns this path exclusively, so
+        removal would probably be safe — but "probably safe" is not the standard
+        for an unattended timer deleting a directory (#1638/#1644). Only one
+        quarantine is kept per source, so this cannot grow without bound.
+        """
+        quarantine = self.path.with_name(self.path.name + ".broken")
+        try:
+            if quarantine.exists():
+                shutil.rmtree(quarantine, ignore_errors=True)
+            self.path.rename(quarantine)
+            logger.warning(
+                "skill source %s at %s was not a git repository — moved to %s "
+                "and re-cloning.", self.source_id, self.path, quarantine,
+            )
+        except OSError as e:  # noqa: BLE001 — fall through and let clone report
+            logger.error(
+                "could not move aside non-repo skill source at %s: %s",
+                self.path, e,
+            )
+
     def _clone(self, auth_url: str) -> Dict[str, Any]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.exists():
+            # Reached only via the `.git`-absent branch in `sync`.
+            self._quarantine_non_repo_dir()
         cmd = [
             "git", *_GIT_HTTP_UA_ARGS, "clone",
             "--branch", self.ref,   # accepts a tag name too, yielding a detached HEAD

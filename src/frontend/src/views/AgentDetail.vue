@@ -12,14 +12,26 @@
           <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-action-primary-500 mx-auto"></div>
         </div>
 
-        <!-- Notification Toast -->
+        <!-- Notification Toast.
+             #1953: anchored bottom-right, NOT `top-20 right-4`. `top-20` is exactly
+             where AgentHeader's row-1 right cluster starts (NavBar h-16 + main py-2 +
+             inner py-2 = 80px), so the toast covered the Running toggle and Delete.
+             `bottom-24` clears the global HelpChatWidget FAB (bottom-6 + h-14 = 80px),
+             which is why this is not the `bottom-4 right-4` used elsewhere. -->
         <div v-if="notification"
           :class="[
-            'fixed top-20 right-4 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
+            'fixed bottom-24 right-6 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
             notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
           ]"
         >
-          {{ notification.message }}
+          <span>{{ notification.message }}</span>
+          <button
+            v-if="notification.type === 'error'"
+            type="button"
+            class="ml-3 font-medium opacity-70 hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-status-danger-500/40 rounded"
+            aria-label="Dismiss notification"
+            @click="dismissNotification"
+          >✕</button>
         </div>
 
         <div v-if="error && !agent" class="bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300 px-4 py-3 rounded mb-4">
@@ -230,7 +242,7 @@
             </div>
 
             <!-- Skills Tab Content -->
-            <div v-if="activeTab === 'skills'">
+            <div v-if="activeTab === 'skills'" class="p-6">
               <SkillsPanel
                 :agent-name="agent.name"
                 :can-manage="!!agent.can_share"
@@ -245,7 +257,7 @@
 
             <!-- Settings Tab Content (#1108) — sectioned home for per-agent
                  config; Guardrails (GUARD-001 UI, #967) is section #1 -->
-            <div v-if="activeTab === 'settings' && agent.can_share" class="space-y-6">
+            <div v-if="activeTab === 'settings' && agent.can_share" class="p-6 space-y-6">
               <SettingsPanel :agent-name="agent.name" :notify="showNotification" />
               <!-- ent#277: renders only when the entitlement is present. -->
               <CrossModelValidationPanel :agent-name="agent.name" />
@@ -470,7 +482,7 @@ function toggleChatMode() {
 }
 
 // Initialize composables
-const { notification, showNotification } = useNotification()
+const { notification, showNotification, dismissNotification } = useNotification()
 
 // Agent lifecycle composable
 const {
@@ -558,10 +570,12 @@ async function toggleAutonomy() {
     // Update local state
     agent.value.autonomy_enabled = newState
 
+    // #1945: the server authors this line — the toggle no longer "activates"
+    // schedules, it gates them, and the message names the case (no schedules /
+    // all disabled / N of M will run) that the raw count used to hide.
     showNotification(
-      newState
-        ? `Autonomy enabled. ${result.schedules_updated} schedule(s) activated.`
-        : `Autonomy disabled. ${result.schedules_updated} schedule(s) paused.`,
+      result.message ||
+        `Autonomy ${newState ? 'enabled' : 'disabled'}.`,
       'success'
     )
   } catch (error) {

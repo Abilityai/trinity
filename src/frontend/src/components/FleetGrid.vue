@@ -600,8 +600,17 @@ onBeforeUnmount(() => {
 :root.dark .fleet-canvas {
   --gv-text: #f9fafb;
   --gv-muted: #9ca3af;
-  --gv-faint: #6b7280;
-  --gv-ghost: #4b5563;
+  /* #1922: dark ink ladder — gray-500 is the floor (disabled/decoration only).
+     Both of these carry READABLE text (--gv-faint: the zoom readout, the
+     far-tile placeholder and the empty stat line; --gv-ghost: the repo label
+     and the dimmed half of a stat), so neither may sit below tertiary.
+     They collapse onto gray-400 with --gv-muted because the dark ladder has
+     exactly ONE legal step for tertiary text — there is no darker ink left to
+     spend. Re-separating them needs weight or size, not a darker gray; that is
+     a design call for #1430, not a color sweep. The light block keeps all three
+     distinct (it has headroom below tertiary). */
+  --gv-faint: #9ca3af;
+  --gv-ghost: #9ca3af;
   --gv-border: #374151;
   --gv-border-soft: rgba(55, 65, 81, 0.5);
   --gv-panel: #1f2937;

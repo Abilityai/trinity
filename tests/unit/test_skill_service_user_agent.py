@@ -77,7 +77,22 @@ for mod_name, attrs in [
     ),
     # sys.modules["utils"] points to tests/utils/ (needed for api_client/cleanup),
     # not src/backend/utils/, so url_validation.py isn't found automatically.
-    ("utils.url_validation", {"validate_skills_library_url": lambda url: url}),
+    #
+    # The stub must carry EVERY name `skill_service` imports from this module,
+    # not just the one this file exercises. It is installed only when the key is
+    # absent from sys.modules, so a missing name fails ONLY when this file runs
+    # before something that loaded the real module — i.e. by file order, which
+    # is how ent#237's `ALLOWED_SKILLS_LIBRARY_HOSTS` import passed CI while
+    # breaking this file in isolation.
+    (
+        "utils.url_validation",
+        {
+            "validate_skills_library_url": lambda url: url,
+            "ALLOWED_SKILLS_LIBRARY_HOSTS": {"github.com", "www.github.com"},
+            "EmbeddedCredentialError": type("EmbeddedCredentialError", (ValueError,), {}),
+            "reject_embedded_credentials": lambda url: url,
+        },
+    ),
 ]:
     if mod_name not in sys.modules:
         m = _types.ModuleType(mod_name)

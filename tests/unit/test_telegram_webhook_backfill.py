@@ -145,6 +145,12 @@ def _load_settings_module():
         PROACTIVE_RATE_LIMIT_DESCRIPTIONS={},
         PROACTIVE_RATE_LIMIT_MAX=1000000,
         get_proactive_rate_limit=MagicMock(return_value=10),
+        SKILLS_AUTO_SYNC_ENABLED_KEY="skills_library_auto_sync_enabled",  # ent#236
+        SKILLS_AUTO_SYNC_INTERVAL_KEY="skills_library_auto_sync_interval_seconds",
+        SKILLS_AUTO_REINJECT_ENABLED_KEY="skills_library_auto_reinject_enabled",
+        SKILLS_AUTO_SYNC_INTERVAL_DEFAULT=3600,
+        SKILLS_AUTO_SYNC_INTERVAL_MIN=300,
+        SKILLS_AUTO_SYNC_INTERVAL_MAX=86400,
     )
     # settings.py module-level imports VALID_CPU/VALID_MEMORY from the
     # container-spec module (#1197); stub it so the standalone load completes.

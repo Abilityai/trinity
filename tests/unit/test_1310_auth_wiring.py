@@ -35,7 +35,8 @@ _ROUTERS = Path(__file__).resolve().parents[2] / "src" / "backend" / "routers"
 
 # Per-(filename, function) allowlist — intentional, documented designs that keep
 # their own inline check (enumeration-safe by construction; INV-8 §2.7 / #186):
-#   * reports.get_report            — 404-not-403 to avoid a report-id oracle
+#   * reports._report_or_404        — 404-not-403 to avoid a report-id oracle;
+#     the ONE gate shared by the detail / rows / export routes (#1838 review)
 #   * nevermined._require_*_access  — the payment-config uniform-404 helpers
 #   * chat.execute_parallel_task    — the resume-session owner check is a compound
 #     `role != "admin" AND NOT db.resume_session_belongs_to_user(...)` raising an
@@ -43,7 +44,7 @@ _ROUTERS = Path(__file__).resolve().parents[2] / "src" / "backend" / "routers"
 #     pattern). No shared helper fits: `assert_owns_or_admin` takes an owner_id
 #     and raises 403, which would leak session existence. Stays inline (#1083).
 _ALLOWLIST: set[tuple[str, str]] = {
-    ("reports.py", "get_report"),
+    ("reports.py", "_report_or_404"),
     ("nevermined.py", "_require_read_access"),
     ("nevermined.py", "_require_write_access"),
     ("chat.py", "execute_parallel_task"),
@@ -239,14 +240,14 @@ def test_allowlist_suppresses_intentional_404():
     """A `can_user_*`-guarded raise in an allowlisted (file, function) is not a
     violation — the intentional-404 designs keep their inline check."""
     src = (
-        "def get_report(report_id, current_user):\n"
+        "def _report_or_404(report_id, current_user):\n"
         "    report = db.get_report(report_id)\n"
         "    if not report or not db.can_user_access_agent(current_user.username, report['agent_name']):\n"
         "        raise HTTPException(status_code=404, detail='Report not found')\n"
     )
     assert find_violations(src, "reports.py") == []
     # same body in a non-allowlisted file/function IS flagged
-    assert find_violations(src.replace("get_report", "leak", 1), "reports.py")
+    assert find_violations(src.replace("_report_or_404", "leak", 1), "reports.py")
 
 
 def test_noqa_inv8_suppresses_line():

@@ -96,7 +96,7 @@ The frontend displays slot usage as a vertical capacity meter bar on the Agents 
 │  │       v                                                          │     │
 │  │  CapacityMeter.vue (vertical bar with discrete cells)           │     │
 │  │       │                                                          │     │
-│  │       ├── Agents.vue (desktop tile, tablet tile)                │     │
+│  │       ├── AgentListPanel.vue (list rows — ent#260)              │     │
 │  │       └── ReplayTimeline.vue (dashboard timeline tile)          │     │
 │  └────────────────────────────────────────────────────────────────┘     │
 │                                                                          │
@@ -324,10 +324,7 @@ Every 5 seconds (agents store / network store):
 
 | File | Line | Purpose |
 |------|------|---------|
-| `src/frontend/src/views/Agents.vue` | 688 | Import CapacityMeter component |
-| `src/frontend/src/views/Agents.vue` | 419-425 | Desktop layout: meter as flex sibling, `self-stretch`, width=6, height=48 |
-| `src/frontend/src/views/Agents.vue` | 533-539 | Tablet layout: meter with `v-if`, width=10, height=28 |
-| `src/frontend/src/views/Agents.vue` | 908-910 | `getSlotStats()` helper reads from `agentsStore.slotStats` |
+| `src/frontend/src/components/AgentListPanel.vue` | — | Dashboard List rows: desktop + tablet meters; `getSlotStats()` reads `networkStore.slotStats` (ent#260 — replaces the retired `views/Agents.vue` integration) |
 | `src/frontend/src/components/ReplayTimeline.vue` | 373 | Import CapacityMeter component |
 | `src/frontend/src/components/ReplayTimeline.vue` | 204-210 | Timeline tile: meter, `self-stretch`, width=6, height=52 |
 | `src/frontend/src/components/ReplayTimeline.vue` | 394 | `slotStats` prop declaration |

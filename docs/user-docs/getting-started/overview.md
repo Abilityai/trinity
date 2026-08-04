@@ -30,7 +30,7 @@ Trinity runs as a set of Docker containers on your local machine or server. Afte
 2. **Create an agent** -- From the dashboard, click "Create Agent" and select a template (GitHub repo URL or local path). Trinity pulls the template, builds a container, and deploys the agent.
 3. **Configure credentials** -- Add API keys and secrets through the agent's credential panel. Credentials are encrypted in Redis and injected into the container at runtime with hot-reload support.
 4. **Chat with the agent** -- Open the agent detail page and use the built-in chat interface. The agent processes your request using its configured tools, MCP connections, and reasoning context.
-5. **Schedule autonomous work** -- Set up cron-based schedules so the agent executes tasks on its own. Enable Autonomy Mode to activate all schedules.
+5. **Schedule autonomous work** -- Set up cron-based schedules so the agent executes tasks on its own. Enable Autonomy Mode to let the agent's enabled schedules run.
 6. **Monitor the fleet** -- Use the dashboard to view agent health, execution history, and the network graph showing inter-agent communication.
 
 ## For Agents

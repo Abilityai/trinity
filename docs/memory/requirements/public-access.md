@@ -146,16 +146,18 @@
   - No new Python dependencies (httpx only)
   - Router generalization: `ChannelMessageRouter` now uses adapter methods instead of Slack-specific hardcodings
 - **Database Tables**:
-  - `telegram_bindings` — Maps bots to agents (bot_id UNIQUE, bot_username, webhook_secret, telegram_secret_token, encrypted bot token)
+  - `telegram_bindings` — Maps bots to agents (bot_id UNIQUE, bot_username, webhook_secret, telegram_secret_token, encrypted bot token, `progress_indicator_enabled` — ent#264, see §15.1h)
   - `telegram_chat_links` — Maps Telegram users to sessions (binding_id, telegram_user_id, message_count)
 - **API Endpoints**:
   - `POST /api/telegram/webhook/{webhook_secret}` — Receive Telegram updates (validated by X-Telegram-Bot-Api-Secret-Token header)
-  - `GET /api/agents/{name}/telegram` — Bot binding status
+  - `GET /api/agents/{name}/telegram` — Bot binding status (`AuthorizedAgentByName` since ent#264 — see Security below; response carries `progress_indicator_enabled`)
   - `PUT /api/agents/{name}/telegram` — Configure bot token (validates via getMe)
   - `DELETE /api/agents/{name}/telegram` — Remove bot binding + delete webhook
   - `POST /api/agents/{name}/telegram/test` — Test bot connectivity / send test message
+  - `PUT /api/agents/{name}/telegram/progress-indicator` — Toggle the in-progress status indicator (ent#264, see §15.1h)
 - **Security**:
   - Bot tokens AES-256-GCM encrypted at rest (same `CredentialEncryptionService` as Slack)
+  - Binding-status GET hardened to `AuthorizedAgentByName` (ent#264): binding status — including `webhook_url`, which embeds the `webhook_secret` — is no longer readable by arbitrary authenticated users (uniform-404 accessor; owner/shared/admin still pass). The sibling `GET .../telegram/groups` (group chat ids/titles/welcome text — tenant data) carries the same accessor; the group-message POST was already owner-gated
   - Webhook auth via `X-Telegram-Bot-Api-Secret-Token` header (set during setWebhook)
   - SSRF prevention: media downloads restricted to `api.telegram.org` domain
   - Restricted tools for Telegram users (WebSearch, WebFetch — same as Slack)
@@ -185,6 +187,7 @@
   - Mention text stripped from agent input for cleaner prompts
   - Commands support @botname suffix in groups (e.g., `/help@mybot`)
   - Uses modern Telegram `reply_parameters` API for threaded replies
+  - In-flight status indicator (ent#264, §15.1h) acks only @mention/reply-triggered turns and `all`-trigger-mode groups; observe-mode un-mentioned turns get typing only (a visible reaction would reveal a silently-observing bot and spam the group)
 - **Database Tables**:
   - `telegram_group_configs` — Per-group settings (binding_id, chat_id, trigger_mode, welcome_enabled, welcome_text, is_active)
 - **API Endpoints**:
@@ -202,6 +205,60 @@
   - Group membership not re-verified per message (documented limitation)
   - Bot loop prevention inherited from TGRAM-001 (`is_bot` check)
 - **Frontend**: TelegramChannelPanel extended with group list, trigger mode radio, welcome message config
+- **Flow**: `docs/memory/feature-flows/telegram-integration.md`
+
+### 15.1h Channel Completion Report-Back (CHANNEL-REPORT — ent#224 Slack, ent#265 Telegram)
+- **Status**: ✅ Slack (2026-07, ent#224) · ✅ Telegram (2026-07, ent#265)
+- **Priority**: P1
+- **Description**: A long-running or **delegated** task whose work started from a channel reports its terminal (success AND failure — a silent failure is the bug this closes) back to the originating chat/thread. A direct channel turn is answered inline by the adapter; the reporter covers the executions that *inherited* their channel context (A→B delegation, background /task work).
+- **Generic mechanism** (`services/channel_completion_report.py`):
+  - **Inherited-context-only / no-double-post rule**: report ONLY when the execution's `triggered_by` is NOT a channel trigger (`slack`/`telegram`/`whatsapp`) — an inline turn was already answered by the adapter. This single condition is the no-spam guarantee; never weaken it.
+  - **Context is persisted on the row at /task creation (ent#265 D0)**: `create_task_execution_and_activities` resolves `_inherited_channel_context(parent_execution_id)` and writes `source_channel`/`_chat_id`/`_thread`/`_agent` onto the child row itself (the former `run_async_task` → `execute_task(source_channel=…)` threading was dead code — `execute_task` writes channel columns only in its no-`execution_id` creation branch). A **provenance guard** gates inheritance, keyed on the **authenticated principal** (never the raw `X-Source-Agent` header — unvalidated client input for a human caller, since the SELF-EXEC-001 spoof guard only fires for agent-scoped keys): an agent-scoped caller must BE the parent's executing agent; a human caller must OWN the parent's agent (or be admin — writing into a channel chat is a proactive-send capability, and every other proactive surface is owner-gated); a connector key never inherits. Failure → no inheritance (never someone else's chat).
+  - **Binding-agent resolution (ent#265 D1)**: consent + bot token evaluate against `binding_agent = row.source_channel_agent or row.agent_name` for BOTH channels — the bot the user actually addressed delivers (on Telegram no other bot even *can* deliver the DM); transitive across A→B→C. NULL column (direct/legacy rows) = the executing agent, byte-identical legacy behavior. Attribution stays with the EXECUTING agent (Slack `username=`; Telegram head-line suffix when it differs — no per-message sender name).
+  - **Terminal chokepoints**: `apply_result` success + failure branches (the failure branch is the ent#265 D3 fix — it previously emitted the #1578 event but never the report) and `_write_terminal_and_gate` (timeout/budget/crash), all CAS-won-only, fire-and-forget, never-raise. CANCELLED envelopes report uniformly.
+  - **At-most-once**: `effect_guard("channel_completion_report", {channel, chat_id, thread}, execution_id, agent_name=row.agent_name)` (#1084) — identity is the resolved destination, never the generated body; the guard's `agent_name` is ALWAYS the executing agent (a binding-agent passthrough fail-opens resolution and silently disarms dedup). A failed send claims completed (at-most-once bias; never blind-retry an ambiguous send).
+  - **Sanitize-before-truncate**: `_summarize` credential-sanitises over a 2× window before capping at 2800 chars (the #1578 emit-chokepoint rule — every egress surface).
+  - **D10 structure**: per-channel resolver dispatch map; `SUPPORTED_CHANNELS` derives from it — a WhatsApp leg is additive.
+- **Per-channel consent units**:
+  - **Slack**: channel-binding `allow_proactive` (ent#223); no binding / no consent → suppress.
+  - **Telegram group**: `telegram_group_configs.allow_proactive` (INTEGER DEFAULT 1 — allow for existing AND new groups; opt-out mute via the "Completion reports" toggle in TelegramChannelPanel; human-only PUT arm — `reject_agent_principal`). Requires `is_active` too.
+  - **Telegram DM**: **consent-by-construction** — a chat link exists only because the user personally cold-started the bot (Telegram's own cold-DM prohibition is the transport guarantee); a block surfaces as a 403 the send handles as a logged no-op.
+  - Unknown Telegram destination (no group config, no chat link) → suppress with log — never fire a send destined to fail.
+  - **Two DM consent regimes (deliberate)**: reporting on *user-initiated work* is the deferred sibling of the inline reply and needs no flag; *agent-initiated outreach* (#321 proactive messaging) keeps its own `agent_sharing.allow_proactive` per-recipient consent. The #321 flag is NOT honored as DM report revocation — it cannot distinguish "explicitly revoked" from "never opted in" (default 0), so honoring it would kill the flagship delegated-DM case for every verified shared user. A future unified consent model inherits this rationale.
+- **Rendering (Telegram)**: pre-escape `&`/`<`/`>` → `_markdown_to_html` → re-cap at 4096 (entity expansion; "message too long" is a 400 the parse-fallback doesn't catch); thread = the triggering `message_id`, passed as `reply_parameters` when numeric, DMs anchored too, `allow_sending_without_reply` makes a deleted original safe.
+- **Database**: `schedule_executions.source_channel_agent TEXT` (nullable; `AgentRef` KEEP — rename cascades, #772 90-day sweep is retention); `telegram_group_configs.allow_proactive INTEGER DEFAULT 1`. Dual-track migration (SQLite `channel_report_back_columns` + Alembic `0031_channel_report_back`).
+- **Known limits (v1)**: lease-reaper/bulk-sweep/pull-sink and operator-terminate (Path B) terminals don't report; a restart mid-inline-turn loses the inline reply and reports nothing (F7); a late token-gated FAILED→SUCCESS resurrection replays the guard — no corrective ✅ (correct at-most-once); fan-out = one report per child execution (per-execution identity — no persisted parent key); pre-migration rows with NULL chat context suppress; Telegram forum topics not threaded (inbound never captures `message_thread_id`); no channel-history persistence of the report.
+- **Deliberate scope cut**: the proactive group-send endpoint (`POST …/telegram/groups/{chat_id}/messages`) is NOT gated on `allow_proactive` here (ent#223 did gate Slack's) — with default 1 the eventual coherence gate is a no-op for un-toggled groups; follow-up issue filed at ship time.
+- **Flow**: `docs/memory/feature-flows/channel-completion-report.md`
+
+### 15.1i Telegram In-Progress Status Indicator (TGRAM-PROGRESS)
+- **Status**: ✅ Implemented (2026-07-30)
+- **Requirement ID**: TGRAM-PROGRESS
+- **Priority**: P2
+- **Issue**: trinity-enterprise#264
+- **Description**: While a Telegram-triggered execution runs (minutes to hours under TIMEOUT-001), the user gets live feedback instead of silence: an immediate 👀 reaction ack on the triggering message at dispatch, the existing one-shot typing garnish, and — once the run crosses a 30s threshold — an elapsed-time placeholder message ("⏳ Working on it — N min elapsed · updated HH:MM UTC") maintained via `editMessageText` on a 60s cadence and resolved (deleted; fallback edited to a neutral terminal line) at every terminal.
+- **Key Features**:
+  - Channel-agnostic start/progress/resolve seam: the router owns a per-turn driver task ticking a new default-no-op `ChannelAdapter.indicate_progress(message, elapsed_seconds)` hook; adapters declare capability via `progress_threshold_seconds` (`None` ⇒ driver never armed — Slack/WhatsApp/VoIP behave byte-identically; ent#228 later implements only the hook, not the loop)
+  - All per-turn indicator state rides `NormalizedMessage.metadata` (the adapter is a long-lived shared singleton handling concurrent turns — no unkeyed adapter state, no cleanup protocol; state dies with the turn)
+  - Honest status (dispatch/terminal-hook driven, never a lying timer): the driver is cancelled AND awaited-dead before `indicate_done` at all three router terminals (success / failed-or-cancelled / exception — timeout surfaces as `failed`), so a tick can never edit the placeholder after it is deleted; a `finally` backstop cancels a still-armed driver on unexpected raises outside the terminals
+  - Resolve-vs-first-send race closed by construction: the first placeholder send runs as a shielded future that records the Telegram `message_id` into metadata **inside the future itself**; the resolve path awaits the in-flight send (bounded) before `indicate_done`, so the delete always sees the id
+  - Group gating: reaction + placeholder only for @mention/reply-triggered turns and `all`-trigger-mode groups (the bot replies to everything there — excluding them would recreate the zero-feedback problem); observe-mode turns get typing only, so the indicator never reveals a silently-observing bot
+  - Self-dating placeholder text (`· updated HH:MM UTC`) — a restart-stranded placeholder dates itself instead of lying forever
+  - Static template text only: the placeholder/edit text is built solely from the elapsed-time template — no agent response or error content at this egress (no sanitizer needed; ent#224 class closed by construction)
+  - Degradation ladder: reaction fails (per-chat disabled / permissions / old chats → 400) → typing + placeholder still work; two consecutive failed progress HTTP attempts (placeholder sends, edits, timeouts alike) set a per-turn degraded flag that stops all further progress HTTP; the turn itself is NEVER failed by indicator code (every hook body fail-soft at its boundary)
+  - Rate-limit aware: one 429 retry honoring `retry_after` (capped 30s) on placeholder send/edit; "message is not modified" treated as success; 👀 reaction is single-attempt (a missed reaction is cosmetic); edit cadence 60s is well under the ≈1 msg/s per-chat budget
+  - Terminal reaction is CLEARED at every terminal — no success-👍 swap (✅ is not in Telegram's allowed bot reaction set; a split success/failure emoji semantics lies on edge cases; the reply itself is the completion signal)
+  - Per-binding toggle, default ON including existing bindings (migration column default): NULL/missing reads as **enabled** via the Python-side `v is None or v != 0` predicate (never SQL — `NULL != 0` is NULL); only an explicit `0` disables; toggle reads are per-turn, so a flip takes effect on the NEXT turn (documented behavior)
+- **Database Changes**:
+  - `telegram_bindings.progress_indicator_enabled INTEGER DEFAULT 1` — dual-track migration (SQLite `telegram_progress_indicator` in `db/migrations.py` + Alembic `0031_telegram_progress_indicator`), plus `db/schema.py` / `db/tables.py` DDL parity
+- **API Endpoints**:
+  - `PUT /api/agents/{name}/telegram/progress-indicator` — owner-only (`OwnedAgentByName`) **+ `reject_agent_principal`** (human-only: an agent-scoped key resolves to the owner and could otherwise flip its own toggle — ent#223 lesson); body `{enabled: bool}`; 404 when no binding exists (mirrors `PUT /voip/enabled` — toggling never requires re-entering the bot token)
+  - `GET /api/agents/{name}/telegram` — response gains `progress_indicator_enabled` (null when unconfigured); endpoint hardened to `AuthorizedAgentByName` (see §15.1c Security)
+- **Frontend**: `TelegramChannelPanel.vue` — "In-progress status indicator" switch in the configured-state block (optimistic flip, revert on error, dark-mode aware)
+- **Known residuals**:
+  - Backend restart mid-run strands the reaction/placeholder (same accepted class as Slack's stranded ⏳; the UTC stamp self-dates the stale placeholder) — no persistence engineering
+  - The resolve-path settle of an in-flight first placeholder send is **bounded at 10s** — a first send that exceeds it (e.g. a 429 `retry_after` ≥ 10s on that exact send) is abandoned and can still strand a placeholder (same accepted class; the UTC stamp self-dates it)
+  - The driver is bound to the inline channel execution path (`execute_task` awaited in-process; channel triggers are not in `ASYNC_DISPATCH_ELIGIBLE_TRIGGERS`). If #1081 pull-mode / #1083 async dispatch ever move channel triggers off the inline path, the in-process driver silently never resolves — the successor is the durable terminal-event seam (`source_channel*` columns + #1578 completion events, the ent#265 rails); the `indicate_progress` hook API survives that migration, only the router ticker moves
 - **Flow**: `docs/memory/feature-flows/telegram-integration.md`
 
 ### 15.1g Webhook Triggers for Agent Schedules (WEBHOOK-001)
@@ -249,7 +306,7 @@
   - Credentials: AuthToken encrypted AES-256-GCM via `CredentialEncryptionService`; AccountSid plaintext (public identifier)
   - Webhook: dual-factor auth — URL `webhook_secret` routes to binding, `X-Twilio-Signature` HMAC-SHA1 validated via `twilio.request_validator.RequestValidator` (handles Twilio's empty-param inclusion gotcha)
   - Dedup by `MessageSid` (2048-entry in-memory ring) to absorb Twilio retries
-  - Media inbound: images/audio/PDFs via Twilio-hosted URLs with HTTP Basic auth; SSRF-gated to `*.twilio.com` domain suffix; `follow_redirects=False` with allowlisted single-redirect follow for signed-URL media
+  - Media inbound via Twilio-hosted URLs with HTTP Basic auth. Any type is **fetched**, but only **images** (plus text/CSV/JSON) reach the workspace — `upload_service.UNSUPPORTED_MIMES` rejects `application/pdf`, `audio/`, `video/` and archives channel-agnostically, so a PDF or voice note surfaces as `"— unsupported format"` (a deliberate policy gate, not a download failure). SSRF-gated two-tier — the credentialed source hop stays `*.twilio.com`, validated redirect targets also allow `*.twiliocdn.com` (Twilio's media CDN, #1932); `follow_redirects=False` with every hop re-validated against the allowlist before it is issued (bounded follow budget)
   - Message splitting at 1600-char Twilio WhatsApp limit (paragraph → sentence → word boundaries)
   - Sandbox auto-detection from well-known number `whatsapp:+14155238886`
   - Empty TwiML (`<Response/>`) returned to Twilio ack; response delivered asynchronously via REST (no TwiML body response path)
@@ -278,7 +335,7 @@
 - **Security**:
   - AuthToken AES-256-GCM encrypted at rest; never logged in full
   - Webhook signature verification via `twilio>=9.10.5` `RequestValidator` (constant-time compare)
-  - SSRF allowlist on media downloads: `*.twilio.com` only, no redirects to other hosts
+  - SSRF allowlist on media downloads (#1932): the credentialed source hop is `*.twilio.com` only; a 30x is followed only to a re-validated `*.twilio.com`/`*.twiliocdn.com` target, always without auth. `s3-external-1.amazonaws.com` is deliberately excluded (path-style ⇒ allowlisting it admits arbitrary buckets)
   - Phone number masking in logs: `whatsapp:+141***5309`
   - Unknown webhook secrets return 200 empty TwiML (no binding-existence oracle)
   - Rate limiting via `ChannelMessageRouter` defaults (30 msg/min per sender)

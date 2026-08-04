@@ -20,10 +20,11 @@ How many tasks the agent may run concurrently (`max_parallel_tasks`, default 3).
 
 ### Autonomy Mode
 
-Master toggle that enables or disables all scheduled operations for an agent.
+Master gate for the agent's scheduled operations.
 
 - Toggle from the Dashboard, Agents page, or Agent Detail view
-- When disabled, all schedules for that agent are paused
+- When disabled, none of the agent's schedules fire
+- The toggle does **not** change each schedule's own on/off switch: a schedule you disabled stays disabled when you turn autonomy back on, and one you left enabled resumes automatically
 - API: `GET /api/agents/{name}/autonomy` and `PUT /api/agents/{name}/autonomy`
 
 ### Read-Only Mode

@@ -71,6 +71,34 @@ EXEMPT_KEYSPACES: Dict[str, str] = {
         "Short-lived SETNX export/import lock carrying its own TTL. Deleting it "
         "would let a second data operation run concurrently with an in-flight one."
     ),
+    "agent:bind_op:": (
+        "Short-lived SETNX repo-binding lock (ent#109) carrying its own TTL, "
+        "guarding double-submit on ONE agent. Same reasoning as agent:data_op: "
+        "— clearing it mid-operation would admit a second binder. It is also "
+        "held ACROSS the container recreate this module's start-path caller "
+        "triggers, so clearing there would drop the lock protecting the very "
+        "operation that asked for the recreate."
+    ),
+    "agent:bind_dest:": (
+        "Repo-binding DESTINATION lock (ent#109), keyed by sha256 of the "
+        "destination repo — NOT by agent name at all, so the name-keyed "
+        "lifecycle this module implements cannot address it. It exists "
+        "precisely because the collision is between two DIFFERENT agents "
+        "targeting one repo; clearing it on any single agent's lifecycle event "
+        "would unserialize the other. Registered here so the parity test stays "
+        "green and the omission stays a decision."
+    ),
+    "agent:mcp_key_regen:": (
+        "Short-lived SETNX MCP-key rotation lock carrying its own TTL (#1854). "
+        "Same shape as agent:data_op: above, and clearing it would be actively "
+        "harmful: this lock is deliberately FAIL-CLOSED because two interleaved "
+        "rotations end at 'the container holds K1 while the only active row is "
+        "K2', permanently 401-ing the heartbeat, the result callback, the pull "
+        "worker and the MCP client — with the surviving plaintext unrecoverable. "
+        "Deleting it mid-rotation would manufacture exactly that interleave, and "
+        "the rotation itself replaces the container, so a lifecycle clear on the "
+        "start path could fire against its own in-flight operation."
+    ),
 }
 
 

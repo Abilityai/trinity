@@ -274,6 +274,7 @@ TABLES = {
             source_channel TEXT,
             source_channel_chat_id TEXT,
             source_channel_thread TEXT,
+            source_channel_agent TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -514,6 +515,27 @@ TABLES = {
             event_type TEXT NOT NULL,
             event_context TEXT,
             created_at TEXT NOT NULL
+        )
+    """,
+
+    # Behavioral evaluations (ent#206) — the referee surface.
+    # A run's quality score, written ONLY by the platform/evaluator, never by the
+    # graded agent's key (the load-bearing rule of the eval epic). `completion`
+    # mirrors schedule_executions clean-exit; `quality` is the separate axis.
+    # -------------------------------------------------------------------------
+    "agent_evaluations": """
+        CREATE TABLE IF NOT EXISTS agent_evaluations (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            execution_id TEXT,
+            archetype TEXT,
+            completion INTEGER,
+            quality REAL,
+            checks_json TEXT,
+            judge_json TEXT,
+            evaluator TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (execution_id) REFERENCES schedule_executions(id)
         )
     """,
 
@@ -997,6 +1019,7 @@ TABLES = {
             webhook_url TEXT,
             telegram_secret_token TEXT,
             last_update_id INTEGER DEFAULT 0,
+            progress_indicator_enabled INTEGER DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT
         )
@@ -1034,7 +1057,8 @@ TABLES = {
             created_at TEXT NOT NULL,
             updated_at TEXT,
             verified_by_email TEXT,
-            verified_at TEXT
+            verified_at TEXT,
+            allow_proactive INTEGER DEFAULT 1
         )
     """,
 
@@ -1431,6 +1455,8 @@ INDEXES = [
 
     # Agent report indexes (#918)
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_agent ON agent_reports(agent_name, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_agent ON agent_evaluations(agent_name, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_execution ON agent_evaluations(execution_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_type ON agent_reports(report_type, created_at DESC)",
     # Serves the retention sweep's `WHERE created_at < cutoff` scan (#918).
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_created ON agent_reports(created_at)",

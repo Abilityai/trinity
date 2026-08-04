@@ -344,6 +344,15 @@ VALUES (?, ?, ?)
 
 Admins can configure which GitHub repositories appear as agent templates via the Settings page, replacing the hardcoded `config.py` list.
 
+**The `config.py` default list is EMPTY since #1931.** It shipped a pre-2026 repo set that no install had ever overridden, so every operator browsed the same dead catalog; curation is now an explicit operator act. Consequences, all deliberate:
+
+- The `None` (no DB row) and `[]` (explicit empty) branches now produce the same **catalog**. They still differ in the `source: defaults | settings` badge — which the panel renders as *"No defaults configured"* rather than *"Using defaults"*, because badging an empty set as defaults is a lie (#1931).
+- **Reset to Defaults** now reverts to an empty list. The button is already `:disabled` when `source === 'defaults'`, so the empty-state row no longer offers it as an action (it named one the user could not take — the dead end #1931 fixed one click away from the Library's own new empty state).
+- Emptying the list removes a **browse** surface, never a **create** capability: `template: github:owner/repo` still resolves through `template_service.get_github_template`'s dynamic branch whether or not the repo is configured. Guarded by `tests/unit/test_1931_empty_github_defaults.py`.
+- Side-effect: with no default repos, `GET /api/templates` makes **zero** outbound GitHub calls on a cold metadata cache (`_fetch_all_metadata([])` skips the `if to_fetch:` block entirely, so no ThreadPoolExecutor, no HTTP, no PAT read), where it previously blocked on up to six 10s-timeout requests.
+
+`trinity-enterprise#14` (remote template registry) will repoint this seam; the constant is kept, not deleted, for that reason and for the `None`-vs-`[]` fallback above.
+
 ### Data Flow
 
 ```
@@ -352,7 +361,7 @@ Settings.vue (GitHub Templates section)
     GET /api/settings/github-templates
     |
     ├─ DB has config → {source: "settings", templates: [...]}
-    └─ No DB config  → {source: "defaults", templates: [...from config.py...]}
+    └─ No DB config  → {source: "defaults", templates: [] since #1931}
     |
     PUT /api/settings/github-templates
     + Body: {templates: [{github_repo, display_name, description}, ...]}
@@ -419,7 +428,7 @@ Templates stored as JSON in `system_settings` table under key `github_templates`
 
 - **Upstream**: [first-time-setup.md](first-time-setup.md) - Initial admin password and API key configuration
 - **Downstream**: [template-processing.md](template-processing.md) - Uses GitHub PAT for private repo cloning
-- **Downstream**: [templates-page.md](templates-page.md) - Templates page uses configured list
+- **Downstream**: [library-page.md](library-page.md) - Library page (formerly Templates, ent#263) uses configured list
 - **Related**: [internal-system-agent.md](internal-system-agent.md) - Ops settings affect fleet health checks
 - **Related**: [ssh-access.md](ssh-access.md) - `ssh_access_enabled` setting controls MCP tool availability
 - **Related**: [agent-avatars.md](agent-avatars.md) - Default avatar generation endpoint and image generation pipeline (AVATAR-003)

@@ -23,26 +23,22 @@
                `xl` to buy the ~150px that keeps a 7-link entitled build
                scroll-free at the capped container width. -->
           <div class="hidden sm:ml-6 sm:flex sm:space-x-3 xl:space-x-6 min-w-0 overflow-x-auto nav-links-scroll">
+            <!-- trinity-enterprise#260 — the Agents entry is gone (the page is
+                 now the Dashboard's List mode); Dashboard inherits its
+                 agent-detail highlight, so /agents/:name pages light this up. -->
             <router-link
               to="/"
               class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium"
-              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path === '/' }"
+              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path === '/' || isAgentSection }"
             >
               Dashboard
             </router-link>
             <router-link
-              to="/agents"
+              to="/library"
               class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium"
-              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': isAgentSection }"
+              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path.startsWith('/library') }"
             >
-              Agents
-            </router-link>
-            <router-link
-              to="/templates"
-              class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium"
-              :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path === '/templates' }"
-            >
-              Templates
+              Library
             </router-link>
             <!-- #1109 — single Operations entry replaces the former
                  Health / Ops / Executions links. One unified badge carries
@@ -134,7 +130,7 @@
           <button
             v-if="buildInfo.info.value"
             @click="showBuildInfoModal = true"
-            class="hidden xl:block text-xs text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 font-mono whitespace-nowrap"
+            class="hidden xl:block text-xs text-gray-400 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 font-mono whitespace-nowrap"
             :title="`Click for build info — commit ${buildInfo.info.value.git_commit_short}`"
           >
             v{{ buildInfo.displayVersion.value }}<span

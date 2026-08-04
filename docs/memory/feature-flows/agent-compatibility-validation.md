@@ -42,9 +42,63 @@ Mirrors the deterministic `canary/` library: `spec.py` (single source of truth),
 
 - **Collector**: one `docker exec` runs a base64-injected in-container Python script that walks a FIXED path allowlist and emits ONE JSON snapshot — per-file `{exists, size, binary, truncated, content}` with 256 KB/file + 2 MB/total caps. Secret-bearing files (`.env`, generated `.mcp.json`) are **existence-only** (content never leaves the container). Backend `json.loads` once → `unavailable` on any failure (never 500). Stopped container detected via `docker_service` **before** exec → degraded report showing the last persisted result. Legacy `workspace/` dir via `git_service._detect_git_dir`.
 - **Static checks**: pure functions over the snapshot, registered in `STATIC_CHECKS` (consistency-tested against `spec.STATIC_IDS`). HARD checks are all STATIC. P-006 (autonomous approval-gate scan) and S-003/S-009 (secret pattern scan) are implemented STATIC; the report cites secret **location/pattern**, never the value.
+- **A detector must never read narrower than the mechanism it audits (ent#128).** Both credential HARD gates were two expressions of that one root cause. **K-001** compared `.mcp.json.template`'s `${VAR}`s against an UPPERCASE-ONLY view of `.env.example`, but Trinity's substitution engines impose no charset (a `str.replace` and an `env_val[2:-1]` slice), so `${my_var}` IS substituted at runtime and a template documenting `my_var=` was HARD-failed for a gap that did not exist. **K-002/T-015** compared the same references against `set(credentials.keys())` — the *section* names — so the documented structured form (`credentials.mcp_servers.<s>.env_vars`) satisfied nothing while `${env_file}` and `${mcp_servers}` PASSED; that admitted set was "whichever sections this template happens to use", making the blind spot template-dependent. Both now read the declaration via `template_service.declared_credential_names()`, and the four detector patterns share `services/credential_charset.py` — which carries an explicit **NON-MEMBERS** list, because `mcp_validator._ENV_VAR_REF_RE` is a *fail-closed gate* paired with a deliberately widest finder and widening it would ADMIT input, not fix a false positive.
+- **A HARD gate must not be able to go dark (ent#128).** `run_static` caught `Exception` → `skipped` and `_counts` counted only `status == "fail"`, so a raise inside a HARD check DROPPED `hard_count` and could flip `overall_status` from `issues` to `compatible` on an agent with a real problem. Four lines of untrusted `template.yaml` were the trigger (`env_vars: [{K: v}]` → `TypeError: unhashable type: 'dict'`), and because `c_k002` delegates to `c_t015` one raise took BOTH gates dark together — indistinguishable from a clean pass in the counts. `template.yaml` is read from the agent's own workspace, so it is a self-attestation bypass on the surface that polices it. Three layers now: `c_t015` wraps ONLY its new term and degrades to the narrower set (which makes `missing` LARGER — fail-closed by direction, never `skipped`); `run_static` returns **FAIL** for a raising check (*a check that could not evaluate is not a check that passed*); and `_counts` also counts `skipped` + `skip_reason == "check_error"` as a finding, at the sink (#1525), so the property survives a future path reintroducing the skip. A benign precondition skip (`no_template`, `ai_not_run`) still counts as nothing.
+- **Verdict changes (release-noted, not monotone).** The blanket "strictly monotone, `fail→pass` only" claim is false. The complete set: `fail→pass` for K-001/K-002/T-015 (the fix); `pass→fail` for K-002 on `${env_file}`/`${mcp_servers}`/`${config_files}` (a closed false negative, deliberate); `pass→fail` for **K-003 (SOFT)** on a lowercase-only comment-free `.env.example` (collateral of widening `_env_example_vars`, which is K-003's precondition for *demanding* comments — the verdict is correct but it is a `pass→fail`); and `pass→pass` for S-010, safe only because its `generic` blocklist is uppercase-exact — asserted, not assumed. The claim that survives: **no agent gains a HARD failure.**
 - **AI checks**: category-batched calls to Anthropic `/v1/messages` (`claude-haiku-4-5`) via `settings_service.get_anthropic_api_key` + httpx, tool-use structured output. **Iterate-expected** (an omitted check becomes `skipped`, never vanishes), per-item validation, concurrent via `asyncio.gather`, fail-open (no key / API error → `skipped` with reason). **AI severity is capped at SOFT** — an LLM verdict never drives the HARD count. Secret-bearing files are never sent; a redaction pass runs over every file before egress.
 - **Runtime-aware**: Claude-only checks (`CLAUDE.md`, `.claude/` skills) are omitted for non-Claude runtimes (Codex/Gemini, #1187).
 - **Fixes**: the 10 gitignore checks; reuses `git_service._GITIGNORE_PATTERNS`; per-agent Redis lock (`compat_fix:{name}`); atomic base64 write-back (`… | base64 -d > .gitignore.tmp && mv`); G-001 removes a blanket `.claude/` line by exact-line match (never substring, CRLF-normalized). **No auto-commit** — uncommitted until the agent's next git sync. `check_id` validated against the spec-derived whitelist (400 otherwise; 409 on a concurrent fix).
+
+### T-018 and the fail-open class (trinity-enterprise#89)
+
+`T-018` (soft, static) reports the `template.yaml` `schedules:` block's
+**structure** — presence/type of `name`/`cron`/`message`, entry shape, block
+shape, bounds, cap — via the same `services/template_schedules.py` reader the
+creation-time materializer uses, so the report cannot drift from what creation
+actually does. It exists because Trinity now *acts* on that block: a malformed
+one silently costs the agent its recurring tasks.
+
+**Cron is A-002's, not T-018's.** A-002 already shipped as "cron expressions are
+valid"; two checks disagreeing about one field is worse than either alone. (The
+reader *does* gate cron strictly, but that is a materialization decision — drop
+the entry — not a report verdict.) A-002's own validator was replaced in the
+same change: `_valid_cron` was a per-field `^[\d*/,\-]+$` regex, wrong in **both
+directions** — it rejected `0 9 * * MON` (valid; the scheduler translates named
+days) and accepted `99 99 * * *` (invalid; no range check). It now delegates to
+`schedule_validation.validate_cron_expression`, the parser the dedicated
+scheduler registers jobs with (#1472). *Validate a config with the same parser
+the executor uses.*
+
+**T-018 is the one check that fails closed, and the reason generalizes.**
+`run_static` catches a raising check and records `_skip(..., "check_error")`;
+`_counts` counts only `status == "fail"`. So a raising **soft** check drops
+`soft_count` 1→0, and because `overall` is a bare
+`(hard_count + soft_count) > 0` test, the whole report flips `issues` →
+`compatible` exactly when that check's finding was the only failure — which is
+the entire population T-018 serves. It is also **durable**: `build_report`
+persists `checks_json`, and `_report_from_persisted` recomputes counts from that
+snapshot, so one transient raise is replayed as a clean bill of health on every
+stopped-agent read. T-018 therefore catches its own `Exception` and returns
+`_fail`, carrying `type(e).__name__` **only** — `str(e)` can embed untrusted
+template content into a persisted, UI-rendered blob.
+
+This was not hypothetical. **`c_p006` — a HARD check — was failing open in the
+field**: it iterated `data.get("schedules") or []` with no
+`isinstance(..., list)` guard, unlike all four sibling readers of that field, so
+`schedules: 5` raised `TypeError` and the check silently vanished from
+`hard_count`. Fixed in the same change, which is what makes the fail-closed
+design evidence-backed rather than theoretical.
+
+`run_static`'s swallow now **logs** (`logger.error`, previously silent for all
+~100 checks). Converting that swallow to `fail` platform-wide is deliberately
+*not* done here — it would flip an unmeasured number of installs to `issues` in
+one step; the log line is the instrument for measuring first.
+
+Regression coverage runs every malformed fixture through **all** of
+`spec.STATIC_IDS` asserting no check lands at `skip_reason == "check_error"` — a
+T-018-only assertion would never have caught `c_p006` — plus a `build_report`
+test pinning the *direction* (a raising reader must still yield
+`overall_status == "issues"`).
 
 ## Persistence
 
@@ -65,11 +119,24 @@ Mirrors the deterministic `canary/` library: `spec.py` (single source of truth),
 | Models | `models.py` (`CompatibilityCheck`, `CompatibilityReport`, `CompatibilityFix*`) |
 | Frontend | `components/CompatibilityPanel.vue`, `components/OverviewPanel.vue`, `stores/agents.js` |
 | MCP | `mcp-server/src/tools/agents.ts`, `client.ts`, `types.ts` |
-| Tests | `tests/unit/test_compatibility_checks.py` |
+| Charset | `services/credential_charset.py` (shared detector charset + NON-MEMBERS list, ent#128) |
+| Tests | `tests/unit/test_compatibility_checks.py`, `tests/unit/test_ent128b1_compat_gates.py` |
 
 ## Testing
 
 `tests/unit/test_compatibility_checks.py` (fixture-driven, no Docker): spec consistency + spec↔doc sync, STATIC checks over good/bad/empty snapshots, gitignore fix transforms (CRLF/dup/comment/`.claude/projects/` survival/idempotent), AI batching (no-key skip, omitted→skipped, redaction), `build_report` orchestration (assemble + tmp-DB persistence, codex runtime omits claude_only, stopped→unavailable), and the collector script executed against a temp ROOT.
+
+`tests/unit/test_ent128b1_compat_gates.py` (39 tests, ent#128) covers the credential
+gates specifically: the complete transition set above, 9 hostile-declaration shapes
+that must still HARD-fail, `run_static` returning FAIL for a raising check, the
+`_counts` belt, and the charset NON-MEMBERSHIP assertions that catch an
+"align all the regexes" refactor. Verified against a **49-fixture synthetic
+adversarial corpus** diffed per check on `(status, skip_reason)` — `hard_count` alone
+cannot distinguish `fail→pass` from `fail→skipped`, which is exactly how a dark gate
+hides. The BUNDLED templates cannot prove any of it: with 0 `.mcp.json.template` and
+0 `.env.example` files in the bundle, every changed check short-circuits before
+reaching changed code (0 verdict diffs, normalizer invoked 0 times), so a green diff
+there is green-because-vacuous.
 
 ## Boundaries / fast-follow
 

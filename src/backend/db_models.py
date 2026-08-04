@@ -253,6 +253,11 @@ class ScheduleExecution(BaseModel):
     source_channel: Optional[str] = None            # telegram | slack | whatsapp
     source_channel_chat_id: Optional[str] = None    # channel/chat/conversation id
     source_channel_thread: Optional[str] = None      # thread id (nullable within a channel)
+    # ent#265: binding-agent for channel report-back — the agent whose channel
+    # binding owns this execution's INHERITED context (delegation copies it down;
+    # transitive across A→B→C). NULL = direct row; reporter falls back to the
+    # executing agent.
+    source_channel_agent: Optional[str] = None
 
 
 # =========================================================================

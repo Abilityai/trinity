@@ -2069,6 +2069,20 @@ class TaskExecutionService:
                 duration_ms=envelope.execution_time_ms,
                 cost=salvage_cost,
             )
+            # ent#265 (D3): report the failure terminal back to its originating
+            # channel too — this applier is the path agent-reported failure
+            # envelopes take (HTTP-error terminals, async-callback failures),
+            # i.e. the most common delegated-failure shape, and it previously
+            # emitted the #1578 event but never the channel report (AC#2 gap;
+            # also fixes the shipped Slack leg). CANCELLED envelopes (#679)
+            # report too — uniform with _write_terminal_and_gate, which already
+            # reports cancels. CAS-won branch only; fire-and-forget + fail-open.
+            channel_completion_report.spawn_completion_report(
+                execution_id=eid,
+                agent_name=agent_name,
+                status=str(getattr(envelope.status, "value", envelope.status)),
+                summary_or_error=envelope.error,
+            )
 
         return TaskExecutionResult(
             execution_id=eid or "",

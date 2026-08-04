@@ -5,6 +5,7 @@ Provides endpoints for managing system-wide configuration like the Trinity promp
 Admin-only access for modification, read access for all authenticated users.
 """
 import asyncio
+import json
 import logging
 import os
 import re
@@ -29,6 +30,7 @@ from models import (
     McpUrlUpdate,
     OpsSettingsUpdate,
     RetentionAcknowledge,
+    SkillsLibraryAutomationUpdate,
     SlackConnectRequest,
     SlackSettingsUpdate,
     TelemetrySharingUpdate,
@@ -66,7 +68,21 @@ from services.settings_service import (
     PROACTIVE_RATE_LIMIT_DESCRIPTIONS,
     PROACTIVE_RATE_LIMIT_MAX,
     get_proactive_rate_limit,
+    SKILLS_AUTO_REINJECT_ENABLED_KEY,
+    SKILLS_AUTO_SYNC_ENABLED_KEY,
+    SKILLS_AUTO_SYNC_INTERVAL_KEY,
+    SKILLS_AUTO_SYNC_INTERVAL_DEFAULT,
+    SKILLS_AUTO_SYNC_INTERVAL_MIN,
+    SKILLS_AUTO_SYNC_INTERVAL_MAX,
 )
+
+# ent#236: the three keys the dedicated /skills-library route owns. Blocked on
+# the generic PUT /{key} so they can only ever be written range-validated.
+SKILLS_AUTOMATION_KEYS = {
+    SKILLS_AUTO_SYNC_ENABLED_KEY,
+    SKILLS_AUTO_SYNC_INTERVAL_KEY,
+    SKILLS_AUTO_REINJECT_ENABLED_KEY,
+}
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -1809,6 +1825,152 @@ async def update_max_parallel_tasks_ceiling_setting(
     }
 
 
+@router.get("/skills-library")
+async def get_skills_library_automation_setting(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Skills-library lifecycle automation config + last-run status (ent#236).
+
+    Admin-only. Registered before the `/{key}` catch-all (Invariant #4).
+
+    Also reports the durable sync status and the last fleet re-inject report, so
+    the panel can show a FAILING auto-sync — the AC's "never silent" half. Both
+    read from `system_settings` rather than service memory because the loop runs
+    on ONE leader worker and this request usually lands on a different one.
+    """
+    assert_admin(current_user)
+
+    from services.settings_service import (
+        get_skills_auto_sync_interval,
+        is_skills_auto_reinject_enabled,
+        is_skills_auto_sync_enabled,
+    )
+    from services.skill_service import (
+        SKILLS_LAST_ERROR_KEY, SKILLS_LAST_STATUS_KEY, SKILLS_LAST_SYNC_KEY,
+    )
+    from services.skills_sync_service import FLEET_LAST_RUN_KEY
+
+    last_run = None
+    try:
+        raw = db.get_setting_value(FLEET_LAST_RUN_KEY, None)
+        if raw:
+            last_run = json.loads(raw)
+    except Exception:  # noqa: BLE001 — a malformed blob must not 500 the panel
+        last_run = None
+
+    return {
+        "auto_sync_enabled": is_skills_auto_sync_enabled(),
+        "auto_sync_interval_seconds": get_skills_auto_sync_interval(),
+        "auto_reinject_enabled": is_skills_auto_reinject_enabled(),
+        "interval_default": SKILLS_AUTO_SYNC_INTERVAL_DEFAULT,
+        "interval_min": SKILLS_AUTO_SYNC_INTERVAL_MIN,
+        "interval_max": SKILLS_AUTO_SYNC_INTERVAL_MAX,
+        "last_sync": db.get_setting_value(SKILLS_LAST_SYNC_KEY, None),
+        "last_sync_status": db.get_setting_value(SKILLS_LAST_STATUS_KEY, None),
+        "last_sync_error": db.get_setting_value(SKILLS_LAST_ERROR_KEY, None) or None,
+        "last_fleet_reinject": last_run,
+    }
+
+
+@router.put("/skills-library")
+async def update_skills_library_automation_setting(
+    body: SkillsLibraryAutomationUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Set skills-library automation flags + interval (ent#236).
+
+    Admin **and human-only**, partial update — every field is optional, and an
+    omitted field is left untouched (so toggling re-inject can't silently reset
+    the interval). Interval is range-validated here with a 400 rather than being
+    clamped silently: an operator who typed 30 should be told the floor exists,
+    not quietly given 300.
+
+    `reject_agent_principal` is load-bearing, not decoration. `assert_admin`
+    answers "what role", never "is this a human": an agent-scoped MCP key
+    resolves to its owner *carrying the owner's role*, so on a default
+    admin-owned install every agent's injected `TRINITY_MCP_API_KEY` satisfies
+    it. This endpoint is the ON-SWITCH for an unattended, fleet-wide write into
+    every running agent's `~/.claude/skills/` — and a `SKILL.md` is instructions
+    Claude executes, not data. Pre-#236 that write needed two deliberate human
+    actions (click Sync, then inject per agent); automating it removed the human,
+    so the gate has to put one back. Third occurrence of the
+    trinity-ops-agent#232 class (see #1644, #1816), and the rule from
+    learnings.md applies directly: the endpoint that USES a capability may be
+    agent-callable, the endpoint that GRANTS it must be human-only.
+
+    The GET stays role-only: it reads non-secret config, and its error string is
+    PAT-scrubbed at the write.
+    """
+    from dependencies import reject_agent_principal
+
+    reject_agent_principal(current_user)
+    assert_admin(current_user)
+
+    from services.settings_service import (
+        SKILLS_AUTO_REINJECT_ENABLED_KEY,
+        SKILLS_AUTO_SYNC_ENABLED_KEY,
+        SKILLS_AUTO_SYNC_INTERVAL_KEY,
+        get_skills_auto_sync_interval,
+        is_skills_auto_reinject_enabled,
+        is_skills_auto_sync_enabled,
+    )
+
+    changed: Dict[str, Any] = {}
+
+    if body.auto_sync_interval_seconds is not None:
+        value = body.auto_sync_interval_seconds
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < SKILLS_AUTO_SYNC_INTERVAL_MIN
+            or value > SKILLS_AUTO_SYNC_INTERVAL_MAX
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"auto_sync_interval_seconds must be an integer between "
+                    f"{SKILLS_AUTO_SYNC_INTERVAL_MIN} and {SKILLS_AUTO_SYNC_INTERVAL_MAX}"
+                ),
+            )
+        db.set_setting(SKILLS_AUTO_SYNC_INTERVAL_KEY, str(value))
+        changed["auto_sync_interval_seconds"] = value
+
+    if body.auto_sync_enabled is not None:
+        db.set_setting(
+            SKILLS_AUTO_SYNC_ENABLED_KEY, "true" if body.auto_sync_enabled else "false"
+        )
+        changed["auto_sync_enabled"] = bool(body.auto_sync_enabled)
+
+    if body.auto_reinject_enabled is not None:
+        db.set_setting(
+            SKILLS_AUTO_REINJECT_ENABLED_KEY,
+            "true" if body.auto_reinject_enabled else "false",
+        )
+        changed["auto_reinject_enabled"] = bool(body.auto_reinject_enabled)
+
+    if changed:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="settings_change",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            details={"setting": "skills_library_automation", "changed": changed},
+        )
+
+    return {
+        "success": True,
+        "auto_sync_enabled": is_skills_auto_sync_enabled(),
+        "auto_sync_interval_seconds": get_skills_auto_sync_interval(),
+        "auto_reinject_enabled": is_skills_auto_reinject_enabled(),
+        "changed": changed,
+    }
+
+
 @router.get("/proactive-rate-limits")
 async def get_proactive_rate_limits_setting(
     request: Request,
@@ -2221,6 +2383,47 @@ async def update_setting(
             ),
         )
 
+    # ent#297: the retention WINDOWS themselves. #1644 blocked the guard's ack
+    # keys here but left the windows falling through to a bare `db.set_setting`
+    # with no type or range check — so the generic PUT was a second, completely
+    # unvalidated write path to the values that drive irreversible deletion
+    # (execution history, health checks, and via agent_soft_delete_retention_days
+    # the #1581 volume purge, which is unrecoverable).
+    #
+    # Route them to `PUT /api/settings/ops/config`, which validates and audits.
+    # Same 422-with-a-pointer shape as max_parallel_tasks_ceiling (#506),
+    # PROACTIVE_RATE_LIMIT_DEFAULTS (#1609) and telemetry_sharing_* (ent#12):
+    # a settings key whose value has a safe range gets a route that knows the
+    # range, and the catch-all refuses to be a way around it.
+    from services.settings_service import RETENTION_OPS_KEYS
+
+    if key in RETENTION_OPS_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is a retention window and must be set via "
+                "PUT /api/settings/ops/config (type- and range-validated, "
+                "audit-logged). See GET /api/settings/retention for the "
+                "effective values (ent#297)"
+            ),
+        )
+
+    # ent#236: the automation keys go through the dedicated validated route.
+    # The interval especially: this generic PUT takes `Dict[str, str]` with no
+    # type or range check, so "10" would be accepted verbatim and the auto-sync
+    # loop would fork `git fetch` six times a minute against GitHub forever.
+    # (The read-side clamp in `get_skills_auto_sync_interval` is the second
+    # layer; this is the first — validate at the boundary AND at the sink, #1525.)
+    if key in SKILLS_AUTOMATION_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/skills-library "
+                f"(range-validated; interval {SKILLS_AUTO_SYNC_INTERVAL_MIN}–"
+                f"{SKILLS_AUTO_SYNC_INTERVAL_MAX}s)"
+            ),
+        )
+
     # Validate URL-based settings to prevent SSRF (SEC-179)
     if key == "skills_library_url" and body.value:
         from utils.url_validation import validate_skills_library_url
@@ -2377,25 +2580,79 @@ async def update_ops_settings(
 
     Admin-only. Only accepts valid ops setting keys.
     Invalid keys are ignored with a warning.
+
+    ent#297 — the OSS write path for the eight retention windows (the enterprise
+    `retention` module has its own already-validated `PUT /api/enterprise/
+    retention/config`, which clamps to the community floor and covers 7 of the 8
+    — `agent_reminders_retention_days` is absent there). This one used to write
+    `Dict[str, str]` straight through with no type or range check.
+    Two things changed:
+
+    * **Values are validated** (`config.validate_ops_setting`); the request is
+      rejected 422 on the first bad one. Validation is deliberately NOT sold as
+      the fix for ent#297 — a small valid integer is the dangerous input, and no
+      range check can tell it apart from a legitimate short window. What it buys
+      is a loud failure instead of a silent coercion to 0 ("sweep disabled"),
+      which is the one thing the old shape got exactly backwards.
+    * **Writes are audited.** Neither this endpoint nor `/ops/reset` logged
+      anything, while the generic `PUT /{key}` directly above them does — so the
+      one route that can shrink a retention window was also the one route that
+      left no trace of having done so. ent#297 lists the audit surface in its
+      blast radius; this closes the half of it that was self-inflicted.
+
+    Validation is **all-or-nothing on purpose**: a partial apply would leave the
+    operator with some windows moved and some not, and no way to tell which from
+    the response.
     """
     assert_admin(current_user)
 
+    from config import validate_ops_setting
+
+    # Validate EVERYTHING before writing ANYTHING.
+    to_write: list = []
+    ignored: list = []
+    for key, value in body.settings.items():
+        if key not in OPS_SETTINGS_DEFAULTS:
+            ignored.append(key)
+            continue
+        try:
+            to_write.append((key, validate_ops_setting(key, value)))
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
     try:
         updated = []
-        ignored = []
+        for key, value in to_write:
+            db.set_setting(key, value)
+            updated.append(key)
 
-        for key, value in body.settings.items():
-            if key in OPS_SETTINGS_DEFAULTS:
-                db.set_setting(key, value)
-                updated.append(key)
-            else:
-                ignored.append(key)
+        if updated:
+            from services.settings_service import RETENTION_OPS_KEYS
+
+            touched = sorted(k for k in updated if k in RETENTION_OPS_KEYS)
+            await platform_audit_service.log(
+                event_type=AuditEventType.CONFIGURATION,
+                event_action="ops_settings_change",
+                source="api",
+                actor_user=current_user,
+                actor_ip=request.client.host if request.client else None,
+                endpoint=str(request.url.path),
+                request_id=getattr(request.state, "request_id", None),
+                # Values are operator config, not secrets, and the whole point is
+                # being able to answer "who shortened retention, to what, when".
+                details={
+                    "settings": dict(to_write),
+                    "retention_windows_changed": touched or None,
+                },
+            )
 
         return {
             "success": True,
             "updated": updated,
             "ignored": ignored if ignored else None
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update ops settings: {str(e)}")
 
