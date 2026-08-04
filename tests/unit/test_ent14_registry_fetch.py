@@ -44,6 +44,44 @@ class _Settings:
         self.lkg = payload
 
 
+def _install_settings_stub(monkeypatch, settings, *, github_templates=None):
+    """Pin the stub by `sys.modules` KEY, not by module object.
+
+    Both consumers resolve this module lazily, at call time:
+    `template_service.get_all_templates` does
+    `from services.settings_service import get_github_templates`, and
+    `template_registry_service._resolve` / `_load_lkg` do
+    `from services.settings_service import settings_service`. Both read
+    `sys.modules["services.settings_service"]`.
+
+    Patching an attribute on a separately-imported reference to that module is
+    ORDER-FRAGILE — it passes in isolation and fails under the full run, where an
+    earlier file has swapped the module object, so the real service is used
+    instead. That failure is silent and confusing rather than loud: the real
+    accessor reads the real (tmp) SQLite database, so a registry test asserting
+    "degrades to the floor" gets the durable last-known-good a *previous* test
+    legitimately persisted, and reports it as a fail-open bug that does not
+    exist. `tests/unit/test_ent89_template_schedules.py` documents this trap;
+    this is that lesson applied.
+
+    The stub is built from a COPY of the real module's namespace, so anything
+    else the test imports from it (`SettingsService`, key constants) still
+    resolves.
+    """
+    import sys
+    import types
+
+    import services.settings_service as real
+
+    fake = types.ModuleType("services.settings_service")
+    fake.__dict__.update(real.__dict__)
+    fake.settings_service = settings
+    if github_templates is not None:
+        fake.get_github_templates = github_templates
+    monkeypatch.setitem(sys.modules, "services.settings_service", fake)
+    return fake
+
+
 @pytest.fixture
 def env(monkeypatch):
     """Registry service with a controllable transport and settings.
@@ -54,8 +92,7 @@ def env(monkeypatch):
     trs.invalidate_registry_cache()
     settings = _Settings()
 
-    import services.settings_service as ss
-    monkeypatch.setattr(ss, "settings_service", settings, raising=True)
+    _install_settings_stub(monkeypatch, settings)
 
     # The SSRF gate resolves DNS. `registry.example.com` is not ours to resolve,
     # and a validator failure here would mask the transport assertions — so the
