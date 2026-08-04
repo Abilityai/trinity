@@ -1970,8 +1970,21 @@ class AuditCalendarResponse(BaseModel):
 class AuditVerifyResponse(BaseModel):
     """Hash chain verification result."""
 
-    valid: bool
-    checked: int
+    # TRI-STATE (#1984). True = verified intact, False = mismatch/tampering,
+    # None = UNVERIFIABLE (nothing in the range carried a hash). It was a plain
+    # `bool`, so "no integrity data exists" was indistinguishable from
+    # "verified" — and that is the default state of every install which never
+    # enabled hashing.
+    valid: Optional[bool] = None
+    # verified | verified_partial | tampered | unverifiable | empty_range
+    status: str = "unverifiable"
+    checked: int = 0
+    # Entries skipped for carrying no hash. Non-zero alongside
+    # `verified_partial` marks the permanent unhashed prefix of a chain that
+    # was enabled midway.
+    skipped_unhashed: int = 0
+    total_in_range: int = 0
+    hash_chain_enabled: bool = False
     first_invalid_id: Optional[int] = None
 
 
