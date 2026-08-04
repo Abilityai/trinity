@@ -159,19 +159,25 @@ def _parse_env_value(raw_value: str) -> str:
     return value
 
 
-def _load_openai_api_key() -> Optional[str]:
-    """Resolve the OpenAI/Codex API key.
+def _load_api_key_with_source() -> Tuple[Optional[str], Optional[str]]:
+    """Resolve the OpenAI/Codex API key AND which variable name it came from.
 
     The per-agent ``.env`` (CRED-002) is copied to ``/home/developer/.env`` by
     startup.sh but is NOT exported into the agent-server process — so unlike the
     Claude/Gemini key (a container env var), the Codex key must be read from the
     process env (if present) OR parsed out of ``.env`` (the cold-start path the
     outside-voice review flagged). Accepts either OPENAI_API_KEY or CODEX_API_KEY.
+
+    #1971: the SOURCE is now returned, because it decides whether the child
+    process is given ``CODEX_API_KEY`` at all. Trinity used to synthesize that
+    variable from a key the operator had supplied under a different name, and
+    the mere presence of ``CODEX_API_KEY`` flips the Codex CLI into API-key auth
+    mode — discarding a valid subscription ``auth.json``.
     """
     for var in _API_KEY_VARS:
         value = os.environ.get(var)
         if value:
-            return value
+            return value, var
     env_path = Path(_AGENT_HOME) / ".env"
     try:
         for raw in env_path.read_text().splitlines():
@@ -182,13 +188,56 @@ def _load_openai_api_key() -> Optional[str]:
             if line.startswith("export "):
                 line = line[len("export "):].lstrip()
             key, _, value = line.partition("=")
-            if key.strip() in _API_KEY_VARS:
+            key = key.strip()
+            if key in _API_KEY_VARS:
                 cleaned = _parse_env_value(value)
                 if cleaned:
-                    return cleaned
+                    return cleaned, key
     except (IOError, OSError):
         pass
-    return None
+    return None, None
+
+
+def _load_openai_api_key() -> Optional[str]:
+    """The key alone. Thin wrapper over :func:`_load_api_key_with_source`.
+
+    Kept as the public shape because it is the seam existing tests monkeypatch;
+    `_execute_codex` still calls THIS, not the tuple variant, so a patched
+    `_load_openai_api_key` keeps working exactly as before.
+    """
+    return _load_api_key_with_source()[0]
+
+
+def _api_key_source_name() -> Optional[str]:
+    """Which variable the resolved key came from, or None.
+
+    Split from the value lookup rather than returned alongside it so
+    `_load_openai_api_key` stays the single patchable seam (#1971 review). The
+    extra resolution is one dict lookup plus, at worst, one small file read.
+    """
+    return _load_api_key_with_source()[1]
+
+
+def _has_subscription_auth(codex_home: str) -> bool:
+    """True when this container holds a Codex **subscription** credential.
+
+    #1971: subscription auth lives in ``$CODEX_HOME/auth.json`` and is the whole
+    point of a ChatGPT-plan Codex agent — such a container has NO API key by
+    design. Trinity modelled only the API-key path, so `_execute_codex` refused
+    to start at all without one, and the reporter's working setup needed a
+    *placeholder* ``OPENAI_API_KEY`` to get past the gate. A placeholder that
+    exists solely to satisfy a check is the check being wrong.
+
+    Deliberately only an existence + non-empty test: validating the token is the
+    CLI's job, and a stale ``auth.json`` should surface as the CLI's own auth
+    error rather than as a Trinity 503 claiming no key is configured — which
+    would be a false statement about a subscription agent.
+    """
+    try:
+        auth = Path(codex_home) / "auth.json"
+        return auth.is_file() and auth.stat().st_size > 0
+    except OSError:  # pragma: no cover - defensive
+        return False
 
 
 def _codex_home() -> str:
@@ -718,16 +767,22 @@ class CodexRuntime(AgentRuntime):
         execution_id = execution_id or str(uuid.uuid4())
 
         api_key = _load_openai_api_key()
-        if not api_key:
+        codex_home = _ensure_codex_home()
+
+        # #1971: an API key is required only when there is no SUBSCRIPTION
+        # credential. A ChatGPT-plan Codex agent has no API key by design, and
+        # the old unconditional gate 503'd it before the CLI was ever invoked —
+        # so the only way to run one was to set a placeholder key purely to get
+        # past this check.
+        if not api_key and not _has_subscription_auth(codex_home):
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "OpenAI API key not configured in agent container. Inject "
-                    "OPENAI_API_KEY via credentials."
+                    "No Codex credentials in agent container: neither an API key "
+                    "(inject OPENAI_API_KEY via credentials) nor a subscription "
+                    f"auth.json under CODEX_HOME ({codex_home})."
                 ),
             )
-
-        codex_home = _ensure_codex_home()
         result_file = os.path.join(codex_home, f"{_safe_result_token(execution_id)}-last.txt")
         sandbox_mode = _resolve_sandbox_mode()
         _surface_unmapped_guardrails(allowed_tools)
@@ -746,12 +801,24 @@ class CodexRuntime(AgentRuntime):
             **os.environ,
             EXECUTION_TAG_NAME: execution_id,
             "CODEX_HOME": codex_home,
-            # Inject under both names — the ecosystem standard is OPENAI_API_KEY;
-            # some Codex builds also read CODEX_API_KEY. Defensive (verified in
-            # /verify-local).
-            "OPENAI_API_KEY": api_key,
-            "CODEX_API_KEY": api_key,
         }
+        # #1971: `CODEX_API_KEY` is NO LONGER synthesized. Setting it under both
+        # names was meant as harmless defence ("some Codex builds also read
+        # CODEX_API_KEY"), but its mere PRESENCE flips the CLI into API-key auth
+        # mode and makes it discard a valid subscription `auth.json` — so every
+        # subscription agent 401'd against api.openai.com, retried 5x and failed
+        # the turn. A defensive duplicate that changes behaviour is not
+        # defensive.
+        #
+        # It is still forwarded when the operator genuinely supplied the key
+        # UNDER THAT NAME, which is the only case the original rationale
+        # actually covers. An operator who set it directly in the container env
+        # keeps it via the `**os.environ` spread above — their explicit choice
+        # is not second-guessed here.
+        if api_key:
+            env["OPENAI_API_KEY"] = api_key
+            if _api_key_source_name() == "CODEX_API_KEY":
+                env["CODEX_API_KEY"] = api_key
 
         metadata = ExecutionMetadata()
         metadata.context_window = self.get_context_window(model)
