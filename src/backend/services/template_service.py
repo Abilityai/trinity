@@ -241,24 +241,21 @@ def _get_cached_metadata_result(repo: str) -> tuple:
 
 
 def _fetch_all_metadata(repos: List[str]) -> Dict[str, dict]:
-    """Fetch template.yaml for multiple repos, using cache and concurrency."""
-    return {
-        repo: pair[0] for repo, pair in _fetch_all_metadata_results(repos).items()
-    }
+    """Fetch template.yaml for multiple repos, using cache and concurrency.
 
-
-def _fetch_all_metadata_results(repos: List[str]) -> Dict[str, tuple]:
-    """`_fetch_all_metadata` with reasons. `repo -> (metadata, reason)`.
-
-    Same caveat as `_get_cached_metadata_result` on overwriting last-good.
+    Return shape is deliberately unchanged (`repo -> metadata`): this function is
+    a seam several suites stub, and `routers/settings.py` calls it directly. The
+    fetch REASON is not threaded through the return value — it goes into
+    `_metadata_cache` and is read back by `_metadata_reason_from_cache`, so
+    adding it cost no caller a signature change (trinity-enterprise#14).
     """
-    results: Dict[str, tuple] = {}
+    results: Dict[str, dict] = {}
     to_fetch = []
 
     for repo in repos:
         cached = _metadata_cache.get(repo)
         if cached and time.time() - cached[0] < _CACHE_TTL:
-            results[repo] = (cached[1], cached[2])
+            results[repo] = cached[1]
         else:
             to_fetch.append(repo)
 
@@ -266,6 +263,11 @@ def _fetch_all_metadata_results(repos: List[str]) -> Dict[str, tuple]:
         pat = _get_github_pat()
         with ThreadPoolExecutor(max_workers=5) as pool:
             futures = {
+                # The reason-preserving variant, NOT `_fetch_template_yaml`: a
+                # cache entry written here with `reason=None` for a repo whose
+                # fetch actually 403'd would tell the creation path "readable,
+                # declares nothing" for the whole TTL — reopening the fork-gate
+                # bypass through the catalog's own cache.
                 pool.submit(_fetch_template_yaml_logged, repo, pat): repo
                 for repo in to_fetch
             }
@@ -278,9 +280,23 @@ def _fetch_all_metadata_results(repos: List[str]) -> Dict[str, tuple]:
                     # only raises when the fetch itself blew up.
                     metadata, reason = {}, f"{type(e).__name__}: {e}"
                 _metadata_cache[repo] = (time.time(), metadata, reason)
-                results[repo] = (metadata, reason)
+                results[repo] = metadata
 
     return results
+
+
+def _metadata_reason_from_cache(repo: str) -> Optional[str]:
+    """The fetch reason for `repo`, or None. Never fetches.
+
+    Read AFTER `_fetch_all_metadata`, which has just populated the cache for
+    every repo it was asked about. A stubbed fetch leaves no entry and this
+    returns `None` — i.e. "readable" — which is the right degradation: a test
+    double that supplies metadata directly is asserting a successful read.
+    """
+    cached = _metadata_cache.get(repo)
+    if cached and time.time() - cached[0] < _CACHE_TTL:
+        return cached[2]
+    return None
 
 
 # ============================================================================
@@ -1636,12 +1652,13 @@ def get_all_templates() -> List[dict]:
             overrides = [{"github_repo": repo} for repo in DEFAULT_GITHUB_TEMPLATE_REPOS]
 
     repos = [e["github_repo"] for e in overrides]
-    all_metadata = _fetch_all_metadata_results(repos)
+    all_metadata = _fetch_all_metadata(repos)
 
     github: List[dict] = []
     for override in overrides:
         repo = override["github_repo"]
-        metadata, reason = all_metadata.get(repo, ({}, None))
+        metadata = all_metadata.get(repo, {})
+        reason = _metadata_reason_from_cache(repo)
         # Still fenced per template: one bad entry costs itself, never the
         # catalog (#1835 / ent#89). That property now covers registry entries too.
         entry = _safe_build_github_template(repo, metadata, override, reason)
