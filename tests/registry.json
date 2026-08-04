@@ -1442,6 +1442,18 @@
         "security"
       ],
       "description": "Hardened parsing of author-controlled YAML (ent#314). template.yaml was on bare yaml.safe_load, leaving alias amplification (measured 416 B -> 110 MB at json.dumps time, parse itself 0.0011 s, so an input-size cap cannot close it) and silent last-wins duplicate keys, which let a template show one credentials: block to a human and declare another to Trinity. Reachable by any creator-role user via a public repo (ent#123 tokenless) since _build_template runs unfenced inside get_all_templates(). Covers: the fixture itself still amplifies under bare safe_load (so the suite cannot pass vacuously); level 4/5/6 bombs rejected under both policies; a small honest anchor STILL parses under BUDGET (the #1932 lesson \u2014 a guard that rejects the legitimate document is an outage that reads as hardened); REJECT refuses one alias and also gates at the scanner (skill_packaging's copy had both hooks); the issue's exact duplicate-credentials case and a nested duplicate; size cap; reject-not-truncate; ManifestError still a subclass so routers/systems.py's named 400 is unchanged and the manifest's published codes survive; and two consolidation guards \u2014 no module may grow a fourth SafeLoader subclass, and all four author-controlled readers must call the shared loader with no bare safe_load left. The four product-level guards fail against pre-fix code."
+    },
+    {
+      "file": "unit/test_1970_execution_origin.py",
+      "feature": "#1970",
+      "added": "2026-08-04",
+      "categories": [
+        "backend",
+        "scheduler",
+        "unit",
+        "security"
+      ],
+      "description": "Scheduler execution-origin attribution (#1970). schedule_executions has carried five source_* audit columns since AUDIT-001 and the backend populates them everywhere it owns, but the scheduler is a separate service whose create_execution() omitted them from the INSERT and had no parameter to receive them - so every scheduler-created row was written with all five NULL (observed across 100+ runs). triggered_by='manual' recorded THAT a human ran something, never who; the attribution survived only in logs, bounded by log retention. Not a vulnerability - nothing authorizes on these columns. Covers: the INSERT persists all five and the returned ScheduleExecution mirrors the row (a caller acting on the model would otherwise still see the bug); a cron tick stays NULL (inventing an owner for a caller-less run is worse than an honest blank); every parameter stays keyword-optional so an un-migrated call site still inserts; partial origin accepted (a webhook has no user, a UI click no MCP key). Boundary parse of the untrusted trigger body: exact backend field names (a rename on either side silently restores the NULLs with no error), malformed/legacy/absent bodies degrade to empty origin rather than failing the run, non-int source_user_id DROPPED not coerced (bool IS an int in Python, so True would persist as real user 1), strings length-capped, blank -> None so empty-string and NULL are not two spellings of unknown. Non-cron paths the DB fix alone would leave blank: a retry inherits the original execution's origin (else attempt 1 is the only attributable attempt) and a reminder inherits the provenance #1296 already stored, with the mapper tolerating a table predating those columns. Plus the hop where the identity was actually dropped - the backend's delegating POST sent no body at all - the validated current_user.agent_name preferred over the raw X-Source-Agent header when absent, the MCP third surface (Invariant #13) sending the origin headers, and a guard that the generic extraHeaders hook cannot replace the bearer token."
     }
   ]
 }

@@ -98,6 +98,64 @@ class ScheduleExecution:
 
 
 @dataclass
+class ExecutionOrigin:
+    """Who initiated an execution (AUDIT-001, #1970).
+
+    One value object instead of five parallel parameters threaded through
+    ``_trigger_handler → _execute_manual_trigger → _execute_schedule_with_lock
+    → create_execution`` — five positional siblings at four call depths is how
+    one of them silently stops being forwarded.
+
+    Attribution only; **nothing authorizes on these fields.** An all-``None``
+    origin is the correct, honest record for a cron tick, which has no caller.
+    """
+    user_id: Optional[int] = None
+    user_email: Optional[str] = None
+    agent_name: Optional[str] = None
+    mcp_key_id: Optional[str] = None
+    mcp_key_name: Optional[str] = None
+
+    def is_empty(self) -> bool:
+        return not any(
+            (self.user_id, self.user_email, self.agent_name,
+             self.mcp_key_id, self.mcp_key_name)
+        )
+
+    @classmethod
+    def from_payload(cls, body: object) -> "ExecutionOrigin":
+        """Build from an untrusted JSON body (the scheduler's trigger endpoint).
+
+        Validates at the boundary: wrong types are dropped rather than coerced,
+        and strings are length-capped, so a malformed or oversized payload
+        cannot write junk into an append-only-in-spirit audit column. A caller
+        that lies about its identity is not a new exposure — ``triggered_by``
+        has been caller-supplied on this same endpoint all along, and the
+        scheduler is reachable only from the platform network.
+        """
+        if not isinstance(body, dict):
+            return cls()
+
+        def _str(key: str) -> Optional[str]:
+            value = body.get(key)
+            if not isinstance(value, str):
+                return None
+            value = value.strip()
+            return value[:255] or None
+
+        user_id = body.get("source_user_id")
+        if isinstance(user_id, bool) or not isinstance(user_id, int):
+            user_id = None
+
+        return cls(
+            user_id=user_id,
+            user_email=_str("source_user_email"),
+            agent_name=_str("source_agent_name"),
+            mcp_key_id=_str("source_mcp_key_id"),
+            mcp_key_name=_str("source_mcp_key_name"),
+        )
+
+
+@dataclass
 class Reminder:
     """A durable one-shot agent self-reminder (#1296).
 
@@ -119,6 +177,13 @@ class Reminder:
     allowed_tools: Optional[List[str]] = None
     execution_id: Optional[str] = None
     error: Optional[str] = None
+    # Provenance captured when the reminder was set (#1296). Carried onto the
+    # execution row the reminder fires, so a reminder-triggered run is
+    # attributable instead of anonymous (AUDIT-001, #1970).
+    owner_id: Optional[int] = None
+    created_by_email: Optional[str] = None
+    source_agent_name: Optional[str] = None
+    source_mcp_key_id: Optional[str] = None
 
 
 @dataclass

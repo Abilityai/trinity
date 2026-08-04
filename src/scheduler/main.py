@@ -22,6 +22,7 @@ from urllib.parse import urlparse, urlunparse
 from aiohttp import web
 
 from .config import config
+from .models import ExecutionOrigin
 from .service import SchedulerService
 
 
@@ -154,7 +155,11 @@ class SchedulerApp:
         Manual/webhook trigger endpoint.
 
         POST /api/schedules/{schedule_id}/trigger
-        Optional JSON body: {"triggered_by": "manual" | "webhook"}
+        Optional JSON body: {
+            "triggered_by": "manual" | "webhook",
+            "source_user_id", "source_user_email", "source_agent_name",
+            "source_mcp_key_id", "source_mcp_key_name"   # #1970, all optional
+        }
 
         Triggers a schedule execution with the same flow as cron triggers,
         including activity tracking and WebSocket broadcasts.
@@ -181,24 +186,35 @@ class SchedulerApp:
             )
 
         # Optional triggered_by from JSON body (webhook callers pass "webhook")
+        # plus the #1970 caller attribution the backend forwards. Both are read
+        # from the same body in one parse; a malformed body degrades to
+        # "manual" + no attribution rather than failing the trigger — the run
+        # itself must not depend on its audit metadata being well-formed.
         triggered_by = "manual"
+        origin = ExecutionOrigin()
         try:
             if request.content_type == "application/json" and request.content_length:
                 body = await request.json()
                 raw = body.get("triggered_by", "manual")
                 if raw in ("manual", "webhook"):
                     triggered_by = raw
+                origin = ExecutionOrigin.from_payload(body)
         except Exception:
             pass  # malformed body — default to "manual"
 
         logger.info(
             f"Trigger received for schedule {schedule_id} ({schedule.name}) "
-            f"triggered_by={triggered_by}"
+            f"triggered_by={triggered_by} "
+            # Log the id, never the email: this line lands in Vector-captured
+            # platform logs and an email is PII that the DB column already holds.
+            f"source_user_id={origin.user_id} source_agent={origin.agent_name}"
         )
 
         # Execute in background (fire-and-forget)
         asyncio.create_task(
-            self._execute_manual_trigger(schedule_id, triggered_by=triggered_by)
+            self._execute_manual_trigger(
+                schedule_id, triggered_by=triggered_by, origin=origin
+            )
         )
 
         # Return immediately; execution creates its own record asynchronously
@@ -211,7 +227,12 @@ class SchedulerApp:
             "message": "Execution started in background"
         })
 
-    async def _execute_manual_trigger(self, schedule_id: str, triggered_by: str = "manual"):
+    async def _execute_manual_trigger(
+        self,
+        schedule_id: str,
+        triggered_by: str = "manual",
+        origin: Optional[ExecutionOrigin] = None,
+    ):
         """Execute a manually or webhook-triggered schedule."""
         try:
             # Acquire lock (prevents concurrent execution)
@@ -226,7 +247,8 @@ class SchedulerApp:
             try:
                 await self.scheduler_service._execute_schedule_with_lock(
                     schedule_id,
-                    triggered_by=triggered_by
+                    triggered_by=triggered_by,
+                    origin=origin
                 )
             finally:
                 lock.release()
