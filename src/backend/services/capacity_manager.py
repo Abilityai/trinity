@@ -345,15 +345,38 @@ class CapacityManager:
                         raise CircuitOpen(agent_name, breaker.retry_after_seconds())
                     return AcquireResult(state="admitted", execution_id=execution_id)
 
-        # First try to acquire a slot directly. SlotService already does the
-        # atomic ZADD + count check.
-        admitted = await self._slots.acquire_slot(
-            agent_name=agent_name,
-            execution_id=execution_id,
-            max_parallel_tasks=max_concurrent,
-            message_preview=message_preview,
-            timeout_seconds=timeout_seconds,
+        # ---- #1766: a pull pilot's autonomous work is queue-ONLY -----------
+        # The pilot flag used to be purely additive: the agent started pulling,
+        # but the backend kept admitting-and-pushing whenever a slot was free, so
+        # the two paths ran in parallel over one queue with two independent
+        # capacity counters. Skipping admission here makes the durable queue the
+        # single entry point for this agent, so its worker pool IS its capacity
+        # (#1081 Phase 5, pilot-scoped). `pull_owns_dispatch` excludes
+        # interactive triggers (Open Question 7 scope cut) and fails safe to
+        # push, so a non-pilot's path is byte-for-byte unchanged.
+        from services.agent_service.pull_mode import pull_owns_dispatch
+
+        pull_exclusive = (
+            overflow_policy == "queue_persistent"
+            and overflow_payload is not None
+            and pull_owns_dispatch(agent_name, overflow_payload.triggered_by)
         )
+
+        if pull_exclusive:
+            # No ZADD: the row falls through to the persistent enqueue below and
+            # is claimed by the agent's own worker. Capacity is enforced
+            # physically by the pool, not by this counter.
+            admitted = False
+        else:
+            # First try to acquire a slot directly. SlotService already does the
+            # atomic ZADD + count check.
+            admitted = await self._slots.acquire_slot(
+                agent_name=agent_name,
+                execution_id=execution_id,
+                max_parallel_tasks=max_concurrent,
+                message_preview=message_preview,
+                timeout_seconds=timeout_seconds,
+            )
         if admitted:
             return AcquireResult(state="admitted", execution_id=execution_id)
 

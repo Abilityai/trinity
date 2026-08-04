@@ -26,8 +26,11 @@ ONLY the two non-secret pull knobs below.
 """
 from __future__ import annotations
 
+import logging
 import os
-from typing import Dict, Set
+from typing import Dict, Optional, Set
+
+logger = logging.getLogger(__name__)
 
 
 def _pilot_allowlist() -> Set[str]:
@@ -38,6 +41,53 @@ def _pilot_allowlist() -> Set[str]:
 def is_pull_pilot_agent(agent_name: str) -> bool:
     """True when ``agent_name`` is in the ``PULL_MODE_PILOT_AGENTS`` allowlist."""
     return agent_name in _pilot_allowlist()
+
+
+def pull_owns_dispatch(agent_name: str, triggered_by: Optional[str]) -> bool:
+    """True when this ``(agent, trigger)`` pair must reach the agent ONLY by the
+    agent claiming it from the durable queue — the backend neither pushes it nor
+    drains it (#1766, the pilot-scoped slice of #1081 Phase 5 "capacity becomes
+    physical").
+
+    Without this, a pilot agent runs BOTH systems at once: the backend still
+    admits-and-pushes whenever a slot is free (``acquire`` had no pilot branch),
+    so a row only ever queued on overflow, and the backend's own
+    ``backlog_service.drain_next`` then raced the agent's worker for it. Two
+    independent capacity counters (Redis ZSET vs the container's worker pool)
+    meant a pilot could run up to 2x ``max_parallel_tasks`` — invisible to canary
+    S-02, which counts ``ZCARD`` only. Making the pilot flag a true either/or
+    restores one capacity owner per agent.
+
+    **Interactive turns are deliberately excluded.** Only the autonomous trigger
+    set queues; a human chat / Session-tab turn keeps today's synchronous push
+    path and today's Redis session lock. That is the scope cut in
+    ``TARGET_ARCHITECTURE.md`` Open Question 7 ("Does human-interactive chat
+    belong in the queue at all?" — *under consideration, not decided*), and it is
+    load-bearing here: one FIFO ordered by ``queued_at`` would park a human turn
+    behind N batch tasks until the held connection timed out, and N competing
+    workers could claim two turns of the same session concurrently — the exact
+    concurrent ``--resume`` on one JSONL the session lock exists to prevent.
+
+    Fail-safe: any error resolving the trigger set returns ``False``, i.e. the
+    unchanged push behaviour. The dangerous direction would be silently claiming
+    dispatch for a trigger we could not classify.
+    """
+    if not is_pull_pilot_agent(agent_name):
+        return False
+    try:
+        # Lazy: task_execution_service imports the capacity stack, and this is
+        # called from inside it. Single source of truth for the trigger set —
+        # never a second copy that can drift.
+        from services.task_execution_service import _AUTONOMOUS_TRIGGERS
+
+        return triggered_by in _AUTONOMOUS_TRIGGERS
+    except Exception:  # noqa: BLE001 — unresolvable trigger set ⇒ push, as today
+        logger.warning(
+            "[#1766] could not resolve the autonomous-trigger set for %s "
+            "(trigger=%r); falling back to push dispatch",
+            agent_name, triggered_by,
+        )
+        return False
 
 
 # The container env keys this module manages. Recreate (``lifecycle.py``) pops
