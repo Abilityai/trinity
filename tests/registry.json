@@ -60,7 +60,7 @@
         "brain-orb",
         "feature-flags"
       ],
-      "description": "Admin-configurable Brain Orb flags (trinity-enterprise#85): _resolve_bool_flag order (stored wins both directions, env opt-in, default OFF, junk-value fail-safe, fail-open on DB error), GET/PUT /api/settings/brain-orb (per-flag source, partial update, clear revert-to-env, set+clear conflict 400, 403 non-admin, audit old\u2192new, /{key} route ordering), generic PUT/DELETE compatibility, brain-orb route gate honoring a real DB flip without restart, and feature-flags composition (voice = base \u2227 voice \u2227 key; 200 despite brain-orb DB failure)."
+      "description": "Admin-configurable Brain Orb flags (trinity-enterprise#85): _resolve_bool_flag order (stored wins both directions, env opt-in, default OFF, junk-value fail-safe, fail-open on DB error), GET/PUT /api/settings/brain-orb (per-flag source, partial update, clear revert-to-env, set+clear conflict 400, 403 non-admin, audit old→new, /{key} route ordering), generic PUT/DELETE compatibility, brain-orb route gate honoring a real DB flip without restart, and feature-flags composition (voice = base ∧ voice ∧ key; 200 despite brain-orb DB failure)."
     },
     {
       "file": "unit/test_1332_cancelled_activity_state.py",
@@ -72,7 +72,7 @@
         "activities",
         "observability"
       ],
-      "description": "A user-cancelled execution's dispatch activity is recorded as ActivityState.CANCELLED, not FAILED. Covers the enum value + activity_state_for_terminal mapping helper, the operator-terminate handler (Path B) closing the open dispatch activity as CANCELLED (terminated\u2192close, already_finished\u2192no-op, no-activity\u2192no-op, close-raises\u2192swallowed), and the collaboration/self-task close helpers mapping a cancelled result to CANCELLED (#1332)."
+      "description": "A user-cancelled execution's dispatch activity is recorded as ActivityState.CANCELLED, not FAILED. Covers the enum value + activity_state_for_terminal mapping helper, the operator-terminate handler (Path B) closing the open dispatch activity as CANCELLED (terminated→close, already_finished→no-op, no-activity→no-op, close-raises→swallowed), and the collaboration/self-task close helpers mapping a cancelled result to CANCELLED (#1332)."
     },
     {
       "file": "unit/test_voip_audio.py",
@@ -84,7 +84,7 @@
         "voip",
         "audio"
       ],
-      "description": "Audio codec round-trip + stateful ratecv continuity (anti-click) + 160-byte framing for the Twilio\u2194Gemini bridge (#1056). Skips where audioop/audioop-lts is unavailable."
+      "description": "Audio codec round-trip + stateful ratecv continuity (anti-click) + 160-byte framing for the Twilio↔Gemini bridge (#1056). Skips where audioop/audioop-lts is unavailable."
     },
     {
       "file": "unit/test_voip_db.py",
@@ -467,7 +467,7 @@
         "lifecycle",
         "file-sharing"
       ],
-      "description": "check_public_folder_mount_matches truth table: enabled+mounted \u2192 True, enabled+unmounted \u2192 False (needs recreation to attach), disabled+mounted \u2192 False (needs recreation to detach), disabled+unmounted \u2192 True. Adversarial cases: similar paths (/public-backup, /public/inner) don't match, missing 'Mounts' key handled, flag re-read each call, other mounts (shared-out, shared-in/*, workspace) don't interfere (9 tests)"
+      "description": "check_public_folder_mount_matches truth table: enabled+mounted → True, enabled+unmounted → False (needs recreation to attach), disabled+mounted → False (needs recreation to detach), disabled+unmounted → True. Adversarial cases: similar paths (/public-backup, /public/inner) don't match, missing 'Mounts' key handled, flag re-read each call, other mounts (shared-out, shared-in/*, workspace) don't interfere (9 tests)"
     },
     {
       "file": "unit/test_slack_dm_default.py",
@@ -479,7 +479,7 @@
         "db",
         "slack"
       ],
-      "description": "set_dm_default + unbind_agent contract: setter is single-tx clear-then-set, idempotent, exclusive (exactly one default per workspace), per-workspace isolation, returns False when agent not bound. Unbind is pure delete (does NOT auto-promote \u2014 router enforces the guard), works on non-default and last-agent paths, unknown agent returns False (10 tests)"
+      "description": "set_dm_default + unbind_agent contract: setter is single-tx clear-then-set, idempotent, exclusive (exactly one default per workspace), per-workspace isolation, returns False when agent not bound. Unbind is pure delete (does NOT auto-promote — router enforces the guard), works on non-default and last-agent paths, unknown agent returns False (10 tests)"
     },
     {
       "file": "test_public_chat_history.py",
@@ -491,7 +491,7 @@
         "public",
         "chat"
       ],
-      "description": "Tests for GET /api/public/sessions/{token} and GET /api/public/sessions/{token}/{session_id} \u2014 auth requirements, 404 on invalid tokens, response shape, limit param"
+      "description": "Tests for GET /api/public/sessions/{token} and GET /api/public/sessions/{token}/{session_id} — auth requirements, 404 on invalid tokens, response shape, limit param"
     },
     {
       "file": "unit/test_voice_tools.py",
@@ -504,7 +504,7 @@
         "gemini",
         "tools"
       ],
-      "description": "Unit tests for voice tool call support (#581): _execute_tool (success, empty prompt, truncation to 2000 chars, agent not reachable, task error), _execute_and_respond (success path with callbacks, timeout \u2192 error response, inactive session skips send), tool declaration (_RUN_TASK_TOOL name + required prompt), end_session cancels pending tool tasks (12 tests)"
+      "description": "Unit tests for voice tool call support (#581): _execute_tool (success, empty prompt, truncation to 2000 chars, agent not reachable, task error), _execute_and_respond (success path with callbacks, timeout → error response, inactive session skips send), tool declaration (_RUN_TASK_TOOL name + required prompt), end_session cancels pending tool tasks (12 tests)"
     },
     {
       "file": "test_files_guardrail_bypass.py",
@@ -543,7 +543,7 @@
         "files",
         "chat"
       ],
-      "description": "Unit tests for web chat file upload (#364): sanitize_filename (path traversal, unicode, dedup, truncation), decode_web_file (data: URI prefix stripping, raw base64, empty/bad input), process_file_uploads (empty list, download failure, unsupported MIME, oversized file, image vision block collection, text file container write, max_files cap) \u2014 14 tests"
+      "description": "Unit tests for web chat file upload (#364): sanitize_filename (path traversal, unicode, dedup, truncation), decode_web_file (data: URI prefix stripping, raw base64, empty/bad input), process_file_uploads (empty list, download failure, unsupported MIME, oversized file, image vision block collection, text file container write, max_files cap) — 14 tests"
     },
     {
       "file": "unit/test_slack_mrkdwn.py",
@@ -569,7 +569,7 @@
         "webhooks",
         "lint"
       ],
-      "description": "AST-based lint guard (no backend deps required) that asserts every db.<method>(...) call in src/backend/routers/ and src/backend/services/ resolves to a real method on DatabaseManager. Two tests: strict regression check for the four WEBHOOK-001 methods (#647: generate_webhook_token, get_schedule_by_webhook_token, revoke_webhook_token, get_webhook_status) and a broad facade-resolution scan guarded by a KNOWN_FACADE_GAPS allowlist for eight unrelated pre-existing gaps. Catches AttributeError-at-runtime regressions that integration-only tests miss in CI \u2014 would have caught WEBHOOK-001 before #291 landed."
+      "description": "AST-based lint guard (no backend deps required) that asserts every db.<method>(...) call in src/backend/routers/ and src/backend/services/ resolves to a real method on DatabaseManager. Two tests: strict regression check for the four WEBHOOK-001 methods (#647: generate_webhook_token, get_schedule_by_webhook_token, revoke_webhook_token, get_webhook_status) and a broad facade-resolution scan guarded by a KNOWN_FACADE_GAPS allowlist for eight unrelated pre-existing gaps. Catches AttributeError-at-runtime regressions that integration-only tests miss in CI — would have caught WEBHOOK-001 before #291 landed."
     },
     {
       "file": "unit/test_slack_token_encryption.py",
@@ -597,7 +597,7 @@
         "credentials",
         "encryption"
       ],
-      "description": "Unit tests for Telegram bot token encryption in db/telegram_channels.py (#664): round-trip via TelegramChannelOperations.create_binding + get_decrypted_bot_token, raw DB value is AES-256-GCM JSON envelope, get_binding_by_agent returns the encrypted blob (plaintext only via accessor), corrupt envelope returns None with ERROR log, wrong-key envelope returns None, re-encryption on update produces a fresh nonce (and token rotation reflects the new plaintext), encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, decrypt swallows missing-key error and returns None. No plaintext fallback path \u2014 Telegram never shipped plaintext."
+      "description": "Unit tests for Telegram bot token encryption in db/telegram_channels.py (#664): round-trip via TelegramChannelOperations.create_binding + get_decrypted_bot_token, raw DB value is AES-256-GCM JSON envelope, get_binding_by_agent returns the encrypted blob (plaintext only via accessor), corrupt envelope returns None with ERROR log, wrong-key envelope returns None, re-encryption on update produces a fresh nonce (and token rotation reflects the new plaintext), encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, decrypt swallows missing-key error and returns None. No plaintext fallback path — Telegram never shipped plaintext."
     },
     {
       "file": "unit/test_whatsapp_token_encryption.py",
@@ -612,7 +612,7 @@
         "credentials",
         "encryption"
       ],
-      "description": "Unit tests for Twilio AuthToken encryption in db/whatsapp_channels.py (#664): round-trip via WhatsAppChannelOperations.create_binding + get_decrypted_auth_token, raw DB value is AES-256-GCM JSON envelope, account_sid stays plaintext (public Twilio identifier \u2014 pinned so future refactors don't accidentally encrypt or strip it), corrupt envelope returns None, wrong-key envelope returns None, re-encryption on update produces a fresh nonce, encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, decrypt returns None on missing key."
+      "description": "Unit tests for Twilio AuthToken encryption in db/whatsapp_channels.py (#664): round-trip via WhatsAppChannelOperations.create_binding + get_decrypted_auth_token, raw DB value is AES-256-GCM JSON envelope, account_sid stays plaintext (public Twilio identifier — pinned so future refactors don't accidentally encrypt or strip it), corrupt envelope returns None, wrong-key envelope returns None, re-encryption on update produces a fresh nonce, encrypt raises on missing CREDENTIAL_ENCRYPTION_KEY, decrypt returns None on missing key."
     },
     {
       "file": "unit/test_slack_workspaces_encryption.py",
@@ -671,7 +671,7 @@
         "resilience",
         "circuit-breaker"
       ],
-      "description": "Tests that the AgentClient circuit breaker only counts TCP unreachability (connect errors/timeouts) toward opening \u2014 HTTP errors, read/write/pool failures, and protocol errors are excluded"
+      "description": "Tests that the AgentClient circuit breaker only counts TCP unreachability (connect errors/timeouts) toward opening — HTTP errors, read/write/pool failures, and protocol errors are excluded"
     },
     {
       "file": "integration/test_circuit_breaker.py",
@@ -685,7 +685,7 @@
         "circuit-breaker",
         "redis"
       ],
-      "description": "Drives the real AgentClient through httpx.MockTransport against real Redis circuit state \u2014 hard vs soft failures, mixed interleave, open-circuit fast-fail, recovery on 200, and the deferred half-open soft-failure probe-lock behaviour"
+      "description": "Drives the real AgentClient through httpx.MockTransport against real Redis circuit state — hard vs soft failures, mixed interleave, open-circuit fast-fail, recovery on 200, and the deferred half-open soft-failure probe-lock behaviour"
     },
     {
       "file": "integration/test_monitoring_service.py",
@@ -698,7 +698,7 @@
         "monitoring",
         "circuit-breaker"
       ],
-      "description": "Mirrors the #474 classification rule on the /health probe path and pins the `status_code >= 500 \u2192 UNHEALTHY` aggregator branch"
+      "description": "Mirrors the #474 classification rule on the /health probe path and pins the `status_code >= 500 → UNHEALTHY` aggregator branch"
     },
     {
       "file": "unit/test_platform_default_model_regression.py",
@@ -769,7 +769,7 @@
         "migrations",
         "reliability"
       ],
-      "description": "Migration runner atomicity + cross-process lock (#1160). _atomic_rebuild rename-swap inside an explicit transaction closes the DROP-rebuild data-loss window (crash mid-rebuild rolls back with no data loss; verified for agent_sharing + agent_skills incl. lowercase/NULL-email behavior preservation and index recreation); replay-after-partial-apply completes cleanly; a failed migration is named on its traceback via add_note (original exception type preserved). Cross-process flock (db/migration_lock.py) serialises concurrent boots \u2014 multiprocessing tests prove mutual exclusion and a safe concurrent rebuild."
+      "description": "Migration runner atomicity + cross-process lock (#1160). _atomic_rebuild rename-swap inside an explicit transaction closes the DROP-rebuild data-loss window (crash mid-rebuild rolls back with no data loss; verified for agent_sharing + agent_skills incl. lowercase/NULL-email behavior preservation and index recreation); replay-after-partial-apply completes cleanly; a failed migration is named on its traceback via add_note (original exception type preserved). Cross-process flock (db/migration_lock.py) serialises concurrent boots — multiprocessing tests prove mutual exclusion and a safe concurrent rebuild."
     },
     {
       "file": "unit/test_compatibility_checks.py",
@@ -794,7 +794,7 @@
         "voip",
         "voice"
       ],
-      "description": "Per-agent persisted voice + VoIP enable/disable toggle (#28). db/agents.py get_voice_name/set_voice_name: unset->'Kore' fallback, set/get roundtrip, invalid-persisted-value->default (reviewer M1 read-path validation), clear->default, set-on-missing-agent->False. db/voip.py set_enabled toggle + the create_binding 'preserve enabled on re-PUT' fix (reviewer H3 \u2014 re-saving credentials on a disabled binding must not silently re-enable it) + set_enabled on a missing binding returns False (router 404s). config.GEMINI_VOICE_NAMES default + parity guard asserting the frontend src/constants/voices.js VOICE ids and DEFAULT_VOICE_NAME mirror the backend constants (reviewer M2 cross-language drift guard). Runs on db_harness backends (SQLite always, PostgreSQL when TEST_POSTGRES_URL set); no Docker/API/Redis."
+      "description": "Per-agent persisted voice + VoIP enable/disable toggle (#28). db/agents.py get_voice_name/set_voice_name: unset->'Kore' fallback, set/get roundtrip, invalid-persisted-value->default (reviewer M1 read-path validation), clear->default, set-on-missing-agent->False. db/voip.py set_enabled toggle + the create_binding 'preserve enabled on re-PUT' fix (reviewer H3 — re-saving credentials on a disabled binding must not silently re-enable it) + set_enabled on a missing binding returns False (router 404s). config.GEMINI_VOICE_NAMES default + parity guard asserting the frontend src/constants/voices.js VOICE ids and DEFAULT_VOICE_NAME mirror the backend constants (reviewer M2 cross-language drift guard). Runs on db_harness backends (SQLite always, PostgreSQL when TEST_POSTGRES_URL set); no Docker/API/Redis."
     },
     {
       "file": "unit/test_28_voip_voice_endpoints.py",
@@ -878,7 +878,7 @@
         "infrastructure",
         "brain-orb"
       ],
-      "description": "Cornelius first-run seeder (ent#107): ensure_seeded first-run gating via durable cornelius_seeded flag (deleted agent not resurrected); fresh-install scoping (existing non-system agents -> skip + converge flag, orb flag untouched); owner-must-exist deferral (pre-setup skip without burning the flag); Docker-unavailable skip; Brain Orb flag defaulted ON existence-guarded (admin OFF preserved); 409-on-exists convergence vs generic-failure retry (flag not burned, never raises); --workers 2 Redis SETNX provision lock (held -> skip, winner provisions+releases with TTL, Redis-down fail-open); _provision builds a github:Abilityai/cornelius create with request=None and source_mode default True (#1656 \u2014 the trinity-enterprise#123 tokenless public-clone path is source-mode only); real-DB smoke of db.count_non_system_agents() facade delegation. create_agent_internal/db/redis/docker seams patched; no Docker/backend. ent#124 addition: precomputed freshness verdict \u2014 ensure_seeded(fresh=True) skips the internal count, fresh=False converges the flag without provisioning, fresh=None preserves the legacy count path."
+      "description": "Cornelius first-run seeder (ent#107): ensure_seeded first-run gating via durable cornelius_seeded flag (deleted agent not resurrected); fresh-install scoping (existing non-system agents -> skip + converge flag, orb flag untouched); owner-must-exist deferral (pre-setup skip without burning the flag); Docker-unavailable skip; Brain Orb flag defaulted ON existence-guarded (admin OFF preserved); 409-on-exists convergence vs generic-failure retry (flag not burned, never raises); --workers 2 Redis SETNX provision lock (held -> skip, winner provisions+releases with TTL, Redis-down fail-open); _provision builds a github:Abilityai/cornelius create with request=None and source_mode default True (#1656 — the trinity-enterprise#123 tokenless public-clone path is source-mode only); real-DB smoke of db.count_non_system_agents() facade delegation. create_agent_internal/db/redis/docker seams patched; no Docker/backend. ent#124 addition: precomputed freshness verdict — ensure_seeded(fresh=True) skips the internal count, fresh=False converges the flag without provisioning, fresh=None preserves the legacy count path."
     },
     {
       "file": "unit/test_1557_autonomy_breaker_decoupled.py",
@@ -890,7 +890,7 @@
         "circuit-breaker",
         "autonomy"
       ],
-      "description": "Disabling autonomy must not touch the circuit breaker (#1557). Structural guards: autonomy.py no longer references force_circuit_dormant/reset_circuit (regression guard \u2014 fails on pre-#1557 source) and still calls set_schedule_enabled (proactive suppression intact). Message honesty: _circuit_breaker_error names transport-unreachable vs dispatch-auth-dead, and every branch keeps the 'circuit breaker open' substring pinned by the #1560 integration test."
+      "description": "Disabling autonomy must not touch the circuit breaker (#1557). Structural guards: autonomy.py no longer references force_circuit_dormant/reset_circuit (regression guard — fails on pre-#1557 source) and still calls set_schedule_enabled (proactive suppression intact). Message honesty: _circuit_breaker_error names transport-unreachable vs dispatch-auth-dead, and every branch keeps the 'circuit breaker open' substring pinned by the #1560 integration test."
     },
     {
       "file": "integration/test_1557_autonomy_inbound.py",
@@ -951,7 +951,7 @@
         "proactive-messaging",
         "regression"
       ],
-      "description": "Proactive messages persist to channel session history (#1600). Core property is session-identifier EQUALITY: the key the proactive path derives must equal the key an inbound DM resolves to, per channel (telegram/whatsapp/slack) \u2014 persisting into a different session looks like a fix but leaves the agent unaware of its own outreach. Also: #903 attribution (assistant role, agent sender_label, recipient sender_email for the single-participant DM), persist only on confirmed delivery (no phantom turn on failure), fail-soft on DB error (message already sent), session created when absent (the chat-link session_id column is never written by any code path), and access-grant notifications deliberately NOT persisted (#951 out of scope)."
+      "description": "Proactive messages persist to channel session history (#1600). Core property is session-identifier EQUALITY: the key the proactive path derives must equal the key an inbound DM resolves to, per channel (telegram/whatsapp/slack) — persisting into a different session looks like a fix but leaves the agent unaware of its own outreach. Also: #903 attribution (assistant role, agent sender_label, recipient sender_email for the single-participant DM), persist only on confirmed delivery (no phantom turn on failure), fail-soft on DB error (message already sent), session created when absent (the chat-link session_id column is never written by any code path), and access-grant notifications deliberately NOT persisted (#951 out of scope)."
     },
     {
       "file": "unit/test_1649_group_message_history.py",
@@ -963,7 +963,7 @@
         "proactive-messaging",
         "regression"
       ],
-      "description": "Proactive GROUP messages persist to channel session history (#1649). Slack is a real recall fix: the broadcast is filed at the posted message's own ts, which IS the thread key an in-thread reply resolves to (asserted against the adapter). Telegram is bookkeeping only \u2014 group sessions are per-(sender, chat) with no group branch, so a broadcast uses a synthetic agent-sender key; a test pins that it deliberately does NOT match a participant's session, so the accepted trade-off can't be mistaken for a bug and a future adapter group-branch forces a re-decision. Router-level tests drive the real endpoints (the #1600 lesson: helper-only tests passed with the persistence call deleted outright). Also: #903 shared-thread attribution (sender_email=None), persist only on confirmed delivery, fail-soft, and send_message_detailed's ts capture keeping send_message's 2-tuple contract for its ~7 callers."
+      "description": "Proactive GROUP messages persist to channel session history (#1649). Slack is a real recall fix: the broadcast is filed at the posted message's own ts, which IS the thread key an in-thread reply resolves to (asserted against the adapter). Telegram is bookkeeping only — group sessions are per-(sender, chat) with no group branch, so a broadcast uses a synthetic agent-sender key; a test pins that it deliberately does NOT match a participant's session, so the accepted trade-off can't be mistaken for a bug and a future adapter group-branch forces a re-decision. Router-level tests drive the real endpoints (the #1600 lesson: helper-only tests passed with the persistence call deleted outright). Also: #903 shared-thread attribution (sender_email=None), persist only on confirmed delivery, fail-soft, and send_message_detailed's ts capture keeping send_message's 2-tuple contract for its ~7 callers."
     },
     {
       "file": "unit/test_1632_operator_queue_caps.py",
@@ -976,7 +976,7 @@
         "security",
         "reliability"
       ],
-      "description": "Operator-queue create-path ingestion caps (#1632): the agent-authored sync boundary is bounded by a DB-measured pending-DEPTH cap (primary, Redis-independent), a per-agent + fleet RATE cap (fail-open, break on deny, real in-process-fallback exercise), a total truncate-with-marker field-hygiene clamp inside the #1525 try/except (title/question/context/options/execution_id/created_at/priority, non-dict context, boundary lengths, never-raises), the reserved-platform-id + malformed-id guard, the opqueue:leader cross-worker lock (non-leader poll cycle is a no-op), the one-per-episode flood alert (un-guessable id, cooldown, emit-failure-safe, platform-exempt), the oversize-file skip, and the generous DB-sink belt + count_pending_for_agent helper. Also pins the concrete platform producer validation_service._notify_operator_on_failure, converted to a direct db.create_operator_queue_item (#1632): reserved `val_` id (an agent can't pre-create and thereby suppress its own validation alarm), bypasses the agent-file sync caps, and stays best-effort (a create failure never fails validation) \u2014 the conversion also fixed a latent bug where the notification appended to a bare list and was never ingested. Also pins the _leader_ttl 30s floor (F1: lease outlasts one worst-case cycle + sleep, so leadership doesn't flap and the flood alert doesn't double-emit under --workers 2). Pure/mocked (rate_limiter stubbed + one real in-process test; DB engine stubbed)."
+      "description": "Operator-queue create-path ingestion caps (#1632): the agent-authored sync boundary is bounded by a DB-measured pending-DEPTH cap (primary, Redis-independent), a per-agent + fleet RATE cap (fail-open, break on deny, real in-process-fallback exercise), a total truncate-with-marker field-hygiene clamp inside the #1525 try/except (title/question/context/options/execution_id/created_at/priority, non-dict context, boundary lengths, never-raises), the reserved-platform-id + malformed-id guard, the opqueue:leader cross-worker lock (non-leader poll cycle is a no-op), the one-per-episode flood alert (un-guessable id, cooldown, emit-failure-safe, platform-exempt), the oversize-file skip, and the generous DB-sink belt + count_pending_for_agent helper. Also pins the concrete platform producer validation_service._notify_operator_on_failure, converted to a direct db.create_operator_queue_item (#1632): reserved `val_` id (an agent can't pre-create and thereby suppress its own validation alarm), bypasses the agent-file sync caps, and stays best-effort (a create failure never fails validation) — the conversion also fixed a latent bug where the notification appended to a bare list and was never ingested. Also pins the _leader_ttl 30s floor (F1: lease outlasts one worst-case cycle + sleep, so leadership doesn't flap and the flood alert doesn't double-emit under --workers 2). Pure/mocked (rate_limiter stubbed + one real in-process test; DB engine stubbed)."
     },
     {
       "file": "unit/test_1615_ssh_password_removed.py",
@@ -988,7 +988,7 @@
         "security",
         "regression"
       ],
-      "description": "Password SSH auth removed (#1615, router surface): an explicit auth_method='password' returns 400 naming key auth as the alternative \u2014 not the pre-fix 500 (ModuleNotFoundError: crypt, removed from the stdlib in Python 3.13) and not a silent fall-through; refusal is case-insensitive and covers unknown methods; the request never reaches the container; key auth still works and remains the default; the response carries neither private_key (#175) nor password. Complements test_ssh_service.py, which guards the service layer (helpers deleted, no crypt import)."
+      "description": "Password SSH auth removed (#1615, router surface): an explicit auth_method='password' returns 400 naming key auth as the alternative — not the pre-fix 500 (ModuleNotFoundError: crypt, removed from the stdlib in Python 3.13) and not a silent fall-through; refusal is case-insensitive and covers unknown methods; the request never reaches the container; key auth still works and remains the default; the response carries neither private_key (#175) nor password. Complements test_ssh_service.py, which guards the service layer (helpers deleted, no crypt import)."
     },
     {
       "file": "unit/test_ent162_per_user_github_pat.py",
@@ -1014,7 +1014,7 @@
         "live",
         "integration"
       ],
-      "description": "Live SSH-access API tests (#1615). Password auth is refused with 400 and never 500 (the pre-fix ModuleNotFoundError: crypt on Python 3.13) \u2014 including with a valid public_key supplied, which is what distinguishes the guard from an incidental missing-key 400; refusal is case-insensitive and covers unknown methods. Key auth (BYOK) returns connection details, is the default, clamps TTL, and leaks neither private_key (#175) nor password. Marked `integration`: an ed25519 key injected through the API is used for a REAL ssh login into the container (proves key auth works \u2014 mocks cannot), and a password login is proven impossible against the agent sshd's own PasswordAuthentication=no. sshd readiness is polled via the SSH banner so the e2e tests don't race container boot."
+      "description": "Live SSH-access API tests (#1615). Password auth is refused with 400 and never 500 (the pre-fix ModuleNotFoundError: crypt on Python 3.13) — including with a valid public_key supplied, which is what distinguishes the guard from an incidental missing-key 400; refusal is case-insensitive and covers unknown methods. Key auth (BYOK) returns connection details, is the default, clamps TTL, and leaks neither private_key (#175) nor password. Marked `integration`: an ed25519 key injected through the API is used for a REAL ssh login into the container (proves key auth works — mocks cannot), and a password login is proven impossible against the agent sshd's own PasswordAuthentication=no. sshd readiness is polled via the SSH banner so the e2e tests don't race container boot."
     },
     {
       "file": "unit/test_1673_execution_error_not_success.py",
@@ -1061,18 +1061,7 @@
         "agents",
         "unit"
       ],
-      "description": "Per-agent display label (ent#181): a human-facing name that is rendered, never resolved \u2014 the slug (agent_name) stays the identity every route, container, volume, MCP key and A2A card keys on. Pins the point of the feature: setting a label leaves the slug AND its #1664 volume identity untouched, does not reserve a name, and two agents may share one (labels aren't identities). NULL = render the slug (no backfill; clearing reverts rather than blanking); a blank/whitespace label stores NULL, not an empty string that would render a nameless agent. Soft-deleted agents are not editable (deleted_at guard, mirroring the other settings setters). Batch read for the fleet list (absent = no label = slug) so the hottest endpoint stays 1 query. Router: owner-gated PUT, `label` never coerced to the slug on read (the UI must tell 'no label' from 'label equals slug'), null clears, 404 when the row vanished, WS agent_label_changed broadcast."
-    },
-    {
-      "file": "unit/test_181_agent_display_label.py",
-      "feature": "ent#181",
-      "added": "2026-07-17",
-      "categories": [
-        "backend",
-        "agents",
-        "unit"
-      ],
-      "description": "Per-agent display label (ent#181): a human-facing name that is rendered, never resolved - the slug (agent_name) stays the identity every route, container, volume, MCP key and A2A card keys on. Pins the point of the feature: setting a label leaves the slug AND its #1664 volume identity untouched, does not reserve a name, two agents may share one. NULL = render the slug (no backfill; clearing reverts rather than blanking); a blank/whitespace label stores NULL. Soft-deleted agents are not editable. Batch read for the fleet list keeps the hottest endpoint at one query. Router: owner-gated PUT, label never coerced to the slug on read, null clears, 404 when the row vanished, WS agent_label_changed broadcast."
+      "description": "Per-agent display label (ent#181): a human-facing name that is rendered, never resolved — the slug (agent_name) stays the identity every route, container, volume, MCP key and A2A card keys on. Pins the point of the feature: setting a label leaves the slug AND its #1664 volume identity untouched, does not reserve a name, and two agents may share one (labels aren't identities). NULL = render the slug (no backfill; clearing reverts rather than blanking); a blank/whitespace label stores NULL, not an empty string that would render a nameless agent. Soft-deleted agents are not editable (deleted_at guard, mirroring the other settings setters). Batch read for the fleet list (absent = no label = slug) so the hottest endpoint stays 1 query. Router: owner-gated PUT, `label` never coerced to the slug on read (the UI must tell 'no label' from 'label equals slug'), null clears, 404 when the row vanished, WS agent_label_changed broadcast."
     },
     {
       "file": "unit/test_1484_create_agent_characterization.py",
@@ -1095,7 +1084,7 @@
         "skills",
         "unit"
       ],
-      "description": "Full-directory skill packages (ent#183): pure packaging primitives (hardened frontmatter contract parse \u2014 alias-bomb refused, garbage requires typed-guarded, malicious dep names regex-gated; git-archive member vetting \u2014 REGTYPE only, symlinks/litter/protected basenames dropped with named warnings; injection tar with generated .trinity-skill.json meta appended LAST; manifest-based prune diff capped 200/skill); round-trip against the REAL agent-server restore_from_tar incl. allowlist confinement; real-git end-to-end (repo -> archive -> filter -> restore, tree-SHA determinism across clones, exec bits from git modes); injection orchestration (skip-if-unchanged vs force, old-image 404 fallback with multi_file_dropped_old_image only for multi-file skills, restore-failure repair path = delete-dir + one re-restore, prune deletes ONLY previous-manifest files, unmanaged same-named dir overwritten but never pruned, per-skill + total caps named errors, dep-probe warnings missing_binary/missing_env fail-open and run for unchanged skills too, SkillInjectionBusy on lock contention, CLAUDE.md section rebuilt from ALL present skills with line-anchored replacement that spares ### lookalikes)."
+      "description": "Full-directory skill packages (ent#183): pure packaging primitives (hardened frontmatter contract parse — alias-bomb refused, garbage requires typed-guarded, malicious dep names regex-gated; git-archive member vetting — REGTYPE only, symlinks/litter/protected basenames dropped with named warnings; injection tar with generated .trinity-skill.json meta appended LAST; manifest-based prune diff capped 200/skill); round-trip against the REAL agent-server restore_from_tar incl. allowlist confinement; real-git end-to-end (repo -> archive -> filter -> restore, tree-SHA determinism across clones, exec bits from git modes); injection orchestration (skip-if-unchanged vs force, old-image 404 fallback with multi_file_dropped_old_image only for multi-file skills, restore-failure repair path = delete-dir + one re-restore, prune deletes ONLY previous-manifest files, unmanaged same-named dir overwritten but never pruned, per-skill + total caps named errors, dep-probe warnings missing_binary/missing_env fail-open and run for unchanged skills too, SkillInjectionBusy on lock contention, CLAUDE.md section rebuilt from ALL present skills with line-anchored replacement that spares ### lookalikes)."
     },
     {
       "file": "unit/test_ent123_tokenless_clone.py",
@@ -1107,7 +1096,7 @@
         "git",
         "unit"
       ],
-      "description": "PAT-free clone of public github: templates (ent#123). 50 tests over the 1484-shape purge-and-mock harness: _gate_tokenless_request (\"\"->None normalization, source-mode-only 400 incl. explicit None, fork passthrough), _parse_github_ref charset guard (eval-interpolation hardening), _validate_github_access tokenless ls-remote probe (ok/unavailable->400/transient->502 fail-closed, anonymous branch check, PAT-ful REST regression), _apply_github_env token-var gating (+GIT_SYNC_AUTO belt), lifecycle._apply_persisted_auth_env rebuild seam (repo-only gate, source-mode re-derivation), git_service.probe_anonymous_repo_access stderr classification, the no_write_credentials sync/reset guard (baked env OR per-agent PAT row \u2014 #1264 live-injection window, fail-open), and startup.sh static guards (repo-only clone gate, credential-less CLONE_URL, GIT_TERMINAL_PROMPT=0, push blackhole, .env PAT fallback, private-repo failure cause)."
+      "description": "PAT-free clone of public github: templates (ent#123). 50 tests over the 1484-shape purge-and-mock harness: _gate_tokenless_request (\"\"->None normalization, source-mode-only 400 incl. explicit None, fork passthrough), _parse_github_ref charset guard (eval-interpolation hardening), _validate_github_access tokenless ls-remote probe (ok/unavailable->400/transient->502 fail-closed, anonymous branch check, PAT-ful REST regression), _apply_github_env token-var gating (+GIT_SYNC_AUTO belt), lifecycle._apply_persisted_auth_env rebuild seam (repo-only gate, source-mode re-derivation), git_service.probe_anonymous_repo_access stderr classification, the no_write_credentials sync/reset guard (baked env OR per-agent PAT row — #1264 live-injection window, fail-open), and startup.sh static guards (repo-only clone gate, credential-less CLONE_URL, GIT_TERMINAL_PROMPT=0, push blackhole, .env PAT fallback, private-repo failure cause)."
     },
     {
       "file": "unit/test_ent125_resilient_system_deploy.py",
@@ -1118,7 +1107,7 @@
         "systems",
         "unit"
       ],
-      "description": "Resilient system-manifest deploy (ent#125): best-effort default \u2014 partial deploy continues past a failed agent-create and reports failed[] with {name, short_name, template, reason, status_code}; post-create config (folders/permissions/schedules/tags) scoped to the survivor map; config-phase failures degrade to warnings; total failure returns HTTP 500 with the full report body, skips config/start, and never writes trinity_prompt; partial still writes it; strict=True aborts preserving the original status code (dict-detail 429 not flattened to 500); reason normalization (dict detail \u2192 error field), PAT-bearing git-URL userinfo redaction (learnings 2026-07-14), and 500-char truncation; orchestrator-workers preset with failed orchestrator warns 'non-functional' and configures permissions over survivors only; dry_run and all-success responses unchanged (failed == []). Router mounted alone; since the ent#124 extraction the deploy orchestration lives in services.system_service.deploy_manifest, so config fns/db are patched on services.system_service and agent creation via the _default_create_agent_fn seam."
+      "description": "Resilient system-manifest deploy (ent#125): best-effort default — partial deploy continues past a failed agent-create and reports failed[] with {name, short_name, template, reason, status_code}; post-create config (folders/permissions/schedules/tags) scoped to the survivor map; config-phase failures degrade to warnings; total failure returns HTTP 500 with the full report body, skips config/start, and never writes trinity_prompt; partial still writes it; strict=True aborts preserving the original status code (dict-detail 429 not flattened to 500); reason normalization (dict detail → error field), PAT-bearing git-URL userinfo redaction (learnings 2026-07-14), and 500-char truncation; orchestrator-workers preset with failed orchestrator warns 'non-functional' and configures permissions over survivors only; dry_run and all-success responses unchanged (failed == []). Router mounted alone; since the ent#124 extraction the deploy orchestration lives in services.system_service.deploy_manifest, so config fns/db are patched on services.system_service and agent creation via the _default_create_agent_fn seam."
     },
     {
       "file": "unit/test_ent124_default_system_seed.py",
@@ -1130,7 +1119,7 @@
         "unit",
         "infrastructure"
       ],
-      "description": "First-run default-system seeder (ent#124): the REAL bundled config/manifests/default-system.yaml validates through the executor's own parse_manifest/validate_manifest (acme trio, full-mesh, no schedules, no prompt) and every local: template it references exists in-tree (learnings 2026-07-23 blank-agent trap); durable default_system_seeded flag gating (deleted fleet never resurrected); persisted first_run_fresh verdict \u2014 computed once BEFORE Cornelius runs, persisted, reused on later passes (cross-pass count-poisoning bug), cornelius_seeded=true forces not-fresh (ent#107-era installs get no fleet), count failure defers without persisting; TRINITY_DEFAULT_SYSTEM_MANIFEST disable sentinels skip without burning the flag; override path used when set, unreadable override fails loudly (operator-queue alert, no bundled fallback, no flag); flag policy per deploy outcome: deployed/partial set flag (+partial alert), failed (0 created)/exception do NOT (retry-safe); existence backstop converges the flag without deploying when any {system}-{short} name is reserved (suffix double-seed guard for the fail-open lock); SETNX lock held->skip / winner deploys+releases; orchestrator never raises when Cornelius explodes. db/docker/redis/deploy_manifest seams patched; no Docker/backend."
+      "description": "First-run default-system seeder (ent#124): the REAL bundled config/manifests/default-system.yaml validates through the executor's own parse_manifest/validate_manifest (acme trio, full-mesh, no schedules, no prompt) and every local: template it references exists in-tree (learnings 2026-07-23 blank-agent trap); durable default_system_seeded flag gating (deleted fleet never resurrected); persisted first_run_fresh verdict — computed once BEFORE Cornelius runs, persisted, reused on later passes (cross-pass count-poisoning bug), cornelius_seeded=true forces not-fresh (ent#107-era installs get no fleet), count failure defers without persisting; TRINITY_DEFAULT_SYSTEM_MANIFEST disable sentinels skip without burning the flag; override path used when set, unreadable override fails loudly (operator-queue alert, no bundled fallback, no flag); flag policy per deploy outcome: deployed/partial set flag (+partial alert), failed (0 created)/exception do NOT (retry-safe); existence backstop converges the flag without deploying when any {system}-{short} name is reserved (suffix double-seed guard for the fail-open lock); SETNX lock held->skip / winner deploys+releases; orchestrator never raises when Cornelius explodes. db/docker/redis/deploy_manifest seams patched; no Docker/backend."
     },
     {
       "file": "unit/test_1809_image_drift_recreate.py",
@@ -1142,7 +1131,7 @@
         "unit",
         "reliability"
       ],
-      "description": "Image-drift recreate predicate (#1809): check_base_image_matches compares the container's resolved image id against what its OWN Config.Image reference currently resolves to \u2014 drift\u2192False (recreate on next cold start), match\u2192True; fail-open True on falsy attrs (Config.Image can be \"\"), ImageNotFound (recreate would fail on the same missing tag), and generic daemon errors (2am case: start proceeds on the old image, never a fleet recreate); ID-pinned Config.Image is a documented tautological no-op; version-pinned tags compare their own tag only (a :latest-only rebuild leaves 0.8.0-pinned agents untouched). Source-pins the lifecycle wiring: lazy evaluation gated on `not needs_recreation and not was_already_running` (cold start only \u2014 start-on-running stays an idempotent no-op), ephemeral-ghost exclusion, image-check assignment ABOVE the #1560 clear_agent_breakers gate, recreate delivering the upgrade via the container's own tag, trinity.base-image-version label refresh, recreate-race hardening (remove NotFound tolerated, run 409 adopts the winner), start-response recreated/recreate_reason surfacing, and the skip-inject _reset fixture stubbing the new predicate (Mock-auto-child trap)."
+      "description": "Image-drift recreate predicate (#1809): check_base_image_matches compares the container's resolved image id against what its OWN Config.Image reference currently resolves to — drift→False (recreate on next cold start), match→True; fail-open True on falsy attrs (Config.Image can be \"\"), ImageNotFound (recreate would fail on the same missing tag), and generic daemon errors (2am case: start proceeds on the old image, never a fleet recreate); ID-pinned Config.Image is a documented tautological no-op; version-pinned tags compare their own tag only (a :latest-only rebuild leaves 0.8.0-pinned agents untouched). Source-pins the lifecycle wiring: lazy evaluation gated on `not needs_recreation and not was_already_running` (cold start only — start-on-running stays an idempotent no-op), ephemeral-ghost exclusion, image-check assignment ABOVE the #1560 clear_agent_breakers gate, recreate delivering the upgrade via the container's own tag, trinity.base-image-version label refresh, recreate-race hardening (remove NotFound tolerated, run 409 adopts the winner), start-response recreated/recreate_reason surfacing, and the skip-inject _reset fixture stubbing the new predicate (Mock-auto-child trap)."
     },
     {
       "file": "unit/test_1759_local_template_not_found.py",
@@ -1154,7 +1143,7 @@
         "unit",
         "reliability"
       ],
-      "description": "Local-template create gate (#1759, companion to #1793). Drives the FULL create_agent_internal, so unlike test_1793_unknown_local_template.py it also proves the reject is pre-side-effect (no container, volume, MCP key, ownership row or ephemeral slot). Covers the absent case at #1793's 404 UNKNOWN_LOCAL_TEMPLATE (both roots missing, dir without template.yaml, name resolving to a regular file), the #1759 400 LOCAL_TEMPLATE_INVALID band (empty / whitespace / comment-only / scalar / list / unparseable template.yaml), INVALID_LOCAL_TEMPLATE_NAME precedence, Blank Agent passthrough, the /template bind source under set/unset/EMPTY HOST_TEMPLATES_PATH, and the disclosure rule \u2014 one identical message whichever root missed, echoing no filesystem path (deploy-local template dirs are named after AGENT names, so 'which root' is a #186 enumeration oracle)."
+      "description": "Local-template create gate (#1759, companion to #1793). Drives the FULL create_agent_internal, so unlike test_1793_unknown_local_template.py it also proves the reject is pre-side-effect (no container, volume, MCP key, ownership row or ephemeral slot). Covers the absent case at #1793's 404 UNKNOWN_LOCAL_TEMPLATE (both roots missing, dir without template.yaml, name resolving to a regular file), the #1759 400 LOCAL_TEMPLATE_INVALID band (empty / whitespace / comment-only / scalar / list / unparseable template.yaml), INVALID_LOCAL_TEMPLATE_NAME precedence, Blank Agent passthrough, the /template bind source under set/unset/EMPTY HOST_TEMPLATES_PATH, and the disclosure rule — one identical message whichever root missed, echoing no filesystem path (deploy-local template dirs are named after AGENT names, so 'which root' is a #186 enumeration oracle)."
     },
     {
       "file": "unit/test_1759_template_root_parity.py",
@@ -1166,7 +1155,7 @@
         "unit",
         "reliability"
       ],
-      "description": "Curated-template root parity (#1759). The create resolver's repo-relative fallback is hand-rolled rather than imported from template_service (which the #1484 harness MagicMocks, so an imported gate would be satisfied by a truthy mock), which makes drift between the two surfaces invisible \u2014 these tests pin them equal against both REAL modules. Also pins that the fallback resolves to <repo>/config/agent-templates and not <repo>/src/config/agent-templates (crud.py sits one directory deeper than template_service.py), that the deploy-local root is unchanged, that the container branch returns the pre-#1759 literal byte-identically, that the host branch is absolute so Docker accepts it as a bind source, and \u2014 the guard that would have caught the missing local:default \u2014 that EVERY shipped in-tree template resolves through the create gate."
+      "description": "Curated-template root parity (#1759). The create resolver's repo-relative fallback is hand-rolled rather than imported from template_service (which the #1484 harness MagicMocks, so an imported gate would be satisfied by a truthy mock), which makes drift between the two surfaces invisible — these tests pin them equal against both REAL modules. Also pins that the fallback resolves to <repo>/config/agent-templates and not <repo>/src/config/agent-templates (crud.py sits one directory deeper than template_service.py), that the deploy-local root is unchanged, that the container branch returns the pre-#1759 literal byte-identically, that the host branch is absolute so Docker accepts it as a bind source, and — the guard that would have caught the missing local:default — that EVERY shipped in-tree template resolves through the create gate."
     },
     {
       "file": "unit/test_1759_export_manifest_template.py",
@@ -1177,7 +1166,7 @@
         "systems",
         "unit"
       ],
-      "description": "export_manifest template round-trip (#1759). Blank Agents carry template: None (key PRESENT), and dict.get(key, default) returns the default only when the key is ABSENT \u2014 so the old local:business-assistant fallback was unreachable dead code and every template-less agent exported template: null, which SystemAgentConfig.template (non-Optional str) rejects on redeploy. Pins the `or` fix emitting local:default, pass-through of a real template, that the exported manifest both validates and names a template that exists in-tree, and that inferred agents are logged."
+      "description": "export_manifest template round-trip (#1759). Blank Agents carry template: None (key PRESENT), and dict.get(key, default) returns the default only when the key is ABSENT — so the old local:business-assistant fallback was unreachable dead code and every template-less agent exported template: null, which SystemAgentConfig.template (non-Optional str) rejects on redeploy. Pins the `or` fix emitting local:default, pass-through of a real template, that the exported manifest both validates and names a template that exists in-tree, and that inferred agents are logged."
     },
     {
       "file": "unit/test_1771c_schedules_cas_edges.py",
@@ -1217,7 +1206,7 @@
         "analytics",
         "scheduling"
       ],
-      "description": "Edge-case matrix (sub-area B) for db/schedules/analytics.py on db_harness (#300): _TRIGGER_BUCKETS subset of _BUCKET_ORDER regression guard (the existing literal assertion omits 'Reminders'), unknown/empty/None trigger bucketing, zero-terminal day reports None not 0%, headline-0.0 spec gap (UNSPEC), terminal-based success_rate incl. the legacy 'error' alias, NULL-skipping context AVG, percentile-cap boundary, full-set avg vs sampled p95 (the locked data-source discipline), percentile pool 0/1/2 rows, offset-bearing day bucketing [SQLITE-ONLY], strict '>' window boundary with a frozen iso_cutoff, gap-filled contiguous timeline, and _schedule_command_label unicode/length boundaries. Also covers get_schedule_analytics end-to-end (agent-written tool_calls SHAPE guards \u2014 valid-JSON-not-a-list, list-of-scalars, dict-without-name, non-numeric duration \u2014 on BOTH that surface and get_agent_schedules_summary; the FAILED arm of the per-schedule timeline; and its own 0/1/2/3-row percentile ladder, a second implementation of the same statistics.quantiles arithmetic get_agent_analytics has)."
+      "description": "Edge-case matrix (sub-area B) for db/schedules/analytics.py on db_harness (#300): _TRIGGER_BUCKETS subset of _BUCKET_ORDER regression guard (the existing literal assertion omits 'Reminders'), unknown/empty/None trigger bucketing, zero-terminal day reports None not 0%, headline-0.0 spec gap (UNSPEC), terminal-based success_rate incl. the legacy 'error' alias, NULL-skipping context AVG, percentile-cap boundary, full-set avg vs sampled p95 (the locked data-source discipline), percentile pool 0/1/2 rows, offset-bearing day bucketing [SQLITE-ONLY], strict '>' window boundary with a frozen iso_cutoff, gap-filled contiguous timeline, and _schedule_command_label unicode/length boundaries. Also covers get_schedule_analytics end-to-end (agent-written tool_calls SHAPE guards — valid-JSON-not-a-list, list-of-scalars, dict-without-name, non-numeric duration — on BOTH that surface and get_agent_schedules_summary; the FAILED arm of the per-schedule timeline; and its own 0/1/2/3-row percentile ladder, a second implementation of the same statistics.quantiles arithmetic get_agent_analytics has)."
     },
     {
       "file": "unit/test_1771c_schedules_analytics_properties.py",
@@ -1303,7 +1292,7 @@
         "scheduling",
         "agents"
       ],
-      "description": "Creation-time schedule materialization (ent#89) against a REAL DB with row read-back: both resolver branches populate declared_schedules (the \u00a70/R2 regression \u2014 the github: branch never populated template_data), the github fetch uses the creation-resolved PAT and the parsed @branch ref, enabled honored/defaulted, cron->cron_expression, name-match and intra-block idempotency, the ghost skip, a falsy create_schedule return counted as failed (R6), and non-fatality of a raising create_schedule / list_agent_schedules inside the rollback fence."
+      "description": "Creation-time schedule materialization (ent#89) against a REAL DB with row read-back: both resolver branches populate declared_schedules (the §0/R2 regression — the github: branch never populated template_data), the github fetch uses the creation-resolved PAT and the parsed @branch ref, enabled honored/defaulted, cron->cron_expression, name-match and intra-block idempotency, the ghost skip, a falsy create_schedule return counted as failed (R6), and non-fatality of a raising create_schedule / list_agent_schedules inside the rollback fence."
     },
     {
       "file": "unit/test_ent89_manifest_no_duplicate.py",
@@ -1409,7 +1398,7 @@
         "lifecycle",
         "credentials"
       ],
-      "description": "Agent MCP key detect/self-heal/rotate (#1854). DB: create_agent_mcp_api_key born ACTIVE (tables.py has no column default -> NULL reads as revoked and cannot even deserialize); captured-id delete (not `id != new_id`, so a racing recreate_missing_container mint is not collateral), connector key survives, keep_id never removed, other agents unreachable; DELETE-not-deactivate proven durable across soft-delete -> recover (recover_agent_ownership reactivates every inactive per-agent row). spawned_by_key_id reconcile: `!= current` repairs a child stranded on an OLDER superseded id, leaves a foreign parent alone, idempotent, and enforce_agent_spawn_scope never 403s at any step of a rotation. Drift predicate: absent env, URL-missing (injection needs BOTH), hash-mismatch, system/ghost exempt, fail-safe on DB error. Headline AC: env_overrides carry BOTH TRINITY_MCP_API_KEY and TRINITY_MCP_URL, proven end-to-end through recreate_container_with_updated_config on an old container that had NEITHER, plus a source-order guard that overrides are applied LAST. Probe: ok/foreign_user_key/foreign_agent_key/unknown_key/not_configured/shadow_entry, stopped container -> unavailable not 500, only digests leave the container (no token, no .mcp.json body) plus a non-vacuous SOURCE guard that no future edit of the in-container script can start leaking one. Health `stale` fires when last_used_at predates recent executions; trinity-system reports exempt not a false missing. Rotation: system/ghost 409 BEFORE any mutation, Redis-down 503 (fail-CLOSED) and contention 409, stopped agent stays stopped on the DB-only path, post-removal failure keeps superseded keys and names the real state with no raw exception text, 409-adoption post-condition blocks deletion, clear_agent_breakers before the recreate, no plaintext or key hash in response/log/audit, rate limit 429. Plus the FR-7 guards on MCP key revoke/delete and connector key mint. Review additions: the self-heal BODY is pinned \u2014 it takes the SAME agent:mcp_key_regen lock as rotation and does NOTHING (no mint, no delete) when Redis is down or another heal/rotation holds it, because there is no per-agent start lock and an unserialised second heal deletes the key the first is about to bake in; it audits its own mint+DELETE; container-env health (env_absent/env_mismatch) outranks the usage-derived states and is fail-soft; `stale` survives a naive legacy timestamp; the 409-adoption post-condition is an EXACT constant-time key match, proven against a container carrying a same-20-char-prefix twin; and any non-`agent` scope (connector, portal_delegate, a future sixth) reads as foreign, never `unknown_key`."
+      "description": "Agent MCP key detect/self-heal/rotate (#1854). DB: create_agent_mcp_api_key born ACTIVE (tables.py has no column default -> NULL reads as revoked and cannot even deserialize); captured-id delete (not `id != new_id`, so a racing recreate_missing_container mint is not collateral), connector key survives, keep_id never removed, other agents unreachable; DELETE-not-deactivate proven durable across soft-delete -> recover (recover_agent_ownership reactivates every inactive per-agent row). spawned_by_key_id reconcile: `!= current` repairs a child stranded on an OLDER superseded id, leaves a foreign parent alone, idempotent, and enforce_agent_spawn_scope never 403s at any step of a rotation. Drift predicate: absent env, URL-missing (injection needs BOTH), hash-mismatch, system/ghost exempt, fail-safe on DB error. Headline AC: env_overrides carry BOTH TRINITY_MCP_API_KEY and TRINITY_MCP_URL, proven end-to-end through recreate_container_with_updated_config on an old container that had NEITHER, plus a source-order guard that overrides are applied LAST. Probe: ok/foreign_user_key/foreign_agent_key/unknown_key/not_configured/shadow_entry, stopped container -> unavailable not 500, only digests leave the container (no token, no .mcp.json body) plus a non-vacuous SOURCE guard that no future edit of the in-container script can start leaking one. Health `stale` fires when last_used_at predates recent executions; trinity-system reports exempt not a false missing. Rotation: system/ghost 409 BEFORE any mutation, Redis-down 503 (fail-CLOSED) and contention 409, stopped agent stays stopped on the DB-only path, post-removal failure keeps superseded keys and names the real state with no raw exception text, 409-adoption post-condition blocks deletion, clear_agent_breakers before the recreate, no plaintext or key hash in response/log/audit, rate limit 429. Plus the FR-7 guards on MCP key revoke/delete and connector key mint. Review additions: the self-heal BODY is pinned — it takes the SAME agent:mcp_key_regen lock as rotation and does NOTHING (no mint, no delete) when Redis is down or another heal/rotation holds it, because there is no per-agent start lock and an unserialised second heal deletes the key the first is about to bake in; it audits its own mint+DELETE; container-env health (env_absent/env_mismatch) outranks the usage-derived states and is fail-soft; `stale` survives a naive legacy timestamp; the 409-adoption post-condition is an EXACT constant-time key match, proven against a container carrying a same-20-char-prefix twin; and any non-`agent` scope (connector, portal_delegate, a future sixth) reads as foreign, never `unknown_key`."
     },
     {
       "file": "unit/test_ent313_failed_creation_container_reclaim.py",
@@ -1420,7 +1409,7 @@
         "unit",
         "reliability"
       ],
-      "description": "Failed-creation container reclaim (ent#313): a create that fails after containers.run must leave no orphan container, no unreclaimable volume and no name-keyed Redis state. Covers both arrival shapes \u2014 handle in hand (later step raised) and NO handle (the reported 60s Docker read timeout, where the daemon created the container and the client never got it, so it is re-derived by name). Pins every fail-closed gate on that re-derived path, because a name resolves to another install's live agent on a shared Docker daemon: 409 name conflict (daemon created nothing) \u2192 refuse; existing agent_ownership row (a concurrent creation won the name) \u2192 refuse; trinity.created label older than the attempt's floor, missing, or unparseable \u2192 refuse; missing floor \u2192 refuse; DB or Docker lookup error \u2192 refuse. Also: Redis cleared when the container is provably gone (removed or never created) and NOT when removal failed (the slot ZSET isn't idle); every failure swallowed so the original creation error is what the caller reports; and an AST guard that create_agent_internal actually AWAITS the reclaim, so the unit tests can't stay green while nothing calls it. Also pins the never-raises contract under a stubbed docker module: the first version used isinstance(exc, docker.errors.APIError), which raises TypeError wherever docker is a test double and replaced the real creation error with an unrelated one (caught by the full suite via test_fork_to_own / test_1484); the 409 check is duck-typed on .response.status_code now."
+      "description": "Failed-creation container reclaim (ent#313): a create that fails after containers.run must leave no orphan container, no unreclaimable volume and no name-keyed Redis state. Covers both arrival shapes — handle in hand (later step raised) and NO handle (the reported 60s Docker read timeout, where the daemon created the container and the client never got it, so it is re-derived by name). Pins every fail-closed gate on that re-derived path, because a name resolves to another install's live agent on a shared Docker daemon: 409 name conflict (daemon created nothing) → refuse; existing agent_ownership row (a concurrent creation won the name) → refuse; trinity.created label older than the attempt's floor, missing, or unparseable → refuse; missing floor → refuse; DB or Docker lookup error → refuse. Also: Redis cleared when the container is provably gone (removed or never created) and NOT when removal failed (the slot ZSET isn't idle); every failure swallowed so the original creation error is what the caller reports; and an AST guard that create_agent_internal actually AWAITS the reclaim, so the unit tests can't stay green while nothing calls it. Also pins the never-raises contract under a stubbed docker module: the first version used isinstance(exc, docker.errors.APIError), which raises TypeError wherever docker is a test double and replaced the real creation error with an unrelated one (caught by the full suite via test_fork_to_own / test_1484); the 409 check is duck-typed on .response.status_code now."
     },
     {
       "file": "unit/test_1951_slack_inbound_media.py",
@@ -1431,7 +1420,7 @@
         "unit",
         "security"
       ],
-      "description": "Slack inbound file-download SSRF gate (#1951) \u2014 the third channel to get the #1932 two-tier treatment. download_file previously fetched url_private_download with no host allowlist, no scheme check and follow_redirects=True. Covers: the legitimate files.slack.com download still succeeds (the #1932 lesson \u2014 an allowlist that rejects the real host reads as 'allowlist present' while being 100% broken); a validated CDN redirect is followed WITHOUT the bot token; hop-1 refusals for unrelated/lookalike/apex-lookalike hosts, the dotless-suffix bypass (evil-slack-files.com), plaintext http, file://, loopback and a platform-network address; off-domain and downgrade redirects refused after exactly one hop; cloud metadata (169.254.169.254) as a redirect target; bounded redirect budget; refusal logged at ERROR not WARNING; source tier proven narrower than the redirect tier; and a static backstop that follow_redirects=True never returns. EVERY negative test asserts the recorded call log, not `is None` \u2014 download_file returns None on every failure path and its bare except swallows AssertionError, so a return-value assertion passes against a completely unpatched seam."
+      "description": "Slack inbound file-download SSRF gate (#1951) — the third channel to get the #1932 two-tier treatment. download_file previously fetched url_private_download with no host allowlist, no scheme check and follow_redirects=True. Covers: the legitimate files.slack.com download still succeeds (the #1932 lesson — an allowlist that rejects the real host reads as 'allowlist present' while being 100% broken); a validated CDN redirect is followed WITHOUT the bot token; hop-1 refusals for unrelated/lookalike/apex-lookalike hosts, the dotless-suffix bypass (evil-slack-files.com), plaintext http, file://, loopback and a platform-network address; off-domain and downgrade redirects refused after exactly one hop; cloud metadata (169.254.169.254) as a redirect target; bounded redirect budget; refusal logged at ERROR not WARNING; source tier proven narrower than the redirect tier; and a static backstop that follow_redirects=True never returns. EVERY negative test asserts the recorded call log, not `is None` — download_file returns None on every failure path and its bare except swallows AssertionError, so a return-value assertion passes against a completely unpatched seam."
     },
     {
       "file": "unit/test_1917_stack_trace_exposure.py",
@@ -1442,7 +1431,7 @@
         "unit",
         "security"
       ],
-      "description": "py/stack-trace-exposure leak guards for the ops / system-agent siblings PR #1912 left untouched (#1917), including open CodeQL alert #231. Each test drives the REAL router function with a sentinel planted in the exception message and asserts both halves: the sentinel is absent from the response AND the exception class name is present (a response that dropped the error entirely would pass a sentinel-only check while making the failure undiagnosable). Covers stop_fleet per-agent, _stop_agent_container (feeds emergency_stop), fleet health (previously str(e)[:50] \u2014 truncation bounds a leak, it does not remove one, and docker/httpx messages put the host FIRST), ops costs (the OTel collector URL), and system-agent health. Plus a static ban on str(e) in ops.py/system_agent.py and a window check on agents.py's three lifecycle details. All 8 fail against pre-fix code \u2014 verified, because the fleet-health test initially patched a get_agent_context_info that does not exist (raising=False made it silent), so it passed against the unpatched router until the pre-fix run exposed it; it now patches get_agent_client and asserts the probe ran."
+      "description": "py/stack-trace-exposure leak guards for the ops / system-agent siblings PR #1912 left untouched (#1917), including open CodeQL alert #231. Each test drives the REAL router function with a sentinel planted in the exception message and asserts both halves: the sentinel is absent from the response AND the exception class name is present (a response that dropped the error entirely would pass a sentinel-only check while making the failure undiagnosable). Covers stop_fleet per-agent, _stop_agent_container (feeds emergency_stop), fleet health (previously str(e)[:50] — truncation bounds a leak, it does not remove one, and docker/httpx messages put the host FIRST), ops costs (the OTel collector URL), and system-agent health. Plus a static ban on str(e) in ops.py/system_agent.py and a window check on agents.py's three lifecycle details. All 8 fail against pre-fix code — verified, because the fleet-health test initially patched a get_agent_context_info that does not exist (raising=False made it silent), so it passed against the unpatched router until the pre-fix run exposed it; it now patches get_agent_client and asserts the probe ran."
     },
     {
       "file": "unit/test_ent314_hardened_yaml.py",
@@ -1453,19 +1442,7 @@
         "unit",
         "security"
       ],
-      "description": "Hardened parsing of author-controlled YAML (ent#314). template.yaml was on bare yaml.safe_load, leaving alias amplification (measured 416 B -> 110 MB at json.dumps time, parse itself 0.0011 s, so an input-size cap cannot close it) and silent last-wins duplicate keys, which let a template show one credentials: block to a human and declare another to Trinity. Reachable by any creator-role user via a public repo (ent#123 tokenless) since _build_template runs unfenced inside get_all_templates(). Covers: the fixture itself still amplifies under bare safe_load (so the suite cannot pass vacuously); level 4/5/6 bombs rejected under both policies; a small honest anchor STILL parses under BUDGET (the #1932 lesson \u2014 a guard that rejects the legitimate document is an outage that reads as hardened); REJECT refuses one alias and also gates at the scanner (skill_packaging's copy had both hooks); the issue's exact duplicate-credentials case and a nested duplicate; size cap; reject-not-truncate; ManifestError still a subclass so routers/systems.py's named 400 is unchanged and the manifest's published codes survive; and two consolidation guards \u2014 no module may grow a fourth SafeLoader subclass, and all four author-controlled readers must call the shared loader with no bare safe_load left. The four product-level guards fail against pre-fix code."
-    },
-    {
-      "file": "unit/test_1967_global_pat_propagation.py",
-      "feature": "#1967",
-      "added": "2026-08-04",
-      "categories": [
-        "backend",
-        "unit",
-        "infrastructure",
-        "credentials"
-      ],
-      "description": "A global GitHub PAT rotation must actually reach running agents (#1967). The #211 auto-propagation reported success while updating nothing, for two independent reasons, both caused by the global path and the per-agent path (#1264) having drifted apart. (1) The eligibility gate was .env-shaped: _propagate_to_agent passed add_if_missing=False, so an agent with no /home/developer/.env - which is EVERY agent provisioned from a GitHub template, since those ship .env.example - returned skipped_no_pat; on such a fleet 100% skipped and the endpoint still answered success:true. (2) .env is not where git authenticates from: clones are created as https://oauth2:<PAT>@github.com/... and that URL is persisted in .git/config on the workspace volume, so rewriting .env changes nothing for the running git process - only git_service.update_remote_pat restores fetch/push before a restart, and only the per-agent path called it. Observed: agents on a revoked token for 11-13 days with nothing in the UI saying so. Covers both halves: an agent with a git config but no .env is now updated (add_if_missing derived per agent, not hard-coded), and the live remote is re-templated with remotes_updated reported SEPARATELY from updated (updated alone overstates the fix - an agent whose .env was rewritten but whose remote was not is still broken for git until restart, which would repeat this issue's own mistake of reporting success for a partial effect). Critically also pins what the fix must NOT be: the issue suggests add_if_missing=True unconditionally, which would spray the global token into every running container including agents that never touched GitHub - the module docstring says the original gate existed to prevent exactly that - so eligibility moved to the git config and a non-GitHub agent keeps the conservative behaviour, with an explicit no-regression test that an agent carrying GITHUB_PAT for the gh CLI with no Trinity-managed repo is STILL rotated (the new gate is a union with the old, not a replacement). Plus: per-agent-PAT agents still skipped and never contacted, stopped agents neither counted nor contacted, one failing agent does not stop the fleet, a git-config read that raises degrades to the conservative gate instead of taking down the rotation, a zero-reach rotation WARNs in the platform log (the failure was silent for weeks; a Settings panel nobody is watching during an incident is not sufficient), and two structural guards that both paths share one _apply_pat_to_agent body and that add_if_missing=False is not reintroduced - the drift IS the bug."
+      "description": "Hardened parsing of author-controlled YAML (ent#314). template.yaml was on bare yaml.safe_load, leaving alias amplification (measured 416 B -> 110 MB at json.dumps time, parse itself 0.0011 s, so an input-size cap cannot close it) and silent last-wins duplicate keys, which let a template show one credentials: block to a human and declare another to Trinity. Reachable by any creator-role user via a public repo (ent#123 tokenless) since _build_template runs unfenced inside get_all_templates(). Covers: the fixture itself still amplifies under bare safe_load (so the suite cannot pass vacuously); level 4/5/6 bombs rejected under both policies; a small honest anchor STILL parses under BUDGET (the #1932 lesson — a guard that rejects the legitimate document is an outage that reads as hardened); REJECT refuses one alias and also gates at the scanner (skill_packaging's copy had both hooks); the issue's exact duplicate-credentials case and a nested duplicate; size cap; reject-not-truncate; ManifestError still a subclass so routers/systems.py's named 400 is unchanged and the manifest's published codes survive; and two consolidation guards — no module may grow a fourth SafeLoader subclass, and all four author-controlled readers must call the shared loader with no bare safe_load left. The four product-level guards fail against pre-fix code."
     },
     {
       "file": "unit/test_1969_lock_denied_tick_audit.py",
@@ -1503,6 +1480,18 @@
         "codex"
       ],
       "description": "/edge-cases boundary + property analysis of the Codex credential resolvers (#1971): _parse_env_value, _load_api_key_with_source, _has_subscription_auth. These are parsing/auth boundaries whose output now decides whether CODEX_API_KEY is exported (and therefore whether a subscription auth.json survives) and whether dispatch is refused - a promotion from what _parse_env_value was originally for. 32 boundary rows (quoting, inline-comment vs in-value '#', empty/whitespace values that must not resolve to '', export prefix, missing/unreadable .env, auth.json absent/zero-byte/directory/broken-symlink) plus 4 Hypothesis properties (parse is total and never grows its input; resolution is total and self-consistent - a (value, None) or (None, source) pair would make the export decision incoherent; subscription detection is total). Found a REAL PRE-EXISTING bug, fixed here: a .env holding non-UTF-8 bytes (a Latin-1 credential, a mis-encoded smart quote - both plausible in a hand-edited file) made read_text() raise UnicodeDecodeError, which is a ValueError and NOT an OSError, so the except (IOError, OSError) around the loop never caught it; the error escaped _execute_codex and failed the dispatch instead of resolving the key or returning the honest 503. Fixed with errors='replace' so a bad byte on an unrelated line cannot hide a valid key. Also documents (not asserts as correct) that .env resolution is by LINE ORDER while the process-env branch is by _API_KEY_VARS priority - harmless while the source only chose a value, but after #1971 it also decides the auth mode. One Hypothesis finding was classified a WRONG TEST and recorded as such: lone surrogates cannot be written to a real file, so that input is unproducible."
+    },
+    {
+      "file": "unit/test_1967_global_pat_propagation.py",
+      "feature": "#1967",
+      "added": "2026-08-04",
+      "categories": [
+        "backend",
+        "unit",
+        "infrastructure",
+        "credentials"
+      ],
+      "description": "A global GitHub PAT rotation must actually reach running agents (#1967). The #211 auto-propagation reported success while updating nothing, for two independent reasons, both caused by the global path and the per-agent path (#1264) having drifted apart. (1) The eligibility gate was .env-shaped: _propagate_to_agent passed add_if_missing=False, so an agent with no /home/developer/.env - which is EVERY agent provisioned from a GitHub template, since those ship .env.example - returned skipped_no_pat; on such a fleet 100% skipped and the endpoint still answered success:true. (2) .env is not where git authenticates from: clones are created as https://oauth2:<PAT>@github.com/... and that URL is persisted in .git/config on the workspace volume, so rewriting .env changes nothing for the running git process - only git_service.update_remote_pat restores fetch/push before a restart, and only the per-agent path called it. Observed: agents on a revoked token for 11-13 days with nothing in the UI saying so. Covers both halves: an agent with a git config but no .env is now updated (add_if_missing derived per agent, not hard-coded), and the live remote is re-templated with remotes_updated reported SEPARATELY from updated (updated alone overstates the fix - an agent whose .env was rewritten but whose remote was not is still broken for git until restart, which would repeat this issue's own mistake of reporting success for a partial effect). Critically also pins what the fix must NOT be: the issue suggests add_if_missing=True unconditionally, which would spray the global token into every running container including agents that never touched GitHub - the module docstring says the original gate existed to prevent exactly that - so eligibility moved to the git config and a non-GitHub agent keeps the conservative behaviour, with an explicit no-regression test that an agent carrying GITHUB_PAT for the gh CLI with no Trinity-managed repo is STILL rotated (the new gate is a union with the old, not a replacement). Plus: per-agent-PAT agents still skipped and never contacted, stopped agents neither counted nor contacted, one failing agent does not stop the fleet, a git-config read that raises degrades to the conservative gate instead of taking down the rotation, a zero-reach rotation WARNs in the platform log (the failure was silent for weeks; a Settings panel nobody is watching during an incident is not sufficient), and two structural guards that both paths share one _apply_pat_to_agent body and that add_if_missing=False is not reintroduced - the drift IS the bug."
     }
   ]
 }
