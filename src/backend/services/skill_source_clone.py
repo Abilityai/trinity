@@ -18,6 +18,14 @@ treated as an attack signal and refused (`moved_tag`), not silently adopted —
 the whole point of pinning is that the bytes don't change under you. Bumping to
 new content is done by pointing the source at a new tag NAME, which is an
 explicit admin action.
+
+**Per-source skills root (ent#332).** The layout inside a source repo is no
+longer assumed to be `.claude/skills/`: each clone resolves its own root —
+a root `catalog.yaml` `skills_root:` declaration wins, else a `skills/`
+directory carrying SKILL.md evidence, else the legacy `.claude/skills/`
+fallback (existing sources keep working with zero config). The resolved root is
+the SOURCE layout only; packaging rewrites arcnames to the canonical
+agent-side `.claude/skills/` destination (see `skill_packaging`).
 """
 
 import logging
@@ -27,6 +35,14 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import yaml
+
+from utils.safe_yaml import (
+    AliasPolicy,
+    HardenedYamlError,
+    load_hardened_yaml,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +69,42 @@ _CLONE_TIMEOUT = 120
 _FETCH_TIMEOUT = 60
 _QUICK_TIMEOUT = 30
 
+# ent#332 — per-source skills root.
+_DEFAULT_SKILLS_ROOT = ".claude/skills"
+_PROBE_SKILLS_ROOT = "skills"
+# catalog.yaml is author-controlled repo content (same trust tier as SKILL.md
+# frontmatter, hardened by ent#314). The cap is enforced by a BOUNDED read
+# (`read(cap + 1)`) — a post-read length check is defeated by a symlink at
+# `catalog.yaml` pointing at /dev/zero, and git materializes author symlinks.
+_CATALOG_MAX_BYTES = 64 * 1024
+# Per-segment charset for a declared skills_root. Applied segment-wise: the
+# whole-string regex family admits `.`, `./skills` and `skills//x`, each of
+# which breaks archive-prefix math into per-skill "empty package" failures.
+_ROOT_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def validate_declared_root(value: Any) -> Optional[str]:
+    """Validate a catalog-declared ``skills_root``; normalized root or None.
+
+    Segment-wise by design: strip ONE trailing ``/``, split on ``/``, and
+    reject any segment that is empty, ``.``, or ``..`` — so ``.``, ``./x``,
+    ``a//b`` and ``a/../b`` are all refused, not just substring-``..`` shapes.
+    A leading ``-`` is refused so the value can never read as a git option
+    (the ``--`` separators downstream are the belt to this suspenders).
+    """
+    if not isinstance(value, str):
+        return None
+    root = value[:-1] if value.endswith("/") else value
+    if not root or len(root) > 200 or root.startswith(("/", "-")):
+        return None
+    segments = root.split("/")
+    if any(
+        seg in ("", ".", "..") or not _ROOT_SEGMENT_RE.match(seg)
+        for seg in segments
+    ):
+        return None
+    return root
+
 
 def redact(text: str) -> str:
     """Strip any embedded PAT from git output before it is logged or returned."""
@@ -74,6 +126,13 @@ class SkillSourceClone:
         self.ref = ref
         self.ref_type = ref_type
         self.path = root / source_id
+        # ent#332: lazily-resolved per-source skills root. Instances are
+        # per-operation (skill_service._clones constructs fresh ones per call),
+        # so the cache has no staleness window across syncs.
+        self._rel_root: Optional[str] = None
+        # True when the probe found SKILL.md evidence under BOTH skills/ and
+        # .claude/skills/ with no catalog.yaml to decide — surfaced in status.
+        self.dual_layout = False
 
     # =========================================================================
     # Sync
@@ -275,8 +334,191 @@ class SkillSourceClone:
         proc = self._git(["rev-parse", rev], timeout=10)
         return proc.stdout.strip() if proc.returncode == 0 else None
 
-    def skills_root(self) -> str:
-        return os.path.realpath(str(self.path / ".claude" / "skills"))
+    def skills_rel_root(self) -> str:
+        """This source's skills root, RELATIVE to the clone (ent#332).
+
+        Resolution order: catalog.yaml ``skills_root:`` declaration → the
+        ``skills/`` probe → the legacy ``.claude/skills`` fallback. Never
+        raises — every invalid tier logs and falls through to the next, so a
+        broken catalog can never blind a source a probe can still read.
+        """
+        if self._rel_root is None:
+            self._rel_root = self._resolve_rel_root()
+        return self._rel_root
+
+    def _resolve_rel_root(self) -> str:
+        declared = self._declared_root()
+        if declared is not None:
+            if self._declared_root_usable(declared):
+                return declared
+            # Containment/symlink failure at the DECLARED tier falls through —
+            # blanking the whole source over a tier it doesn't need would
+            # regress a repo that serves skills from a probeable root today.
+        if self._probe_skills_layout():
+            return _PROBE_SKILLS_ROOT
+        return _DEFAULT_SKILLS_ROOT
+
+    def _declared_root(self) -> Optional[str]:
+        """The catalog.yaml ``skills_root`` declaration, validated, or None.
+
+        A missing catalog.yaml is silent; a PRESENT-but-unusable one warns.
+        Never raises: ``HardenedYamlError`` is a ValueError, not a YAMLError,
+        so it is caught EXPLICITLY — missing it would escape through
+        ``list_skills`` and 500 the merged listing (the skill_packaging trap).
+        """
+        catalog = self.path / "catalog.yaml"
+        try:
+            # lstat-order guard: never open a symlinked catalog.yaml — git
+            # materializes author-controlled symlinks (the _skill_files idiom).
+            if catalog.is_symlink() or not catalog.is_file():
+                return None
+        except OSError:
+            return None
+        try:
+            with open(catalog, "rb") as fh:
+                raw = fh.read(_CATALOG_MAX_BYTES + 1)
+        except OSError as e:
+            logger.warning(
+                "could not read catalog.yaml for skill source %s: %s",
+                self.source_id, e,
+            )
+            return None
+        if len(raw) > _CATALOG_MAX_BYTES:
+            logger.warning(
+                "catalog.yaml too large for skill source %s; ignoring",
+                self.source_id,
+            )
+            return None
+        try:
+            data = load_hardened_yaml(
+                raw.decode("utf-8", errors="replace"),
+                kind="catalog",
+                alias_policy=AliasPolicy.REJECT,
+                max_bytes=_CATALOG_MAX_BYTES,
+            )
+        except (HardenedYamlError, yaml.YAMLError):
+            logger.warning(
+                "unparseable catalog.yaml for skill source %s; ignoring",
+                self.source_id,
+            )
+            return None
+        if not isinstance(data, dict):
+            logger.warning(
+                "catalog.yaml for skill source %s is not a mapping; ignoring",
+                self.source_id,
+            )
+            return None
+        # Unknown schema_version ⇒ the whole catalog is unusable (semantics may
+        # have changed under us) — degrade to the probe, which still resolves a
+        # conventional layout correctly. Tolerates int 1 AND string "1": YAML
+        # yields either depending on how the author quoted it.
+        schema = data.get("schema_version", 1)
+        if str(schema).strip() != "1":
+            logger.warning(
+                "unknown catalog.yaml schema_version %r for skill source %s; "
+                "ignoring the catalog", schema, self.source_id,
+            )
+            return None
+        value = data.get("skills_root")
+        if value is None:
+            return None
+        root = validate_declared_root(value)
+        if root is None:
+            logger.warning(
+                "invalid catalog.yaml skills_root %r for skill source %s; "
+                "falling back to layout probe", value, self.source_id,
+            )
+        return root
+
+    def _declared_root_usable(self, rel_root: str) -> bool:
+        """Containment + symlink gate for a DECLARED root.
+
+        The declared directory may be absent (declared-but-empty is honest);
+        what it may not be is a symlink or a realpath escape from the clone.
+        """
+        candidate = self.path / rel_root
+        try:
+            if candidate.is_symlink():
+                logger.warning(
+                    "declared skills_root %r for skill source %s is a symlink; "
+                    "falling back to layout probe", rel_root, self.source_id,
+                )
+                return False
+        except OSError:
+            return False
+        base = os.path.realpath(str(self.path))
+        target = os.path.realpath(os.path.join(base, rel_root))
+        if not target.startswith(base + os.sep):
+            logger.warning(
+                "declared skills_root %r for skill source %s resolves outside "
+                "the clone; falling back to layout probe", rel_root, self.source_id,
+            )
+            return False
+        return True
+
+    def _probe_skills_layout(self) -> bool:
+        """True when ``skills/`` is the evidence-bearing root.
+
+        Evidence-gated twice: ``skills/`` must be a REAL directory (lstat — a
+        git-authored ``skills -> .claude/skills`` symlink would list fine but
+        yield empty ``git archive`` output, failing every injection) holding at
+        least one real ``<dir>/SKILL.md``; and when ``.claude/skills/`` ALSO
+        carries evidence with no catalog to decide, the legacy root is kept —
+        a pre-existing dual-layout source must never silently flip which
+        executable content the ent#236 auto-sync injects fleet-wide.
+        """
+        candidate = self.path / _PROBE_SKILLS_ROOT
+        if not self._is_real_dir(candidate) or not self._has_skill_evidence(candidate):
+            return False
+        legacy = self.path / _DEFAULT_SKILLS_ROOT
+        if self._is_real_dir(legacy) and self._has_skill_evidence(legacy):
+            self.dual_layout = True
+            logger.warning(
+                "skill source %s carries SKILL.md evidence under BOTH skills/ "
+                "and .claude/skills/ with no catalog.yaml skills_root to "
+                "decide; keeping .claude/skills/ — declare skills_root in "
+                "catalog.yaml to switch", self.source_id,
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _is_real_dir(p: Path) -> bool:
+        try:
+            return not p.is_symlink() and p.is_dir()
+        except OSError:
+            return False
+
+    @classmethod
+    def _has_skill_evidence(cls, root: Path) -> bool:
+        try:
+            for child in root.iterdir():
+                if cls._is_real_dir(child) and (child / "SKILL.md").is_file():
+                    return True
+        except OSError:
+            pass
+        return False
+
+    def skills_root(self) -> Optional[str]:
+        """Absolute, realpath-resolved skills root — or None when refused.
+
+        The containment base is ``realpath(self.path)``, not ``self.path``:
+        ``/data/skills-library`` may itself be a symlink to a larger volume,
+        and comparing a resolved target against the unresolved base would
+        refuse every source spuriously. None (a symlinked final root escaping
+        the clone) propagates as an empty listing via ``skill_dir``/
+        ``skill_names`` — never a TypeError inside ``list_skills``.
+        """
+        rel = self.skills_rel_root()
+        base = os.path.realpath(str(self.path))
+        target = os.path.realpath(os.path.join(base, rel))
+        if not target.startswith(base + os.sep):
+            logger.warning(
+                "skills root for source %s resolves outside the clone; "
+                "treating as absent", self.source_id,
+            )
+            return None
+        return target
 
     def skill_dir(self, skill_name: str) -> Optional[Path]:
         """Resolve a skill directory inside THIS source, or None if unsafe.
@@ -288,14 +530,19 @@ class SkillSourceClone:
         independent guard (see skill_service._skill_dir for the pairing).
         """
         root = self.skills_root()
+        if root is None:
+            return None
         target = os.path.realpath(os.path.join(root, skill_name))
         if target != root and not target.startswith(root + os.sep):
             return None
         return Path(target)
 
     def skill_names(self) -> List[str]:
-        """Directory names under .claude/skills/ that carry a SKILL.md."""
-        skills_dir = self.path / ".claude" / "skills"
+        """Directory names under the resolved root that carry a SKILL.md."""
+        root = self.skills_root()
+        if root is None:
+            return []
+        skills_dir = Path(root)
         if not skills_dir.is_dir():
             return []
         return sorted(
@@ -305,7 +552,8 @@ class SkillSourceClone:
 
     def tree_shas(self) -> Dict[str, str]:
         """Per-skill git tree SHA — the package version (ent#183)."""
-        proc = self._git(["ls-tree", "-z", "HEAD", ".claude/skills/"], text=False, timeout=15)
+        rel = self.skills_rel_root()
+        proc = self._git(["ls-tree", "-z", "HEAD", "--", f"{rel}/"], text=False, timeout=15)
         if proc.returncode != 0:
             logger.warning("ls-tree failed for skill source %s", self.source_id)
             return {}
@@ -321,13 +569,16 @@ class SkillSourceClone:
         return shas
 
     def archive_skill(self, skill_name: str) -> Optional[bytes]:
-        """`git archive HEAD -- .claude/skills/<name>` — the injection source.
+        """`git archive HEAD -- <root>/<name>` — the injection source.
 
         Reads from HEAD rather than the working tree so a concurrent sync's
-        `reset --hard` cannot yield a mixed-tree tar.
+        `reset --hard` cannot yield a mixed-tree tar. Member names carry the
+        SOURCE layout prefix; `skill_packaging.filter_skill_archive` rewrites
+        them to the canonical agent-side `.claude/skills/` destination.
         """
+        rel = self.skills_rel_root()
         proc = self._git(
-            ["archive", "--format=tar", "HEAD", "--", f".claude/skills/{skill_name}"],
+            ["archive", "--format=tar", "HEAD", "--", f"{rel}/{skill_name}"],
             text=False, timeout=_QUICK_TIMEOUT,
         )
         if proc.returncode != 0:

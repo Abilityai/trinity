@@ -6,6 +6,9 @@
           <h2 class="text-lg font-medium text-gray-900 dark:text-white">Skills Library</h2>
           <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
             Repositories the platform syncs reusable agent skills from. Skills live at
+            <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">skills/&lt;name&gt;/SKILL.md</code>
+            (declared via <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">catalog.yaml</code>)
+            or the legacy
             <code class="px-1 py-0.5 bg-gray-100 dark:bg-gray-700 rounded text-xs">.claude/skills/&lt;name&gt;/SKILL.md</code>.
           </p>
         </div>
