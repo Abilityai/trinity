@@ -1257,6 +1257,34 @@ class FleetExecutionStats(BaseModel):
     deleted_agent_cost: float = 0.0
 
 
+class ExecutionTimelineBucket(BaseModel):
+    """One bucket of `GET /api/executions/timeline` (ent#326)."""
+    bucket: str
+    total: int
+    success: int
+    failed: int
+    cost: float
+    # Context-window occupancy summed over the bucket — NOT "tokens consumed".
+    # `schedule_executions` has no token columns (`output_tokens` lives only on
+    # `chat_messages`, which covers chat turns rather than fleet executions), so
+    # the field is named for the quantity it actually holds. A tile labelling
+    # this as tokens would be exactly the mislabel ent#326 warns against.
+    context_used: int
+
+
+class ExecutionTimeline(BaseModel):
+    """Bucketed fleet execution rollups for the grid's data tiles (ent#326).
+
+    The time-series sibling of `FleetExecutionStats`: same table, same access
+    model, buckets instead of scalars. `hour`/`day` series are gap-filled so a
+    chart renders a real zero rather than skipping the interval (#1107).
+    """
+    group_by: str
+    hours: int
+    gap_filled: bool
+    buckets: List[ExecutionTimelineBucket]
+
+
 class EvaluationCreate(BaseModel):
     """Body for a manual/admin evaluation write (ent#206). The graded agent is
     the path `{name}`; the caller is fenced human-admin-only at the router, so

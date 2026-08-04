@@ -472,3 +472,94 @@ class ScheduleStatsMixin:
                 "deleted_agent_count": row["deleted_agent_count"] or 0,
                 "deleted_agent_cost": round(row["deleted_agent_cost"] or 0.0, 4),
             }
+
+    # ------------------------------------------------------------------
+    # Bucketed fleet timeline (ent#326)
+    # ------------------------------------------------------------------
+
+    def get_fleet_execution_timeline(
+        self,
+        agent_names: Optional[List[str]],  # None = admin (no agent filter)
+        group_by: str,
+        hours: int,
+    ) -> List[Dict]:
+        """Bucketed fleet execution rollups — the time-series sibling of
+        :meth:`get_fleet_execution_stats` (ent#326).
+
+        One endpoint for the grid's data tiles (ent#94 #96/#98/#101) so three
+        tiles don't each grow their own query. Same table, same access model as
+        `/api/executions`; time-series shape instead of scalars.
+
+        `group_by`:
+          * ``hour`` / ``day`` — UTC time buckets, **gap-filled** by the caller
+            so a chart renders a real zero instead of skipping the interval
+            (the #1107 convention).
+          * ``trigger`` — grouped through ``_TRIGGER_BUCKETS`` with its explicit
+            ``Other`` catch-all, so a newly-added trigger type never silently
+            vanishes from a chart.
+          * ``agent`` — per agent_name.
+
+        Per bucket: execution count, failure count, cost sum, context-token sum.
+
+        NOTE on "tokens": ``schedule_executions`` has NO token columns — it
+        carries ``cost``, ``context_used`` and ``context_max``. ``output_tokens``
+        exists only on ``chat_messages``, which covers chat turns rather than
+        fleet executions. So ``context_used`` is reported as what it is,
+        **context-window occupancy**, and the field is named accordingly. A tile
+        labelling this "tokens consumed" would be the liveness-vs-quality
+        mislabel ent#326 explicitly warns against.
+        """
+        if agent_names is not None and len(agent_names) == 0:
+            return []
+
+        bind: Dict = {}
+        where = ["1=1"]
+        if agent_names is not None:
+            keys = [f"an{i}" for i in range(len(agent_names))]
+            where.append("agent_name IN (%s)" % ",".join(f":{k}" for k in keys))
+            bind.update(dict(zip(keys, agent_names)))
+        if hours:
+            where.append("started_at > :cutoff")
+            bind["cutoff"] = iso_cutoff(hours)
+
+        # `started_at` is an ISO-Z TEXT column (Invariant #16), so substr is the
+        # dialect-agnostic bucketer on both SQLite and PostgreSQL — no date
+        # functions, no timezone conversion, and it slices the SAME UTC string
+        # the row was written with.
+        if group_by == "hour":
+            key_sql = "substr(started_at, 1, 13)"      # YYYY-MM-DDTHH
+        elif group_by == "day":
+            key_sql = "substr(started_at, 1, 10)"      # YYYY-MM-DD
+        elif group_by == "trigger":
+            key_sql = "triggered_by"
+        elif group_by == "agent":
+            key_sql = "agent_name"
+        else:  # pragma: no cover - the router validates first
+            raise ValueError(f"unsupported group_by: {group_by}")
+
+        sql = f"""
+            SELECT {key_sql} AS bucket,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN status IN ('failed', 'error') THEN 1 ELSE 0 END) AS failed,
+                   SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success,
+                   SUM(COALESCE(cost, 0)) AS cost,
+                   SUM(COALESCE(context_used, 0)) AS context_used
+            FROM schedule_executions
+            WHERE {" AND ".join(where)}
+            GROUP BY {key_sql}
+        """
+
+        with get_engine().connect() as conn:
+            rows = conn.execute(text(sql), bind).mappings().all()
+
+        return [
+            {
+                "bucket": r["bucket"],
+                "total": int(r["total"] or 0),
+                "failed": int(r["failed"] or 0),
+                "success": int(r["success"] or 0),
+                "cost": round(float(r["cost"] or 0.0), 6),
+                "context_used": int(r["context_used"] or 0),
+            }
+            for r in rows
+        ]
