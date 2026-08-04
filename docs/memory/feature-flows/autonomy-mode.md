@@ -1,13 +1,27 @@
 # Feature: Autonomy Mode
 
-> **Last Updated**: 2026-02-22 - Dashboard visual indication: AgentNode now shows "(paused)" text next to schedule count when autonomy is disabled, providing immediate visual feedback that schedules are not executing.
+> **Last Updated**: 2026-08-03 (#1945) — the toggle is a **gate, not a bulk edit**: it writes only `agent_ownership.autonomy_enabled` and no longer rewrites per-schedule `enabled`. Per-schedule intent now survives an off→on cycle.
 >
-> **Previous (2026-02-12)** - UI Standardization: New `AutonomyToggle.vue` reusable component used in 4 locations. Running and Autonomy toggles now on same row in Dashboard and Agents page.
+> **Previous (2026-02-22)** - Dashboard visual indication: AgentNode now shows "(paused)" text next to schedule count when autonomy is disabled, providing immediate visual feedback that schedules are not executing.
 
 ## Overview
-Autonomy Mode enables or disables all scheduled tasks for an agent with a single toggle. When autonomy is enabled, all schedules run automatically. When disabled, all schedules are paused.
+Autonomy Mode is the agent-level master gate for proactive work. When autonomy is enabled, the agent's **enabled** schedules run automatically. When disabled, no cron trigger fires for the agent at all.
 
-**Scope (autonomy governs proactive work ONLY, #1557):** the toggle acts solely by enabling/disabling the agent's schedules (`db.set_schedule_enabled`). It deliberately does **not** touch the transport circuit breaker or any inbound path — a paused agent still answers manual chat, Telegram/Slack/public, and webhooks normally. An earlier hook (#631 AC#5) forced the transport breaker `dormant` on autonomy-off; because the `execute_task` gate consults that breaker for every trigger, it fast-failed all inbound chat on a healthy paused agent with "circuit breaker open — agent is unhealthy". That coupling was removed — see [dispatch-circuit-breaker.md](dispatch-circuit-breaker.md). #631's flood protection does not depend on it (the breaker's own failure-driven backoff/dormant path plus the #1464 leader lock and #1121 monitoring-default-off throttle a genuinely-down agent).
+**Gate, not a bulk edit (#1945).** The toggle writes exactly one row — `agent_ownership.autonomy_enabled` — and never touches a schedule's own `enabled` flag. The two are different concepts:
+
+| Flag | Written by | Means |
+|------|-----------|-------|
+| `agent_ownership.autonomy_enabled` | the autonomy toggle | may this agent do proactive work *at all* |
+| `agent_schedules.enabled` | the owner (Schedules tab / API / template) | should *this* schedule run while the agent is autonomous |
+
+Until #1945 both were written by the toggle: `set_autonomy_status_logic` looped `set_schedule_enabled(id, enabled)` over every schedule, unfiltered and in both directions, so the first toggle destroyed per-schedule intent — a deliberately-disabled schedule was silently re-armed on the next autonomy-on, and autonomy-off was a set-all rather than a pause. With a template able to materialize up to 20 declared schedules at agent creation, one unrelated toggle could arm all of them at once.
+
+Consequences of the gate model:
+- An enabled schedule on a paused agent is a **normal, expected state**. The scheduler skips it (cron-only gate), writes no execution row, and advances its `next_run_at` projection so the UI never shows a receding "Next: Nd ago" (#1472). The Schedules tab labels it "Will not fire — autonomy off" and offers a one-click enable-autonomy banner (#1796).
+- Re-enabling autonomy restores exactly the per-schedule state the owner left, disabled ones included. **Upgrade note:** an agent whose schedules were already flattened to disabled by a pre-#1945 autonomy-off stays that way — nothing re-arms them, and the toggle response says so ("all N schedule(s) are disabled — nothing will run until you enable one").
+- Admin fleet ops (`POST /api/ops/schedules/pause|resume`, `emergency_stop`) still write `enabled` in bulk by design — those are explicit set-all incident tools, not a per-agent gate.
+
+**Scope (autonomy governs proactive work ONLY, #1557):** the toggle deliberately does **not** touch the transport circuit breaker or any inbound path — a paused agent still answers manual chat, Telegram/Slack/public, and webhooks normally. An earlier hook (#631 AC#5) forced the transport breaker `dormant` on autonomy-off; because the `execute_task` gate consults that breaker for every trigger, it fast-failed all inbound chat on a healthy paused agent with "circuit breaker open — agent is unhealthy". That coupling was removed — see [dispatch-circuit-breaker.md](dispatch-circuit-breaker.md). #631's flood protection does not depend on it (the breaker's own failure-driven backoff/dormant path plus the #1464 leader lock and #1121 monitoring-default-off throttle a genuinely-down agent).
 
 ## User Story
 As an agent owner, I want to toggle autonomous operation for my agent so that I can quickly enable or disable all scheduled tasks without managing each schedule individually.
@@ -20,7 +34,7 @@ As an agent owner, I want to toggle autonomous operation for my agent so that I 
 | Dashboard Graph | `AgentNode.vue` | 78-85 | Same row as RunningStateToggle |
 | Dashboard Timeline | `ReplayTimeline.vue` | 155-161 | No label (compact) |
 | Agent Detail Header | `AgentHeader.vue` | 120-125 | Medium size, owners only |
-| Agents List Page | `Agents.vue` | 116-122 | Same row as RunningStateToggle |
+| Dashboard List rows | `AgentListPanel.vue` | — | Controls column; rewired to `networkStore.toggleAutonomy` (ent#260 — replaces the retired Agents page) |
 
 ### Component
 - **Reusable Component**: `src/frontend/src/components/AutonomyToggle.vue` (151 lines)
@@ -162,7 +176,10 @@ async function toggleAutonomy(agentName) {
     return {
       success: true,
       enabled: newState,
-      schedulesUpdated: response.data.schedules_updated
+      // #1945: counts, not "how many we changed" — the toggle changes none
+      totalSchedules: response.data.total_schedules,
+      enabledSchedules: response.data.enabled_schedules,
+      message: response.data.message
     }
   } catch (error) {
     console.error('[Network] Failed to toggle autonomy:', error)
@@ -227,10 +244,10 @@ async function toggleAutonomy() {
     // Update local state
     agent.value.autonomy_enabled = newState
 
+    // #1945: the server authors this line — the toggle gates schedules rather
+    // than activating them, and the message names the case the raw count hid.
     showNotification(
-      newState
-        ? `Autonomy enabled. ${result.schedules_updated} schedule(s) activated.`
-        : `Autonomy disabled. ${result.schedules_updated} schedule(s) paused.`,
+      result.message || `Autonomy ${newState ? 'enabled' : 'disabled'}.`,
       'success'
     )
   } catch (error) {
@@ -377,34 +394,28 @@ async def set_autonomy_status_logic(
 
     enabled = bool(enabled)
 
-    # Update the autonomy flag
+    # The ONLY write (#1945). Do NOT re-add a per-schedule fan-out here — the
+    # per-schedule `enabled` flag is owner intent and must survive a toggle.
     db.set_autonomy_enabled(agent_name, enabled)
 
-    # Enable/disable all schedules for this agent
-    # NOTE (2026-02-11): Now uses database-only updates. Dedicated scheduler syncs within 60s.
+    # Report-only: what the agent's schedules will do under the new gate.
     schedules = db.list_agent_schedules(agent_name)
-    updated_count = 0
-    for schedule in schedules:
-        schedule_id = schedule.id
-        if schedule_id:
-            db.set_schedule_enabled(schedule_id, enabled)  # Also recalculates next_run_at
-            updated_count += 1
-
-    logger.info(
-        f"Autonomy {'enabled' if enabled else 'disabled'} for agent {agent_name} "
-        f"by {current_user.username}. Updated {updated_count} schedules."
-    )
+    total_schedules = len(schedules)
+    enabled_schedules = sum(1 for s in schedules if s.enabled)
+    # message names the case: no schedules / all disabled / N of M will run
+    ...
 
     return {
         "status": "updated",
         "agent_name": agent_name,
         "autonomy_enabled": enabled,
-        "schedules_updated": updated_count,
-        "message": f"Autonomy {'enabled' if enabled else 'disabled'}. {updated_count} schedule(s) updated."
+        "total_schedules": total_schedules,
+        "enabled_schedules": enabled_schedules,
+        "message": message,
     }
 ```
 
-> **Note (2026-02-11)**: The service now uses `db.set_schedule_enabled()` directly since the embedded scheduler has been removed. The dedicated scheduler (`src/scheduler/`) automatically syncs schedule state changes from the database every 60 seconds.
+> **Note (2026-08-03, #1945)**: the pre-#1945 body looped `db.set_schedule_enabled(id, enabled)` over every schedule here and returned `schedules_updated`. Both are gone — the loop was the defect (it erased per-schedule intent), and the count described a write that no longer happens. The response now carries `total_schedules` + `enabled_schedules` and a server-authored `message` the UI renders verbatim. The dedicated scheduler (`src/scheduler/`) picks up genuine per-schedule changes on its 60s sync; the autonomy gate itself is read live at fire time, so a toggle takes effect immediately.
 
 #### Bulk Status Logic (lines 120-143)
 ```python
@@ -515,20 +526,20 @@ def get_all_agents_autonomy_status(self) -> Dict[str, bool]:
 
 ## Side Effects
 
-### Schedule Toggling
-When autonomy is toggled, all schedules for the agent are enabled/disabled in the database:
-
-> **Note (2026-02-11)**: The embedded scheduler service has been removed. Schedule state changes are now detected by the dedicated scheduler via 60-second periodic sync.
+### Schedule Toggling — none (#1945)
+Toggling autonomy writes **no** schedule row. The single side effect is the
+`agent_ownership.autonomy_enabled` flag; every schedule keeps its own `enabled`,
+`next_run_at` and `updated_at` untouched (a test pins the unchanged
+`updated_at`/`next_run_at` pair, since `set_schedule_enabled` would bump both).
 
 ```python
-schedules = db.list_agent_schedules(agent_name)
-for schedule in schedules:
-    if enabled:
-        db.set_schedule_enabled(schedule.id, True)  # Also recalculates next_run_at
-    else:
-        db.set_schedule_enabled(schedule.id, False)  # Clears next_run_at
-# Dedicated scheduler syncs changes within 60 seconds
+db.set_autonomy_enabled(agent_name, enabled)   # the only write
+schedules = db.list_agent_schedules(agent_name)  # read-only, for the response counts
 ```
+
+Because nothing changes per schedule, the scheduler's 60s sync has nothing to
+pick up — the gate is read live on every cron fire, so the pause/resume is
+immediate.
 
 ### Scheduler Enforcement
 The **dedicated scheduler service** double-checks autonomy before executing any schedule:
@@ -645,8 +656,9 @@ Response:
   "status": "updated",
   "agent_name": "my-agent",
   "autonomy_enabled": true,
-  "schedules_updated": 3,
-  "message": "Autonomy enabled. 3 schedule(s) updated."
+  "total_schedules": 3,
+  "enabled_schedules": 2,
+  "message": "Autonomy enabled. 2 of 3 schedule(s) will run; per-schedule settings unchanged."
 }
 ```
 
@@ -667,20 +679,21 @@ Response:
    - Verify: Click toggle - switch slides right, label changes to "AUTO" (amber)
    - Verify: Click again - switch slides left, returns to "Manual"
 
-2. **Dashboard Toggle Immediate Effect**
-   - Action: Toggle autonomy on an agent with schedules
-   - Expected: Schedules are immediately enabled/disabled in the backend
-   - Verify: Open Agent Detail -> Schedules tab, confirm schedule states match
+2. **Per-schedule intent survives a toggle (#1945)** — the regression scenario
+   - Action: on an agent with two enabled schedules, disable ONE from the Schedules tab, then toggle autonomy off and back on
+   - Expected: the disabled schedule is still disabled; the other is still enabled
+   - Verify: Schedules tab shows one Active + one Disabled; `sqlite3 ~/trinity-data/trinity.db "SELECT id, enabled FROM agent_schedules WHERE agent_name='<agent>'"` matches
+   - Automated: `tests/unit/test_1945_autonomy_preserves_schedule_intent.py`
 
 3. **Toggle from Agent Detail**
    - Action: Open agent detail page, click "Manual" button
-   - Expected: Button changes to "AUTO", success notification shows schedule count
+   - Expected: Button changes to "AUTO", notification names the case ("N of M schedule(s) will run", or "all N are disabled — nothing will run")
    - Verify: Refresh page - state persists
 
 4. **Disable Autonomy**
    - Action: Click "AUTO" button on an agent with autonomy enabled
-   - Expected: Button changes to "Manual", schedules paused notification
-   - Verify: Check Schedules tab - all schedules should be disabled
+   - Expected: Button changes to "Manual", "N schedule(s) paused; per-schedule settings preserved"
+   - Verify: Schedules tab still shows each schedule's own Active/Disabled state (unchanged), with the "Will not fire — autonomy off" warning on the enabled ones; nothing fires
 
 5. **System Agent Exclusion**
    - Action: Navigate to trinity-system agent
@@ -699,7 +712,7 @@ Response:
 
 ## Related Flows
 
-- **Upstream**: [Scheduling](scheduling.md) - Autonomy controls schedule enabled/disabled state
+- **Upstream**: [Scheduling](scheduling.md) - Autonomy gates whether an enabled schedule may fire (it does not change the schedule's own `enabled`, #1945)
 - **Related**: [Scheduler Service](scheduler-service.md) - Dedicated scheduler enforces autonomy check before execution
 - **Related**: [Agent Lifecycle](agent-lifecycle.md) - Agent must exist for autonomy to apply
 - **Related**: [Agent Sharing](agent-sharing.md) - Shares `can_share` permission check for toggle access
@@ -710,6 +723,7 @@ Response:
 
 | Date | Change |
 |------|--------|
+| 2026-08-03 | **Gate, not a bulk edit (#1945)**: `set_autonomy_status_logic` no longer loops `set_schedule_enabled` over every schedule — it writes only `agent_ownership.autonomy_enabled`, and the scheduler's existing cron-fire gate (`src/scheduler/service.py::_execute_schedule_with_lock`) does the rest. Per-schedule `enabled` is now purely owner intent and survives an autonomy off→on cycle in both directions; a template-authored `enabled: false` is likewise no longer erased. Response drops `schedules_updated` (a count of a write that no longer happens) for `total_schedules` + `enabled_schedules` + a server-authored `message`; `AgentDetail.vue` renders the message verbatim. No schema change and no migration — the fix is the removal of a write. Upgrade note: an agent already flattened to all-disabled by a pre-#1945 toggle stays that way (the intent is unrecoverable), and the response says so. |
 | 2026-07-10 | **Decoupled from the circuit breaker (#1557)**: removed the #631 AC#5 hook that forced the transport circuit breaker `dormant` on autonomy-off (and reset it on autonomy-on). Pausing autonomy no longer blocks inbound chat — it acts only via `set_schedule_enabled`. The misleading "agent is unhealthy" fast-fail message was also split to name the real cause (transport-unreachable vs dispatch-auth-dead). See `services/agent_service/autonomy.py` and `services/task_execution_service.py::_circuit_breaker_error`. |
 | 2026-02-22 | **Dashboard Visual Indication**: AgentNode.vue (lines 138-155) now shows "(paused)" text in italics next to schedule count when autonomy is disabled. Schedule stats row grayed out (text-gray-300) when autonomy off vs normal gray (text-gray-500) when on. Schedule count fetched via `/api/agents/execution-stats` which now includes `schedules_total` and `schedules_enabled` fields. |
 | 2026-02-12 | **UI Standardization**: Extracted `AutonomyToggle.vue` reusable component (151 lines) used in 4 locations: AgentNode.vue, ReplayTimeline.vue, AgentHeader.vue, Agents.vue. Running and Autonomy toggles now on same row in Dashboard Graph (AgentNode.vue:57-86) and Agents page (Agents.vue:108-123). Created dedicated [autonomy-toggle-component.md](autonomy-toggle-component.md) for component documentation. |

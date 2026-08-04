@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import axios from 'axios'
 import { useAgentsStore } from './agents'
 import { parseUTC, getTimestampMs } from '@/utils/timestamps'
+import { agentDisplayName } from '@/utils/agentName'
 
 export const useNetworkStore = defineStore('network', () => {
   // State
@@ -48,11 +49,14 @@ export const useNetworkStore = defineStore('network', () => {
   // a network blip replays missed events instead of dropping them.
   const lastEventId = ref(null)
 
-  // View mode state (grid | timeline) — default timeline, persisted.
-  // trinity-enterprise#47 added 'grid'; the legacy 'graph' Vue Flow canvas was
-  // decommissioned (#1689). A persisted 'graph' preference degrades to the
-  // default (timeline) via the VIEW_MODES.includes() guard below.
-  const VIEW_MODES = ['grid', 'timeline']
+  // View mode state (grid | timeline | list) — default timeline, persisted.
+  // trinity-enterprise#47 added 'grid'; trinity-enterprise#260 added 'list'
+  // (the Agents page consolidated into the dashboard); the legacy 'graph' Vue
+  // Flow canvas was decommissioned (#1689). A persisted stale mode (e.g.
+  // 'graph', or 'list' on an older bundle) degrades to the default (timeline)
+  // via the VIEW_MODES.includes() guard below. NOTE: the Dashboard's mode
+  // toggle v-for is the second home of this list — keep them in sync.
+  const VIEW_MODES = ['grid', 'timeline', 'list']
   const savedViewMode = localStorage.getItem('trinity-dashboard-view')
   const viewMode = ref(VIEW_MODES.includes(savedViewMode) ? savedViewMode : 'timeline')
   const isTimelineMode = computed(() => viewMode.value === 'timeline')
@@ -123,11 +127,49 @@ export const useNetworkStore = defineStore('network', () => {
   const filterTags = ref([])
   // Filter by owner
   const filterOwner = ref(localStorage.getItem('trinity-dashboard-filter-owner') || '')
+  // ent#261: hotkey type-to-filter query. NEVER persisted (accelerator, not a
+  // takeover — a reload always starts unfiltered; no localStorage key) and
+  // cleared by the Dashboard on unmount so it can't outlive the page as an
+  // invisible filter.
+  const filterQuery = ref('')
+
+  // Pre-query fleet: `agents` is already server-side tag-filtered by
+  // fetchAgents; this composes the client-side owner filter on top. This is
+  // the collection EVERY convertAgentsToNodes call site consumes (ent#261
+  // invariant): node data enriches timeline rows (isSystemAgent → system-first
+  // sort + purple treatment), so nodes must stay PRE-query — a query-filtered
+  // rebuild followed by Esc would render degraded rows until the next rebuild.
+  const ownerFilteredAgents = computed(() => {
+    if (!filterOwner.value) return agents.value
+    const owner = filterOwner.value === '__unassigned__' ? null : filterOwner.value
+    return agents.value.filter(a => (a.owner || null) === owner)
+  })
+
+  // ent#261 seam: the canonical "visible agents" set — pre-query fleet ∘ the
+  // type-to-filter query (case-insensitive substring over slug AND display
+  // label via agentDisplayName, #1642 house rule). Feeds ALL THREE panes (the
+  // Dashboard passes it as the :agents prop of ReplayTimeline, FleetGrid, and
+  // AgentListPanel). Do NOT wire convertAgentsToNodes through it — nodes read
+  // ownerFilteredAgents above (pre-query invariant).
+  const visibleAgents = computed(() => {
+    const q = filterQuery.value.trim().toLowerCase()
+    if (!q) return ownerFilteredAgents.value
+    return ownerFilteredAgents.value.filter(a =>
+      a.name.toLowerCase().includes(q) ||
+      agentDisplayName(a).toLowerCase().includes(q)
+    )
+  })
 
   // Actions
   function setFilterTags(tags) {
     filterTags.value = tags || []
     fetchAgents() // Refetch when filter changes
+  }
+
+  function setFilterQuery(q) {
+    // Pure client-side (ent#261): no refetch, no node rebuild — the owner
+    // filter is the model here, NOT the tag filter's refetch.
+    filterQuery.value = q ?? ''
   }
 
   function setFilterOwner(owner) {
@@ -137,11 +179,8 @@ export const useNetworkStore = defineStore('network', () => {
     } else {
       localStorage.removeItem('trinity-dashboard-filter-owner')
     }
-    // Re-convert agents to nodes with owner filter applied
-    const filtered = filterOwner.value
-      ? agents.value.filter(a => (a.owner || null) === (filterOwner.value === '__unassigned__' ? null : filterOwner.value))
-      : agents.value
-    convertAgentsToNodes(filtered)
+    // Re-convert agents to nodes with owner filter applied (pre-query, ent#261)
+    convertAgentsToNodes(ownerFilteredAgents.value)
   }
 
   async function fetchAgents() {
@@ -154,11 +193,24 @@ export const useNetworkStore = defineStore('network', () => {
       }
       const response = await axios.get('/api/agents', { params })
       agents.value = response.data
+      // Write-through (ent#260 / #1643): keep agentsStore.agents warm from the
+      // same response — with the Agents page gone this is the base fetch that
+      // backs displayNameForSlug (browser-tab titles on Dashboard → AgentDetail
+      // nav) and the WS agent_created/label handlers' merge target. Zero extra
+      // HTTP; cycle-free since agents.js no longer imports this store.
+      // GATED on no active quick-tag filter: `params.tags` narrows the response
+      // SERVER-side, and agentsStore.agents means "the full fleet" to its
+      // consumers (Executions agent dropdown, tab titles) — a filtered subset
+      // must not clobber it. Shallow copy so array-level ops in one store
+      // (push/filter/sort) can't silently mutate the other's list; row objects
+      // stay shared, so in-place status/label patches propagate to both.
+      if (filterTags.value.length === 0) {
+        useAgentsStore().agents = [...response.data]
+      }
       // Apply client-side owner filter before converting to nodes
-      const filtered = filterOwner.value
-        ? response.data.filter(a => (a.owner || null) === (filterOwner.value === '__unassigned__' ? null : filterOwner.value))
-        : response.data
-      convertAgentsToNodes(filtered)
+      // (ownerFilteredAgents recomputes from the fresh agents.value above;
+      // pre-query by design — ent#261)
+      convertAgentsToNodes(ownerFilteredAgents.value)
       await fetchPermissionEdges()
     } catch (error) {
       console.error('Failed to fetch agents:', error)
@@ -1257,7 +1309,9 @@ export const useNetworkStore = defineStore('network', () => {
         if (hasChanges) {
           console.log('[Collaboration] Agent list changed, refreshing...')
           agents.value = newAgents
-          convertAgentsToNodes(newAgents)
+          // Pre-query, owner-filtered rebuild (ent#261) — this poll previously
+          // rebuilt nodes from the RAW list, ignoring even the owner filter.
+          convertAgentsToNodes(ownerFilteredAgents.value)
         }
       } catch (error) {
         console.error('[Collaboration] Failed to refresh agents:', error)
@@ -1304,12 +1358,17 @@ export const useNetworkStore = defineStore('network', () => {
     }
   }
 
-  // View Mode Functions (grid | timeline). A stale 'graph' preference (#1689)
-  // falls through the includes() guard to the timeline default.
-  function setViewMode(mode) {
+  // View Mode Functions (grid | timeline | list). A stale preference (#1689
+  // 'graph', or 'list' on an older bundle) falls through the includes() guard
+  // to the timeline default. `persist: false` skips ONLY the localStorage
+  // write — used by the `?view=` deep-link/redirect (ent#260), which is a
+  // one-shot intent that must not rewrite the user's saved view selection.
+  function setViewMode(mode, { persist = true } = {}) {
     if (!VIEW_MODES.includes(mode)) mode = 'timeline'
     viewMode.value = mode
-    localStorage.setItem('trinity-dashboard-view', mode)
+    if (persist) {
+      localStorage.setItem('trinity-dashboard-view', mode)
+    }
 
     // Keep WebSocket and shared stats polling active in ALL views for live
     // updates; only the timeline's activity-refresh fallback is mode-scoped.
@@ -1319,7 +1378,7 @@ export const useNetworkStore = defineStore('network', () => {
       console.log('[Collaboration] Switched to Timeline view (live mode)')
     } else {
       stopActivityRefresh()
-      console.log('[Collaboration] Switched to Grid view')
+      console.log(`[Collaboration] Switched to ${mode === 'grid' ? 'Grid' : 'List'} view`)
     }
   }
 
@@ -1665,7 +1724,11 @@ export const useNetworkStore = defineStore('network', () => {
       return {
         success: true,
         enabled: newState,
-        schedulesUpdated: response.data.schedules_updated
+        // #1945: the toggle no longer rewrites per-schedule `enabled` — these
+        // report what the agent's schedules will do under the new gate.
+        totalSchedules: response.data.total_schedules,
+        enabledSchedules: response.data.enabled_schedules,
+        message: response.data.message
       }
     } catch (error) {
       console.error('[Network] Failed to toggle autonomy:', error)
@@ -1759,6 +1822,9 @@ export const useNetworkStore = defineStore('network', () => {
     schedules,
     filterTags,
     filterOwner,
+    filterQuery, // ent#261 — type-to-filter query (never persisted)
+    ownerFilteredAgents, // ent#261 — pre-query fleet (the "Y" in "X of Y match"; feeds nodes)
+    visibleAgents, // ent#261 seam — the canonical filtered fleet all three panes consume
     // View mode / Replay state
     viewMode,
     isTimelineMode,
@@ -1782,6 +1848,7 @@ export const useNetworkStore = defineStore('network', () => {
     fetchAgents,
     fetchPermissionEdges,
     setFilterTags,
+    setFilterQuery,
     setFilterOwner,
     fetchHistoricalCollaborations,
     fetchHistoricalCommunications: fetchHistoricalCollaborations, // Alias for new terminology

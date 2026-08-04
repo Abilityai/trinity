@@ -42,6 +42,8 @@ As an agent owner, I want to assign platform skills to my agents so that they fo
 #### SkillsPanel.vue - Skill Assignment Interface
 **File**: `src/frontend/src/components/SkillsPanel.vue` (325 lines)
 
+> **ent#263**: the panel's skill-package fact chips (automation, invocability, file count/size) now render via the shared contract seam `components/skills/{SkillContractChips.vue, contract.js}` — one rendering consumed by both this per-agent tab and the Library page's fleet browse ([library-page.md](library-page.md)); the panel's former local `SkillMeta`/`formatBytes`/`deps` helpers were extracted there.
+
 The SkillsPanel provides a checkbox-based interface for selecting and assigning skills:
 
 | Section | Lines | Description |

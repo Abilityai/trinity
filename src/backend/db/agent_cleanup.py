@@ -98,6 +98,10 @@ AGENT_REFS: List[AgentRef] = [
     AgentRef("agent_sharing",                "agent_name",        Policy.CASCADE),
     AgentRef("agent_schedules",              "agent_name",        Policy.CASCADE),
     AgentRef("schedule_executions",          "agent_name",        Policy.KEEP),
+    # ent#265: binding-agent for channel report-back. KEEP mirrors the row it
+    # rides on (same #772 90-day terminal-row sweep); cascade_rename touches ALL
+    # refs regardless of policy, so a renamed binding agent keeps delivering.
+    AgentRef("schedule_executions",          "source_channel_agent", Policy.KEEP),
 
     # --- Agent loops (#740 Phase 1) ----------------------------------------
     # Loop ownership lives on the TARGET agent. `agent_loops` carries a
@@ -167,6 +171,7 @@ AGENT_REFS: List[AgentRef] = [
     # delete and re-key on rename so a reused agent name can't inherit another
     # tenant's reports (cross-tenant disclosure).
     AgentRef("agent_reports",                "agent_name",        Policy.CASCADE),
+    AgentRef("agent_evaluations",            "agent_name",        Policy.CASCADE),
 
     # Per-agent MCP connector config (ent#46, OSS-core #118). The scoped
     # connector KEY is an mcp_api_keys row (scope='connector') already covered

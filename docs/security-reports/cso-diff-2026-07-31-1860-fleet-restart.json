@@ -1,0 +1,65 @@
+{
+  "version": "1.1",
+  "date": "2026-07-31",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/1860-fleet-restart-adoption",
+  "base": "dev@5b289996",
+  "issue": "abilityai/trinity#1860",
+  "phases_run": [
+    "P0",
+    "P1",
+    "P2-diff",
+    "P5-lock",
+    "P6",
+    "P7",
+    "P9-A01/A03/A09",
+    "P12",
+    "P13",
+    "P14"
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "hardened_endpoints": [
+      "POST /api/ops/fleet/restart"
+    ],
+    "new_auth_gates": [
+      "reject_agent_principal (ops.py:260)"
+    ],
+    "new_redis_keys": [
+      "ops:fleet_restart (SETNX single-flight, backend ACL user)"
+    ],
+    "new_inputs": 0
+  },
+  "findings": [],
+  "filter_stats": {
+    "raw_candidates": 4,
+    "discarded_by_rule": {
+      "fail-open-lock (platform convention)": 1,
+      "error-text-to-admin (existing practice)": 1,
+      "dos-excluded (sequential duration)": 1,
+      "ttl-extension-benign (expire w/o token)": 1
+    }
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "verification": {
+    "live": [
+      "agent-key 403",
+      "concurrent 409",
+      "audit row content",
+      "image adoption 3/3",
+      "no-drift idempotence",
+      "config-drift single-agent"
+    ],
+    "unit": "16/16 tests/unit/test_1860_fleet_restart_adoption.py"
+  },
+  "trend": {
+    "note": "first diff-scope report for this branch; verdict PASS, net hardening"
+  },
+  "verdict": "PASS"
+}

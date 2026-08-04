@@ -298,6 +298,15 @@
         </p>
       </div>
 
+      <!-- Bind to your own repo (ent#109). Its own component: GitPanel is
+           already long, and the #1430 raw-color ratchet is per-file. -->
+      <BindRepoPanel
+        :agent-name="agentName"
+        :agent-status="agentStatus"
+        :is-tokenless="isTokenless"
+        @bound="loadGitStatus"
+      />
+
       <!-- GitHub PAT Settings (#347) -->
       <div class="border-t dark:border-gray-700 pt-4 mt-4">
         <h3 class="text-sm font-medium text-gray-900 dark:text-white mb-3">GitHub Authentication</h3>
@@ -438,8 +447,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
+import BindRepoPanel from './BindRepoPanel.vue'
 
 const props = defineProps({
   agentName: {
@@ -474,6 +484,14 @@ const newPat = ref('')
 const patSaving = ref(false)
 const patError = ref(null)
 const patSuccess = ref(null)
+
+// ent#109: drives the bind panel's copy. `patStatus.configured` is the
+// per-agent PAT row; `has_global` is the platform token, which deliberately
+// never reaches a tokenless container's remote (ent#123) — so an agent with
+// only a global PAT is still tokenless from git's point of view.
+const isTokenless = computed(
+  () => !!patStatus.value && !patStatus.value.configured
+)
 
 const loadGitStatus = async () => {
   loading.value = true

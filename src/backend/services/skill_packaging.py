@@ -26,6 +26,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+from utils.safe_yaml import (
+    AliasPolicy,
+    HardenedYamlError,
+    load_hardened_yaml,
+)
+
 # One name guard for get_skill / assign / inject alike. Names originate from
 # library directory names, but the guard is defense-in-depth against a
 # traversal-shaped name reaching path math or an exec argument.
@@ -86,20 +92,6 @@ def validate_skill_name(name: str) -> bool:
 # Frontmatter contract
 # =========================================================================
 
-class _NoAliasSafeLoader(yaml.SafeLoader):
-    """SafeLoader that refuses aliases: safe_load still EXPANDS anchors, so a
-    sub-KiB billion-laughs frontmatter would OOM the backend regardless of the
-    input size cap (#919 hardened-parse convention)."""
-
-    def fetch_alias(self):  # noqa: D102 — yaml internal hook
-        raise yaml.YAMLError("aliases are not allowed in skill frontmatter")
-
-    def compose_node(self, parent, index):  # noqa: D102
-        if self.check_event(yaml.events.AliasEvent):
-            raise yaml.YAMLError("aliases are not allowed in skill frontmatter")
-        return super().compose_node(parent, index)
-
-
 def parse_frontmatter(text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Parse the leading ``---`` frontmatter block of a SKILL.md.
 
@@ -116,8 +108,21 @@ def parse_frontmatter(text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str
     if len(block.encode("utf-8", errors="replace")) > FRONTMATTER_MAX_BYTES:
         return None, "frontmatter_invalid"
     try:
-        data = yaml.load(block, Loader=_NoAliasSafeLoader)
-    except yaml.YAMLError:
+        # ent#314: was a local `_NoAliasSafeLoader`; now the shared loader, which
+        # keeps BOTH of that copy's gates (scanner + compose) and adds the
+        # duplicate-key guard this file never had. REJECT is preserved
+        # deliberately — no legitimate frontmatter needs an alias, and this
+        # consumer walks every field.
+        data = load_hardened_yaml(
+            block,
+            kind="frontmatter",
+            alias_policy=AliasPolicy.REJECT,
+            max_bytes=FRONTMATTER_MAX_BYTES,
+        )
+    except (HardenedYamlError, yaml.YAMLError):
+        # HardenedYamlError is a ValueError, not a YAMLError — catch it
+        # explicitly or a refused alias would escape as a 500 instead of the
+        # graceful "frontmatter_invalid" this contract promises.
         return None, "frontmatter_invalid"
     if not isinstance(data, dict):
         return None, "frontmatter_invalid" if data is not None else None
@@ -317,3 +322,39 @@ def compute_prune(
     if len(stale) > PRUNE_CAP_PER_SKILL:
         return stale[:PRUNE_CAP_PER_SKILL], True
     return stale, False
+
+
+def compute_removal(
+    previous_manifest: Optional[List[str]], skill_name: str
+) -> Tuple[List[str], bool]:
+    """Every path a prior injection wrote, for removal-on-unassign (ent#236).
+
+    The unassign counterpart of :func:`compute_prune`, and deliberately built
+    ON it rather than beside it: "delete everything the platform wrote" is
+    exactly "prune against an empty new manifest", so the confinement,
+    ``..``-rejection, and cap live in ONE place and cannot drift apart. The
+    caller deletes only these paths, so agent-authored files and runtime
+    artifacts inside the skill directory survive by construction — the same
+    guarantee prune states.
+
+    The generated ``.trinity-skill.json`` is appended LAST (prune filters it
+    out, because a re-injection rewrites it). Ordering matters for the same
+    reason ``build_injection_tar`` writes it last: while it exists the package
+    is still platform-managed, so an interrupted removal is resumable.
+
+    The meta is included even when the manifest is missing or unusable. Callers
+    only reach this function for a package that HAS a meta (an unmanaged
+    directory is filtered out one level up), so the meta file provably exists
+    and is the marker that makes the directory removable at all — leaving it
+    behind would keep the skill in every future reconcile's inventory with
+    nothing left to delete, i.e. an unremovable package retried on every agent
+    start. The one exception is truncation: there, files definitely remain, and
+    dropping the meta would strand them as unmanaged orphans no later prune
+    could reach, so the marker stays and the caller warns.
+
+    Returns ``(paths_to_delete, truncated)``.
+    """
+    paths, truncated = compute_prune(previous_manifest, [], skill_name)
+    if not truncated:
+        paths = paths + [f".claude/skills/{skill_name}/{META_FILENAME}"]
+    return paths, truncated

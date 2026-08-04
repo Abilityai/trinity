@@ -1,7 +1,22 @@
 # =============================================================================
+# SUPERSEDED (#1931) — the canonical manifest for this fleet is now
+#   config/manifests/vc-due-diligence.yaml
+# =============================================================================
+# That copy deploys the same eleven agents under the same names AND declares
+# the dd-lead -> specialist permissions this one leaves to a manual post-deploy
+# step. It also drops three keys that are dead or harmful here:
+#   - `prompt:`     overwrites the platform-wide trinity_prompt
+#   - `auto_start:` and top-level `folders:` are not read by parse_manifest
+#   - per-agent `resources:` is overwritten by each dd-* template.yaml anyway
+# It lives under config/manifests/ with the other bundled manifests and is
+# covered by CI (tests/unit/test_1931_manifest_roster.py,
+# tests/unit/test_ent124_default_system_seed.py). This file is kept for
+# reference and is NOT guarded against drift — prefer the canonical one.
+# =============================================================================
+#
 # AI Venture Capital Due Diligence Team - System Manifest
 # =============================================================================
-# Deploy with: POST /api/system-manifest
+# Deploy with: POST /api/systems/deploy (JSON body: {manifest, dry_run, strict})
 #
 # "9 analysts. 60 seconds. One verdict."
 #

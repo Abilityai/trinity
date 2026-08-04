@@ -10,7 +10,7 @@ For a single, agent-initiated, one-shot deferred follow-up rather than a recurri
 
 - **Schedule** -- A cron expression paired with a message or task sent to an agent at the specified times.
 - **Execution** -- Each time a schedule fires, it creates an execution record with status, duration, response, cost, and model used.
-- **Autonomy Mode** -- Master toggle that enables or disables all schedules for an agent. Schedules will not fire if autonomy is off.
+- **Autonomy Mode** -- Master gate for an agent's schedules: nothing fires while autonomy is off. It is a gate, not a bulk edit -- it never changes each schedule's own on/off switch, so turning autonomy off and back on restores exactly the schedules you had enabled.
 - **Scheduler Service** -- Standalone service with Redis distributed locks. Uses async fire-and-forget dispatch with DB polling for status.
 - **Misfire Handling** -- If the scheduler restarts, missed jobs within a 1-hour grace window are caught up and fired immediately (`misfire_grace_time=3600`, `coalesce=True`, `max_instances=1`).
 
@@ -25,7 +25,7 @@ For a single, agent-initiated, one-shot deferred follow-up rather than a recurri
 5. Enable or disable individual schedules with the toggle.
 6. View execution history with status, duration, and cost.
 7. Click **Run Now** to trigger a schedule immediately.
-8. Use the autonomy toggle to control all schedules at once.
+8. Use the autonomy toggle to pause or resume all of the agent's scheduled work at once. Individual schedules keep their own enabled/disabled state across the toggle -- while autonomy is off, an enabled schedule shows a "Will not fire -- autonomy off" warning instead of being switched off.
 
 ### Execution Flow
 

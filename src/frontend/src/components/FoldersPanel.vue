@@ -19,7 +19,7 @@
     </div>
 
     <!-- Main Content -->
-    <div v-else>
+    <div v-else class="space-y-6">
       <!-- Restart Required Banner -->
       <div v-if="foldersData?.restart_required" class="mb-4 p-4 bg-state-autonomous-50 dark:bg-state-autonomous-900/20 border border-state-autonomous-200 dark:border-state-autonomous-700 rounded-lg">
         <div class="flex items-start">

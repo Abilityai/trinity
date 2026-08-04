@@ -1,5 +1,9 @@
 <template>
-  <div class="fixed z-10 inset-0 overflow-y-auto">
+  <!-- z-50: the house modal tier (SystemViewEditor / OnboardingWizard). Was
+       z-10, which sat UNDER the Dashboard's z-30 filter pill + z-20
+       query-empty overlay (ent#261) — chassis chrome floated above the open
+       modal. All full-screen modals must outrank page-level overlay chrome. -->
+  <div class="fixed z-50 inset-0 overflow-y-auto">
     <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
       <div class="fixed inset-0 bg-gray-500 dark:bg-gray-900 bg-opacity-75 dark:bg-opacity-75 transition-opacity"></div>
 
@@ -325,8 +329,7 @@
 <script setup>
 import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
 import { useAgentsStore } from '../stores/agents'
-import axios from 'axios'
-import { useAuthStore } from '../stores/auth'
+import api from '../api'
 
 const props = defineProps({
   initialTemplate: {
@@ -337,7 +340,6 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'created'])
 const agentsStore = useAgentsStore()
-const authStore = useAuthStore()
 
 const form = reactive({
   name: '',
@@ -432,9 +434,9 @@ const fetchTemplates = async () => {
   templatesLoading.value = true
   templatesError.value = ''
   try {
-    const response = await axios.get('/api/templates', {
-      headers: authStore.authHeader
-    })
+    // Invariant #7 — shared api client (was the last raw-axios /api/templates
+    // consumer alongside the Library page, migrated together in ent#263).
+    const response = await api.get('/api/templates')
     templates.value = response.data
     // If a caller injected an initialTemplate that doesn't exist in this
     // deploy (e.g. the onboarding wizard prefilling `local:scout` on an

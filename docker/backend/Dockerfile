@@ -29,6 +29,15 @@ ENV VERSION=${VERSION} \
     GIT_BRANCH=${GIT_BRANCH} \
     BUILD_DATE=${BUILD_DATE}
 
+# `idna` is pinned explicitly even though httpx already pulls it in:
+# services/setup_url_display.py canonicalises author-supplied `setup_url`
+# hosts with UTS-46 nontransitional IDNA (browser semantics — the stdlib
+# `str.encode("idna")` codec is IDNA2003 and disagrees on exactly the
+# deviation set that matters, e.g. `fass.de` vs `xn--fa-hia.de`). A
+# transitive pin is one dependency resolution away from vanishing, and the
+# #1033 class of bug is invisible to /verify-local because the source
+# imports fine on the host. (trinity-enterprise#127)
+#
 # cryptography is pinned explicitly: the 49.x line's bundled OpenSSL triggers a
 # SIGILL (illegal instruction) when loaded in the same process as grpcio's
 # BoringSSL (pulled in transitively by the OTLP gRPC exporter) on
@@ -47,6 +56,7 @@ RUN pip install --no-cache-dir \
     websockets==14.1 \
     redis==5.2.1 \
     httpx==0.28.1 \
+    idna==3.10 \
     pyyaml==6.0.2 \
     sqlalchemy==2.0.36 \
     alembic==1.18.4 \
@@ -59,6 +69,14 @@ RUN pip install --no-cache-dir \
     psutil==6.1.1 \
     payments-py==1.2.1 \
     Pillow==11.1.0 \
+    # #1536 report export. Both are pure-Python wheels — no system libraries, so
+    # the image build is unchanged beyond these two lines (WeasyPrint was
+    # rejected for exactly that reason: cairo/pango would have made a PDF button
+    # a container-build concern). The export endpoint degrades to 503 when they
+    # are absent, so an instance that upgrades code without rebuilding the image
+    # (#1814) gets a clear message instead of a 500.
+    openpyxl==3.1.5 \
+    reportlab==4.2.5 \
     google-genai==1.63.0 \
     "slack_sdk[socket-mode]==3.41.0" \
     aiohttp \

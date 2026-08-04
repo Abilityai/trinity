@@ -295,14 +295,23 @@
       </div>
     </div>
 
-    <!-- Notification Toast -->
+    <!-- Notification Toast. #1953: same anchor as the AgentDetail toast — this
+         panel renders inside Agent Detail, so `top-20 right-4` collided with the
+         same header controls. See views/AgentDetail.vue for the full rationale. -->
     <div v-if="notification"
       :class="[
-        'fixed top-20 right-4 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
+        'fixed bottom-24 right-6 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
         notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
       ]"
     >
-      {{ notification.message }}
+      <span>{{ notification.message }}</span>
+      <button
+        v-if="notification.type === 'error'"
+        type="button"
+        class="ml-3 font-medium opacity-70 hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-status-danger-500/40 rounded"
+        aria-label="Dismiss notification"
+        @click="dismissNotification"
+      >✕</button>
     </div>
   </div>
 </template>
@@ -310,6 +319,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useAgentsStore } from '../stores/agents'
+import { useNotification } from '../composables/useNotification'
 import FileTreeNode from './file-manager/FileTreeNode.vue'
 import FilePreview from './file-manager/FilePreview.vue'
 
@@ -326,14 +336,11 @@ const props = defineProps({
 
 const agentsStore = useAgentsStore()
 
-// Notification system
-const notification = ref(null)
-const showNotification = (message, type = 'success') => {
-  notification.value = { message, type }
-  setTimeout(() => {
-    notification.value = null
-  }, 4000)
-}
+// #1926: was a local copy of the toast helper with a hardcoded 4s
+// auto-dismiss, so an error toast vanished before it could be read or acted
+// on. Now the shared composable, which keeps errors up until dismissed
+// (principle 18).
+const { notification, showNotification, dismissNotification } = useNotification()
 
 // State
 const fileTree = ref([])

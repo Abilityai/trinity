@@ -198,22 +198,22 @@ regular-agent semantics.
 | `src/backend/routers/settings.py` | Ops settings (OPS_SETTINGS_DEFAULTS) |
 | `src/backend/db/agents.py` | SYSTEM_AGENT_NAME constant, is_system checks |
 | `src/frontend/src/views/AgentDetail.vue` | **System Agent UI** - uses standard agent detail with tab filtering (lines 414-448) |
-| `src/frontend/src/views/Agents.vue` | System agent display on Agents page (admin-only, purple ring, SYSTEM badge, lines 46-75) |
-| `src/frontend/src/stores/agents.js` | `systemAgent` getter (line 25-27), `sortedAgentsWithSystem` getter (line 39-41) |
+| `src/frontend/src/components/AgentListPanel.vue` | System agent display on the Dashboard List mode (purple left border, SYSTEM badge, pinned first; Run toggle hidden — grid-tile guard; visibility is backend-scoped via `get_accessible_agents`, ent#260) |
+| `src/frontend/src/stores/agents.js` | `systemAgent` getter; system-first pinning now lives in `utils/agentSort.js::sortAgents` (the `sortedAgentsWithSystem` getter was deleted with the Agents page, ent#260) |
 | `src/frontend/src/router/index.js` | `/system-agent` redirects to `/agents/trinity-system` (lines 77-81) |
 
 ## Frontend UI
 
-### Route (Updated 2026-01-13)
+### Route (Updated 2026-01-13; Agents page retired ent#260)
 - **Path**: `/agents/trinity-system` (legacy `/system-agent` redirects here)
-- **Access**: Admin-only visibility on Agents page; full access on AgentDetail.vue
-- **NavBar**: "System" link removed - access via Agents page or direct URL
+- **Access**: listed on the Dashboard List/Grid/Timeline per the backend's `get_accessible_agents` scoping; full access on AgentDetail.vue
+- **NavBar**: "System" link removed - access via the Dashboard or direct URL
 
-### UI Consolidation (2026-01-13)
+### UI Consolidation (2026-01-13; historical line references — the Agents page itself was later retired into the Dashboard List mode, ent#260)
 
 The dedicated `SystemAgent.vue` has been removed. The system agent now uses the standard `AgentDetail.vue` with tab filtering:
 
-**Agents Page Display** (`src/frontend/src/views/Agents.vue`):
+**Agents Page Display** (`src/frontend/src/views/Agents.vue`, retired ent#260):
 - Lines 271-304: Admin check on mount (`GET /api/users/me`)
 - Lines 274-279: `displayAgents` computed - includes system agent for admins via `sortedAgentsWithSystem`
 - Lines 46-57: System agent card styling - purple ring (`ring-2 ring-purple-500/50`), purple border
@@ -281,7 +281,7 @@ The dedicated `SystemAgent.vue` has been removed. The system agent now uses the 
 |----------|--------|-------------|
 | `/api/ops/fleet/status` | GET | All agents with status, context, activity |
 | `/api/ops/fleet/health` | GET | Health summary with critical/warning issues |
-| `/api/ops/fleet/restart` | POST | Restart all/filtered agents |
+| `/api/ops/fleet/restart` | POST | Restart all/filtered running agents through the canonical stop→`start_agent_internal` path — applies pending config drift and adopts a rebuilt base image (#1860). Skips system + ephemeral agents; agent-scoped keys 403 (`reject_agent_principal` — system-scoped keys unaffected); 409 while another fleet restart is in flight; outcome durably recorded in the audit log (`fleet_restart`) even if the client times out |
 | `/api/ops/fleet/stop` | POST | Stop all/filtered agents |
 
 ### Schedule Control
