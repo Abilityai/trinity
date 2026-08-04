@@ -11,6 +11,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse, FileResponse
 from pydantic import BaseModel
 
+from ..safe_yaml import AliasPolicy, HardenedYamlError, load_hardened_yaml
+
 
 class FileUpdateRequest(BaseModel):
     """Request body for file updates."""
@@ -252,8 +254,22 @@ def _read_persistent_state() -> list[str]:
     if not _PERSISTENT_STATE_PATH.exists():
         return list(_DEFAULT_PERSISTENT_STATE)
     try:
-        data = yaml.safe_load(_PERSISTENT_STATE_PATH.read_text()) or {}
-    except (OSError, yaml.YAMLError):
+        # #1965: `~/.trinity/persistent-state.yaml` is written by the agent
+        # itself (S4, #383) — the most agent-writable document of the set — and
+        # the returned patterns drive what survives a reset. REJECT: no
+        # legitimate allowlist needs an anchor.
+        #
+        # HardenedYamlError is a ValueError, NOT a YAMLError, so it is named in
+        # the except tuple explicitly. Falling back to the defaults on a refused
+        # document is the right failure here: this helper already treats an
+        # unreadable file as "use the defaults", and a bomb is a species of
+        # unreadable.
+        data = load_hardened_yaml(
+            _PERSISTENT_STATE_PATH.read_text(),
+            kind="persistent_state",
+            alias_policy=AliasPolicy.REJECT,
+        ) or {}
+    except (OSError, yaml.YAMLError, HardenedYamlError):
         return list(_DEFAULT_PERSISTENT_STATE)
     patterns = data.get("persistent_state")
     if not isinstance(patterns, list) or not patterns:
