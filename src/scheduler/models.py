@@ -97,6 +97,15 @@ class ScheduleExecution:
     validates_execution_id: Optional[str] = None  # FK to execution being validated
 
 
+# SQLite stores INTEGER as a signed 64-bit value and RAISES on anything wider
+# rather than truncating, so this is the real bound on `source_user_id` — a
+# parser that only type-checks lets a payload field fail the INSERT (#1970,
+# found by /edge-cases). PostgreSQL `integer`/`bigint` are narrower or equal, so
+# clamping here is safe on both backends.
+_SQLITE_INT_MIN = -(2 ** 63)
+_SQLITE_INT_MAX = 2 ** 63 - 1
+
+
 @dataclass
 class ExecutionOrigin:
     """Who initiated an execution (AUDIT-001, #1970).
@@ -116,9 +125,16 @@ class ExecutionOrigin:
     mcp_key_name: Optional[str] = None
 
     def is_empty(self) -> bool:
-        return not any(
-            (self.user_id, self.user_email, self.agent_name,
-             self.mcp_key_id, self.mcp_key_name)
+        # Compared against None, NOT truthiness. `user_id=0` is a populated
+        # origin, but `not any((0, ...))` reported it empty. Found by
+        # /edge-cases, Hypothesis-shrunk to `{"source_user_id": 0}`. Nothing in
+        # `src/` gated on this yet — which is exactly why it was worth fixing
+        # before the first caller inherited a helper that lies about a valid
+        # value.
+        return all(
+            value is None
+            for value in (self.user_id, self.user_email, self.agent_name,
+                          self.mcp_key_id, self.mcp_key_name)
         )
 
     @classmethod
@@ -126,11 +142,12 @@ class ExecutionOrigin:
         """Build from an untrusted JSON body (the scheduler's trigger endpoint).
 
         Validates at the boundary: wrong types are dropped rather than coerced,
-        and strings are length-capped, so a malformed or oversized payload
-        cannot write junk into an append-only-in-spirit audit column. A caller
-        that lies about its identity is not a new exposure — ``triggered_by``
-        has been caller-supplied on this same endpoint all along, and the
-        scheduler is reachable only from the platform network.
+        wrong RANGES likewise, and strings are length-capped — so a malformed or
+        oversized payload cannot write junk into an append-only-in-spirit audit
+        column, nor break the write. A caller that lies about its identity is
+        not a new exposure — ``triggered_by`` has been caller-supplied on this
+        same endpoint all along, and the scheduler is reachable only from the
+        platform network.
         """
         if not isinstance(body, dict):
             return cls()
@@ -144,6 +161,17 @@ class ExecutionOrigin:
 
         user_id = body.get("source_user_id")
         if isinstance(user_id, bool) or not isinstance(user_id, int):
+            user_id = None
+        elif not (_SQLITE_INT_MIN <= user_id <= _SQLITE_INT_MAX):
+            # Found by /edge-cases. The type check alone was not enough: the
+            # column is INTEGER and SQLite raises `OverflowError: Python int too
+            # large to convert to SQLite INTEGER` rather than truncating, so an
+            # out-of-range value from this untrusted body escaped into the
+            # INSERT and took the whole dispatch with it — silently losing the
+            # run on the #1970 path (the exception lands in a blanket `except`
+            # AFTER the endpoint already answered "triggered"). Dropped to None
+            # like every other unusable input here: attribution is never worth
+            # a failed run.
             user_id = None
 
         return cls(
