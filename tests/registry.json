@@ -1442,6 +1442,31 @@
         "security"
       ],
       "description": "Hardened parsing of author-controlled YAML (ent#314). template.yaml was on bare yaml.safe_load, leaving alias amplification (measured 416 B -> 110 MB at json.dumps time, parse itself 0.0011 s, so an input-size cap cannot close it) and silent last-wins duplicate keys, which let a template show one credentials: block to a human and declare another to Trinity. Reachable by any creator-role user via a public repo (ent#123 tokenless) since _build_template runs unfenced inside get_all_templates(). Covers: the fixture itself still amplifies under bare safe_load (so the suite cannot pass vacuously); level 4/5/6 bombs rejected under both policies; a small honest anchor STILL parses under BUDGET (the #1932 lesson \u2014 a guard that rejects the legitimate document is an outage that reads as hardened); REJECT refuses one alias and also gates at the scanner (skill_packaging's copy had both hooks); the issue's exact duplicate-credentials case and a nested duplicate; size cap; reject-not-truncate; ManifestError still a subclass so routers/systems.py's named 400 is unchanged and the manifest's published codes survive; and two consolidation guards \u2014 no module may grow a fourth SafeLoader subclass, and all four author-controlled readers must call the shared loader with no bare safe_load left. The four product-level guards fail against pre-fix code."
+    },
+    {
+      "file": "unit/test_1971_codex_subscription_auth.py",
+      "feature": "#1971",
+      "added": "2026-08-04",
+      "categories": [
+        "agent-server",
+        "unit",
+        "reliability",
+        "codex"
+      ],
+      "description": "Codex subscription auth must survive Trinity's dispatch (#1971). _execute_codex set BOTH OPENAI_API_KEY and CODEX_API_KEY from the same resolved value, described in-source as harmless defence ('some Codex builds also read CODEX_API_KEY'). It is not harmless: the mere PRESENCE of CODEX_API_KEY flips the Codex CLI into API-key auth mode and makes it discard a valid subscription auth.json, so every subscription agent 401'd against api.openai.com, retried 5x and failed the turn - while the same auth.json worked when the CLI was invoked directly. Through /task that was the only reachable behaviour. A SECOND defect is visible in the reporter's own repro but was not filed: their working case is 'only a placeholder OPENAI_API_KEY set', a placeholder because _execute_codex raised 503 before invoking the CLI whenever no API key was found - and a ChatGPT-plan container has no API key by design. Fixing only the reported half leaves subscription agents working provided they know to set a fake key. Covers: source tracking (which variable the key came from, incl. the cold-start .env parse) with an explicit guard that _load_openai_api_key remains the patchable seam _execute_codex calls - the first attempt moved it and turned 127 existing Codex tests red; subscription detection that is existence+non-empty ONLY (a zero-byte file and a directory are both rejected, but invalid JSON is accepted, because validating is the CLI's job and a stale token must surface as the CLI's auth error rather than a Trinity 503 falsely claiming no credentials); the env actually handed to the child - CODEX_API_KEY no longer synthesized from an OPENAI_API_KEY, still forwarded when the operator supplied it UNDER THAT NAME (the only case the original rationale covers), neither variable fabricated for a subscription agent, CODEX_HOME (#1098) still exported; and the gate - subscription auth alone now dispatches, no credentials at all still fails fast so the gate is not a no-op, and the 503 names BOTH remedies since the old message said only 'inject OPENAI_API_KEY' and thereby pointed subscription users at the placeholder workaround that caused this issue."
+    },
+    {
+      "file": "unit/test_codex_credentials_properties.py",
+      "feature": "#1971",
+      "added": "2026-08-04",
+      "categories": [
+        "agent-server",
+        "unit",
+        "properties",
+        "edge-cases",
+        "codex"
+      ],
+      "description": "/edge-cases boundary + property analysis of the Codex credential resolvers (#1971): _parse_env_value, _load_api_key_with_source, _has_subscription_auth. These are parsing/auth boundaries whose output now decides whether CODEX_API_KEY is exported (and therefore whether a subscription auth.json survives) and whether dispatch is refused - a promotion from what _parse_env_value was originally for. 32 boundary rows (quoting, inline-comment vs in-value '#', empty/whitespace values that must not resolve to '', export prefix, missing/unreadable .env, auth.json absent/zero-byte/directory/broken-symlink) plus 4 Hypothesis properties (parse is total and never grows its input; resolution is total and self-consistent - a (value, None) or (None, source) pair would make the export decision incoherent; subscription detection is total). Found a REAL PRE-EXISTING bug, fixed here: a .env holding non-UTF-8 bytes (a Latin-1 credential, a mis-encoded smart quote - both plausible in a hand-edited file) made read_text() raise UnicodeDecodeError, which is a ValueError and NOT an OSError, so the except (IOError, OSError) around the loop never caught it; the error escaped _execute_codex and failed the dispatch instead of resolving the key or returning the honest 503. Fixed with errors='replace' so a bad byte on an unrelated line cannot hide a valid key. Also documents (not asserts as correct) that .env resolution is by LINE ORDER while the process-env branch is by _API_KEY_VARS priority - harmless while the source only chose a value, but after #1971 it also decides the auth mode. One Hypothesis finding was classified a WRONG TEST and recorded as such: lone surrogates cannot be written to a real file, so that input is unproducible."
     }
   ]
 }
