@@ -988,6 +988,12 @@ class AgentPropagationStatus(BaseModel):
     # "updated", "skipped_per_agent_pat", "skipped_no_pat", "failed"
     status: str
     error: Optional[str] = None
+    # #1967: whether the LIVE git remote was re-templated. The `.env` write only
+    # takes effect on the next restart, so this is the field that says whether
+    # fetch/push work *now*. Optional with a None default: it is genuinely
+    # unknown on the pre-skip and failure paths, and "unknown" must stay
+    # distinguishable from "attempted and did not happen".
+    remote_updated: Optional[bool] = None
 
 
 class GithubPatPropagationResult(BaseModel):
@@ -996,6 +1002,11 @@ class GithubPatPropagationResult(BaseModel):
     updated: List[str]
     skipped: List[AgentPropagationStatus]
     failed: List[AgentPropagationStatus]
+    # #1967: how many of `updated` also got their live remote re-templated.
+    # `updated` alone overstates the fix — an agent whose `.env` was rewritten
+    # but whose remote was not is still authenticating with the revoked token
+    # until it restarts, which is the silent failure this issue reports.
+    remotes_updated: int = 0
 
 
 # =============================================================================
@@ -1970,8 +1981,21 @@ class AuditCalendarResponse(BaseModel):
 class AuditVerifyResponse(BaseModel):
     """Hash chain verification result."""
 
-    valid: bool
-    checked: int
+    # TRI-STATE (#1984). True = verified intact, False = mismatch/tampering,
+    # None = UNVERIFIABLE (nothing in the range carried a hash). It was a plain
+    # `bool`, so "no integrity data exists" was indistinguishable from
+    # "verified" — and that is the default state of every install which never
+    # enabled hashing.
+    valid: Optional[bool] = None
+    # verified | verified_partial | tampered | unverifiable | empty_range
+    status: str = "unverifiable"
+    checked: int = 0
+    # Entries skipped for carrying no hash. Non-zero alongside
+    # `verified_partial` marks the permanent unhashed prefix of a chain that
+    # was enabled midway.
+    skipped_unhashed: int = 0
+    total_in_range: int = 0
+    hash_chain_enabled: bool = False
     first_invalid_id: Optional[int] = None
 
 

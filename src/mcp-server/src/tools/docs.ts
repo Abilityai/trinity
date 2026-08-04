@@ -8,6 +8,7 @@ import { z } from "zod";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
+import { askTrinity, MAX_QUESTION_CHARS } from "./ask_trinity_client.js";
 
 // Get the directory of this module
 const __filename = fileURLToPath(import.meta.url);
@@ -105,6 +106,48 @@ export function createDocsTools() {
       execute: async () => {
         const content = readAgentGuide();
         return content;
+      },
+    },
+
+    // ========================================================================
+    // ask_trinity - Grounded Q&A about Trinity itself (DOCS-QA-001, ent#328)
+    // ========================================================================
+    askTrinity: {
+      name: "ask_trinity",
+      description:
+        "Ask a question about the Trinity platform and get a grounded, " +
+        "documentation-backed answer. Covers how Trinity works — agents, " +
+        "schedules, credentials, file sharing, the operator queue, MCP, " +
+        "deployment — rather than the contents of any one agent's workspace. " +
+        "Pass the session_id returned by a previous call to ask a follow-up; " +
+        "omit it to start fresh. Sessions expire after ~30 minutes.",
+      parameters: z.object({
+        question: z
+          .string()
+          .describe(
+            `Question about Trinity (max ${MAX_QUESTION_CHARS} characters)`,
+          ),
+        session_id: z
+          .string()
+          .optional()
+          .describe(
+            "Opaque session id from a previous ask_trinity call, to continue " +
+              "that conversation. Pass it through verbatim — it is a string, " +
+              "not a number.",
+          ),
+      }),
+      execute: async ({
+        question,
+        session_id,
+      }: {
+        question: string;
+        session_id?: string;
+      }) => {
+        // Every failure path inside askTrinity returns structured TEXT rather
+        // than throwing, so an unreachable docs service degrades the answer
+        // instead of crashing the tool call (an AC of ent#328).
+        const result = await askTrinity(question, session_id);
+        return result.text;
       },
     },
   };
