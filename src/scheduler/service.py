@@ -883,11 +883,34 @@ class SchedulerService:
         finally:
             lock.release()
 
+    def _abandon_precreated_execution(self, execution, reason: str) -> None:
+        """Fail an execution row created before this run could be aborted (#1968).
+
+        A manual trigger now creates its row synchronously so the caller gets a
+        real id back, which means the row can already exist when a gate below
+        decides not to run. Leaving it `running` forever is the worse outcome:
+        canary E-01 flags exactly that, and the UI would show a task that never
+        ends. Fail it with the reason instead. Best-effort — an abort path must
+        not raise.
+        """
+        if execution is None:
+            return
+        try:
+            self.db.update_execution_status(
+                execution.id, ExecutionStatus.FAILED, error=reason
+            )
+            logger.info(f"Abandoned pre-created execution {execution.id}: {reason}")
+        except Exception as exc:
+            logger.error(
+                f"Could not abandon pre-created execution {execution.id}: {exc}"
+            )
+
     async def _execute_schedule_with_lock(
         self,
         schedule_id: str,
         triggered_by: str = "schedule",
         origin: Optional[ExecutionOrigin] = None,
+        execution=None,
     ):
         """Execute schedule after acquiring lock.
 
@@ -897,14 +920,26 @@ class SchedulerService:
             origin: Who initiated the run (#1970). None for a cron tick — there
                 is no caller, and the execution row records that honestly as
                 NULLs rather than inventing an owner.
+            execution: A row already created by the caller (#1968). The manual
+                trigger endpoint creates it synchronously so it can return a
+                real `execution_id`; passing it here is what stops this method
+                creating a SECOND row for the same run. None on the cron path,
+                which still creates its own.
         """
         schedule = self.db.get_schedule(schedule_id)
         if not schedule:
             logger.error(f"Schedule {schedule_id} not found")
+            # Deleted between the trigger response and this task starting.
+            self._abandon_precreated_execution(
+                execution, "Schedule was deleted before the run started"
+            )
             return
 
         if not schedule.enabled and triggered_by == "schedule":
             logger.info(f"Schedule {schedule_id} is disabled, skipping")
+            self._abandon_precreated_execution(
+                execution, "Schedule was disabled before the run started"
+            )
             return
 
         # Check if agent has autonomy enabled (only for cron-triggered, not manual)
@@ -917,6 +952,9 @@ class SchedulerService:
             # the default-OFF fleet) and no last_run_at (nothing ran; setting it
             # would suppress the _get_missed_schedules catch-up).
             self._advance_next_run_only(schedule)
+            self._abandon_precreated_execution(
+                execution, "Agent autonomy was disabled before the run started"
+            )
             return
 
         # #1808: git-sync freeze gate. The owner opted in via
@@ -950,34 +988,48 @@ class SchedulerService:
             # Same projection advance as the autonomy branch (#1472) so the
             # schedule never renders a receding "Next: Nd ago" while frozen.
             self._advance_next_run_only(schedule)
+            self._abandon_precreated_execution(
+                execution, "Git sync started failing before the run started"
+            )
             return
 
         # Agent-owned pre-check gate (#454): may skip the firing entirely or
         # override the message. Manual triggers always fire.
         should_fire, effective_message = await self._apply_pre_check_gate(schedule, triggered_by)
         if not should_fire:
+            # Unreachable for a pre-created row: the gate short-circuits to
+            # (True, schedule.message) for anything but triggered_by="schedule",
+            # and only manual/webhook triggers pre-create. Abandon anyway — a
+            # future gate change must not silently strand a running row.
+            self._abandon_precreated_execution(
+                execution, "Agent pre-check declined the run"
+            )
             return
 
         logger.info(f"Executing schedule: {schedule.name} for agent {schedule.agent_name} (triggered_by={triggered_by})")
 
-        # Create execution record
-        origin = origin or ExecutionOrigin()
-        execution = self.db.create_execution(
-            schedule_id=schedule.id,
-            agent_name=schedule.agent_name,
-            message=effective_message,
-            triggered_by=triggered_by,
-            model_used=schedule.model,
-            source_user_id=origin.user_id,
-            source_user_email=origin.user_email,
-            source_agent_name=origin.agent_name,
-            source_mcp_key_id=origin.mcp_key_id,
-            source_mcp_key_name=origin.mcp_key_name
-        )
+        # #1968: the manual path already created the row, synchronously, so its
+        # id could be returned to the caller. Creating another here would give
+        # one trigger two executions — the caller's id would name a row that
+        # never runs while a second one did the work.
+        if execution is None:
+            origin = origin or ExecutionOrigin()
+            execution = self.db.create_execution(
+                schedule_id=schedule.id,
+                agent_name=schedule.agent_name,
+                message=effective_message,
+                triggered_by=triggered_by,
+                model_used=schedule.model,
+                source_user_id=origin.user_id,
+                source_user_email=origin.user_email,
+                source_agent_name=origin.agent_name,
+                source_mcp_key_id=origin.mcp_key_id,
+                source_mcp_key_name=origin.mcp_key_name
+            )
 
-        if not execution:
-            logger.error(f"Failed to create execution record for schedule {schedule_id}")
-            return
+            if not execution:
+                logger.error(f"Failed to create execution record for schedule {schedule_id}")
+                return
 
         # #1472: advance the run-time projection ONCE, at fire time, regardless of
         # the eventual outcome — the single "this window was consumed" write. It
