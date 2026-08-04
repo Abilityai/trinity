@@ -671,6 +671,54 @@ async def _apply_fork_to_own(
     updated `(repo, pat, tier, fork_upstream_repo)`. Runs BEFORE the docker
     try-block so the structured FORK_* errors reach the UI. When the caller is
     NOT forking the inputs pass through unchanged (tier untouched)."""
+    # trinity-enterprise#14 F2 — an unreadable template.yaml is UNKNOWN, not absent.
+    #
+    # The chain this closes, every link verified in source:
+    #   _fetch_template_yaml_result()  -> ({}, "HTTP 403") on a rate limit
+    #   _get_cached_metadata_result()  -> caches the {} for a full 600s TTL
+    #   _build_template()              -> "fork_to_own": None
+    #   the test below                 -> `None == "required"` is False
+    #   => the gate never fires and the agent is created bound to the SHARED
+    #      UPSTREAM TEMPLATE REPO instead of a user-owned copy.
+    #
+    # `fork_to_own: required` exists precisely to stop that, and the failure is
+    # silent: the user's knowledge base ends up in the wrong place with no error.
+    # It is the ent#162 class ("a private KB could reach the shared public
+    # upstream") reached without any attacker.
+    #
+    # Pre-existing, but the remote template registry converts it from
+    # unreachable to EXPECTED: it re-introduces per-repo GitHub metadata fetches
+    # on a DEFAULT install (#1931 had driven them to zero), ships default-on, and
+    # its own arithmetic — workers x windows/hr x entries — exceeds GitHub's
+    # 60/hr ANONYMOUS limit above ~5 listed repos, while the curated fleet is
+    # very likely to include the fork_to_own template (Cornelius).
+    #
+    # Scoped to the branch that is actually unsafe. A caller who IS forking ends
+    # up with a user-owned repo whatever the template declares, so an outage must
+    # not block them; only the non-forking path has to treat unknown as refuse.
+    # A clean HTTP 404 stays "absent" (`metadata_reason_is_unreadable`), so a repo
+    # that genuinely ships no template.yaml creates exactly as it always has.
+    #
+    # The trade is deliberate: creation now depends on GitHub API reachability
+    # where it previously depended only on `git clone`. A loud, retryable refusal
+    # beats a silent wrong-repo binding — the learnings.md 2026-07-15
+    # direction-of-failure rule, applied to a gate instead of a retention window.
+    if (gh_template or {}).get("metadata_unavailable") and not config.fork_to_own:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": (
+                    f"Could not read '{config.template}' template metadata from "
+                    f"GitHub, so Trinity cannot tell whether this template must "
+                    f"be copied into a repo you own. Refusing rather than "
+                    f"guessing. This is usually a transient GitHub rate limit — "
+                    f"retry shortly, or configure a platform GitHub token in "
+                    f"Settings to raise the limit from 60 to 5000 requests/hour."
+                ),
+                "code": "TEMPLATE_METADATA_UNAVAILABLE",
+            },
+        )
+
     fork_meta = (gh_template or {}).get("fork_to_own")
     if fork_meta == "required" and not config.fork_to_own:
         raise HTTPException(

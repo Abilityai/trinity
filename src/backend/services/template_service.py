@@ -36,7 +36,14 @@ logger = logging.getLogger(__name__)
 # GitHub Metadata Fetching & Caching
 # ============================================================================
 
-_metadata_cache: Dict[str, tuple] = {}  # repo -> (timestamp, metadata_dict)
+#: repo -> (timestamp, metadata_dict, reason). The REASON is cached alongside
+#: the metadata (trinity-enterprise#14) because "{} because the repo declares no
+#: template.yaml" and "{} because GitHub rate-limited us" are the same value and
+#: must not be the same DECISION: `fork_to_own: required` silently reads as
+#: absent in the second case and the creation gate never fires, binding the
+#: agent to the shared upstream template repo instead of a user-owned copy. See
+#: `metadata_reason_is_unreadable`.
+_metadata_cache: Dict[str, tuple] = {}
 _CACHE_TTL = 600  # 10 minutes
 
 
@@ -109,12 +116,45 @@ def _fetch_template_yaml(repo: str, pat: str, ref: Optional[str] = None) -> dict
     creation path can distinguish "no template.yaml" from "we could not read
     it" without changing the catalog's log levels.
     """
+    return _fetch_template_yaml_logged(repo, pat, ref)[0]
+
+
+def _fetch_template_yaml_logged(
+    repo: str, pat: str, ref: Optional[str] = None
+) -> tuple:
+    """`_fetch_template_yaml` with the reason kept. Returns `(metadata, reason)`.
+
+    The catalog's log levels are unchanged; the split exists so the reason can
+    reach the metadata cache instead of being discarded one frame below the
+    place that computed it (trinity-enterprise#14).
+    """
     metadata, reason = _fetch_template_yaml_result(repo, pat, ref)
     if reason and reason.startswith("HTTP "):
         logger.debug("template.yaml not found for %s (%s)", repo, reason)
     elif reason:
         logger.warning("Failed to fetch template.yaml for %s: %s", repo, reason)
-    return metadata
+    return metadata, reason
+
+
+def metadata_reason_is_unreadable(reason: Optional[str]) -> bool:
+    """Did we fail to READ a repo's template.yaml, as opposed to reading that it
+    has none? (trinity-enterprise#14)
+
+    A clean **HTTP 404** is ABSENCE: GitHub answered, and the answer is that the
+    file (or the repo, for a private one without a usable token) is not there.
+    Most repos ship no `template.yaml` at all and create perfectly well, so this
+    must stay the permissive case or every dynamic `github:owner/repo` creation
+    breaks.
+
+    Everything else — 403 rate-limit, 5xx, a connection error, a timeout, an
+    ent#314 parse refusal — means the declaration exists as far as we know and
+    we could not see it. Callers whose decision is SECURITY-relevant must treat
+    that as unknown-and-refuse rather than as absent; callers whose decision is
+    cosmetic (a display name, an MCP-server chip) may keep degrading, and do.
+    """
+    if not reason:
+        return False
+    return not reason.startswith("HTTP 404")
 
 
 def fetch_template_metadata_for_create(
@@ -175,25 +215,50 @@ def _get_github_pat() -> str:
 
 def _get_cached_metadata(repo: str) -> dict:
     """Return cached metadata for a repo, fetching if stale or missing."""
+    return _get_cached_metadata_result(repo)[0]
+
+
+def _get_cached_metadata_result(repo: str) -> tuple:
+    """`_get_cached_metadata` with the fetch reason. Returns `(metadata, reason)`.
+
+    KNOWN DEFECT, deliberately not fixed here: this writes the cache
+    unconditionally, so a `{}` from a transient 403 OVERWRITES a
+    previously-good entry and is served for a full `_CACHE_TTL`. That is what
+    turns the fork-gate window from one request into ten minutes. It is strictly
+    wider than the template registry — this cache serves every template path —
+    so it is tracked separately. Caching the REASON alongside the empty metadata
+    is what keeps the fail-closed gate correct for the whole stale window
+    regardless. (trinity-enterprise#14 F4)
+    """
     cached = _metadata_cache.get(repo)
     if cached and time.time() - cached[0] < _CACHE_TTL:
-        return cached[1]
+        return cached[1], cached[2]
 
     pat = _get_github_pat()
-    metadata = _fetch_template_yaml(repo, pat)
-    _metadata_cache[repo] = (time.time(), metadata)
-    return metadata
+    metadata, reason = _fetch_template_yaml_logged(repo, pat)
+    _metadata_cache[repo] = (time.time(), metadata, reason)
+    return metadata, reason
 
 
 def _fetch_all_metadata(repos: List[str]) -> Dict[str, dict]:
     """Fetch template.yaml for multiple repos, using cache and concurrency."""
-    results = {}
+    return {
+        repo: pair[0] for repo, pair in _fetch_all_metadata_results(repos).items()
+    }
+
+
+def _fetch_all_metadata_results(repos: List[str]) -> Dict[str, tuple]:
+    """`_fetch_all_metadata` with reasons. `repo -> (metadata, reason)`.
+
+    Same caveat as `_get_cached_metadata_result` on overwriting last-good.
+    """
+    results: Dict[str, tuple] = {}
     to_fetch = []
 
     for repo in repos:
         cached = _metadata_cache.get(repo)
         if cached and time.time() - cached[0] < _CACHE_TTL:
-            results[repo] = cached[1]
+            results[repo] = (cached[1], cached[2])
         else:
             to_fetch.append(repo)
 
@@ -201,17 +266,19 @@ def _fetch_all_metadata(repos: List[str]) -> Dict[str, dict]:
         pat = _get_github_pat()
         with ThreadPoolExecutor(max_workers=5) as pool:
             futures = {
-                pool.submit(_fetch_template_yaml, repo, pat): repo
+                pool.submit(_fetch_template_yaml_logged, repo, pat): repo
                 for repo in to_fetch
             }
             for future in as_completed(futures):
                 repo = futures[future]
                 try:
-                    metadata = future.result()
-                except Exception:
-                    metadata = {}
-                _metadata_cache[repo] = (time.time(), metadata)
-                results[repo] = metadata
+                    metadata, reason = future.result()
+                except Exception as e:  # noqa: BLE001
+                    # An unreadable repo, not an absent declaration — the pool
+                    # only raises when the fetch itself blew up.
+                    metadata, reason = {}, f"{type(e).__name__}: {e}"
+                _metadata_cache[repo] = (time.time(), metadata, reason)
+                results[repo] = (metadata, reason)
 
     return results
 
@@ -1055,13 +1122,30 @@ def _catalog_credential_metadata(data, template_id: str, source_trust: str):
     return requirements, errors
 
 
-def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> dict:
+def _build_template(
+    repo: str,
+    metadata: dict,
+    admin_override: dict = None,
+    metadata_error: Optional[str] = None,
+) -> dict:
     """Build a full template dict from repo + fetched metadata + optional admin overrides.
 
     Priority for display_name / description:
-      1. Admin-configured value (from Settings DB entry) — if non-empty
+      1. Admin-configured value (from Settings DB entry, or a remote registry
+         entry — both arrive as `admin_override`) — if non-empty
       2. template.yaml value (from GitHub) — if available
       3. Repo name fallback
+
+    `admin_override` is deliberately the ONE override shape (trinity-enterprise#14):
+    a registry entry maps onto it exactly, so the registry needs no new builder,
+    no new `source` value, and no catalog payload change — registry templates ARE
+    `github:` templates. It also hardens this path rather than adding a
+    fragility: a registry-supplied display name renders the card correctly even
+    when the per-repo GitHub fetch is rate-limited.
+
+    `metadata_error` is the fetch reason from `_fetch_template_yaml_result`,
+    threaded through so `metadata_unavailable` can distinguish "this repo
+    declares nothing" from "we could not read what it declares".
     """
     # A GitHub repo's template.yaml is untrusted, and `_fetch_template_yaml`
     # returns `yaml.safe_load(content) or {}` — a top-level list or scalar is
@@ -1094,6 +1178,21 @@ def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> d
     # git_service, which imports database/docker modules at module load.
     from services.git_service import DEFAULT_PERSISTENT_STATE
 
+    # Curatable ORDER (trinity-enterprise#14). The router sorts on
+    # `(priority, display_name)`, and until now `priority` was readable only
+    # from the repo's own template.yaml — i.e. the one dimension of the vendor's
+    # stated control model ("curate freely: feature, ORDER, add, deprecate")
+    # that had no mechanism. An override value wins when it is a real int.
+    #
+    # Backward compatible by construction: TMPL-001 admin entries come from
+    # `GitHubTemplateEntry`, which has no `priority` field, so `.get()` is None
+    # and this is byte-identical for them. `bool` is excluded for
+    # `_coerce_priority`'s own reason — `isinstance(True, int)` is True, so
+    # `priority: true` must not sort as 1.
+    _priority = override.get("priority")
+    if isinstance(_priority, bool) or not isinstance(_priority, int):
+        _priority = metadata.get("priority")
+
     schedules, schedule_errors = _template_schedules(
         metadata.get("schedules"), f"github:{repo}"
     )
@@ -1115,7 +1214,7 @@ def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> d
         # Surface `priority` so the router's `(priority, display_name)` sort is
         # honored. Coerced to a real int — a GitHub repo's template.yaml is
         # untrusted and could set `priority: "high"`, which would 500 the sort.
-        "priority": _coerce_priority(metadata.get("priority")),
+        "priority": _coerce_priority(_priority),
         "resources": metadata.get("resources", {"cpu": "2", "memory": "4g"}),
         "skills": metadata.get("skills", []),
         # The template's own `mcp_servers:` is authoritative; `credentials:` is the
@@ -1170,6 +1269,22 @@ def _build_template(repo: str, metadata: dict, admin_override: dict = None) -> d
         # card subtitle.
         "fork_to_own": metadata.get("fork_to_own"),
         "tagline": metadata.get("tagline", ""),
+        # trinity-enterprise#14: True when this repo's template.yaml could not be
+        # READ (403 rate-limit, 5xx, timeout, ent#314 parse refusal) — NOT when
+        # GitHub answered 404 and the repo simply declares nothing.
+        #
+        # Every field above degrades silently on an unreadable fetch, which is
+        # correct for display and WRONG for `fork_to_own`: reading `required` as
+        # None skips the creation gate and binds the agent to the shared upstream
+        # template repo instead of a user-owned copy (the ent#162 class, reached
+        # with no attacker). The creation path refuses on this flag;
+        # `mcp_servers` and `resources` degrade the same way but carry no
+        # security consequence, so they keep degrading.
+        #
+        # Present on EVERY entry, so a registry-sourced entry and an
+        # admin-override-sourced one have an identical key set — the payload
+        # invariant that buys "no MCP change" and "no Library.vue change".
+        "metadata_unavailable": metadata_reason_is_unreadable(metadata_error),
     }
 
 
@@ -1354,7 +1469,10 @@ def _build_local_template(template_dir: Path, *, is_bundled: bool) -> Optional[d
 
 
 def _safe_build_github_template(
-    repo: str, metadata: dict, admin_override: dict = None
+    repo: str,
+    metadata: dict,
+    admin_override: dict = None,
+    metadata_error: Optional[str] = None,
 ) -> Optional[dict]:
     """`_build_template` behind the same per-template fence the local path has.
 
@@ -1367,7 +1485,7 @@ def _safe_build_github_template(
     (trinity-enterprise#89, closing the gap #1835 left open.)
     """
     try:
-        return _build_template(repo, metadata, admin_override)
+        return _build_template(repo, metadata, admin_override, metadata_error)
     except Exception:  # noqa: BLE001
         logger.exception("Skipping GitHub template %s: failed to build entry", repo)
         return None
@@ -1460,6 +1578,30 @@ def get_local_template(template_id: str) -> Optional[dict]:
     return _build_local_template(template_dir, is_bundled=is_plain_segment)
 
 
+def _registry_template_overrides() -> List[dict]:
+    """Registry-sourced `admin_override` dicts, or `[]`. Never raises.
+
+    A second fence around a service that already promises never to raise
+    (trinity-enterprise#14). That is not belt-and-braces theatre: fail-open is
+    the entire safety story of the remote registry, and it must not depend on
+    `template_registry_service` being bug-free. Same reasoning as
+    `_safe_build_github_template`, one level up.
+
+    Also the seam tests monkeypatch, so the fail-open matrix can drive real
+    parse/transport failures through the real service AND assert that a service
+    which simply *explodes* still leaves the catalog standing.
+    """
+    try:
+        from services.template_registry_service import get_registry_overrides
+
+        return get_registry_overrides()
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "Template registry unavailable; falling back to the bundled catalog"
+        )
+        return []
+
+
 def get_all_templates() -> List[dict]:
     """Return the full resolved template list — local + GitHub-configured.
 
@@ -1478,30 +1620,33 @@ def get_all_templates() -> List[dict]:
     db_entries = get_github_templates()
 
     if db_entries is not None:
-        # Admin-configured list
-        repos = [e["github_repo"] for e in db_entries]
-        all_metadata = _fetch_all_metadata(repos)
-        github = [
-            entry
-            for entry in (
-                _safe_build_github_template(
-                    e["github_repo"], all_metadata.get(e["github_repo"], {}), e
-                )
-                for e in db_entries
-            )
-            if entry is not None
-        ]
+        # Admin-configured list. UNTOUCHED by trinity-enterprise#14, deliberately:
+        # an admin who has curated a list must never have it silently replaced by
+        # a vendor registry, so TMPL-001's "DB-configured list takes full
+        # precedence" contract survives byte-for-byte — and a curated install
+        # makes zero registry requests, because this branch never asks.
+        overrides = db_entries
     else:
-        # Defaults
-        all_metadata = _fetch_all_metadata(DEFAULT_GITHUB_TEMPLATE_REPOS)
-        github = [
-            entry
-            for entry in (
-                _safe_build_github_template(repo, all_metadata.get(repo, {}))
-                for repo in DEFAULT_GITHUB_TEMPLATE_REPOS
-            )
-            if entry is not None
-        ]
+        # Precedence: remote registry (trinity-enterprise#14), else the bundled
+        # default list. This is the only new branch, and it fills the slot that
+        # has been EMPTY since #1931 — so on a default install the registry is
+        # purely additive and on a curated install it is not even consulted.
+        overrides = _registry_template_overrides()
+        if not overrides:
+            overrides = [{"github_repo": repo} for repo in DEFAULT_GITHUB_TEMPLATE_REPOS]
+
+    repos = [e["github_repo"] for e in overrides]
+    all_metadata = _fetch_all_metadata_results(repos)
+
+    github: List[dict] = []
+    for override in overrides:
+        repo = override["github_repo"]
+        metadata, reason = all_metadata.get(repo, ({}, None))
+        # Still fenced per template: one bad entry costs itself, never the
+        # catalog (#1835 / ent#89). That property now covers registry entries too.
+        entry = _safe_build_github_template(repo, metadata, override, reason)
+        if entry is not None:
+            github.append(entry)
 
     return local + github
 
@@ -1523,17 +1668,34 @@ def get_github_template(template_id: str) -> Optional[dict]:
     if db_entries is not None:
         for entry in db_entries:
             if entry["github_repo"] == repo:
-                metadata = _get_cached_metadata(repo)
-                return _build_template(repo, metadata, entry)
+                metadata, reason = _get_cached_metadata_result(repo)
+                return _build_template(repo, metadata, entry, reason)
+    else:
+        # trinity-enterprise#14 F1: this is the SECOND resolver of the same repo
+        # list, and it feeds `GET /api/templates/{id}` *and* agent creation
+        # (`crud._resolve_github_repo_and_pat`). Without this branch a
+        # registry-sourced template would list as "Cornelius — your second brain"
+        # and resolve by id as "cornelius", and under the rate-limit scenario the
+        # detail view would degrade all the way to the repo basename — i.e. the
+        # hardening the registry buys (a card that renders even when the metadata
+        # fetch fails) would not extend to the detail path at all.
+        #
+        # `learnings.md` 2026-07-10, "the create path is never one call site".
+        # The registry-vs-defaults precedence must be IDENTICAL to
+        # `get_all_templates()`; a test pins list, detail and create to one ladder.
+        for override in _registry_template_overrides():
+            if override.get("github_repo") == repo:
+                metadata, reason = _get_cached_metadata_result(repo)
+                return _build_template(repo, metadata, override, reason)
 
     # Check defaults
     if repo in DEFAULT_GITHUB_TEMPLATE_REPOS:
-        metadata = _get_cached_metadata(repo)
-        return _build_template(repo, metadata)
+        metadata, reason = _get_cached_metadata_result(repo)
+        return _build_template(repo, metadata, None, reason)
 
     # Dynamic: repo not in any configured list but still a valid github: ID
-    metadata = _get_cached_metadata(repo)
-    return _build_template(repo, metadata)
+    metadata, reason = _get_cached_metadata_result(repo)
+    return _build_template(repo, metadata, None, reason)
 
 
 def clone_github_repo(github_repo: str, github_pat: str, dest_path: Path, branch: str = None) -> bool:
