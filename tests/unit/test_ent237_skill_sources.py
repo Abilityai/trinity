@@ -648,6 +648,40 @@ class TestSourceEditingReachesDisk:
 
         assert marker.exists()
 
+    def test_repointing_reclaims_the_old_repo_quarantine_too(
+        self, service, sources_db, tmp_path
+    ):
+        """A repoint must not strand `<id>.broken` holding the OLD repo.
+
+        Neither reclamation path can reach it while the source still exists:
+        `discard_source_checkout` runs on delete, and `_reclaim_orphan_checkouts`
+        considers only ids with NO row. So the quarantine outlived every repoint
+        for the life of the source — bounded at one per source, but it is the
+        previous repo's content sitting in the library root indefinitely.
+
+        The quarantine is produced the way production produces it (a checkout
+        that has lost its `.git`), not written by hand, so the test breaks if
+        the naming ever moves.
+        """
+        old = _mkrepo(tmp_path / "repos", "old", {"old-skill": "old"})
+        new = _mkrepo(tmp_path / "repos", "new", {"new-skill": "new"})
+        src = sources_db.create_source(name="Quarantined", url=str(old), ref="main")
+        service.sync_library()
+
+        shutil.rmtree(service.library_root / src.id / ".git")
+        service.sync_library()          # clone branch → quarantines, re-clones
+
+        quarantine = service.library_root / f"{src.id}.broken"
+        assert (quarantine / ".claude" / "skills" / "old-skill").is_dir(), (
+            "fixture did not reproduce a real quarantine"
+        )
+
+        sources_db.update_source(src.id, url=str(new))
+        service.sync_library()
+
+        assert not quarantine.exists()
+        assert [s["name"] for s in service.list_skills()] == ["new-skill"]
+
     def test_an_unreadable_origin_never_triggers_the_discard(
         self, service, sources_db, tmp_path, monkeypatch
     ):

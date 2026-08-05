@@ -38,7 +38,11 @@ from database import db
 from services.settings_service import get_skills_library_url, get_skills_library_branch, get_github_pat
 from services.agent_client import get_agent_client, AgentClientError
 from services import skill_packaging as pkg
-from services.skill_source_clone import SOURCE_ID_RE, SkillSourceClone
+from services.skill_source_clone import (
+    QUARANTINE_SUFFIX,
+    SOURCE_ID_RE,
+    SkillSourceClone,
+)
 from urllib.parse import urlparse, urlunparse
 
 from utils.url_validation import (
@@ -212,7 +216,7 @@ class SkillService:
         removed = False
         for path in (
             self.library_root / source_id,
-            self.library_root / f"{source_id}.broken",
+            self.library_root / f"{source_id}{QUARANTINE_SUFFIX}",
         ):
             try:
                 if path.is_dir():
@@ -256,9 +260,11 @@ class SkillService:
         for entry in entries:
             if not entry.is_dir():
                 continue
-            source_id = entry.name[:-len(".broken")] if entry.name.endswith(
-                ".broken"
-            ) else entry.name
+            source_id = (
+                entry.name[:-len(QUARANTINE_SUFFIX)]
+                if entry.name.endswith(QUARANTINE_SUFFIX)
+                else entry.name
+            )
             if not SOURCE_ID_RE.match(source_id) or source_id in known:
                 continue
             shutil.rmtree(entry, ignore_errors=True)

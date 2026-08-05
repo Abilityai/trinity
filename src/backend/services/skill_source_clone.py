@@ -62,6 +62,12 @@ logger = logging.getLogger(__name__)
 # no version suffix, to avoid another version string drifting against VERSION.
 _GIT_HTTP_UA_ARGS = ["-c", "http.useragent=Trinity-Skills-Sync"]
 
+# The sibling directory `_quarantine_non_repo_dir` parks a non-repository
+# checkout in. Shared rather than spelled inline, because it is written by this
+# module and read by `skill_service`'s two reclamation paths — a literal drifting
+# between the writer and the reclaimer leaves quarantines nothing can collect.
+QUARANTINE_SUFFIX = ".broken"
+
 # Source ids are server-minted (`src_<hex>`), never user-supplied — but this is
 # a directory name derived from a DB value, so it is validated anyway rather
 # than trusted. One regex, applied at construction, is cheaper than auditing
@@ -166,6 +172,11 @@ class SkillSourceClone:
         # True when the probe found SKILL.md evidence under BOTH skills/ and
         # .claude/skills/ with no catalog.yaml to decide — surfaced in status.
         self.dual_layout = False
+
+    @property
+    def quarantine_path(self) -> Path:
+        """Where `_quarantine_non_repo_dir` parks a non-repository checkout."""
+        return self.path.with_name(self.path.name + QUARANTINE_SUFFIX)
 
     # =========================================================================
     # Sync
@@ -289,13 +300,22 @@ class SkillSourceClone:
         reconstructible from the URL the admin just supplied, and this path only
         runs on an explicit admin repoint (#1638's caution is about unattended
         deletion of data with no other copy; neither clause holds here).
+
+        The quarantine goes with it. It holds the PREVIOUS repo's content, so a
+        repoint makes it permanently irrelevant — and it is invisible to both
+        reclamation paths while the source still exists:
+        `discard_source_checkout` runs only on delete, and
+        `_reclaim_orphan_checkouts` considers only ids with no row. Left behind
+        it persists for the life of the source.
         """
         logger.warning(
             "skill source %s now points at a different repository — discarding "
             "the stale checkout at %s and re-cloning",
             self.source_id, self.path,
         )
-        shutil.rmtree(self.path, ignore_errors=True)
+        for path in (self.path, self.quarantine_path):
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
 
     def _quarantine_non_repo_dir(self) -> None:
         """Move a non-repository source directory aside so a clone can proceed.
@@ -315,7 +335,7 @@ class SkillSourceClone:
         for an unattended timer deleting a directory (#1638/#1644). Only one
         quarantine is kept per source, so this cannot grow without bound.
         """
-        quarantine = self.path.with_name(self.path.name + ".broken")
+        quarantine = self.quarantine_path
         try:
             if quarantine.exists():
                 shutil.rmtree(quarantine, ignore_errors=True)
