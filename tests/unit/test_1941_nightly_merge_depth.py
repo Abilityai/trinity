@@ -137,3 +137,91 @@ def test_remediation_text_is_scoped_to_the_conflict_branch():
             "`git merge dev` remediation appears outside the conflict/regression "
             "branches, so it would be shown to PRs with neither (#1941)"
         )
+
+
+# ---------------------------------------------------------------------------
+# #2029 — an absent verdict must not render as "clean"
+# ---------------------------------------------------------------------------
+
+
+def _status_step():
+    """The step that writes `status-pr*.json`, found by what it writes."""
+    for _name, job in _doc()["jobs"].items():
+        for step in job.get("steps") or []:
+            if isinstance(step, dict) and "status-pr" in str(step.get("run", "")):
+                return step
+    pytest.fail("no step writes status-pr*.json any more")
+
+
+def _comment_job():
+    for name, job in _doc()["jobs"].items():
+        for step in job.get("steps") or []:
+            if isinstance(step, dict) and "github-script" in str(step.get("uses", "")):
+                return name, job
+    pytest.fail("no job posts the sticky comment any more")
+
+
+def test_an_unknown_merge_verdict_writes_no_status_file():
+    """The #2029 defect: this step is `if: always()`, so it also runs when the
+    job died before the merge produced an answer. The unset output stringifies
+    to '', `'' == "true"` is false, and the JSON became
+    `{merge_conflict: false, regression: false}` — byte-identical to a clean
+    run, which the comment job renders as a green tick.
+
+    Writing nothing is the honest answer: the comment job enumerates the files
+    that exist, so a missing one leaves that PR's sticky untouched.
+    """
+    body = _commands(_status_step()["run"])
+    assert 'if [ -z "$merge_conflict" ]' in body, (
+        "the status step no longer refuses to write on an unknown merge "
+        "verdict — a failed job posts a false clean again (#2029)"
+    )
+    guard = body[body.index('if [ -z "$merge_conflict" ]'):]
+    assert "exit 0" in guard.split("fi")[0], (
+        "the unknown-verdict branch does not exit before writing the file"
+    )
+
+
+def test_regression_defaults_to_false_only_when_the_merge_conflicted():
+    """`regression` legitimately has no value when the merge conflicted — the
+    diff never ran because there was nothing to test. Any OTHER empty value
+    means the diff step was skipped by a job failure, which is the same
+    unknown-verdict case and must not become a clean verdict."""
+    body = _commands(_status_step()["run"])
+    idx = body.index('if [ -z "$regression" ]')
+    branch = body[idx:]
+    assert '"$merge_conflict" = "true"' in branch.split("fi")[0] or \
+           '"$merge_conflict" = "true"' in branch[:400], (
+        "regression falls back to false without checking that the merge "
+        "actually conflicted (#2029)"
+    )
+
+
+def test_the_status_step_still_runs_on_failure():
+    """`if: always()` is what lets the step observe the failed case at all.
+    Dropping it would 'fix' #2029 by never writing a status for a failed job —
+    and also never writing one for a genuine conflict."""
+    assert _status_step().get("if") == "always()"
+
+
+def test_the_comment_job_is_not_gated_on_the_whole_matrix():
+    """Pins a deliberate decision, not an omission.
+
+    #2029 offers a coarser belt — gate the comment step on
+    `needs.test.result == 'success'`. It is not applied, and should not be:
+    `test` is a MATRIX job, so its result is 'failure' when any single leg
+    fails, and one PR's infrastructure hiccup would suppress the report for
+    every other PR in the sweep. That trades a false green for a silence that
+    is equally wrong and hits PRs that were fine.
+
+    The per-PR guard is precise and complete on its own — a leg with no verdict
+    writes no file, and the all-legs-failed case falls out of the same
+    mechanism.
+    """
+    _name, job = _comment_job()
+    for step in job.get("steps") or []:
+        if "github-script" in str(step.get("uses", "")):
+            assert "needs.test.result" not in str(step.get("if", "")), (
+                "the sticky-comment step is gated on the whole matrix — one "
+                "failed leg now silences every other PR's report (#2029)"
+            )

@@ -205,8 +205,43 @@ jobs:
         run: |
           merge_conflict='${{ steps.merge.outputs.merge_conflict }}'
           regression='${{ steps.diff.outputs.regression }}'
-          # Default regression to "false" when merge conflicted (no diff ran).
-          if [ -z "$regression" ]; then regression="false"; fi
+
+          # #2029: absence of a verdict is its own state, not "clean".
+          #
+          # This step is `if: always()`, so it also runs when the job died
+          # BEFORE the merge step produced an answer — a failed checkout, a
+          # failed PR-head fetch, or the #1941 branch above that exits 1 on a
+          # non-conflict merge failure. `merge_conflict` is then the empty
+          # string, `'' == "true"` is false, and the JSON says
+          # `{merge_conflict: false, regression: false}` — byte-identical to a
+          # genuinely clean run. The comment job renders a green tick for a
+          # suite that never ran.
+          #
+          # That is #1941's own mistake one job downstream, and in the more
+          # dangerous direction: #1941 produced a false ALARM, which is
+          # self-limiting because someone investigates. This produces a false
+          # ALL-CLEAR on a regression detector, which nothing corrects.
+          #
+          # Writing no file is the honest answer: the comment job enumerates
+          # `status-pr*.json`, so a missing one means this PR is skipped and any
+          # existing sticky is left exactly as it was.
+          if [ -z "$merge_conflict" ]; then
+            echo "::warning::merge verdict unknown for PR ${{ matrix.pr_number }} — no status written, sticky left untouched"
+            exit 0
+          fi
+
+          # `regression` legitimately has no value when the merge conflicted:
+          # the diff never ran because there was nothing to test. Anything else
+          # means the diff step was skipped by a job failure, which is the same
+          # unknown-verdict case as above.
+          if [ -z "$regression" ]; then
+            if [ "$merge_conflict" = "true" ]; then
+              regression="false"
+            else
+              echo "::warning::regression verdict unknown for PR ${{ matrix.pr_number }} — no status written, sticky left untouched"
+              exit 0
+            fi
+          fi
           jq -n \
             --arg pr "${{ matrix.pr_number }}" \
             --arg head_sha "${{ matrix.head_sha }}" \
@@ -255,6 +290,17 @@ jobs:
           echo "$paths" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
+      # #2029 considered a second, coarser belt here — gating this step on
+      # `needs.test.result == 'success'` — and it is deliberately NOT applied.
+      # `test` is a MATRIX job, so its result is `failure` when any single leg
+      # fails: one PR's infrastructure hiccup would suppress the report for
+      # every other PR in the sweep, trading a false green for a silence that
+      # is just as wrong and affects PRs that were fine.
+      #
+      # The per-PR guard in `Write status JSON` is already both precise and
+      # complete: a leg with no verdict writes no file, the loop below
+      # enumerates what exists, and only that PR is skipped. The all-legs-failed
+      # case falls out of the same mechanism — no files, no comments.
       - name: Post or update sticky comment per PR
         uses: actions/github-script@v9
         env:
