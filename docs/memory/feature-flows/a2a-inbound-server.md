@@ -156,7 +156,7 @@ breaker, activity rows, and cost tracking like any other trigger.
 | Track | Artifact |
 |-------|----------|
 | SQLite | `db/migrations.py` → `_migrate_agent_ownership_a2a_exposed` |
-| PostgreSQL | `migrations/versions/0033_agent_ownership_a2a_exposed.py` (`down_revision = "0032_telegram_progress_indicator"` — re-chained onto the dev head at the 2026-08-03 rebase; the branch must carry exactly ONE Alembic head or `alembic upgrade head` refuses the branched graph) |
+| PostgreSQL | `migrations/versions/0035_agent_ownership_a2a_exposed.py` (`down_revision = "0033_agent_evaluations"` — re-chained onto the dev head at the 2026-08-05 rebase; the branch must carry exactly ONE Alembic head or `alembic upgrade head` refuses the branched graph, which is a PostgreSQL boot failure. 0034 is skipped deliberately: PR #1901 holds `0034_skill_sources` unmerged off the same head, so whichever lands second re-chains — skipping the number keeps the filenames from colliding too) |
 | Fresh DDL | `db/schema.py` + `db/tables.py` |
 
 ## Open-core split
