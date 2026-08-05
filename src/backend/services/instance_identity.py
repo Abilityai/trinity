@@ -23,7 +23,8 @@ Resolution order, first usable wins:
   3. ``installation_id[:8]`` — the durable per-install UUID
      (``operator_intake_service``). Opaque to a human, but an OSS install
      carrying neither of the above still gets *something* that distinguishes
-     it from its neighbour, which is the whole point.
+     it from its neighbour, which is the whole point. Note this tier can
+     *mint* that id if none exists yet — see ``_label_from_installation_id``.
 
 Returns ``None`` when all three are absent, and never raises. An unlabelled
 alert is exactly today's behaviour, whereas an alert that fails to send is
@@ -131,6 +132,19 @@ def _label_from_installation_id() -> Optional[str]:
     through `database`, and the alert path must not acquire a DB dependency
     that can fail it. A DB error here means an unlabelled alert, not a lost
     one.
+
+    **This tier can WRITE.** `get_or_create_installation_id` mints and
+    persists the UUID when `system_settings` has none, so on an install that
+    never completed operator intake the first canary alert is what creates
+    it. That is deliberate rather than incidental — a read-only variant would
+    return ``None`` on exactly the un-configured OSS install this tier exists
+    to label — but it has two consequences worth stating. The id is local
+    until the operator opts into intake/telemetry, so minting it transmits
+    nothing. And `canary_service` has no leader lock (unlike monitoring
+    #1464 / operator-queue #1632), so under `--workers 2` two workers can
+    race the read-then-write and land different UUIDs, last-write-wins; the
+    cost is bounded to a differing 8-char label across one cycle's alerts on
+    a fresh install, and the race is pre-existing in the accessor.
     """
     try:
         from services.operator_intake_service import get_or_create_installation_id
