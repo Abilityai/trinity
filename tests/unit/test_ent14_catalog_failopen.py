@@ -106,6 +106,37 @@ def _install_settings_stub(monkeypatch, settings, *, github_templates=None):
     return fake
 
 
+
+def _as_streaming(resp: httpx.Response) -> httpx.Response:
+    """Rebuild a buffered mock response as a STREAMING one.
+
+    `httpx.Response(text=...)` / `(content=...)` decodes and buffers in the
+    CONSTRUCTOR and marks the stream consumed, so `iter_raw()` — the call the
+    production path makes — raises `StreamConsumed` against it, and the buffered
+    shape can only ever exercise `iter_bytes()`. That is precisely why the
+    byte-ceiling tests were green while the ceiling was counting DECODED bytes
+    (ent#14 S1): the harness could not express the failure it was asserting
+    against. Converting centrally keeps every test's ordinary
+    `httpx.Response(...)` spelling and still drives the real streaming path.
+
+    A caller that needs a COMPRESSED body must build the streaming response
+    itself (`stream=httpx.ByteStream(...)`) — passing compressed bytes as
+    `content=` would decode them here, before the code under test ever sees
+    them. That mistake is refused loudly rather than silently re-encoded.
+    """
+    if not resp.is_stream_consumed:
+        return resp
+    if "content-encoding" in resp.headers:
+        raise AssertionError(
+            "build a Content-Encoding response as a stream "
+            "(httpx.Response(..., stream=httpx.ByteStream(raw))) — `content=` "
+            "decodes it in the constructor, so the code under test would never "
+            "see the compressed bytes"
+        )
+    return httpx.Response(
+        resp.status_code, headers=resp.headers, stream=httpx.ByteStream(resp.content)
+    )
+
 @pytest.fixture
 def env(monkeypatch):
     trs.invalidate_registry_cache()
@@ -135,7 +166,7 @@ def env(monkeypatch):
     def _client(timeout):
         def _dispatch(request):
             state["requests"].append(request)
-            return state["handler"](request)
+            return _as_streaming(state["handler"](request))
 
         return httpx.Client(
             timeout=timeout, follow_redirects=False,
@@ -228,8 +259,22 @@ ALIAS_BOMB = "\n".join(
 )
 
 
+def _compressed(request):
+    """A gzip body whose WIRE size is legal and whose decoded size is not
+    (ent#14 S1). Built as a STREAM: `content=` would decode it in httpx's
+    constructor, so the code under test would never see compressed bytes."""
+    import gzip
+    wire = gzip.compress(b"A" * (64 * 1024 * 1024), 9)
+    return httpx.Response(
+        200,
+        headers={"Content-Encoding": "gzip", "Content-Length": str(len(wire))},
+        stream=httpx.ByteStream(wire),
+    )
+
+
 FAILURE_MODES = {
     "unreachable":         _unreachable,
+    "compressed_body":     _compressed,
     "read_timeout":        _timeout,
     "http_404":            lambda r: httpx.Response(404, text="Not Found"),
     "http_403":            lambda r: httpx.Response(403, text="Forbidden"),

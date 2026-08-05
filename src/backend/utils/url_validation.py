@@ -72,6 +72,15 @@ _BARE_RUN_BOUNDARY = frozenset("'\"(<[")
 # redacted, not a URL that silently never had one.
 _USERINFO_PLACEHOLDER = "***"
 
+#: RFC 6598 shared address space (CGNAT). Python's `ipaddress` reports it as
+#: NEITHER `is_private` NOR `is_reserved`, so the standard predicate stack below
+#: admits it (trinity-enterprise#14 S3). Not reachable inside Trinity's own
+#: topology — both Docker networks are 172.28/16 and 172.29/16, which ARE
+#: `is_private` — but several cloud providers address internal endpoints out of
+#: this range, so a Trinity deployed there would have a hole the same shape as
+#: 10.0.0.0/8. Parsed once, at import.
+_SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
+
 
 class EmbeddedCredentialError(ValueError):
     """A URL carries userinfo (`https://<token>@host/...`)."""
@@ -416,6 +425,7 @@ def validate_template_registry_url(url: str) -> str:
             or ip.is_link_local
             or ip.is_multicast
             or ip.is_unspecified
+            or (ip.version == 4 and ip in _SHARED_ADDRESS_SPACE)
         ):
             raise ValueError(
                 "Template registry URL resolves to an internal address. "

@@ -157,10 +157,22 @@ def metadata_reason_is_unreadable(reason: Optional[str]) -> bool:
     return not reason.startswith("HTTP 404")
 
 
-def fetch_template_metadata_for_create(
+def fetch_template_metadata_result_for_create(
     repo: str, pat: Optional[str] = None, ref: Optional[str] = None
-) -> dict:
-    """Raw template.yaml for the CREATION path — resolved PAT, pinned ref, no cache.
+) -> tuple:
+    """Raw template.yaml for the CREATION path, WITH the fetch reason kept.
+    Returns `(metadata, reason)`.
+
+    The reason has to reach the caller because a SECURITY decision reads it
+    (trinity-enterprise#14 S2). `{}` because the repo declares nothing and `{}`
+    because we could not read what it declares are the same value and must not
+    be the same decision — the whole point of `metadata_reason_is_unreadable`.
+    The `fetch_template_metadata_for_create` wrapper below drops it, which is
+    fine for schedules (a total normalizer, cosmetic on failure) and wrong for
+    the `fork_to_own` gate, which was reading the CATALOG's reason instead: the
+    global-platform-PAT, default-branch, 600-second-cached one.
+
+    Everything below is the ent#89 contract, unchanged:
 
     Deliberately NOT `_get_cached_metadata` (trinity-enterprise#89):
 
@@ -195,7 +207,7 @@ def fetch_template_metadata_for_create(
             # diagnosable, and a truncated reason defeats its purpose.
             _sanitize_for_warning(reason, max_len=200),
         )
-        return {}
+        return {}, reason
     if not isinstance(metadata, dict):
         logger.warning(
             "template.yaml for %s (ref=%s) is a %s, not a mapping — ignoring it",
@@ -203,8 +215,29 @@ def fetch_template_metadata_for_create(
             _sanitize_for_warning(ref or "default"),
             _type_name(metadata),
         )
-        return {}
-    return metadata
+        # Deliberately `None`, not a reason: this document WAS read, and what it
+        # says is that it declares nothing (a top-level list cannot carry
+        # `fork_to_own`). Classifying it as unreadable would 503 every creation
+        # from a repo with a malformed template.yaml, and it buys no safety —
+        # evading a `fork_to_own: required` this way needs write access to the
+        # template repo, and anyone with that would simply delete the line.
+        # `_build_template` classifies the same case identically.
+        return {}, None
+    return metadata, None
+
+
+def fetch_template_metadata_for_create(
+    repo: str, pat: Optional[str] = None, ref: Optional[str] = None
+) -> dict:
+    """`fetch_template_metadata_result_for_create` without the reason.
+
+    Kept as the ent#89 spelling for callers whose decision is not
+    security-relevant. A caller that must distinguish "declares nothing" from
+    "could not be read" MUST use the `_result_` form — dropping the reason is
+    exactly how the trinity-enterprise#14 S2 gate ended up reading the catalog
+    cache instead of its own read.
+    """
+    return fetch_template_metadata_result_for_create(repo, pat=pat, ref=ref)[0]
 
 
 def _get_github_pat() -> str:

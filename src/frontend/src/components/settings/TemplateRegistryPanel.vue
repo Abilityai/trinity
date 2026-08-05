@@ -236,6 +236,7 @@ const ERROR_COPY = {
   http_error: 'The registry URL returned an error response — most often a wrong path or a private file.',
   redirect: 'The registry URL redirects. Redirects are refused for safety; point this at the final URL directly.',
   too_large: 'The registry document is larger than Trinity will read. It is capped at 256 KiB.',
+  encoding_refused: 'The registry host returned a compressed response. Trinity reads this document uncompressed so the size cap applies to what actually arrives — serve it without Content-Encoding.',
   parse_refused: 'The registry document was refused by the YAML parser — likely a syntax error, a duplicate key, or an anchor/alias (which are not allowed here).',
   unsupported_version: 'The registry declares a schema version this Trinity does not understand. Upgrade Trinity, or serve a version 1 document.',
   bad_shape: 'The document was read but is not a registry — it needs a top-level `templates:` list.',

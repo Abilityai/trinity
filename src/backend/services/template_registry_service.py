@@ -191,6 +191,12 @@ ERROR_TIMEOUT = "timeout"
 ERROR_HTTP = "http_error"
 ERROR_REDIRECT = "redirect"
 ERROR_TOO_LARGE = "too_large"
+#: A compressed body. Asking for `identity` is a request, not a control — a
+#: hostile server compresses regardless — so the refusal is what makes the
+#: wire-byte ceiling meaningful rather than merely correct. Named rather than
+#: folded into `bad_shape`: gzip bytes handed to a UTF-8 decode would surface
+#: as a shape problem and hide the cause.
+ERROR_ENCODING = "encoding_refused"
 ERROR_PARSE_REFUSED = "parse_refused"
 ERROR_UNSUPPORTED_VERSION = "unsupported_version"
 ERROR_BAD_SHAPE = "bad_shape"
@@ -455,12 +461,27 @@ def _http_client(timeout: float) -> httpx.Client:
 def _fetch_registry_text(url: str) -> tuple[Optional[str], Optional[str]]:
     """Stream the document under a hard byte ceiling. Returns `(text, error_code)`.
 
-    The ceiling is applied to bytes ACTUALLY RECEIVED, not to `Content-Length`.
-    A declared length is checked first purely as an early abort — it is absent on
-    chunked responses and trivially lied about, so it can never be the gate.
-    `resp.text` on a 10 GB body OOMs the worker before any parse-time cap could
-    act; that is why the transport layer is the load-bearing one and the parser's
-    `max_bytes` is only a belt.
+    The ceiling is applied to bytes ACTUALLY RECEIVED — **network** bytes, via
+    `iter_raw()`. A declared `Content-Length` is checked first purely as an early
+    abort: it is absent on chunked responses and trivially lied about, so it can
+    never be the gate. `resp.text` on a 10 GB body OOMs the worker before any
+    parse-time cap could act; that is why the transport layer is the load-bearing
+    one and the parser's `max_bytes` is only a belt.
+
+    `iter_raw()`, not `iter_bytes()` — the two differ by exactly the attack.
+    `iter_bytes()` yields DECODED chunks, and httpx sends
+    `Accept-Encoding: gzip, deflate` unless told otherwise, so a body whose WIRE
+    size passes the `Content-Length` abort inflates ~1030:1 before the running
+    total is ever consulted: measured 458 MB of transient allocation, on the
+    event-loop thread, from a 199 KiB response. The cap bounded the decoded
+    total, which is not the resource under attack — the peak is. The same
+    hostile body over `iter_raw()` peaks at 0.2 MB.
+
+    So the ceiling counts wire bytes and a compressed body is refused outright
+    (`ERROR_ENCODING`), the same way a redirect is. `Accept-Encoding: identity`
+    is sent as well, but only as the polite half: it asks a cooperative server
+    not to compress and cannot bind a hostile one. This document is ~1 KB of
+    YAML — compression buys nothing worth the ambiguity.
     """
     try:
         with _http_client(REGISTRY_FETCH_TIMEOUT) as client:
@@ -469,6 +490,7 @@ def _fetch_registry_text(url: str) -> tuple[Optional[str], Optional[str]]:
                 url,
                 headers={
                     "Accept": "text/yaml, application/yaml, text/plain;q=0.9, */*;q=0.1",
+                    "Accept-Encoding": "identity",
                     "User-Agent": "Trinity-Template-Registry/1",
                 },
             ) as resp:
@@ -477,13 +499,22 @@ def _fetch_registry_text(url: str) -> tuple[Optional[str], Optional[str]]:
                 if resp.status_code != 200:
                     return None, ERROR_HTTP
 
+                # Before any body is read: a server that compressed anyway is
+                # refused rather than accommodated. `iter_raw()` already bounds
+                # the memory, so this is not the memory control — it keeps the
+                # bytes we DO accept decodable as UTF-8, so `bad_shape` cannot
+                # become the reported cause of a compression decision.
+                encoding = (resp.headers.get("content-encoding") or "").strip().lower()
+                if encoding and encoding != "identity":
+                    return None, ERROR_ENCODING
+
                 declared = resp.headers.get("content-length")
                 if declared and declared.isdigit() and int(declared) > REGISTRY_MAX_BYTES:
                     return None, ERROR_TOO_LARGE
 
                 chunks: list[bytes] = []
                 total = 0
-                for chunk in resp.iter_bytes():
+                for chunk in resp.iter_raw():
                     total += len(chunk)
                     if total > REGISTRY_MAX_BYTES:
                         # Abort mid-stream: do not finish reading a body we have

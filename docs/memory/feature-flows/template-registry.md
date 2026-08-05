@@ -99,6 +99,7 @@ assertion is on the **catalog output** — never on an internal call count.
 | 3xx redirect | `redirect` | bundled floor (never followed) |
 | body over 256 KiB | `too_large` | bundled floor |
 | body over cap with a **lying** `Content-Length` | `too_large` | bundled floor |
+| compressed body (any `Content-Encoding`) | `encoding_refused` | bundled floor (never read) |
 | malformed YAML | `parse_refused` | bundled floor |
 | YAML alias / anchor (incl. a level-6 bomb) | `parse_refused` | bundled floor |
 | duplicate top-level key | `parse_refused` | bundled floor |
@@ -209,10 +210,37 @@ on a 10 GB body OOMs the worker before any parse-time cap could act. The declare
 length is checked only as an early abort. `max_bytes` is passed to the parser as a
 belt so the cap survives a future refactor of the fetch layer.
 
+**The ceiling counts WIRE bytes** (`iter_raw()`), and a compressed body is
+refused outright (`encoding_refused`) before it is read. The first cut counted
+`iter_bytes()` — *decoded* chunks — and httpx sends `Accept-Encoding: gzip,
+deflate` unless told otherwise, so a body whose wire size passed the
+`Content-Length` abort inflated ~1030:1 before the running total was ever
+consulted: **458 MB of transient allocation, on the event-loop thread, from a
+199 KiB response** (ent#14 S1). The refusal returned `too_large` correctly, so
+this was never a correctness bug — it was the memory bound failing to bound the
+resource actually under attack, which is the peak and not the decoded total.
+`Accept-Encoding: identity` is sent too, but only as the polite half: it asks a
+cooperative server not to compress ~1 KB of YAML and cannot bind a hostile one.
+The same body over `iter_raw()` peaks at 0.2 MB.
+
+The harness carried the same blind spot and is worth knowing about before
+writing a transport test here: `httpx.Response(text=…)`/`(content=…)` decodes
+and buffers in the CONSTRUCTOR, so a buffered mock can only ever exercise
+`iter_bytes()` and the ceiling tests were green against a shape that could not
+express the failure. Both fixtures now convert every mock response to a real
+stream (`_as_streaming`), and a compressed body must be built as
+`stream=httpx.ByteStream(raw)` — passing compressed bytes as `content=` is
+refused loudly rather than silently decoded before the code under test sees it.
+
 **SSRF gate** (`utils.url_validation.validate_template_registry_url`): HTTPS only;
 **no userinfo** (rejected outright, never stripped, so a credential cannot be
 persisted into a settings row or echoed through a status payload); resolve-and-
-reject private / loopback / link-local / reserved / multicast destinations;
+reject private / loopback / link-local / reserved / multicast destinations, plus
+**RFC 6598 shared address space (`100.64.0.0/10`)**, which Python's `ipaddress`
+reports as neither `is_private` nor `is_reserved` and which several cloud
+providers use for internal endpoints (ent#14 S3 — not reachable in Trinity's own
+`172.28/16` + `172.29/16` topology, a hole the shape of `10.0.0.0/8` anywhere
+that does use it);
 **`follow_redirects=False`**, because a URL that passed the gate and then
 redirects is a bypass and `raw.githubusercontent.com` does not redirect for a
 valid path. Named residual: pre-resolution does not close DNS rebinding (a TOCTOU
@@ -239,8 +267,9 @@ already differ in character-class ordering while denoting the same set.
 > other three accept. Strictly stricter, never differently strict.
 
 **Status vocabulary.** `last_error_code` is a fixed lowercase set (`unreachable`,
-`timeout`, `http_error`, `redirect`, `too_large`, `parse_refused`,
-`unsupported_version`, `bad_shape`, `invalid_url`, `disabled`) — never a raw
+`timeout`, `http_error`, `redirect`, `too_large`, `encoding_refused`,
+`parse_refused`, `unsupported_version`, `bad_shape`, `invalid_url`, `disabled`)
+— never a raw
 exception string, so a hostile server's response text cannot reach the operator's
 panel. The panel translates the code into prose locally.
 
@@ -279,6 +308,49 @@ Deliberately **not** `settings_service._resolve_bool_flag`: its env leg is
 `TEMPLATE_REGISTRY_ENABLED=false` and ship an inert kill switch — the #1039
 "inert by obscurity" class, caught before a line of it was written. Uses the
 `OPERATOR_INTAKE_ENABLED` / `TELEMETRY_SHARING_ENABLED` shape instead.
+
+### …and then it shipped inert anyway, one layer down
+
+Both vars must be injected into `backend.environment:` in **`docker-compose.yml`
+*and* `docker-compose.prod.yml`**, and documented in `.env.example`. The first
+version of this feature wired neither. Prod compose launches **standalone** — no
+base-compose merge, no `env_file:` on any service — and it is what every deploy
+path uses (`.github/workflows/deploy-dev.yml`, `scripts/deploy/gcp-deploy.sh`),
+so the explicit `environment:` list is the only path into the container. The
+result was the precise outcome the paragraph above congratulates itself for
+avoiding: a hard kill switch that does nothing, on a feature that is default-ON
+and makes outbound requests. It worked on a laptop, where the shell environment
+reaches the process directly.
+
+The lesson is worth more than the fix: **avoiding a known failure mode in the
+layer you are looking at does not avoid it in the layer you are not.** The
+`_resolve_bool_flag` analysis was correct and load-bearing, and it was reasoning
+about the *code path* while the flag died in *packaging*. This is the
+#1039/#1056 class for the sixth time (#1056 `VOIP_*`, ent#31 `LOG_*`, #1039,
+#1871 `AGENT_LOG_*`, #411 `CANARY_*`, this), which is why it is now pinned by
+`tests/unit/test_ent14_registry_env_packaging.py` rather than trusted:
+
+- injection present in **both** composes (drift between them *is* the bug);
+- `TEMPLATE_REGISTRY_ENABLED` uses the `${VAR:-true}` form — a hardcoded `- TEMPLATE_REGISTRY_ENABLED=true`
+  satisfies a presence check while re-breaking the switch, so presence is not
+  the property worth asserting;
+- `TEMPLATE_REGISTRY_URL` carries its **full non-empty** default — a bare `:-`
+  arrives set-but-empty, `os.getenv` returns `""` instead of falling back, and
+  the registry points at nothing (#1076 class). Strictly worse than an unwired
+  var, because it looks wired;
+- the compose default and the `config.py` default are asserted equal, since two
+  spellings of one default drift invisibly (the container always wins, so the
+  code default becomes decorative while still reading as authoritative);
+- a meta-test proves the matcher goes red on pre-fix content *and* on the
+  hardcoded-value revert.
+
+One note on verifying a guard like this, because the first attempt produced a
+false green: proving it by deleting the real compose line and re-running is the
+right instinct, but the deletion was done with
+`grep -v 'VAR=${VAR'` — where `$` is a **regex end-of-line anchor**, so the
+pattern matched nothing, the line was never removed, and the suite passed
+against an unmodified tree. Use `grep -vF`, and confirm the file actually
+changed before believing the run.
 
 Deliberately **not** coupled to `DO_NOT_TRACK`: those two honour it because they
 *send* data about the operator. A registry fetch sends nothing — it is a
@@ -411,11 +483,39 @@ own arithmetic puts a PAT-less install over the anonymous budget above ~5 entrie
 `fork_to_own: required` agent.
 
 **The fix.** `_fetch_template_yaml_result` already distinguished "no
-`template.yaml`" from "could not read it"; the catalog wrapper threw the reason
-away one frame below the code that computed it. The reason is now cached beside
-the metadata and surfaced as `metadata_unavailable`, and creation **refuses**
+`template.yaml`" from "could not read it"; the wrapper threw the reason away one
+frame below the code that computed it. Creation now reads it and **refuses**
 (`503`, `TEMPLATE_METADATA_UNAVAILABLE`, retryable, naming the platform-PAT
 remedy) rather than guessing.
+
+**Which read decides** (ent#14 S2 — the first cut got this wrong). Both the
+availability verdict *and* the `fork_to_own` value come from
+`_read_source_template`, the **creation-path** read: `template.yaml` fetched with
+the PAT that will actually clone (per-agent → per-user → global, ent#162), at the
+requested ref, cache-bypassed. The first cut read the CATALOG dict
+(`gh_template["metadata_unavailable"]` / `["fork_to_own"]`), which comes from
+`_get_cached_metadata_result` — global platform PAT, default branch, 600 s cache
+— one call *after* `_resolve_template` had already made the correct read for
+ent#89's `schedules:`. That was wrong in both directions at once:
+
+- **False pass.** GitHub answers **404, not 403**, for a repo a token cannot see.
+  A *private* `fork_to_own: required` template readable only by the creator's own
+  per-user PAT therefore classified as ABSENT (`metadata_unavailable` False,
+  `fork_to_own` None) — the gate passed and the agent bound to the shared
+  upstream. The exact outcome the gate exists to prevent, no attacker involved.
+  Note that fixing only the availability half would NOT have closed this: the
+  *value* has to come from the correctly-credentialed read too.
+- **False refuse.** A creator whose own PAT read the template fine was 503'd
+  because the shared cache entry said 403 — for the full 600 s TTL, on every
+  non-forking `github:` create, including the plain `github:owner/repo` escape
+  hatch the acceptance criteria call untouched.
+
+Costs **zero extra GitHub calls** — it consumes the read ent#89 already made. The
+structural argument is that the read which DECIDES is now made with the same
+credentials as the clone that follows, so "we could not see it" and "the agent
+could not have cloned it" can no longer disagree. `fork_to_own: required` is
+enforced if **either** read declares it (a union, not a precedence), so the
+change can only ever remove a false pass, never add one.
 
 - A clean **HTTP 404 stays "absent"**, so a repo that genuinely ships no
   `template.yaml` creates exactly as before.
@@ -470,7 +570,9 @@ Owner: @vybe. Blocking for the release cut, not for the PR.
 | `tests/unit/test_ent14_catalog_failopen.py` | **The matrix at the seam** — 19 failure modes × 2 (catalog equality and through the router's sort), a raising registry service, per-entry fencing, the full precedence ladder incl. zero-requests-when-curated, the config hard switch beating the DB row, **list/detail/create sharing one ladder**, payload key-set equality, and a hostile registry failing to inject `fork_to_own` / `credentials` / `schedules` / `hidden` / `id` |
 | `tests/unit/test_ent14_registry_settings_api.py` | GET/PUT/DELETE, the principal matrix (**an admin-owned agent key is refused on both writes**), audit rows on write *and* on a no-op reset, partial update, the hard-switch 409, and the catch-all 422 on PUT **and** DELETE for all four keys |
 | `tests/unit/test_ent14_repo_pattern_parity.py` | All four `owner/repo` gates agree on a corpus; the registry gate is stricter on dot segments; registry acceptance is a **subset** of every other gate |
-| `tests/unit/test_ent14_fork_to_own_failclosed.py` | The F2 regression — verified red without the fix (10 of 24 assertions fail) |
+| `tests/unit/test_ent14_fork_to_own_failclosed.py` | The F2 regression — verified red without the fix — plus the **S2** half: the private-404 false pass and the poisoned-cache false refuse, both driven through the real `_resolve_template` with a GitHub whose answer depends on WHICH token asks (3 of those fail against the catalog-reading gate) |
+| `tests/unit/test_ent14_registry_url_ssrf.py` | The SSRF gate itself, DNS stubbed: RFC 6598 refused with both `/10` boundaries held public, one CGNAT record among public ones enough to refuse, the neighbouring internal ranges pinned, scheme + userinfo + unresolvable-host |
+| `tests/unit/test_ent14_registry_env_packaging.py` | **Packaging** — both knobs injected in both composes, `${VAR:-true}` rather than a hardcoded `true`, the URL's full non-empty default, compose↔`config.py` default agreement, dev/prod parity, `.env.example` coverage, and a meta-test that goes red on pre-fix content *and* on the hardcoded-value revert (see [the section above](#and-then-it-shipped-inert-anyway-one-layer-down)) |
 
 `tests/unit/pytest.ini` overrides `pyproject.toml`, so `asyncio_mode = auto` does
 **not** apply in that directory: a bare `async def test_*` is collected and
@@ -493,3 +595,4 @@ driven through an explicit `asyncio.run`.
 | Date | Changes |
 |------|---------|
 | 2026-08-04 | **ent#14 — initial implementation.** Runtime registry fetch + cache, admin URL/toggle surface, the fail-open matrix, `AliasPolicy.REJECT` + the named `safe_yaml` helper, the SSRF gate, the ladder in both resolvers (F1), and the `fork_to_own` fail-closed fix (F2). |
+| 2026-08-05 | **CSO diff findings closed.** S2 — the `fork_to_own` gate now decides from the creation-path read (right credentials, pinned ref, no cache) instead of the platform-PAT catalog cache, closing a false pass on private templates and a 600 s false refuse. S1 — the byte ceiling counts wire bytes (`iter_raw()`) and any `Content-Encoding` is refused, closing a ~1030:1 decompression bypass measured at 458 MB from a 199 KiB body; both transport fixtures now build real streams, since the buffered mock shape could not express the failure. S3 — RFC 6598 (`100.64.0.0/10`) added to the SSRF deny set. |

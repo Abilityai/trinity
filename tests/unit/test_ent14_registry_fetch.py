@@ -19,6 +19,37 @@ URL = "https://registry.example.com/registry.yaml"
 GOOD = "version: 1\ntemplates:\n  - repo: acme/one\n    display_name: One\n"
 
 
+def _as_streaming(resp: httpx.Response) -> httpx.Response:
+    """Rebuild a buffered mock response as a STREAMING one.
+
+    `httpx.Response(text=...)` / `(content=...)` decodes and buffers in the
+    CONSTRUCTOR and marks the stream consumed, so `iter_raw()` — the call the
+    production path makes — raises `StreamConsumed` against it, and the buffered
+    shape can only ever exercise `iter_bytes()`. That is precisely why the
+    byte-ceiling tests were green while the ceiling was counting DECODED bytes
+    (ent#14 S1): the harness could not express the failure it was asserting
+    against. Converting centrally keeps every test's ordinary
+    `httpx.Response(...)` spelling and still drives the real streaming path.
+
+    A caller that needs a COMPRESSED body must build the streaming response
+    itself (`stream=httpx.ByteStream(...)`) — passing compressed bytes as
+    `content=` would decode them here, before the code under test ever sees
+    them. That mistake is refused loudly rather than silently re-encoded.
+    """
+    if not resp.is_stream_consumed:
+        return resp
+    if "content-encoding" in resp.headers:
+        raise AssertionError(
+            "build a Content-Encoding response as a stream "
+            "(httpx.Response(..., stream=httpx.ByteStream(raw))) — `content=` "
+            "decodes it in the constructor, so the code under test would never "
+            "see the compressed bytes"
+        )
+    return httpx.Response(
+        resp.status_code, headers=resp.headers, stream=httpx.ByteStream(resp.content)
+    )
+
+
 class _Settings:
     """Stand-in for the settings singleton the service reads lazily."""
 
@@ -107,7 +138,7 @@ def env(monkeypatch):
     def _client(timeout):
         def _dispatch(request):
             state["requests"].append(request)
-            return state["handler"](request)
+            return _as_streaming(state["handler"](request))
 
         return httpx.Client(
             timeout=timeout,
@@ -204,6 +235,137 @@ def test_a_declared_oversize_length_aborts_before_reading(env):
 def test_a_body_just_under_the_ceiling_still_parses(env):
     padding = "#" * (trs.REGISTRY_MAX_BYTES - len(GOOD) - 16)
     env.serve(lambda r: httpx.Response(200, text=GOOD + padding))
+    assert [t.repo for t in trs.get_registry_templates()] == ["acme/one"]
+
+
+# ---------------------------------------------------------------------------
+# The ceiling counts WIRE bytes (ent#14 S1)
+#
+# The hole the tests above could not see: they asserted a DECODED total, and
+# httpx sends `Accept-Encoding: gzip, deflate` by default, so a body whose wire
+# size passes the `Content-Length` abort inflated ~1030:1 before the running
+# total was consulted — 458 MB of transient allocation, on the event-loop
+# thread, from a 199 KiB response. Correctness held (`too_large` was returned);
+# the memory bound the ceiling exists to provide did not.
+# ---------------------------------------------------------------------------
+
+class _CountingStream(httpx.SyncByteStream):
+    """A body that records how much of it was actually pulled off the wire.
+
+    `read_bytes == 0` is the assertion that matters: a refusal that still reads
+    the body is not a refusal, and a peak-memory assertion alone would not
+    distinguish the two.
+    """
+
+    def __init__(self, payload: bytes, chunk: int = 64 * 1024):
+        self._payload = payload
+        self._chunk = chunk
+        self.read_bytes = 0
+
+    def __iter__(self):
+        for i in range(0, len(self._payload), self._chunk):
+            part = self._payload[i:i + self._chunk]
+            self.read_bytes += len(part)
+            yield part
+
+
+def _gzip_bomb(decoded_mb: int = 64) -> tuple[bytes, int]:
+    import gzip
+    decoded = b"A" * (decoded_mb * 1024 * 1024)
+    return gzip.compress(decoded, 9), len(decoded)
+
+
+def test_the_request_asks_for_no_compression(env):
+    """The polite half. It cannot bind a hostile server — that is what the
+    refusal below is for — but a cooperative one should not compress ~1 KB of
+    YAML in the first place."""
+    trs.get_registry_templates()
+    assert env.requests[0].headers.get("accept-encoding") == "identity"
+
+
+def test_a_compressed_body_is_refused_WITHOUT_being_read(env):
+    """A server that compressed anyway. The wire body is well under the ceiling,
+    so the `Content-Length` abort passes it — and decoding it would allocate
+    ~1030x its size before the running total is ever consulted."""
+    wire, decoded_size = _gzip_bomb()
+    assert len(wire) < trs.REGISTRY_MAX_BYTES, "the wire body must look legal"
+    stream = _CountingStream(wire)
+
+    env.serve(lambda r: httpx.Response(
+        200,
+        headers={"Content-Encoding": "gzip", "Content-Length": str(len(wire))},
+        stream=stream,
+    ))
+
+    assert trs.get_registry_templates() == []
+    assert trs.get_registry_status()["last_error_code"] == trs.ERROR_ENCODING
+    assert stream.read_bytes == 0, (
+        "the body was read despite the encoding refusal — the header gate is "
+        "meant to fire before a single byte is consumed"
+    )
+    assert decoded_size > trs.REGISTRY_MAX_BYTES * 100  # the bound that matters
+
+
+def test_the_hostile_body_does_not_inflate_in_memory(env):
+    """The empirical anchor of the finding, at 1/3 scale: 64 MB of decoded
+    payload must not appear anywhere. Pre-fix this allocated the full decoded
+    size; the threshold is deliberately generous so it measures the ORDER of
+    magnitude, not an allocator detail."""
+    import tracemalloc
+
+    wire, decoded_size = _gzip_bomb()
+    env.serve(lambda r: httpx.Response(
+        200,
+        headers={"Content-Encoding": "gzip"},
+        stream=httpx.ByteStream(wire),
+    ))
+
+    already_tracing = tracemalloc.is_tracing()
+    if not already_tracing:
+        tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        trs.get_registry_templates()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        if not already_tracing:
+            tracemalloc.stop()
+
+    assert peak < 8 * 1024 * 1024, (
+        "peak %.1f MB from a %d-byte wire body — the ceiling is counting "
+        "decoded bytes again" % (peak / 1e6, len(wire))
+    )
+    assert decoded_size == 64 * 1024 * 1024
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "deflate", "br", "zstd", "GZIP", " gzip "])
+def test_every_non_identity_encoding_is_refused(encoding):
+    """Refused by NAME, not by whether httpx happens to ship a decoder for it —
+    an encoding Trinity cannot decode would otherwise reach the UTF-8 decode and
+    be reported as `bad_shape`, hiding the cause."""
+    import services.template_registry_service as _trs
+
+    def handler(request):
+        return httpx.Response(200, headers={"Content-Encoding": encoding},
+                              stream=httpx.ByteStream(b"version: 1\ntemplates: []\n"))
+
+    import httpx as _httpx
+    original = _trs._http_client
+    _trs._http_client = lambda t: _httpx.Client(
+        timeout=t, follow_redirects=False, transport=_httpx.MockTransport(handler))
+    try:
+        text, err = _trs._fetch_registry_text(URL)
+    finally:
+        _trs._http_client = original
+    assert (text, err) == (None, _trs.ERROR_ENCODING)
+
+
+def test_an_explicit_identity_encoding_is_normal(env):
+    """`Content-Encoding: identity` is what a compliant server echoes for an
+    uncompressed body. Refusing it would break the honest case."""
+    env.serve(lambda r: httpx.Response(
+        200, headers={"Content-Encoding": "identity"},
+        stream=httpx.ByteStream(GOOD.encode())))
     assert [t.repo for t in trs.get_registry_templates()] == ["acme/one"]
 
 
