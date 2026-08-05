@@ -61,7 +61,11 @@ export const useAuditLogStore = defineStore('auditLog', {
     // #941 v2 — dashboard expansion
     stats: null,              // { total, by_event_type: {...}, by_actor_type: {...} }
     statsLoading: false,
-    verifyState: 'idle',      // idle | verifying | valid | invalid | error
+    // #1984: 'unverifiable' is a REQUIRED state, not a nicety. The backend
+    // answers valid=null when nothing in range was hashed; without this the
+    // binary `data.valid ? 'valid' : 'invalid'` below rendered that as a
+    // green tick (before) or a tamper alarm (after) — both wrong.
+    verifyState: 'idle',      // idle | verifying | valid | unverifiable | invalid | error
     verifyResult: null,       // { checked, first_invalid_id?, range?: [start, end] }
     activePreset: '24h',      // '1h' | '24h' | '7d' | '30d' | 'all' | 'custom'
     exporting: false,
@@ -401,8 +405,10 @@ export const useAuditLogStore = defineStore('auditLog', {
       const authStore = useAuthStore()
       if (!authStore.isAuthenticated) return
       if (this.entries.length === 0) {
-        this.verifyState = 'valid'
-        this.verifyResult = { checked: 0, range: null }
+        // #1984: was 'valid' with checked:0 — the same vacuous affirmation the
+        // backend made, asserted client-side without even asking.
+        this.verifyState = 'unverifiable'
+        this.verifyResult = { checked: 0, status: 'empty_range', range: null }
         return
       }
       const ids = this.entries.map((e) => Number(e.id)).filter((n) => !isNaN(n))
@@ -426,10 +432,20 @@ export const useAuditLogStore = defineStore('auditLog', {
         const data = r.data || {}
         this.verifyResult = {
           checked: Number(data.checked) || 0,
+          skipped_unhashed: Number(data.skipped_unhashed) || 0,
+          total_in_range: Number(data.total_in_range) || 0,
+          hash_chain_enabled: Boolean(data.hash_chain_enabled),
+          status: data.status || null,
           first_invalid_id: data.first_invalid_id ?? null,
           range: [startId, endId],
         }
-        this.verifyState = data.valid ? 'valid' : 'invalid'
+        // Tri-state, NOT truthiness. `valid === null` means "nothing was
+        // hashed, so integrity is unknowable" — reporting that as either
+        // verified or tampered is a different wrong answer (#1984).
+        this.verifyState =
+          data.valid === true ? 'valid'
+          : data.valid === false ? 'invalid'
+          : 'unverifiable'
       } catch (e) {
         this.verifyState = 'error'
         this.verifyResult = null

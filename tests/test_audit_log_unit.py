@@ -996,10 +996,11 @@ def test_verify_chain_valid(audit_service, audit_ops):
 
 
 def test_verify_chain_empty_range(audit_service, audit_ops):
-    """verify_chain on empty range returns valid=True, checked=0."""
+    """verify_chain on an empty range is unverifiable (#1984), not vacuously valid."""
     service, _, _ = audit_service
     result = asyncio.run(service.verify_chain(999999, 999999))
-    assert result["valid"] is True
+    assert result["valid"] is None
+    assert result["status"] == "empty_range"
     assert result["checked"] == 0
 
 

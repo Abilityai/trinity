@@ -2687,6 +2687,40 @@ async def reset_ops_settings(
             if db.delete_setting(key):
                 deleted.append(key)
 
+        # #1966: ent#297 added the audit entry to `/ops/config` but not here,
+        # while its own prose ("neither this route nor /ops/reset logged
+        # anything before") read as though it had covered both. So the exact
+        # asymmetry ent#297 objected to survived one route over: the generic
+        # `PUT /{key}` audits, `/ops/config` audits, this one did not.
+        #
+        # Retention windows genuinely cannot be reset here (#1638 skips them),
+        # but `ssh_access_enabled` can — resetting it changes whether ephemeral
+        # SSH credentials may be minted at all, and that left no trace.
+        #
+        # Logged unconditionally, NOT gated on `deleted` the way /ops/config
+        # gates on `updated`: there the empty case means nothing was asked for,
+        # whereas an admin pressing reset on already-default settings is a real
+        # administrative act whose absence from the log is indistinguishable
+        # from it never having been attempted.
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="ops_settings_reset",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            # Keys and counts only. Unlike /ops/config there is no value worth
+            # recording — every one of these is being DELETED, so the durable
+            # fact is which keys reverted to their code default and which were
+            # protected, not what they held on the way out.
+            details={
+                "reset": deleted,
+                "reset_count": len(deleted),
+                "skipped": sorted(RETENTION_OPS_KEYS),
+            },
+        )
+
         return {
             "success": True,
             "message": "Ops settings reset to defaults (retention windows unchanged)",

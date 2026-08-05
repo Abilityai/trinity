@@ -222,8 +222,11 @@ class AgentSnapshot:
     # owned EXCLUSIVELY by the lease-reaper and NEVER enters the slot ZSET (a
     # claim is a pure SQL UPDATE with no ZADD). S-01 uses this to exclude leased
     # rows from the SQL side of its slot–row bijection, so a legitimately-
-    # unslotted pull row is not flagged `in_sql_only`. Only S-01 reads this;
-    # E-01/E-02/E-05 keep seeing the full `running_exec_ids` unchanged.
+    # unslotted pull row is not flagged `in_sql_only`. Read by S-01 and, since
+    # #1766, by E-05 — a leased row is `running` with a NULL claude_session_id
+    # by design, and `mark_no_session_executions_failed` (the sweep E-05 watches)
+    # already excludes leased rows for that reason. E-01/E-02 keep seeing the
+    # full `running_exec_ids` unchanged.
     running_lease_expires_at: Dict[str, Optional[str]] = field(default_factory=dict)
     # `claude_session_id` per running id (str or None); used by E-05 to detect
     # dispatched rows that never acquired a backing session.
