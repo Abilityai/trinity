@@ -784,6 +784,9 @@ class DatabaseManager:
     def get_shared_agents(self, username: str):
         return self._agent_ops.get_shared_agents(username)
 
+    def get_agents_shared_with_email(self, email: str):
+        return self._agent_ops.get_agents_shared_with_email(email)
+
     def is_agent_shared_with_user(self, agent_name: str, username: str):
         return self._agent_ops.is_agent_shared_with_user(agent_name, username)
 
@@ -981,6 +984,9 @@ class DatabaseManager:
 
     def delete_connector_config(self, agent_name: str):
         return self._connector_ops.delete_config(agent_name)
+
+    def list_connector_enabled_agents(self):
+        return self._connector_ops.list_enabled_agents()
 
     def mint_connector_key(self, agent_name, user_id):
         return self._connector_ops.mint_key(agent_name, user_id)
