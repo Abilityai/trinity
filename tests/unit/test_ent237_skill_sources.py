@@ -648,6 +648,54 @@ class TestSourceEditingReachesDisk:
 
         assert marker.exists()
 
+    def test_an_unreadable_origin_never_triggers_the_discard(
+        self, service, sources_db, tmp_path, monkeypatch
+    ):
+        """The fail-SAFE direction of an unattended `rmtree`, pinned.
+
+        `_origin_matches` answers MATCH when `git config` fails, because the
+        action gated on the answer deletes a directory and an unknown answer
+        must not widen that (#1638/#1644). The feature half of this fix is
+        covered — neutering the origin check fails
+        `test_repointing_moves_the_git_remote_too` — but the safe direction was
+        not: flipping the branch to `return False`, so a transient git failure
+        discards the checkout, left the whole file green. The argument lived
+        only in the docstring, where a refactor can invert it silently.
+
+        Staged as the case where a discard would otherwise be CORRECT — the url
+        IS genuinely repointed — so what is asserted is the ambiguity resolving
+        to "leave it alone", not the absence of a mismatch.
+        """
+        from services.skill_source_clone import SkillSourceClone
+
+        old = _mkrepo(tmp_path / "repos", "old", {"old-skill": "old"})
+        new = _mkrepo(tmp_path / "repos", "new", {"new-skill": "new"})
+        src = sources_db.create_source(name="Unreadable", url=str(old), ref="main")
+        service.sync_library()
+        marker = service.library_root / src.id / ".git" / "trinity-marker"
+        marker.write_text("an rmtree would take this with it")
+
+        real_git = SkillSourceClone._git
+
+        def blinded(self, args, **kwargs):
+            """Only the origin read fails; every other git call is real."""
+            if args[:3] == ["config", "--get", "remote.origin.url"]:
+                return subprocess.CompletedProcess(
+                    args=["git", *args], returncode=1, stdout="",
+                    stderr="fatal: not in a git directory",
+                )
+            return real_git(self, args, **kwargs)
+
+        monkeypatch.setattr(SkillSourceClone, "_git", blinded)
+
+        clone = _clone(src.id, new, "main", "branch", service.library_root)
+        assert clone._origin_matches(str(new)) is True
+
+        sources_db.update_source(src.id, url=str(new))
+        service.sync_library()
+
+        assert marker.exists(), "an unreadable origin discarded the checkout"
+
     def test_pat_bearing_origin_is_not_read_as_a_repoint(self):
         """The credential-stripping half of the compare, isolated."""
         from services.skill_source_clone import canonical_remote
