@@ -1553,6 +1553,33 @@
         "parity"
       ],
       "description": "The agent server was outside ent#314's YAML sweep (#1965). utils/safe_yaml.py (PR #1961) put every author-controlled YAML reader in the backend behind one hardened loader, and its AST guard walks the whole backend with an EMPTY allowlist - but it walked _BACKEND.rglob only, so docker/base-image/agent_server/ kept six bare yaml.safe_load calls on documents the backend itself assigns REJECT: template.yaml (x2, credential_requirements_service), skill frontmatter (skill_packaging), dashboard.yaml (compatibility/static_checks) and .trinity/persistent-state.yaml. The vector is amplification at SERIALIZATION, not parse - a 416 B level-6 anchor bomb resolves in ~0.001 s and blows up to ~110 MB when something walks the graph - and the backend proxies /info and /dashboard, so the walk happens in-container then again across the wire. Covers: byte-parity of the vendored loader (the credential_paths.py shape, Invariant #5) plus proof the vendored COPY actually behaves - refuses a level-6 bomb under BUDGET, any alias under REJECT, duplicate keys, and still parses an honest document (byte parity is not behaviour parity if the file never imports); each of the four agent-authored sites on the shared loader with its backend counterpart's kind AND policy; /config/agent-config.yaml deliberately BUDGET not REJECT, stated as an exception because the platform writes it and bind-mounts it mode:'ro' so the agent cannot author it, and yaml.dump emits an anchor for any shared object reference - REJECT there would be a self-inflicted outage for no security; no bare safe_load left anywhere in the tree; and HardenedYamlError named in the except arms that previously caught only yaml.YAMLError (it is a ValueError, so without its own arm a refused bomb escapes to the generic handler and surfaces as the unnamed 500 the AC rules out - the trap static_checks._parse_yaml records backend-side). AC #4 end-to-end: a level-6 bomb in a container's template.yaml is refused by BOTH template.yaml readers with the expanded graph never reaching the response, an honest template still serves, and the metrics assertion checks the NAMED refusal rather than has_metrics:False - a bomb parses fine under bare safe_load and yields no metrics: key, so the flag alone passes against the very tree this issue reports. The AST-guard widening itself lives in test_ent314_hardened_yaml.py (both trees, still empty allowlist) rather than here, because splitting a guard across two files is how the second copy stops being run."
+    },
+    {
+      "file": "unit/test_audit_chain_edges.py",
+      "feature": "#2015",
+      "added": "2026-08-05",
+      "categories": [
+        "backend",
+        "unit",
+        "security",
+        "audit",
+        "edge-cases"
+      ],
+      "description": "Edge-case analysis of the audit hash chain as merged by #1985. Covers what the chain can and cannot DETECT (a mutated hashed field, a deleted middle row and a reordered pair are all caught; fields outside _compute_hash's subset - source/actor_email/actor_ip/endpoint/mcp_key_id - are silently mutable with the chain still reporting verified, and tail truncation is undetectable because verification is over a caller-supplied range), _compute_hash's real input domain (details as str vs dict must hash identically or every entry fails verification, key order in a details string, unparseable details hitting the except branch, non-ASCII, missing optional fields, and the four fields read with [] raising KeyError rather than hashing a hole), and range boundaries (inverted/absurd ranges degrade to empty_range, a single-row range never checks a link because of the i>0 guard, counts add up to total_in_range). Carries the xfail(strict) for #2015: enabling the hash chain is in-memory only, so a restart silently disables it, plus a static pin that the enable route persists nothing. Uses asyncio.run, not get_event_loop - the sibling #1984 suite closes the loop, so the latter passes standalone and fails on collection order."
+    },
+    {
+      "file": "unit/test_pat_propagation_properties.py",
+      "feature": "#2016",
+      "added": "2026-08-05",
+      "categories": [
+        "backend",
+        "unit",
+        "security",
+        "credentials",
+        "property-based",
+        "edge-cases"
+      ],
+      "description": "Round-trip property analysis of GITHUB_PAT propagation as merged by #1979. The contract is stated once as a Hypothesis property - after a rotation the agent reads back exactly the new token under all three key names (GITHUB_PAT/GH_TOKEN/GITHUB_TOKEN) - with the oracle being a byte-faithful copy of the agent-server's own last-wins .env parser, because what the agent sees is the only definition of success for a credential rotation. Plus idempotence, unrelated keys surviving, and the old token not surviving anywhere as text. Deterministic boundaries that hold: empty file, no trailing newline, leading whitespace/tab, commented-out line, present-but-empty, lookalike and prefixed keys, CRLF, append-not-glued. Three xfail(strict) findings: a duplicated GITHUB_PAT line survives count=1 and wins under last-wins parsing so the agent keeps the revoked token while the rotation reports updated (#2016); a backslash in the token raises re.error because the new line is used as an re.sub REPLACEMENT (#2017); and the writer escapes an embedded quote while the reader never unescapes it (#2017, a .env parse-contract issue deliberately left byte-faithful by #1999)."
     }
   ]
 }
