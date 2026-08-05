@@ -1442,6 +1442,17 @@
         "security"
       ],
       "description": "Hardened parsing of author-controlled YAML (ent#314). template.yaml was on bare yaml.safe_load, leaving alias amplification (measured 416 B -> 110 MB at json.dumps time, parse itself 0.0011 s, so an input-size cap cannot close it) and silent last-wins duplicate keys, which let a template show one credentials: block to a human and declare another to Trinity. Reachable by any creator-role user via a public repo (ent#123 tokenless) since _build_template runs unfenced inside get_all_templates(). Covers: the fixture itself still amplifies under bare safe_load (so the suite cannot pass vacuously); level 4/5/6 bombs rejected under both policies; a small honest anchor STILL parses under BUDGET (the #1932 lesson \u2014 a guard that rejects the legitimate document is an outage that reads as hardened); REJECT refuses one alias and also gates at the scanner (skill_packaging's copy had both hooks); the issue's exact duplicate-credentials case and a nested duplicate; size cap; reject-not-truncate; ManifestError still a subclass so routers/systems.py's named 400 is unchanged and the manifest's published codes survive; and two consolidation guards \u2014 no module may grow a fourth SafeLoader subclass, and all four author-controlled readers must call the shared loader with no bare safe_load left. The four product-level guards fail against pre-fix code."
+    },
+    {
+      "file": "unit/test_ent332_skills_root.py",
+      "feature": "trinity-enterprise#332",
+      "added": "2026-08-04",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "Per-source skills-library root (ent#332): catalog.yaml skills_root: declaration -> evidence-gated skills/ probe -> .claude/skills/ fallback, resolved per SkillSourceClone; packaging rewrites tar arcnames to the canonical agent-side .claude/skills/ destination at filter_skill_archive so manifests, prune confinement and the ent#236 removal machinery stay destination-canonical with zero migration. Covers: resolution order + zero-config back-compat; dual-layout (evidence under BOTH roots, no catalog) keeps .claude/skills/ and flags layout_conflict instead of silently flipping which executable content ent#236 auto-injects; segment-wise skills_root validation ('.', './skills', 'skills//x' all rejected -- a whole-string charset regex admits each and breaks archive-prefix math into per-skill empty-package failures); every bad catalog shape (unparseable, alias-bearing HardenedYamlError, non-mapping, unknown schema_version, oversized, symlinked) falls back to probe and never raises through list_skills; symlinked probe/declared roots fall to the next tier rather than blanking the source, and an escaping final tier empty/None-propagates without a TypeError; tree-SHA version parity across layouts (repo restructure with unchanged content keeps versions stable -- no spurious fleet re-inject); arcname rewrite identity for legacy layout, destination-canonical executable_paths, fail-visible layout-mismatch, unsafe source_root ValueError; cross-layout prune continuity; _legacy_fallback SKILL.md lookup with rewritten members; end-to-end mixed-layout merge through the real service with per-source skills_root in library status."
     }
   ]
 }

@@ -7,10 +7,13 @@ Manages the skills library:
 - Get skill content
 - Inject skills into running agents as FULL directory packages
 
-Skills are stored in a GitHub repository with structure:
-  .claude/skills/<name>/SKILL.md   (+ scripts/, templates, resources)
+Skills are stored in a GitHub repository as `<root>/<name>/SKILL.md`
+(+ scripts/, templates, resources), where each source's root resolves per
+ent#332 — catalog.yaml `skills_root:` → `skills/` probe → `.claude/skills/`
+fallback. Agent-side, packages ALWAYS land at `~/.claude/skills/<name>/`
+(arcnames are rewritten at packaging).
 
-The local clone is stored at /data/skills-library/
+The local clones are stored under /data/skills-library/
 
 Injection (ent#183) ships the whole skill directory: a vetted tar built from
 `git archive` is POSTed to the EXISTING agent-server restore primitive
@@ -144,8 +147,9 @@ class SkillService:
     """
     Service for managing skills library and skill assignments.
 
-    The skills library is a GitHub repository containing skill directory
-    packages in .claude/skills/<name>/ structure.
+    The skills library is a set of GitHub repositories containing skill
+    directory packages under each source's resolved root (ent#332); the
+    agent-side install location is always ~/.claude/skills/<name>/.
     """
 
     def __init__(self):
@@ -771,10 +775,14 @@ class SkillService:
         skill_packaging) with a first-paragraph description fallback. The clone
         is explicit for the same reason as `_skill_files`.
         """
+        # The SOURCE-layout root (ent#332) — display/provenance only; the
+        # agent-side destination is always .claude/skills/<name>/. A None
+        # clone (the pure-parse backward-compat contract) reads as legacy.
+        rel_root = clone.skills_rel_root() if clone is not None else ".claude/skills"
         info: Dict[str, Any] = {
             "name": skill_name,
             "description": None,
-            "path": f".claude/skills/{skill_name}/SKILL.md",
+            "path": f"{rel_root}/{skill_name}/SKILL.md",
             "automation": None,
             "user_invocable": True,
             "allowed_tools": None,
@@ -876,6 +884,7 @@ class SkillService:
         source_status = []
         for src in sources:
             clone = clones.get(src.id)
+            cloned = bool(clone and (clone.path / ".git").exists())
             source_status.append({
                 "id": src.id,
                 "name": src.name,
@@ -885,7 +894,11 @@ class SkillService:
                 "is_default": src.is_default,
                 "enabled": src.enabled,
                 "priority": src.priority,
-                "cloned": bool(clone and (clone.path / ".git").exists()),
+                "cloned": cloned,
+                # ent#332: the resolved per-source layout root — null until the
+                # source has actually been cloned (honest, not a guess).
+                "skills_root": clone.skills_rel_root() if cloned else None,
+                "layout_conflict": bool(clone.dual_layout) if cloned else False,
                 "last_sync": src.last_sync_at.isoformat() if src.last_sync_at else None,
                 "last_sync_status": src.last_sync_status,
                 "commit_sha": src.last_commit_sha,
@@ -1410,8 +1423,10 @@ print(json.dumps(out))
 
             archive = await asyncio.to_thread(clone.archive_skill, skill_name)
             if archive:
+                # ent#332: strip the OWNING source's layout prefix and rewrite
+                # arcnames to the canonical agent-side destination.
                 members, filter_warnings, total = pkg.filter_skill_archive(
-                    archive, skill_name
+                    archive, skill_name, source_root=clone.skills_rel_root()
                 )
             else:
                 members, filter_warnings, total = [], [], 0
