@@ -272,21 +272,25 @@ class TestParsing:
         assert mod.parse_env_file(env_file)["K"] == expected
 
     @pytest.mark.parametrize("line,key,expected", [
-        # Byte-faithful to the export loop this replaces, ON PURPOSE. Each of
-        # these is a quirk someone might "fix" — and the ent#127 predicate
-        # (`credential_requirements_service._env_pairs`, whose source is
-        # spliced into an in-container probe) is defined as agreement with
-        # exactly these results. Improving the parse is a separate change with
-        # ent#127's parity test as its gate; doing it inside a revocation fix
-        # would move that predicate silently.
-        ('K=""""', "K", ""),            # every quote layer peeled, not one pair
-        ('K="\'v\'"', "K", "v"),         # both quote chars stripped, in order
+        # These WERE byte-faithful to the export loop #1999 replaced, pinned
+        # so that improving the parse had to be a deliberate, separate change
+        # with ent#127's parity test as its gate — not a silent drift inside a
+        # revocation fix.
+        #
+        # #2023 is that change, and the pin did its job: three of these fired
+        # when the reader learned to strip ONE matched pair and reverse the
+        # writer's escaping, forcing the decision into the open instead of
+        # letting the predicate move underneath its consumers. The rows that
+        # did not move are left as they were — still quirks a future reader
+        # might "fix" by accident.
+        ('K=""""', "K", '""'),          # #2023: ONE pair stripped, not every layer
+        ('K="\'v\'"', "K", "'v'"),       # #2023: the inner single quotes are data
         ("K='\"v\"'", "K", '"v"'),       # ... so the inner pair survives here
-        ('K="', "K", ""),               # a lone quote is not a value
+        ('K="', "K", '"'),              # #2023: an unterminated quote is not a strip
         ("export K=v", "export K", "v"),  # the name really is two words
         ("K-E-Y=v", "K-E-Y", "v"),      # os.environ accepts it; the child got it
     ])
-    def test_quirks_are_preserved_deliberately(
+    def test_parse_quirks_are_pinned_so_a_change_is_deliberate(
         self, monkeypatch, env_file, line, key, expected
     ):
         mod = _load(monkeypatch, {})

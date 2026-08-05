@@ -71,7 +71,7 @@ PROTECTED_KEYS = frozenset({
     "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "BASH_ENV", "ENV", "IFS",
 })
 
-# NOTE (#1999): the parsing below is deliberately BYTE-FAITHFUL to the export
+# NOTE (#1999, revised by #2023): the parsing below WAS byte-faithful to the export
 # loop this replaces. That loop's exact quirks are a published contract — the
 # ent#127 "is this credential set" predicate
 # (`services/credential_requirements_service._env_pairs`) is *defined* as
@@ -99,6 +99,62 @@ _MIRRORED_KEYS: set = set()
 # ---------------------------------------------------------------------------
 # .env parsing
 # ---------------------------------------------------------------------------
+
+def format_env_line(key: str, value: str) -> str:
+    """Encode one `KEY="value"` line — the exact inverse of
+    :func:`unquote_env_value` (#2023).
+
+    Lives beside its inverse on purpose. The encode half used to be inline in
+    `routers/credentials.py` and the decode half elsewhere, which is how they
+    came to disagree: the writer escaped `"` and the reader never reversed it,
+    so every credential containing a quote round-tripped corrupted. Two halves
+    of one encoding belong in one file, where a change to either is visibly a
+    change to both.
+
+    Backslash is escaped BEFORE quote. The other order is not merely untidy —
+    it is undecodable: a value ending in `\\` would produce `KEY="a\\"`, whose
+    closing quote reads as escaped.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'{key}="{escaped}"'
+
+
+def unquote_env_value(value: str) -> str:
+    """Reverse the `.env` writer's quoting for ONE value (#2023).
+
+    Strips a single matched quote pair and, inside a DOUBLE-quoted value only,
+    reverses the writer's escaping (`routers/credentials.py`): `\\"` -> `"` and
+    `\\\\` -> `\\`. Single-quoted values are taken literally, which is what a
+    shell would do and what the writer never produces.
+
+    Why not `.strip('"').strip("'")`, which is what this replaces: that removes
+    quote CHARACTERS from both ends and never reverses `\\"`, so any credential
+    containing a double quote round-tripped corrupted — injected as `a"b`,
+    read back by the agent as `a\\"b`, and used to authenticate as the wrong
+    string. It also ate a legitimate trailing quote from an unquoted value.
+
+    One pass, not two sequential `.replace()` calls: reversing `\\\\` and then
+    `\\"` would turn `\\\\"` (an escaped backslash followed by the closing
+    context) into the wrong thing. A single scan consumes each escape exactly
+    once.
+    """
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        inner = value[1:-1]
+        if value[0] != '"':
+            return inner
+        out = []
+        i = 0
+        while i < len(inner):
+            ch = inner[i]
+            if ch == "\\" and i + 1 < len(inner) and inner[i + 1] in ('"', "\\"):
+                out.append(inner[i + 1])
+                i += 2
+            else:
+                out.append(ch)
+                i += 1
+        return "".join(out)
+    return value
+
 
 def parse_env_file(path: Path = ENV_FILE) -> Dict[str, str]:
     """Parse a `.env` file into a dict. Never raises.
@@ -133,7 +189,7 @@ def parse_env_file(path: Path = ENV_FILE) -> Dict[str, str]:
         key = key.strip()
         if not key:
             continue
-        parsed[key] = value.strip().strip('"').strip("'")
+        parsed[key] = unquote_env_value(value.strip())
     return parsed
 
 

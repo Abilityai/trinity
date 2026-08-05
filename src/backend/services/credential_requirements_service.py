@@ -143,10 +143,10 @@ def _env_pairs(lines) -> Dict[str, str]:
 
     Every quirk below is that code's quirk, kept on purpose:
 
-    * `.strip` on a quote character peels ALL layers of it, not one pair, so a
-      value of four double-quotes collapses to empty, and `KEY="'v'"` yields `v`.
-    * The two quote characters are stripped independently and in order (double
-      first, then single), so `KEY='"v"'` keeps its inner double quotes.
+    * ONE matched quote pair is stripped, and inside a double-quoted value the
+      writer's escaping is reversed (`\\"` -> `"`, `\\\\` -> `\\`) — #2023. It used
+      to `.strip()` each quote character, peeling ALL layers and never reversing
+      `\\"`, so any credential containing a double quote read back corrupted.
     * A duplicate key is last-wins, because `os.environ[key] = value` is.
     * A leading `export ` is NOT stripped, so `export KEY=v` binds the name
       `export KEY` and the agent genuinely cannot see `KEY`. Reporting that as
@@ -168,9 +168,30 @@ def _env_pairs(lines) -> Dict[str, str]:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
-        value = value.strip().strip('"').strip("'")
         if not key:
             continue
+        # Inlined, not imported (#2023). This function's SOURCE is spliced into
+        # the in-container probe by `_build_collector_script`, so it must stay
+        # self-contained — an import of the agent-server helper would NameError
+        # there. It mirrors `execution_env.unquote_env_value`, and the ent#127
+        # parity test is what holds the two together.
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            inner = value[1:-1]
+            if value[0] != '"':
+                value = inner
+            else:
+                out = []
+                i = 0
+                while i < len(inner):
+                    ch = inner[i]
+                    if ch == "\\" and i + 1 < len(inner) and inner[i + 1] in ('"', "\\"):
+                        out.append(inner[i + 1])
+                        i += 2
+                    else:
+                        out.append(ch)
+                        i += 1
+                value = "".join(out)
         pairs[key] = value
     return pairs
 
