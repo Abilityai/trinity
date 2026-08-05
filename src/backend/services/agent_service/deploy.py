@@ -83,6 +83,32 @@ def _validate_archive_mcp_config(mcp_file: Path, version_name: str,
         )
 
 
+def _remove_partial_deploy(dest_created: Path | None) -> None:
+    """Remove a deployed-templates directory a failed deploy left behind (#2006).
+
+    Second layer under the moved `.mcp.json` gate: that gate now runs before
+    the copy, but every OTHER failure between `copytree` and `create_agent_fn`
+    (`_prepopulate_workspace_from_template`'s 500, a docker outage) leaves the
+    same addressable residue, because `/data/deployed-templates` is a member of
+    `_LOCAL_TEMPLATE_ROOTS` and the directory name is exactly the
+    `local:<version_name>` id the caller can pass to `POST /api/agents`.
+
+    Deliberately NOT a blanket cleanup in `finally`: the caller clears its
+    handle before creation starts, so a directory a container may already
+    reference is never removed. Never raises — this runs on an error path and
+    must not replace the real failure with a cleanup failure.
+    """
+    if dest_created is None:
+        return
+    try:
+        shutil.rmtree(dest_created)
+        logger.info("Removed partial deploy directory: %s", dest_created)
+    except Exception as e:  # noqa: BLE001 — the original error is what matters
+        logger.warning(
+            "could not remove partial deploy directory %s: %s", dest_created, e
+        )
+
+
 def _prepopulate_workspace_from_template(version_name: str, template_dir: Path) -> None:
     """Pre-populate `agent-{version_name}-workspace` with the template files (#950).
 
@@ -359,6 +385,12 @@ async def deploy_local_agent_logic(
         DeployLocalResponse with deployment details
     """
     temp_dir = None
+    # #2006: the deployed-templates dir this call created, while it is still
+    # this call's to remove. Cleared just before `create_agent_fn` — once
+    # creation starts, the directory may be referenced by a container mount
+    # spec, so removing it on a late failure would break a half-created agent
+    # rather than clean up after one.
+    dest_created = None
 
     try:
         # 1. Validate archive size
@@ -440,6 +472,26 @@ async def deploy_local_agent_logic(
             )
 
         base_name = sanitize_agent_name(base_name)
+
+        # 6a. Structure-validate an archive-supplied `.mcp.json` (ent#213) —
+        # on the EXTRACTED copy, BEFORE anything is persisted or stopped
+        # (#2006). The guard used to run 32 lines after `copytree`, so a 400
+        # aborted the deploy while leaving the rejected config on disk under
+        # `/data/deployed-templates/<version_name>/` — a live member of
+        # `_LOCAL_TEMPLATE_ROOTS`, therefore reachable by a subsequent
+        # `POST /api/agents {"template": "local:<version_name>"}`. A guard that
+        # runs after the persist is not a gate.
+        #
+        # `temp_dir` is the only thing written before this point and the
+        # `finally` already removes it, so a rejection now leaves nothing
+        # behind. Running here also precedes the quota check and the
+        # stop-previous-version step, so a deploy that will be refused no
+        # longer stops a running agent on its way to the refusal.
+        archive_mcp_file = extract_root / ".mcp.json"
+        if archive_mcp_file.exists():
+            _validate_archive_mcp_config(
+                archive_mcp_file, base_name, getattr(current_user, "email", None)
+            )
 
         # 6b. Agent quota enforcement: per-role limits (QUOTA-001)
         # Skip for redeploys of existing agents owned by this user
@@ -532,6 +584,7 @@ async def deploy_local_agent_logic(
             shutil.rmtree(dest_path)
 
         shutil.copytree(extract_root, dest_path)
+        dest_created = dest_path
         logger.info(f"Copied agent template to: {dest_path}")
 
         # 10. Create agent
@@ -565,10 +618,11 @@ async def deploy_local_agent_logic(
 
         mcp_file = dest_path / ".mcp.json"
         if mcp_file.exists():
-            # ent#213: structure-validate an archive-supplied `.mcp.json` before
-            # it is pre-populated into the workspace, matching the inject path.
-            _validate_archive_mcp_config(mcp_file, version_name,
-                                         getattr(current_user, "email", None))
+            # ent#213's validation moved to step 6a (#2006) — it now runs on
+            # `extract_root` before this copy exists. This is a copy of the
+            # bytes that already passed, so re-validating here would only be
+            # able to fail on something written between the two points, and
+            # nothing writes `.mcp.json` in that window. Bookkeeping only.
             credentials_imported[".mcp.json"] = "from_archive"
 
         # Write credentials from request to template directory
@@ -608,6 +662,10 @@ async def deploy_local_agent_logic(
         # run anyway since no /template bind is set up — see crud.py).
         _prepopulate_workspace_from_template(version_name, dest_path)
 
+        # Hand the directory over: from here it can be referenced by the
+        # container's mount spec, so it is no longer ours to delete (#2006).
+        dest_created = None
+
         agent_status = await create_agent_fn(
             agent_config,
             current_user,
@@ -636,8 +694,10 @@ async def deploy_local_agent_logic(
         )
 
     except HTTPException:
+        _remove_partial_deploy(dest_created)
         raise
     except Exception as e:
+        _remove_partial_deploy(dest_created)
         raise HTTPException(
             status_code=500,
             detail=f"Failed to deploy local agent: {str(e)}"
