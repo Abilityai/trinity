@@ -372,6 +372,34 @@ COMMUNITY_RETENTION_FLOOR_DAYS = 5
 # clear_agent_runtime_state -> remove_agent_volumes (#1581), destroying the
 # agent's workspace/public/shared volumes and any declared `data_paths` runtime
 # data (#1169). The floor does not apply to it in ANY edition.
+# ent#237: the bundled community skills source, written into a FRESH install so
+# the library is never empty out of the box (AC#3). Seeded as a row rather than
+# resolved as a code default at read time, for the same reason as the retention
+# floor above: an existing install must not silently acquire a source it never
+# configured, and an admin who deletes or disables this one must have that stick
+# across restarts. A code-default fallback would resurrect it on every boot.
+#
+# `ref_type: tag` is AC#5 — the community catalog takes PRs from strangers and
+# skills carry executables the ent#139 runner runs, so instances follow a tag we
+# bump deliberately, never the branch head. The repo itself is ent#296; until it
+# cuts its first tag this seed points at a 404 and `sync_library` reports a
+# failed source (fail-soft by design — it never raises).
+#
+# The tag name must match what ent#296 actually publishes: that issue's plan
+# (vybe, 2026-08-04) cuts **v0.1.0** once the seed content lands, so a `v1.0.0`
+# default would leave every fresh install seeded with a source that can never
+# sync — and the failure is quiet (a failed row in Settings), not loud. Bump
+# this in lockstep with the catalog's releases; the env var is the escape hatch
+# for an instance that wants to pin an older or newer catalog.
+#
+# TRINITY_DEFAULT_SKILL_SOURCE="" disables the seed entirely for an operator who
+# wants no community catalog (mirrors TRINITY_DEFAULT_SYSTEM_MANIFEST).
+DEFAULT_SKILL_SOURCE_URL = os.getenv(
+    "TRINITY_DEFAULT_SKILL_SOURCE", "github.com/abilityai/trinity-skills"
+)
+DEFAULT_SKILL_SOURCE_REF = os.getenv("TRINITY_DEFAULT_SKILL_SOURCE_REF", "v0.1.0")
+DEFAULT_SKILL_SOURCE_NAME = "Trinity Community Skills"
+
 COMMUNITY_FRESH_INSTALL_SEED = {
     "execution_log_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
     "execution_row_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),

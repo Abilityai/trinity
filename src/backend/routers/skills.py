@@ -27,9 +27,16 @@ from dependencies import (
 )
 from database import db
 from db_models import AgentSkill, SkillInfo, AgentSkillsUpdate
+from models import SkillSourceCreate, SkillSourceUpdate
+from db.skill_sources import DuplicateSkillSource, DefaultSourceExists
+from services.platform_audit_service import platform_audit_service, AuditEventType
+from utils.url_validation import (
+    EmbeddedCredentialError,
+    reject_embedded_credentials,
+    validate_skills_library_url,
+)
 from services.skill_service import skill_service, SkillInjectionBusy
 from services.skill_packaging import validate_skill_name
-from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +140,12 @@ async def list_skills(current_user: User = Depends(get_current_user)):
             file_count=s.get("file_count", 0),
             size_bytes=s.get("size_bytes", 0),
             version=s.get("version"),
+            # ent#237: provenance. Explicitly constructed models drop anything
+            # not named here, so a new service field is invisible over REST
+            # until it is listed — which is why these three are spelled out.
+            source_id=s.get("source_id"),
+            source_name=s.get("source_name"),
+            shadowed_by=s.get("shadowed_by") or [],
         )
         for s in skills
     ]
@@ -180,7 +193,18 @@ async def sync_library(admin_user: User = Depends(require_admin)):
     """
     Sync the skills library from GitHub.
 
-    Admin-only. Clones or pulls the configured repository.
+    Admin-only AND human-only. Clones or pulls every configured source.
+
+    `reject_agent_principal` on top of `require_admin`, for the same reason the
+    source mutations carry it. This route is not a read: it clones executable
+    material, and when the commit moves with `skills_auto_reinject_enabled` on
+    it spawns `run_fleet_reinject`, pushing skill `scripts/` to every running
+    agent. An agent-scoped MCP key resolves to its owner CARRYING the owner's
+    role (ent#293), so role-gating alone lets an agent trigger fleet-wide
+    executable delivery on a default admin-owned install. "Use, not grant" was
+    the original rationale and it does not survive that effect — the same
+    grant-vs-use misread that had to be corrected once already on this branch,
+    for the LIST route.
 
     ent#236: when the fleet re-inject flag is on AND the pull actually moved the
     library commit, the fleet sweep is spawned in the BACKGROUND — the operator
@@ -188,6 +212,7 @@ async def sync_library(admin_user: User = Depends(require_admin)):
     updated". The sweep's own report is the honest surface (Settings panel +
     operator alarm on failure), so nothing is lost by not awaiting it here.
     """
+    reject_agent_principal(admin_user)
     result = await asyncio.to_thread(skill_service.sync_library)
     if not result.get("success"):
         # 409, not 400: a concurrent sync (the scheduled loop, or another admin)
@@ -369,3 +394,212 @@ async def unassign_skill(
         "skill_name": skill_name,
         "removal": removal,
     }
+
+
+# ============================================================================
+# Skill Source Management (ent#237 — multi-source library)
+# ============================================================================
+#
+# Every MUTATION here carries `reject_agent_principal` in ADDITION to
+# `require_admin`, and that is load-bearing rather than defensive padding.
+# `require_admin` answers "what role", not "is this a human": an agent-scoped
+# MCP key resolves to its owner CARRYING the owner's role, so on a default
+# admin-owned install every agent's injected TRINITY_MCP_API_KEY satisfies
+# `require_admin` (ent#293, the third occurrence of that class after
+# trinity-ops-agent#232 → #1644 → #1816).
+#
+# Adding a source is the GRANT action from the learnings.md grant-vs-use
+# distinction — it decides which repo the fleet executes code from. A
+# prompt-injected agent that could register its own repo would get unattended,
+# fleet-wide, persistent prompt injection, since skills are instructions Claude
+# follows and ent#236 automates the sync + re-inject.
+#
+# The SYNC routes carry the gate too (both this one and /skills/library/sync).
+# They were originally role-gated only, as "use, not grant" — but grant-vs-use
+# is a claim about EFFECT, and on this branch the effect of a sync is cloning
+# executable material and, when the commit moves, spawning a fleet-wide
+# re-inject of it. That is the second time the same axis was misread here; the
+# first was the LIST route, gated because "read" said nothing about the private
+# repo URLs it returns. The rule that survives both: gate on what the route
+# does, not on which verb it is.
+
+async def _audit_source(request, actor, action: str, source_id: str, details: dict):
+    """Audit a source mutation. Best-effort — an audit failure must not undo a
+    write that already succeeded."""
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action=action,
+            source="api",
+            actor_user=actor,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            target_type="skill_source",
+            target_id=source_id,
+            details=details,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@router.get("/skills/sources")
+async def list_skill_sources(admin_user: User = Depends(require_admin)):
+    """List configured skill sources in RESOLUTION order (first wins a clash).
+
+    Admin-only because the rows carry repo URLs, which for a private source are
+    themselves sensitive. The per-agent Skills tab does not use this — it gets
+    `source_name` from `GET /skills/library`, which exposes no URLs.
+
+    `reject_agent_principal` even though this is a READ: `require_admin` alone
+    would not deliver the sensitivity argument above. An agent-scoped MCP key
+    resolves to its owner carrying the owner's role (ent#293), so on a default
+    admin-owned install every agent could read the private repo URLs this gate
+    exists to protect — and a prompt-injected agent reading them is precisely
+    the disclosure the admin-gating is for.
+    """
+    reject_agent_principal(admin_user)
+    return skill_service.get_library_status()
+
+
+@router.post("/skills/sources", status_code=201)
+async def create_skill_source(
+    request: Request,
+    body: SkillSourceCreate,
+    admin_user: User = Depends(require_admin),
+):
+    """Register a skills repo as a source."""
+    reject_agent_principal(admin_user)
+
+    # SSRF allowlist (#179) at the boundary, so a bad URL is rejected on write
+    # rather than surfacing later as a recurring sync failure.
+    try:
+        reject_embedded_credentials(body.url)
+    except EmbeddedCredentialError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        url = validate_skills_library_url(body.url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid repository URL: {e}")
+
+    try:
+        source = db.create_skill_source(
+            name=body.name,
+            url=url,
+            ref=body.ref,
+            ref_type=body.ref_type,
+            enabled=body.enabled,
+            is_default=False,
+            created_by=str(admin_user.id),
+        )
+    except DuplicateSkillSource as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except DefaultSourceExists as e:  # pragma: no cover — is_default is forced False
+        raise HTTPException(status_code=409, detail=str(e))
+
+    await _audit_source(
+        request, admin_user, "skill_source_create", source.id,
+        {"url": url, "ref": body.ref, "ref_type": body.ref_type},
+    )
+    return source
+
+
+@router.put("/skills/sources/{source_id}")
+async def update_skill_source(
+    request: Request,
+    source_id: str,
+    body: SkillSourceUpdate,
+    admin_user: User = Depends(require_admin),
+):
+    """Patch a source (name, url, ref, ref_type, enabled, priority)."""
+    reject_agent_principal(admin_user)
+
+    fields = body.model_dump(exclude_unset=True, exclude_none=True)
+    if "url" in fields:
+        try:
+            reject_embedded_credentials(fields["url"])
+        except EmbeddedCredentialError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        try:
+            fields["url"] = validate_skills_library_url(fields["url"])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid repository URL: {e}")
+
+    try:
+        source = db.update_skill_source(source_id, **fields)
+    except DuplicateSkillSource as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    if source is None:
+        raise HTTPException(status_code=404, detail="Skill source not found")
+
+    await _audit_source(
+        request, admin_user, "skill_source_update", source_id,
+        {"changed": sorted(fields.keys())},
+    )
+    return source
+
+
+@router.delete("/skills/sources/{source_id}")
+async def delete_skill_source(
+    request: Request,
+    source_id: str,
+    admin_user: User = Depends(require_admin),
+):
+    """Remove a source.
+
+    Assignments referencing it are intentionally left alone: the skill keeps
+    resolving by bare name through whatever source still provides it, and
+    cascading would silently strip capabilities that are still available.
+    """
+    reject_agent_principal(admin_user)
+
+    if not db.delete_skill_source(source_id):
+        raise HTTPException(status_code=404, detail="Skill source not found")
+
+    # Reclaim the clone. Row first, disk second: the row is authoritative, so a
+    # filesystem failure here must not fail a delete that already committed —
+    # it degrades to an orphan directory that the sync sweep
+    # (`_reclaim_orphan_checkouts`) picks up. The reverse order would delete a
+    # live source's content while the row still points at it.
+    reclaimed = await asyncio.to_thread(
+        skill_service.discard_source_checkout, source_id
+    )
+
+    await _audit_source(
+        request, admin_user, "skill_source_delete", source_id,
+        {"checkout_reclaimed": reclaimed},
+    )
+    return {"deleted": True, "source_id": source_id, "checkout_reclaimed": reclaimed}
+
+
+@router.post("/skills/sources/{source_id}/sync")
+async def sync_skill_source(
+    source_id: str,
+    admin_user: User = Depends(require_admin),
+):
+    """Sync ONE source, leaving the others untouched.
+
+    Human-only for the same reason as the full sweep above — this reaches the
+    same clone-and-re-inject machinery, just scoped to one source.
+    """
+    reject_agent_principal(admin_user)
+
+    if db.get_skill_source(source_id) is None:
+        raise HTTPException(status_code=404, detail="Skill source not found")
+
+    # Off the event loop, same as the full sweep: this is synchronous git
+    # subprocess work bounded only by the clone timeout, so running it inline in
+    # an async handler stalls every other request on this worker for as long as
+    # a clone takes.
+    result = await asyncio.to_thread(skill_service.sync_library, source_id)
+    if not result.get("success"):
+        # 409 on contention, mirroring the full-sweep route. ent#237 moved the
+        # ent#236 sync lock into the shared `sync_library`, so this route can
+        # now come back `busy` too — reporting that as a 400 would tell the
+        # caller their request was bad when the library is simply being updated
+        # by someone else, and is retryable.
+        raise HTTPException(
+            status_code=409 if result.get("busy") else 400,
+            detail=result.get("error", "Sync failed"),
+        )
+    return result
