@@ -40,21 +40,64 @@ _MODULE = (
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _isolate_environ():
+    """Snapshot and restore the CONTENTS of `os.environ`, never the object.
+
+    An earlier version of this fixture did
+    `monkeypatch.setattr(os, "environ", dict(baseline))`, i.e. replaced the
+    process-global mapping with a plain dict for the duration of each test.
+    That is hermetic for the test and hostile to everything else in the
+    process: `os.environ` stops writing through to the C environment, and any
+    thread still alive from another test — an APScheduler tick, an event-bus
+    dispatcher — sees an env with no PATH or HOME for that window. Whether such
+    a thread overlaps these tests is decided by `pytest-randomly`'s seed, which
+    is exactly the shape of a failure that appears under one seed and not the
+    other two.
+
+    Restoring contents keeps the real mapping (and its putenv side effects)
+    intact for everyone else while still giving each test a clean slate.
+    """
+    saved = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
+
+
 def _load(monkeypatch, baseline: dict):
     """Import a FRESH copy of the module under a controlled baseline.
 
-    `INITIAL_ENV` is captured at import time on purpose — it is the container
-    baseline, the thing `docker exec` shows. Re-importing per test is the only
-    honest way to control it, and it also keeps the module-level override /
-    mirrored-key state from leaking between tests.
+    `INITIAL_ENV` is the container baseline — what `docker exec` shows —
+    captured at import time. It is set explicitly here rather than by staging
+    a fake `os.environ` before the import, so controlling the baseline costs
+    nothing outside this module. Re-importing per test also keeps the
+    module-level override / mirrored-key state from leaking between tests.
+
+    Keys the baseline does not define are removed from the real environ, so a
+    test asserting "this key must not reach the child" cannot pass or fail on
+    whatever the developer's shell happened to export.
     """
-    monkeypatch.setattr(os, "environ", dict(baseline), raising=True)
     spec = importlib.util.spec_from_file_location(
         f"_execution_env_1999_{len(sys.modules)}", _MODULE
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+
+    mod.INITIAL_ENV = dict(baseline)
+    for key in _CONTROLLED_KEYS:
+        if key in baseline:
+            os.environ[key] = baseline[key]
+        else:
+            os.environ.pop(key, None)
     return mod
+
+
+# The keys these tests reason about. Scoped rather than clearing the whole
+# environ, so PATH/HOME stay real for anything else running in-process.
+_CONTROLLED_KEYS = (
+    "CANARY_VAR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "AGENT_RUNTIME",
+    "GOOGLE_API_KEY", "K", "OTHER", "SOMETHING", "TOKEN_A", "TRINITY_EXECUTION_ID",
+)
 
 
 @pytest.fixture
@@ -325,10 +368,13 @@ class TestProtectedKeys:
     def test_protected_keys_are_not_mirrored_into_the_process_either(
         self, monkeypatch, env_file
     ):
-        mod = _load(monkeypatch, {"PATH": "/usr/bin"})
+        """Asserted as "PATH is unchanged", not "PATH equals a fixture value":
+        the real mapping is in play now, and unchanged is the actual claim."""
+        mod = _load(monkeypatch, {})
+        before = os.environ.get("PATH")
         env_file.write_text('PATH="/tmp/evil"\n')
         mod.sync_process_env(env_file)
-        assert os.environ["PATH"] == "/usr/bin"
+        assert os.environ.get("PATH") == before
 
 
 # ---------------------------------------------------------------------------
