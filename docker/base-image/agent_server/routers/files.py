@@ -179,10 +179,16 @@ PROTECTED_PATHS = [
 #
 # .mcp.json and .mcp.json.template were historically editable here because
 # "users need to modify them" — but raw editing of either is RCE-by-config:
-# tool `command:` fields run as the agent process. Owners modify MCP servers
-# at agent-creation time via the template, or via the platform-internal
-# /api/credentials/update flow which regenerates .mcp.json from the template
-# with envsubst (no arbitrary content). See #590 (AISEC-C2).
+# tool `command:` fields run as the agent process. See #590 (AISEC-C2).
+#
+# The sanctioned paths (#2008 — this comment previously named
+# `/api/credentials/update`, which had no callers anywhere and was removed;
+# both blocks below were justified by a route that did not run):
+#   * declare servers in the template's `.mcp.json.template` — rendered into
+#     `.mcp.json` at container startup, `${VAR}` substituted inside `env` only,
+#     each server validated (#2007);
+#   * post-deploy, `POST /api/agents/{name}/credentials/inject` — the same
+#     `validate_mcp_config` gate, which is Layer 2 of the #590 closure (#598).
 #
 # CLAUDE.md is intentionally NOT here — owners do edit their agent's
 # instructions directly.

@@ -615,14 +615,6 @@ These tests run directly against an agent container's internal API. They require
 
 ### 17. Agent Server Credentials Tests (`test_agent_credentials_direct.py`)
 
-#### REQ-AS-CRED-001: Update Credentials
-- **Endpoint**: `POST /api/credentials/update`
-- **Tests**:
-  - Writes .env file
-  - Generates .mcp.json from template
-  - Returns updated files list
-- **Priority**: HIGH
-
 #### REQ-AS-CRED-002: Credential Status
 - **Endpoint**: `GET /api/credentials/status`
 - **Tests**:
