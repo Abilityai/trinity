@@ -269,8 +269,14 @@ jobs:
           # fail-closed on a missing input XML, so a stack that never booted
           # would surface as "this PR introduced regressions" — an
           # infrastructure failure wearing a PR's name. Fail the job loudly
-          # instead; the `comment` step then posts nothing for this PR rather
-          # than something false.
+          # instead.
+          #
+          # This comment used to end "the `comment` step then posts nothing for
+          # this PR rather than something false", and that was not true when it
+          # was written — #2029. Exiting here skipped the verdict, the status
+          # step still ran under `if: always()`, the unset output stringified to
+          # a clean result, and the sticky said ✅. The guard in `Write status
+          # JSON` below is what finally makes the sentence accurate.
           for side in base head; do
             xml="$GITHUB_WORKSPACE/junit-${side}-pr${{ matrix.pr_number }}.xml"
             if [ ! -s "$xml" ]; then
@@ -304,7 +310,36 @@ jobs:
         run: |
           merge_conflict='${{ steps.merge.outputs.merge_conflict }}'
           regression='${{ steps.diff.outputs.regression }}'
-          if [ -z "$regression" ]; then regression="false"; fi
+
+          # #2029: absence of a verdict is its own state, not "clean".
+          #
+          # This step is `if: always()`, so it also runs when the job died
+          # BEFORE a verdict existed — a failed checkout, a failed PR-head
+          # fetch, a non-conflict merge failure, or the missing-JUnit guard
+          # above. `merge_conflict` is then '', `'' == "true"` is false, and the
+          # JSON says `{merge_conflict: false, regression: false}` — identical
+          # to a genuinely clean run, which the comment job renders as a green
+          # tick for a suite that never ran.
+          #
+          # Writing no file is the honest answer: the comment job enumerates
+          # `status-pr*.json`, so a missing one leaves that PR's sticky exactly
+          # as it was.
+          if [ -z "$merge_conflict" ]; then
+            echo "::warning::merge verdict unknown for PR ${{ matrix.pr_number }} — no status written, sticky left untouched"
+            exit 0
+          fi
+
+          # `regression` is legitimately unset when the merge conflicted (the
+          # diff never ran). Any other empty value means the diff step was
+          # skipped by a job failure — the same unknown verdict as above.
+          if [ -z "$regression" ]; then
+            if [ "$merge_conflict" = "true" ]; then
+              regression="false"
+            else
+              echo "::warning::regression verdict unknown for PR ${{ matrix.pr_number }} — no status written, sticky left untouched"
+              exit 0
+            fi
+          fi
           jq -n \
             --arg pr "${{ matrix.pr_number }}" \
             --arg head_sha "${{ matrix.head_sha }}" \

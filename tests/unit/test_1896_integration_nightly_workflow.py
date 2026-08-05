@@ -198,3 +198,49 @@ def test_local_workflow_is_untouched():
         "run-core.sh no longer defines the same suite the nightly runs — the "
         "two must agree or the local path stops reproducing CI (#1896)"
     )
+
+
+# ---------------------------------------------------------------------------
+# #2029 — an absent verdict must not render as "clean"
+# ---------------------------------------------------------------------------
+
+
+def _status_step():
+    """The step that writes `status-pr*.json`, located by what it writes rather
+    than by name, so renaming it doesn't silently skip these assertions."""
+    for _name, job in _doc()["jobs"].items():
+        for step in job.get("steps") or []:
+            if isinstance(step, dict) and "status-pr" in str(step.get("run", "")):
+                return step
+    pytest.fail("no step writes status-pr*.json any more")
+
+
+def test_an_unknown_verdict_writes_no_status_file():
+    """This workflow's own missing-JUnit guard (`exit 1`) routes straight into
+    the #2029 defect: the job dies, `Write status JSON` still runs under
+    `if: always()`, the unset merge output stringifies to a clean verdict, and
+    the sticky comment says ✅ for a suite that never ran.
+
+    The guard makes the earlier comment's claim — "posts nothing for this PR
+    rather than something false" — actually true.
+    """
+    body = _commands(_status_step()["run"])
+    assert 'if [ -z "$merge_conflict" ]' in body, (
+        "the status step writes a verdict even when none was produced (#2029)"
+    )
+    assert "exit 0" in body[body.index('if [ -z "$merge_conflict" ]'):].split("fi")[0]
+
+
+def test_regression_defaults_to_false_only_on_a_real_conflict():
+    body = _commands(_status_step()["run"])
+    branch = body[body.index('if [ -z "$regression" ]'):]
+    assert '"$merge_conflict" = "true"' in branch[:400], (
+        "regression falls back to false without checking the merge actually "
+        "conflicted, so a skipped diff reads as clean (#2029)"
+    )
+
+
+def test_the_status_step_still_runs_on_failure():
+    """`if: always()` is what lets the step see the failed case at all —
+    removing it would suppress genuine conflict verdicts too."""
+    assert _status_step().get("if") == "always()"
