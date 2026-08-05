@@ -17,7 +17,15 @@ that. So a tag that resolves to a **different commit than last sync** is
 treated as an attack signal and refused (`moved_tag`), not silently adopted —
 the whole point of pinning is that the bytes don't change under you. Bumping to
 new content is done by pointing the source at a new tag NAME, which is an
-explicit admin action.
+explicit admin action — and one that works: `db.update_source` clears the
+recorded SHA whenever `url`/`ref`/`ref_type` change, because a pin baseline is
+only meaningful for the ref it was recorded against. (It did not, once: the
+bump was compared against the *old* tag's SHA and refused as a move, with the
+error telling the operator to do what they had just done.)
+
+Repointing a source's `url` re-clones rather than fetching: `origin` is written
+at clone time, so without that check every later sync silently pulled the OLD
+repo — `success`, moving commit, fleet re-inject and all. See `_origin_matches`.
 
 **Per-source skills root (ent#332).** The layout inside a source repo is no
 longer assumed to be `.claude/skills/`: each clone resolves its own root —
@@ -57,8 +65,10 @@ _GIT_HTTP_UA_ARGS = ["-c", "http.useragent=Trinity-Skills-Sync"]
 # Source ids are server-minted (`src_<hex>`), never user-supplied — but this is
 # a directory name derived from a DB value, so it is validated anyway rather
 # than trusted. One regex, applied at construction, is cheaper than auditing
-# every path join downstream.
-_SOURCE_ID_RE = re.compile(r"^src_[0-9a-f]{8,32}$")
+# every path join downstream. Public because `skill_service` reclaims orphaned
+# checkouts by directory name and must apply the SAME shape test — a second
+# copy of this pattern is a second thing to get wrong when it drifts.
+SOURCE_ID_RE = re.compile(r"^src_[0-9a-f]{8,32}$")
 
 # Git refs reach the command line. The SSRF allowlist covers the URL; this
 # covers the ref, so neither a branch nor a tag name can smuggle an option
@@ -111,11 +121,34 @@ def redact(text: str) -> str:
     return re.sub(r"https://[^@]+@", "https://***@", text or "")
 
 
+def canonical_remote(url: str) -> str:
+    """Comparable form of a git remote: no credentials, no `.git`, no trailing /.
+
+    Used only to answer "is the checkout's `origin` still the repo this source
+    is configured for". Userinfo is dropped because the stored URL never carries
+    a PAT while the on-disk `origin` always does for a private source, so a raw
+    comparison would report a repoint on every sync. Scheme and host are
+    case-folded; the PATH is not, since a local-filesystem remote (the shape the
+    tests use) is case-sensitive on Linux.
+    """
+    text = (url or "").strip()
+    if not text:
+        return ""
+    m = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*://)([^/]*)(.*)$", text)
+    if m:
+        scheme, netloc, rest = m.groups()
+        netloc = netloc.rsplit("@", 1)[-1]  # drop `user:pat@`
+        text = f"{scheme.lower()}{netloc.lower()}{rest}"
+    if text.endswith(".git"):
+        text = text[:-4]
+    return text.rstrip("/")
+
+
 class SkillSourceClone:
     """The local git clone backing one skill source."""
 
     def __init__(self, source_id: str, url: str, ref: str, ref_type: str, root: Path):
-        if not _SOURCE_ID_RE.match(source_id or ""):
+        if not SOURCE_ID_RE.match(source_id or ""):
             raise ValueError(f"unsafe skill source id: {source_id!r}")
         if not _REF_RE.match(ref or ""):
             raise ValueError(f"unsafe git ref: {ref!r}")
@@ -147,11 +180,25 @@ class SkillSourceClone:
         ignored for branch sources, where movement is the point.
         """
         try:
+            repointed = False
+            if (self.path / ".git").exists() and not self._origin_matches(auth_url):
+                self._discard_repointed_checkout()
+                repointed = True
+
             if (self.path / ".git").exists():
                 result = self._update(expected_sha)
             else:
                 result = self._clone(auth_url)
-                if result.get("success"):
+                # A repoint is a DIFFERENT repo, so `expected_sha` — recorded
+                # against the old one — is not a pin for this tag and must not
+                # refuse the very content the admin just asked for. The DB
+                # clears the SHA on a url/ref change (`update_source`) so this
+                # is normally already None; the guard keeps this class correct
+                # for a caller that doesn't. The genuine bypass case
+                # `_refuse_moved_pin_after_clone` exists for — a LOST checkout
+                # while upstream moved the tag — is untouched: there is no
+                # `origin` to mismatch when there is no checkout.
+                if result.get("success") and not repointed:
                     refused = self._refuse_moved_pin_after_clone(expected_sha)
                     if refused is not None:
                         result = refused
@@ -208,6 +255,47 @@ class SkillSourceClone:
             ),
             "moved_tag": True,
         }
+
+    def _origin_matches(self, auth_url: str) -> bool:
+        """Is this checkout's `origin` still the configured repo?
+
+        `_update_branch`/`_update_tag` fetch **`origin`**, which git wrote at
+        clone time — so without this check, repointing a source's `url` changed
+        nothing on disk and every later sync silently pulled the OLD repo,
+        reporting `success` with a moving commit that feeds ent#236's fleet
+        re-inject. Silent-wrong: the admin sees the new URL in Settings while
+        the fleet keeps receiving the previous repo's executables.
+
+        An unreadable or absent `origin` counts as a MATCH — i.e. no discard.
+        The answer is genuinely unknown there, and the action gated on it
+        deletes a directory: the fail-safe direction is to leave it alone and
+        let `_update`'s `fetch origin` fail honestly, rather than to widen an
+        unattended `rmtree` to cover an ambiguity (#1638/#1644). It costs
+        nothing for the case this exists for — a repointed source always has a
+        readable `origin`, that being the whole problem.
+        """
+        proc = self._git(["config", "--get", "remote.origin.url"], timeout=10)
+        if proc.returncode != 0:
+            return True
+        return canonical_remote(proc.stdout.strip()) == canonical_remote(auth_url)
+
+    def _discard_repointed_checkout(self) -> None:
+        """Drop a checkout whose source now points at a different repo.
+
+        Deleted rather than `git remote set-url`-ed, which would be the smaller
+        edit but leaves the OLD repo's refs in place — and a tag name present in
+        both repos at different commits then reads to `_update_tag` as a moved
+        pin and is refused forever. A skills clone is derived state, fully
+        reconstructible from the URL the admin just supplied, and this path only
+        runs on an explicit admin repoint (#1638's caution is about unattended
+        deletion of data with no other copy; neither clause holds here).
+        """
+        logger.warning(
+            "skill source %s now points at a different repository — discarding "
+            "the stale checkout at %s and re-cloning",
+            self.source_id, self.path,
+        )
+        shutil.rmtree(self.path, ignore_errors=True)
 
     def _quarantine_non_repo_dir(self) -> None:
         """Move a non-repository source directory aside so a clone can proceed.

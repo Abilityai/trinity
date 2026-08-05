@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -37,7 +38,7 @@ from database import db
 from services.settings_service import get_skills_library_url, get_skills_library_branch, get_github_pat
 from services.agent_client import get_agent_client, AgentClientError
 from services import skill_packaging as pkg
-from services.skill_source_clone import SkillSourceClone
+from services.skill_source_clone import SOURCE_ID_RE, SkillSourceClone
 from urllib.parse import urlparse, urlunparse
 
 from utils.url_validation import (
@@ -192,6 +193,83 @@ class SkillService:
                 logger.error(f"skipping unusable skill source {src.id}: {e}")
         return clones
 
+    def discard_source_checkout(self, source_id: str) -> bool:
+        """Reclaim a deleted source's clone (and its quarantine). Never raises.
+
+        Called after the row is gone, so it can only ever be best-effort — the
+        DB delete is authoritative and must not be undone by a filesystem
+        failure. `_reclaim_orphan_checkouts` is the backstop for the crash
+        window between the two.
+
+        The id is re-validated against the same regex `SkillSourceClone` uses
+        even though it comes from a server-minted DB value: this builds a path
+        that is then `rmtree`d, and "trusted because of where it came from" is
+        not a property that survives a caller being added.
+        """
+        if not SOURCE_ID_RE.match(source_id or ""):
+            logger.error("refusing to reclaim unsafe skill source id %r", source_id)
+            return False
+        removed = False
+        for path in (
+            self.library_root / source_id,
+            self.library_root / f"{source_id}.broken",
+        ):
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                    removed = True
+                    logger.info("reclaimed skills checkout %s", path)
+            except OSError as e:  # noqa: PERF203 — two paths, not a hot loop
+                logger.warning("could not reclaim skills checkout %s: %s", path, e)
+        return removed
+
+    def _reclaim_orphan_checkouts(self) -> List[str]:
+        """Remove per-source checkouts no `skill_sources` row points at.
+
+        The backstop to `discard_source_checkout`: a crash between the row
+        delete and the directory removal, or a pre-fix install that has been
+        accumulating clones through add/remove cycles, leaves directories with
+        no reclamation path short of shell access.
+
+        **Fail-CLOSED on the row read.** A DB error must reclaim nothing — a
+        sweep that treats "I could not read the sources" as "there are no
+        sources" deletes the entire library (#1638/#1644's lesson: the
+        destructive branch is the one that ships green). Only names matching the
+        server-minted source-id shape are considered at all, so the legacy
+        pre-ent#237 `.git` checkout, `_adopt_legacy_clone`'s staging directory
+        and anything else an operator put here are structurally out of scope.
+        Logs what it reclaims, per #1644.
+        """
+        try:
+            known = {s.id for s in db.list_skill_sources()}
+        except Exception:  # noqa: BLE001 — fail closed, reclaim nothing
+            logger.warning(
+                "skipping skills checkout reclamation: could not load sources",
+                exc_info=True,
+            )
+            return []
+        reclaimed: List[str] = []
+        try:
+            entries = list(self.library_root.iterdir())
+        except OSError:
+            return reclaimed
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            source_id = entry.name[:-len(".broken")] if entry.name.endswith(
+                ".broken"
+            ) else entry.name
+            if not SOURCE_ID_RE.match(source_id) or source_id in known:
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+            reclaimed.append(entry.name)
+        if reclaimed:
+            logger.info(
+                "reclaimed %d orphaned skills checkout(s): %s",
+                len(reclaimed), ", ".join(sorted(reclaimed)),
+            )
+        return reclaimed
+
     def _source_names(self) -> Dict[str, str]:
         try:
             return {s.id: s.name for s in db.list_skill_sources()}
@@ -310,7 +388,9 @@ class SkillService:
                 "error": "A skills library sync is already running",
             }
         try:
-            return self._sync_sources_locked(sources)
+            return self._sync_sources_locked(
+                sources, single_source=source_id is not None
+            )
         finally:
             self._release_sync_lock(sync_token)
 
@@ -345,16 +425,30 @@ class SkillService:
         except Exception:  # noqa: BLE001
             pass
 
-    def _sync_sources_locked(self, sources: List[Any]) -> Dict[str, Any]:
+    def _sync_sources_locked(
+        self, sources: List[Any], single_source: bool = False
+    ) -> Dict[str, Any]:
         """The git half of `sync_library`, run under the cross-worker lock.
 
         `sources` arrives already resolved and filtered by the caller —
         re-reading it here would re-query rows that may have changed after the
         lock was taken, so the set that is synced would not be the set that was
         admitted (ent#236's rationale, kept per-source by ent#237).
+
+        `single_source` is the caller's INTENT, not `len(sources) == 1`: a
+        full sweep of an install that happens to have one source is still a
+        full sweep, and must still reclaim orphans.
         """
         github_pat = get_github_pat()
         results: List[Dict[str, Any]] = []
+
+        # Reclaim checkouts of sources that no longer exist. Only on a FULL
+        # sweep: a single-source sync must not reach outside the source it was
+        # asked about, and the scheduled auto-sync is a full sweep, so a leaked
+        # directory is picked up within one interval anyway. Runs under the
+        # sync lock so it cannot race a concurrent clone into the same path.
+        if not single_source:
+            self._reclaim_orphan_checkouts()
 
         for src in sources:
             try:

