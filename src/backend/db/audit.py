@@ -41,7 +41,49 @@ class PlatformAuditOperations:
         in. Hash chain fields (`previous_hash`, `entry_hash`) are optional;
         Phase 4 enables them.
         """
-        stmt = insert(audit_log).values(
+        stmt = self._insert_stmt(entry)
+        with get_engine().begin() as conn:
+            conn.execute(stmt)
+
+    def create_audit_entry_chained(
+        self, entry: Dict[str, Any], compute_hash
+    ) -> None:
+        """Insert a HASH-CHAINED entry, reading the chain head in the same
+        transaction as the write (#2015).
+
+        The head used to live in a service attribute (`_last_hash`), which made
+        the chain a property of one process: with more than one worker each
+        kept its own head, wrote `previous_hash` values pointing into a
+        different worker's sequence, and `verify_chain`'s link check reported
+        the untampered result as **tampered** — the loud false positive its own
+        docstring warns against.
+
+        Reading it here instead makes the DB the single chain head. The SELECT
+        and the INSERT share one transaction so a concurrent append cannot land
+        between them and orphan the link; SQLite serializes writers, so the
+        second append blocks and then reads the first one's hash.
+
+        `compute_hash` is injected rather than imported: the hashing policy
+        belongs to the service (it decides WHICH fields are covered), while the
+        atomicity belongs here. Importing the service from a db module would
+        also invert the layering.
+        """
+        with get_engine().begin() as conn:
+            head = conn.execute(
+                select(audit_log.c.entry_hash)
+                .where(audit_log.c.entry_hash.isnot(None))
+                .order_by(audit_log.c.id.desc())
+                .limit(1)
+            ).scalar()
+            entry["previous_hash"] = head
+            entry["entry_hash"] = compute_hash(entry)
+            conn.execute(self._insert_stmt(entry))
+
+    @staticmethod
+    def _insert_stmt(entry: Dict[str, Any]):
+        """The INSERT, shared by the plain and chained writers so the two can
+        never drift on which columns they persist."""
+        return insert(audit_log).values(
             event_id=entry["event_id"],
             event_type=entry["event_type"],
             event_action=entry["event_action"],
@@ -62,8 +104,6 @@ class PlatformAuditOperations:
             previous_hash=entry.get("previous_hash"),
             entry_hash=entry.get("entry_hash"),
         )
-        with get_engine().begin() as conn:
-            conn.execute(stmt)
 
     # ---------------------------------------------------------------------
     # Read
