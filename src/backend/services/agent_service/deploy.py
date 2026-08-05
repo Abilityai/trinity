@@ -97,12 +97,30 @@ def _remove_partial_deploy(dest_created: Path | None) -> None:
     handle before creation starts, so a directory a container may already
     reference is never removed. Never raises — this runs on an error path and
     must not replace the real failure with a cleanup failure.
+
+    The containment check is repeated HERE rather than inherited from the
+    caller's #950 guard. `rmtree` is a destructive sink whose path descends
+    from a caller-supplied name, and "the caller already validated it" is a
+    property that survives exactly until someone adds a second call site. It is
+    also the barrier CodeQL recognizes (normalize → prefix-check → use the
+    normalized value), which is why the flagged alert was fixed rather than
+    dismissed: on a `rmtree`, "probably confined" is not the standard.
     """
     if dest_created is None:
         return
+
+    base = os.path.normpath(DEPLOYED_TEMPLATES_DIR_IN_BACKEND)
+    target = os.path.normpath(str(dest_created))
+    if not target.startswith(base + os.sep) or target == base:
+        logger.error(
+            "refusing to remove a partial deploy outside the deployed-templates "
+            "directory: %s", target,
+        )
+        return
+
     try:
-        shutil.rmtree(dest_created)
-        logger.info("Removed partial deploy directory: %s", dest_created)
+        shutil.rmtree(target)
+        logger.info("Removed partial deploy directory: %s", target)
     except Exception as e:  # noqa: BLE001 — the original error is what matters
         logger.warning(
             "could not remove partial deploy directory %s: %s", dest_created, e

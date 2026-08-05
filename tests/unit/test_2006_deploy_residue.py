@@ -329,6 +329,56 @@ class TestPartialDeployCleanup:
         assert (templates_dir / "late-fail").is_dir()
 
 
+class TestCleanupIsConfined:
+    """`_remove_partial_deploy` re-checks containment at the sink.
+
+    Raised by CodeQL (py/path-injection, high) against the `rmtree`: the path
+    descends from a caller-supplied name, and the #950 guard that confines it
+    lives in the CALLER. Fixed rather than dismissed — on a destructive sink,
+    "the caller already validated it" holds only until there is a second call
+    site.
+    """
+
+    def test_a_path_outside_the_templates_dir_is_refused(
+        self, templates_dir, user, monkeypatch, tmp_path
+    ):
+        outside = tmp_path / "not-templates" / "precious"
+        outside.mkdir(parents=True)
+        (outside / "data.txt").write_text("do not delete me")
+
+        deploy_mod._remove_partial_deploy(outside)
+
+        assert (outside / "data.txt").exists()
+
+    def test_the_templates_root_itself_is_refused(self, templates_dir, monkeypatch):
+        templates_dir.mkdir(parents=True)
+        (templates_dir / "other-agent").mkdir()
+
+        deploy_mod._remove_partial_deploy(templates_dir)
+
+        assert (templates_dir / "other-agent").exists()
+
+    def test_a_traversal_escape_is_refused(self, templates_dir, tmp_path):
+        templates_dir.mkdir(parents=True)
+        sibling = tmp_path / "sibling"
+        sibling.mkdir()
+
+        deploy_mod._remove_partial_deploy(templates_dir / ".." / "sibling")
+
+        assert sibling.exists()
+
+    def test_a_legitimate_child_is_still_removed(self, templates_dir):
+        child = templates_dir / "agent-v1"
+        child.mkdir(parents=True)
+
+        deploy_mod._remove_partial_deploy(child)
+
+        assert not child.exists()
+
+    def test_none_is_a_no_op(self):
+        deploy_mod._remove_partial_deploy(None)  # must not raise
+
+
 # ---------------------------------------------------------------------------
 # Static: the gate must stay in front of the persist
 # ---------------------------------------------------------------------------
