@@ -35,6 +35,7 @@ from ..model_context import resolve_context_window
 from ..state import agent_state
 from ..utils.credential_sanitizer import sanitize_dict, sanitize_subprocess_line, sanitize_text
 from ._runtime_config import _DEFAULT_MAX_TURNS_TASK, _load_guardrails
+from .execution_env import build_execution_env
 from .error_classifier import (
     _classify_empty_result,
     _classify_signal_exit,
@@ -605,7 +606,7 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
         text=True,
         bufsize=1,  # Line buffered
         start_new_session=True,
-        env={**os.environ, EXECUTION_TAG_NAME: ctx.task_session_id},
+        env=build_execution_env({EXECUTION_TAG_NAME: ctx.task_session_id}),
     )
     ctx.process = process
     # Issue #407: capture pgid now — after wait() reaps the parent,

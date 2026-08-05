@@ -22,6 +22,11 @@ from ..models import (
     TokenReloadResponse,
 )
 from ..state import agent_state
+from ..services.execution_env import (
+    env_drift_report,
+    set_runtime_override,
+    sync_process_env,
+)
 from ..services.trinity_mcp import inject_trinity_mcp_if_configured
 from ..utils.credential_sanitizer import refresh_credential_values
 from ..utils.helpers import iso_z_from_mtime
@@ -134,10 +139,14 @@ async def update_credentials(request: CredentialUpdateRequest):
             if inject_trinity_mcp_if_configured():
                 logger.info("Re-injected Trinity MCP after credential reload")
 
-        # 3. Also export credentials to environment (for current process)
-        # Note: This won't affect already-running subprocesses, but helps for new ones
-        for var_name, value in request.credentials.items():
-            os.environ[var_name] = str(value)
+        # 3. Re-point this process's env at the .env just written (#1999).
+        # Spawned executions no longer read this — `build_execution_env` parses
+        # the file per spawn — but in-process readers (error classifier,
+        # AGENT_RUNTIME, the sanitizer's redaction set) still do. Unlike the
+        # loop this replaces, it also REMOVES keys the new file dropped, so a
+        # re-push of a cleaned .env clears a deleted key instead of leaving it
+        # applied to every future execution.
+        sync_process_env(env_file)
 
         # SECURITY: Refresh credential sanitizer cache after updating credentials
         refresh_credential_values()
@@ -198,6 +207,15 @@ async def reload_subscription_token(request: TokenReloadRequest):
     os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = request.token
     if request.remove_api_key:
         os.environ.pop("ANTHROPIC_API_KEY", None)
+
+    # #1999: spawned processes build their env from INITIAL_ENV + .env +
+    # overrides, and this token is deliberately NOT a .env credential — so
+    # mutating os.environ alone would no longer reach the next subprocess.
+    # Recording it as a runtime override is what keeps #1089 working; `None`
+    # is a force-unset the file layer cannot express.
+    set_runtime_override("CLAUDE_CODE_OAUTH_TOKEN", request.token)
+    if request.remove_api_key:
+        set_runtime_override("ANTHROPIC_API_KEY", None)
 
     # Persist to the writable-layer override. Parent dir is created + chowned in
     # the Dockerfile, so the agent (UID 1000) can write here. Create the file
@@ -260,7 +278,13 @@ async def get_credentials_status():
     return {
         "agent_name": agent_state.agent_name,
         "files": files_status,
-        "credential_count": credential_count
+        "credential_count": credential_count,
+        # #1999: per-key drift between .env and this process's env — NAMES
+        # ONLY, never values. The ghost class was expensive to diagnose
+        # precisely because /proc/<pid>/environ and `docker exec` both agree
+        # with the file and disagree with what executions receive; this is the
+        # one route that shows the divergence.
+        "env_drift": env_drift_report(env_file),
     }
 
 
@@ -375,16 +399,11 @@ async def inject_credential_files(request: CredentialInjectRequest):
     # Export updated credentials to environment for this process
     # (helps new subprocesses, though existing ones won't see changes)
     if ".env" in files_written:
-        env_file = home_dir / ".env"
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, _, value = line.partition("=")
-                    key = key.strip()
-                    value = value.strip().strip('"').strip("'")
-                    if key:
-                        os.environ[key] = value
+        # #1999: same delete-aware sync as /update. The loop this replaces had
+        # no delete phase and a quote-stripping parser, so a re-injected .env
+        # with a key REMOVED left the old value applied to every subsequently
+        # spawned execution — invisible to /proc and docker exec.
+        sync_process_env(home_dir / ".env")
 
         # SECURITY: Refresh credential sanitizer cache after updating credentials
         refresh_credential_values()
