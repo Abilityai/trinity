@@ -85,10 +85,16 @@ class CanaryAlerts:
             "`agent:slots:*`."
         ),
         "S-03": (
-            "Slot metadata HASH TTL is below `execution_timeout_seconds + 300s` "
-            "(or missing entirely). Catches #226 class — slot metadata "
-            "expires while execution is still running, leaking the slot "
-            "permanently. Check the `expire()` call in `SlotService.acquire_slot`."
+            "Slot metadata HASH is missing (`missing`), has no expiry "
+            "(`no_expiry`), or was created with a TTL below its OWN stored "
+            "`timeout_seconds + 300s` (`below_floor`). The first two are the "
+            "#226 class — metadata expires while the execution is still "
+            "running, leaking the slot permanently; check the `expire()` call "
+            "in `SlotService.acquire_slot`. `below_floor` is narrower than it "
+            "looks (ent#336): the floor comes from the slot's own stored "
+            "timeout, which `acquire_slot` writes from the same local it "
+            "derives the TTL from, so it flags those two lines drifting apart "
+            "— NOT a caller passing a wrong timeout."
         ),
         "E-01": (
             "An execution stayed `running` past `execution_timeout_seconds + 300s` "
@@ -160,9 +166,13 @@ class CanaryAlerts:
             "for `[Capacity] maintenance tick failed`."
         ),
         "R-01": (
-            "Agent container has unreaped zombie `claude` processes (#407 class). "
-            "Restart the affected agent to clear; check agent-server's subprocess "
-            "wait() path for the reaped child."
+            "Agent container has a zombie `claude` process that has PERSISTED "
+            "past the dwell window (#407 class) — a transient zombie awaiting "
+            "its parent's wait() is normal and is deliberately not flagged "
+            "(ent#337). Compare `first_seen_count` with `zombie_count` to tell "
+            "a single stuck zombie from an accumulating leak. Restart the "
+            "affected agent to clear; check agent-server's subprocess wait() "
+            "path for the unreaped child."
         ),
     }
 
@@ -409,8 +419,13 @@ class CanaryAlerts:
                 ttl = obs.get("redis_ttl_seconds", "?")
                 floor = obs.get("floor_seconds", "?")
                 kind = _mrkdwn_safe(obs.get("kind"))
+                # ent#336: name where the floor came from — on a missing/
+                # no_expiry slot the HASH may be gone, so the printed floor is
+                # the agent-cap placeholder rather than this slot's own bound.
+                src = _mrkdwn_safe(obs.get("floor_source"))
                 lines.append(
-                    f"  • *{agent}* `{eid}`: TTL={ttl}s ({kind}); floor={floor}s"
+                    f"  • *{agent}* `{eid}`: TTL={ttl}s ({kind}); "
+                    f"floor={floor}s (from {src})"
                 )
             if len(violations) > 5:
                 lines.append(f"  • _… +{len(violations) - 5} more_")
@@ -485,7 +500,16 @@ class CanaryAlerts:
                 obs = v.observed_state or {}
                 agent = _mrkdwn_safe(obs.get("agent_name"))
                 count = obs.get("zombie_count", "?")
-                lines.append(f"  • *{agent}*: {count} zombie(s)")
+                # ent#337: the count alone reads as noise now that transients
+                # are filtered — how LONG it has held, and whether it grew
+                # since first-seen, are what distinguish a stuck zombie from
+                # an accumulating leak.
+                held = _format_duration(obs.get("held_for_seconds"))
+                first = obs.get("first_seen_count", "?")
+                trend = f"{first} → {count}" if first != count else f"{count}"
+                lines.append(
+                    f"  • *{agent}*: {trend} zombie(s), held {held}"
+                )
             if len(violations) > 5:
                 lines.append(f"  • _… +{len(violations) - 5} more_")
             return "\n".join(lines) if lines else None
@@ -665,7 +689,7 @@ class CanaryAlerts:
             agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
             kinds = sorted({_mrkdwn_safe(v.observed_state.get("kind")) for v in violations})
             return (
-                f"{len(violations)} slot(s) with TTL below floor "
+                f"{len(violations)} slot(s) with an unusable metadata TTL "
                 f"({'/'.join(kinds)}) on {len(agents)} agent(s): "
                 f"{', '.join(agents)[:160]}."
             )
@@ -709,9 +733,18 @@ class CanaryAlerts:
         if invariant_id == "R-01":
             agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
             total = sum(v.observed_state.get("zombie_count", 0) for v in violations)
+            # ent#337: worst dwell tells the reader whether this is a fresh
+            # stick or a long-running leak. `or 0` guards a None the same way
+            # the E-06/G-03 branches below do.
+            worst = max(
+                violations,
+                key=lambda v: v.observed_state.get("held_for_seconds") or 0,
+            )
+            worst_str = _format_duration(worst.observed_state.get("held_for_seconds"))
             return (
-                f"{total} zombie claude process(es) across {len(agents)} "
-                f"agent(s): {', '.join(agents)[:160]}."
+                f"{total} PERSISTING zombie claude process(es) across "
+                f"{len(agents)} agent(s), worst held {worst_str}: "
+                f"{', '.join(agents)[:160]}."
             )
         # The five branches below coerce `agent_name` with `or "?"` before
         # `sorted()`. This is NOT decoration: these are the first per-ROW
