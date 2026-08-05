@@ -218,9 +218,6 @@ class TestParsing:
             ('K="v"', "v"),
             ("K='v'", "v"),
             ("K=v", "v"),
-            ('K="a \\" b"', 'a " b'),          # the writer's own escaping
-            ('K="trailing\\""', 'trailing"'),  # .strip('"') would eat this
-            ("export K=v", "v"),
             ('K=""', ""),
             ("K=", ""),
             ('K="  spaced  "', "  spaced  "),
@@ -231,21 +228,55 @@ class TestParsing:
         env_file.write_text(line + "\n")
         assert mod.parse_env_file(env_file)["K"] == expected
 
+    @pytest.mark.parametrize("line,key,expected", [
+        # Byte-faithful to the export loop this replaces, ON PURPOSE. Each of
+        # these is a quirk someone might "fix" — and the ent#127 predicate
+        # (`credential_requirements_service._env_pairs`, whose source is
+        # spliced into an in-container probe) is defined as agreement with
+        # exactly these results. Improving the parse is a separate change with
+        # ent#127's parity test as its gate; doing it inside a revocation fix
+        # would move that predicate silently.
+        ('K=""""', "K", ""),            # every quote layer peeled, not one pair
+        ('K="\'v\'"', "K", "v"),         # both quote chars stripped, in order
+        ("K='\"v\"'", "K", '"v"'),       # ... so the inner pair survives here
+        ('K="', "K", ""),               # a lone quote is not a value
+        ("export K=v", "export K", "v"),  # the name really is two words
+        ("K-E-Y=v", "K-E-Y", "v"),      # os.environ accepts it; the child got it
+    ])
+    def test_quirks_are_preserved_deliberately(
+        self, monkeypatch, env_file, line, key, expected
+    ):
+        mod = _load(monkeypatch, {})
+        env_file.write_text(line + "\n")
+        assert mod.parse_env_file(env_file)[key] == expected
+
     @pytest.mark.parametrize(
         "content",
         [
             "# comment\n",
             "\n\n",
             "no_equals_sign\n",
-            "1BAD=x\n",       # not a valid env identifier
-            "BAD KEY=x\n",
-            "-BAD=x\n",
+            "=novalue\n",   # empty key
         ],
     )
     def test_junk_lines_are_skipped_not_fatal(self, monkeypatch, env_file, content):
         mod = _load(monkeypatch, {})
         env_file.write_text(content)
         assert mod.parse_env_file(env_file) == {}
+
+    @pytest.mark.parametrize("content,key", [
+        ("1BAD=x\n", "1BAD"),
+        ("BAD KEY=x\n", "BAD KEY"),
+        ("-BAD=x\n", "-BAD"),
+    ])
+    def test_odd_names_are_still_bound(self, monkeypatch, env_file, content, key):
+        """Not a valid shell identifier, but `os.environ[...]` accepts it and
+        the loop this replaces bound it — so the child DID receive it. Adding a
+        name filter here would be a silent behaviour narrowing inside a
+        revocation fix, and would also fork the ent#127 predicate."""
+        mod = _load(monkeypatch, {})
+        env_file.write_text(content)
+        assert mod.parse_env_file(env_file)[key] == "x"
 
     def test_missing_file_is_empty_not_an_error(self, monkeypatch, tmp_path):
         mod = _load(monkeypatch, {})

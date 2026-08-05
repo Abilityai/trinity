@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Dict, Mapping, Optional
 
@@ -72,9 +71,17 @@ PROTECTED_KEYS = frozenset({
     "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "BASH_ENV", "ENV", "IFS",
 })
 
-# POSIX-ish env name. A `.env` line whose key is not a valid identifier cannot
-# be exported by any shell either, so skipping it matches operator expectation.
-_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# NOTE (#1999): the parsing below is deliberately BYTE-FAITHFUL to the export
+# loop this replaces. That loop's exact quirks are a published contract — the
+# ent#127 "is this credential set" predicate
+# (`services/credential_requirements_service._env_pairs`) is *defined* as
+# agreement with it, and its source is spliced into an in-container probe. This
+# issue is about the LIFECYCLE (a removed key must stop applying), not about
+# parsing; changing both at once would silently move that predicate under a
+# security fix. Improving the parse — one matched quote pair instead of
+# peeling every layer, unescaping what the writer escaped, honouring
+# `export ` — is a real improvement and a separate change, with ent#127's
+# parity test as its gate.
 
 # `.env` is written by the platform but editable in-container; cap the read so
 # a runaway file cannot be loaded into memory at every single spawn.
@@ -122,29 +129,12 @@ def parse_env_file(path: Path = ENV_FILE) -> Dict[str, str]:
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-        if line.startswith("export "):
-            line = line[len("export "):].lstrip()
         key, _, value = line.partition("=")
         key = key.strip()
-        if not _ENV_KEY_RE.match(key):
+        if not key:
             continue
-        parsed[key] = _unquote(value.strip())
+        parsed[key] = value.strip().strip('"').strip("'")
     return parsed
-
-
-def _unquote(value: str) -> str:
-    """Strip ONE matched quote pair and unescape what the writer escaped.
-
-    Deliberately not `.strip('"')`: that eats every leading/trailing quote, so
-    a value that legitimately ends in `"` loses a character. The writer only
-    escapes `"` inside a double-quoted value, so that is all we reverse.
-    """
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-        inner = value[1:-1]
-        if value[0] == '"':
-            return inner.replace('\\"', '"')
-        return inner
-    return value
 
 
 # ---------------------------------------------------------------------------
