@@ -114,7 +114,7 @@ def test_all_time_is_allowed_for_categorical_groupings(router_mod, monkeypatch):
     import asyncio
 
     monkeypatch.setattr(router_mod.db, "get_fleet_execution_timeline",
-                        lambda *a, **k: [], raising=False)
+                        lambda *a, **k: [])
     monkeypatch.setattr(router_mod, "accessible_agent_names", lambda u: None)
     monkeypatch.setattr(router_mod, "narrow_to_agent", lambda names, a: names)
 
@@ -135,7 +135,7 @@ def test_day_series_is_continuous_even_with_no_data(router_mod, monkeypatch):
     import asyncio
 
     monkeypatch.setattr(router_mod.db, "get_fleet_execution_timeline",
-                        lambda *a, **k: [], raising=False)
+                        lambda *a, **k: [])
     monkeypatch.setattr(router_mod, "accessible_agent_names", lambda u: None)
     monkeypatch.setattr(router_mod, "narrow_to_agent", lambda names, a: names)
 
@@ -159,7 +159,6 @@ def test_a_populated_day_keeps_its_values_and_neighbours_are_zero(router_mod, mo
         router_mod.db, "get_fleet_execution_timeline",
         lambda *a, **k: [{"bucket": today, "total": 3, "success": 2, "failed": 1,
                           "cost": 0.5, "context_used": 900}],
-        raising=False,
     )
     monkeypatch.setattr(router_mod, "accessible_agent_names", lambda u: None)
     monkeypatch.setattr(router_mod, "narrow_to_agent", lambda names, a: names)
@@ -178,7 +177,7 @@ def test_hour_series_uses_hour_granularity(router_mod, monkeypatch):
     import asyncio
 
     monkeypatch.setattr(router_mod.db, "get_fleet_execution_timeline",
-                        lambda *a, **k: [], raising=False)
+                        lambda *a, **k: [])
     monkeypatch.setattr(router_mod, "accessible_agent_names", lambda u: None)
     monkeypatch.setattr(router_mod, "narrow_to_agent", lambda names, a: names)
 
@@ -198,7 +197,6 @@ def test_categorical_groupings_are_not_gap_filled(router_mod, monkeypatch):
         router_mod.db, "get_fleet_execution_timeline",
         lambda *a, **k: [{"bucket": "a1", "total": 1, "success": 1, "failed": 0,
                           "cost": 0.0, "context_used": 0}],
-        raising=False,
     )
     monkeypatch.setattr(router_mod, "accessible_agent_names", lambda u: None)
     monkeypatch.setattr(router_mod, "narrow_to_agent", lambda names, a: names)
@@ -229,7 +227,6 @@ def test_unknown_trigger_folds_to_other_instead_of_vanishing(router_mod, monkeyp
             {"bucket": "brand_new_trigger_type", "total": 5, "success": 5,
              "failed": 0, "cost": 0.2, "context_used": 20},
         ],
-        raising=False,
     )
     monkeypatch.setattr(router_mod, "accessible_agent_names", lambda u: None)
     monkeypatch.setattr(router_mod, "narrow_to_agent", lambda names, a: names)
@@ -261,7 +258,6 @@ def test_triggers_sharing_a_bucket_are_summed(router_mod, monkeypatch):
             {"bucket": same[1], "total": 3, "success": 3, "failed": 0,
              "cost": 0.25, "context_used": 7},
         ],
-        raising=False,
     )
     monkeypatch.setattr(router_mod, "accessible_agent_names", lambda u: None)
     monkeypatch.setattr(router_mod, "narrow_to_agent", lambda names, a: names)
@@ -289,8 +285,7 @@ def test_non_admin_scope_is_passed_to_the_db(router_mod, monkeypatch):
         seen["names"] = agent_names
         return []
 
-    monkeypatch.setattr(router_mod.db, "get_fleet_execution_timeline", _capture,
-                        raising=False)
+    monkeypatch.setattr(router_mod.db, "get_fleet_execution_timeline", _capture)
     monkeypatch.setattr(router_mod, "accessible_agent_names", lambda u: ["mine"])
     monkeypatch.setattr(router_mod, "narrow_to_agent", lambda names, a: names)
 
@@ -307,7 +302,6 @@ def test_admin_scope_is_none_meaning_no_filter(router_mod, monkeypatch):
     monkeypatch.setattr(
         router_mod.db, "get_fleet_execution_timeline",
         lambda agent_names, group_by, hours: seen.setdefault("names", agent_names) or [],
-        raising=False,
     )
     monkeypatch.setattr(router_mod, "accessible_agent_names", lambda u: None)
     monkeypatch.setattr(router_mod, "narrow_to_agent", lambda names, a: names)

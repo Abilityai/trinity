@@ -1324,6 +1324,13 @@ class DatabaseManager:
         """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
         return self._schedule_ops.get_fleet_execution_stats(agent_names, hours)
 
+    def get_fleet_execution_timeline(self, agent_names, group_by: str, hours: int):
+        """Bucketed fleet execution rollups — the time-series sibling of
+        :meth:`get_fleet_execution_stats` (ent#326)."""
+        return self._schedule_ops.get_fleet_execution_timeline(
+            agent_names, group_by, hours
+        )
+
     # =========================================================================
     # Git Configuration Management (delegated to db/schedules.py)
     # =========================================================================
