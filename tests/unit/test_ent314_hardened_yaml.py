@@ -37,6 +37,12 @@ import pytest
 import yaml
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
+# #1965: the agent server is a separate image that cannot import `src/backend`,
+# so it carries a byte-identical vendored copy of the loader (Invariant #5). It
+# parses the same author-controlled documents and was outside ent#314's sweep.
+_AGENT_SERVER = (
+    Path(__file__).resolve().parents[2] / "docker" / "base-image" / "agent_server"
+)
 _BACKEND_STR = str(_BACKEND)
 while _BACKEND_STR in sys.path:
     sys.path.remove(_BACKEND_STR)
@@ -263,6 +269,15 @@ def test_no_service_parses_yaml_without_the_shared_loader():
     `agent_service/lifecycle` and `git_service`. A guard whose scope is "the
     files I remembered" cannot find the one you forgot; that is how three
     partial loaders accumulated while the catalog path had none.
+
+    **#1965: and the WHOLE agent server too.** The first version of this scan
+    walked `_BACKEND.rglob` only, so `docker/base-image/agent_server/` stayed
+    outside the sweep with six bare `safe_load` calls on documents the backend
+    itself assigns REJECT — `template.yaml`, skill frontmatter, `dashboard.yaml`
+    and `.trinity/persistent-state.yaml`. A guard scoped to one tree cannot see
+    the sibling tree that parses the same documents, which is the same
+    self-fulfilling-scope failure this test's own docstring describes, one
+    directory up.
     """
     import ast
 
@@ -271,28 +286,39 @@ def test_no_service_parses_yaml_without_the_shared_loader():
     # directory it had just fixed, which is the same self-fulfilling scope that
     # let `agent_service/crud.py` sit unguarded. `utils/safe_yaml.py` is the one
     # module allowed to call PyYAML directly — it IS the guard.
-    for path in _BACKEND.rglob("*.py"):
-        rel = str(path.relative_to(_BACKEND))
-        if rel in {"utils/safe_yaml.py"} or "/venv/" in rel or rel.startswith("migrations/"):
+    #
+    # `_AGENT_SERVER` is a separate image that structurally cannot import
+    # `src/backend`, so it carries a byte-identical vendored copy (Invariant #5)
+    # — hence two exempt paths, one per tree.
+    roots = [
+        (_BACKEND, {"utils/safe_yaml.py"}),
+        (_AGENT_SERVER, {"safe_yaml.py"}),
+    ]
+    for root, exempt in roots:
+        if not root.exists():  # pragma: no cover - partial checkout
             continue
-        if rel in _BARE_SAFE_LOAD_ALLOWED:
-            continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError:  # newer syntax than this interpreter — not our call
-            continue
-        for node in ast.walk(tree):
-            # AST, not a line scan: `template_schedules.py`'s module docstring
-            # QUOTES `yaml.safe_load(...)` while explaining the guard, and a
-            # textual scan reported that prose as a vulnerability. The repo's
-            # own learnings entry (2026-07-10) records this exact trap.
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                if node.func.attr == "safe_load":
-                    offenders.append(f"{rel}:{node.lineno}")
+        for path in root.rglob("*.py"):
+            rel = str(path.relative_to(root))
+            if rel in exempt or "/venv/" in rel or rel.startswith("migrations/"):
+                continue
+            if rel in _BARE_SAFE_LOAD_ALLOWED:
+                continue
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError:  # newer syntax than this interpreter — not our call
+                continue
+            for node in ast.walk(tree):
+                # AST, not a line scan: `template_schedules.py`'s module docstring
+                # QUOTES `yaml.safe_load(...)` while explaining the guard, and a
+                # textual scan reported that prose as a vulnerability. The repo's
+                # own learnings entry (2026-07-10) records this exact trap.
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    if node.func.attr == "safe_load":
+                        offenders.append(f"{root.name}/{rel}:{node.lineno}")
 
     assert not offenders, (
-        "author-controlled YAML must go through utils/safe_yaml.load_hardened_yaml "
-        f"(ent#314). Unguarded parses: {offenders}"
+        "author-controlled YAML must go through the shared hardened loader "
+        f"(ent#314 / #1965). Unguarded parses: {offenders}"
     )
 
 
