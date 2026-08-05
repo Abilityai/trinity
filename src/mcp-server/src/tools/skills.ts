@@ -29,6 +29,11 @@ interface SkillInfo {
   file_count?: number;
   size_bytes?: number;
   version?: string | null;
+  // ent#237 provenance. `source_name` only — never a URL, since this tool is
+  // reachable by agent-scoped keys.
+  source_id?: string | null;
+  source_name?: string | null;
+  shadowed_by?: Array<{ source_id: string; source_name: string }>;
 }
 
 /**
@@ -36,12 +41,28 @@ interface SkillInfo {
  */
 interface SkillsLibraryStatus {
   configured: boolean;
-  url: string | null;
-  branch: string;
   cloned: boolean;
   last_sync: string | null;
-  commit_sha: string | null;
   skill_count: number;
+  // ent#237: multi-source. `sources` is the real shape now; the flat
+  // url/branch/commit_sha fields are retained by the backend for compatibility
+  // and reflect only the FIRST source in resolution order.
+  sources?: Array<{
+    id: string;
+    name: string;
+    ref: string;
+    ref_type: string;
+    is_default: boolean;
+    enabled: boolean;
+    last_sync_status: string | null;
+    skill_count: number;
+  }>;
+  source_count?: number;
+  enabled_source_count?: number;
+  shadowed_count?: number;
+  url: string | null;
+  branch: string;
+  commit_sha: string | null;
 }
 
 /**
@@ -108,7 +129,7 @@ export function createSkillsTools(
         if (skills.length === 0) {
           return JSON.stringify({
             message: "No skills available. The skills library may not be configured or synced.",
-            hint: "Configure skills_library_url in Settings and sync the library.",
+            hint: "Add a skills source in Settings \u2192 Agents and sync it.",
             skills: []
           }, null, 2);
         }
@@ -126,7 +147,12 @@ export function createSkillsTools(
             multi_file: s.multi_file ?? false,
             file_count: s.file_count ?? 0,
             size_bytes: s.size_bytes ?? 0,
-            version: s.version ?? null
+            version: s.version ?? null,
+            source: s.source_name ?? null,
+            // Non-empty => lower-precedence sources also ship this name and
+            // are unreachable. Surfaced so an agent reading the catalog sees
+            // the same conflict the UI shows (ent#237 AC#4).
+            shadowed_by: (s.shadowed_by ?? []).map(x => x.source_name)
           }))
         }, null, 2);
       },
