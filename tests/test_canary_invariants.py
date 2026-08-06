@@ -1585,6 +1585,7 @@ class TestInvariantE01:
         started_at="2026-05-18T11:00:00Z",
         timeout=900,
         running_ids=("e1",),
+        lease_expires_at=None,
     ):
         from canary.snapshot import Snapshot, AgentSnapshot
         return Snapshot(
@@ -1597,6 +1598,9 @@ class TestInvariantE01:
                     execution_timeout_seconds=timeout,
                     running_exec_ids=set(running_ids),
                     running_started_at={eid: started_at for eid in running_ids},
+                    running_lease_expires_at={
+                        eid: lease_expires_at for eid in running_ids
+                    },
                 )
             ],
         )
@@ -1649,6 +1653,39 @@ class TestInvariantE01:
         snap = self._snap(started_at="not-an-iso-timestamp")
         from canary.invariants import e01_terminal_state_closure as e01
         assert e01.check(snap) == []
+
+    # #1990 lease-awareness. The enforcing guard — including both grace
+    # boundaries, the cleanup-interval coupling, the absent-key fail-open, and
+    # the E-02 no-exclusion verdict — is
+    # `tests/unit/test_1990_e01_lease_awareness.py`; CI runs `pytest unit/`
+    # only, so a lease regression must go red there. These three keep the
+    # triple visible beside the rest of E-01's coverage.
+
+    def test_skips_pull_claimed_row_within_the_reaper_grace(self):
+        # Aged exactly as the firing case below, but pull-CLAIMED with a lease
+        # 1s overdue: owned by the lease-reaper, whose lease window IS
+        # timeout+buffer, so E-01 would otherwise page critical the instant the
+        # reaper became eligible.
+        snap = self._snap(lease_expires_at="2026-05-18T11:59:59Z")
+        from canary.invariants import e01_terminal_state_closure as e01
+        assert e01.check(snap) == []
+
+    def test_lease_overdue_past_the_grace_fires_as_a_reaper_failure(self):
+        # 11:49:00 vs a 12:00:00 snapshot = 660s overdue > the 600s grace: the
+        # reaper has skipped two of its own cycles. The silence is bounded.
+        snap = self._snap(lease_expires_at="2026-05-18T11:49:00Z")
+        from canary.invariants import e01_terminal_state_closure as e01
+        violations = e01.check(snap)
+        assert len(violations) == 1
+        assert violations[0].observed_state["lease_overdue_seconds"] == 660
+
+    def test_null_lease_row_of_same_age_still_fires(self):
+        # The control: the grace is keyed on the lease, not on age.
+        snap = self._snap(lease_expires_at=None)
+        from canary.invariants import e01_terminal_state_closure as e01
+        violations = e01.check(snap)
+        assert len(violations) == 1
+        assert violations[0].observed_state["age_seconds"] == 3600
 
 
 # ---------------------------------------------------------------------------

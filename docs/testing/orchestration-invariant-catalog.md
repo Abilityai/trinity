@@ -71,11 +71,38 @@ State machine: `queued → running → {success, failed, cancelled}`. See `src/b
 
 **E-01** Terminal-state closure *(Tier B ≤ timeout + 5 min, 🔴)*
 Every execution reaches a terminal state within its timeout + slot buffer.
-Signal: `status='running' AND started_at < now() - (timeout_seconds + 300s)` → must be 0.
+Signal: `status='running' AND started_at < now() - (timeout_seconds + 300s)
+AND (lease_expires_at IS NULL OR lease_expires_at < now() - 600s)` → must be 0.
+⚠️ **The lease clause is load-bearing (#1990), and so is its 600s bound.** A #1081 pull-CLAIMED row is
+`running` but owned **exclusively** by the lease-reaper, which re-queues or poison-parks it at
+`MAX_REDELIVERY` — so its age is not evidence of a stuck execution. The windows are in fact identical
+(`claim_next_queued` stamps the lease at `started_at + timeout + SLOT_TTL_BUFFER`), so without the clause E-01
+fired at the *instant* the reaper became eligible to act, with zero head-room, on every re-delivery — a
+**critical** stream indistinguishable from the real lights-out condition during the #1766 soak. Mirrors S-01,
+E-05 (#1982), and the six `lease_expires_at IS NULL` sweep exclusions in `db/schedules/` — including
+`mark_stale_executions_failed`, the sweep whose failure E-01 exists to detect. NULL-lease (push) rows are
+unaffected.
+**The grace is bounded, not an exclusion.** `600s` = 2 × `cleanup_service.CLEANUP_INTERVAL_SECONDS`, the loop
+the reaper runs in: a healthy reaper resolves an overdue lease within one 300s cycle (`requeue_expired_lease`
+clears the lease and resets `started_at` in one atomic UPDATE; `park_expired_lease` goes terminal), so
+observable overdue-ness tops out at one interval and the second interval is head-room. Past 600s the reaper has
+skipped multiple of its own cycles and the row fires — a **different diagnosis**, carried in `observed_state`
+as `lease_expires_at` / `lease_overdue_seconds` and split in the Slack runbook hint: the *lease-reaper* has
+failed, not `cleanup_service`'s stale-row watchdog. This is the automated owner of §9 **M4** in
+`PULL_MIGRATION_TESTING.md` (a #1766 abort criterion); a blanket exclusion would have left it to a human
+pasting SQL. **The constant is coupled to `CLEANUP_INTERVAL_SECONDS`** and
+`tests/unit/test_1990_e01_lease_awareness.py` asserts the 2× relation so the coupling cannot drift.
 
 **E-02** No phantom reversal *(Tier A, 🔴)* — the #378/#403 invariant.
 Once an execution is in a terminal state, its `status` is immutable for the rest of its life.
 Signal: audit-log every status transition; any `{success|failed|cancelled} → *` after that = violation.
+🚫 **No lease exclusion here — deliberately (#1990).** E-02 is the fourth reader of the running-row set and the
+only one that keeps seeing leased rows: a terminal→non-terminal reversal is corruption regardless of who owns
+the row, the reaper cannot produce one (`requeue_expired_lease` / `park_expired_lease` both CAS on
+`status='running'` with a past lease, so a terminal row is unreachable to them), and re-delivery *preserves*
+the `execution_id` (#1084/#525 are execution_id-scoped). Pull is **more** exposed to this bug class than push —
+a late worker result races a reaper pass for the same row — so copying #1990's grace here "for consistency"
+would blind E-02 for 600s on exactly the path #1081 adds.
 
 **E-03** Completed rows are fully populated *(Tier A, 🟡)* — ✅ **SHIPPED Phase 4, #1077** (registry id `E-03`).
 `status IN (success, failed, cancelled)` ⇒ `completed_at IS NOT NULL AND duration_ms IS NOT NULL`.

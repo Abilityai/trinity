@@ -29,7 +29,8 @@ integration stage gated on defect confirmation):
 1. ✅ **P0 defect confirmation** — B1–B6 via code + DB/unit repro (§2). All six CONFIRMED.
 2. ✅ **P0 dark-regression baseline** — existing suite green + live-PG dark-schema check (§4).
 3. ✅ **P0 concurrency on real PG** — T2.1 double-claim → surfaced + fixed **C1** (§5).
-4. ⬜ **P0 canary lease-awareness** — T3.6 (E-05) / T3.7 (E-01); pilot confirmed E-05 fires. Still open.
+4. ✅ **P0 canary lease-awareness** — T3.6 (E-05, closed by #1766) / T3.7 (E-01, closed by #1990). Every
+   invariant that reads the running-row set is now lease-aware except E-02, which deliberately is not.
 5. ✅ **P1 correctness** — Tiers 1/4/5; B1/B2/B3/B5 fixed + verified; B6 fixed (static).
 6. ⬜ **Opt-in gate** — Tier 6 side-effect safety (`effect_guard` fail-open when `execution_id` absent). Open.
 7. ✅ **Integration** — live pilot (#946), pull PROVEN end-to-end on `gtm-synthesizer` (§6).
@@ -148,7 +149,7 @@ Run on **both** engines (SQLite supported until EOS 2026-09-01), even though loc
 | T3.4 | Meter disjoint under re-delivery | P2 | A re-queued (`queued`) row counted by neither meter nor ZSET until re-claimed; a parked (FAILED) row by neither. |
 | T3.5 | Canary S-01 fix verified | P1 | Excludes `lease_expires_at IS NOT NULL` rows → no false-fire on a pilot; still fires for a genuine non-pull mismatch. |
 | T3.6 | **Canary E-05 false-fire (KNOWN pre-opt-in blocker)** | P0 | A pull-`running` row >60s with `claude_session_id IS NULL` trips E-05. Apply the same lease-exclusion **before any pilot opt-in**. |
-| T3.7 | Canary E-01 transient fire during re-delivery | P1 | A row `running` past `timeout+300s` mid-re-delivery may trip E-01. Fix via lease-exclusion or accept as retiring-with-ZSET at Phase 5. |
+| T3.7 | Canary E-01 fire on a legitimately-running pull turn | P1 | ✅ **CLOSED by #1990** — fixed via a bounded lease grace, not accepted and not a blanket exclusion. Not merely a re-delivery transient: `claim_next_queued` stamps the lease at `started_at + timeout + SLOT_TTL_BUFFER`, the **identical** window, so E-01 fired at the instant the reaper's recovery window opened and stayed red until its next sweep, every re-delivery, per execution, at **critical**. A leased row is now silent only while its lease is overdue by ≤ 600s (2 × the `cleanup_service` interval the reaper runs in); past that it fires as a *lease-reaper* failure — see M4 in §9. A NULL-lease control of the same age still fires. |
 
 ### TIER 4 — Lease reaper / redelivery / poison-park — P1
 
@@ -331,8 +332,15 @@ Ran on `gtm-synthesizer` (rebuilt image, `AGENT_AUTH_SECRET` fixed; chosen becau
 
 ~~Canary lease-awareness E-05 (§3 T3.6)~~ ✅ **closed by #1766** — E-05 now excludes leased rows, mirroring
 S-01 and the `mark_no_session_executions_failed` sweep it watches (which already carried
-`lease_expires_at IS NULL`); without it E-05 fired on every pull turn past 60s · canary lease-awareness
-E-01 (§3 T3.7) · Tier-6 `effect_guard` `execution_id` injection · ~~G3 canary-on-PG (#1540)~~ ✅ closed ·
+`lease_expires_at IS NULL`); without it E-05 fired on every pull turn past 60s ·
+~~canary lease-awareness E-01 (§3 T3.7)~~ ✅ **closed by #1990** — the same lease-awareness, on the invariant
+with the worst overlap: the lease is stamped at exactly `timeout + SLOT_TTL_BUFFER`, so E-01 fired **critical**
+the moment the lease-reaper became eligible and stayed red until its next sweep. E-01's is a **bounded grace**
+(600s = 2 × the `cleanup_service` interval the reaper runs in), not a blanket exclusion, so an overdue lease
+the reaper never touches still fires — that is M4's automated owner (§9). Canary lease-awareness is now
+complete: S-01 and E-05 exclude leased rows, E-01 grace-bounds them; E-02 deliberately does neither (a
+terminal→non-terminal reversal is corruption regardless of ownership, and pull is the more exposed path) ·
+Tier-6 `effect_guard` `execution_id` injection · ~~G3 canary-on-PG (#1540)~~ ✅ closed ·
 B6 runtime-verify on the rebuilt image · the ≥2-week soak (#856 / #1766, measurement set in §9).
 
 **Also closed by #1766:** the pilot flag was purely additive, so a pilot ran push AND pull concurrently —

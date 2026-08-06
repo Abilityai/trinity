@@ -100,8 +100,15 @@ class CanaryAlerts:
         ),
         "E-01": (
             "An execution stayed `running` past `execution_timeout_seconds + 300s` "
-            "buffer. Cleanup watchdog should have fired — inspect "
-            "`cleanup_service` logs and the agent container for a wedged Claude."
+            "buffer. Read `lease_expires_at` in the violation FIRST — it selects "
+            "the diagnosis (#1990). NULL ⇒ a push row the cleanup watchdog should "
+            "have closed: inspect `cleanup_service` logs and the agent container "
+            "for a wedged Claude. NON-NULL ⇒ a #1081 pull-claimed row whose lease "
+            "is overdue by more than the reaper's grace — the LEASE-REAPER has "
+            "not acted for several of its own cycles: check `_sweep_expired_leases` "
+            "in the cleanup loop, and whether the #1085 re-delivery governor is "
+            "holding it (`governor:pause` in Redis). Same invariant, different "
+            "component."
         ),
         "E-02": (
             "An execution went terminal then non-terminal. Look for retry "
@@ -474,9 +481,21 @@ class CanaryAlerts:
                 age = obs.get("age_seconds", "?")
                 timeout = obs.get("execution_timeout_seconds", "?")
                 buffer = obs.get("slot_ttl_buffer_seconds", "?")
+                # #1990: a leased row is a lease-reaper failure, not a wedged
+                # execution — say which, inline, so on-call is not sent after
+                # `cleanup_service` for the reaper's problem (or vice versa).
+                if obs.get("lease_expires_at"):
+                    overdue = obs.get("lease_overdue_seconds", "?")
+                    grace = obs.get("lease_reaper_grace_seconds", "?")
+                    tail = (
+                        f" — *lease-reaper*: lease overdue {overdue}s "
+                        f"> grace {grace}s"
+                    )
+                else:
+                    tail = ""
                 lines.append(
                     f"  • *{agent}* `{eid}`: age={age}s "
-                    f"(timeout={timeout}s + buffer={buffer}s)"
+                    f"(timeout={timeout}s + buffer={buffer}s){tail}"
                 )
             if len(violations) > 5:
                 lines.append(f"  • _… +{len(violations) - 5} more_")
@@ -768,9 +787,15 @@ class CanaryAlerts:
             )
         if invariant_id == "E-01":
             agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
+            # #1990: the leased split is the headline triage fact — a leased row
+            # means the lease-reaper is not running, not that an execution wedged.
+            leased = sum(
+                1 for v in violations if (v.observed_state or {}).get("lease_expires_at")
+            )
+            leased_note = f" ({leased} lease-reaper overdue)" if leased else ""
             return (
                 f"{len(violations)} execution(s) stuck in `running` past "
-                f"timeout+buffer across {len(agents)} agent(s)."
+                f"timeout+buffer across {len(agents)} agent(s){leased_note}."
             )
         if invariant_id == "E-02":
             return (

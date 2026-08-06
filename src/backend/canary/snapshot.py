@@ -220,13 +220,29 @@ class AgentSnapshot:
     # `lease_expires_at` per running id (ISO str, or None). A non-NULL value
     # marks a #1081-Phase-3 pull-CLAIMED row: it is `status='running'` but is
     # owned EXCLUSIVELY by the lease-reaper and NEVER enters the slot ZSET (a
-    # claim is a pure SQL UPDATE with no ZADD). S-01 uses this to exclude leased
-    # rows from the SQL side of its slot–row bijection, so a legitimately-
-    # unslotted pull row is not flagged `in_sql_only`. Read by S-01 and, since
-    # #1766, by E-05 — a leased row is `running` with a NULL claude_session_id
-    # by design, and `mark_no_session_executions_failed` (the sweep E-05 watches)
-    # already excludes leased rows for that reason. E-01/E-02 keep seeing the
-    # full `running_exec_ids` unchanged.
+    # claim is a pure SQL UPDATE with no ZADD).
+    #
+    # Read by S-01, E-05 and E-01 — the three invariants whose predicate the
+    # lease-reaper's ownership makes false:
+    #   * S-01 (#1081) excludes leased rows from the SQL side of its slot–row
+    #     bijection, so a legitimately-unslotted pull row is not `in_sql_only`.
+    #   * E-05 (#1766) — a leased row is `running` with a NULL
+    #     claude_session_id by design, and `mark_no_session_executions_failed`
+    #     (the sweep E-05 watches) already excludes leased rows for that reason.
+    #   * E-01 (#1990) — a leased row's deadline is its LEASE, not
+    #     `execution_timeout + 300s`; the two windows are in fact identical
+    #     (`claim_next_queued` stamps the lease at exactly that), so E-01 fired
+    #     at the instant the reaper became eligible to act, with zero head-room.
+    #
+    # E-02 is the fourth reader of `running_exec_ids` and deliberately does NOT
+    # exclude leased rows (#1990): a terminal→non-terminal reversal is corruption
+    # regardless of who owns the row, the reaper's CAS on `status='running'`
+    # cannot produce one, and re-delivery preserves the `execution_id` — so
+    # excluding leased rows would blind E-02 on the very path #1081 adds.
+    #
+    # Absent key ⇒ treat as NULL (`.get(eid) is None`): a collector that never
+    # populated the field (older image, pre-#1081 columns) must fail OPEN, i.e.
+    # keep checking the row.
     running_lease_expires_at: Dict[str, Optional[str]] = field(default_factory=dict)
     # `claude_session_id` per running id (str or None); used by E-05 to detect
     # dispatched rows that never acquired a backing session.
