@@ -14,7 +14,7 @@ import json
 import logging
 import random
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Request, Query, WebSocket
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Query, WebSocket
 
 from models import (
     AgentConfig,
@@ -433,9 +433,59 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
 
 
 @router.post("")
-async def create_agent_endpoint(config: AgentConfig, request: Request, current_user: User = Depends(require_role("creator"))):
-    """Create a new agent. Requires creator role or above."""
-    result = await create_agent_internal(config, current_user, request, skip_name_sanitization=False)
+async def create_agent_endpoint(
+    config: AgentConfig,
+    request: Request,
+    current_user: User = Depends(require_role("creator")),
+    idempotency_key: Optional[str] = Header(None),
+):
+    """Create a new agent. Requires creator role or above.
+
+    Invariant #18 (trinity-enterprise#15): accepts an optional
+    ``Idempotency-Key`` so a retried import (long fork/copy creates can outlive
+    client timeouts) replays the original response instead of 409ing on the
+    name. Header-only — no auto-derived key: name uniqueness already prevents a
+    double-create, the header adds transparent REPLAY. The scope folds the
+    caller (2026-07-20 learning: another user's identical key must never replay
+    a foreign create response).
+    """
+    from fastapi.encoders import jsonable_encoder
+    from fastapi.responses import JSONResponse
+    from services import idempotency_service
+
+    idem = None
+    if idempotency_key:
+        scope = f"agent_create:{current_user.id}"
+        idem = idempotency_service.begin(scope, idempotency_key)
+        if idem.replay:
+            if idem.in_flight:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": (
+                            "An agent create with this Idempotency-Key is "
+                            "still being processed."
+                        ),
+                        # Named distinctly from the name-taken 409 so clients
+                        # can tell "wait" from "pick another name".
+                        "code": "CREATE_IN_FLIGHT",
+                    },
+                )
+            return JSONResponse(
+                content=idem.snapshot, headers={"X-Idempotent-Replay": "true"}
+            )
+
+    try:
+        result = await create_agent_internal(config, current_user, request, skip_name_sanitization=False)
+    except Exception:
+        # Release the fresh claim so a corrected retry can proceed (fail-open;
+        # never converts the underlying error).
+        if idem is not None:
+            idempotency_service.fail(idem)
+        raise
+
+    if idem is not None:
+        idempotency_service.complete(idem, config.name, jsonable_encoder(result))
     # SEC-001: audit after successful creation. Failures here swallowed by the service.
     await platform_audit_service.log(
         event_type=AuditEventType.AGENT_LIFECYCLE,
@@ -450,6 +500,11 @@ async def create_agent_endpoint(config: AgentConfig, request: Request, current_u
             "template": getattr(config, "template", None),
             "base_image": getattr(config, "base_image", None),
             "agent_type": getattr(config, "agent_type", None),
+            # trinity-enterprise#15: import provenance — intent always; for a
+            # copy the snapshot's source repo + exact SHA (the only durable
+            # record of what a volume-lost snapshot agent was cloned from).
+            "import_intent": getattr(config, "import_intent", None),
+            "import_snapshot": getattr(result, "import_snapshot", None),
         },
     )
     return result

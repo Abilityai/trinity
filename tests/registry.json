@@ -1,6 +1,19 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent15_import_intents.py",
+      "feature": "trinity-enterprise#15",
+      "added": "2026-08-06",
+      "categories": [
+        "backend",
+        "unit",
+        "agent-lifecycle",
+        "github",
+        "security"
+      ],
+      "description": "GitHub import intents (ent#15): stage_github_snapshot with an object-patched async _run_git fake that plays the clone into the staging dir — success (head SHA capture, .git strip, escaping-symlink prune with in-tree symlink survival, regular-file count, PAT only on the clone call), COPY_SOURCE_UNREADABLE 400 (auth/not-found/remote-branch shapes) + staging cleanup, COPY_CLONE_FAILED 502 transient, COPY_SOURCE_EMPTY 400, --branch flag presence/absence; crud._resolve_template intake gates pre-side-effect (INTENT_REQUIRES_GITHUB_TEMPLATE, FORK_PARAMS_REQUIRED, INTENT_FORK_BLOCK_CONFLICT), intent-less local:default resolving gate-free, and copy-branch wiring (snapshot staged, github_repo/git_instance_id stay None, tokenless source-mode gate never fires — source_mode parametrized None/False/True); create_agent_endpoint idempotency — scope folds the caller (two principals, same key → different scopes), replay returns snapshot + X-Idempotent-Replay without re-creating, in-flight → 409 CREATE_IN_FLIGHT. Real modules owned per test (2026-07-12 learning); no Docker/DB."
+    },
+    {
       "file": "unit/test_1870_completed_turn_recovery.py",
       "feature": "#1870",
       "added": "2026-08-02",

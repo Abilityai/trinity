@@ -12,6 +12,13 @@ export interface Agent {
   };
   container_id?: string;
   mcp_exposed?: boolean;  // #846 — exposed as a dedicated chat_with_<slug> MCP tool
+  // trinity-enterprise#15: present on the create response for a copy-import
+  import_snapshot?: {
+    source_repo: string;
+    source_branch: string;
+    head_sha: string;
+    file_count: number;
+  };
 }
 
 export interface AgentConfig {
@@ -28,6 +35,9 @@ export interface AgentConfig {
   port?: number;  // SSH port - ui_port removed for security
   template?: string;
   source_branch?: string;  // Branch to track (default: main). Can also use github:owner/repo@branch syntax.
+  // trinity-enterprise#15: GitHub-repo import intent. MCP exposes only
+  // "copy" | "clone" — "fork" is web-UI-only (its PAT arg would be audit-logged).
+  import_intent?: string;
   // trinity-enterprise#69: ephemeral "ghost" agent budget — at least one of
   // max_executions/ttl_seconds; entitlement-gated at the backend.
   ephemeral?: {

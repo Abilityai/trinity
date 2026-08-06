@@ -234,7 +234,9 @@ async def validate_destination_pat(user_gh: GitHubService) -> str:
             400, "FORK_PAT_INVALID",
             "GitHub token is invalid or expired. It must be able to create "
             "repositories (classic PAT with 'repo' scope, or a fine-grained "
-            "token with Administration + Contents write).",
+            "token with Administration + Contents write). If your token is "
+            "read-only, use the 'copy' (snapshot) or 'clone' import intent "
+            "instead — neither needs repo-create scope. (trinity-enterprise#15)",
         )
     return login or ""
 
@@ -300,7 +302,10 @@ async def inspect_or_create_destination_repo(
         raise _http_error(
             400, "FORK_REPO_CREATE_FAILED",
             f"Could not create '{destination_repo}': "
-            f"{scrub_secret(result.error or 'unknown error', user_pat)}",
+            f"{scrub_secret(result.error or 'unknown error', user_pat)} "
+            f"If the token cannot create repositories, the 'copy' (snapshot) "
+            f"or 'clone' import intents work with read-only access. "
+            f"(trinity-enterprise#15)",
         )
     await _wait_for_repo_visible(user_gh, destination_repo)
     return DestinationState("created", [])
