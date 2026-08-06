@@ -118,8 +118,15 @@ export const useAgentsStore = defineStore('agents', {
         }
         return this.selectedAgent
       } catch (error) {
+        // #1914: re-throw. Swallowing here returned `undefined` to the caller,
+        // which is indistinguishable from a successful empty fetch — that is
+        // how a 404 rendered AgentDetail as a blank page (neither the error
+        // banner nor the agent body had a truthy condition). Callers that
+        // genuinely tolerate a failure (the post-stop status poll in
+        // AgentDetail) already wrap this in their own try/catch.
         this.error = error.message
         console.error('Failed to fetch agent:', error)
+        throw error
       } finally {
         this.loading = false
       }

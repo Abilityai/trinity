@@ -378,7 +378,12 @@ class SchedulerDatabase:
         triggered_by: str = "schedule",
         model_used: str = None,
         attempt_number: int = 1,
-        retry_of_execution_id: str = None
+        retry_of_execution_id: str = None,
+        source_user_id: Optional[int] = None,
+        source_user_email: Optional[str] = None,
+        source_agent_name: Optional[str] = None,
+        source_mcp_key_id: Optional[str] = None,
+        source_mcp_key_name: Optional[str] = None
     ) -> Optional[ScheduleExecution]:
         """Create a new execution record.
 
@@ -390,6 +395,17 @@ class SchedulerDatabase:
             model_used: Model override
             attempt_number: Which attempt this is (1 = first try, RETRY-001)
             retry_of_execution_id: Original execution ID for retries (RETRY-001)
+            source_user_id: User who initiated this run (AUDIT-001, #1970)
+            source_user_email: Email of that user (denormalized for durability —
+                the row must stay readable after the account is renamed/removed)
+            source_agent_name: Agent that initiated this run, if agent-initiated
+            source_mcp_key_id: MCP key id the initiator authenticated with
+            source_mcp_key_name: Human-readable name of that key
+
+        The five ``source_*`` columns are **attribution, never authorization** —
+        nothing gates on them. NULL is the correct value for a cron tick: no
+        caller exists, and inventing one would be worse than an honest blank
+        (#1970).
         """
         execution_id = self._generate_id()
         now = utc_now_iso()
@@ -399,8 +415,10 @@ class SchedulerDatabase:
             cursor.execute("""
                 INSERT INTO schedule_executions (
                     id, schedule_id, agent_name, status, started_at, message, triggered_by,
-                    model_used, attempt_number, retry_of_execution_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    model_used, attempt_number, retry_of_execution_id,
+                    source_user_id, source_user_email, source_agent_name,
+                    source_mcp_key_id, source_mcp_key_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 execution_id,
                 schedule_id,
@@ -411,7 +429,12 @@ class SchedulerDatabase:
                 triggered_by,
                 model_used,
                 attempt_number,
-                retry_of_execution_id
+                retry_of_execution_id,
+                source_user_id,
+                source_user_email,
+                source_agent_name,
+                source_mcp_key_id,
+                source_mcp_key_name
             ))
             conn.commit()
 
@@ -423,6 +446,11 @@ class SchedulerDatabase:
                 started_at=parse_scheduler_ts(now),
                 message=message,
                 triggered_by=triggered_by,
+                source_user_id=source_user_id,
+                source_user_email=source_user_email,
+                source_agent_name=source_agent_name,
+                source_mcp_key_id=source_mcp_key_id,
+                source_mcp_key_name=source_mcp_key_name,
                 attempt_number=attempt_number,
                 retry_of_execution_id=retry_of_execution_id
             )
@@ -725,6 +753,14 @@ class SchedulerDatabase:
         except (TypeError, ValueError):
             allowed_tools = None
         firing_at = row["firing_at"]
+        # #1970: guard the provenance columns the way _row_to_execution guards
+        # its optional ones — this mapper also serves `SELECT *` against a DB
+        # that may predate a column, and a bare row["col"] raises there.
+        row_keys = row.keys()
+
+        def _opt(col):
+            return row[col] if col in row_keys else None
+
         return Reminder(
             id=row["id"],
             agent_name=row["agent_name"],
@@ -738,6 +774,10 @@ class SchedulerDatabase:
             allowed_tools=allowed_tools,
             execution_id=row["execution_id"],
             error=row["error"],
+            owner_id=_opt("owner_id"),
+            created_by_email=_opt("created_by_email"),
+            source_agent_name=_opt("source_agent_name"),
+            source_mcp_key_id=_opt("source_mcp_key_id"),
         )
 
     def get_active_reminders(self) -> List[Reminder]:

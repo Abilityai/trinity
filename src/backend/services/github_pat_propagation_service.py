@@ -1,15 +1,40 @@
 """
 GitHub PAT propagation service (#211).
 
-Pushes the global GitHub PAT to running agents' .env files when it is updated
-in Settings, so agents pick up the new token without a restart.
+Pushes the global GitHub PAT to running agents when it is updated in Settings,
+so agents pick up the new token without a restart.
 
 Eligibility rules:
 - Agent container must be running.
 - Agent must NOT have a per-agent PAT (#347) configured — those override the global
   and are managed separately.
-- Agent's current .env must already contain a GITHUB_PAT key. Agents that never
-  set up GitHub are skipped to avoid injecting unused credentials.
+- Agent must either have a Trinity-managed git config (a `github_repo`) OR already
+  carry a `GITHUB_PAT` line in its `.env`. Agents with neither never set up GitHub
+  and are skipped, so a rotation does not spray the token into containers that
+  have no use for it.
+
+#1967 — WHAT ROTATION ACTUALLY REQUIRES
+---------------------------------------
+Two independent gaps each fully defeated a global rotation, and both existed
+because this path and the per-agent path (`propagate_pat_to_single_agent`, #1264)
+had drifted apart:
+
+1. **The eligibility gate was `.env`-shaped.** It required an existing
+   `GITHUB_PAT` line, so an agent provisioned from a GitHub template — which
+   ships `.env.example` and no `.env` — skipped as `skipped_no_pat`. On a fleet
+   of such agents, *every* agent skipped and the endpoint still answered
+   `success: true`.
+
+2. **`.env` is not where git authenticates from.** Clones are created as
+   `https://oauth2:<PAT>@github.com/<org>/<repo>.git` and that URL is persisted
+   in `.git/config` on the workspace volume. Rewriting `.env` changes nothing
+   for the running `git` process. Only re-templating the remote restores
+   fetch/push before a restart — which the per-agent path already did and this
+   one did not.
+
+So the `.env` write is the *next-start* fix and the remote rewrite is the *now*
+fix, and a rotation needs both. `_apply_pat_to_agent` below is now the single
+body both paths call, so the next divergence has to be deliberate.
 """
 import asyncio
 import logging
@@ -110,6 +135,61 @@ async def _apply_pat_to_env(
     return "updated"
 
 
+async def _apply_pat_to_agent(
+    client: httpx.AsyncClient,
+    agent_name: str,
+    pat: str,
+    *,
+    add_if_missing: bool,
+) -> tuple[str, bool]:
+    """Apply ``pat`` to one running agent: `.env` write **and** live remote rewrite.
+
+    #1967: the single shared body for both propagation paths. Previously the
+    global path wrote only `.env` and the per-agent path did both, so a global
+    rotation left every clone authenticating with the revoked token until its
+    container was restarted — for as long as it stayed up.
+
+    Returns ``(env_status, remote_updated)`` where ``env_status`` is
+    ``"updated"`` or ``"skipped_no_pat"``. The `.env` write raises httpx errors
+    for the caller to classify; the remote rewrite is best-effort by contract
+    (`git_service.update_remote_pat` returns False rather than raising), because
+    a container that cannot be exec'd into must not fail the whole rotation for
+    the agents that can.
+    """
+    from services import git_service
+
+    env_status = await _apply_pat_to_env(
+        client, agent_name, f"http://agent-{agent_name}:8000", pat,
+        add_if_missing=add_if_missing,
+    )
+
+    # The load-bearing half. Only meaningful for an agent whose clone Trinity
+    # templated in the first place — `update_remote_pat` no-ops without a repo.
+    git_config = db.get_git_config(agent_name)
+    github_repo = git_config.github_repo if git_config else None
+    remote_updated = (
+        await git_service.update_remote_pat(agent_name, pat, github_repo)
+        if github_repo else False
+    )
+    return env_status, remote_updated
+
+
+def _agent_has_git_config(agent_name: str) -> bool:
+    """True when Trinity manages a GitHub repo for this agent.
+
+    #1967: the eligibility signal that replaces "the `.env` already has a
+    `GITHUB_PAT` line". A template-provisioned agent has a git config from the
+    moment it is created but no `.env` until something writes one, which is
+    exactly the population the old gate excluded.
+    """
+    try:
+        git_config = db.get_git_config(agent_name)
+        return bool(git_config and git_config.github_repo)
+    except Exception:  # noqa: BLE001 — eligibility must not break the rotation
+        logger.warning("could not read git config for %s", agent_name, exc_info=True)
+        return False
+
+
 async def propagate_pat_to_single_agent(agent_name: str, pat: str) -> dict:
     """Push a newly-set per-agent PAT into a running container with no restart (#1264).
 
@@ -124,8 +204,6 @@ async def propagate_pat_to_single_agent(agent_name: str, pat: str) -> dict:
     the relaxed lifecycle injection + the startup.sh self-heal. Returns a small
     status dict for the set-PAT API response.
     """
-    from services import git_service
-
     # #1264 review: query the single container instead of enumerating the fleet.
     # get_agent_container is a module-level import (above) so it's patchable as a
     # stable module global, not resolved from sys.modules at call time.
@@ -134,21 +212,28 @@ async def propagate_pat_to_single_agent(agent_name: str, pat: str) -> dict:
         return {"applied": False, "reason": "agent_not_running"}
 
     env_updated = False
-    base_url = f"http://agent-{agent_name}:8000"
+    remote_updated = False
     async with httpx.AsyncClient(timeout=AGENT_HTTP_TIMEOUT_SECONDS) as client:
         try:
-            await _apply_pat_to_env(client, agent_name, base_url, pat, add_if_missing=True)
-            env_updated = True
+            # #1967: now the shared body. The remote rewrite used to sit outside
+            # this try, so it still ran when the `.env` write failed — preserved
+            # below by catching only the `.env` error and continuing.
+            env_status, remote_updated = await _apply_pat_to_agent(
+                client, agent_name, pat, add_if_missing=True
+            )
+            env_updated = env_status == "updated"
         except (httpx.HTTPStatusError, httpx.RequestError) as e:
             logger.warning("single-agent PAT .env inject failed for %s: %s", agent_name, e)
+            # The .env write is the half that failed; the remote rewrite is the
+            # load-bearing one and is independent of it, so still attempt it.
+            from services import git_service
 
-    # Re-template the live remote so an existing clone picks up the token now.
-    git_config = db.get_git_config(agent_name)
-    github_repo = git_config.github_repo if git_config else None
-    remote_updated = (
-        await git_service.update_remote_pat(agent_name, pat, github_repo)
-        if github_repo else False
-    )
+            git_config = db.get_git_config(agent_name)
+            github_repo = git_config.github_repo if git_config else None
+            remote_updated = (
+                await git_service.update_remote_pat(agent_name, pat, github_repo)
+                if github_repo else False
+            )
 
     return {
         "applied": env_updated or remote_updated,
@@ -162,11 +247,24 @@ async def _propagate_to_agent(
     new_pat: str,
     client: httpx.AsyncClient,
 ) -> AgentPropagationStatus:
-    """Read .env from one agent, patch GITHUB_PAT, write it back (global-PAT path)."""
-    base_url = f"http://agent-{agent_name}:8000"
+    """Apply the new global PAT to one agent: `.env` + live remote (global path).
+
+    #1967: `add_if_missing` is now derived per agent rather than hard-coded
+    False. An agent Trinity manages a repo for GETS the line written even when
+    its `.env` does not exist — that is the template-provisioned population the
+    old gate silently excluded. An agent with no git config keeps the
+    conservative behaviour (update an existing line, never create one), so a
+    rotation still does not inject the token into containers that have no use
+    for it.
+    """
+    has_git = _agent_has_git_config(agent_name)
     try:
-        status = await _apply_pat_to_env(client, agent_name, base_url, new_pat, add_if_missing=False)
-        return AgentPropagationStatus(agent_name=agent_name, status=status)
+        status, remote_updated = await _apply_pat_to_agent(
+            client, agent_name, new_pat, add_if_missing=has_git
+        )
+        return AgentPropagationStatus(
+            agent_name=agent_name, status=status, remote_updated=remote_updated
+        )
     except httpx.HTTPStatusError as e:
         error = f"agent returned {e.response.status_code}: {e.response.text[:200]}"
         logger.warning("GITHUB_PAT propagation failed for %s: %s", agent_name, error)
@@ -204,6 +302,7 @@ async def propagate_github_pat(new_pat: str) -> GithubPatPropagationResult:
     updated: List[str] = []
     skipped: List[AgentPropagationStatus] = list(pre_skipped)
     failed: List[AgentPropagationStatus] = []
+    remotes_updated = 0
 
     if targets:
         async with httpx.AsyncClient() as client:
@@ -226,14 +325,37 @@ async def propagate_github_pat(new_pat: str) -> GithubPatPropagationResult:
 
             if result.status == "updated":
                 updated.append(result.agent_name)
+                if result.remote_updated:
+                    remotes_updated += 1
             elif result.status == "failed":
                 failed.append(result)
             else:
                 skipped.append(result)
+
+    # #1967: log the shape an operator would otherwise only see in the response
+    # body. A rotation that updated nothing on a non-empty fleet is the exact
+    # silent failure this issue reports, and it deserves a WARNING in the
+    # platform log — not just a green line in a Settings panel nobody is looking
+    # at during an incident.
+    if running_agents and not updated:
+        logger.warning(
+            "GitHub PAT rotation reached 0 of %d running agents "
+            "(skipped=%d, failed=%d) — agents keep authenticating with the "
+            "previous token until restarted",
+            len(running_agents), len(skipped), len(failed),
+        )
+    elif updated and remotes_updated < len(updated):
+        logger.warning(
+            "GitHub PAT rotation updated %d agents but re-templated only %d "
+            "live git remotes — the remainder keep using the previous token "
+            "for git until restarted",
+            len(updated), remotes_updated,
+        )
 
     return GithubPatPropagationResult(
         total_running=len(running_agents),
         updated=updated,
         skipped=skipped,
         failed=failed,
+        remotes_updated=remotes_updated,
     )

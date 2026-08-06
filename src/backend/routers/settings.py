@@ -157,6 +157,7 @@ async def get_public_feature_flags(
         VOICE_ENABLED,
         VOIP_ENABLED,
         MCP_AGENT_CHAT_PULL_ENABLED,
+        MCP_INLINE_AUTH_ENABLED,
         REDELIVERY_GOVERNOR_ENABLED,
     )
     from services.entitlement_service import entitlement_service
@@ -197,6 +198,14 @@ async def get_public_feature_flags(
         # of the same env var. Lets an operator confirm, via the API, whether the
         # treatment window is active during the soak. NOT a UI surface.
         "mcp_agent_chat_pull_enabled": MCP_AGENT_CHAT_PULL_ENABLED,
+        # MCP inline email auth (#848) — default OFF. Observability-only here,
+        # mirroring the two flags around it: the real gates are the mcp-server's
+        # own read of the same env var (the keyless session tier) and
+        # require_inline_auth_enabled on /api/internal/mcp-auth/*. Both processes
+        # read ONE key, so this is also how an operator confirms the two halves
+        # actually agree after a deploy — the failure mode that shipped this PR
+        # with the flag wired into neither container. NOT a UI surface.
+        "mcp_inline_auth_enabled": MCP_INLINE_AUTH_ENABLED,
         # Re-delivery governor (#1085) — default OFF. Observability-only here:
         # the actual gates live at the callback endpoint / reaper / drain read
         # points. Lets an operator confirm via the API whether the correlated-
@@ -2686,6 +2695,40 @@ async def reset_ops_settings(
                 continue
             if db.delete_setting(key):
                 deleted.append(key)
+
+        # #1966: ent#297 added the audit entry to `/ops/config` but not here,
+        # while its own prose ("neither this route nor /ops/reset logged
+        # anything before") read as though it had covered both. So the exact
+        # asymmetry ent#297 objected to survived one route over: the generic
+        # `PUT /{key}` audits, `/ops/config` audits, this one did not.
+        #
+        # Retention windows genuinely cannot be reset here (#1638 skips them),
+        # but `ssh_access_enabled` can — resetting it changes whether ephemeral
+        # SSH credentials may be minted at all, and that left no trace.
+        #
+        # Logged unconditionally, NOT gated on `deleted` the way /ops/config
+        # gates on `updated`: there the empty case means nothing was asked for,
+        # whereas an admin pressing reset on already-default settings is a real
+        # administrative act whose absence from the log is indistinguishable
+        # from it never having been attempted.
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="ops_settings_reset",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            # Keys and counts only. Unlike /ops/config there is no value worth
+            # recording — every one of these is being DELETED, so the durable
+            # fact is which keys reverted to their code default and which were
+            # protected, not what they held on the way out.
+            details={
+                "reset": deleted,
+                "reset_count": len(deleted),
+                "skipped": sorted(RETENTION_OPS_KEYS),
+            },
+        )
 
         return {
             "success": True,
