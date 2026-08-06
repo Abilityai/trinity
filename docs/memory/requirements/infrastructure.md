@@ -300,7 +300,68 @@
 - **Storage**: `canary_violations` table; observed_state JSON column.
 - **Activation**: gated by `CANARY_ENABLED=1` env var; disabled by
   default. Production deployment is staging/dev — the harness watches
-  there, not in user-facing prod.
+  there, not in user-facing prod. `CANARY_ENABLED` and
+  `CANARY_SLACK_WEBHOOK_URL` must be forwarded under `backend.environment:`
+  in **both** `docker-compose.yml` and `docker-compose.prod.yml` (#1881
+  part 1, shipped as #1876): prod compose launches standalone — no base-compose merge and no
+  `env_file:` — so the explicit `environment:` list is the only path into
+  the container, and the vars were wired into the dev file only. Staging/dev
+  runs prod compose, so the harness was un-enableable on exactly the
+  deployment it exists for: a documented `.env` lever that silently did
+  nothing (#1039/#1056 packaging-gap class), and a silent-green one level
+  above H-01 that no invariant can catch, since invariants only run inside
+  the thing that isn't running. Pinned by
+  `tests/unit/test_canary_env_prod_parity.py`.
+- **Single-cycling-worker lease** (#1881 part 2): the FastAPI lifespan
+  starts `canary_service` in **every** uvicorn worker (prod runs
+  `--workers 2`) and the service held only a per-process `asyncio.Lock`,
+  which guards re-entrancy inside one process and says nothing about
+  cross-worker exclusion. Enabling the harness therefore meant two full
+  cycles per interval — R-01 `docker exec`ing into every running agent
+  container twice per 5 min, violations double-persisted (11,942
+  `canary_violations` rows in 24h, measured on eu2), and two independent
+  writers on every shared marker (`canary:last_cycle_at`,
+  `canary:last_cycle_red`, `canary:e02:terminal_seen`,
+  `canary:h01:suspect_since`). The two defects had to ship together: the
+  compose fix alone converts a dormant bug into a live one. The scheduled
+  loop now runs only when it holds the Redis `canary:leader` lease — SET
+  NX, TTL `max(3×interval, 900s)`, own-lease-only refresh, best-effort
+  release on `stop()` — mirroring `monitoring:leader` (#1464) and
+  `opqueue:leader` (#1632). Every worker still runs its loop and re-checks
+  each cycle, so leadership fails over when the holder dies with no
+  restart; non-leaders log on the **transition** only, never per cycle.
+  - **TTL floor**, the one deviation from `interval × 3`: a canary cycle's
+    cost is dominated by R-01's `container.exec_run` sweep, which is bounded
+    by no timeout and scales with *fleet size*, not with how often we look.
+    A shortened interval must not shorten the lease below one sweep, or it
+    lapses mid-cycle and leadership flaps — restoring the concurrent
+    probing the lease exists to remove. The floor is a no-op at the default
+    300s interval.
+  - **Fail-open to leader** when Redis is unreachable. The precedents' own
+    justification does not transfer — a duplicate canary cycle is *not*
+    inert (it re-runs the sweep and double-persists rows) — so it is taken
+    on different grounds: this is the one subsystem whose purpose is
+    noticing that something went quiet, and a canary that stops is the
+    silent-green failure H-01 exists to catch, one level up where nothing
+    can see it. Duplicated probes are noisy and visible; silence is not.
+    A Redis outage is also already a degraded state the harness announces
+    (`sources_unavailable`; H-01 fires unconfirmed on an unreadable
+    marker), and failing closed would suppress precisely those paths.
+  - Consequently the lease is **best-effort, not mutual exclusion**:
+    H-01's `CONFIRMATION_MIN_SECONDS` and R-01's `DWELL_SECONDS`
+    elapsed-wall-clock gates stay load-bearing and must not be relaxed to
+    "seen in a second cycle" on the strength of it. Both also ride out a
+    real-time transient, which is a single-worker property.
+  - Knock-on: a leader failover leaves up to ~1200s (TTL + interval) with
+    nobody cycling, which exceeds R-01's `_MAX_OBSERVATION_GAP_SECONDS`
+    (600) and restarts its dwell. Correct — a crashed leader is a genuine
+    observation outage, and restarting is the fail-safe direction.
+  - `run_cycle()` is deliberately **not** gated: `POST /api/canary/run-cycle`
+    lands on an arbitrary worker, so gating it would make an explicit admin
+    request return an empty payload roughly half the time under
+    `--workers 2` — structurally identical to a green cycle, the exact
+    ambiguity the 409 `"cycle in progress"` contract exists to remove.
+  - Guard: `tests/unit/test_1881_canary_leader_lease.py`.
 - **Fleet**: `config/canary-fleet.yaml` deploys two synthetic agents
   (`canary-fleet-burst` minute-cron, `canary-fleet-long` 5-min cron) via
   the existing `/api/systems/deploy` endpoint. Without the fleet, the
@@ -382,9 +443,13 @@
   wall-clock** (`CONFIRMATION_MIN_SECONDS`, marker `canary:h01:suspect_since`,
   E-02's cross-cycle-state precedent) so the last-agent delete race — DB row
   gone, container still tearing down — cannot false-fire. Deliberately NOT "a
-  second cycle": prod runs `--workers 2` and `canary_service` holds no leader
-  lease, so both loops share the marker and worker B would confirm worker A's
-  sighting seconds later, collapsing the gate. An unreadable *or unwritable*
+  second cycle": prod runs `--workers 2` and, when the gate was written,
+  `canary_service` held no leader lease, so both loops shared the marker and
+  worker B would confirm worker A's sighting seconds later, collapsing the
+  gate. The #1881 `canary:leader` lease does not retire the rule — it fails
+  open to leader on a Redis outage, restoring concurrent loops over the shared
+  marker, and the transient being ridden out is real-time regardless of worker
+  count. An unreadable *or unwritable*
   marker fires *unconfirmed* rather than skipping,
   because a guard that cannot self-check must say so; the marker carries a 24h
   TTL refreshed every suspicious cycle, so a `_clear_marker` that silently
