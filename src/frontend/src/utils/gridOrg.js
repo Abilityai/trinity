@@ -21,6 +21,27 @@
  */
 
 import { CELL_W, CELL_H, GAP_X, GAP_Y, cellXY, nearestFreeCell } from './gridLayout'
+import { isWidgetKey } from './gridWidgets'
+
+/**
+ * Layout entries that are NOT agents — today, info tiles (ent#325).
+ *
+ * Both arrange helpers below rebuild a FRESH map keyed from the `agents`
+ * array, and `fleetGrid.applyLayout` replaces the layout wholesale, so
+ * without this every `widget:*` position was destroyed by a single "Tidy up"
+ * or "Group by dept" the moment the org overlay was on. Seeding the output
+ * with these keys first both preserves them and makes them obstacles the
+ * agent placement flows around, since both helpers place through
+ * `nearestFreeCell`.
+ */
+function nonAgentEntries(layout, agents) {
+  const agentNames = new Set((agents || []).map((a) => a.name))
+  const out = {}
+  for (const [k, p] of Object.entries(layout || {})) {
+    if (!agentNames.has(k) && isWidgetKey(k)) out[k] = { c: p.c, r: p.r }
+  }
+  return out
+}
 
 export const DEPT_PREFIX = 'dept-'
 export const REPORTS_PREFIX = 'reports-to-'
@@ -254,7 +275,7 @@ function blockCols(n) {
  * blocks pack densely and the grid stays uniform. Output is a normal layout
  * map — fully hand-editable afterwards, exactly like Tidy.
  */
-export function arrangeByDept(agents, meta) {
+export function arrangeByDept(agents, meta, layout = null) {
   const m = meta || orgMeta(agents)
   const groups = new Map()
   for (const a of agents) {
@@ -269,7 +290,12 @@ export function arrangeByDept(agents, meta) {
     return y[1].length - x[1].length || x[0].localeCompare(y[0])
   })
   const MAX_COLS = 8
-  const layout = {}
+  // Seed with the info tiles so their positions survive the arrange and the
+  // department blocks flow around them (ent#325 AC). With no widgets on the
+  // board `nearestFreeCell` returns every requested cell unchanged, so the
+  // department layout is byte-identical to the pre-ent#325 behaviour — pinned
+  // by a test, because that equivalence is the whole reason this is safe.
+  const out = nonAgentEntries(layout, agents)
   let blockC = 0
   let blockR = 0
   let bandRows = 0
@@ -282,12 +308,12 @@ export function arrangeByDept(agents, meta) {
       bandRows = 0
     }
     names.forEach((n, i) => {
-      layout[n] = { c: blockC + (i % cols), r: blockR + Math.floor(i / cols) }
+      out[n] = nearestFreeCell(out, blockC + (i % cols), blockR + Math.floor(i / cols))
     })
     blockC += cols
     bandRows = Math.max(bandRows, rows)
   }
-  return layout
+  return out
 }
 
 /**
@@ -321,7 +347,9 @@ export function tidyByDept(layout, agents, meta) {
     return { dept, names: ordered, minC, minR }
   })
   entries.sort((a, b) => a.minR - b.minR || a.minC - b.minC)
-  const out = {}
+  // Seed with the info tiles (ent#325): preserved, and treated as obstacles
+  // by the `nearestFreeCell` placement below.
+  const out = nonAgentEntries(layout, agents)
   for (const g of entries) {
     const cols = blockCols(g.names.length)
     g.names.forEach((n, i) => {

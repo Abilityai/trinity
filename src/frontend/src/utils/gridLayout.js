@@ -110,14 +110,23 @@ export function defaultLayout(agentNames, systemNames = new Set()) {
  *   - an invalid or colliding saved position resolves to the nearest free cell
  * Returns `{ layout, changed }` — `changed` signals the caller to re-persist.
  */
-export function normalizeLayout(saved, agentNames, originFor = null) {
+export function normalizeLayout(saved, agentNames, originFor = null, widgetKeys = []) {
   const layout = {}
   let changed = false
-  const names = [...agentNames]
+  // Agents FIRST, then widgets (ent#325). Order matters: on a collision the
+  // first pass keeps whoever it reaches first, and an agent's saved position
+  // is the one a user is more likely to have arranged deliberately — an info
+  // tile evicted to a neighbouring cell is a smaller surprise than a fleet
+  // constellation shifting under them.
+  const names = [...agentNames, ...widgetKeys]
   const source = saved && typeof saved === 'object' ? saved : {}
+  const live = new Set(names)
 
-  // Drop entries for agents that no longer exist (gap remains free).
-  if (Object.keys(source).some((n) => !agentNames.includes(n))) changed = true
+  // Drop entries for occupants that no longer exist (gap remains free).
+  // `live` covers widgets too — checking against `agentNames` alone would
+  // report `changed` on every pass for any board carrying a widget, which
+  // re-persists localStorage once per reconcile forever.
+  if (Object.keys(source).some((n) => !live.has(n))) changed = true
 
   // First pass: keep valid, non-colliding saved positions.
   const pending = []
@@ -132,8 +141,14 @@ export function normalizeLayout(saved, agentNames, originFor = null) {
   }
 
   // Second pass: place newcomers / evicted entries near their origin.
+  // `originFor` is agent-only by contract (a widget has no department, so the
+  // org overlay has no zone to seed it beside) — widgets fall through to the
+  // board origin here, and their DEFAULT placement is owned by
+  // `gridWidgets.seedWidgetCells`, which knows about the band above the fleet.
   for (const name of pending) {
-    const origin = (originFor && originFor(name, layout)) || { c: 0, r: 0 }
+    const origin =
+      (originFor && !name.startsWith('widget:') && originFor(name, layout)) ||
+      { c: 0, r: 0 }
     const o = isValidPos(origin) ? origin : { c: 0, r: 0 }
     layout[name] = nearestFreeCell(layout, o.c, o.r)
     changed = true
