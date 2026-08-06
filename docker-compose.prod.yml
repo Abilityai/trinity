@@ -160,6 +160,13 @@ services:
       # operator manifest, or `disabled` to skip seeding. Empty = bundled
       # config/manifests/default-system.yaml.
       - TRINITY_DEFAULT_SYSTEM_MANIFEST=${TRINITY_DEFAULT_SYSTEM_MANIFEST:-}
+      # ent#126: directory the bundled-manifest catalog
+      # (GET /api/systems/manifests) reads. Empty = the image's own
+      # config/manifests (already bind-mounted :ro below). Point it at another
+      # bind-mounted directory to offer your own curated fleet manifests; an
+      # unreadable path is an EMPTY catalog, not an error, so mount the
+      # directory too — setting this alone silently lists nothing.
+      - TRINITY_MANIFESTS_DIR=${TRINITY_MANIFESTS_DIR:-}
       # Agent /tmp tmpfs size (#1231) — read by capabilities.py to build the
       # agent container mount spec. noexec,nosuid stay fixed; only size tunes.
       # Existing agents pick up a change on recreate, not restart.
