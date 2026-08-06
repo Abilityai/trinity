@@ -1246,7 +1246,11 @@ class TaskExecutionService:
                 logger.warning(
                     f"[TaskExecService] execution context build failed, falling back: {e}"
                 )
-                platform_prompt = get_platform_system_prompt(runtime=agent_runtime)
+                # ent#243: pass the model here too — a context-build failure must
+                # not silently swap the prompt tier as well as the context block.
+                platform_prompt = get_platform_system_prompt(
+                    runtime=agent_runtime, model=model
+                )
                 effective_system_prompt = (
                     platform_prompt + "\n\n" + system_prompt if system_prompt else platform_prompt
                 )

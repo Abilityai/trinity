@@ -70,13 +70,15 @@ export interface TokenResponse {
  * Extends Record<string, unknown> to satisfy FastMCP's session type requirements
  */
 export interface McpAuthContext extends Record<string, unknown> {
-  userId: string;        // Username of the key owner
+  userId: string;        // Username of the key owner ("anonymous" pre-login, #848)
   userEmail?: string;    // Email of the key owner
   keyId?: string;        // MCP API key ID (AUDIT-001: for execution origin tracking)
   keyName: string;       // Name of the MCP API key
   agentName?: string;    // Agent name if scope is 'agent', 'system', or 'connector'
   // user=human, agent=regular agent, system=bypasses all permissions,
   // connector=end-user consumption key bound to one agent (ent#46),
+  // anonymous=keyless pre-login session that may only call the inline-auth
+  // tools until verify_login upgrades it (#848),
   // portal_delegate=trusted issuer that exchanges an end-user email for a portal
   // session and nothing else (ent#163).
   //
@@ -87,8 +89,30 @@ export interface McpAuthContext extends Record<string, unknown> {
   // "user-scoped keys see all accessible agents" branch. Keep this union
   // exhaustive against `mcp_api_keys.scope`; anything not listed must be
   // treated as least-privileged, never as `user`.
-  scope: "user" | "agent" | "system" | "connector" | "portal_delegate";
+  scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous";
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
+
+  // --- #848 inline email auth (anonymous scope only) ---------------------
+  // Mutated IN PLACE by verify_login. FastMCP hands every tool the same auth
+  // object by reference, so an in-place upgrade is observed by all subsequent
+  // calls on the session without any library support. The session's advertised
+  // advertised tool list is deliberately NOT keyed on login state — behaviour
+  // flips, visibility does not. (FastMCP does re-filter live sessions; a
+  // login-keyed gate would just flip at reconciler timing. See server.ts.)
+  /** Set once the OTP is verified. Absent ⇒ still pre-login. */
+  verifiedEmail?: string;
+  /** Email awaiting a code, set by request_login. Not proof of anything. */
+  pendingEmail?: string;
+  /** Opaque per-session id, for correlating rate limits and audit rows. */
+  sessionId?: string;
+  /**
+   * Agent names this verified email may reach, as resolved by the backend at
+   * verify time. Used only to pick a default and to give a helpful error when
+   * several are available — it is NOT the authorization boundary. The backend
+   * re-gates every call on `email_has_agent_access`, so a stale or tampered
+   * list here cannot widen access.
+   */
+  agents?: string[];
 }
 
 export interface AgentAccessInfo {

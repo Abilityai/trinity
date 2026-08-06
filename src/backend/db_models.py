@@ -661,6 +661,34 @@ class AgentSkill(BaseModel):
     skill_name: str
     assigned_by: str  # Username of who assigned
     assigned_at: datetime
+    # ent#237: which source this assignment resolved from when it was made.
+    # None = assigned before multi-source, or the source row is gone. Recorded
+    # so a later cross-source swap under the same bare name is detectable.
+    source_id: Optional[str] = None
+
+
+class SkillSource(BaseModel):
+    """One git repo the skills library syncs from (ent#237).
+
+    Replaces the single ``skills_library_url`` system setting. Resolution on a
+    name collision is ``priority`` ascending then ``created_at`` ascending —
+    custom sources (100) beat the bundled default (1000), i.e. custom-wins.
+    """
+    id: str
+    name: str
+    url: str
+    ref: str = "main"
+    ref_type: str = "branch"   # 'branch' (tracks a moving head) | 'tag' (pinned)
+    is_default: bool = False   # the bundled community source; at most one
+    enabled: bool = True
+    priority: int = 100
+    last_sync_at: Optional[datetime] = None
+    last_sync_status: Optional[str] = None   # 'success' | 'failed' | 'never'
+    last_commit_sha: Optional[str] = None
+    last_error: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class SkillInfo(BaseModel):
@@ -684,6 +712,16 @@ class SkillInfo(BaseModel):
     file_count: int = 0
     size_bytes: int = 0
     version: Optional[str] = None  # git tree SHA of the skill dir
+    # ent#237 provenance. `source_name` carries no URL, so this model stays safe
+    # for the non-admin per-agent Skills tab (source URLs are admin-only, on
+    # GET /skills/sources).
+    source_id: Optional[str] = None
+    source_name: Optional[str] = None
+    # Lower-precedence sources that also ship this name and are therefore
+    # UNREACHABLE. Non-empty means the operator is running someone else's
+    # version of this skill than a given source intended — AC#4 requires that be
+    # visible, never a silent overwrite.
+    shadowed_by: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class AgentSkillsUpdate(BaseModel):

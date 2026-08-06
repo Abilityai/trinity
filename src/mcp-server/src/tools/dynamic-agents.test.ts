@@ -151,7 +151,7 @@ function baseOpts(server: FakeServer, fetchImpl: any) {
     agentChatPullEnabled: false,
     registerDynamicTool: server.registerDynamicTool,
     unregisterDynamicTool: server.unregisterDynamicTool,
-    connectorDenied: (_auth: any) => true,
+    operatorOnly: (_auth: any) => true,
     builtinToolNames: new Set<string>(["chat_with_agent", "list_agents"]),
     intervalMs: 1_000_000, // effectively disable the timer in tests
     runImmediately: false, // tests drive syncOnce() deterministically
