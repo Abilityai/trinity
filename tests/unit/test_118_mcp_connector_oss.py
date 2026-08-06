@@ -76,6 +76,65 @@ class TestService:
         for s in snips:
             assert "trinity_mcp_SECRET" in s.content and "http://localhost:8080/mcp" in s.content
 
+    def test_keyless_snippets_carry_no_authorization(self):
+        """#848 AC6: the keyless setup must contain no key and no auth header —
+        it connects as an anonymous session that signs in by email."""
+        from services.connector_service import build_keyless_snippets, build_snippets
+        keyless = build_keyless_snippets("agent-1", "http://localhost:8080/mcp")
+        # Same clients as the keyed variant — parity, not a divergent shape.
+        assert {s.client for s in build_snippets("agent-1", "u", "k")} == {
+            s.client for s in keyless
+        }
+        for s in keyless:
+            assert "http://localhost:8080/mcp" in s.content
+            assert "Authorization" not in s.content, "keyless config must carry no auth header"
+            assert "Bearer" not in s.content
+        # The email-login hint appears so the user knows the next step.
+        assert any("request_login" in (s.note or "") for s in keyless)
+
+
+# ---------------------------------------------------------------------------
+# Status endpoint — keyless snippets gated on the inline-auth flag (#848 AC6)
+# ---------------------------------------------------------------------------
+
+class TestStatusKeylessGating:
+    def _status(self, monkeypatch, flag_on):
+        import routers.connector as rc
+
+        # Patch through the router's own references (conftest evicts modules).
+        monkeypatch.setattr(rc.config, "MCP_INLINE_AUTH_ENABLED", flag_on)
+        monkeypatch.setattr(rc, "resolve_mcp_url", lambda _req: "http://localhost:8080/mcp")
+
+        class _DB:
+            def get_connector_config(self, _name):
+                return {"enabled": 1, "exposed_playbooks": None,
+                        "created_at": None, "updated_at": None}
+
+            def get_connector_key_prefix(self, _name):
+                return None  # no key — keyless must still be offered when the flag is on
+
+        monkeypatch.setattr(rc, "db", _DB())
+        return rc._status("agent-1", None)
+
+    def test_keyless_offered_only_when_flag_on(self, monkeypatch):
+        on = self._status(monkeypatch, True)
+        assert on.inline_auth_available is True
+        assert len(on.keyless_snippets) >= 1
+        for s in on.keyless_snippets:
+            assert "Authorization" not in s.content
+
+    def test_keyless_absent_when_flag_off(self, monkeypatch):
+        off = self._status(monkeypatch, False)
+        assert off.inline_auth_available is False
+        assert off.keyless_snippets == []
+
+    def test_keyless_is_independent_of_having_a_key(self, monkeypatch):
+        # get_connector_key_prefix returns None above, so has_key is False, yet
+        # the keyless setup is still offered — it's an ALTERNATIVE to the key.
+        on = self._status(monkeypatch, True)
+        assert on.has_key is False
+        assert on.keyless_snippets
+
 
 # ---------------------------------------------------------------------------
 # Config CRUD

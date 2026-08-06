@@ -9,7 +9,7 @@ and wedges the agent server's reader thread, the stream-json result
 event is lost — but the JSONL on disk usually contains the completed
 turn.
 
-Three recovery surfaces, all backed by a single file scan
+Four recovery surfaces, all backed by a single file scan
 (``_read_jsonl_records``):
 
 1. ``_recover_response_from_jsonl`` — when stdout dropped assistant text,
@@ -26,6 +26,25 @@ Three recovery surfaces, all backed by a single file scan
    per-call ``usage`` token counts, ``context_window``, and the
    ``model`` name from the JSONL so the failure row carries telemetry
    instead of null everything (#678).
+
+4. ``_recover_completed_turn_from_jsonl`` — when the runtime reports
+   ``error_during_execution`` for a turn that actually FINISHED, recover
+   the completed answer instead of discarding it (#1870). Distinct from
+   (1) in both trigger and boundary rule: (1) handles a clean exit whose
+   stdout was lost and anchors on the newest user-input record, which the
+   trailing ``<task-notification>`` captures — the #1870 defect. This one
+   anchors on positive completion evidence (``stop_reason: end_turn``) and
+   returns the marker message's ``message.id`` group.
+
+   NOTE — coverage bound: this reads a file that only exists when JSONL
+   persistence is on. ``headless_executor`` auto-enables it for
+   ``timeout_seconds > 600`` only, and ``execute_task`` never passes
+   ``persist_session=True``, so a schedule or webhook whose agent has
+   ``execution_timeout_seconds <= 600`` writes NO JSONL and #1870 stays
+   unfixed for it. There is no fallback: stream-json carries no completion
+   signal (``message.stop_reason`` measured ``None`` in 179/179 real
+   assistant records). The operator lever is raising the agent's timeout
+   above 600s.
 """
 from __future__ import annotations
 
@@ -33,7 +52,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -51,6 +70,42 @@ _MAX_JSONL_BYTES_FOR_RECOVERY = 10 * 1024 * 1024  # 10MB cap on read
 # the reader at a file outside the projects dir. Belt: this regex.
 # Suspenders: resolve() + is_relative_to() below.
 _SAFE_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+# #1870: the only `stop_reason` accepted as evidence that the model finished
+# its turn. `tool_use` means interrupted mid-work; `max_tokens` means the
+# output was truncated. `stop_sequence` is a legitimately-completed turn (63x
+# main-thread across 1,075 transcripts) but stays rejected — a coverage gap
+# fails safe, an uncharacterised shape does not.
+_COMPLETED_STOP_REASON = "end_turn"
+
+# #1870: tolerance on the marker's upper time bound. `task_start_iso` is a
+# naive UTC value stamped `Z` and `_parse_iso_timestamp` coerces naive to UTC,
+# so a container clock running AHEAD of UTC would let a previous turn's marker
+# pass the lower bound. Bounding both ends makes the staleness guard fail
+# closed in either direction.
+#
+# Calibration note: both sides of this comparison are produced INSIDE the agent
+# container — `task_start_iso` by the agent server and the record timestamps by
+# the `claude` CLI — and `now()` is read there too, so there is no cross-host
+# skew term to size against. In practice the bound catches a corrupt or absurd
+# future timestamp (and a container whose CLI ever wrote local-naive rather
+# than `Z` times, which would fail closed). The exact value is therefore slop,
+# not a tuned threshold; it fails closed either way, so the blast radius of it
+# being wrong is "the bug is not fixed for this turn".
+_MAX_FUTURE_CLOCK_SKEW_S = 300
+
+# #1870: `stop_reason` comes from an untrusted file, so only a known-shaped
+# token is ever echoed into a log line (the decline reason wants the value for
+# rollout diagnosis; the real vocabulary is `end_turn`/`tool_use`/`max_tokens`/
+# `stop_sequence`/`refusal`/...).
+_SAFE_STOP_REASON_RE = re.compile(r"^[a-z_]{1,32}$")
+
+
+def _safe_stop_reason(value: Any) -> str:
+    """A log-safe rendering of an untrusted ``stop_reason``."""
+    if isinstance(value, str) and _SAFE_STOP_REASON_RE.match(value):
+        return value
+    return "absent" if value is None else "other"
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +225,25 @@ def _record_timestamp(rec: Dict[str, Any]) -> Optional[datetime]:
     return _parse_iso_timestamp(rec.get("timestamp"))
 
 
+def _is_before(rec: Dict[str, Any], cutoff: datetime) -> bool:
+    """True when a record's timestamp parses AND predates ``cutoff``.
+
+    #1870: applied to EVERY collected record, on every path. After a 10MB seek
+    the realistic failure is not "no boundary was found" (the retained tail
+    almost always holds some string-content user record) but "a boundary was
+    found and it belongs to a PREVIOUS turn" — which a boundary-is-None
+    fallback never sees. Filtering the collected records bounds the blast
+    radius regardless of which path produced them.
+
+    An ABSENT or unparseable timestamp is not evidence of staleness, so such a
+    record is kept: dropping it would silently lose answer text. All 6,663
+    markers in the measured corpus carried timestamps, so this costs nothing
+    in practice.
+    """
+    rec_dt = _record_timestamp(rec)
+    return rec_dt is not None and rec_dt < cutoff
+
+
 # ---------------------------------------------------------------------------
 # Text recovery (refactored on top of the snapshot reader)
 # ---------------------------------------------------------------------------
@@ -240,6 +314,326 @@ def _recover_response_from_jsonl(session_id: Optional[str]) -> Optional[str]:
 
     if not text_parts:
         return None
+    return "\n".join(text_parts)
+
+
+# ---------------------------------------------------------------------------
+# Completed-turn recovery (#1870)
+# ---------------------------------------------------------------------------
+
+
+def _is_main_thread(entry: Dict[str, Any]) -> bool:
+    """True when a record belongs to the MAIN conversation thread.
+
+    ``isSidechain`` marks Task/subagent transcripts; ``isMeta`` marks injected
+    user messages (caveats, command wrappers). Both are excluded, because
+    either is fatal here: #1870's reproduction is a fan-out turn, and a
+    subagent finishing emits an assistant record with ``stop_reason:
+    end_turn`` while its prompt is a string-content user record — i.e. it
+    satisfies BOTH the marker test and the boundary test. Ungated, a crashed
+    main thread would return 200 carrying a subagent's internal thought, which
+    is strictly worse than the bug being fixed.
+
+    Measured over 1,075 transcripts (CC 2.1.181-2.1.220): current Claude Code
+    writes subagent transcripts to a SEPARATE ``<session>/subagents/agent-*.jsonl``
+    (0 ``isSidechain`` records in main-session files), so this is version-proofing
+    rather than a live defence — but older CLIs inlined them, sidechain assistant
+    records carry ``end_turn`` 961x in that same corpus, and an agent fleet runs
+    whatever CLI its base image happens to carry.
+
+    Known residual (accepted): a future CLI introducing a THIRD sub-thread
+    marker would slip through. The robust escalation is a ``parentUuid`` chain
+    walk rooted at the turn's opening user record; that is a second on-disk
+    format dependency and is not worth it here. The decline/hit log lines make
+    any such misfire diagnosable.
+    """
+    return not entry.get("isSidechain") and not entry.get("isMeta")
+
+
+def _message_of(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The ``message`` dict of a record, or None when it isn't one."""
+    msg = entry.get("message")
+    return msg if isinstance(msg, dict) else None
+
+
+def _text_blocks(msg: Dict[str, Any]) -> List[str]:
+    """Non-empty ``text`` block strings of a message, in order.
+
+    Every level is isinstance-guarded: a malformed record must be skipped, not
+    raise. Note ``thinking`` blocks are deliberately NOT collected — they are
+    the model's internal narration, never the answer.
+    """
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return []
+    out: List[str] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            continue
+        text = block.get("text")
+        if isinstance(text, str) and text:
+            out.append(text)
+    return out
+
+
+def _recover_completed_turn_from_jsonl(
+    session_id: Optional[str], since_iso: Optional[str]
+) -> Optional[str]:
+    """Recover the answer of a turn the runtime mislabelled as failed (#1870).
+
+    Claude Code can report ``is_error: true`` / ``error_during_execution`` for
+    a turn that actually FINISHED: the model reaches ``stop_reason: end_turn``,
+    a background subagent's ``<task-notification>`` lands after it, the
+    follow-on turn is interrupted, and the CLI's terminal-state check sees a
+    non-terminal last message. The completed answer is on disk; the caller
+    would otherwise raise 502 and discard it.
+
+    Returns the completed answer, or None when the transcript does not carry
+    positive evidence that this turn finished. **Fails closed everywhere** —
+    the worst case is "the bug is not fixed for this turn", never a wrong
+    answer reported as a success.
+
+    Why this is a NEW function rather than a ``since`` parameter on
+    ``_recover_response_from_jsonl``: that function walks backward from the END
+    OF FILE to the newest string-content user record, and the trailing
+    ``<task-notification>`` IS a string-content user record. The boundary
+    therefore lands PAST the completed answer and the forward scan returns
+    nothing. The notification is inside any plausible time window, so a window
+    could not have rescued it — the boundary rule itself is the defect. The
+    #678 path is working; leaving it untouched gives it zero regression risk.
+
+    Three independent gates, all required:
+
+    * **main-thread only** — ``_is_main_thread`` on marker selection, the
+      boundary walk AND text collection.
+    * **turn-scoped** — the marker's timestamp must parse and fall inside
+      ``[since_iso, now + skew]``. Fail closed when it doesn't: without a lower
+      bound a genuinely-aborted turn on a ``--resume`` session would recover
+      the PREVIOUS turn's answer and report it as this turn's success. The
+      upper bound exists because ``task_start_iso`` is a naive-UTC value
+      stamped ``Z`` and ``_parse_iso_timestamp`` coerces naive to UTC, so a
+      container running AHEAD of UTC would let a stale marker pass the lower
+      bound — failing OPEN into exactly the mode the guard exists to prevent.
+    * **finished** — the LAST qualifying assistant record must ITSELF carry
+      ``stop_reason == "end_turn"``. Deliberately stricter than "the last
+      ``end_turn`` anywhere in scope": if the main thread's final record is a
+      ``tool_use``, it was interrupted mid-work and no earlier ``end_turn``
+      may rescue it.
+
+    The answer is **the marker message's ``message.id`` group**, not a text
+    window ending at the marker. This is the single most important property
+    here. A thinking-enabled final message is written as TWO records sharing
+    one ``message.id`` — ``thinking`` first, answer ``text`` second — and BOTH
+    carry ``stop_reason: end_turn``:
+
+        idx 130  assistant  message.id=msg_X  end_turn  content=[thinking]
+        idx 131  assistant  message.id=msg_X  end_turn  content=[text]  <- THE ANSWER
+
+    Measured over 1,075 real transcripts (6,663 main-thread markers), **40.6%
+    of markers are thinking-only**. A window rule survives that only by
+    accident — it takes the LAST marker, and the text record happens to carry
+    ``end_turn`` too. Break the accident and it returns a truncated answer as a
+    200 SUCCESS: ``_read_jsonl_records`` drops the final partial line on an
+    interrupted write, and #1870 IS the interrupted-tail scenario. Lose that
+    one line and the thinking-only record becomes the marker, so the "response"
+    is the turn's intermediate narration with the final answer missing —
+    stored ``success``, no error, no retry. Strictly worse than the bug being
+    fixed: today the work is lost loudly, that would lose it quietly behind a
+    deliverable that reads like it is about to say something.
+
+    Grouping by ``message.id`` also makes the recovered response the RIGHT
+    artifact. A normal success stores only ``result_text`` (``stream_parser``
+    clears and replaces), whereas a ``(boundary, marker]`` window stores
+    intermediate narration a successful run never stores — measured
+    window/final text ratio p90 2.19x, p99 9.95x, max 79.5x. ``message.id``
+    grouping is exactly ``result_text`` semantics.
+
+    Concurrency is a non-issue, for a reason worth stating so it isn't
+    re-derived: by the time finalize runs, ``process.wait()`` has returned, so
+    ``claude`` — the only writer — has exited. The residual is precisely the
+    dropped partial tail line handled above.
+    """
+    # A turn we cannot scope is a turn we cannot safely recover: without a
+    # lower bound this degenerates into "return the newest end_turn in the
+    # file", which is the stale-answer mode. Fail closed.
+    since_dt = _parse_iso_timestamp(since_iso)
+    if since_dt is None:
+        logger.warning(
+            f"event=completed_turn_recovery_declined reason=no_since_iso "
+            f"session_id={session_id!r}"
+        )
+        return None
+
+    records, _truncated, err = _read_jsonl_records(session_id)
+    if err:
+        logger.warning(
+            f"event=completed_turn_recovery_declined reason={err} "
+            f"session_id={session_id!r}"
+        )
+        return None
+    if not records:
+        logger.warning(
+            f"event=completed_turn_recovery_declined reason=no_records "
+            f"session_id={session_id!r}"
+        )
+        return None
+
+    max_dt = datetime.now(timezone.utc) + timedelta(
+        seconds=_MAX_FUTURE_CLOCK_SKEW_S
+    )
+
+    # --- Gate 1+2: the last main-thread assistant record inside the window.
+    #
+    # Every skip records a DISTINCT reason. A decline is the only observable
+    # this gate emits, so collapsing causes into one label is how it rots: if a
+    # future CLI moves the `timestamp` field, EVERY recovery would decline with
+    # a reason an operator reads as "working as intended, the marker was old"
+    # and never investigates.
+    marker_idx: Optional[int] = None
+    skipped: set[str] = set()
+    for i, entry in enumerate(records):
+        if entry.get("type") != "assistant":
+            continue
+        if not _is_main_thread(entry):
+            skipped.add("sub_thread_only")
+            continue
+        if _message_of(entry) is None:
+            skipped.add("malformed_message")
+            continue
+        rec_dt = _record_timestamp(entry)
+        if rec_dt is None:
+            skipped.add("marker_no_timestamp")
+            continue
+        if rec_dt < since_dt:
+            skipped.add("stale_marker")
+            continue
+        if rec_dt > max_dt:
+            skipped.add("future_marker")
+            continue
+        marker_idx = i
+
+    if marker_idx is None:
+        # Precedence = "which cause implies an ACTION". An unparseable
+        # timestamp means the on-disk format moved (fix the parser); a future
+        # one means the container clock is wrong (fix the clock); a malformed
+        # message means the record shape moved. `stale_marker` and
+        # `sub_thread_only` are the guard working exactly as designed and are
+        # therefore reported last.
+        reason = "no_marker"
+        for candidate in (
+            "marker_no_timestamp",
+            "future_marker",
+            "malformed_message",
+            "stale_marker",
+            "sub_thread_only",
+        ):
+            if candidate in skipped:
+                reason = candidate
+                break
+        logger.warning(
+            f"event=completed_turn_recovery_declined reason={reason} "
+            f"session_id={session_id!r}"
+        )
+        return None
+
+    # --- Gate 3: that record must ITSELF report the turn finished.
+    marker_msg = _message_of(records[marker_idx])
+    assert marker_msg is not None  # guaranteed by the scan above
+    marker_stop_reason = marker_msg.get("stop_reason")
+    if marker_stop_reason != _COMPLETED_STOP_REASON:
+        # Includes `tool_use` (interrupted mid-work), `max_tokens` (truncated
+        # output is not a completed turn), a missing field, and any
+        # non-string junk. `stop_sequence` is also rejected: it is a
+        # legitimately-completed turn (63x main-thread in the corpus) but
+        # rejecting it merely leaves the bug unfixed for a rare shape, whereas
+        # accepting a shape we have not characterised risks a wrong answer.
+        #
+        # Distinct from `no_marker` on purpose: "the turn was genuinely
+        # interrupted" is the EXPECTED steady-state decline and must not read
+        # the same as "there were no main-thread assistant records at all".
+        # The observed value is the useful bit during rollout, but it comes
+        # from an untrusted file, so only a known-shaped token is echoed.
+        logger.warning(
+            f"event=completed_turn_recovery_declined reason=not_finished "
+            f"stop_reason={_safe_stop_reason(marker_stop_reason)} "
+            f"session_id={session_id!r}"
+        )
+        return None
+
+    # --- The answer: the marker message's `message.id` group.
+    marker_id = marker_msg.get("id")
+    text_parts: List[str] = []
+    if isinstance(marker_id, str) and marker_id:
+        for entry in records:
+            if entry.get("type") != "assistant" or not _is_main_thread(entry):
+                continue
+            msg = _message_of(entry)
+            if msg is None or msg.get("id") != marker_id:
+                continue
+            if _is_before(entry, since_dt):
+                continue
+            text_parts.extend(_text_blocks(msg))
+    elif not _text_blocks(marker_msg):
+        # FAIL CLOSED before the window walk ever runs.
+        #
+        # The `message.id` rule exists because a thinking-enabled final message
+        # is two records sharing one id and BOTH carry `end_turn`, so a dropped
+        # tail line leaves a thinking-only marker. Without an id we cannot
+        # group — and a `(boundary, marker]` window would then happily return
+        # the turn's EARLIER narration, with the answer entirely absent, as a
+        # 200 SUCCESS. That is the exact silent-partial-deliverable regression
+        # the id rule was written to prevent, re-opened on the only path that
+        # would ever run in the world where `message.id` is gone.
+        #
+        # Requiring the marker record to carry text itself closes it: a
+        # thinking-only marker declines here instead of laundering narration
+        # into an answer. A multi-record final message still gets its full
+        # window text below, because its LAST record carries text.
+        logger.warning(
+            f"event=completed_turn_recovery_declined reason=no_text "
+            f"session_id={session_id!r}"
+        )
+        return None
+    else:
+        # Fallback only for a marker with no `message.id`: the window walk.
+        # Boundary = the most recent MAIN-THREAD user record with string
+        # content, searched backward FROM THE MARKER (not from the end of
+        # file), so a post-answer `<task-notification>` can no longer capture
+        # it and a subagent prompt can no longer become it.
+        boundary_idx: Optional[int] = None
+        for i in range(marker_idx - 1, -1, -1):
+            entry = records[i]
+            if entry.get("type") != "user" or not _is_main_thread(entry):
+                continue
+            msg = _message_of(entry)
+            if msg is not None and isinstance(msg.get("content"), str):
+                boundary_idx = i
+                break
+        if boundary_idx is None:
+            logger.warning(
+                f"event=completed_turn_recovery_declined reason=no_boundary "
+                f"session_id={session_id!r}"
+            )
+            return None
+        for entry in records[boundary_idx + 1: marker_idx + 1]:
+            if entry.get("type") != "assistant" or not _is_main_thread(entry):
+                continue
+            msg = _message_of(entry)
+            if msg is None or _is_before(entry, since_dt):
+                continue
+            text_parts.extend(_text_blocks(msg))
+
+    if not text_parts:
+        # FAIL CLOSED. This is the truncated-tail case: the marker is a
+        # thinking-only record whose answer line was lost. Never fall back to
+        # window text here — that is the silent partial-deliverable regression
+        # described above.
+        logger.warning(
+            f"event=completed_turn_recovery_declined reason=no_text "
+            f"session_id={session_id!r}"
+        )
+        return None
+
     return "\n".join(text_parts)
 
 

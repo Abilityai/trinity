@@ -178,6 +178,12 @@ services:
       - AGENT_TOOL_STALL_LIMIT_S=${AGENT_TOOL_STALL_LIMIT_S:-}
       # #946 pull-pilot routing flag (observability mirror of the mcp-server gate).
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # #848 inline email auth — read by BOTH processes from this one key. The
+      # backend gates the /api/internal/mcp-auth/* surface on it (404 when off)
+      # and gates the keyless connector snippet. Prod compose launches standalone
+      # (no env_file merge), so without this the .env lever never reaches the
+      # container and the feature is un-flippable (#1056/#1039 class).
+      - MCP_INLINE_AUTH_ENABLED=${MCP_INLINE_AUTH_ENABLED:-false}
       # Pull / work-stealing pilot opt-in (#1081 Phase 2) + lease-reaper poison
       # cap (#429/#1402). Backend-only, process-env (needs a backend restart).
       # PULL_MODE_PILOT_AGENTS empty = pull fully dark; MAX_REDELIVERY default 3.
@@ -610,6 +616,17 @@ services:
       # #946 pull-pilot routing gate — see docker-compose.yml. Without this the
       # flag cannot be enabled in prod (the #1056/#1039 packaging-gap class).
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # #848 inline email auth — THIS is the session-tier gate: with it OFF a
+      # keyless MCP connection is refused outright and no login tools register.
+      # Same packaging-gap class as the line above; the backend reads the same key
+      # to gate /api/internal/mcp-auth/*.
+      - MCP_INLINE_AUTH_ENABLED=${MCP_INLINE_AUTH_ENABLED:-false}
+      # #848 ceiling for the four backend relay fetches on the inline-auth path.
+      # Functional via its 15000ms default; wired so the lever is not inert.
+      - MCP_INLINE_AUTH_TIMEOUT_MS=${MCP_INLINE_AUTH_TIMEOUT_MS:-15000}
+      # ent#328: `ask_trinity` POSTs here for grounded Trinity docs answers.
+      # Empty = the public Cloud Function default baked into the client.
+      - ASK_TRINITY_ENDPOINT=${ASK_TRINITY_ENDPOINT:-}
       # INTERNAL_API_SECRET (SEC-001) — shared secret for POST /api/internal/audit
       # so MCP tool-call audit reaches the backend. Mirrors docker-compose.yml;
       # without it audit.ts (postAudit) early-returns and ALL MCP tool-call audit

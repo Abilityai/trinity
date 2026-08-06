@@ -1,0 +1,74 @@
+{
+  "version": "1.1",
+  "date": "2026-08-04",
+  "mode": "daily",
+  "scope": "--diff",
+  "branch": "feature/ent-237-multi-source-skills",
+  "merge_base": "3f1d4c89b7b5a87f4b0f72910c4512bc439844af",
+  "phases_run": [0, 1, 2, 3, 9, 12, 13, 14],
+  "phases_skipped": {
+    "4_cicd": "no workflow changes in diff",
+    "5_infra": "no docker/compose changes in diff",
+    "6_webhooks": "no webhook or agent-identity endpoints in diff",
+    "7_llm": "no prompt/tool-schema surfaces in diff",
+    "8_skill_supply_chain": "no .claude/skills changes in diff",
+    "10_stride": "diff-scoped run",
+    "11_data_classification": "diff-scoped run"
+  },
+  "attack_surface": {
+    "new_endpoints": 5,
+    "new_unauthenticated_endpoints": 0,
+    "new_admin_endpoints": 5,
+    "new_db_tables": 1,
+    "new_outbound_network_classes": 1,
+    "new_dependencies": 0
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "HIGH",
+      "confidence": 10,
+      "status": "VERIFIED",
+      "resolution": "FIXED",
+      "category": "Supply Chain / Data Integrity",
+      "phase": "P9/A08",
+      "file": "src/backend/services/skill_source_clone.py",
+      "line": 90,
+      "title": "Tag pin enforced only on the update path; a fresh clone adopts a moved tag silently",
+      "description": "_update_tag enforces the pin via a no-force fetch and a recorded-SHA comparison, both properties of an existing checkout. sync() routes to _clone() whenever .git is absent, and that path took no expected_sha and performed no comparison. The _update_tag docstring claimed to cover the fresh-clone case; it does not.",
+      "exploit_scenario": "Source pinned to tag v0.1.0 syncs and records SHA A. The local checkout is lost (this class's own _quarantine_non_repo_dir rename, a restored /data backup, or a recreated volume). Upstream force-moves v0.1.0 onto a commit adding an executable. Next sync takes the clone path and adopts the moved tag, returning success with a changed commit — so ent#236's fleet re-inject pushes the payload to every running agent, unattended.",
+      "verification": "Executed end-to-end against a local upstream repo. Before fix: success=True, moved_tag=None, action=cloned, commit changed from pinned SHA, backdoor.sh present on disk. After fix: success=False, moved_tag=True, checkout removed, backdoor absent.",
+      "impact": "Arbitrary third-party code injected fleet-wide into agent containers, defeating the feature's stated AC#5 supply-chain control, with a successful-looking sync.",
+      "recommendation": "Verify the resolved HEAD against the recorded SHA after a fresh clone and delete the checkout on refusal, since list_skills and injection read the working tree.",
+      "fix_applied": "_refuse_moved_pin_after_clone in skill_source_clone.py; regression test test_moved_tag_is_refused_on_a_FRESH_clone_too (fails without the fix) plus test_first_ever_clone_of_a_tag_has_no_pin_to_check."
+    }
+  ],
+  "clean_verified": [
+    "A10 SSRF — github.com allowlist enforced on create, update, and re-validated at sync",
+    "A03 command injection — ref regex forbids leading '-', '--' separator before URL, list-form args",
+    "A03 SQL injection — SQLAlchemy Core throughout db/skill_sources.py",
+    "A01 access control — require_admin on all 5 routes; reject_agent_principal on 4 mutations + the LIST read",
+    "Credential exposure — PAT URL never logged; redact() on all git stderr; _scrub_pat on durable status",
+    "Host confusion — PAT splice decided by parsing, not substring match",
+    "Embedded credentials rejected on create and update",
+    "P2 secrets — none introduced (test placeholders only)",
+    "P3 supply chain — no dependency changes",
+    "Subprocess timeouts present on every git invocation",
+    "Fresh-install seed is fail-safe, idempotent, row-based, tag-pinned"
+  ],
+  "filter_stats": {
+    "candidates_considered": 9,
+    "dropped_hard_exclusion": 4,
+    "dropped_below_confidence_gate": 4,
+    "reported": 1
+  },
+  "totals": {"critical": 0, "high": 1, "medium": 0, "low": 0},
+  "trend": {
+    "prior_report": "cso-diff-2026-07-29-ent236-skills-lifecycle.md",
+    "new": 1,
+    "resolved": 0,
+    "persistent_external": ["ent#293 — agent-scoped key satisfies assert_admin (pre-existing, mitigated on this diff's routes)"],
+    "direction": "improving"
+  },
+  "incident_response_required": false
+}

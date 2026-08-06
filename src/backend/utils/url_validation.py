@@ -15,6 +15,36 @@ from urllib.parse import urlparse
 ALLOWED_SKILLS_LIBRARY_HOSTS = {"github.com", "www.github.com"}
 
 
+class EmbeddedCredentialError(ValueError):
+    """A URL carries userinfo (`https://<token>@host/...`)."""
+
+
+def reject_embedded_credentials(url: str) -> None:
+    """Refuse a URL embedding a token or password.
+
+    `validate_skills_library_url` checks `parsed.hostname`, which IGNORES
+    userinfo, and returns the URL unchanged — so a tokenized clone URL passes
+    SSRF validation and is then persisted verbatim wherever the caller stores
+    it. Pasting one is an easy mistake: it is the form GitHub hands you for
+    scripted clones.
+
+    Deliberately NOT folded into `validate_skills_library_url`: that helper
+    serves the pre-ent#237 `skills_library_url` setting too, and an install
+    relying on an embedded token for private-repo access would break on
+    upgrade. Callers opt in on new surfaces.
+
+    Lives here rather than in the router so it is importable without pulling in
+    the whole `routers` package (which drags in the agent-service chain).
+    """
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    if parsed.username or parsed.password:
+        raise EmbeddedCredentialError(
+            "Repository URL must not embed a token or password. It is stored "
+            "and displayed in plain text. Configure a GitHub PAT in Settings "
+            "for private repositories instead."
+        )
+
+
 def validate_skills_library_url(url: str) -> str:
     """
     Validate that a skills library URL points to github.com.

@@ -142,12 +142,12 @@ export interface ReconcilerOptions {
   client: TrinityClient;
   requireApiKey: boolean;
   agentChatPullEnabled: boolean;
-  /** Register a dynamic tool with the connector-denied gate + bound audit target. */
+  /** Register a dynamic tool with the operator-only gate + bound audit target. */
   registerDynamicTool: (tool: any, canAccess: (auth: any) => boolean, auditTargetId: string) => void;
   /** Remove a previously-registered dynamic tool by name. */
   unregisterDynamicTool: (name: string) => void;
-  /** Connector-tier visibility gate (mirrors operator tools). */
-  connectorDenied: (auth: any) => boolean;
+  /** Operator-tier visibility gate (mirrors the static operator tools, #848). */
+  operatorOnly: (auth: any) => boolean;
   /** Built-in tool names — the final collision guard. */
   builtinToolNames: Set<string>;
   /** Poll interval (ms). Default ~20s. */
@@ -184,7 +184,7 @@ export function startExposedToolsReconciler(opts: ReconcilerOptions): Reconciler
     agentChatPullEnabled,
     registerDynamicTool,
     unregisterDynamicTool,
-    connectorDenied,
+    operatorOnly,
     builtinToolNames,
     intervalMs = 20_000,
     runImmediately = true,
@@ -277,7 +277,7 @@ export function startExposedToolsReconciler(opts: ReconcilerOptions): Reconciler
         // (and starve every later agent). On failure, leave `name` out of
         // `current` so the next poll retries it.
         try {
-          registerDynamicTool(tool, connectorDenied, name);
+          registerDynamicTool(tool, operatorOnly, name);
           current.set(name, spec.tool_name);
           claimedToolNames.add(spec.tool_name);
         } catch (e) {

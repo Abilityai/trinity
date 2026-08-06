@@ -1599,7 +1599,7 @@ class TestInvariantE01:
 
 class TestInvariantE05:
     @staticmethod
-    def _snap(*, started_at, session_id):
+    def _snap(*, started_at, session_id, lease_expires_at=None):
         from canary.snapshot import Snapshot, AgentSnapshot
         return Snapshot(
             snapshot_time="2026-05-18T12:00:00Z",
@@ -1612,6 +1612,7 @@ class TestInvariantE05:
                     running_exec_ids={"e1"},
                     running_started_at={"e1": started_at},
                     running_claude_session_ids={"e1": session_id},
+                    running_lease_expires_at={"e1": lease_expires_at},
                 )
             ],
         )
@@ -1647,6 +1648,31 @@ class TestInvariantE05:
         assert v.invariant_id == "E-05"
         assert v.severity == "major"
         assert v.observed_state["age_seconds"] == 3600
+
+    # -- #1766: pull-claimed rows are excluded ------------------------------
+
+    def test_leased_row_is_excluded(self):
+        """A pull-CLAIMED row is `running` with a NULL claude_session_id BY
+        DESIGN — `mark_no_session_executions_failed` already skips leased rows,
+        so E-05 must too or it fires on every pull turn for a whole soak."""
+        snap = self._snap(
+            started_at="2026-05-18T11:00:00Z",   # 1h old
+            session_id=None,                     # no session — would fire
+            lease_expires_at="2026-05-18T12:30:00Z",
+        )
+        from canary.invariants import e05_dispatched_rows_have_session as e05
+        assert e05.check(snap) == []
+
+    def test_non_leased_control_still_fires(self):
+        """The exclusion must be keyed on the lease, not blanket-silence E-05:
+        an identical row with a NULL lease is still the #106 bug class."""
+        snap = self._snap(
+            started_at="2026-05-18T11:00:00Z",
+            session_id=None,
+            lease_expires_at=None,
+        )
+        from canary.invariants import e05_dispatched_rows_have_session as e05
+        assert len(e05.check(snap)) == 1
 
 
 # ---------------------------------------------------------------------------
