@@ -316,6 +316,24 @@
   Continuing-red invariants don't re-post. The dashboard-notifications
   path (writing `agent_notifications` rows via `db.create_notification`)
   was rejected on the product call.
+- **Instance attribution (#1987)**: the payload names the instance that
+  fired it — a `[eu2]` prefix on both the Block Kit header and the `text`
+  fallback — so instances sharing one webhook (as `dev` and `eu2` do since
+  the #1766 soak) stay tellable apart. A webhook carries no sender
+  identity, and continuing-red gating makes each alert a one-shot, so
+  anything the message omits is not recoverable from a later one.
+  `services/instance_identity.py::get_instance_label()` resolves it:
+  optional `TRINITY_INSTANCE_NAME` override → first DNS label of
+  `FRONTEND_URL`'s host (`https://eu2.abilityai.dev` → `eu2`; an IP
+  literal keeps its whole host) → `installation_id[:8]` → unlabelled.
+  Deliberately no new *required* var: managed instances already carry
+  `FRONTEND_URL`, so attribution improves fleet-wide without an `.env`
+  rollout. Every tier degrades instead of raising — an unlabelled alert
+  is the prior behaviour, a lost alert is the failure the sink exists to
+  prevent. The label is sanitized (ASCII-alnum + hostname punctuation,
+  32-char cap) at resolution *and* at the render boundary, so it can
+  neither forge Slack markup (`<!channel>`) nor overflow the 150-char
+  header cap Slack rejects the whole message on.
 - **Determinism**: invariant checks are pure functions
   `check(snapshot) → list[ViolationReport]`. Same snapshot input always
   yields the same output. No LLM reasoning anywhere in the canary path.
@@ -335,6 +353,57 @@
   after it. **Credential safety:** E-04/G-04 violations persist to
   `canary_violations`, so neither ever echoes the raw `backlog_metadata` — E-04
   reports the failed-predicate reason code, G-04 the matched pattern name only.
+- **Phase 5 (shipped, #1813)**: **H-01 collector blindness** — the harness's
+  first *self*-check, and the reason the `H-` (harness health) id family exists:
+  every other invariant means "the system is broken", H-01 means "the observer
+  is blind", and an H-01 violation invalidates every other green in that cycle.
+  #1540 repointed the SQL-tier collectors onto the configured engine but left
+  the failure *shape* untouched — a collector reading an empty or unreachable
+  source returns zero rows, which is indistinguishable from a genuinely clean
+  fleet, so both report green. H-01 fires when the roster read
+  (`_collect_known_agents`) returns zero rows or raises **while an independent,
+  non-SQL source proves the fleet is alive**: Docker container presence
+  (`docker_agent_names`, read from the container list *before* any `exec_run`,
+  since `zombie_counts` is keyed by exec success and thins on a degraded
+  container) ∪ Redis slot keys (`orphan_redis_slots`, corroborating only — slot
+  keys exist solely while an execution holds a slot). Docker is collected
+  **before** the roster read, so it still supplies evidence on the arm where
+  that read raises and the collector returns early; Redis needs `known_agents`
+  and cannot. Reason codes
+  (stable — trinity-enterprise#202 scores on them): `roster_read_failed` /
+  `roster_empty_contradicted` (critical) / `roster_empty_unverifiable` (major —
+  the evidence source was unreachable, was never read, or **only Redis** had
+  anything to say: `orphan_redis_slots` is by definition slot keys whose agent
+  is absent from `agent_ownership`, i.e. L-03's leaked-slot state, so treating
+  it as a contradiction would page critical over a correct roster plus an
+  unrelated leak). `docker_available`/`redis_available` are **tri-state**
+  (`None` = the collector never ran) because `sources_unavailable` cannot
+  express a skipped collector. **Confirmation on elapsed
+  wall-clock** (`CONFIRMATION_MIN_SECONDS`, marker `canary:h01:suspect_since`,
+  E-02's cross-cycle-state precedent) so the last-agent delete race — DB row
+  gone, container still tearing down — cannot false-fire. Deliberately NOT "a
+  second cycle": prod runs `--workers 2` and `canary_service` holds no leader
+  lease, so both loops share the marker and worker B would confirm worker A's
+  sighting seconds later, collapsing the gate. An unreadable *or unwritable*
+  marker fires *unconfirmed* rather than skipping,
+  because a guard that cannot self-check must say so; the marker carries a 24h
+  TTL refreshed every suspicious cycle, so a `_clear_marker` that silently
+  failed cannot leave the gate armed forever. The gate applies to **every**
+  arm including `roster_read_failed` — a raised roster read is often a
+  momentary DB blip, and paging critical on one is how a safety net gets muted.
+  A whole-database outage now reaches the check at all: `_run_cycle_inner`'s
+  pre-cycle latest-violation read is fail-open (it previously raised before
+  `collect_snapshot` ran, so H-01 never executed), with transition detection
+  falling back to `canary:last_cycle_red` so a persistent outage chirps once
+  rather than every cycle. Scoped to the roster read
+  ONLY: on a live-but-quiet fleet `terminal_rows`/`enabled_schedules`/
+  `orphan_refs`/`terminal_exec_statuses` are all legitimately empty, so a
+  general "any SQL collector reads zero" rule would false-alarm on every idle
+  install. Dual-track by construction (a pure function over the `Snapshot`; it
+  issues no SQL). **Residual:** an entirely *stopped* fleet has no containers
+  and no slots, so no evidence exists and H-01 can only reach
+  `roster_empty_unverifiable`; partial blindness (roster returns 1 of 20) is out
+  of scope, since a count comparison would false-fire on create/stop races.
 - **Registration**: each new invariant is a new file under
   `src/backend/canary/invariants/` + a registry entry (per the catalog at
   `docs/testing/orchestration-invariant-catalog.md`); the service and API

@@ -364,7 +364,8 @@ class TestRestoreRoundTrip:
 
 # Stub heavy backend deps ONLY if a real module isn't already loaded (combined
 # runs where the full backend imported first must keep their real modules).
-import types as _types  # noqa: E402
+import types as _types
+import unittest.mock as _mock  # noqa: E402
 
 _STUBBED_MODULE_NAMES = [
     "database",
@@ -376,11 +377,17 @@ _STUBBED_MODULE_NAMES = [
 
 @pytest.fixture(autouse=True)
 def _restore_sys_modules():
-    """Snapshot sys.modules before each test and restore after.
+    """Per-test safety net. NOT the mechanism any more — see the import below.
 
-    The stubs below are installed at import time (skill_service reaches them
-    at module scope, before any fixture could run), so without this they would
-    leak into other files in the same pytest session — the #762 class.
+    This fixture used to be the only defence, and it could not work: the stubs
+    were installed at IMPORT time, i.e. during collection, and pytest imports
+    every test module before running any test. So by the time a fixture first
+    ran, later modules had already been collected against the stubs and had
+    captured names from them — bindings no amount of `sys.modules` restoration
+    can reach (#1898).
+
+    Kept because it is nearly free and it does catch a test that stubs at RUN
+    time, which is a different and still-live hazard.
     """
     saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
     try:
@@ -412,28 +419,94 @@ _STUBS = {
         "AgentRequestError": type("AgentRequestError", (Exception,), {}),
         "get_all_circuit_states": MagicMock(return_value={}),
     },
-    "utils.url_validation": {"validate_skills_library_url": lambda url: url},
+    # The stub must mirror EVERY name skill_service imports from the real
+    # module — a missing constant is an ImportError at collection, not a
+    # graceful degradation (see abilityai/trinity#1898 for the wider fragility).
+    "utils.url_validation": {
+        "validate_skills_library_url": lambda url: url,
+        "ALLOWED_SKILLS_LIBRARY_HOSTS": {"github.com", "www.github.com"},
+        # ent#334 added this import to skill_service. Identity here, matching
+        # `validate_skills_library_url` above: nothing in this module renders a
+        # source URL, so the real stripping is exercised by
+        # test_ent334_status_url_disclosure, not stubbed away from it.
+        "strip_url_credentials": lambda url: url,
+    },
 }
+# #1898: the stubs live ONLY for the duration of the import below.
+#
+# They used to be written straight into `sys.modules` and left there. That is
+# import-time code, so it runs during COLLECTION — and pytest imports every
+# test module before running a single test. Every file collected after this one
+# therefore resolved `services.settings_service` (and the other three) to a
+# four-function fake, captured names from it at its own module scope, and kept
+# those bindings for the rest of the session. Restoring `sys.modules` later
+# cannot reach a name another module has already bound.
+#
+# The symptoms were order-dependent and looked like unrelated bugs: 7 failures
+# in `test_1081_physical_meter.py` when it happened to be collected after this
+# file, and `ImportError: cannot import name ... from 'services.settings_service'
+# (unknown location)` at collection for anything importing a real name the stub
+# does not define (#1855).
+#
+# `patch.dict` restores the whole mapping on exit, so nothing survives the
+# `with`. The module objects bound below keep referencing the stubs, which is
+# exactly what these tests want — the stubbing was never meant to outlive this
+# import.
+_stub_modules = {}
 for _name, _attrs in _STUBS.items():
-    if _name not in sys.modules:
-        _mod = _types.ModuleType(_name)
-        for _k, _v in _attrs.items():
-            setattr(_mod, _k, _v)
-        sys.modules[_name] = _mod
+    _mod = _types.ModuleType(_name)
+    for _k, _v in _attrs.items():
+        setattr(_mod, _k, _v)
+    _stub_modules[_name] = _mod
 
-import services.skill_service as skill_service_module  # noqa: E402
-from services.skill_service import SkillService, SkillInjectionBusy  # noqa: E402
+with _mock.patch.dict(sys.modules, _stub_modules):
+    # Deliberately NOT evicting a cached `services.skill*` here.
+    #
+    # A first version of this fix did, to force a fresh import against the
+    # stubs regardless of collection order. It broke 10 sibling tests
+    # (`test_ent236_skills_lifecycle`, `test_ent237_skill_sources`): evicting
+    # and re-importing produces a SECOND module object, so this file's
+    # `skill_service_module` and the one those files patch stop being the same
+    # object, and their monkeypatching lands on a module the code under test is
+    # not using.
+    #
+    # The pre-existing behaviour — take whatever `import` returns — is kept. It
+    # means the stubs are ignored when something imported `skill_service`
+    # first, which is a separate wart and not what #1898 is about. Scope creep
+    # in a test-isolation fix is how a test-isolation fix breaks tests.
+    import services.skill_service as skill_service_module  # noqa: E402
+    from services.skill_service import SkillService, SkillInjectionBusy  # noqa: E402
+    from services.skill_source_clone import SkillSourceClone  # noqa: E402
 
 
 def _run(coro):
     return asyncio.run(coro)
 
 
+# ent#237 made the library multi-source: `skill_service` orchestrates N
+# `SkillSourceClone`s under /data/skills-library/<source_id>/ instead of being a
+# single clone itself. These tests predate that and are written against ONE
+# library, which is still a valid configuration — so the fixture wires exactly
+# one source and the assertions below are unchanged. The directory is named
+# `src_*` because that is the id format a clone validates.
+_TEST_SOURCE_ID = "src_aaaaaaaa"
+
+
 @pytest.fixture()
 def service(tmp_path):
     svc = SkillService()
-    svc.library_path = tmp_path / "library"
+    svc.library_root = tmp_path
+    svc.library_path = tmp_path / _TEST_SOURCE_ID
     (svc.library_path / ".claude" / "skills").mkdir(parents=True)
+
+    clone = SkillSourceClone(
+        _TEST_SOURCE_ID, "https://github.com/owner/repo", "main", "branch", tmp_path
+    )
+    # Bypass the DB: these tests assert injection/listing behaviour, not source
+    # persistence (that is test_ent237_skill_sources.py).
+    svc._clones = lambda enabled_only=True: [clone]
+    svc._source_names = lambda: {_TEST_SOURCE_ID: "Test library"}
+    svc.test_clone = clone
     return svc
 
 
@@ -471,17 +544,18 @@ def _resp(status_code, body=None, text=""):
 def _wire(service, *, metas=None, restore=None, probe=None):
     """Patch the exec/transport seams; returns the mocks."""
     service._read_agent_skill_metas = AsyncMock(return_value=metas or {})
-    service._git_tree_shas = MagicMock(
+    # ent#237: these three are per-clone now, not per-service.
+    service.test_clone.tree_shas = MagicMock(
         return_value={
             p.name: f"tree-{p.name}"
             for p in (service.library_path / ".claude" / "skills").iterdir()
             if p.is_dir()
         }
     )
-    service._git_archive_skill = MagicMock(
+    service.test_clone.archive_skill = MagicMock(
         side_effect=lambda name: _fake_archive_from_library(service, name)
     )
-    service._get_current_commit = MagicMock(return_value="commit123")
+    service.test_clone.current_commit = MagicMock(return_value="commit123")
     if callable(restore) and not isinstance(restore, MagicMock):
         service._post_restore = AsyncMock(side_effect=restore)
     else:
@@ -897,13 +971,18 @@ class TestRealGitPipeline:
         _git(library, "add", "-A")
         _git(library, "commit", "-qm", "seed")
 
-        svc = SkillService()
-        svc.library_path = library
+        # ent#237: git operations are per-source (SkillSourceClone), so the
+        # clone is constructed directly here — this test is about the real
+        # archive→filter→restore pipeline, not about source resolution.
+        clone = SkillSourceClone(
+            _TEST_SOURCE_ID, str(library), "main", "branch", library.parent
+        )
+        clone.path = library
 
-        shas = svc._git_tree_shas()
+        shas = clone.tree_shas()
         assert "demo" in shas and len(shas["demo"]) == 40
 
-        archive = svc._git_archive_skill("demo")
+        archive = clone.archive_skill("demo")
         assert archive
         members, warnings, _ = pkg.filter_skill_archive(archive, "demo")
         names = [m[0] for m in members]
@@ -943,10 +1022,10 @@ class TestRealGitPipeline:
         _git(tmp_path, "clone", "-q", str(origin), str(clone_a))
         _git(tmp_path, "clone", "-q", str(origin), str(clone_b))
 
-        svc_a, svc_b = SkillService(), SkillService()
-        svc_a.library_path = clone_a
-        svc_b.library_path = clone_b
-        assert svc_a._git_tree_shas()["demo"] == svc_b._git_tree_shas()["demo"]
+        a = SkillSourceClone(_TEST_SOURCE_ID, str(origin), "main", "branch", tmp_path)
+        b = SkillSourceClone("src_bbbbbbbb", str(origin), "main", "branch", tmp_path)
+        a.path, b.path = clone_a, clone_b
+        assert a.tree_shas()["demo"] == b.tree_shas()["demo"]
 
 
 class TestListAndGetSurface:
@@ -958,8 +1037,8 @@ class TestListAndGetSurface:
             ),
             "scripts/x.py": "pass\n",
         })
-        service._git_tree_shas = MagicMock(return_value={"demo": "sha"})
-        service._get_current_commit = MagicMock(return_value=None)
+        service.test_clone.tree_shas = MagicMock(return_value={"demo": "sha"})
+        service.test_clone.current_commit = MagicMock(return_value=None)
         skills = service.list_skills()
         assert len(skills) == 1
         s = skills[0]
@@ -978,10 +1057,17 @@ class TestListAndGetSurface:
         # The realpath containment check is the guard that must still hold if
         # the name regex is ever loosened — pin it independently by disabling
         # the regex (CodeQL flagged these joins; both guards are load-bearing).
+        # ent#237: the realpath containment check moved onto SkillSourceClone,
+        # applied against the OWNING source's root (a shared root would let a
+        # symlink in one source resolve into another's checkout). The service's
+        # _skill_dir now also requires the skill to EXIST in a source, so the
+        # containment property is pinned at its new home to keep it independent
+        # of existence.
         monkeypatch.setattr(pkg, "validate_skill_name", lambda name: True)
-        assert service._skill_dir("../../../etc") is None
-        assert service._skill_dir("..") is None
-        assert service._skill_dir("ok") is not None
+        clone = service.test_clone
+        assert clone.skill_dir("../../../etc") is None
+        assert clone.skill_dir("..") is None
+        assert clone.skill_dir("ok") is not None
 
     def test_skill_dir_refuses_symlink_escaping_the_root(self, service,
                                                          tmp_path):

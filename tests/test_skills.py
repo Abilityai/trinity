@@ -79,25 +79,37 @@ class TestSkillsLibraryStatus:
         assert "configured" in data
         assert isinstance(data["configured"], bool)
 
-    def test_library_status_has_optional_fields(self, api_client: TrinityApiClient):
-        """Library status includes optional configuration fields."""
+    def test_library_status_omits_source_url(self, api_client: TrinityApiClient):
+        """The repo URL must NOT be in this payload (ent#334).
+
+        This assertion is inverted from what it was: it used to require `url`
+        (and `branch`) to be present. That was the bug — this route is
+        `Depends(get_current_user)`, reachable by every authenticated caller
+        and by agent-scoped MCP keys, while source repo URLs are
+        admin-sensitive and served only by `GET /api/skills/sources`
+        (`require_admin` + `reject_agent_principal`). The route now declares a
+        `response_model` allow-list that drops the flat `url` and the
+        per-source `url`. Only the URL — `branch`/`commit_sha` stay.
+
+        Asserting KEY ABSENCE, not "no secret in the body": the org/repo half
+        of the disclosure carries no secret at all.
+
+        `cloned`/`skill_count` stay — the frontend stores derive their
+        empty-state discriminator from `configured`/`cloned`.
+        """
         response = api_client.get("/api/skills/library/status")
         assert_status(response, 200)
         data = response.json()
 
-        # These fields may be null if not configured
-        expected_fields = ["url", "branch", "cloned", "skill_count"]
-        for field in expected_fields:
+        assert "url" not in data, "ent#334: leaked flat url"
+        for source in data.get("sources", []):
+            assert "url" not in source, "ent#334: leaked per-source url"
+
+        # Everything non-URL stays. `branch`/`commit_sha` are a ref name and a
+        # commit hash — not credentials, not a repo identity — and the Library
+        # header renders them.
+        for field in ["cloned", "skill_count", "branch", "commit_sha"]:
             assert field in data, f"Missing field: {field}"
-
-    def test_library_status_branch_default(self, api_client: TrinityApiClient):
-        """Library status shows default branch as 'main'."""
-        response = api_client.get("/api/skills/library/status")
-        assert_status(response, 200)
-        data = response.json()
-
-        # Branch should default to 'main'
-        assert data.get("branch") == "main" or data.get("branch") is None
 
 
 # =============================================================================

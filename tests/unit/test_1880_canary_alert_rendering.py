@@ -130,6 +130,20 @@ _OBSERVED_STATE = {
         "drain_tick_age_seconds": 900,
     },
     "R-01": {"agent_name": "agent-a", "zombie_count": 3},
+    # H-01 is the only fleet-wide invariant: no `agent_name`, at most one
+    # violation. Both renderers read `violations[0]` directly instead of
+    # aggregating, so this fixture is what proves that path works.
+    "H-01": {
+        "reason": "roster_empty_contradicted",
+        "confirmation": "confirmed",
+        "blind_since": "2026-07-30T09:55:00Z",
+        "snapshot_time": _SNAP,
+        "known_agent_count": 0,
+        "evidence_agent_count": 2,
+        "evidence_sample": ["agent-a", "agent-b"],
+        "docker_available": True,
+        "redis_available": True,
+    },
 }
 
 
