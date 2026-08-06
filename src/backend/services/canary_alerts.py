@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Any, List, Optional, Tuple
 
 from canary.snapshot import ViolationReport
+from services.instance_identity import get_instance_label, sanitize_instance_label
 
 
 logger = logging.getLogger(__name__)
@@ -214,6 +215,9 @@ class CanaryAlerts:
             return
 
         worst = max(violations, key=lambda v: severity_rank(v.severity))
+        # #1987: name the instance in the payload. Resolved here rather than
+        # inside the composer so `_build_slack_payload` stays a pure function
+        # of its arguments — the render path never touches env or the DB.
         text, blocks = cls._build_slack_payload(
             invariant_id,
             violations,
@@ -221,6 +225,7 @@ class CanaryAlerts:
             previous_violation_at,
             worst.severity,
             persisted_ids,
+            instance_label=get_instance_label(),
         )
 
         # Lazy import — avoids dragging the SlackService init (and its
@@ -252,6 +257,8 @@ class CanaryAlerts:
         previous_violation_at: Optional[str],
         severity: str,
         persisted_ids: List[Optional[int]],
+        *,
+        instance_label: Optional[str] = None,
     ) -> Tuple[str, list]:
         """Compose the Slack message text + Block Kit blocks.
 
@@ -260,25 +267,40 @@ class CanaryAlerts:
         identify blocks by `type` rather than index so adding/removing
         sections doesn't break them.
 
+        `instance_label` (#1987) names the instance that fired the alert and
+        is rendered into BOTH the header and the `text` fallback — the header
+        so it is visible without expanding the message, the fallback because
+        that is what a mobile push notification actually shows, and triaging
+        "eu2, the #1766 pilot" vs "dev, unrelated" from the lock screen is
+        the case that motivated it. `None` (nothing identifies this install)
+        renders exactly today's unlabelled payload.
+
         Returns `(text, blocks)` — `text` is the fallback used by
         clients that don't render blocks (notifications, screen
         readers).
         """
         emoji = cls._SEVERITY_EMOJI.get(severity, "•")
         name = cls._INVARIANT_NAMES.get(invariant_id, invariant_id)
+        # Re-sanitized at the render boundary rather than trusted from the
+        # resolver — same argument `_mrkdwn_safe` makes below. It also bounds
+        # the length, and an over-long `header` is a 400 from Slack that drops
+        # the WHOLE message while the transition is still recorded as sent
+        # (the #1880 failure mode).
+        label = sanitize_instance_label(instance_label)
+        prefix = f"[{label}] " if label else ""
         body = cls._render_message(invariant_id, violations, snapshot_time)
         forensic = cls._render_forensic(invariant_id, violations)
         runbook = cls._INVARIANT_RUNBOOKS.get(invariant_id)
         last_red = cls._format_last_red(previous_violation_at, snapshot_time)
         row_ref = cls._format_row_refs(persisted_ids)
 
-        text = f"{emoji} canary {invariant_id} {name} ({severity}): {body}"
+        text = f"{prefix}{emoji} canary {invariant_id} {name} ({severity}): {body}"
         blocks = [
             {
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": f"{emoji} {invariant_id} {name} — {severity}",
+                    "text": f"{emoji} {prefix}{invariant_id} {name} — {severity}",
                     "emoji": True,
                 },
             },

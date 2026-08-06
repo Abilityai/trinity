@@ -290,6 +290,12 @@ services:
       # credential — leaking it lets anyone post to that one channel.
       # Unset = canary cycles run silently (still persists violations).
       - CANARY_SLACK_WEBHOOK_URL=${CANARY_SLACK_WEBHOOK_URL:-}
+      # Optional label naming THIS instance in outbound alerts (#1987). Mirrors
+      # docker-compose.yml. Unset is the norm — services/instance_identity.py
+      # derives one from FRONTEND_URL's host (already forwarded above), which is
+      # why alert attribution improves on every managed instance without an .env
+      # rollout. Set it only to override that derivation.
+      - TRINITY_INSTANCE_NAME=${TRINITY_INSTANCE_NAME:-}
       # SSH access host override (read by services/ssh_service.py). Mirrors
       # docker-compose.yml; without this line the .env value is inert in prod (the
       # #1039 packaging-gap class) and SSH host detection falls back to localhost.
