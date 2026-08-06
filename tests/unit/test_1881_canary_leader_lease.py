@@ -45,15 +45,48 @@ import pytest
 class FakeRedis:
     """Minimal in-memory stand-in for the shared breaker Redis client.
 
-    Models the subset the leader lock uses: SET NX EX, GET, EXPIRE, DELETE.
-    TTL is not time-simulated — expiry is modelled by the test deleting the key
-    directly, which is exactly what a real TTL lapse presents to the next
-    `set(nx=True)`. Mirrors `test_1464_monitoring_leader_lock.FakeRedis`.
+    Models the subset the leader lock uses: SET NX EX, GET, EXPIRE, DELETE, and
+    `register_script` for the compare-and-{delete,expire} Lua. TTL is not
+    time-simulated — expiry is modelled by the test deleting the key directly,
+    which is exactly what a real TTL lapse presents to the next `set(nx=True)`.
+    Mirrors `test_1464_monitoring_leader_lock.FakeRedis`.
+
+    **`register_script` must be honoured, not stubbed away.** Every mutation of
+    the lease key now goes through Lua, and `_try_acquire_leadership` catches
+    everything and FAILS OPEN to leader. So a fake that raises on
+    `register_script` makes every non-leader return `True` — the double-running
+    this module exists to prevent — while every assertion still reads as a
+    plausible pass. That is not hypothetical: it is what these tests did before
+    this method existed.
     """
 
     def __init__(self) -> None:
         self.store: Dict[str, str] = {}
         self.ttls: Dict[str, int] = {}
+
+    def register_script(self, src: str):
+        """Return a callable with redis-py's `Script` signature.
+
+        Dispatches on the source so one emulator serves both scripts, and
+        resolves the target from the `client=` kwarg passed at CALL time rather
+        than closing over `self`. That is load-bearing for isolation:
+        `_LEASE_SCRIPTS` is a module-level `ScriptCache` that memoises the
+        registered scripts process-wide, so the objects registered by the FIRST
+        test would otherwise stay bound to that test's fake and silently mutate
+        it for every later one.
+        """
+        is_delete = "del" in src
+
+        def _run(keys, args, client=None):
+            target = client if client is not None else self
+            key, token = keys[0], args[0]
+            if target.get(key) != token:
+                return 0  # not ours — both scripts are no-ops
+            if is_delete:
+                return target.delete(key)
+            return 1 if target.expire(key, int(args[1])) else 0
+
+        return _run
 
     def set(self, key, value, nx=False, ex=None):
         if nx and key in self.store:
@@ -170,14 +203,25 @@ def test_release_only_deletes_own_lease(monkeypatch):
     assert fake.get(_module().REDIS_KEY_LEADER) == a._worker_id
 
 
-def test_stop_releases_leadership(monkeypatch):
-    """`stop()` must hand off, not leave the sibling idle for a whole TTL."""
+@pytest.mark.asyncio
+async def test_stop_releases_leadership(monkeypatch):
+    """`stop()` must hand off, not leave the sibling idle for a whole TTL.
+
+    `stop()` is async (it awaits the cancelled cycle task before releasing, so
+    the release cannot land while a cycle is still unwinding and let a sibling
+    start one concurrently with our tail — the shape `monitoring_service.stop()`
+    already had). Awaiting it here is therefore part of the assertion: calling
+    it bare returns a coroutine, releases nothing, and this test would pass on
+    the *next* line for the wrong reason, since `b` would then be acquiring an
+    expired-but-never-released lease rather than a handed-off one.
+    """
     fake = FakeRedis()
     _use_redis(monkeypatch, fake)
     a, b = _svc(), _svc()
 
     assert a._try_acquire_leadership() is True
-    a.stop()
+    await a.stop()
+    assert fake.get(_module().REDIS_KEY_LEADER) is None, "the lease was handed off"
     assert b._try_acquire_leadership() is True
 
 
@@ -200,24 +244,51 @@ def test_ttl_expiry_lets_sibling_take_over(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_ttl_outlasts_a_cycle_plus_a_sleep():
-    """The TTL is refreshed once at the TOP of a cycle, so it must comfortably
-    outlast one cycle plus the inter-cycle sleep. A TTL at or below the interval
-    guarantees a mid-cycle lapse and permanent leadership flapping."""
-    svc = _svc()
-    assert svc._leader_ttl() > svc.interval
+def test_ttl_is_sized_off_the_heartbeat_not_the_cycle():
+    """The TTL answers ONE question now: how stale may the heartbeat get.
 
-
-def test_ttl_has_a_floor_independent_of_the_interval():
-    """A canary cycle's cost is dominated by R-01's per-agent `docker exec`
-    sweep, which scales with FLEET SIZE and is bounded by no timeout — not with
-    how often we look. So `interval * 3` alone is the wrong shape at a short
-    interval: shortening the interval must not shorten the TTL below what one
-    sweep can take."""
+    It used to answer two at once — "how long may a cycle run" and "how long
+    before a dead leader is noticed" — which want opposite values, so it served
+    neither. Because `_heartbeat_loop` re-arms the lease independently of where
+    the cycle is, the TTL no longer has to outlast a cycle, and is therefore
+    deliberately BELOW the cycle interval. Asserting that explicitly, because
+    `ttl < interval` looks like the classic mid-cycle-lapse bug and a future
+    reader will otherwise "fix" it straight back to the old shape.
+    """
     module = _module()
-    assert _svc(interval=5)._leader_ttl() == module._LEADER_TTL_FLOOR_SECONDS
-    # The floor is a no-op at the default interval — the default is unchanged.
-    assert _svc()._leader_ttl() == _svc().interval * 3
+    assert module._LEADER_TTL_SECONDS == module._LEADER_HEARTBEAT_SECONDS * 3, (
+        "3x the refresh cadence is the precedents' rule (#1464 / #1632): one or "
+        "two missed beats must not move leadership, three consecutive should"
+    )
+    assert _svc()._leader_ttl() == module._LEADER_TTL_SECONDS
+    # Independent of the interval — the whole point of the split.
+    assert _svc(interval=5)._leader_ttl() == _svc(interval=3600)._leader_ttl()
+
+
+def test_a_wedged_leader_eventually_yields_rather_than_holding_forever():
+    """The heartbeat must not become a worse failure than the one it fixed.
+
+    An unbounded heartbeat keeps a WEDGED leader's lease alive indefinitely, so
+    nobody cycles at all — trading "two workers probing" for "no worker
+    watching", which is the wrong direction for this subsystem. The cap is what
+    makes the heartbeat a fix rather than a regression.
+    """
+    module = _module()
+    assert module._MAX_CYCLE_LEASE_SECONDS > module._LEADER_TTL_SECONDS
+    # Past the cap we deliberately prefer the duplicate to the silence — same
+    # direction as the fail-open in `_try_acquire_leadership`.
+    assert module._MAX_CYCLE_LEASE_SECONDS >= _svc().interval
+
+
+def test_failover_window_shrank_and_owns_its_arithmetic():
+    """The reviewer's point 2: ~1200s unwatched was bought entirely by the TTL.
+
+    R-01's `_MAX_OBSERVATION_GAP_SECONDS` comment and `architecture.md` both
+    quote this number, so it lives in one method rather than three prose copies.
+    """
+    svc = _svc()
+    assert svc._max_failover_seconds() == svc.interval * 2 + svc._leader_ttl()
+    assert svc._max_failover_seconds() < 1200, "must beat the pre-heartbeat window"
 
 
 # ---------------------------------------------------------------------------

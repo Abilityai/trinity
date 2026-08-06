@@ -189,13 +189,22 @@ DWELL_SECONDS = 600
 # collection) but a real outage is not.
 #
 # The #1881 leader lease adds one more producer of a long gap: if the holding
-# worker dies, nobody cycles until its lease expires (`_leader_ttl`, 900s) and a
-# sibling's next loop iteration picks it up — up to ~1200s of no observations.
-# That exceeds this window, so a leader failover restarts the dwell. Correct and
-# deliberate: a crashed leader IS "a real outage" by this comment's own rule, and
-# restarting costs at most one extra dwell before a genuine zombie fires, which
-# is the fail-safe direction. Do not widen this constant to paper over it —
-# claiming continuity across an interval nobody watched is the failure mode.
+# worker dies, nobody cycles until its lease expires and a sibling's next loop
+# iteration picks it up. `canary_service._max_failover_seconds` owns that
+# arithmetic — ~780s at the defaults (one interval of staleness before the
+# crash + the 180s lease TTL + one interval before a sibling next looks). That
+# still exceeds this window, so a leader failover restarts the dwell. Correct
+# and deliberate: a crashed leader IS "a real outage" by this comment's own
+# rule, and restarting costs at most one extra dwell before a genuine zombie
+# fires, which is the fail-safe direction. Do not widen this constant to paper
+# over it — claiming continuity across an interval nobody watched is the
+# failure mode.
+#
+# (Before the lease's heartbeat the same window was ~1200s, because the TTL had
+# to be sized to outlast a whole cycle. Shrinking it did not change the
+# conclusion here, only the number — the failover window would have to drop
+# under 600s to stop restarting the dwell, and it cannot: two of its three
+# terms are the cycle interval itself.)
 _MAX_OBSERVATION_GAP_SECONDS = 600
 
 # Marker lifetime, refreshed on each positive observation. Bounds memory if an
