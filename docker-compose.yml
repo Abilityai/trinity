@@ -220,6 +220,11 @@ services:
       # credential — leaking it lets anyone post to that one channel.
       # Unset = canary cycles run silently (still persists violations).
       - CANARY_SLACK_WEBHOOK_URL=${CANARY_SLACK_WEBHOOK_URL:-}
+      # Optional label naming THIS instance in outbound alerts (#1987). Unset
+      # is the norm — services/instance_identity.py then derives one from
+      # FRONTEND_URL's host, so multiple instances sharing one webhook are
+      # already distinguishable. Set it only to override that derivation.
+      - TRINITY_INSTANCE_NAME=${TRINITY_INSTANCE_NAME:-}
       # Backend agent-call budget (#904 RC-1). Caps how many concurrent
       # outbound agent HTTP calls the backend will hold at once, plus
       # the per-acquire queue wait before returning 503. Default
