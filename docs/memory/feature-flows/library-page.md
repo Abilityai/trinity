@@ -126,7 +126,7 @@ Single desktop link: label **Library**, `to="/library"`, active check `$route.pa
 ### Skills read surfaces (`src/backend/routers/skills.py`)
 | Endpoint | Auth | Used for |
 |----------|------|----------|
-| `GET /api/skills/library/status` | any auth user | sync-state header + empty-state discriminator (`{configured, url, branch, cloned, last_sync, commit_sha, skill_count}` — PR #1901 keeps these flat fields verbatim and adds `sources[]`) |
+| `GET /api/skills/library/status` | any auth user | sync-state header + empty-state discriminator (`{configured, cloned, branch, commit_sha, last_sync, skill_count}` + `sources[]`). **No `url`** — ent#334 put a `response_model` allow-list on this route: it is open to every authenticated caller including agent-scoped keys, while source repo URLs are admin-sensitive and served only by the admin-gated `GET /api/skills/sources`. The per-source `url` and `last_error` are withheld for the same reason (`last_error` is git failure text, which echoes the PAT-spliced clone URL). `configured`/`cloned` are the load-bearing pair — the empty-state discriminator derives from them |
 | `GET /api/skills/library` | any auth user | skill cards (`SkillInfo` contract, ent#183) |
 | `POST /api/skills/library/sync` | admin | Sync now button |
 
