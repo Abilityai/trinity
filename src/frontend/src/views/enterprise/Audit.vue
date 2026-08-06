@@ -381,6 +381,8 @@ const detailsJson = computed(() => {
                 store.verifyState === 'valid',
               'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-200':
                 store.verifyState === 'invalid',
+              'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200':
+                store.verifyState === 'unverifiable',
               'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-200':
                 store.verifyState === 'error',
             }"
@@ -388,7 +390,22 @@ const detailsJson = computed(() => {
             <span v-if="store.verifyState === 'idle'">Hash chain · not verified</span>
             <span v-else-if="store.verifyState === 'verifying'">Verifying…</span>
             <span v-else-if="store.verifyState === 'valid'">
-              ✓ Valid · {{ store.verifyResult?.checked || 0 }} entries
+              ✓ Valid · {{ store.verifyResult?.checked || 0 }} entries<template
+                v-if="store.verifyResult?.skipped_unhashed"
+              >
+                · {{ store.verifyResult.skipped_unhashed }} unhashed (not covered)</template>
+            </span>
+            <!-- #1984: previously rendered as a green "✓ Valid · 0 entries" —
+                 a verified verdict over a range nothing had been hashed in. -->
+            <span v-else-if="store.verifyState === 'unverifiable'">
+              <template v-if="store.verifyResult?.status === 'empty_range'">
+                — Nothing in range to verify
+              </template>
+              <template v-else>
+                ⚠ Unverifiable · no hashes on
+                {{ store.verifyResult?.total_in_range || 0 }} entries — hash
+                chain was never enabled
+              </template>
             </span>
             <span v-else-if="store.verifyState === 'invalid'">
               ✗ Tamper detected · first invalid id #{{ store.verifyResult?.first_invalid_id }}
@@ -607,12 +624,12 @@ const detailsJson = computed(() => {
         <div v-show="heatmapsOpen" class="px-4 pb-4">
           <!-- Weekly (dow × hour) -->
           <div v-show="heatmapTab === 'weekly'" role="tabpanel" aria-label="Weekly pattern">
-            <div v-if="store.heatmapLoading" class="text-xs text-gray-500 py-4 text-center">
+            <div v-if="store.heatmapLoading" class="text-xs text-gray-500 dark:text-gray-400 py-4 text-center">
               Loading heatmap…
             </div>
             <div
               v-else-if="(store.heatmap?.total || 0) === 0"
-              class="text-xs text-gray-500 py-4 text-center"
+              class="text-xs text-gray-500 dark:text-gray-400 py-4 text-center"
             >
               No events in this window.
             </div>
@@ -655,12 +672,12 @@ const detailsJson = computed(() => {
 
           <!-- Calendar (per-day, GitHub-style) -->
           <div v-show="heatmapTab === 'calendar'" role="tabpanel" aria-label="Calendar">
-            <div v-if="store.calendarLoading" class="text-xs text-gray-500 py-4 text-center">
+            <div v-if="store.calendarLoading" class="text-xs text-gray-500 dark:text-gray-400 py-4 text-center">
               Loading calendar…
             </div>
             <div
               v-else-if="(store.calendar?.total || 0) === 0"
-              class="text-xs text-gray-500 py-4 text-center"
+              class="text-xs text-gray-500 dark:text-gray-400 py-4 text-center"
             >
               No events in this window.
             </div>
@@ -839,12 +856,12 @@ const detailsJson = computed(() => {
           class="flex-1 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 overflow-hidden"
           :class="store.selectedEntry ? 'lg:max-w-3xl' : ''"
         >
-          <div v-if="store.loading" class="p-6 text-sm text-gray-500 text-center">
+          <div v-if="store.loading" class="p-6 text-sm text-gray-500 dark:text-gray-400 text-center">
             Loading…
           </div>
           <div
             v-else-if="!store.entries.length"
-            class="p-6 text-sm text-gray-500 text-center"
+            class="p-6 text-sm text-gray-500 dark:text-gray-400 text-center"
           >
             {{
               store.total === 0

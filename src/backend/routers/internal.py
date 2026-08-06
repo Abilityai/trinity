@@ -113,7 +113,7 @@ def _pull_authorized(request: Request, agent_name: str) -> bool:
     # with a valid scoped key, so rollback takes effect on backend restart rather
     # than only after a container recreate. The trusted-backend (internal-secret)
     # path is unchanged.
-    from services.agent_service.pull_mode import is_pull_pilot_agent
+    from services.pull_pilot import is_pull_pilot_agent
     if not is_pull_pilot_agent(agent_name):
         return False
     return heartbeat_service.authorize_heartbeat(_validated_agent_key(request), agent_name)
@@ -717,6 +717,7 @@ async def log_audit_entry(request: InternalAuditRequest):
             mcp_key_name=request.mcp_key_name,
             mcp_scope=request.mcp_scope,
             actor_agent_name=request.actor_agent_name,
+            actor_email=request.actor_email,
             target_type=request.target_type,
             target_id=request.target_id,
             request_id=request.request_id,

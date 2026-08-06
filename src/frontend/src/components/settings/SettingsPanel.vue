@@ -30,6 +30,11 @@
       <McpExposedPanel :agent-name="agentName" :notify="notify" />
     </section>
 
+    <!-- Section 3b: Trinity access key — the agent's own scope='agent' MCP key (#1854) -->
+    <section class="rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden p-6">
+      <AgentMcpKeyPanel :agent-name="agentName" :notify="notify" />
+    </section>
+
     <!-- Section 4: Reliability — dispatch circuit breaker (#526; honest toggle #1712) -->
     <section class="rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
       <ReliabilityPanel :agent-name="agentName" :notify="notify" />
@@ -51,6 +56,7 @@
 import GuardrailsPanel from '../GuardrailsPanel.vue'
 import CapacityPanel from '../CapacityPanel.vue'
 import McpExposedPanel from '../McpExposedPanel.vue'
+import AgentMcpKeyPanel from '../AgentMcpKeyPanel.vue'
 import ReliabilityPanel from '../ReliabilityPanel.vue'
 import VoiceRepliesControl from '../VoiceRepliesControl.vue'
 

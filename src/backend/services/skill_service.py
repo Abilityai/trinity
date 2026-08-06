@@ -7,10 +7,13 @@ Manages the skills library:
 - Get skill content
 - Inject skills into running agents as FULL directory packages
 
-Skills are stored in a GitHub repository with structure:
-  .claude/skills/<name>/SKILL.md   (+ scripts/, templates, resources)
+Skills are stored in a GitHub repository as `<root>/<name>/SKILL.md`
+(+ scripts/, templates, resources), where each source's root resolves per
+ent#332 — catalog.yaml `skills_root:` → `skills/` probe → `.claude/skills/`
+fallback. Agent-side, packages ALWAYS land at `~/.claude/skills/<name>/`
+(arcnames are rewritten at packaging).
 
-The local clone is stored at /data/skills-library/
+The local clones are stored under /data/skills-library/
 
 Injection (ent#183) ships the whole skill directory: a vetted tar built from
 `git archive` is POSTed to the EXISTING agent-server restore primitive
@@ -27,7 +30,6 @@ import logging
 import os
 import re
 import shutil
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -36,7 +38,19 @@ from database import db
 from services.settings_service import get_skills_library_url, get_skills_library_branch, get_github_pat
 from services.agent_client import get_agent_client, AgentClientError
 from services import skill_packaging as pkg
-from utils.url_validation import validate_skills_library_url
+from services.skill_source_clone import (
+    QUARANTINE_SUFFIX,
+    SOURCE_ID_RE,
+    SkillSourceClone,
+    redact,
+)
+from urllib.parse import urlparse, urlunparse
+
+from utils.url_validation import (
+    ALLOWED_SKILLS_LIBRARY_HOSTS,
+    strip_url_credentials,
+    validate_skills_library_url,
+)
 
 try:  # Redis is optional here: the injection lock fails open without it.
     import redis as _redis_lib
@@ -100,9 +114,21 @@ _SYNC_LOCK_TTL_SECONDS = 300
 
 
 def _scrub_pat(text: str) -> str:
-    """Replace credentials in any `https://<creds>@host` URL. Never raises."""
+    """Replace credentials in any `https://<creds>@host` URL. Never raises.
+
+    Delegates to `skill_source_clone.redact` (ent#347). These were two separate
+    hand-written patterns that had drifted apart and were each wrong in a
+    different way — the one duplication that matters, since the value it guards
+    lands in DURABLE admin-rendered state (`skills_library_last_error`) and in
+    an HTTP `detail`. One pattern, one place; see `_CREDENTIAL_URL_RE`.
+
+    The try/except stays: this wrapper's own contract is "never raises", and it
+    is called on a `str(e)` from an arbitrary exception whose `__str__` can
+    itself blow up. `redact` is total for `str`/`None`, so this is belt to its
+    suspenders rather than a live branch.
+    """
     try:
-        return re.sub(r"https://[^@\s]+@", "https://***@", text)
+        return redact(text)
     except Exception:  # noqa: BLE001
         return ""
 
@@ -140,53 +166,240 @@ class SkillService:
     """
     Service for managing skills library and skill assignments.
 
-    The skills library is a GitHub repository containing skill directory
-    packages in .claude/skills/<name>/ structure.
+    The skills library is a set of GitHub repositories containing skill
+    directory packages under each source's resolved root (ent#332); the
+    agent-side install location is always ~/.claude/skills/<name>/.
     """
 
     def __init__(self):
+        # ent#237: the root now HOLDS per-source clones instead of being one.
+        # `library_path` is retained as the legacy single-clone location purely
+        # so `_adopt_legacy_clone` can recognise and move it.
+        self.library_root = SKILLS_LIBRARY_PATH
         self.library_path = SKILLS_LIBRARY_PATH
         self._last_sync: Optional[datetime] = None
         self._last_commit_sha: Optional[str] = None
-        # list_skills metadata cache keyed by library commit SHA — walking every
-        # skill dir + parsing frontmatter on each GET is sync filesystem work.
+        # list_skills metadata cache. The key is a fingerprint over EVERY
+        # enabled source's commit (not one SHA), so adding, removing, disabling
+        # or re-syncing any source invalidates it. A single-SHA key would serve
+        # a stale merged list after a second source moved.
         self._list_cache: Tuple[Optional[str], List[Dict[str, Any]]] = (None, [])
+
+    # =========================================================================
+    # Sources (ent#237 — multi-source library)
+    # =========================================================================
+
+    def _clones(self, enabled_only: bool = True) -> List["SkillSourceClone"]:
+        """Build a clone handle per configured source, in RESOLUTION order.
+
+        A source whose stored id/ref is unusable is SKIPPED rather than raised
+        on: one malformed row must not blind the whole library. The clone
+        constructor is the validator (see skill_source_clone).
+        """
+        clones: List[SkillSourceClone] = []
+        try:
+            sources = db.list_skill_sources(enabled_only=enabled_only)
+        except Exception as e:  # noqa: BLE001 — no table yet / DB down
+            logger.warning(f"could not load skill sources: {e}")
+            return clones
+        for src in sources:
+            try:
+                clones.append(SkillSourceClone(
+                    src.id, src.url, src.ref, src.ref_type, self.library_root
+                ))
+            except ValueError as e:
+                logger.error(f"skipping unusable skill source {src.id}: {e}")
+        return clones
+
+    def discard_source_checkout(self, source_id: str) -> bool:
+        """Reclaim a deleted source's clone (and its quarantine). Never raises.
+
+        Called after the row is gone, so it can only ever be best-effort — the
+        DB delete is authoritative and must not be undone by a filesystem
+        failure. `_reclaim_orphan_checkouts` is the backstop for the crash
+        window between the two.
+
+        The id is re-validated against the same regex `SkillSourceClone` uses
+        even though it comes from a server-minted DB value: this builds a path
+        that is then `rmtree`d, and "trusted because of where it came from" is
+        not a property that survives a caller being added.
+        """
+        if not SOURCE_ID_RE.match(source_id or ""):
+            logger.error("refusing to reclaim unsafe skill source id %r", source_id)
+            return False
+        removed = False
+        for path in (
+            self.library_root / source_id,
+            self.library_root / f"{source_id}{QUARANTINE_SUFFIX}",
+        ):
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                    removed = True
+                    logger.info("reclaimed skills checkout %s", path)
+            except OSError as e:  # noqa: PERF203 — two paths, not a hot loop
+                logger.warning("could not reclaim skills checkout %s: %s", path, e)
+        return removed
+
+    def _reclaim_orphan_checkouts(self) -> List[str]:
+        """Remove per-source checkouts no `skill_sources` row points at.
+
+        The backstop to `discard_source_checkout`: a crash between the row
+        delete and the directory removal, or a pre-fix install that has been
+        accumulating clones through add/remove cycles, leaves directories with
+        no reclamation path short of shell access.
+
+        **Fail-CLOSED on the row read.** A DB error must reclaim nothing — a
+        sweep that treats "I could not read the sources" as "there are no
+        sources" deletes the entire library (#1638/#1644's lesson: the
+        destructive branch is the one that ships green). Only names matching the
+        server-minted source-id shape are considered at all, so the legacy
+        pre-ent#237 `.git` checkout, `_adopt_legacy_clone`'s staging directory
+        and anything else an operator put here are structurally out of scope.
+        Logs what it reclaims, per #1644.
+        """
+        try:
+            known = {s.id for s in db.list_skill_sources()}
+        except Exception:  # noqa: BLE001 — fail closed, reclaim nothing
+            logger.warning(
+                "skipping skills checkout reclamation: could not load sources",
+                exc_info=True,
+            )
+            return []
+        reclaimed: List[str] = []
+        try:
+            entries = list(self.library_root.iterdir())
+        except OSError:
+            return reclaimed
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            source_id = (
+                entry.name[:-len(QUARANTINE_SUFFIX)]
+                if entry.name.endswith(QUARANTINE_SUFFIX)
+                else entry.name
+            )
+            if not SOURCE_ID_RE.match(source_id) or source_id in known:
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+            reclaimed.append(entry.name)
+        if reclaimed:
+            logger.info(
+                "reclaimed %d orphaned skills checkout(s): %s",
+                len(reclaimed), ", ".join(sorted(reclaimed)),
+            )
+        return reclaimed
+
+    def _source_names(self) -> Dict[str, str]:
+        try:
+            return {s.id: s.name for s in db.list_skill_sources()}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _resolution(self) -> Dict[str, Dict[str, Any]]:
+        """Map every available skill name to the source that WINS it.
+
+        Custom-wins precedence (ent#237 AC#4): `_clones` yields sources in
+        resolution order, so the FIRST source offering a name owns it and every
+        later one is recorded as shadowed. The shadow list is what the UI
+        surfaces — AC#4 requires the conflict be visible, never a silent
+        overwrite, and a bare "first wins" with no record is exactly the silent
+        overwrite it forbids.
+        """
+        names = self._source_names()
+        resolved: Dict[str, Dict[str, Any]] = {}
+        for clone in self._clones(enabled_only=True):
+            for name in clone.skill_names():
+                entry = resolved.get(name)
+                if entry is None:
+                    resolved[name] = {
+                        "clone": clone,
+                        "source_id": clone.source_id,
+                        "source_name": names.get(clone.source_id, clone.source_id),
+                        "shadowed_by": [],
+                    }
+                else:
+                    entry["shadowed_by"].append({
+                        "source_id": clone.source_id,
+                        "source_name": names.get(clone.source_id, clone.source_id),
+                    })
+        return resolved
+
+    def _resolve_one(self, skill_name: str) -> Optional[Dict[str, Any]]:
+        """Resolve a single name. Applies the name regex FIRST.
+
+        Every path that turns a name into a filesystem path or an in-container
+        exec goes through here or `_skill_dir`, so the regex cannot be skipped
+        by a caller that only wants the owning source.
+        """
+        if not pkg.validate_skill_name(skill_name):
+            return None
+        return self._resolution().get(skill_name)
+
+    def _library_fingerprint(self, clones: Optional[List["SkillSourceClone"]] = None) -> Optional[str]:
+        """Cache key over every enabled source's current commit.
+
+        None when there are no sources, which disables caching rather than
+        caching an empty list under a stable key.
+        """
+        clones = self._clones(enabled_only=True) if clones is None else clones
+        if not clones:
+            return None
+        parts = [f"{c.source_id}:{c.current_commit() or 'none'}" for c in clones]
+        return "|".join(sorted(parts))
 
     # =========================================================================
     # Library Sync Operations
     # =========================================================================
 
-    def sync_library(self) -> Dict[str, Any]:
+    def sync_library(self, source_id: Optional[str] = None) -> Dict[str, Any]:
+        """Sync every enabled source, or just one.
+
+        Per-source outcomes are reported individually and one failure never
+        aborts the others — with several sources configured, a single
+        unreachable repo must not stop a healthy one from updating. The
+        aggregate `success` is True when at least one source synced, so a fleet
+        with one broken custom repo still reports a usable library.
         """
-        Sync the skills library from GitHub.
+        self._adopt_legacy_clone()
 
-        Clones the repository if it doesn't exist, or pulls latest changes.
-        Uses GitHub PAT for private repository access.
-
-        Returns:
-            Dict with sync status, commit info, and skill count
-        """
-        url = get_skills_library_url()
-        if not url:
-            return {
-                "success": False,
-                "error": "Skills library URL not configured",
-                "hint": "Configure skills_library_url in Settings"
-            }
-
-        # Validate URL to prevent SSRF (SEC-179)
         try:
-            url = validate_skills_library_url(url)
-        except ValueError as e:
-            logger.warning(f"Skills library URL validation failed: {e}")
+            sources = db.list_skill_sources(enabled_only=True)
+        except Exception:  # noqa: BLE001
+            # `error` is returned verbatim as an HTTP `detail` by both sync
+            # routes, so nothing derived from the exception object goes in it
+            # (CodeQL py/stack-trace-exposure, flagged on PR #1901). The full
+            # exception — the part an operator actually debugs from — is logged.
+            logger.exception("could not load skill sources")
+            return {"success": False, "error": "could not load skill sources"}
+
+        if source_id is not None:
+            sources = [s for s in sources if s.id == source_id]
+            if not sources:
+                return {
+                    "success": False,
+                    "error": "skill source not found or disabled",
+                }
+
+        if not sources:
             return {
                 "success": False,
-                "error": f"Invalid skills library URL: {e}"
+                "error": "No skill sources configured",
+                "hint": "Add a skills source in Settings → Agents",
+                "sources": [],
             }
 
         # ent#236: serialize clone/pull across workers. Returned as `busy`, NOT
         # as a failure — a contended manual click must not overwrite the panel's
         # status with "Last sync failed" when nothing actually failed.
+        #
+        # ent#237 keeps ONE lock covering ALL sources rather than a lock per
+        # source. Per-source locking would let two workers interleave over
+        # different sources and each publish a merged listing built from a
+        # half-updated set of checkouts — and the listing, the cache
+        # invalidation and the durable status below are all library-wide, not
+        # per-source. Sync is a periodic background job; serializing the whole
+        # sweep costs nothing that matters.
         sync_token = self._acquire_sync_lock()
         if sync_token is False:
             return {
@@ -195,7 +408,9 @@ class SkillService:
                 "error": "A skills library sync is already running",
             }
         try:
-            return self._sync_library_locked(url)
+            return self._sync_sources_locked(
+                sources, single_source=source_id is not None
+            )
         finally:
             self._release_sync_lock(sync_token)
 
@@ -230,82 +445,277 @@ class SkillService:
         except Exception:  # noqa: BLE001
             pass
 
-    def _sync_library_locked(self, url: str) -> Dict[str, Any]:
+    def _sync_sources_locked(
+        self, sources: List[Any], single_source: bool = False
+    ) -> Dict[str, Any]:
         """The git half of `sync_library`, run under the cross-worker lock.
 
-        `url` arrives already SSRF-validated by the caller — re-resolving it
-        here would re-run the check against settings that may have changed
-        after the lock was taken.
+        `sources` arrives already resolved and filtered by the caller —
+        re-reading it here would re-query rows that may have changed after the
+        lock was taken, so the set that is synced would not be the set that was
+        admitted (ent#236's rationale, kept per-source by ent#237).
+
+        `single_source` is the caller's INTENT, not `len(sources) == 1`: a
+        full sweep of an install that happens to have one source is still a
+        full sweep, and must still reclaim orphans.
         """
-        branch = get_skills_library_branch()
         github_pat = get_github_pat()
+        results: List[Dict[str, Any]] = []
 
-        # Construct authenticated URL for private repos
-        if github_pat and "github.com" in url:
-            # Handle various URL formats
-            if url.startswith("https://"):
-                auth_url = url.replace("https://", f"https://{github_pat}@")
-            elif url.startswith("github.com"):
-                auth_url = f"https://{github_pat}@{url}"
-            else:
-                auth_url = f"https://{github_pat}@github.com/{url}"
+        # Reclaim checkouts of sources that no longer exist. Only on a FULL
+        # sweep: a single-source sync must not reach outside the source it was
+        # asked about, and the scheduled auto-sync is a full sweep, so a leaked
+        # directory is picked up within one interval anyway. Runs under the
+        # sync lock so it cannot race a concurrent clone into the same path.
+        if not single_source:
+            self._reclaim_orphan_checkouts()
+
+        for src in sources:
+            try:
+                clone = SkillSourceClone(
+                    src.id, src.url, src.ref, src.ref_type, self.library_root
+                )
+            except ValueError:
+                # Same rule as above: the message is built from the stored row,
+                # not from the exception, because it reaches an HTTP response.
+                # SkillSourceClone rejects exactly three fields, and the third
+                # (source_id) is server-minted — so naming ref/ref_type names
+                # everything an operator can actually correct.
+                logger.warning(
+                    "unusable skill source configuration for %s", src.id, exc_info=True
+                )
+                msg = (
+                    f"unusable source configuration (ref={src.ref!r}, "
+                    f"ref_type={src.ref_type!r}) — check the source's branch or tag"
+                )
+                results.append({
+                    "source_id": src.id, "name": src.name,
+                    "success": False, "error": msg,
+                })
+                db.record_skill_source_sync(src.id, success=False, error=msg)
+                continue
+
+            try:
+                url = validate_skills_library_url(src.url)
+            except ValueError:
+                logger.warning(
+                    "invalid skill source URL for %s: %s", src.id, src.url, exc_info=True
+                )
+                msg = (
+                    "invalid source URL — must be an https://github.com "
+                    "repository URL or owner/repo shorthand"
+                )
+                results.append({
+                    "source_id": src.id, "name": src.name,
+                    "success": False, "error": msg,
+                })
+                db.record_skill_source_sync(src.id, success=False, error=msg)
+                continue
+
+            auth_url = self._authenticated_url(url, github_pat)
+            logger.info(
+                "syncing skill source %s (%s) %s=%s",
+                src.name, src.id, src.ref_type, src.ref,
+            )
+            # ent#236's commit-changed gate, per source. `src.last_commit_sha`
+            # is the DURABLE previous value, read from the row before this sync
+            # overwrites it — not an in-memory field, so the comparison holds
+            # across workers and restarts (a fresh process reading None would
+            # otherwise report "changed" and sweep the whole fleet on every
+            # backend restart).
+            previous_sha = src.last_commit_sha
+            outcome = clone.sync(
+                auth_url,
+                expected_sha=src.last_commit_sha if src.ref_type == "tag" else None,
+            )
+            db.record_skill_source_sync(
+                src.id,
+                success=bool(outcome.get("success")),
+                commit_sha=outcome.get("commit_sha"),
+                error=outcome.get("error"),
+            )
+            entry = {"source_id": src.id, "name": src.name}
+            entry.update(outcome)
+            entry["previous_commit_sha"] = previous_sha
+            entry["commit_changed"] = bool(
+                outcome.get("success")
+                and outcome.get("commit_sha")
+                and outcome.get("commit_sha") != previous_sha
+            )
+            results.append(entry)
+
+        # Any source moving invalidates the merged listing.
+        self._list_cache = (None, [])
+        ok = [r for r in results if r.get("success")]
+        if ok:
+            self._last_sync = datetime.now(timezone.utc)
+            self._last_commit_sha = ok[0].get("commit_sha")
+
+        # ent#236 fires the fleet-wide re-inject only when the library actually
+        # moved. With several sources, ANY source moving changes what agents
+        # would receive, so the aggregate is an OR — a sweep is idempotent and
+        # a missed one leaves the fleet silently stale, which is the failure
+        # ent#236 exists to remove.
+        commit_changed = any(r.get("commit_changed") for r in results)
+
+        error = None if ok else "; ".join(
+            str(r.get("error")) for r in results if r.get("error")
+        )
+        # Durable status for the Settings panel (ent#236). Written on BOTH
+        # branches: a failure path that skipped it would leave the last SUCCESS
+        # on screen. `_last_commit_sha` is a library-wide summary field only —
+        # per-source truth is `record_skill_source_sync` above.
+        self._persist_sync_status(
+            bool(ok), error, self._last_commit_sha if ok else None
+        )
+
+        skills = self.list_skills()
+        return {
+            "success": bool(ok),
+            "sources": results,
+            "synced": len(ok),
+            "failed": len(results) - len(ok),
+            "skill_count": len(skills),
+            "shadowed_count": sum(1 for s in skills if s.get("shadowed_by")),
+            "commit_changed": commit_changed,
+            # Library-wide summary sha (first successful source), kept because
+            # ent#236's consumers use it as a version MARKER for the fleet
+            # re-inject report and the audit row's target_id — not as a claim
+            # that the library has one commit. Per-source truth is in `sources`,
+            # and it is the same value written to the durable status row.
+            "commit_sha": self._last_commit_sha if ok else None,
+            "last_sync": self._last_sync.isoformat() if self._last_sync else None,
+            "error": error,
+        }
+
+    @staticmethod
+    def _authenticated_url(url: str, github_pat: Optional[str]) -> str:
+        """Splice a PAT into the clone URL for a private source.
+
+        The host is decided by PARSING, never by `"github.com" in url`
+        (CodeQL py/incomplete-url-substring-sanitization, flagged on PR #1901).
+        A substring test is satisfied by `https://evil.com/?x=github.com`, and
+        the old `.replace("https://", ...)` would then have sent the platform
+        PAT to evil.com. Not reachable today — `sync_library` validates every
+        source URL first — but "safe only because a caller three frames up
+        validates" is precisely the property that breaks when a caller is added,
+        and the blast radius here is a live GitHub credential.
+
+        Shorthand (`owner/repo`, `github.com/owner/repo`) is normalised to an
+        absolute https URL FIRST, so exactly one parsed host decides the splice.
+        Telling those two shorthands apart is itself done by parsing rather than
+        by `url.startswith("github.com/")`: a host prefix test is the same class
+        of check as the substring test above, and keeping ONE way to answer
+        "which host is this" is what stops the two answers from drifting apart.
+        """
+        if "://" in url:
+            absolute = url
         else:
-            # Public repo or no PAT
-            if not url.startswith("https://"):
-                auth_url = f"https://github.com/{url}"
+            # Scheme-less: either "<host>/owner/repo" or the bare "owner/repo".
+            # A first segment that PARSES to a known GitHub host is a host;
+            # anything else (including a lookalike) is treated as an owner name
+            # and lands under github.com, where the splice check below applies.
+            shorthand = urlparse(f"https://{url}")
+            if (shorthand.hostname or "").lower() in ALLOWED_SKILLS_LIBRARY_HOSTS:
+                absolute = f"https://{url}"
             else:
-                auth_url = url
+                absolute = f"https://github.com/{url}"
 
-        # Log without exposing PAT
-        safe_url = re.sub(r'https://[^@]+@', 'https://***@', auth_url)
-        logger.info(f"Syncing skills library from {safe_url} (branch: {branch})")
+        if not github_pat:
+            return absolute
+
+        parsed = urlparse(absolute)
+        # Exact host match against the same allowlist the SSRF guard uses — a
+        # PAT is only ever spliced for a host we know is GitHub.
+        if parsed.scheme != "https" or (parsed.hostname or "").lower() not in ALLOWED_SKILLS_LIBRARY_HOSTS:
+            return absolute
+        # Rebuild rather than string-replace: replace() would also rewrite a
+        # second "https://" occurrence inside a path or query.
+        netloc = f"{github_pat}@{parsed.netloc}"
+        return urlunparse(parsed._replace(netloc=netloc))
+
+    def _adopt_legacy_clone(self) -> Optional[str]:
+        """Migrate a pre-ent#237 single-repo install into the source model.
+
+        AC#6 (kept per vybe 2026-07-30): an existing install keeps working with
+        zero admin action. The old `skills_library_url` setting becomes a
+        regular CUSTOM source — custom, not default, so precedence keeps
+        preferring it over the community catalog the operator never chose.
+
+        DB row and clone move together, in that order: the row is written
+        first, so a crash between the two leaves a source whose next sync
+        simply re-clones. The reverse order would move the checkout somewhere
+        no row points at — an orphan nothing ever cleans up. Idempotent and
+        fail-soft; a failure here must never block a sync of already-migrated
+        sources.
+
+        The `skills_library_url` setting is DELETED once adoption succeeds, so
+        this is a genuine one-way migration. Leaving it in place would make the
+        setting a read-time default that re-creates the source on the next sync
+        after an admin deliberately deleted it — the same resurrection trap the
+        fresh-install seed is a row precisely to avoid (#1638's lesson). Nothing
+        else reads the key after ent#237, so consuming it strands no consumer.
+        """
+        legacy_git = self.library_root / ".git"
+        try:
+            url = get_skills_library_url()
+        except Exception:  # noqa: BLE001
+            return None
+        if not url:
+            return None
 
         try:
-            # Test for a REPOSITORY, not merely a directory. A path that exists
-            # but holds no `.git` — a clone interrupted by a full disk or a
-            # crash, a stray `mkdir`, a restored backup — makes `git pull` fail
-            # with "not a git repository" on every attempt, forever: nothing in
-            # this path ever re-clones, so the only recovery is shell access to
-            # delete the directory. That was survivable while sync was a button
-            # a human clicked and immediately saw fail. ent#236 puts it on an
-            # unattended timer, where it means every scheduled sync fails and
-            # the fleet re-inject silently never runs — the exact silent-failure
-            # mode this feature exists to remove. Treat a non-repo directory as
-            # "not cloned yet" and let the clone path re-establish it.
-            if (self.library_path / ".git").is_dir():
-                # Pull latest changes
-                result = self._git_pull(branch)
-            else:
-                # Clone repository (also re-clones over a non-repo directory)
-                result = self._git_clone(auth_url, branch)
+            if db.get_default_skill_source() is None and db.count_skill_sources() == 0:
+                pass  # nothing configured yet — proceed
+            existing = [s for s in db.list_skill_sources() if s.url == url]
+            if existing:
+                return existing[0].id
+            branch = get_skills_library_branch() or "main"
+            source = db.create_skill_source(
+                name="Migrated library",
+                url=url,
+                ref=branch,
+                ref_type="branch",   # the legacy setting tracked a branch
+                is_default=False,
+                created_by="migration:ent237",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"legacy skills-library adoption skipped: {e}")
+            return None
 
-            if result["success"]:
-                previous_commit = self._persisted_commit()
-                self._last_sync = datetime.utcnow()
-                self._last_commit_sha = self._get_current_commit()
-                self._list_cache = (None, [])
-                result["commit_sha"] = self._last_commit_sha
-                result["skill_count"] = len(self.list_skills())
-                result["last_sync"] = self._last_sync.isoformat()
-                # ent#236: the fleet sweep fires only on a REAL update — a no-op
-                # pull must not re-inject across every running agent.
-                result["commit_changed"] = bool(
-                    self._last_commit_sha and self._last_commit_sha != previous_commit
-                )
-                result["previous_commit_sha"] = previous_commit
-                self._persist_sync_status(True, None, self._last_commit_sha)
-            else:
-                self._persist_sync_status(False, result.get("error"), None)
+        if legacy_git.exists():
+            target = self.library_root / source.id
+            try:
+                if not target.exists():
+                    staging = self.library_root.parent / f".skills-migrate-{source.id}"
+                    # Move the whole old checkout aside, then into place under
+                    # the root it used to BE — a direct rename into a child of
+                    # itself is not a valid move.
+                    os.rename(self.library_root, staging)
+                    self.library_root.mkdir(parents=True, exist_ok=True)
+                    os.rename(staging, target)
+                    logger.info(
+                        "adopted legacy skills clone into source %s", source.id
+                    )
+            except OSError as e:
+                # The row survives; the next sync clones fresh into the subdir.
+                logger.warning(f"could not move legacy skills clone: {e}")
 
-            return result
+        # Consume the setting — see the one-way-migration note above. Best-effort:
+        # a failure here leaves a harmless duplicate-suppressed re-adoption on
+        # the next sync (the `existing` check above), never a broken migration.
+        try:
+            db.delete_setting("skills_library_url")
+            db.delete_setting("skills_library_branch")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "adopted skills_library_url into source %s but could not clear "
+                "the legacy setting (%s); it will be re-checked next sync",
+                source.id, e,
+            )
 
-        except Exception as e:
-            logger.error(f"Failed to sync skills library: {e}")
-            self._persist_sync_status(False, str(e), None)
-            return {
-                "success": False,
-                "error": str(e)
-            }
+        logger.info("migrated skills_library_url into skill source %s", source.id)
+        return source.id
 
     # -------------------------------------------------------------------------
     # Durable sync status (ent#236)
@@ -356,229 +766,100 @@ class SkillService:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"could not persist skills library sync status: {e}")
 
-    def _quarantine_non_repo_dir(self) -> None:
-        """Move a non-repository library directory aside so a clone can proceed.
-
-        `git clone` refuses a destination that exists and is non-empty, so
-        detecting "directory but not a repo" is only half a fix — without this
-        the sync would just fail on a different message, equally forever.
-
-        Renamed, never deleted. The platform owns this path exclusively (it is
-        only ever a clone of the configured remote, and nothing else writes
-        here), so removal would probably be safe — but "probably safe" is not
-        the standard for an unattended timer deleting a directory derived from
-        an operator-supplied setting (#1638/#1644). A rename is recoverable,
-        auditable, and costs one inode. Only one quarantine is kept; a repeat
-        replaces it, so this cannot grow without bound.
-        """
-        quarantine = self.library_path.with_name(self.library_path.name + ".broken")
-        try:
-            if quarantine.exists():
-                shutil.rmtree(quarantine, ignore_errors=True)
-            self.library_path.rename(quarantine)
-            logger.warning(
-                "Skills library path %s was not a git repository — moved to %s "
-                "and re-cloning.", self.library_path, quarantine,
-            )
-        except OSError as e:  # noqa: BLE001 — fall through and let clone report
-            logger.error(
-                "Could not move aside non-repo skills library at %s: %s",
-                self.library_path, e,
-            )
-
-    def _git_clone(self, url: str, branch: str) -> Dict[str, Any]:
-        """Clone the skills library repository."""
-        self.library_path.parent.mkdir(parents=True, exist_ok=True)
-        if self.library_path.exists():
-            # Reached only via the `.git`-absent branch in sync_library.
-            self._quarantine_non_repo_dir()
-
-        cmd = [
-            "git", *_GIT_HTTP_UA_ARGS,
-            "clone", "--branch", branch, "--depth", "1", url, str(self.library_path),
-        ]
-
-        try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
-            logger.info(f"Cloned skills library to {self.library_path}")
-            return {"success": True, "action": "cloned"}
-        except subprocess.CalledProcessError as e:
-            # Sanitize error output to remove PAT
-            error_msg = re.sub(r'https://[^@]+@', 'https://***@', e.stderr or str(e))
-            logger.error(f"Git clone failed: {error_msg}")
-            return {"success": False, "error": f"Clone failed: {error_msg}"}
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "Clone timed out after 120 seconds"}
-
-    def _git_pull(self, branch: str) -> Dict[str, Any]:
-        """Pull latest changes from the skills library."""
-        try:
-            # Fetch and reset to remote branch
-            subprocess.run(
-                ["git", *_GIT_HTTP_UA_ARGS, "fetch", "origin", branch],
-                cwd=self.library_path,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
-            subprocess.run(
-                ["git", "reset", "--hard", f"origin/{branch}"],
-                cwd=self.library_path,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            logger.info(f"Pulled latest skills library changes")
-            return {"success": True, "action": "pulled"}
-        except subprocess.CalledProcessError as e:
-            error_msg = re.sub(r'https://[^@]+@', 'https://***@', e.stderr or str(e))
-            logger.error(f"Git pull failed: {error_msg}")
-            return {"success": False, "error": f"Pull failed: {error_msg}"}
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "Pull timed out"}
-
-    def _get_current_commit(self) -> Optional[str]:
-        """Get the current commit SHA."""
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=self.library_path,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            return result.stdout.strip()[:12]  # Short SHA
-        except Exception:
-            return None
-
-    # =========================================================================
-    # Git package helpers (ent#183)
-    # =========================================================================
-
-    def _git_tree_shas(self) -> Dict[str, str]:
-        """Per-skill git tree SHA — the package VERSION.
-
-        Deterministic across clones/mtimes by construction (a content hash of
-        the tar bytes would embed checkout mtimes and never match twice).
-        One `git ls-tree -z` covers every skill; NUL-delimited so names are
-        never shell-quoted by git.
-        """
-        try:
-            result = subprocess.run(
-                ["git", "ls-tree", "-z", "HEAD", ".claude/skills/"],
-                cwd=self.library_path,
-                check=True,
-                capture_output=True,
-                timeout=15,
-            )
-        except Exception as e:  # noqa: BLE001 — no git/no HEAD → no versions
-            logger.warning(f"skills ls-tree failed: {e}")
-            return {}
-        shas: Dict[str, str] = {}
-        for entry in result.stdout.decode("utf-8", errors="replace").split("\0"):
-            if not entry.strip():
-                continue
-            # "<mode> <type> <sha>\t<path>"
-            head, _, path = entry.partition("\t")
-            fields = head.split()
-            if len(fields) != 3 or fields[1] != "tree":
-                continue
-            shas[path.rsplit("/", 1)[-1]] = fields[2]
-        return shas
-
-    def _git_archive_skill(self, skill_name: str) -> Optional[bytes]:
-        """`git archive HEAD -- .claude/skills/<name>` — the tar SOURCE.
-
-        Reading from HEAD (not the working tree) is atomic against a
-        concurrent admin sync's `git reset --hard`, so a mid-sync injection
-        gets one consistent version instead of a mixed-tree tar.
-        """
-        try:
-            result = subprocess.run(
-                ["git", "archive", "--format=tar", "HEAD", "--",
-                 f".claude/skills/{skill_name}"],
-                cwd=self.library_path,
-                check=True,
-                capture_output=True,
-                timeout=30,
-            )
-            return result.stdout
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"git archive failed for skill {skill_name}: {e}")
-            return None
-
     # =========================================================================
     # Skill Discovery Operations
     # =========================================================================
 
     def list_skills(self) -> List[Dict[str, Any]]:
         """
-        List all available skills from the library.
+        List every available skill, merged across sources (ent#237).
 
-        Scans .claude/skills/*/SKILL.md files. Each entry carries the parsed
-        frontmatter contract (ent#183): automation, user_invocable, requires,
-        plus package metadata (multi_file, file_count, size_bytes, version).
-        Cached per library commit SHA.
+        Each entry carries the parsed frontmatter contract (ent#183) —
+        automation, user_invocable, requires — plus package metadata
+        (multi_file, file_count, size_bytes, version) and, new here, its
+        provenance: `source_id`, `source_name`, and `shadowed_by`.
+
+        `shadowed_by` is non-empty when a LOWER-precedence source also ships
+        this name. The winning entry is listed once, carrying the losers — so
+        the UI can show the conflict (AC#4: never a silent overwrite) without a
+        second lookup. The shadowed copies are deliberately NOT separate list
+        entries: they are unreachable, and listing them as installable would
+        offer a choice the flat `.claude/skills/<name>/` namespace cannot honour.
         """
-        # Cache key is the CLONE's current commit, never the worker-local
-        # _last_commit_sha: under --workers 2 another worker's sync moves the
-        # shared clone while this worker's remembered SHA still matches its
-        # own cache — it would serve a stale list indefinitely. One cheap
-        # `git rev-parse` per call; the cache exists to skip the walk+parse.
-        commit = self._get_current_commit()
-        cached_commit, cached = self._list_cache
-        if commit is not None and cached_commit == commit and cached:
+        # Cache key spans EVERY enabled source's commit, never the worker-local
+        # _last_commit_sha: under --workers 2 another worker's sync moves a
+        # shared clone while this worker's remembered SHA still matches its own
+        # cache — it would serve a stale list indefinitely. One cheap
+        # `git rev-parse` per source per call; the cache skips the walk+parse.
+        clones = self._clones(enabled_only=True)
+        fingerprint = self._library_fingerprint(clones)
+        cached_fingerprint, cached = self._list_cache
+        if fingerprint is not None and cached_fingerprint == fingerprint and cached:
             return cached
 
-        skills = []
-        skills_dir = self.library_path / ".claude" / "skills"
+        names = self._source_names()
+        # Per-source tree SHAs, fetched once per source rather than per skill.
+        tree_shas: Dict[str, Dict[str, str]] = {}
+        resolved: Dict[str, Dict[str, Any]] = {}
 
-        if not skills_dir.exists():
-            logger.debug(f"Skills directory not found: {skills_dir}")
-            return skills
+        for clone in clones:
+            source_label = names.get(clone.source_id, clone.source_id)
+            for name in clone.skill_names():
+                if name in resolved:
+                    # Lower precedence — record the conflict and move on.
+                    resolved[name]["shadowed_by"].append({
+                        "source_id": clone.source_id,
+                        "source_name": source_label,
+                    })
+                    continue
+                if clone.source_id not in tree_shas:
+                    tree_shas[clone.source_id] = clone.tree_shas()
+                skill_file = (clone.skill_dir(name) or Path("/nonexistent")) / "SKILL.md"
+                if not skill_file.exists():
+                    continue
+                info = self._parse_skill_info(clone, name, skill_file)
+                info["version"] = tree_shas[clone.source_id].get(name)
+                info["source_id"] = clone.source_id
+                info["source_name"] = source_label
+                info["shadowed_by"] = []
+                resolved[name] = info
 
-        tree_shas = self._git_tree_shas()
-        for skill_path in sorted(skills_dir.iterdir()):
-            if not skill_path.is_dir():
-                continue
-            skill_file = skill_path / "SKILL.md"
-            if not skill_file.exists():
-                continue
-            info = self._parse_skill_info(skill_path.name, skill_file)
-            info["version"] = tree_shas.get(skill_path.name)
-            skills.append(info)
-
-        skills = sorted(skills, key=lambda s: s["name"])
-        if commit is not None:
-            self._list_cache = (commit, skills)
+        skills = sorted(resolved.values(), key=lambda s: s["name"])
+        if fingerprint is not None:
+            self._list_cache = (fingerprint, skills)
         return skills
 
-    def _skills_root(self) -> str:
-        return os.path.realpath(str(self.library_path / ".claude" / "skills"))
-
     def _skill_dir(self, skill_name: str) -> Optional[Path]:
-        """Resolve a library skill directory, or None if the name is unsafe.
+        """Resolve the WINNING source's directory for a skill name.
 
         TWO independent guards, because skill names arrive from URL paths and
-        from persisted assignments: the name regex (`validate_skill_name`) and
-        a realpath containment check against the skills root. The containment
-        check is the one that still holds if the regex is ever loosened — and
-        it is the single chokepoint every path in this module derives from.
-        """
-        if not pkg.validate_skill_name(skill_name):
-            return None
-        root = self._skills_root()
-        target = os.path.realpath(os.path.join(root, skill_name))
-        if target != root and not target.startswith(root + os.sep):
-            return None
-        return Path(target)
+        from persisted assignments: the name regex (`validate_skill_name`) and a
+        realpath containment check. The containment check is the one that still
+        holds if the regex is ever loosened.
 
-    def _skill_files(self, skill_name: str) -> List[Dict[str, Any]]:
-        """Walk a skill dir, litter-excluded — [{path, size, executable}]."""
-        skill_dir = self._skill_dir(skill_name)
+        ent#237 moved the containment check into `SkillSourceClone.skill_dir`,
+        so it is applied against the OWNING source's root. Checking against a
+        shared root would let a symlink in one source's tree resolve into
+        another's checkout and still pass — an escape route that did not exist
+        while there was a single clone.
+        """
+        entry = self._resolve_one(skill_name)
+        if entry is None:
+            return None
+        return entry["clone"].skill_dir(skill_name)
+
+    def _skill_files(
+        self, clone: "SkillSourceClone", skill_name: str
+    ) -> List[Dict[str, Any]]:
+        """Walk a skill dir in a GIVEN source, litter-excluded.
+
+        Takes the clone explicitly rather than re-resolving: the caller is
+        mid-iteration over sources and may be describing a skill that is NOT
+        the winner (or is being read during a sync that would resolve
+        differently), so re-resolving here would silently describe a different
+        source's copy than the one being listed.
+        """
+        skill_dir = clone.skill_dir(skill_name)
         files: List[Dict[str, Any]] = []
         if skill_dir is None or not skill_dir.is_dir():
             return files
@@ -598,17 +879,24 @@ class SkillService:
             })
         return files
 
-    def _parse_skill_info(self, skill_name: str, skill_file: Path) -> Dict[str, Any]:
+    def _parse_skill_info(
+        self, clone: "SkillSourceClone", skill_name: str, skill_file: Path
+    ) -> Dict[str, Any]:
         """
         Parse skill information from SKILL.md + directory metadata.
 
         Extracts the frontmatter contract (hardened, tolerant — see
-        skill_packaging) with a first-paragraph description fallback.
+        skill_packaging) with a first-paragraph description fallback. The clone
+        is explicit for the same reason as `_skill_files`.
         """
+        # The SOURCE-layout root (ent#332) — display/provenance only; the
+        # agent-side destination is always .claude/skills/<name>/. A None
+        # clone (the pure-parse backward-compat contract) reads as legacy.
+        rel_root = clone.skills_rel_root() if clone is not None else ".claude/skills"
         info: Dict[str, Any] = {
             "name": skill_name,
             "description": None,
-            "path": f".claude/skills/{skill_name}/SKILL.md",
+            "path": f"{rel_root}/{skill_name}/SKILL.md",
             "automation": None,
             "user_invocable": True,
             "allowed_tools": None,
@@ -642,7 +930,7 @@ class SkillService:
                         info["description"] = line[:200]  # Truncate
                         break
 
-            files = self._skill_files(skill_name)
+            files = self._skill_files(clone, skill_name)
             info["file_count"] = len(files)
             info["size_bytes"] = sum(f["size"] for f in files)
             info["multi_file"] = len(files) > 1
@@ -654,12 +942,16 @@ class SkillService:
 
     def get_skill(self, skill_name: str) -> Optional[Dict[str, Any]]:
         """
-        Get full details for a specific skill.
+        Get full details for a specific skill (from the source that wins it).
 
         Returns:
             Skill info dict with full content and file list, or None if not found
         """
-        skill_dir = self._skill_dir(skill_name)
+        entry = self._resolve_one(skill_name)
+        if entry is None:
+            return None
+        clone = entry["clone"]
+        skill_dir = clone.skill_dir(skill_name)
         if skill_dir is None:
             return None
         skill_file = skill_dir / "SKILL.md"
@@ -669,10 +961,13 @@ class SkillService:
 
         try:
             content = skill_file.read_text(errors="replace")
-            info = self._parse_skill_info(skill_name, skill_file)
-            info["version"] = self._git_tree_shas().get(skill_name)
+            info = self._parse_skill_info(clone, skill_name, skill_file)
+            info["version"] = clone.tree_shas().get(skill_name)
             info["content"] = content
-            info["files"] = self._skill_files(skill_name)
+            info["files"] = self._skill_files(clone, skill_name)
+            info["source_id"] = entry["source_id"]
+            info["source_name"] = entry["source_name"]
+            info["shadowed_by"] = entry["shadowed_by"]
             return info
         except Exception as e:
             logger.error(f"Failed to read skill {skill_name}: {e}")
@@ -684,18 +979,66 @@ class SkillService:
 
     def get_library_status(self) -> Dict[str, Any]:
         """
-        Get the current status of the skills library.
+        Get the current status of the skills library (ent#237: per source).
 
-        Returns:
-            Dict with configuration status, sync info, and skill counts
+        `configured` now means "at least one source exists", and the legacy
+        top-level `url`/`branch`/`commit_sha` fields are kept — populated from
+        the FIRST source in resolution order — so the pre-ent#237 MCP tool and
+        Settings panel keep rendering while they migrate to `sources`.
         """
-        url = get_skills_library_url()
-        branch = get_skills_library_branch()
+        try:
+            sources = db.list_skill_sources()
+        except Exception as e:  # noqa: BLE001 — pre-migration / DB down
+            logger.warning(f"could not load skill sources for status: {e}")
+            sources = []
+
+        clones = {c.source_id: c for c in self._clones(enabled_only=False)}
+        skills = self.list_skills() if sources else []
+
+        source_status = []
+        for src in sources:
+            clone = clones.get(src.id)
+            cloned = bool(clone and (clone.path / ".git").exists())
+            source_status.append({
+                "id": src.id,
+                "name": src.name,
+                # ent#334: stripped HERE, not only in the REST projection.
+                # `SkillSourcesPanel.vue` renders this straight onto the admin
+                # route, and `GET /skills/sources` returns this dict verbatim —
+                # so the service is the only place that covers every consumer.
+                # Rows predating `reject_embedded_credentials`, and the
+                # legacy-adoption path (which validates nothing), still carry
+                # `https://<token>@host/...`.
+                "url": strip_url_credentials(src.url),
+                "ref": src.ref,
+                "ref_type": src.ref_type,
+                "is_default": src.is_default,
+                "enabled": src.enabled,
+                "priority": src.priority,
+                "cloned": cloned,
+                # ent#332: the resolved per-source layout root — null until the
+                # source has actually been cloned (honest, not a guess).
+                "skills_root": clone.skills_rel_root() if cloned else None,
+                "layout_conflict": bool(clone.dual_layout) if cloned else False,
+                "last_sync": src.last_sync_at.isoformat() if src.last_sync_at else None,
+                "last_sync_status": src.last_sync_status,
+                "commit_sha": src.last_commit_sha,
+                "last_error": src.last_error,
+                # Skills this source actually WINS — what the operator can use
+                # from it, which is the number that matters when two sources
+                # overlap. Its total shipped count is on the source detail.
+                "skill_count": sum(
+                    1 for s in skills if s.get("source_id") == src.id
+                ),
+            })
 
         # ent#236: the DURABLE row wins over the per-process field. Under
         # `--workers 2` the worker answering this request is usually not the one
         # that synced, and the auto-sync loop runs on a single leader worker —
         # reading memory first would report "never synced" from every follower.
+        # ent#237 keeps these library-wide: per-source truth is on each entry of
+        # `sources` below, and these three summarise the last sweep as a whole,
+        # which is what the Settings panel's header reports.
         try:
             stored_sync = db.get_setting_value(SKILLS_LAST_SYNC_KEY, None)
             last_status = db.get_setting_value(SKILLS_LAST_STATUS_KEY, None)
@@ -703,26 +1046,32 @@ class SkillService:
         except Exception:  # noqa: BLE001 — status must never 500 the panel
             stored_sync = last_status = last_error = None
 
-        status = {
-            "configured": bool(url),
-            "url": url,
-            "branch": branch,
-            "cloned": self.library_path.exists(),
+        first = source_status[0] if source_status else {}
+        # Second emitter of the same value (ent#334). Stripped again rather
+        # than trusted to be clean via `first`: the two are edited
+        # independently, and `strip_url_credentials` is idempotent. The
+        # `if` preserves the no-sources `None` — coercing it to `""` would
+        # silently change what an unconfigured install reports.
+        first_url = first.get("url")
+        first_url = strip_url_credentials(first_url) if first_url else first_url
+        return {
+            "configured": bool(sources),
+            "sources": source_status,
+            "source_count": len(sources),
+            "enabled_source_count": sum(1 for s in sources if s.enabled),
+            "skill_count": len(skills),
+            "multi_file_count": sum(1 for s in skills if s.get("multi_file")),
+            "shadowed_count": sum(1 for s in skills if s.get("shadowed_by")),
             "last_sync": stored_sync
             or (self._last_sync.isoformat() if self._last_sync else None),
             "last_sync_status": last_status,
             "last_sync_error": last_error,
-            "commit_sha": self._last_commit_sha or self._get_current_commit(),
-            "skill_count": 0,
-            "multi_file_count": 0,
+            # Legacy single-library fields (deprecated, first source wins).
+            "url": first_url,
+            "branch": first.get("ref"),
+            "cloned": any(s["cloned"] for s in source_status),
+            "commit_sha": first.get("commit_sha"),
         }
-
-        if self.library_path.exists():
-            skills = self.list_skills()
-            status["skill_count"] = len(skills)
-            status["multi_file_count"] = sum(1 for s in skills if s.get("multi_file"))
-
-        return status
 
     # =========================================================================
     # Injection lock (cross-worker, fail-open — the compat_fix pattern)
@@ -1120,8 +1469,20 @@ print(json.dumps(out))
     ) -> Dict[str, Any]:
         client = get_agent_client(agent_name)
         results: Dict[str, Dict[str, Any]] = {}
-        commit_sha = self._last_commit_sha or self._get_current_commit()
-        tree_shas = await asyncio.to_thread(self._git_tree_shas)
+        # ent#237: resolve ONCE for the whole injection. Re-resolving per skill
+        # would let a concurrent admin sync move a source mid-loop and inject a
+        # half-and-half set; one snapshot means every skill in this run comes
+        # from the precedence state that was in force when it started.
+        resolution = await asyncio.to_thread(self._resolution)
+        tree_shas: Dict[str, Dict[str, str]] = {}
+        source_commits: Dict[str, Optional[str]] = {}
+        for entry in resolution.values():
+            clone = entry["clone"]
+            if clone.source_id not in tree_shas:
+                tree_shas[clone.source_id] = await asyncio.to_thread(clone.tree_shas)
+                source_commits[clone.source_id] = await asyncio.to_thread(
+                    clone.current_commit
+                )
         # The bulk-assign PUT historically persisted arbitrary strings, so the
         # ONE name guard must run before any name reaches an in-container exec.
         valid_names = [n for n in skill_names if pkg.validate_skill_name(n)]
@@ -1150,20 +1511,29 @@ print(json.dumps(out))
             # Direct parse, not get_skill(): the batch tree_shas above already
             # covers versions — get_skill would fork one git subprocess per
             # skill per injection. Path still derives from the one sanitized
-            # chokepoint.
-            skill_dir = self._skill_dir(skill_name)
+            # chokepoint, now the owning source's (ent#237).
+            entry = resolution.get(skill_name)
+            skill_dir = None if entry is None else entry["clone"].skill_dir(skill_name)
             skill_file = None if skill_dir is None else skill_dir / "SKILL.md"
-            if skill_file is None or not skill_file.exists():
+            if entry is None or skill_file is None or not skill_file.exists():
                 results[skill_name] = {
                     "success": False, "status": "failed", "files_written": 0,
                     "error": "Skill not found in library", "warnings": [],
                 }
                 continue
-            skill = self._parse_skill_info(skill_name, skill_file)
+            clone = entry["clone"]
+            skill = self._parse_skill_info(clone, skill_name, skill_file)
             contracts[skill_name] = skill
             warnings.extend(skill.get("contract_warnings") or [])
 
-            tree_sha = tree_shas.get(skill_name)
+            # A shadowed assignment is honoured (the winner is injected) but the
+            # operator is told, so "I assigned Community's copy and got Acme's"
+            # is never silent — the AC#4 rule applied at inject time, not just
+            # in the listing.
+            if entry["shadowed_by"]:
+                warnings.append(f"shadowed_source:{entry['source_name']}")
+
+            tree_sha = tree_shas.get(clone.source_id, {}).get(skill_name)
             agent_entry = agent_metas.get(skill_name) or {}
             agent_meta = agent_entry.get("meta") if isinstance(agent_entry, dict) else None
 
@@ -1179,10 +1549,12 @@ print(json.dumps(out))
                 }
                 continue
 
-            archive = await asyncio.to_thread(self._git_archive_skill, skill_name)
+            archive = await asyncio.to_thread(clone.archive_skill, skill_name)
             if archive:
+                # ent#332: strip the OWNING source's layout prefix and rewrite
+                # arcnames to the canonical agent-side destination.
                 members, filter_warnings, total = pkg.filter_skill_archive(
-                    archive, skill_name
+                    archive, skill_name, source_root=clone.skills_rel_root()
                 )
             else:
                 members, filter_warnings, total = [], [], 0
@@ -1215,7 +1587,12 @@ print(json.dumps(out))
             manifest = [arcname for arcname, _c, _m in members]
             meta = {
                 "version": tree_sha,
-                "commit": commit_sha,
+                # ent#237: the OWNING source's commit, not a library-wide one —
+                # with several sources there is no single library commit, and
+                # stamping the wrong source's SHA would make the agent-side
+                # version record unauditable.
+                "commit": source_commits.get(clone.source_id),
+                "source_id": clone.source_id,
                 "manifest": manifest,
                 "injected_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             }

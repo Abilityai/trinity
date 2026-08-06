@@ -13,6 +13,7 @@ from typing import List, Optional
 import httpx
 
 from database import db
+from models import REPORT_PAYLOAD_MAX_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +45,38 @@ Use `list_agents` to discover your available collaborators.
 
 ### Sharing Files with Users
 
-When the user asks for a file (CSV, PDF, report, image, exported data, etc.) or when your answer is best delivered as a file instead of inline text:
+When the user asks for a file (image, PDF, document, generated asset) or when your answer is best delivered as a file instead of inline text — but see **Publishing Reports** below first: rows-and-columns results belong in a report, which the user can already export to Excel or PDF, and which works even when file sharing is off:
 
 1. Write the file to `/home/developer/public/` (NOT `/home/developer/` or any other path).
 2. Call the `mcp__trinity__share_file` MCP tool with the relative filename.
 3. Include the returned `url` in your reply as-is.
 
 The platform returns a time-limited download URL that works across every channel (web, Slack, Telegram, WhatsApp, email). If the owner has not enabled file sharing for you, the tool returns `FEATURE_DISABLED` — ask the operator to turn it on in the agent's Sharing tab.
+
+### Publishing Reports
+
+Any result that is rows-and-columns, or that a human will re-read later — a table you just produced (10 rows or 10,000), findings from a scheduled run, batch summaries, KPI snapshots, numbers someone compares against next period — belongs in a **report**, not only in chat. If you are about to paste a table into chat, or to hand-write a CSV and share it as a file, publish a report instead: the user gets the same data with Excel and PDF export built in. Chat is read once; a report is persisted on your Reports tab and the fleet Reports view. Reports are one-way: when you need a *decision*, use the operator queue below instead.
+
+```
+mcp__trinity__report(
+    report_type="recon.weekly_summary",    # namespaced, lower_snake
+    title="Week 30: 14 leads, 3 qualified",
+    payload={...},                         # max __REPORT_PAYLOAD_MAX__ serialized
+    display_hint="table",                  # optional, see below
+    period_start="...", period_end="...")  # optional ISO-8601
+```
+
+Match the payload to the `display_hint` or it renders as raw JSON:
+
+- `table` — `{"columns": ["Name","Status"], "rows": [["Acme","qualified"]]}` (a row may instead be an object keyed by column)
+- `kpi` — `{"tiles": [{"label": "Leads", "value": 14, "unit": "new"}]}`
+- `markdown` — `{"markdown": "## Findings\\n..."}`
+- `timeline` — `{"events": [{"ts": "2026-07-27T09:00:00Z", "label": "Deal closed", "detail": "..."}]}`
+- `json` — any shape, when none of the above fit
+
+Aggregate before publishing: the 20 rows that matter, not 5,000 raw ones. Oversized payloads are rejected and reports are rate-limited.
+
+Before filing a recurring report, read back what you already filed — `mcp__trinity__list_reports` (metadata; filter by `report_type`) then `mcp__trinity__get_report(report_id)` for a payload. That is how you continue a series instead of duplicating or contradicting last period's numbers.
 
 ### Operator Communication
 
@@ -159,6 +185,17 @@ The `execution_id` is in the **Execution Context** block below. The platform sto
 - The current memory for this user (if any) appears in the **"What you know about this user"** block above.
 - Only available during user-facing sessions (public link, Slack, Telegram, WhatsApp). The tool returns an error if called from a scheduled task or agent-to-agent call."""
 
+# The payload ceiling is INTERPOLATED, never typed twice (#1838 review). The
+# block shipped `256 KB` while `REPORT_PAYLOAD_MAX_BYTES` was already 5 MiB in
+# the same PR — so every agent would have been told a ceiling 20x below the real
+# one, and would pre-aggregate away exactly the payloads #1537 raised the cap to
+# accept. A literal here is a second source of truth for a number the platform
+# already owns; `test_1535_report_prompt_guidance.py` pins the substitution too.
+PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(
+    "__REPORT_PAYLOAD_MAX__", f"{REPORT_PAYLOAD_MAX_BYTES // (1024 * 1024)} MB"
+)
+
+
 
 # ---------------------------------------------------------------------------
 # Runtime-aware MCP tool naming (#1187 F-MCP)
@@ -179,8 +216,10 @@ _CODEX_MCP_ORIENTATION = (
     "## MCP Tools (Codex runtime)\n\n"
     "A Trinity MCP server named `trinity` is configured for you. Call its tools "
     "by the bare names documented below — `list_agents`, `chat_with_agent`, "
-    "`share_file`, `write_user_memory` — exactly as your client auto-discovers "
-    "them. Do not add any vendor-specific tool-name prefix.\n\n---\n\n"
+    "`share_file`, `report`, `list_reports`, `get_report`, `write_user_memory` — "
+    "exactly as your client "
+    "auto-discovers them. Do not add any vendor-specific tool-name prefix."
+    "\n\n---\n\n"
 )
 
 

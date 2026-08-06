@@ -1,0 +1,98 @@
+{
+  "version": "1.1",
+  "date": "2026-08-02",
+  "mode": "daily",
+  "scope": "--diff",
+  "branch": "feature/ent89-template-schedules",
+  "merge_base": "c4c83f4a35880f53547e677973bc0e4a8af69073",
+  "issue": "trinity-enterprise#89",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "attack_surface": {
+    "files_changed": 21,
+    "lines_added": 2581,
+    "lines_removed": 28,
+    "new_endpoints": 0,
+    "modified_endpoints": 0,
+    "new_unauthenticated_inputs": 0,
+    "new_dependencies": 0,
+    "ci_workflow_changes": 0,
+    "docker_infra_changes": 0,
+    "schema_changes": 0,
+    "new_untrusted_input_parsers": 1
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "MEDIUM",
+      "confidence": 8,
+      "status": "VERIFIED",
+      "phase": 7,
+      "category": "LLM cost amplification",
+      "title": "A template can arm 20 every-minute autonomous schedules that one autonomy toggle enables at once",
+      "files": [
+        "src/backend/services/template_schedules.py:35",
+        "src/backend/services/agent_service/autonomy.py:60"
+      ],
+      "description": "Creation now materializes a template's declared schedules. MAX_DECLARED_SCHEDULES is 20 and the reader accepts '* * * * *'. Independently, set_autonomy_status_logic force-enables every schedule on an agent when autonomy is turned on, with no filter.",
+      "exploit_scenario": "1) A public github: template declares 20 entries with cron '* * * * *' and enabled: true. 2) A creator (or an agent-scoped MCP key holding create_agent) creates an agent from it; all 20 rows are written. 3) Nothing fires: agent_ownership.autonomy_enabled defaults to 0 and the scheduler gates on it (src/scheduler/service.py:844). 4) The operator later enables autonomy for an unrelated reason; set_autonomy_status force-enables all 20 at once -> ~28,800 LLM turns/day on the operator's key.",
+      "impact": "Cost amplification on the operator's own API key or subscription, reachable with one template choice plus one unrelated toggle.",
+      "mitigations_present": [
+        "agent_ownership.autonomy_enabled defaults to 0; scheduler gates on it (this is the control that holds)",
+        "MAX_DECLARED_SCHEDULES = 20 bounds fan-out",
+        "max_parallel_tasks (default 3) bounds concurrency",
+        "ghost agents skipped; ent#69 refuses ephemeral callers",
+        "documented at docs/memory/requirements/scheduling.md:115-119"
+      ],
+      "severity_rationale": "MEDIUM not HIGH: the amplification capability is pre-existing (no per-agent schedule cap has ever existed, so 20 deliberate API calls always achieved the same). #89 reduces friction, it does not create the capability.",
+      "recommendation": "Make set_autonomy_status stop clobbering per-schedule 'enabled' intent. No change required in this PR.",
+      "action": "follow-up filed during this audit",
+      "follow_up_issue": "https://github.com/Abilityai/trinity/issues/1945"
+    }
+  ],
+  "discarded_candidates": [
+    {
+      "title": "Log injection via unsanitized `reason` argument",
+      "file": "src/backend/services/template_service.py:113",
+      "reason_discarded": "hard exclusion #9 (log spoofing); reported instead as a code-consistency item in the /review pass"
+    },
+    {
+      "title": "Prompt injection via schedules[].message",
+      "reason_discarded": "no new trust boundary — the same template.yaml already ships CLAUDE.md and skills"
+    },
+    {
+      "title": "SSRF via repo in the GitHub API URL",
+      "file": "src/backend/services/template_service.py:58",
+      "reason_discarded": "hard exclusion #10 — host is a hard-coded literal (api.github.com); attacker controls path only. Pattern unchanged from pre-#89 code."
+    }
+  ],
+  "supply_chain_summary": {
+    "python_deps_changed": 0,
+    "node_deps_changed": 0,
+    "lockfile_changes": 0,
+    "new_install_scripts": 0
+  },
+  "filter_stats": {
+    "candidates_considered": 4,
+    "reported": 1,
+    "discarded_by_hard_exclusion": 2,
+    "discarded_by_trust_boundary_analysis": 1
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 1,
+    "low": 0
+  },
+  "trend": {
+    "previous_reports": [
+      { "date": "2026-07-30", "issue": "#1880", "findings": 0 },
+      { "date": "2026-07-31", "issue": "#1860", "findings": 0 },
+      { "date": "2026-07-31", "issue": "#1919", "findings": 0 }
+    ],
+    "direction": "new MEDIUM (amplification of a pre-existing mechanism, not a newly introduced defect)",
+    "resolved": 0,
+    "persistent": 0,
+    "new": 1
+  },
+  "verification_note": "Independent finding verification performed in-context rather than via fresh-context subagents (subagent dispatch disabled for this session). Finding 1's exploit path was verified by direct execution of the reader against a 50-entry every-minute block, plus source confirmation of the autonomy gate and the clobber."
+}

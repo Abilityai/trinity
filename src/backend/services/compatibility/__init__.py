@@ -61,10 +61,25 @@ def _check_dict(c: spec.CheckDef, status: str, message: str,
     }
 
 
+def _did_not_pass(check: Dict[str, Any]) -> bool:
+    """True if this check represents a real finding — including a crashed check.
+
+    `run_static` now returns FAIL for a check that raises (ent#128), so the first
+    clause covers it. The second is a deliberate second layer at the sink (#1525):
+    a check that reports `skipped` with `skip_reason == "check_error"` DID NOT
+    PASS, and counting only `status == "fail"` is what let a raise inside a HARD
+    check drop `hard_count` and flip `overall_status` to `compatible` on a broken
+    agent. If any future path reintroduces that skip, the count still holds.
+    """
+    if check.get("status") == "fail":
+        return True
+    return check.get("status") == "skipped" and check.get("skip_reason") == "check_error"
+
+
 def _counts(checks: List[Dict[str, Any]]) -> Dict[str, int]:
-    hard = sum(1 for c in checks if c["status"] == "fail" and c["severity"] == "hard")
-    soft = sum(1 for c in checks if c["status"] == "fail" and c["severity"] == "soft")
-    info = sum(1 for c in checks if c["status"] == "fail" and c["severity"] == "info")
+    hard = sum(1 for c in checks if _did_not_pass(c) and c["severity"] == "hard")
+    soft = sum(1 for c in checks if _did_not_pass(c) and c["severity"] == "soft")
+    info = sum(1 for c in checks if _did_not_pass(c) and c["severity"] == "info")
     return {"hard_count": hard, "soft_count": soft, "info_count": info}
 
 

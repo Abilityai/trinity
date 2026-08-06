@@ -12,18 +12,57 @@
           <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-action-primary-500 mx-auto"></div>
         </div>
 
-        <!-- Notification Toast -->
+        <!-- Notification Toast.
+             #1953: anchored bottom-right, NOT `top-20 right-4`. `top-20` is exactly
+             where AgentHeader's row-1 right cluster starts (NavBar h-16 + main py-2 +
+             inner py-2 = 80px), so the toast covered the Running toggle and Delete.
+             `bottom-24` clears the global HelpChatWidget FAB (bottom-6 + h-14 = 80px),
+             which is why this is not the `bottom-4 right-4` used elsewhere. -->
         <div v-if="notification"
           :class="[
-            'fixed top-20 right-4 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
+            'fixed bottom-24 right-6 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
             notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
           ]"
         >
-          {{ notification.message }}
+          <span>{{ notification.message }}</span>
+          <button
+            v-if="notification.type === 'error'"
+            type="button"
+            class="ml-3 font-medium opacity-70 hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-status-danger-500/40 rounded"
+            aria-label="Dismiss notification"
+            @click="dismissNotification"
+          >✕</button>
         </div>
 
-        <div v-if="error && !agent" class="bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300 px-4 py-3 rounded mb-4">
-          {{ error }}
+        <!-- #1914: agent 404'd. Deliberately does NOT say whether the agent
+             exists — the backend's 404 is uniform for missing vs. inaccessible
+             (Invariant #8 / #186) and this copy must not undo that. -->
+        <div v-if="notFound && !loading" data-testid="agent-not-found" class="max-w-lg mx-auto text-center py-16">
+          <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 9.75l4.5 4.5m0-4.5l-4.5 4.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <h2 class="mt-4 text-lg font-semibold text-gray-900 dark:text-gray-100">Agent not found</h2>
+          <p class="mt-2 text-sm text-gray-600 dark:text-gray-400">
+            <span class="font-mono text-gray-800 dark:text-gray-200">{{ route.params.name }}</span>
+            doesn't exist, or you don't have access to it.
+          </p>
+          <router-link
+            to="/"
+            class="mt-6 inline-block px-4 py-2 rounded-lg bg-action-primary-600 hover:bg-action-primary-700 text-white text-sm font-medium transition-colors"
+          >
+            Back to Dashboard
+          </router-link>
+        </div>
+
+        <div v-if="error && !agent" data-testid="agent-load-error" class="bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300 px-4 py-3 rounded mb-4 flex items-center justify-between gap-4">
+          <span>{{ error }}</span>
+          <button
+            @click="loadAgent"
+            data-testid="agent-load-retry"
+            class="shrink-0 px-3 py-1 rounded border border-status-danger-400 dark:border-status-danger-700 text-sm font-medium hover:bg-status-danger-200 dark:hover:bg-status-danger-900 transition-colors"
+          >
+            Retry
+          </button>
         </div>
 
         <div v-if="agent" :class="['ml-16', isFullscreenTab ? 'flex-1 flex flex-col min-h-0' : '']">
@@ -370,6 +409,7 @@ const sessionsStore = useSessionsStore()  // SESSION_TAB_2026-04 Phase 3
 const agent = ref(null)
 const loading = ref(true)
 const error = ref('')
+const notFound = ref(false)  // #1914: the agent 404'd (missing OR inaccessible — uniform by design)
 const activeTab = ref('overview')  // #1107: Overview is the default landing tab
 // Tabs reachable via ?tab= deep-link (Timeline / EXEC-023 navigation).
 // Single source — referenced in onMounted + onActivated (#1107: dedupe + overview).
@@ -470,7 +510,7 @@ function toggleChatMode() {
 }
 
 // Initialize composables
-const { notification, showNotification } = useNotification()
+const { notification, showNotification, dismissNotification } = useNotification()
 
 // Agent lifecycle composable
 const {
@@ -558,10 +598,12 @@ async function toggleAutonomy() {
     // Update local state
     agent.value.autonomy_enabled = newState
 
+    // #1945: the server authors this line — the toggle no longer "activates"
+    // schedules, it gates them, and the message names the case (no schedules /
+    // all disabled / N of M will run) that the raw count used to hide.
     showNotification(
-      newState
-        ? `Autonomy enabled. ${result.schedules_updated} schedule(s) activated.`
-        : `Autonomy disabled. ${result.schedules_updated} schedule(s) paused.`,
+      result.message ||
+        `Autonomy ${newState ? 'enabled' : 'disabled'}.`,
       'success'
     )
   } catch (error) {
@@ -855,13 +897,29 @@ const visibleTabs = computed(() => {
 })
 
 // Load agent
+//
+// #1914: a failure here has to reach the template, or the page renders blank —
+// `v-if="agent"` and the error banner are both false when `agent` is null and
+// `error` is ''. Two distinct failure states:
+//   404      -> not-found panel. The backend returns a UNIFORM 404 for both a
+//               non-existent agent and one this caller cannot access (an
+//               enumeration oracle otherwise — Invariant #8 / #186), so the
+//               copy must not claim which of the two it is.
+//   anything -> generic "couldn't load" banner with a retry (network blip,
+//   else      500, expired token). Retrying a 404 is pointless, so only this
+//               branch offers it.
 async function loadAgent() {
   loading.value = true
   error.value = ''
+  notFound.value = false
   try {
     agent.value = await agentsStore.fetchAgent(route.params.name)
   } catch (err) {
-    error.value = 'Failed to load agent details'
+    if (err.response?.status === 404) {
+      notFound.value = true
+    } else {
+      error.value = 'Failed to load agent details'
+    }
   } finally {
     loading.value = false
   }

@@ -164,6 +164,14 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", 
 # for the breaker to engage — a true opt-in canary (D7/D11).
 DISPATCH_BREAKER_ENABLED = os.getenv("DISPATCH_BREAKER_ENABLED", "false").lower() == "true"
 
+# MCP inline email auth (#848). Same env key the mcp-server reads, so a
+# single-.env deploy cannot drift between the two halves. Default OFF: with it
+# off the whole /api/internal/mcp-auth surface 404s, so the backend does not
+# depend on the MCP server's own gate for its default-OFF posture. Gating BOTH
+# halves matters because this surface bypasses the email whitelist and creates
+# accounts — it must not be live on an install that never opted in.
+MCP_INLINE_AUTH_ENABLED = os.getenv("MCP_INLINE_AUTH_ENABLED", "false").lower() == "true"
+
 # Fire-and-Forget Dispatch — global master switch (#1083).
 # When ON, eligible autonomous turns are dispatched to the agent with a 202
 # accept and finalized via the result-callback endpoint, so a wedged turn
@@ -372,9 +380,139 @@ COMMUNITY_RETENTION_FLOOR_DAYS = 5
 # clear_agent_runtime_state -> remove_agent_volumes (#1581), destroying the
 # agent's workspace/public/shared volumes and any declared `data_paths` runtime
 # data (#1169). The floor does not apply to it in ANY edition.
+# ent#237: the bundled community skills source, written into a FRESH install so
+# the library is never empty out of the box (AC#3). Seeded as a row rather than
+# resolved as a code default at read time, for the same reason as the retention
+# floor above: an existing install must not silently acquire a source it never
+# configured, and an admin who deletes or disables this one must have that stick
+# across restarts. A code-default fallback would resurrect it on every boot.
+#
+# `ref_type: tag` is AC#5 — the community catalog takes PRs from strangers and
+# skills carry executables the ent#139 runner runs, so instances follow a tag we
+# bump deliberately, never the branch head. The repo itself is ent#296; until it
+# cuts its first tag this seed points at a 404 and `sync_library` reports a
+# failed source (fail-soft by design — it never raises).
+#
+# The tag name must match what ent#296 actually publishes: that issue's plan
+# (vybe, 2026-08-04) cuts **v0.1.0** once the seed content lands, so a `v1.0.0`
+# default would leave every fresh install seeded with a source that can never
+# sync — and the failure is quiet (a failed row in Settings), not loud. Bump
+# this in lockstep with the catalog's releases; the env var is the escape hatch
+# for an instance that wants to pin an older or newer catalog.
+#
+# TRINITY_DEFAULT_SKILL_SOURCE="" disables the seed entirely for an operator who
+# wants no community catalog (mirrors TRINITY_DEFAULT_SYSTEM_MANIFEST).
+DEFAULT_SKILL_SOURCE_URL = os.getenv(
+    "TRINITY_DEFAULT_SKILL_SOURCE", "github.com/abilityai/trinity-skills"
+)
+DEFAULT_SKILL_SOURCE_REF = os.getenv("TRINITY_DEFAULT_SKILL_SOURCE_REF", "v0.1.0")
+DEFAULT_SKILL_SOURCE_NAME = "Trinity Community Skills"
+
 COMMUNITY_FRESH_INSTALL_SEED = {
     "execution_log_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
     "execution_row_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
     "health_check_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
     "schedule_soft_delete_retention_days": str(COMMUNITY_RETENTION_FLOOR_DAYS),
 }
+
+
+# ============================================================================
+# Ops-settings value validation (ent#297)
+# ============================================================================
+# `PUT /api/settings/ops/config` took `Dict[str, str]` and wrote it straight to
+# `db.set_setting` with NO type or range check, so every ops setting — including
+# the eight retention windows that drive irreversible deletion — accepted any
+# string at all.
+#
+# Read the failure modes precisely, because they are asymmetric and the
+# intuitive one is the harmless one:
+#
+#   * GARBAGE FAILS SAFE. Every reader coerces via `max(int(raw), 0)` inside a
+#     try/except returning 0, and 0 means "sweep disabled". So "abc" widens
+#     retention to forever. Wrong, but not destructive.
+#   * A SMALL VALID INTEGER IS THE CATASTROPHIC INPUT. `{"execution_row_
+#     retention_days": "1"}` is well-typed, in range for any naive check, and
+#     deletes the fleet's execution history on the next 5-minute cleanup cycle.
+#
+# So validation is NOT what stops the ent#297 attack, and it must not be sold as
+# such: a legitimate admin may genuinely want a 1-day window, and no range check
+# can tell that apart from an attack. The controls that stop it are the admin
+# gate rejecting agent principals (the root fix) and the #1644 blast-radius
+# guard refusing an over-threshold sweep. What validation buys is narrower and
+# still worth having — a malformed write fails LOUDLY at the boundary instead of
+# silently coercing to a value nobody chose, which is the #1525
+# validate-at-the-boundary rule and the same reasoning as the #506 ceiling's
+# dedicated range-checked route.
+# 10 years. Chosen to MATCH the enterprise `retention` module's own
+# `_MAX_DAYS` (`RetentionConfigUpdate` validates every window `ge=0, le=3650`),
+# not picked independently — these are two write paths to the same values, and
+# a wider OSS bound would let an admin store a window the managed panel then
+# refuses to edit, i.e. a value its own GET surfaces and its own PUT rejects.
+# The enterprise constant can't be imported here (private submodule, and OSS
+# must build without it), so the alignment is by value + this note.
+_DAYS_MAX = 3650
+_PERCENT = (0, 100)
+_MINUTES = (0, 525600)              # 1 year
+
+# key -> (kind, min, max); `None` bound = unbounded on that side.
+OPS_SETTINGS_VALIDATION = {
+    "ops_context_warning_threshold": ("int", *_PERCENT),
+    "ops_context_critical_threshold": ("int", *_PERCENT),
+    "ops_idle_timeout_minutes": ("int", *_MINUTES),
+    "ops_cost_limit_daily_usd": ("float", 0, 1_000_000),
+    "ops_max_execution_minutes": ("int", *_MINUTES),
+    "ops_alert_suppression_minutes": ("int", *_MINUTES),
+    "ops_log_retention_days": ("int", 0, _DAYS_MAX),
+    "ops_health_check_interval": ("int", 1, 86400),
+    "ssh_access_enabled": ("bool", None, None),
+    # The eight retention windows (RETENTION_OPS_KEYS). `0` is a documented,
+    # meaningful value on every one — "disable this sweep" — so the lower bound
+    # is 0 and NOT the community floor. Clamping to the floor here would be
+    # wrong twice over: it would silently rewrite an operator's explicit choice,
+    # and the floor is a fresh-install SEED plus an enterprise entitlement
+    # clamp, deliberately NOT an OSS hard limit (#1039/#1638).
+    "execution_log_retention_days": ("int", 0, _DAYS_MAX),
+    "execution_row_retention_days": ("int", 0, _DAYS_MAX),
+    "health_check_retention_days": ("int", 0, _DAYS_MAX),
+    "agent_soft_delete_retention_days": ("int", 0, _DAYS_MAX),
+    "schedule_soft_delete_retention_days": ("int", 0, _DAYS_MAX),
+    "agent_reports_retention_days": ("int", 0, _DAYS_MAX),
+    "operator_queue_retention_days": ("int", 0, _DAYS_MAX),
+    "agent_reminders_retention_days": ("int", 0, _DAYS_MAX),
+}
+
+
+def validate_ops_setting(key: str, value: str) -> str:
+    """Validate one ops setting; return it normalized, or raise ValueError.
+
+    Unknown keys pass through untouched — `PUT /ops/config` already filters to
+    `OPS_SETTINGS_DEFAULTS` and reports the rest as `ignored`, and turning that
+    into a hard reject is a separate contract change.
+    """
+    spec = OPS_SETTINGS_VALIDATION.get(key)
+    if spec is None:
+        return value
+
+    kind, low, high = spec
+    raw = (value or "").strip()
+
+    if kind == "bool":
+        if raw.lower() not in ("true", "false"):
+            raise ValueError(f"{key} must be 'true' or 'false' (got {value!r})")
+        return raw.lower()
+
+    try:
+        parsed = int(raw) if kind == "int" else float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{key} must be {'an integer' if kind == 'int' else 'a number'} "
+            f"(got {value!r}). An unparseable value used to coerce to 0, which "
+            f"for a retention window silently means 'sweep disabled'."
+        )
+
+    if low is not None and parsed < low:
+        raise ValueError(f"{key} must be >= {low} (got {parsed})")
+    if high is not None and parsed > high:
+        raise ValueError(f"{key} must be <= {high} (got {parsed})")
+
+    return str(parsed)

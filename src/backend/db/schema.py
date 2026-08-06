@@ -518,6 +518,27 @@ TABLES = {
         )
     """,
 
+    # Behavioral evaluations (ent#206) — the referee surface.
+    # A run's quality score, written ONLY by the platform/evaluator, never by the
+    # graded agent's key (the load-bearing rule of the eval epic). `completion`
+    # mirrors schedule_executions clean-exit; `quality` is the separate axis.
+    # -------------------------------------------------------------------------
+    "agent_evaluations": """
+        CREATE TABLE IF NOT EXISTS agent_evaluations (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            execution_id TEXT,
+            archetype TEXT,
+            completion INTEGER,
+            quality REAL,
+            checks_json TEXT,
+            judge_json TEXT,
+            evaluator TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (execution_id) REFERENCES schedule_executions(id)
+        )
+    """,
+
     # -------------------------------------------------------------------------
     # Notifications (NOTIF-001)
     # -------------------------------------------------------------------------
@@ -754,7 +775,41 @@ TABLES = {
             skill_name TEXT NOT NULL,
             assigned_by TEXT NOT NULL,
             assigned_at TEXT NOT NULL,
+            source_id TEXT,
             UNIQUE(agent_name, skill_name)
+        )
+    """,
+
+    # ent#237: multi-source skills library. A source is one git repo the
+    # platform syncs skills from; `skill_sources` replaces the single
+    # `skills_library_url` setting.
+    #
+    # UNIQUE stays (agent_name, skill_name) — NOT (agent_name, skill_name,
+    # source_id). Names are the flat namespace (ent#237 AC#4: custom-wins
+    # precedence, bare names) because the agent-side identity is the directory
+    # `.claude/skills/<name>/` and the ent#139 runner + ent#178 A2A card both
+    # resolve by bare name. `source_id` RECORDS which source an assignment
+    # resolved from so a silent cross-source swap is detectable; it is
+    # deliberately NOT part of the key, which would permit two rows that
+    # cannot both exist on disk.
+    "skill_sources": """
+        CREATE TABLE IF NOT EXISTS skill_sources (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            ref TEXT NOT NULL DEFAULT 'main',
+            ref_type TEXT NOT NULL DEFAULT 'branch',
+            is_default INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            priority INTEGER NOT NULL DEFAULT 100,
+            last_sync_at TEXT,
+            last_sync_status TEXT,
+            last_commit_sha TEXT,
+            last_error TEXT,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(url, ref)
         )
     """,
 
@@ -1400,6 +1455,8 @@ INDEXES = [
 
     # Agent report indexes (#918)
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_agent ON agent_reports(agent_name, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_agent ON agent_evaluations(agent_name, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_execution ON agent_evaluations(execution_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_type ON agent_reports(report_type, created_at DESC)",
     # Serves the retention sweep's `WHERE created_at < cutoff` scan (#918).
     "CREATE INDEX IF NOT EXISTS idx_agent_reports_created ON agent_reports(created_at)",
@@ -1439,6 +1496,13 @@ INDEXES = [
     # Agent skills indexes
     "CREATE INDEX IF NOT EXISTS idx_agent_skills_agent ON agent_skills(agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_agent_skills_skill ON agent_skills(skill_name)",
+    # ent#237: resolution order for the custom-wins precedence merge.
+    "CREATE INDEX IF NOT EXISTS idx_skill_sources_resolution "
+    "ON skill_sources(priority, created_at) WHERE enabled = 1",
+    # At most one bundled default source. Partial-unique so custom sources
+    # (is_default = 0) are unconstrained; valid on both SQLite and PostgreSQL.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_sources_one_default "
+    "ON skill_sources(is_default) WHERE is_default = 1",
 
     # Agent tags indexes
     "CREATE INDEX IF NOT EXISTS idx_agent_tags_tag ON agent_tags(tag)",

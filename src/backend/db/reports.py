@@ -136,13 +136,24 @@ class ReportOperations:
         self,
         agent_name: str,
         report_type: Optional[str] = None,
+        hours: Optional[int] = None,
+        search: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ) -> List[Dict]:
-        """Metadata list for one agent, newest first."""
-        conditions = [agent_reports.c.agent_name == agent_name]
-        if report_type:
-            conditions.append(agent_reports.c.report_type == report_type)
+        """Metadata list for one agent, newest first.
+
+        `hours`/`search` (#1539) are built by `_fleet_conditions` rather than
+        re-derived here: two independently-written predicates for "the same
+        filter" drift the moment one side gains a column, and the fleet view is
+        where an operator learns what `search` matches. Passing a single-agent
+        list keeps the agent scope an ordinary `IN (...)` term.
+        """
+        conditions = self._fleet_conditions(
+            [agent_name], report_type, hours, search, search_agent_name=False
+        )
+        if conditions is None:  # unreachable: a single-agent list is never empty
+            return []
         stmt = (
             select(*_SUMMARY_COLUMNS)
             .where(and_(*conditions))
@@ -159,6 +170,7 @@ class ReportOperations:
         report_type: Optional[str],
         hours: Optional[int],
         search: Optional[str],
+        search_agent_name: bool = True,
     ) -> Optional[list]:
         """Shared WHERE conditions for fleet list/stats.
 
@@ -175,13 +187,19 @@ class ReportOperations:
             conditions.append(agent_reports.c.created_at >= iso_cutoff(hours=hours))
         if search:
             like = f"%{search}%"
-            conditions.append(
-                or_(
-                    agent_reports.c.title.like(like),
-                    agent_reports.c.report_type.like(like),
-                    agent_reports.c.agent_name.like(like),
-                )
-            )
+            # `agent_name` is a useful search arm on the FLEET view (that is how
+            # you find "everything scout published") but actively wrong on a
+            # single-agent list: every row already carries that name, so a term
+            # matching it — "recon" inside agent `recon-bot` — would return the
+            # agent's whole history regardless of title, looking like search was
+            # ignored (#1539).
+            arms = [
+                agent_reports.c.title.like(like),
+                agent_reports.c.report_type.like(like),
+            ]
+            if search_agent_name:
+                arms.append(agent_reports.c.agent_name.like(like))
+            conditions.append(or_(*arms))
         return conditions
 
     def get_fleet_reports(

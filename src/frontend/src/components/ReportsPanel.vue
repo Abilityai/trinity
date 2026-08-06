@@ -12,11 +12,46 @@
       >Refresh</button>
     </div>
 
+    <!-- Filters (#1539) — same controls as the fleet view minus the agent
+         picker, which this tab is already scoped by. -->
+    <div class="flex flex-wrap items-center gap-2 mb-4">
+      <select
+        :value="store.filters.report_type"
+        class="text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-1"
+        @change="store.setFilter('report_type', $event.target.value)"
+      >
+        <option value="">All types</option>
+        <option v-for="t in typeOptions" :key="t" :value="t">{{ t }}</option>
+      </select>
+      <select
+        :value="store.filters.hours"
+        class="text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-1"
+        @change="store.setFilter('hours', Number($event.target.value))"
+      >
+        <option :value="24">24h</option>
+        <option :value="168">7d</option>
+        <option :value="720">30d</option>
+        <option :value="0">All time</option>
+      </select>
+      <input
+        :value="store.filters.search"
+        type="search"
+        placeholder="Search title / type"
+        class="text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 px-2 py-1 flex-1 min-w-[12rem]"
+        @input="onSearch($event.target.value)"
+      />
+    </div>
+
     <p v-if="store.error" class="text-sm text-red-600 mb-3">{{ store.error }}</p>
 
     <div v-if="store.loading && store.reports.length === 0" class="text-sm text-gray-400">Loading…</div>
     <div v-else-if="store.reports.length === 0" class="text-sm text-gray-400">
-      No reports yet. Agents publish reports via the <code>report</code> MCP tool.
+      <template v-if="hasActiveFilter">
+        No reports match these filters.
+      </template>
+      <template v-else>
+        No reports yet. Agents publish reports via the <code>report</code> MCP tool.
+      </template>
     </div>
 
     <ul v-else class="space-y-2">
@@ -47,11 +82,32 @@
           <ReportRenderer
             v-else
             :report-type="report.report_type"
+            :meta="store.rowMeta[report.id]"
+            :load-more="() => store.loadMoreRows(report.id)"
             :display-hint="report.display_hint"
             :payload="store.payloads[report.id].payload"
           />
-          <div v-if="canDelete" class="mt-3 text-right">
+          <div class="mt-3 flex items-center justify-between gap-2">
+            <div class="flex items-center gap-2">
+              <!-- #1536: buttons, NOT plain links. A raw navigation to the export
+                   URL sends no Authorization header — Trinity's JWT lives in
+                   localStorage and is attached by the api.js interceptor — so an
+                   <a href> download answered 401. Goes through the store. -->
+              <button
+                type="button"
+                class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-wait"
+                :disabled="exporting === report.id + ':xlsx'"
+                @click="onExport(report.id, 'xlsx')"
+              >{{ exporting === report.id + ':xlsx' ? 'Exporting…' : 'Export .xlsx' }}</button>
+              <button
+                type="button"
+                class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-wait"
+                :disabled="exporting === report.id + ':pdf'"
+                @click="onExport(report.id, 'pdf')"
+              >{{ exporting === report.id + ':pdf' ? 'Exporting…' : 'Export PDF' }}</button>
+            </div>
             <button
+              v-if="canDelete"
               class="text-xs px-2 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
               @click="store.deleteReport(report.id)"
             >Delete</button>
@@ -63,8 +119,8 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, watch } from 'vue'
-import { useReportsStore } from '../stores/reports'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useReportsStore, downloadReportExport } from '../stores/reports'
 import ReportRenderer from './reports/ReportRenderer.vue'
 
 const props = defineProps({
@@ -74,6 +130,38 @@ const props = defineProps({
 
 const store = useReportsStore()
 
+// Type options come from what this agent has actually published — there is no
+// per-agent stats endpoint, and inventing one for a dropdown would be a new
+// surface for a filter the list already answers. Derived from the loaded page,
+// so it reflects the current window rather than all time (#1539).
+const seenTypes = ref(new Set())
+watch(
+  () => store.reports,
+  (rows) => {
+    for (const r of rows || []) seenTypes.value.add(r.report_type)
+    seenTypes.value = new Set(seenTypes.value)
+  },
+  { immediate: true, deep: false },
+)
+const typeOptions = computed(() => [...seenTypes.value].sort())
+
+const hasActiveFilter = computed(
+  () =>
+    !!store.filters.report_type ||
+    !!store.filters.search ||
+    store.filters.hours !== 168,
+)
+
+// Debounced so a typed query is one request, not one per keystroke.
+let _searchTimer = null
+function onSearch(value) {
+  if (_searchTimer) clearTimeout(_searchTimer)
+  _searchTimer = setTimeout(() => store.setFilter('search', value), 300)
+}
+onUnmounted(() => {
+  if (_searchTimer) clearTimeout(_searchTimer)
+})
+
 function load() {
   store.setAgent(props.agentName)
   store.fetchReports()
@@ -82,4 +170,21 @@ function load() {
 onMounted(load)
 watch(() => props.agentName, load)
 onUnmounted(() => store.clearAgent())
+
+// #1536: export goes through the store so the api.js auth interceptor runs.
+// A plain <a href> download sent no Bearer token and got 401.
+const exporting = ref(null)
+async function onExport(reportId, format) {
+  exporting.value = `${reportId}:${format}`
+  try {
+    await downloadReportExport(reportId, format)
+  } catch (e) {
+    // Surface it rather than failing silently — a 503 here is the #1814
+    // "code upgraded without rebuilding the image" case and the detail says so.
+    const detail = e?.response?.data?.detail
+    window.alert(detail || 'Export failed. Please try again.')
+  } finally {
+    exporting.value = null
+  }
+}
 </script>
