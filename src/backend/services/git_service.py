@@ -1325,6 +1325,29 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     # the 15-min sync loop commits it (and every plugin update commits another
     # copy) — repo bloat, same class as #1596. Re-installable, so never in git.
     ".claude/plugins/",
+    # #2036: container-only Claude Code config. The base image bakes
+    # `~/.claude/settings.json` (docker/base-image/hooks/claude-settings.json)
+    # registering the platform guardrail hooks by ABSOLUTE container path
+    # (`/opt/trinity/hooks/*.py`). HOME == the repo root, so `git add -A` swept
+    # it into the agent's GitHub repo — and any clone made outside the container
+    # is then hard-bricked: a PreToolUse hook whose script is missing exits 2,
+    # which is precisely Claude Code's "block this tool call" signal, so every
+    # Bash/Edit/Write fails on a machine that has no `/opt/trinity`. Worse blast
+    # radius than #462/#1596/#1702 — the leak breaks foreign clones rather than
+    # merely bloating them. The rest are runtime state observed leaking in the
+    # same commit (`backups/` alone was ~3,000 lines).
+    #
+    # Trade-off, stated: `.claude/settings.json` doubles as Claude Code's
+    # PROJECT-level settings file, so a template can no longer commit one. That
+    # is the right default — the baked file always exists and would collide —
+    # and an agent that genuinely needs it keeps the #1596 escape hatch: negate
+    # in its own `.gitignore` (`!.claude/settings.json`). `settings.local.json`
+    # is already covered by the `*.local.json` rule below.
+    ".claude/settings.json",
+    ".claude/remote-settings.json",
+    ".claude/policy-limits.json",
+    ".claude/backups/",
+    ".claude/.last-cleanup",
     # Temporary files
     "*.log",
     "*.tmp",
