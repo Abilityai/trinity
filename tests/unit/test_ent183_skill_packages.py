@@ -425,6 +425,11 @@ _STUBS = {
     "utils.url_validation": {
         "validate_skills_library_url": lambda url: url,
         "ALLOWED_SKILLS_LIBRARY_HOSTS": {"github.com", "www.github.com"},
+        # ent#334 added this import to skill_service. Identity here, matching
+        # `validate_skills_library_url` above: nothing in this module renders a
+        # source URL, so the real stripping is exercised by
+        # test_ent334_status_url_disclosure, not stubbed away from it.
+        "strip_url_credentials": lambda url: url,
     },
 }
 # #1898: the stubs live ONLY for the duration of the import below.
