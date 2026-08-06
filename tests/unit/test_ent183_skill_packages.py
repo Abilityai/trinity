@@ -412,7 +412,13 @@ _STUBS = {
         "AgentRequestError": type("AgentRequestError", (Exception,), {}),
         "get_all_circuit_states": MagicMock(return_value={}),
     },
-    "utils.url_validation": {"validate_skills_library_url": lambda url: url},
+    # The stub must mirror EVERY name skill_service imports from the real
+    # module — a missing constant is an ImportError at collection, not a
+    # graceful degradation (see abilityai/trinity#1898 for the wider fragility).
+    "utils.url_validation": {
+        "validate_skills_library_url": lambda url: url,
+        "ALLOWED_SKILLS_LIBRARY_HOSTS": {"github.com", "www.github.com"},
+    },
 }
 for _name, _attrs in _STUBS.items():
     if _name not in sys.modules:
@@ -423,17 +429,37 @@ for _name, _attrs in _STUBS.items():
 
 import services.skill_service as skill_service_module  # noqa: E402
 from services.skill_service import SkillService, SkillInjectionBusy  # noqa: E402
+from services.skill_source_clone import SkillSourceClone  # noqa: E402
 
 
 def _run(coro):
     return asyncio.run(coro)
 
 
+# ent#237 made the library multi-source: `skill_service` orchestrates N
+# `SkillSourceClone`s under /data/skills-library/<source_id>/ instead of being a
+# single clone itself. These tests predate that and are written against ONE
+# library, which is still a valid configuration — so the fixture wires exactly
+# one source and the assertions below are unchanged. The directory is named
+# `src_*` because that is the id format a clone validates.
+_TEST_SOURCE_ID = "src_aaaaaaaa"
+
+
 @pytest.fixture()
 def service(tmp_path):
     svc = SkillService()
-    svc.library_path = tmp_path / "library"
+    svc.library_root = tmp_path
+    svc.library_path = tmp_path / _TEST_SOURCE_ID
     (svc.library_path / ".claude" / "skills").mkdir(parents=True)
+
+    clone = SkillSourceClone(
+        _TEST_SOURCE_ID, "https://github.com/owner/repo", "main", "branch", tmp_path
+    )
+    # Bypass the DB: these tests assert injection/listing behaviour, not source
+    # persistence (that is test_ent237_skill_sources.py).
+    svc._clones = lambda enabled_only=True: [clone]
+    svc._source_names = lambda: {_TEST_SOURCE_ID: "Test library"}
+    svc.test_clone = clone
     return svc
 
 
@@ -471,17 +497,18 @@ def _resp(status_code, body=None, text=""):
 def _wire(service, *, metas=None, restore=None, probe=None):
     """Patch the exec/transport seams; returns the mocks."""
     service._read_agent_skill_metas = AsyncMock(return_value=metas or {})
-    service._git_tree_shas = MagicMock(
+    # ent#237: these three are per-clone now, not per-service.
+    service.test_clone.tree_shas = MagicMock(
         return_value={
             p.name: f"tree-{p.name}"
             for p in (service.library_path / ".claude" / "skills").iterdir()
             if p.is_dir()
         }
     )
-    service._git_archive_skill = MagicMock(
+    service.test_clone.archive_skill = MagicMock(
         side_effect=lambda name: _fake_archive_from_library(service, name)
     )
-    service._get_current_commit = MagicMock(return_value="commit123")
+    service.test_clone.current_commit = MagicMock(return_value="commit123")
     if callable(restore) and not isinstance(restore, MagicMock):
         service._post_restore = AsyncMock(side_effect=restore)
     else:
@@ -897,13 +924,18 @@ class TestRealGitPipeline:
         _git(library, "add", "-A")
         _git(library, "commit", "-qm", "seed")
 
-        svc = SkillService()
-        svc.library_path = library
+        # ent#237: git operations are per-source (SkillSourceClone), so the
+        # clone is constructed directly here — this test is about the real
+        # archive→filter→restore pipeline, not about source resolution.
+        clone = SkillSourceClone(
+            _TEST_SOURCE_ID, str(library), "main", "branch", library.parent
+        )
+        clone.path = library
 
-        shas = svc._git_tree_shas()
+        shas = clone.tree_shas()
         assert "demo" in shas and len(shas["demo"]) == 40
 
-        archive = svc._git_archive_skill("demo")
+        archive = clone.archive_skill("demo")
         assert archive
         members, warnings, _ = pkg.filter_skill_archive(archive, "demo")
         names = [m[0] for m in members]
@@ -943,10 +975,10 @@ class TestRealGitPipeline:
         _git(tmp_path, "clone", "-q", str(origin), str(clone_a))
         _git(tmp_path, "clone", "-q", str(origin), str(clone_b))
 
-        svc_a, svc_b = SkillService(), SkillService()
-        svc_a.library_path = clone_a
-        svc_b.library_path = clone_b
-        assert svc_a._git_tree_shas()["demo"] == svc_b._git_tree_shas()["demo"]
+        a = SkillSourceClone(_TEST_SOURCE_ID, str(origin), "main", "branch", tmp_path)
+        b = SkillSourceClone("src_bbbbbbbb", str(origin), "main", "branch", tmp_path)
+        a.path, b.path = clone_a, clone_b
+        assert a.tree_shas()["demo"] == b.tree_shas()["demo"]
 
 
 class TestListAndGetSurface:
@@ -958,8 +990,8 @@ class TestListAndGetSurface:
             ),
             "scripts/x.py": "pass\n",
         })
-        service._git_tree_shas = MagicMock(return_value={"demo": "sha"})
-        service._get_current_commit = MagicMock(return_value=None)
+        service.test_clone.tree_shas = MagicMock(return_value={"demo": "sha"})
+        service.test_clone.current_commit = MagicMock(return_value=None)
         skills = service.list_skills()
         assert len(skills) == 1
         s = skills[0]
@@ -978,10 +1010,17 @@ class TestListAndGetSurface:
         # The realpath containment check is the guard that must still hold if
         # the name regex is ever loosened — pin it independently by disabling
         # the regex (CodeQL flagged these joins; both guards are load-bearing).
+        # ent#237: the realpath containment check moved onto SkillSourceClone,
+        # applied against the OWNING source's root (a shared root would let a
+        # symlink in one source resolve into another's checkout). The service's
+        # _skill_dir now also requires the skill to EXIST in a source, so the
+        # containment property is pinned at its new home to keep it independent
+        # of existence.
         monkeypatch.setattr(pkg, "validate_skill_name", lambda name: True)
-        assert service._skill_dir("../../../etc") is None
-        assert service._skill_dir("..") is None
-        assert service._skill_dir("ok") is not None
+        clone = service.test_clone
+        assert clone.skill_dir("../../../etc") is None
+        assert clone.skill_dir("..") is None
+        assert clone.skill_dir("ok") is not None
 
     def test_skill_dir_refuses_symlink_escaping_the_root(self, service,
                                                          tmp_path):

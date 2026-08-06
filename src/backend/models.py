@@ -1342,6 +1342,12 @@ class ConnectorStatus(BaseModel):
     key_prefix: Optional[str] = None
     mcp_url: Optional[str] = None
     snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
+    # #848 inline email auth. When the platform flag is on, an owner can share
+    # the agent WITHOUT minting a key: the collaborator connects keyless and
+    # signs in by email. `inline_auth_available` mirrors the flag;
+    # `keyless_snippets` is the no-key config (empty when the flag is off).
+    inline_auth_available: bool = False
+    keyless_snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -1353,6 +1359,64 @@ class ConnectorKeySecret(BaseModel):
     key_prefix: str
     mcp_url: Optional[str] = None
     snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# MCP inline email auth (#848) — /api/internal/mcp-auth/*
+#
+# The MCP server calls these with X-Internal-Secret on behalf of a keyless
+# session. The internal secret authenticates the CALLER, never the action: every
+# body carries the asserted ``email`` and the backend re-gates each call on that
+# email's own access. Nothing here ever returns a credential.
+# ---------------------------------------------------------------------------
+
+class McpInlineLoginRequest(BaseModel):
+    """Body for POST /api/internal/mcp-auth/request."""
+    email: str = Field(..., min_length=3, max_length=254)
+    session_id: Optional[str] = Field(default=None, max_length=200)
+
+
+class McpInlineLoginVerify(BaseModel):
+    """Body for POST /api/internal/mcp-auth/verify."""
+    email: str = Field(..., min_length=3, max_length=254)
+    code: str = Field(..., min_length=1, max_length=32)
+    session_id: Optional[str] = Field(default=None, max_length=200)
+
+
+class McpInlineAgent(BaseModel):
+    """One agent a verified email may reach through the connector surface."""
+    name: str
+    description: Optional[str] = None
+
+
+class McpInlineVerifyResponse(BaseModel):
+    """Response for a SUCCESSFUL verify. Carries no credential of any kind —
+    the MCP session binding is the credential and it lives only in the MCP
+    server's memory (§7.6: session, not a minted key)."""
+    verified: bool = True
+    username: Optional[str] = None
+    agents: List[McpInlineAgent] = Field(default_factory=list)
+
+
+class McpInlinePlaybooksRequest(BaseModel):
+    """Body for POST /api/internal/mcp-auth/playbooks."""
+    email: str = Field(..., min_length=3, max_length=254)
+    agent: str = Field(..., min_length=1, max_length=100)
+
+
+class McpInlineChatRequest(BaseModel):
+    """Body for POST /api/internal/mcp-auth/chat."""
+    email: str = Field(..., min_length=3, max_length=254)
+    agent: str = Field(..., min_length=1, max_length=100)
+    message: str = Field(..., min_length=1, max_length=100000)
+    idempotency_key: Optional[str] = Field(default=None, max_length=255)
+
+
+class McpInlineChatResponse(BaseModel):
+    """Response for POST /api/internal/mcp-auth/chat."""
+    agent: str
+    response: str
+    execution_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -2317,6 +2381,11 @@ class InternalAuditRequest(BaseModel):
     mcp_key_name: Optional[str] = None
     mcp_scope: Optional[str] = None
     actor_agent_name: Optional[str] = None
+    # #848: a keyless inline-auth caller has no key and no agent — the verified
+    # email is its only identity. Without this field Pydantic would silently
+    # DROP it (extra='ignore' by default), leaving an unattributable audit row
+    # and no error to notice.
+    actor_email: Optional[str] = None
     # Target
     target_type: Optional[str] = None
     target_id: Optional[str] = None
@@ -3249,3 +3318,50 @@ class WhatsAppConfigureRequest(BaseModel):
 class WhatsAppTestRequest(BaseModel):
     to_number: Optional[str] = None
     message: str = "Hello from Trinity! Your WhatsApp integration is configured correctly."
+
+
+# ============================================================================
+# Skill Sources (ent#237 — multi-source skills library)
+# ============================================================================
+
+class SkillSourceCreate(BaseModel):
+    """Register a skills repo as a source.
+
+    `is_default` is absent by design: the bundled community source is seeded at
+    fresh install and there can be only one, so an API caller never sets the
+    flag. Its trust posture (tag-pinned, ours to bump) is not a property a
+    caller should be able to claim for an arbitrary repo.
+    """
+    name: str = Field(..., min_length=1, max_length=100)
+    url: str = Field(..., min_length=1, max_length=500)
+    ref: str = Field("main", min_length=1, max_length=200)
+    # 'branch' tracks a moving head; 'tag' pins and REFUSES a moved tag. An
+    # operator syncing a repo whose write access they do not fully control
+    # should pin (ent#237 AC#5).
+    ref_type: Literal["branch", "tag"] = "branch"
+    enabled: bool = True
+
+    @field_validator("name", "ref")
+    @classmethod
+    def _no_control_chars(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("must not be blank")
+        if any(ord(c) < 32 or ord(c) == 127 for c in v):
+            raise ValueError("must not contain control characters")
+        return v
+
+
+class SkillSourceUpdate(BaseModel):
+    """Patch a source. Every field optional; omitted fields are untouched.
+
+    `is_default` is not patchable — promoting a custom source would change its
+    trust posture without changing where it points (enforced in the db layer
+    too, so an added field here cannot silently start working).
+    """
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    url: Optional[str] = Field(None, min_length=1, max_length=500)
+    ref: Optional[str] = Field(None, min_length=1, max_length=200)
+    ref_type: Optional[Literal["branch", "tag"]] = None
+    enabled: Optional[bool] = None
+    priority: Optional[int] = Field(None, ge=1, le=10000)

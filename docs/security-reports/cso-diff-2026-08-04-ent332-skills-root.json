@@ -1,0 +1,83 @@
+{
+  "version": "1.1",
+  "date": "2026-08-04",
+  "mode": "daily",
+  "scope": "--diff",
+  "branch": "feature/ent-332-per-source-skills-root",
+  "base": "feature/ent-237-multi-source-skills",
+  "merge_base": "0bd6a8c5d872b2d734a71728d789a45488758883",
+  "issue": "abilityai/trinity-enterprise#332",
+  "phases_run": [0, 1, 2, 7, 9, 12, 13, 14],
+  "diff_size": {"files": 9, "insertions": 354, "deletions": 30},
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_auth_dependencies": 0,
+    "new_outbound_urls": 0,
+    "new_external_input_paths": 1,
+    "new_input_description": "catalog.yaml at a skills-source repo root (author-controlled repo content) supplying a skills_root value that reaches filesystem path joins, git argv pathspecs, tar prefix math, and display strings",
+    "base_image_files_touched": 0,
+    "vendored_parity_files_touched": 0
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "medium",
+      "severity_conditional": "high",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "introduced_by_this_diff": false,
+      "inherited_from": "dev (pre-ent#237); widened by ent#237",
+      "phase": "P9-A01/A02",
+      "category": "Access Control / Credential Disclosure",
+      "title": "GET /api/skills/library/status returns raw skills-source URLs to any authenticated principal, including agent-scoped MCP keys; the legacy-adoption path can launder an embedded PAT into that field",
+      "file": "src/backend/routers/skills.py:154",
+      "related_files": [
+        "src/backend/services/skill_service.py:891",
+        "src/backend/services/skill_service.py:942",
+        "src/backend/services/skill_service.py:560",
+        "src/backend/utils/url_validation.py:31",
+        "src/mcp-server/src/tools/skills.ts:192"
+      ],
+      "description": "The status route is gated only by Depends(get_current_user) - no require_admin, no reject_agent_principal, no response_model - while its own siblings on the same router are hardened (/skills/library/{name} calls reject_agent_principal; /skills/sources is require_admin). Its body carries per-source raw url plus the legacy flat url with no userinfo stripping on any reader. Separately, _adopt_legacy_clone migrates the pre-ent#237 skills_library_url setting into a skill_sources row without reject_embedded_credentials or validate_skills_library_url, both of which the POST/PUT source routes do apply. The legacy setter (PUT /api/settings/{key}) validated only via validate_skills_library_url, which checks parsed.hostname and therefore ignores userinfo - empirically confirmed to return a PAT-bearing URL unchanged. url_validation.py:31 documents that embedded-credential rejection was deliberately kept out of that helper so upgrading installs relying on an embedded token would not break, i.e. the codebase asserts such installs plausibly exist.",
+      "exploit_scenario": "1) An operator configured skills_library_url as https://<pat>@github.com/org/private-skills before ent#237 - accepted without complaint. 2) Any sync runs (admin-triggered or the ent#236 auto-sync); adoption writes the PAT-bearing URL verbatim into skill_sources and deletes the legacy setting, making the row the durable home. 3) An attacker holding ANY authenticated principal - a user-role chat-only grantee created via /share, or any non-ephemeral agent-scoped MCP key reached by prompt injection inside any agent workspace (the MCP tool get_skills_library_status has no canAccess gate and is advertised to every agent key) - calls GET /api/skills/library/status and reads sources[].url in cleartext. No further action needed.",
+      "impact": "Discloses a GitHub PAT with at least private-repo read to the lowest-privilege role and to untrusted agent workspaces. Unconditional lesser variant: private skills-repo URLs (org/repo names) are disclosed to every authenticated principal even with no PAT present.",
+      "recommendation": "(a) Add require_admin + reject_agent_principal to /skills/library/status, or strip userinfo from url in get_library_status before returning (skill_service.py:891,942). (b) Call reject_embedded_credentials in _adopt_legacy_clone and either refuse adoption or strip userinfo before create_skill_source (skill_service.py:560). Fix belongs on the ent#237 branch (still unmerged - the cheap moment), not this PR.",
+      "verification": "Independent fresh-context refutation agent attempted six distinct refutations; all failed. Route gate, absence of redaction, adoption bypass, reachability of the misconfiguration precondition, absence of any userinfo stripper, and agent-key reachability each confirmed with file:line citations."
+    }
+  ],
+  "findings_introduced_by_this_diff": [],
+  "clean_categories": {
+    "P2_secrets": "No secret-shaped tokens introduced by the diff (word-boundary scan for sk-/ghp_/gho_/github_pat_/xox[bp]-/AKIA/PRIVATE KEY on added lines: zero hits). No .env or CI config touched.",
+    "P9_A01_access_control": "Zero endpoints, auth dependencies, or route decorators added or altered by the diff (routers/skills.py untouched).",
+    "P9_A03_injection": "The author-controlled skills_root reaches git argv only as a pathspec behind an explicit -- separator at both call sites (skill_source_clone.py:556,581; clone at :254 already had it), never through a shell - subprocess list form throughout. Segment-wise validation rejects a leading '-' so the value can never read as an option.",
+    "P9_A03_path_traversal": "Actively verified: no member name under any source_root can escape the destination prefix. Attack corpus (skills/x/../../../../etc/passwd, skills/x/../../.env, skills/x/a/../../../outside) produced zero escapes; every unsafe source_root (../../etc, skills/../.., '.', -oProxyCommand=x, /etc, a//b) raises ValueError rather than silently mis-prefixing.",
+    "P9_A08_integrity": "catalog.yaml parses through the shared ent#314 hardened loader with AliasPolicy.REJECT and a 64 KB cap, enforced by a bounded read(cap+1) - a post-read length check would be defeated by a symlinked catalog.yaml. The ent#314 consolidation guard remains green (21 passed); no new bare yaml.safe_load on author-controlled content.",
+    "P7_llm_agent_isolation": "The author-controlled root never reaches an in-container exec. All five in-agent scripts hardcode ~/.claude/skills (skill_service.py:1042,1076,1191,1212,1276); the arcname rewrite at filter_skill_archive means the restore paths allowlist, manifest, prune confinement and gitignore lines stay destination-canonical regardless of source layout.",
+    "P7_protected_names": "Protected-basename enforcement survives the rewrite (checked on the pre-rewrite relative path): .env, CLAUDE.md and .trinity-skill.json under a custom root are still dropped with named warnings.",
+    "P9_A03_xss": "No v-html on the skills surfaces; the new skills_root/layout_conflict fields and the now-variable path string are plain interpolation (Vue auto-escaped) and charset-restricted to [A-Za-z0-9._-] per segment.",
+    "P5_vendored_parity": "Invariant #5 unaffected - zero docker/base-image files touched, no vendored security-policy copy modified.",
+    "P9_A09_logging": "Author-controlled values reaching logs use %r (repr-escaped, defeating newline log-injection) and are bounded by the 64 KB catalog cap. No credential material logged."
+  },
+  "filter_stats": {
+    "candidates_considered": 6,
+    "discarded_hard_exclusion": 3,
+    "discarded_below_confidence_gate": 2,
+    "reported": 1,
+    "below_gate_notes": [
+      "skills_root echoed into logs via %r without truncation - bounded by the 64 KB catalog cap and repr-escaped; hardening nicety, confidence 3/10, not a finding.",
+      "skill.path now carries a source-repo-relative directory name to MCP list_skills callers - not a URL, charset-restricted, discloses only a directory name in an operator-configured repo; confidence 3/10, not a finding."
+    ]
+  },
+  "totals": {"critical": 0, "high": 0, "medium": 1, "low": 0, "introduced_by_diff": 0},
+  "trend": {
+    "prior_report": "cso-diff-2026-08-04-ent237-multi-source-skills",
+    "resolved": [
+      "HIGH 10/10 - Tag pin enforced only on the update path; a fresh clone adopts a moved tag silently. Still fixed on this branch (_refuse_moved_pin_after_clone present at skill_source_clone.py:169; 7 pin tests pass)."
+    ],
+    "persistent": [],
+    "new": [
+      "MEDIUM 9/10 - skills-source URL disclosure via /skills/library/status (inherited from dev, surfaced while scanning this diff's blast radius)"
+    ],
+    "direction": "improving - prior HIGH resolved and holding; this diff introduces zero findings"
+  }
+}
