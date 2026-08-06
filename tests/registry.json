@@ -1623,6 +1623,18 @@
         "security"
       ],
       "description": "_patch_env_github_pat replaced only the FIRST matching line (count=1) while the agent's own .env reader is LAST-WINS, so on a file carrying a duplicate GITHUB_PAT line the rotation wrote the new token to line 1, the revoked token survived below it, and the agent kept authenticating with the revoked one - while propagate_pat_to_all_agents reported that agent as 'updated'. Same silent-success class #1967 exists to close, reached differently: there the rotation never touched the agent, here it touches it and the agent ignores the result. The duplicate is not created by this function (it appends only when the key is absent) - it arrives from an agent editing its own .env (#1999), an SSH/docker-exec append, or a restored file. Fixed by dropping the cap so every occurrence is levelled; NOT de-duplicated, since after levelling every copy carries the same value and removing lines would be a second behaviour change for no correctness gain. Every assertion goes through what the AGENT READS rather than what the file contains - the file did contain the new token, on a line nothing read. Covers the reproduction, the revoked token surviving nowhere in the file (shells and greps read .env too), 2/3/5 copies, each of the three #1574 mirrored keys independently (each runs its own substitution, so a cap left on one reopens the bug for that key), interleaved duplicates of different keys, the messy real-world duplicate shapes (indented/tabbed/unquoted/single-quoted/empty-value), a commented duplicate deliberately left alone, lookalike keys untouched, and the single-line path unchanged incl. idempotence. Structural guard reads the CALL via ast, not the source text: this function's docstring explains the bug and therefore contains the string 'count=1', so a textual scan passes on the prose with the cap restored (the #1871/ent#314 trap; the first draft of this test failed exactly that way). Mutation-verified against BOTH spellings - count=1 and the positional third argument - 15 of 21 fail on each."
+    },
+    {
+      "file": "unit/test_1849_ede_diagnostic_filtered.py",
+      "feature": "#1849",
+      "added": "2026-08-01",
+      "categories": [
+        "agent-runtime",
+        "unit",
+        "sessions",
+        "regression"
+      ],
+      "description": "Claude Code's internal [ede_diagnostic] header must never be surfaced as the error cause (#1849): stream_parser filters diagnostic entries from result.errors at BOTH the max_turns and execution_error branches, joins the remaining real errors, keeps the token-stripped diagnostic payload as labelled context, and no longer raises on a malformed errors shape (which previously landed as HTTP 200 success). Acceptance test drives a marker-first errors[] through _finalize_headless_result to routers/sessions.py::_is_resume_not_found."
     }
   ]
 }
