@@ -75,13 +75,20 @@ immediately — the exact transient this gate exists to stop flagging.
 
 ## Why elapsed wall-clock, not a cycle count
 
-"Seen in N consecutive cycles" is wrong under multiple uvicorn workers: each
-runs its own cycle loop with no cross-worker lease (trinity#1881 part 2), so
-two workers sampling ~1s apart would self-confirm a 2-cycle rule instantly.
-The eu2 data shows exactly that — two R-01 rows 0.8s apart for the same
-condition. Elapsed wall-clock is immune: extra observers cannot make time pass.
-This follows H-01's precedent, which chose elapsed time over cycle counts for
-the same reason.
+"Seen in N consecutive cycles" is wrong under multiple uvicorn workers: when
+this gate was written each ran its own cycle loop with no cross-worker lease, so
+two workers sampling ~1s apart would self-confirm a 2-cycle rule instantly. The
+eu2 data shows exactly that — two R-01 rows 0.8s apart for the same condition.
+Elapsed wall-clock is immune: extra observers cannot make time pass. This
+follows H-01's precedent, which chose elapsed time over cycle counts for the
+same reason.
+
+trinity#1881 part 2 has since given the service a `canary:leader` lease, and
+that changes nothing here. The lease is best-effort and fails open to leader
+when Redis is unreachable, so concurrent loops over this shared marker are still
+reachable — and more to the point, what this dwell measures is how long a
+specific pid has SURVIVED, which is a wall-clock quantity whether one worker is
+sampling it or four. Do not convert it back to a count.
 
 The clock is read from `snapshot.snapshot_time`, never `time.time()`. That is
 what makes the boundary testable with a fixed instant rather than a margin
@@ -180,6 +187,24 @@ DWELL_SECONDS = 600
 # cannot claim continuity across it, so the dwell restarts. Sized at 2x the
 # canary interval, i.e. one missed cycle is tolerated (clock jitter, a slow
 # collection) but a real outage is not.
+#
+# The #1881 leader lease adds one more producer of a long gap: if the holding
+# worker dies, nobody cycles until its lease expires and a sibling's next loop
+# iteration picks it up. `canary_service._max_failover_seconds` owns that
+# arithmetic — ~780s at the defaults (one interval of staleness before the
+# crash + the 180s lease TTL + one interval before a sibling next looks). That
+# still exceeds this window, so a leader failover restarts the dwell. Correct
+# and deliberate: a crashed leader IS "a real outage" by this comment's own
+# rule, and restarting costs at most one extra dwell before a genuine zombie
+# fires, which is the fail-safe direction. Do not widen this constant to paper
+# over it — claiming continuity across an interval nobody watched is the
+# failure mode.
+#
+# (Before the lease's heartbeat the same window was ~1200s, because the TTL had
+# to be sized to outlast a whole cycle. Shrinking it did not change the
+# conclusion here, only the number — the failover window would have to drop
+# under 600s to stop restarting the dwell, and it cannot: two of its three
+# terms are the cycle interval itself.)
 _MAX_OBSERVATION_GAP_SECONDS = 600
 
 # Marker lifetime, refreshed on each positive observation. Bounds memory if an

@@ -90,14 +90,25 @@ only *arms* a marker (`canary:h01:suspect_since`); the violation fires once the
 condition has persisted for `CONFIRMATION_MIN_SECONDS`.
 
 Confirmation is on **elapsed time, not on "a second cycle"**. Prod runs the
-backend with `uvicorn --workers 2`, and the canary service holds only a
-per-process `asyncio.Lock` — it has no cross-worker leader lease (unlike
-`monitoring:leader` #1464 or `opqueue:leader` #1632) — so two independent canary
-loops share this one marker. Under a cycle-count rule worker B would confirm
-worker A's sighting seconds later, collapsing the gate to nothing exactly inside
-the teardown window it exists to ride out. An elapsed-time rule is correct under
-one worker or five, and it absorbs cross-worker clock skew (a negative elapsed
-simply does not confirm).
+backend with `uvicorn --workers 2`. When this gate was written the canary
+service held only a per-process `asyncio.Lock` and no cross-worker leader lease,
+so two independent loops shared this one marker and a cycle-count rule would
+have let worker B confirm worker A's sighting seconds later — collapsing the
+gate to nothing exactly inside the teardown window it exists to ride out.
+
+The service **does** hold a lease now (`canary:leader`, #1881, mirroring
+`monitoring:leader` #1464 / `opqueue:leader` #1632), and that does not make this
+rule redundant — do not "simplify" it back to a cycle count. Two reasons. First,
+the lease is best-effort and **fails open to leader when Redis is unreachable**,
+which puts every worker back to running concurrent cycles over this shared
+marker — and Redis-down is not a rare corner here, it is one of the states the
+harness exists to report. Second, and more fundamental: the thing being ridden
+out is a *real-time* transient (a container finishing teardown), not "one more
+observation". That is true with one worker, so cycle count was never the right
+unit regardless of how many there are.
+
+An elapsed-time rule is correct under one worker or five, and it absorbs
+cross-worker clock skew (a negative elapsed simply does not confirm).
 
 Cost: the alarm arrives at ~10 min rather than ~5. Irrelevant for a config
 regression, which persists until a human fixes it.
@@ -196,13 +207,15 @@ CONFIRMED_SUSTAINED = "confirmed_sustained"
 UNCONFIRMED_NO_MARKER = "unconfirmed_marker_unavailable"
 
 # How long the suspicious condition must persist before it is believed.
-# Confirmation is on ELAPSED TIME, not on "a second cycle": prod runs the
-# backend with `uvicorn --workers 2` and the canary service has only a
-# per-process `asyncio.Lock` — no cross-worker leader lease (unlike
-# `monitoring:leader` #1464 or `opqueue:leader` #1632) — so two independent
-# canary loops share this marker. Under a cycle-count rule, worker B would
-# confirm worker A's sighting seconds later, collapsing the gate to nothing
-# precisely inside the container-teardown window it exists to ride out.
+# Confirmation is on ELAPSED TIME, not on "a second cycle". Prod runs the
+# backend with `uvicorn --workers 2`; the canary service holds a `canary:leader`
+# lease (#1881) but it is best-effort and FAILS OPEN when Redis is unreachable,
+# so two independent canary loops can still share this marker. Under a
+# cycle-count rule, worker B would confirm worker A's sighting seconds later,
+# collapsing the gate to nothing precisely inside the container-teardown window
+# it exists to ride out. The gate is also not merely a multi-worker workaround:
+# what it rides out is a real-time transient, which is a single-worker property
+# too. See the module docstring — do NOT relax this to a cycle count.
 #
 # 60s is comfortably longer than a container teardown and comfortably shorter
 # than the 300s cycle, so the single-worker path still confirms on the very
