@@ -1635,6 +1635,18 @@
         "regression"
       ],
       "description": "Claude Code's internal [ede_diagnostic] header must never be surfaced as the error cause (#1849): stream_parser filters diagnostic entries from result.errors at BOTH the max_turns and execution_error branches, joins the remaining real errors, keeps the token-stripped diagnostic payload as labelled context, and no longer raises on a malformed errors shape (which previously landed as HTTP 200 success). Acceptance test drives a marker-first errors[] through _finalize_headless_result to routers/sessions.py::_is_resume_not_found."
+    },
+    {
+      "file": "mcp-server/src/tools/ask_trinity_edges.test.ts",
+      "feature": "#2027",
+      "added": "2026-08-05",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "unit",
+        "edge-cases"
+      ],
+      "description": "Two edge cases in ask_trinity (ent#328/#1981), found by /edge-cases. (1) truncate cut on UTF-16 CODE UNITS, so a boundary landing inside a surrogate pair left an unpaired surrogate - ill-formed Unicode that a strict UTF-8 encoder or JSON-RPC client replaces with U+FFFD or rejects; proven by construction (65,536-char answer with U+1F600 straddling the cut). Fixed by stepping back one unit off a high surrogate; only the final unit can be orphaned, so one check covers it. (2) The context-loss warning lived inside `if (responseSessionId)`, so a 200 that answered but OMITTED session_id produced no warning at all and the caller silently lost its conversation context - exactly what that warning exists to prevent; the 'different id returned' branch was covered and the neighbouring 'no id returned' one was not. The warning is now decided by the REQUEST's session, with distinct wording since 'a new session was started' is false when none came back. Both fixes are mirrored into src/helper-mcp/src/client.ts, which carries a byte-identical copy. Covers: the straddling cut, the limit still reported as the ORIGINAL max, a fully-fitting pair surviving, a BMP-only answer still cut at exactly max (the step-back must not misfire), a short answer untouched, the 200-char ERROR-path truncation (likelier to meet arbitrary bytes than the answer path), and all four session shapes. Two rows were also added to the existing PARITY_CASES table: mutating ONLY the helper copy previously changed nothing in the suite - the parity claim held just for the cases in its table - and both helper-only mutations now fail it."
     }
   ]
 }
