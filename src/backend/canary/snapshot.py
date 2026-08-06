@@ -332,6 +332,15 @@ class Snapshot:
     # a load-bearing `observed_state` key read by the Slack renderers
     # (`canary_alerts._render_message` / `_render_forensic`).
     zombie_counts: Dict[str, int] = field(default_factory=dict)
+    # R-01 input (ent#337): per-agent container `State.StartedAt`. A PID is only
+    # an identity within ONE PID namespace, so a container that restarts outside
+    # the backend (`docker restart`, a restart policy after an OOM/crash) hands
+    # out low PIDs again and would let a fresh transient zombie inherit the
+    # previous incarnation's dwell. R-01 restarts the dwell when this value
+    # moves. An agent MISSING from this map means the value was not observable
+    # this cycle — R-01 then leaves the marker untouched rather than treating a
+    # non-signal as a restart.
+    zombie_container_started_at: Dict[str, str] = field(default_factory=dict)
     # R-01 input (ent#337): the actual zombie `claude` PIDs per agent. R-01
     # fires only once a SPECIFIC pid has persisted across its dwell window; a
     # bare count cannot distinguish one stuck zombie from a succession of
@@ -524,16 +533,48 @@ def _collect_zombie_counts() -> Dict[str, Any]:
     available. `comm` is truncated to 15 chars by the kernel, so an exact
     `$3 == "claude"` is correct and avoids matching e.g. `claude-wrapper`.
 
-    Returns a dict with three keys:
+    ## Why the container's start time comes back too
+
+    A PID is only a process identity WITHIN one PID namespace. A container that
+    restarts outside the backend — `docker restart`, a restart policy firing
+    after an OOM kill or a crash — gets a fresh namespace that hands out low
+    PIDs immediately, and a zombie `claude` in a freshly restarted agent is
+    exactly the low-PID case. Without a restart signal R-01's marker would
+    survive the restart, and a brand-new transient zombie landing on a PID still
+    in the marker would inherit a dwell-old `first_seen` and page critical on
+    its first sample — the false positive ent#337 exists to remove. The module
+    docstring's PID-reuse dismissal argues from `pid_max` wrap-around, which is
+    the right argument for a RUNNING container and the wrong one for a restarted
+    one.
+
+    `State.StartedAt` is the cheapest signal that distinguishes them, and it
+    costs nothing: docker-py's `containers.list()` defaults to `sparse=False`,
+    which already issues a full inspect per container, so the field is sitting
+    in `container.attrs` before we ask. Deliberately NOT `attrs["Created"]` —
+    a restart does not create a new container, so `Created` never moves.
+
+    Returns a dict with four keys:
       "pids":        {agent_name: set[int]}  zombie claude PIDs per container.
       "counts":      {agent_name: int}       len(pids), for the render surfaces.
+      "started_at":  {agent_name: str}       container `State.StartedAt`, the
+                                             PID-namespace generation marker
+                                             R-01 invalidates its dwell on.
+                                             An agent is ABSENT here when the
+                                             field could not be read — R-01
+                                             then leaves the dwell alone rather
+                                             than restarting it on a non-signal.
       "unavailable": [str, ...]              per-agent failure messages for the
                                              caller to append to sources_unavailable.
 
     All-or-nothing failure (e.g. docker_client None) returns empty maps plus
     {"unavailable": ["docker: <reason>"]}.
     """
-    out: Dict[str, Any] = {"pids": {}, "counts": {}, "unavailable": []}
+    out: Dict[str, Any] = {
+        "pids": {},
+        "counts": {},
+        "started_at": {},
+        "unavailable": [],
+    }
     try:
         from services.docker_service import docker_client
     except Exception as exc:
@@ -563,6 +604,23 @@ def _collect_zombie_counts() -> Dict[str, Any]:
         # correctly per docker_service.list_all_agents_fast). Strip the
         # historical `agent-` prefix to align with agent_ownership.agent_name.
         agent_name = container.name.removeprefix("agent-")
+        # Read BEFORE the exec and outside its try: the PID-namespace
+        # generation is a property of the container, not of the exec, and it
+        # must still be recorded when a later per-container failure occurs.
+        # Guarded because `attrs["State"]` is a plain status STRING on the
+        # sparse list path — if anything ever flips `sparse=True`, this must
+        # degrade to "not observed" (leave the dwell alone), never to a
+        # constant that silently invalidates every marker each cycle.
+        try:
+            started_at = (container.attrs or {}).get("State", {}).get("StartedAt")
+            if isinstance(started_at, str) and started_at:
+                out["started_at"][agent_name] = started_at
+        except Exception:  # pragma: no cover - defensive, attrs shape only
+            logger.debug(
+                "canary snapshot: no State.StartedAt for %s; "
+                "R-01 dwell continuity unverified this cycle",
+                agent_name,
+            )
         try:
             result = container.exec_run(cmd)
             raw = result.output
@@ -1245,6 +1303,7 @@ def collect_snapshot() -> Snapshot:
         z = _collect_zombie_counts()
         snap.zombie_counts = z["counts"]
         snap.zombie_pids = z.get("pids", {})
+        snap.zombie_container_started_at = z.get("started_at", {})
         snap.sources_unavailable.extend(z["unavailable"])
     except Exception as exc:
         logger.exception("canary snapshot: zombie collector raised")

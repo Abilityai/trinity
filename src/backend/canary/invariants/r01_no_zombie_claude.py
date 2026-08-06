@@ -43,12 +43,28 @@ demonstrably dwelled — a measurement, not an inference. It also makes "the
 count is growing" a real signal (new pids appearing while old ones persist)
 rather than an artifact of sampling.
 
-Residual, stated rather than hidden: a pid observed at T and T+dwell is assumed
-to be the same process. PID reuse inside the dwell window would defeat that, but
-it needs the container's pid space to wrap (default `pid_max` is ~4.2M) within
-10 minutes AND to land on this exact number AND for the new holder to also be a
-zombie `claude`. Accepted — the alternative (start time from `/proc`) buys
-nothing here, per the next paragraph.
+Two things could break that assumption, and they need different answers:
+
+- **PID reuse inside a RUNNING container.** Needs the container's pid space to
+  wrap (default `pid_max` is ~4.2M) within 10 minutes AND to land on this exact
+  number AND for the new holder to also be a zombie `claude`. Accepted as a
+  residual — the alternative (start time from `/proc`) buys nothing here, per
+  the next paragraph.
+- **A container RESTART.** Not a residual — a real re-arm of the false positive,
+  and the `pid_max` argument does not cover it. A restart outside the backend
+  (`docker restart`, a restart policy after an OOM kill or a crash) gives a
+  fresh PID namespace that hands out LOW pids immediately, and a zombie `claude`
+  in a freshly restarted agent is exactly the low-pid case; `clear_agent_breakers`
+  only covers backend-mediated lifecycle events, so the marker would survive.
+  The snapshot therefore carries the container's `State.StartedAt`
+  (`snapshot.zombie_container_started_at`), stored in a reserved
+  `__started_at` field on the marker HASH: when it moves, the whole marker is
+  dropped and every pid restarts its dwell. It is free — docker-py's
+  `containers.list()` already full-inspects each container — and it is the
+  *generation* of the namespace, which is what pid identity is actually scoped
+  to. When the value is not observable the marker is left ALONE rather than
+  restarted: an unreadable field is not evidence of a restart, and treating it
+  as one would blind the invariant every cycle.
 
 The same reasoning rejects reading `ps -eo etimes` to age the zombie in a
 single sample, which looks cleaner and sidesteps all cross-cycle state:
@@ -78,7 +94,14 @@ docker exec runs at the end — which is the safe direction.
 
 Redis HASH per agent, `agent:canary_zombie:{name}`, field = pid:
 
-    {pid: "<first_seen_unix>:<first_count>"}
+    {pid: "<first_seen_unix>:<first_count>:<last_seen_unix>"}
+
+plus one reserved non-numeric field carrying the container generation:
+
+    {"__started_at": "<container State.StartedAt>"}
+
+Reserved-field collision is structurally impossible: every other field is
+`str(pid)`, i.e. digits only.
 
 Deliberately under the `agent:` prefix rather than `canary:`: it is the first
 **name-keyed** canary key, so it inherits the #1560 recycled-name hazard
@@ -89,7 +112,7 @@ Deliberately under the `agent:` prefix rather than `canary:`: it is the first
 there. E-02's `canary:e02:*` keys are legitimately unregistered because they
 are global, not per-agent.
 
-Two independent bounds keep it from going stale:
+Three independent bounds keep it from going stale:
 
 - **TTL**, refreshed on every positive observation. Bounds memory and cleans up
   after a deleted / renamed / discarded-ghost agent that the lifecycle hooks
@@ -99,6 +122,10 @@ Two independent bounds keep it from going stale:
   this, `now − first_seen` would exceed the dwell on the next successful sample
   and fire immediately with no evidence of continuity at all. A gap longer than
   `_MAX_OBSERVATION_GAP_SECONDS` restarts the dwell.
+- **Generation check** via `__started_at`. The continuity check above cannot see
+  a container restart: a restart inside one cycle leaves no observation gap at
+  all, so `last_seen` stays fresh while the pid space underneath it is brand
+  new. See the container-restart bullet above.
 
 ## Severity
 
@@ -154,6 +181,11 @@ _MAX_OBSERVATION_GAP_SECONDS = 600
 # Marker lifetime, refreshed on each positive observation. Bounds memory if an
 # agent vanishes without a lifecycle hook firing (discarded ghost, purge).
 _MARKER_TTL_SECONDS = 24 * 60 * 60
+
+# Reserved marker field holding the container's `State.StartedAt` — the PID
+# NAMESPACE GENERATION this dwell was measured in. Non-numeric on purpose:
+# every other field in the HASH is `str(pid)`, so collision is impossible.
+_GENERATION_FIELD = "__started_at"
 
 
 def _redis():
@@ -235,13 +267,41 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
                     logger.exception("R-01: marker clear failed for %s", agent_name)
             continue
 
+        # Container-generation check. A restart outside the backend gives a
+        # fresh PID namespace, so every stored dwell was measured against pids
+        # that no longer mean anything — drop them and start over. Done BEFORE
+        # the per-pid loop so nothing can fire on an inherited `first_seen`.
+        #
+        # Only an OBSERVED MISMATCH invalidates. An agent absent from
+        # `zombie_container_started_at` (field unreadable, sparse attrs) is a
+        # non-signal, and restarting the dwell on a non-signal every cycle would
+        # make the invariant permanently blind — the failure mode ent#337's own
+        # first-write-WINS rule exists to avoid.
+        generation = snapshot.zombie_container_started_at.get(agent_name)
+        stored_generation = stored.get(_GENERATION_FIELD)
+        if generation and stored_generation and stored_generation != generation:
+            logger.info(
+                "R-01: %s restarted (%s → %s); restarting zombie dwell",
+                agent_name,
+                stored_generation,
+                generation,
+            )
+            try:
+                redis_client.delete(key)
+            except Exception:
+                logger.exception("R-01: marker clear failed for %s", agent_name)
+            stored = {}
+
         current_count = len(pids)
         live_fields = {str(p) for p in pids}
         # Reap marker fields for pids that are gone: those zombies were reaped,
         # which is the healthy outcome. Doing this per-pid is what makes a
         # succession of distinct transients self-clear WITHOUT ever needing an
         # observed zero — the case a count-based dwell cannot see.
-        departed = [f for f in stored if f not in live_fields]
+        # `_GENERATION_FIELD` is not a pid and must survive the reap.
+        departed = [
+            f for f in stored if f != _GENERATION_FIELD and f not in live_fields
+        ]
 
         oldest_first_seen: Optional[float] = None
         oldest_first_count: Optional[int] = None
@@ -273,6 +333,12 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
                     oldest_first_seen = first_seen
                     oldest_first_count = first_count
                     dwelled_pid = pid
+
+        # Record (or refresh) the generation alongside the dwells it scopes, so
+        # the very first observation of an agent already carries one and the
+        # NEXT restart is detectable.
+        if generation:
+            updates[_GENERATION_FIELD] = generation
 
         try:
             if updates:
