@@ -48,10 +48,11 @@
         <p class="font-medium text-gray-900 dark:text-gray-100">The library is configured but has no skills yet</p>
         <p class="mt-1 text-gray-500 dark:text-gray-400">
           Add a skill directory to the repository, then re-sync the library.
-          <!-- ent#263 review: userinfo-stripped — this state renders to ANY
-               agent accessor and the clone path stores credentialed URLs
-               (https://user:token@host) verbatim. -->
-          <span v-if="store.libraryStatus?.url" class="block mt-1 font-mono text-xs break-all">{{ stripUserinfo(store.libraryStatus.url) }}</span>
+          <!-- ent#334: the repo URL used to render here. It is gone from the
+               payload entirely now — `GET /skills/library/status` is open to
+               any authenticated caller (agent-scoped keys included, which is
+               what this panel runs as), while repo URLs are admin-sensitive
+               and served only by the admin-gated `GET /skills/sources`. -->
         </p>
       </div>
     </template>
@@ -164,7 +165,7 @@ import { useRole } from '../composables/useRole'
 // ent#263 shared contract seam — one rendering of the #183 package facts
 // consumed by BOTH this per-agent tab and the Library page's fleet browse.
 import SkillContractChips from './skills/SkillContractChips.vue'
-import { deps, stripUserinfo } from './skills/contract'
+import { deps } from './skills/contract'
 
 const props = defineProps({
   agentName: { type: String, required: true },

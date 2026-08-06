@@ -198,6 +198,26 @@ class SharingMixin:
             rows = conn.execute(stmt).mappings().all()
         return [row["agent_name"] for row in rows]
 
+    def get_agents_shared_with_email(self, email: str) -> List[str]:
+        """Every agent name directly shared with this email (#848).
+
+        Email-keyed counterpart of ``get_shared_agents`` (which is username-keyed
+        and therefore needs an existing ``users`` row). MCP inline auth (#848)
+        must answer "is this address known to Trinity / what can it reach"
+        BEFORE any user account exists, so it cannot go through the username
+        path. Same defensive normalization as the other email-keyed lookups
+        (#446): strip + lowercase at the boundary.
+        """
+        normalized = (email or "").strip().lower()
+        if not normalized:
+            return []
+        stmt = select(agent_sharing.c.agent_name).where(
+            agent_sharing.c.shared_with_email == normalized
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [row["agent_name"] for row in rows]
+
     def is_agent_shared_with_email(self, agent_name: str, email: str) -> bool:
         """Check if an agent is shared with the given email directly."""
         normalized = (email or "").strip().lower()
