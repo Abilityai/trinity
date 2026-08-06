@@ -348,10 +348,19 @@
   (`docker_agent_names`, read from the container list *before* any `exec_run`,
   since `zombie_counts` is keyed by exec success and thins on a degraded
   container) ∪ Redis slot keys (`orphan_redis_slots`, corroborating only — slot
-  keys exist solely while an execution holds a slot). Reason codes
+  keys exist solely while an execution holds a slot). Docker is collected
+  **before** the roster read, so it still supplies evidence on the arm where
+  that read raises and the collector returns early; Redis needs `known_agents`
+  and cannot. Reason codes
   (stable — trinity-enterprise#202 scores on them): `roster_read_failed` /
-  `roster_empty_contradicted` (critical) / `roster_empty_unverifiable` (major,
-  the evidence source was itself unreachable). **Confirmation on elapsed
+  `roster_empty_contradicted` (critical) / `roster_empty_unverifiable` (major —
+  the evidence source was unreachable, was never read, or **only Redis** had
+  anything to say: `orphan_redis_slots` is by definition slot keys whose agent
+  is absent from `agent_ownership`, i.e. L-03's leaked-slot state, so treating
+  it as a contradiction would page critical over a correct roster plus an
+  unrelated leak). `docker_available`/`redis_available` are **tri-state**
+  (`None` = the collector never ran) because `sources_unavailable` cannot
+  express a skipped collector. **Confirmation on elapsed
   wall-clock** (`CONFIRMATION_MIN_SECONDS`, marker `canary:h01:suspect_since`,
   E-02's cross-cycle-state precedent) so the last-agent delete race — DB row
   gone, container still tearing down — cannot false-fire. Deliberately NOT "a
@@ -359,7 +368,16 @@
   lease, so both loops share the marker and worker B would confirm worker A's
   sighting seconds later, collapsing the gate. An unreadable *or unwritable*
   marker fires *unconfirmed* rather than skipping,
-  because a guard that cannot self-check must say so. Scoped to the roster read
+  because a guard that cannot self-check must say so; the marker carries a 24h
+  TTL refreshed every suspicious cycle, so a `_clear_marker` that silently
+  failed cannot leave the gate armed forever. The gate applies to **every**
+  arm including `roster_read_failed` — a raised roster read is often a
+  momentary DB blip, and paging critical on one is how a safety net gets muted.
+  A whole-database outage now reaches the check at all: `_run_cycle_inner`'s
+  pre-cycle latest-violation read is fail-open (it previously raised before
+  `collect_snapshot` ran, so H-01 never executed), with transition detection
+  falling back to `canary:last_cycle_red` so a persistent outage chirps once
+  rather than every cycle. Scoped to the roster read
   ONLY: on a live-but-quiet fleet `terminal_rows`/`enabled_schedules`/
   `orphan_refs`/`terminal_exec_statuses` are all legitimately empty, so a
   general "any SQL collector reads zero" rule would false-alarm on every idle

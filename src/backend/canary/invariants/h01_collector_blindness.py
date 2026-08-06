@@ -44,19 +44,41 @@ test — otherwise the evidence is circular and the guard is decorative:
 
 - **Docker** (`snapshot.docker_agent_names`) — running agent containers, read
   from the container list itself, not from `zombie_counts` (which is keyed by
-  `exec_run` success and silently thins on a degraded container).
+  `exec_run` success and silently thins on a degraded container). This is the
+  ONLY source that can confirm a contradiction, and it is collected FIRST in
+  `collect_snapshot` — before the roster read, which returns early on failure —
+  so it is available on every arm including `roster_read_failed`.
 - **Redis** (`snapshot.orphan_redis_slots`) — with an empty roster, every
-  `agent:slots:*` key buckets here. Strong when it fires, but slot keys exist
-  only while an execution holds a slot, so an idle fleet legitimately has none.
-  Corroborating evidence, never the sole basis for "the fleet is empty".
+  `agent:slots:*` key buckets here. Slot keys exist only while an execution
+  holds a slot, so an idle fleet legitimately has none. Strictly corroborating:
+  it can raise a `roster_empty_unverifiable` into a louder signal_query, but it
+  can never on its own make the outcome `critical` — see below.
 
 | roster read      | independent evidence            | outcome              |
 |------------------|---------------------------------|----------------------|
 | non-empty        | —                               | pass, clear marker   |
-| raised           | (not needed — definitive)       | critical             |
-| empty            | proves agents exist             | critical             |
-| empty            | source unavailable              | major                |
+| raised           | —                               | critical             |
+| empty            | Docker proves agents exist      | critical             |
+| empty            | Redis only                      | major                |
+| empty            | source unavailable / not read   | major                |
 | empty            | available, agrees empty         | pass, clear marker   |
+
+Every arm that fires goes through the confirmation gate below — including
+`roster_read_failed`. See "Sustained-condition confirmation".
+
+## Why Redis alone cannot page critical
+
+`orphan_redis_slots` is BY DEFINITION slot keys whose agent is absent from
+`agent_ownership` — which is the leaked-slot state L-03 exists to report. On a
+genuinely empty fleet holding one leaked slot key, Docker evidence is empty and
+a naive union would fire `roster_empty_contradicted` / critical: a correct
+roster, an unrelated Redis leak, and a critical page claiming the harness is
+blind. So the severity ladder is asymmetric on purpose — Docker evidence is
+required for `SEVERITY_CONFIRMED`; Redis-only evidence reports
+`roster_empty_unverifiable` at `SEVERITY_UNVERIFIABLE`, which is the honest
+description of that state (something is there, but nothing that can distinguish
+"blind collector" from "L-03 leak"). Redis names still ride in
+`evidence_sample`, so the operator sees them either way.
 
 ## Sustained-condition confirmation
 
@@ -80,12 +102,28 @@ simply does not confirm).
 Cost: the alarm arrives at ~10 min rather than ~5. Irrelevant for a config
 regression, which persists until a human fixes it.
 
+The gate applies to **every** firing arm, `roster_read_failed` included. The
+delete race is only one of the two transients it absorbs: a roster read that
+*raises* is very often a momentary DB blip — a connection reset, a PG restart,
+brief pool exhaustion — and paging critical on a single one of those is a false
+positive of exactly the kind that gets a safety net muted. What the gate costs
+on that arm is 60s of detection latency on a real outage, against which a
+persistent outage is unaffected by definition.
+
 The marker follows E-02's precedent (an invariant may hold cross-cycle state in
 Redis via a lazy client import). It stores the *first* suspicious snapshot_time,
 so the violation can report `blind_since` and a manual same-cycle
-`POST /api/canary/run-cycle` replay cannot confirm itself. No TTL: the marker
-tracks the condition, not the process, so it correctly survives a backend
-restart mid-episode.
+`POST /api/canary/run-cycle` replay cannot confirm itself.
+
+It carries a TTL of `MARKER_TTL_SECONDS`, refreshed on every suspicious cycle.
+The marker must survive a backend restart mid-episode (it tracks the condition,
+not the process), so the TTL is sized at many cycles rather than one — but it
+cannot be absent: `_clear_marker` is best-effort and swallows failures, and
+`POST /api/canary/run-cycle` with an `invariant_ids` filter that excludes H-01
+never reaches the clear path at all. Without an expiry a marker orphaned that
+way stays armed forever, and the next genuine episode confirms instantly on its
+first cycle instead of waiting out the race. The TTL bounds that staleness
+without weakening the gate, because a live episode rewrites the key every cycle.
 
 ## Fail-loud, never fail-silent
 
@@ -99,7 +137,7 @@ Because the service's green→red transition detection only alerts on the flip, 
 persistent condition alerts once rather than every 5 minutes — the chirp cannot
 become spam.
 
-## Known residual (documented, not covered)
+## Known residuals (documented, not covered)
 
 Docker is filtered to `status=running` and stopped agents hold no Redis slots,
 so a blind SQL tier plus an *entirely stopped* fleet has no available evidence
@@ -107,6 +145,19 @@ and can only reach `roster_empty_unverifiable`. Partial blindness — a roster
 returning 1 agent out of 20 — is also out of scope: a count comparison would
 false-alarm on legitimate create/stop races between the two reads. H-01 covers
 total blindness only, by deliberate choice.
+
+**What `roster_read_failed` does and does not see.** It fires when the
+`agent_ownership` SELECT itself raises. A whole-database outage used to be
+invisible to it for a reason that had nothing to do with this invariant:
+`canary_service._run_cycle_inner` read `get_latest_canary_violation_per_invariant()`
+*before* collecting the snapshot, unguarded, so a DB-down cycle raised out of
+the loop and H-01 never executed — the harness went quiet in precisely the
+scenario it exists to announce. That read is now fail-open (#1813), with
+transition detection falling back to a Redis-held record of the previous
+cycle's red set, so the cycle completes and H-01 fires. What remains genuinely
+out of scope is a failure that prevents the *process* from running the cycle at
+all (the backend is down, the event loop is wedged) — no in-process guard can
+cover that, and external liveness monitoring owns it.
 
 Consumer: trinity-enterprise#202 (benchmark scorer over the canary invariants),
 whose AC requires that any unavailable data source fails the score loud rather
@@ -117,7 +168,7 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Optional, Set
 
-from ..snapshot import Snapshot, ViolationReport
+from ..snapshot import COLLECTOR_DOCKER, COLLECTOR_REDIS, Snapshot, ViolationReport
 
 
 logger = logging.getLogger(__name__)
@@ -158,14 +209,24 @@ UNCONFIRMED_NO_MARKER = "unconfirmed_marker_unavailable"
 # next cycle.
 CONFIRMATION_MIN_SECONDS = 60
 
+# Marker lifetime, refreshed on every suspicious cycle. Bounds the staleness of
+# a marker that `_clear_marker` (best-effort) failed to delete, or that an
+# `invariant_ids`-filtered `run-cycle` never reached — either leaves the gate
+# armed forever, so the next genuine episode confirms on its first cycle
+# instead of riding out the delete race. Sized at many cycles, not one: the
+# marker deliberately survives a backend restart mid-episode, so it must
+# outlive far more than the 300s interval. Mirrors R-01's `_MARKER_TTL_SECONDS`.
+MARKER_TTL_SECONDS = 24 * 60 * 60
+
 # `sources_unavailable` prefixes. These are the same load-bearing internal skip
 # contract the other invariants match on (`startswith("redis")`,
 # `startswith("sqlite.orphan_refs")`) — see the label-contract warning in
 # `collect_snapshot`. Renaming a label without updating these silently disables
 # the corresponding branch here.
 _ROSTER_FAILURE_PREFIX = "sqlite.agent_ownership"
-_DOCKER_PREFIX = "docker"
-_REDIS_PREFIX = "redis"
+# The Docker/Redis prefixes are the `COLLECTOR_*` names imported above — the
+# collector registry and the label prefix are deliberately the same string, so
+# "did it run?" and "did it fail?" can be asked with one identifier.
 
 # Bounded sample of evidence agent names in the violation payload. Counts and
 # identifiers only, never raw source rows (#1644's lesson: an alarm's context
@@ -185,7 +246,23 @@ def _read_marker() -> Optional[str]:
 
 
 def _write_marker(snapshot_time: str) -> None:
-    _redis().set(REDIS_KEY_SUSPECT_SINCE, snapshot_time)
+    # `ex=` rather than a separate EXPIRE: one round-trip, and it makes the TTL
+    # impossible to forget on a future write path — an un-expiring marker is
+    # the failure this bounds.
+    _redis().set(REDIS_KEY_SUSPECT_SINCE, snapshot_time, ex=MARKER_TTL_SECONDS)
+
+
+def _refresh_marker_ttl() -> None:
+    """Keep an armed marker alive for as long as the episode lasts.
+
+    Best-effort: a failed refresh only brings the expiry forward, and an
+    expired marker re-arms rather than fires. Without this the TTL would be
+    an absolute lifetime rather than an idle timeout, and an episode outliving
+    it would silently re-arm — going green for one cycle and re-alerting."""
+    try:
+        _redis().expire(REDIS_KEY_SUSPECT_SINCE, MARKER_TTL_SECONDS)
+    except Exception:
+        logger.exception("H-01: failed to refresh suspicion marker TTL")
 
 
 def _clear_marker() -> None:
@@ -211,6 +288,23 @@ def _has(snapshot: Snapshot, prefix: str) -> bool:
     return any(s.startswith(prefix) for s in snapshot.sources_unavailable)
 
 
+def _availability(snapshot: Snapshot, collector: str) -> Optional[bool]:
+    """Tri-state: True = ran and was fine, False = ran and failed, None = never
+    ran.
+
+    `sources_unavailable` cannot express the third state — a collector that was
+    skipped records nothing, which is byte-identical to a collector that
+    succeeded. On the `roster_read_failed` arm `collect_snapshot` returns before
+    Redis is read, so a two-state answer reported `redis=up` on a cycle where
+    Redis had not been consulted at all. For the one alarm whose entire job is
+    legibility, that read as "everything else is fine" — the opposite of the
+    truth. `None` is rendered as "not read" by the Slack surfaces.
+    """
+    if not snapshot.collector_ran(collector):
+        return None
+    return not _has(snapshot, collector)
+
+
 def _violation(
     snapshot: Snapshot,
     reason: str,
@@ -231,8 +325,15 @@ def _violation(
             "known_agent_count": len(snapshot.known_agents),
             "evidence_agent_count": len(evidence),
             "evidence_sample": sorted(evidence)[:_EVIDENCE_SAMPLE_CAP],
-            "docker_available": not _has(snapshot, _DOCKER_PREFIX),
-            "redis_available": not _has(snapshot, _REDIS_PREFIX),
+            # Tri-state (True / False / None-means-never-ran) — see
+            # `_availability`. A consumer reading these as booleans (including
+            # trinity-enterprise#202's scorer) gets `None` as falsy, i.e.
+            # "not up", which is the safe direction to be wrong in.
+            "docker_available": _availability(snapshot, COLLECTOR_DOCKER),
+            "redis_available": _availability(snapshot, COLLECTOR_REDIS),
+            # Named separately so "we could not confirm" is greppable without
+            # having to know that None means never-ran.
+            "docker_agent_count": len(snapshot.docker_agent_names),
         },
         signal_query=(
             f"agent roster read returned {len(snapshot.known_agents)} agents "
@@ -250,29 +351,43 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
         _clear_marker()
         return []
 
-    # Independent, non-SQL proof that agents exist. Redis contributes only the
-    # names it can attribute to a slot key; both sources are unioned so either
-    # one alone is sufficient.
-    evidence: Set[str] = set(snapshot.docker_agent_names) | set(
-        snapshot.orphan_redis_slots
-    )
+    # Independent, non-SQL proof that agents exist. Both sources ride in
+    # `evidence` (so the operator sees every name we found), but they are NOT
+    # interchangeable for severity — only Docker can confirm a contradiction.
+    docker_evidence: Set[str] = set(snapshot.docker_agent_names)
+    evidence: Set[str] = docker_evidence | set(snapshot.orphan_redis_slots)
 
     if roster_failed:
         reason, severity = REASON_ROSTER_READ_FAILED, SEVERITY_CONFIRMED
-    elif evidence:
-        reason, severity = REASON_CONTRADICTED, SEVERITY_CONFIRMED
-    elif _has(snapshot, _DOCKER_PREFIX) or _has(snapshot, _REDIS_PREFIX):
+    elif docker_evidence:
         # Ordering note: a PER-AGENT `docker.exec[name]` failure also carries the
-        # `docker` prefix, but it cannot reach this branch — the container's name
-        # is recorded in `docker_agent_names` BEFORE the exec is attempted, so
-        # `evidence` is non-empty and the contradiction branch above wins. Only a
-        # wholesale Docker failure (`docker: client unavailable`, `docker.list`,
-        # `docker.import`) leaves evidence empty, which is exactly the
-        # "cannot verify" case this branch is for.
+        # `docker` prefix, but it cannot reach the unverifiable branch — the
+        # container's name is recorded in `docker_agent_names` BEFORE the exec is
+        # attempted, so `docker_evidence` is non-empty and this branch wins.
+        # Only a wholesale Docker failure (`docker: client unavailable`,
+        # `docker.list`, `docker.import`) leaves it empty.
+        reason, severity = REASON_CONTRADICTED, SEVERITY_CONFIRMED
+    elif evidence:
+        # Redis-only evidence. `orphan_redis_slots` is by definition slot keys
+        # whose agent is ABSENT from `agent_ownership` — the leaked-slot state
+        # L-03 exists to report. On a genuinely empty fleet holding one leaked
+        # key, treating this as a contradiction would page critical over a
+        # correct roster and an unrelated Redis leak. It is real evidence that
+        # something is there, but not evidence that the ROSTER is wrong, so it
+        # lands on the honest arm: cannot verify.
+        reason, severity = REASON_UNVERIFIABLE, SEVERITY_UNVERIFIABLE
+    elif _availability(snapshot, COLLECTOR_DOCKER) is not True or _availability(
+        snapshot, COLLECTOR_REDIS
+    ) is not True:
+        # `is not True` covers BOTH "ran and failed" and "never ran" — the
+        # second is reachable here because `collect_snapshot` returns early on a
+        # roster failure, and a two-state test would silently call an
+        # unconsulted source "available" and fall through to the all-clear.
         reason, severity = REASON_UNVERIFIABLE, SEVERITY_UNVERIFIABLE
     else:
-        # Roster empty, every evidence source reachable, all agree there is
-        # nothing to see. A genuinely empty fleet — AC #3, must not alarm.
+        # Roster empty, every evidence source actually ran and was reachable,
+        # all agree there is nothing to see. A genuinely empty fleet — AC #3,
+        # must not alarm.
         _clear_marker()
         return []
 
@@ -337,6 +452,12 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
         except Exception:
             logger.exception("H-01: failed to re-arm suspicion marker")
         return []
+
+    # The episode is still live, so keep the marker alive with it. Makes the
+    # TTL an idle timeout rather than an absolute lifetime — an episode that
+    # outlives `MARKER_TTL_SECONDS` would otherwise silently re-arm, go green
+    # for one cycle, and re-alert.
+    _refresh_marker_ttl()
 
     # `<` also absorbs a negative elapsed (cross-worker clock skew).
     if elapsed < CONFIRMATION_MIN_SECONDS:

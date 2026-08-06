@@ -23,6 +23,7 @@ are deployed via the canary-fleet manifest.
 """
 
 import asyncio
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -85,6 +86,22 @@ CANARY_INTERVAL_SECONDS = 300
 # notification once (on the first cycle that catches it) rather than every
 # cycle thereafter — see `_run_cycle_inner` for the rule.
 REDIS_KEY_LAST_CYCLE = "canary:last_cycle_at"
+
+# Redis key holding the invariant ids that were RED in the previous cycle, as a
+# JSON list. This is a fallback authority for transition detection, used only
+# when the primary (`db.get_latest_canary_violation_per_invariant`) is
+# unreadable — i.e. when the database is down.
+#
+# It exists because of H-01 (#1813). The pre-cycle DB read below used to be
+# unguarded, so a database outage raised out of `_run_cycle_inner` before the
+# snapshot was even collected: the canary went silent in exactly the scenario
+# H-01 was built to announce. Making that read fail-open fixes the silence, but
+# on its own it would swap one defect for another — an empty `previous_latest`
+# makes every violation look like a fresh green→red flip, so a multi-hour DB
+# outage would alert every 5 minutes, breaking the "a persistent condition
+# chirps once" property. Redis is a separate failure domain from the DB, so it
+# can still remember what was red while the DB cannot.
+REDIS_KEY_LAST_CYCLE_RED = "canary:last_cycle_red"
 
 
 class CanaryService:
@@ -192,8 +209,27 @@ class CanaryService:
         # the previous cycle's snapshot. This is the only rule that
         # silences continuously-red invariants without losing real
         # green→red flips, including red→green→red.
-        previous_latest = db.get_latest_canary_violation_per_invariant()
+        #
+        # The DB read is fail-open (#1813). It used to be unguarded, which made
+        # a database outage abort the cycle before `collect_snapshot` ran — so
+        # H-01, whose entire job is to announce that the harness cannot see the
+        # fleet, never executed on the most total blindness there is. `{}` here
+        # would by itself make every violation read as a fresh flip, so when the
+        # primary is unreadable we fall back to a Redis-held record of the
+        # previous cycle's red set (a separate failure domain from the DB) and
+        # dedupe against that instead.
+        previous_latest: Dict[str, dict] = {}
+        previous_latest_available = True
+        try:
+            previous_latest = db.get_latest_canary_violation_per_invariant()
+        except Exception:
+            previous_latest_available = False
+            logger.exception(
+                "canary: latest-violation read failed; running the cycle anyway "
+                "with Redis-backed transition detection"
+            )
         prev_cycle_at = self._read_prev_cycle_at()
+        prev_red = self._read_prev_cycle_red()
 
         # Heavy work — synchronous SQLite + Redis reads. Offload to a thread
         # so we don't block the asyncio loop while sqlite3 is blocking.
@@ -233,7 +269,20 @@ class CanaryService:
         for inv_id, vlist in results.items():
             if not vlist:
                 continue
-            if not self._is_green_to_red(inv_id, previous_latest, prev_cycle_at):
+            if previous_latest_available:
+                is_transition = self._is_green_to_red(
+                    inv_id, previous_latest, prev_cycle_at
+                )
+            else:
+                # DB unreadable — `previous_latest` is empty for every
+                # invariant, so the primary rule would classify all of them as
+                # transitions on every cycle. Fall back to the Redis red set:
+                # red last cycle ⇒ continuation, exactly the property the
+                # primary rule provides. `None` (Redis also unreadable, or a
+                # first-ever run) keeps the historical verbose-on-failure
+                # behavior — the canary's reason to exist is catching flips.
+                is_transition = prev_red is None or inv_id not in prev_red
+            if not is_transition:
                 continue
             # Capture the prior snapshot_time BEFORE emit so the alert
             # sink can render "last red Xm ago". `previous_latest` was
@@ -266,6 +315,10 @@ class CanaryService:
         # check. Done AFTER notifications so a crash mid-emit doesn't
         # advance the cursor and silence a real transition on retry.
         self._write_prev_cycle_at(snapshot.snapshot_time)
+        # Companion record for the DB-down fallback above. Written on EVERY
+        # cycle, not just when the DB is unreadable: the fallback is only
+        # useful if it was already being maintained when the outage began.
+        self._write_prev_cycle_red([i for i, v in results.items() if v])
 
         if persisted_count or snapshot.sources_unavailable:
             logger.info(
@@ -318,6 +371,45 @@ class CanaryService:
             self._redis().set(REDIS_KEY_LAST_CYCLE, snapshot_time)
         except Exception:
             logger.exception("canary: failed to persist previous-cycle marker")
+
+    def _read_prev_cycle_red(self) -> Optional[set]:
+        """Invariant ids that were red last cycle, or None if unknown.
+
+        `None` (never written, unparseable, or Redis down) is deliberately
+        distinct from `set()` (last cycle was fully green): the DB-down
+        fallback treats unknown as "notify" and a known-green as "this is a
+        flip", and collapsing the two would either spam or silence.
+        """
+        try:
+            raw = self._redis().get(REDIS_KEY_LAST_CYCLE_RED)
+        except Exception:
+            logger.exception("canary: failed to read previous-cycle red set")
+            return None
+        if raw is None:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            logger.warning("canary: unparseable previous-cycle red set %r", raw)
+            return None
+        return set(parsed) if isinstance(parsed, list) else None
+
+    def _write_prev_cycle_red(self, invariant_ids: List[str]) -> None:
+        """Record which invariants were red, for the DB-down fallback.
+
+        TTL'd rather than permanent: a stale set from an hours-old cycle is a
+        worse authority than "unknown", which at least fails toward notifying.
+        Sized well above the interval so a couple of missed cycles don't drop
+        it, and it is rewritten every cycle anyway.
+        """
+        try:
+            self._redis().set(
+                REDIS_KEY_LAST_CYCLE_RED,
+                json.dumps(sorted(invariant_ids)),
+                ex=self.interval * 12,
+            )
+        except Exception:
+            logger.exception("canary: failed to persist previous-cycle red set")
 
     @staticmethod
     def _is_green_to_red(

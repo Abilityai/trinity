@@ -279,8 +279,23 @@ class FakeRedis:
     def get(self, key: str):
         return self._strings.get(key)
 
-    def set(self, key: str, value: str) -> bool:
+    def set(self, key: str, value: str, ex: int = None) -> bool:
         self._strings[key] = str(value)
+        # `ex=` is real redis-py semantics and H-01 relies on it (#1813): a
+        # marker written without an expiry can stay armed forever when the
+        # best-effort clear fails. A fake that silently ignored `ex` would let
+        # that regression pass.
+        if ex is not None:
+            self._ttls[key] = int(ex)
+        else:
+            self._ttls.pop(key, None)
+        return True
+
+    def expire(self, key: str, seconds: int) -> bool:
+        """Refresh a TTL. redis-py returns False when the key is absent."""
+        if key not in self._strings and key not in self._hashes and key not in self._zsets:
+            return False
+        self._ttls[key] = int(seconds)
         return True
 
 
@@ -3922,8 +3937,17 @@ def _h01_snap(
     orphan_redis_slots=None,
     sources_unavailable=None,
     snapshot_time="2026-07-29T12:00:00Z",
+    collectors_ran=None,
 ):
-    from canary.snapshot import Snapshot
+    """A synthetic snapshot for H-01.
+
+    `collectors_ran` defaults to BOTH collectors having run, which is the
+    normal cycle. Pass an explicit set to model the skipped-collector state —
+    `collect_snapshot` returns early on a roster-read failure, so Redis
+    genuinely does not run on that arm, and H-01 must report that rather than
+    inferring "available" from a silent `sources_unavailable`.
+    """
+    from canary.snapshot import COLLECTOR_DOCKER, COLLECTOR_REDIS, Snapshot
 
     return Snapshot(
         snapshot_time=snapshot_time,
@@ -3931,6 +3955,11 @@ def _h01_snap(
         docker_agent_names=set(docker_agent_names or ()),
         orphan_redis_slots=dict(orphan_redis_slots or {}),
         sources_unavailable=list(sources_unavailable or ()),
+        collectors_ran=(
+            {COLLECTOR_DOCKER, COLLECTOR_REDIS}
+            if collectors_ran is None
+            else set(collectors_ran)
+        ),
     )
 
 
@@ -4055,7 +4084,17 @@ class TestInvariantH01:
         assert h01.check(snap) == []
         assert h01.check(snap) == [], "identical snapshot_time is the same cycle"
 
-    def test_redis_slot_evidence_alone_confirms(self, fake_redis):
+    def test_redis_slot_evidence_alone_is_major_not_critical(self, fake_redis):
+        """Review finding: Redis alone must not page critical.
+
+        `orphan_redis_slots` is BY DEFINITION slot keys whose agent is absent
+        from `agent_ownership` — the leaked-slot state L-03 exists to report.
+        A genuinely empty fleet holding one leaked key would otherwise produce
+        `roster_empty_contradicted` / critical: a correct roster, an unrelated
+        Redis leak, and a critical page claiming the harness is blind. The
+        names still ride in the evidence sample; only the severity ladder
+        treats the two sources differently.
+        """
         from canary.invariants import h01_collector_blindness as h01
 
         first = _h01_snap(orphan_redis_slots={"a1": 2})
@@ -4065,14 +4104,38 @@ class TestInvariantH01:
         assert h01.check(first) == []
         violations = h01.check(second)
         assert len(violations) == 1
-        assert violations[0].observed_state["reason"] == h01.REASON_CONTRADICTED
+        assert violations[0].observed_state["reason"] == h01.REASON_UNVERIFIABLE
+        assert violations[0].severity == "major"
+        # Still surfaced to the operator — demoted, not discarded.
+        assert violations[0].observed_state["evidence_sample"] == ["a1"]
+
+    def test_docker_evidence_still_confirms_critical(self, fake_redis):
+        """The counterpart to the test above: Docker IS sufficient alone."""
+        from canary.invariants import h01_collector_blindness as h01
+
+        assert h01.check(_h01_snap(docker_agent_names={"a1"})) == []
+        v = h01.check(
+            _h01_snap(
+                docker_agent_names={"a1"}, snapshot_time="2026-07-29T12:05:00Z"
+            )
+        )[0]
+        assert v.observed_state["reason"] == h01.REASON_CONTRADICTED
+        assert v.severity == "critical"
 
     def test_roster_read_failure_fires_without_evidence(self, fake_redis):
-        """An exception on the roster read is definitive blindness."""
+        """A raised roster read fires critical — after the same 60s gate.
+
+        The gate is NOT skipped on this arm. There is no delete race to ride
+        out here, but a raised read is very often a momentary DB blip (a
+        connection reset, a PG restart, brief pool exhaustion), and paging
+        critical on one of those is exactly how a safety net gets muted.
+        """
         from canary.invariants import h01_collector_blindness as h01
 
         unavail = ["sqlite.agent_ownership: connection refused"]
-        assert h01.check(_h01_snap(sources_unavailable=unavail)) == []
+        assert h01.check(_h01_snap(sources_unavailable=unavail)) == [], (
+            "first sighting arms the marker; it must not fire immediately"
+        )
         violations = h01.check(
             _h01_snap(
                 sources_unavailable=unavail, snapshot_time="2026-07-29T12:05:00Z"
@@ -4081,6 +4144,44 @@ class TestInvariantH01:
         assert len(violations) == 1
         assert violations[0].severity == "critical"
         assert violations[0].observed_state["reason"] == h01.REASON_ROSTER_READ_FAILED
+
+    def test_roster_read_failure_reports_docker_evidence_not_a_phantom_all_clear(
+        self, fake_redis
+    ):
+        """Review finding 1a — the arm that used to misreport its own evidence.
+
+        `collect_snapshot` returns early when the roster read raises, so before
+        the fix the Docker and Redis collectors never ran on this arm — yet the
+        payload reported `docker_available: True`, `redis_available: True` and
+        `evidence_agent_count: 0`, rendering as "docker=up · redis=up … 0 vs 0
+        agent(s)". For the one alarm whose stated job is legibility, that reads
+        as "everything else is fine and the fleet is empty" when in fact neither
+        source had been consulted.
+
+        Docker now runs FIRST, so it carries real evidence here; Redis still
+        cannot (it needs `known_agents`) and must report `None` = never read.
+        """
+        from canary.snapshot import COLLECTOR_DOCKER
+        from canary.invariants import h01_collector_blindness as h01
+
+        def _snap(at):
+            return _h01_snap(
+                docker_agent_names={"a1", "a2"},
+                sources_unavailable=["sqlite.agent_ownership: connection refused"],
+                collectors_ran={COLLECTOR_DOCKER},
+                snapshot_time=at,
+            )
+
+        assert h01.check(_snap("2026-07-29T12:00:00Z")) == []
+        obs = h01.check(_snap("2026-07-29T12:05:00Z"))[0].observed_state
+
+        assert obs["reason"] == h01.REASON_ROSTER_READ_FAILED
+        assert obs["docker_available"] is True
+        assert obs["redis_available"] is None, (
+            "never-consulted must not render as available"
+        )
+        assert obs["evidence_agent_count"] == 2
+        assert sorted(obs["evidence_sample"]) == ["a1", "a2"]
 
     def test_unavailable_evidence_fires_major(self, fake_redis):
         """Fix 2 — a guard that cannot check must say so, not stay quiet."""
@@ -4096,6 +4197,60 @@ class TestInvariantH01:
         assert len(violations) == 1
         assert violations[0].severity == "major"
         assert violations[0].observed_state["reason"] == h01.REASON_UNVERIFIABLE
+
+    def test_a_collector_that_never_ran_is_not_an_all_clear(self, fake_redis):
+        """The state `sources_unavailable` structurally cannot express.
+
+        An empty roster with Redis never consulted is NOT "every source agrees
+        the fleet is empty" — but a two-state availability test reads the
+        silent `sources_unavailable` as success and falls straight through to
+        the AC #3 all-clear.
+        """
+        from canary.snapshot import COLLECTOR_DOCKER
+        from canary.invariants import h01_collector_blindness as h01
+
+        def _snap(at):
+            return _h01_snap(collectors_ran={COLLECTOR_DOCKER}, snapshot_time=at)
+
+        assert h01.check(_snap("2026-07-29T12:00:00Z")) == []
+        v = h01.check(_snap("2026-07-29T12:05:00Z"))[0]
+        assert v.observed_state["reason"] == h01.REASON_UNVERIFIABLE
+        assert v.observed_state["redis_available"] is None
+        assert v.severity == "major"
+
+    def test_marker_carries_a_ttl_so_an_orphan_cannot_arm_forever(self, fake_redis):
+        """Review finding 4.
+
+        `_clear_marker` swallows failures, and `POST /api/canary/run-cycle`
+        with an `invariant_ids` filter excluding H-01 never reaches the clear
+        path at all — so without an expiry a marker orphaned either way stays
+        armed forever and the next genuine episode confirms on its first cycle
+        instead of riding out the delete race.
+        """
+        from canary.invariants import h01_collector_blindness as h01
+
+        assert h01.check(_h01_snap(docker_agent_names={"a1"})) == []
+        ttl = fake_redis.ttl(h01.REDIS_KEY_SUSPECT_SINCE)
+        assert 0 < ttl <= h01.MARKER_TTL_SECONDS
+
+    def test_live_episode_refreshes_the_marker_ttl(self, fake_redis):
+        """The TTL is an idle timeout, not an absolute lifetime.
+
+        An episode outliving `MARKER_TTL_SECONDS` would otherwise silently
+        re-arm — going green for a cycle and re-alerting on a condition that
+        never changed.
+        """
+        from canary.invariants import h01_collector_blindness as h01
+
+        assert h01.check(_h01_snap(docker_agent_names={"a1"})) == []
+        # Simulate the key aging most of the way to expiry.
+        fake_redis.expire(h01.REDIS_KEY_SUSPECT_SINCE, 5)
+        h01.check(
+            _h01_snap(
+                docker_agent_names={"a1"}, snapshot_time="2026-07-29T12:05:00Z"
+            )
+        )
+        assert fake_redis.ttl(h01.REDIS_KEY_SUSPECT_SINCE) > 5
 
     def test_marker_unreadable_fires_unconfirmed_rather_than_skipping(
         self, fake_redis, monkeypatch

@@ -170,9 +170,11 @@ class CanaryAlerts:
             "cycle is meaningless — triage this before any other canary result. "
             "Check `DATABASE_URL` and that the backend points at the live "
             "database (#1540 class); `roster_read_failed` means the read raised, "
-            "`roster_empty_contradicted` means it returned zero while Docker or "
-            "Redis still saw agents, `roster_empty_unverifiable` means the "
-            "independent sources were themselves unreachable."
+            "`roster_empty_contradicted` means it returned zero while DOCKER "
+            "still saw running agent containers, `roster_empty_unverifiable` "
+            "means the independent sources were unreachable, never read, or "
+            "only Redis had anything to say (a slot key alone cannot tell a "
+            "blind collector from an L-03 leak)."
         ),
     }
 
@@ -597,12 +599,25 @@ class CanaryAlerts:
             # makes "the fleet is provably alive" checkable rather than
             # asserted. Already capped at 10 by the check.
             obs = violations[0].observed_state or {}
+
+            def _source(state) -> str:
+                # Tri-state, NOT a boolean (#1813). `None` means the collector
+                # never ran — `collect_snapshot` returns early on a roster-read
+                # failure, so on that arm Redis genuinely was not consulted.
+                # Rendering that as "unavailable" would blame a healthy Redis;
+                # rendering it as "up" (what a two-state ternary did) told the
+                # reader everything else was fine on the one alarm whose job is
+                # to say the opposite.
+                if state is None:
+                    return "not read"
+                return "up" if state else "unavailable"
+
             lines: List[str] = [
                 f"*Reason:* `{_mrkdwn_safe(obs.get('reason'))}` "
                 f"({_mrkdwn_safe(obs.get('confirmation'), fallback='unconfirmed')})",
                 f"*Blind since:* {_mrkdwn_safe(obs.get('blind_since'), fallback='this cycle')}",
-                f"*Sources:* docker={'up' if obs.get('docker_available') else 'unavailable'} · "
-                f"redis={'up' if obs.get('redis_available') else 'unavailable'}",
+                f"*Sources:* docker={_source(obs.get('docker_available'))} · "
+                f"redis={_source(obs.get('redis_available'))}",
                 f"*Roster vs evidence:* {_mrkdwn_safe(obs.get('known_agent_count'))} "
                 f"vs {_mrkdwn_safe(obs.get('evidence_agent_count'))} agent(s)",
             ]
