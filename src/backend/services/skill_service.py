@@ -48,6 +48,7 @@ from urllib.parse import urlparse, urlunparse
 
 from utils.url_validation import (
     ALLOWED_SKILLS_LIBRARY_HOSTS,
+    strip_url_credentials,
     validate_skills_library_url,
 )
 
@@ -1001,7 +1002,14 @@ class SkillService:
             source_status.append({
                 "id": src.id,
                 "name": src.name,
-                "url": src.url,
+                # ent#334: stripped HERE, not only in the REST projection.
+                # `SkillSourcesPanel.vue` renders this straight onto the admin
+                # route, and `GET /skills/sources` returns this dict verbatim —
+                # so the service is the only place that covers every consumer.
+                # Rows predating `reject_embedded_credentials`, and the
+                # legacy-adoption path (which validates nothing), still carry
+                # `https://<token>@host/...`.
+                "url": strip_url_credentials(src.url),
                 "ref": src.ref,
                 "ref_type": src.ref_type,
                 "is_default": src.is_default,
@@ -1039,6 +1047,13 @@ class SkillService:
             stored_sync = last_status = last_error = None
 
         first = source_status[0] if source_status else {}
+        # Second emitter of the same value (ent#334). Stripped again rather
+        # than trusted to be clean via `first`: the two are edited
+        # independently, and `strip_url_credentials` is idempotent. The
+        # `if` preserves the no-sources `None` — coercing it to `""` would
+        # silently change what an unconfigured install reports.
+        first_url = first.get("url")
+        first_url = strip_url_credentials(first_url) if first_url else first_url
         return {
             "configured": bool(sources),
             "sources": source_status,
@@ -1052,7 +1067,7 @@ class SkillService:
             "last_sync_status": last_status,
             "last_sync_error": last_error,
             # Legacy single-library fields (deprecated, first source wins).
-            "url": first.get("url"),
+            "url": first_url,
             "branch": first.get("ref"),
             "cloned": any(s["cloned"] for s in source_status),
             "commit_sha": first.get("commit_sha"),
