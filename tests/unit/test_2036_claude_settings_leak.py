@@ -40,7 +40,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
@@ -72,26 +72,35 @@ KEEP_PATHS = (
 )
 
 
-def _load_git_service():
-    """Import git_service with heavy dependencies mocked out (mirrors
-    `test_github_init_gitignore.py` so both files stub the same surface)."""
-    mock_modules = {}
-    for mod in [
-        "docker", "docker.errors", "docker.types",
-        "redis", "redis.asyncio",
-        "database",
-        "services.docker_service",
-    ]:
-        mock_modules[mod] = Mock()
-    mock_modules["database"].db = Mock()
-    mock_modules["database"].AgentGitConfig = Mock
-    mock_modules["database"].GitSyncResult = Mock
+_STUBBED_MODULE_NAMES = (
+    "docker", "docker.errors", "docker.types",
+    "redis", "redis.asyncio",
+    "database",
+    "services.docker_service",
+)
 
-    with patch.dict("sys.modules", mock_modules):
-        for key in list(sys.modules.keys()):
-            if key.startswith("services.git_service"):
-                del sys.modules[key]
-        import services.git_service as gs
+
+def _load_git_service(monkeypatch):
+    """Import git_service with heavy dependencies stubbed out.
+
+    Stubs the same surface as `test_github_init_gitignore.py`, but through
+    `monkeypatch.setitem`/`delitem` rather than a bare `del sys.modules[...]`
+    — teardown then restores the real modules automatically, so this file
+    cannot leak a stubbed `database`/`docker` into a later test in the same
+    worker (`tests/lint_sys_modules.py` enforces this).
+    """
+    for name in _STUBBED_MODULE_NAMES:
+        monkeypatch.setitem(sys.modules, name, Mock())
+    sys.modules["database"].db = Mock()
+    sys.modules["database"].AgentGitConfig = Mock
+    sys.modules["database"].GitSyncResult = Mock
+
+    # Force a fresh import so the stubs above are the ones it binds to.
+    for key in list(sys.modules):
+        if key.startswith("services.git_service"):
+            monkeypatch.delitem(sys.modules, key, raising=False)
+
+    import services.git_service as gs
     return gs
 
 
@@ -191,17 +200,17 @@ def test_dockerfile_still_bakes_settings_into_the_repo_root():
         ".claude/.last-cleanup",
     ],
 )
-def test_pattern_is_canonical(pattern):
-    gs = _load_git_service()
+def test_pattern_is_canonical(pattern, monkeypatch):
+    gs = _load_git_service(monkeypatch)
     assert pattern in gs._GITIGNORE_PATTERNS, (
         f"{pattern} missing from _GITIGNORE_PATTERNS (#2036)"
     )
 
 
-def test_project_scoped_claude_source_is_not_swallowed():
+def test_project_scoped_claude_source_is_not_swallowed(monkeypatch):
     """No rule may exclude `.claude/` wholesale — commands/skills/agents are
     the agent's source and must keep syncing (G-001 in the validation spec)."""
-    gs = _load_git_service()
+    gs = _load_git_service(monkeypatch)
     for bad in (".claude", ".claude/", ".claude/*"):
         assert bad not in gs._GITIGNORE_PATTERNS
 
@@ -210,11 +219,11 @@ def test_project_scoped_claude_source_is_not_swallowed():
 # 3. Behaviour: a fresh agent never stages the leaking files
 # ---------------------------------------------------------------------------
 
-def test_add_all_does_not_stage_leaking_runtime_files(tmp_path):
+def test_add_all_does_not_stage_leaking_runtime_files(tmp_path, monkeypatch):
     """The in-container auto-sync runs `git add -A`. After the canonical
     `.gitignore` merge, none of the leaking artifacts may be staged — while
     every legitimate `.claude/` source file still is."""
-    gs = _load_git_service()
+    gs = _load_git_service(monkeypatch)
     git = _init_repo(tmp_path)
 
     for rel in LEAKING_PATHS + KEEP_PATHS:
@@ -237,14 +246,14 @@ def test_add_all_does_not_stage_leaking_runtime_files(tmp_path):
 # 4. Behaviour: an already-bricked repo heals on the next Push
 # ---------------------------------------------------------------------------
 
-def test_existing_committed_settings_is_untracked_but_kept_on_disk(tmp_path):
+def test_existing_committed_settings_is_untracked_but_kept_on_disk(tmp_path, monkeypatch):
     """The repos that are already broken are the point of the fix.
 
     `_migrate_workspace_gitignore` must untrack the committed copy so the next
     push deletes it from the remote (unbricking future clones), while leaving
     the working-tree file alone so the RUNNING agent keeps its guardrail hooks.
     """
-    gs = _load_git_service()
+    gs = _load_git_service(monkeypatch)
     git = _init_repo(tmp_path)
 
     for rel in LEAKING_PATHS + KEEP_PATHS:
@@ -281,10 +290,10 @@ def test_existing_committed_settings_is_untracked_but_kept_on_disk(tmp_path):
     assert not dropped, f"migration untracked legitimate agent source: {dropped}"
 
 
-def test_migration_is_idempotent(tmp_path):
+def test_migration_is_idempotent(tmp_path, monkeypatch):
     """A second Push must be a no-op — `.gitignore` gains no duplicate lines
     and `rm --cached` finds nothing (it runs on every push, #462)."""
-    gs = _load_git_service()
+    gs = _load_git_service(monkeypatch)
     _init_repo(tmp_path)
     _write(tmp_path, ".claude/settings.json")
 
@@ -298,14 +307,14 @@ def test_migration_is_idempotent(tmp_path):
     assert len(lines) == len(set(lines)), "duplicate .gitignore entries appended"
 
 
-def test_agent_can_override_with_a_negation(tmp_path):
+def test_agent_can_override_with_a_negation(tmp_path, monkeypatch):
     """The #1596 escape hatch still works: an agent that genuinely needs to
     commit project settings negates the rule in its own `.gitignore`.
 
     Asserted because the fix removes a file Claude Code also uses for
     PROJECT-level settings — the trade-off is only acceptable if the opt-out
     is real."""
-    gs = _load_git_service()
+    gs = _load_git_service(monkeypatch)
     git = _init_repo(tmp_path)
     _write(tmp_path, ".claude/settings.json")
 
