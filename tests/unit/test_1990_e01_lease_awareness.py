@@ -1,4 +1,4 @@
-"""#1990 — canary E-01 skips pull-CLAIMED rows, and ONLY those.
+"""#1990 — canary E-01 gives pull-CLAIMED rows a BOUNDED grace, and only those.
 
 E-01 ("no ``running`` row older than ``execution_timeout_seconds + 300s``") had
 no lease-awareness. A #1081 Phase-3 pull-claimed row (``lease_expires_at IS NOT
@@ -16,10 +16,31 @@ every re-delivery, per execution. That lands on the #1766 soak, whose AC is
 "canary green throughout" and whose abort criterion is a critical violation on
 the pilot.
 
+## The grace is bounded — silence is not permanent
+
+The skip lasts only while the lease is overdue by at most
+``LEASE_REAPER_GRACE_SECONDS`` (2 x ``cleanup_service.CLEANUP_INTERVAL_SECONDS``
+— asserted in ``test_grace_is_derived_from_the_cleanup_interval``). Past that
+the row fires as a **lease-reaper** failure. Two tests carry that pair and must
+be read together:
+
+* ``test_leased_row_within_the_reaper_grace_is_silent`` — a healthy reaper never
+  pages. It resolves an overdue lease within one cycle (``requeue_expired_lease``
+  clears the lease and resets ``started_at`` in one atomic UPDATE;
+  ``park_expired_lease`` goes terminal), so observable overdue-ness tops out at
+  one interval and the grace has a whole spare cycle of head-room.
+* ``test_leased_row_overdue_past_the_grace_fires`` — a **stopped** reaper does.
+  Without this positive case the grace would be decorative: an unconditional
+  skip left `PULL_MIGRATION_TESTING.md` §9 M4 ("a ``running`` row past its
+  ``lease_expires_at`` that the reaper has not touched is a reaper failure", a
+  #1766 abort criterion) with no automated owner at all — E-05 and S-01 exclude
+  leased rows too, E-02 only sees terminal→non-terminal reversals, and there is
+  no lease-overdue invariant.
+
 The load-bearing test here is ``test_null_lease_control_of_identical_age_fires``
-and its twin in ``test_leased_and_control_rows_in_one_snapshot``: the exclusion
-must be keyed on the lease, not a blanket silencing of aged rows. Every other
-test in this module would still pass if someone "fixed" E-01 by deleting it.
+and its twin in ``test_leased_and_control_rows_in_one_snapshot``: the grace must
+be keyed on the lease, not a blanket silencing of aged rows. Every other test in
+this module would still pass if someone "fixed" E-01 by deleting it.
 
 ``test_e02_deliberately_counts_leased_running_rows`` records the AC-5 verdict
 executably rather than in prose: E-02 is the fourth reader of
@@ -52,6 +73,7 @@ T0 = datetime(2026, 5, 18, 12, 0, 0, tzinfo=timezone.utc)
 TIMEOUT = 900
 BUFFER = 300
 THRESHOLD = TIMEOUT + BUFFER  # 1200s — E-01 fires strictly ABOVE this
+GRACE = 600  # LEASE_REAPER_GRACE_SECONDS — also fires strictly ABOVE
 
 
 def _iso(offset_seconds: int) -> str:
@@ -86,6 +108,20 @@ def _snap(rows: Dict[str, Optional[str]], *, age_seconds: int = THRESHOLD + 1):
     )
 
 
+def _pull_snap(overdue_seconds: int):
+    """One pull-CLAIMED row whose lease is ``overdue_seconds`` past due.
+
+    Faithful to ``claim_next_queued``, which stamps ``lease_expires_at =
+    started_at + (execution_timeout_seconds + SLOT_TTL_BUFFER)`` in the SAME
+    atomic UPDATE that writes ``started_at`` — so age and lease-overdue-ness
+    move together and ``age == THRESHOLD + overdue`` by construction.
+    """
+    return _snap(
+        {"pull-1": _iso(-overdue_seconds)},
+        age_seconds=THRESHOLD + overdue_seconds,
+    )
+
+
 def _check(snap):
     from canary.invariants import e01_terminal_state_closure as e01
 
@@ -93,29 +129,32 @@ def _check(snap):
 
 
 # ---------------------------------------------------------------------------
-# The reported bug: a legitimately-running pull turn
+# The reported bug: a legitimately-running pull turn, within the reaper's window
 # ---------------------------------------------------------------------------
 
 
-def test_leased_row_past_threshold_is_silent():
+@pytest.mark.parametrize(
+    "overdue",
+    [
+        1,      # the reaper's recovery window has only just opened
+        300,    # one full CLEANUP_INTERVAL — a healthy reaper's WORST case
+        GRACE,  # the grace itself: fires strictly ABOVE, so still silent
+    ],
+)
+def test_leased_row_within_the_reaper_grace_is_silent(overdue: int):
     """The exact #1990 false positive: a claimed row whose lease has expired.
 
-    ``lease_expires_at`` is stamped at ``started_at + THRESHOLD``, so at any age
-    past the threshold the lease is also past — i.e. the reaper has become
-    eligible but has not swept yet. Before the fix this paged critical.
+    Before the fix every one of these paged **critical**, because the lease is
+    stamped at exactly ``started_at + THRESHOLD`` — so ``age > threshold``
+    became true at the instant the reaper's window opened, with zero head-room.
+
+    A healthy reaper cannot exceed ``overdue == 300``: ``_sweep_expired_leases``
+    runs once per 300s ``cleanup_service`` cycle and RESOLVES the row on that
+    pass (``requeue_expired_lease`` clears the lease and resets ``started_at``
+    in one atomic UPDATE; ``park_expired_lease`` goes terminal, leaving the
+    running set). The grace is 2x that, i.e. a whole spare cycle of head-room.
     """
-    lease = _iso(-1)  # expired one second ago; reaper's window just opened
-    assert _check(_snap({"pull-1": lease})) == []
-
-
-def test_leased_row_far_past_threshold_is_still_silent():
-    """Re-delivery latency is bounded by MAX_REDELIVERY, not by this window.
-
-    A row can sit leased-and-aged across several reaper passes; none of that is
-    E-01's business.
-    """
-    snap = _snap({"pull-1": _iso(-3600)}, age_seconds=THRESHOLD * 10)
-    assert _check(snap) == []
+    assert _check(_pull_snap(overdue)) == []
 
 
 def test_leased_row_with_a_future_lease_is_silent():
@@ -123,8 +162,76 @@ def test_leased_row_with_a_future_lease_is_silent():
     assert _check(_snap({"pull-1": _iso(600)})) == []
 
 
+def test_aged_row_with_a_far_future_lease_is_silent():
+    """The LEASE governs, not the age — a not-yet-due lease silences any age.
+
+    Guards the ordering: the lease is read before the age, so a row 10x past
+    E-01's threshold but still inside its own lease belongs to the worker, not
+    to this invariant.
+    """
+    snap = _snap({"pull-1": _iso(3600)}, age_seconds=THRESHOLD * 10)
+    assert _check(snap) == []
+
+
 # ---------------------------------------------------------------------------
-# The exclusion is keyed on the LEASE — not a blanket silencing
+# The grace is BOUNDED — a stopped lease-reaper must fire
+# ---------------------------------------------------------------------------
+
+
+def test_leased_row_overdue_past_the_grace_fires():
+    """The detector this fix restores: a reaper that has stopped.
+
+    ``PULL_MIGRATION_TESTING.md`` §9 **M4** — "a ``running`` row past its
+    ``lease_expires_at`` that the reaper has not touched is a reaper failure" —
+    is a #1766 soak **abort criterion**. An unconditional lease exclusion left
+    it with no automated owner: S-01 and E-05 exclude leased rows too, E-02 only
+    catches terminal→non-terminal reversals, and there is no lease-overdue
+    invariant. Without this test the grace window is decorative.
+    """
+    violations = _check(_pull_snap(GRACE + 1))
+    assert len(violations) == 1
+    v = violations[0]
+    assert v.invariant_id == "E-01"
+    assert v.severity == "critical"
+    assert v.observed_state["execution_id"] == "pull-1"
+    # The lease fields are what tell on-call this is the REAPER's failure and
+    # not a wedged execution — a different component, a different runbook.
+    assert v.observed_state["lease_expires_at"] == _iso(-(GRACE + 1))
+    assert v.observed_state["lease_overdue_seconds"] == GRACE + 1
+    assert v.observed_state["lease_reaper_grace_seconds"] == GRACE
+    assert "LEASE-REAPER failure" in v.signal_query
+
+
+@pytest.mark.parametrize(
+    "overdue,expected",
+    [
+        (GRACE - 1, 0),
+        (GRACE, 0),  # `lease_overdue <= grace` continues — fires strictly above
+        (GRACE + 1, 1),
+    ],
+)
+def test_lease_grace_boundary_is_exact(overdue: int, expected: int):
+    assert len(_check(_pull_snap(overdue))) == expected
+
+
+def test_grace_is_derived_from_the_cleanup_interval():
+    """The constant is 2x the reaper's own cycle — coupled, not a magic number.
+
+    The lease-reaper runs inside ``cleanup_service``'s loop, so the grace is
+    "one worst-case cycle plus one spare". If that interval is ever changed,
+    this assertion goes red and the grace has to be re-derived with it, rather
+    than a healthy reaper silently starting to page (grace too small) or a dead
+    one silently staying invisible for longer (too large).
+    """
+    from canary.invariants import e01_terminal_state_closure as e01
+    from services.cleanup_service import CLEANUP_INTERVAL_SECONDS
+
+    assert e01.LEASE_REAPER_GRACE_SECONDS == 2 * CLEANUP_INTERVAL_SECONDS
+    assert GRACE == e01.LEASE_REAPER_GRACE_SECONDS  # this module's local copy
+
+
+# ---------------------------------------------------------------------------
+# The grace is keyed on the LEASE — not a blanket silencing
 # ---------------------------------------------------------------------------
 
 
@@ -142,12 +249,32 @@ def test_null_lease_control_of_identical_age_fires():
     assert v.severity == "critical"
     assert v.observed_state["execution_id"] == "push-1"
     assert v.observed_state["age_seconds"] == THRESHOLD + 1
+    # A push violation reports a NULL lease and NO overdue fields — that absence
+    # is the discriminator the runbook hint routes on.
+    assert v.observed_state["lease_expires_at"] is None
+    assert "lease_overdue_seconds" not in v.observed_state
+    assert "LEASE-REAPER" not in v.signal_query
 
 
 def test_leased_and_control_rows_in_one_snapshot():
     """Both rows, one agent, one snapshot: exactly the NULL-lease one fires."""
     violations = _check(_snap({"pull-1": _iso(-1), "push-1": None}))
     assert [v.observed_state["execution_id"] for v in violations] == ["push-1"]
+
+
+def test_both_fire_and_stay_distinguishable_when_the_reaper_is_also_down():
+    """A dead reaper AND a wedged push row in one snapshot: two violations, two
+    diagnoses. The lease fields must keep them apart — a single undifferentiated
+    "N stuck executions" alert would send on-call to the wrong component for
+    half of them."""
+    snap = _snap(
+        {"pull-1": _iso(-(GRACE + 1)), "push-1": None},
+        age_seconds=THRESHOLD + GRACE + 1,
+    )
+    by_id = {v.observed_state["execution_id"]: v for v in _check(snap)}
+    assert set(by_id) == {"pull-1", "push-1"}
+    assert by_id["pull-1"].observed_state["lease_overdue_seconds"] == GRACE + 1
+    assert by_id["push-1"].observed_state["lease_expires_at"] is None
 
 
 def test_missing_lease_key_fails_open_and_fires():
@@ -177,6 +304,19 @@ def test_missing_lease_key_fails_open_and_fires():
     assert len(_check(snap)) == 1
 
 
+@pytest.mark.parametrize("lease", ["", "not-a-timestamp"])
+def test_unusable_lease_value_is_not_a_lease_and_fires(lease: str):
+    """An empty or unparseable lease is NOT evidence the reaper owns the row.
+
+    Collector writes go through ``to_utc_iso``, so NULL-or-ISO is what is
+    produced today and this is belt-and-braces. But a bare ``is not None``
+    would read ``""`` as a LIVE lease and silence the row permanently — the
+    exact widening the fail-open on an absent key exists to prevent. Same
+    direction for both: not-a-legible-deadline ⇒ keep checking.
+    """
+    assert len(_check(_snap({"weird-1": lease}))) == 1
+
+
 # ---------------------------------------------------------------------------
 # Boundary — the threshold is untouched for NULL-lease rows
 # ---------------------------------------------------------------------------
@@ -195,8 +335,12 @@ def test_null_lease_boundary_is_unchanged(age: int, expected: int):
 
 
 @pytest.mark.parametrize("age", [THRESHOLD - 1, THRESHOLD, THRESHOLD + 1])
-def test_leased_boundary_is_silent_throughout(age: int):
-    """The lease removes the row from the check at every age, not just past it."""
+def test_within_grace_lease_is_silent_across_the_age_boundary(age: int):
+    """A lease inside the grace removes the row at every age, not just past it.
+
+    The age threshold is E-01's push-path predicate; for a leased row inside the
+    reaper's window it is not consulted at all.
+    """
     assert _check(_snap({"pull-1": _iso(-1)}, age_seconds=age)) == []
 
 
