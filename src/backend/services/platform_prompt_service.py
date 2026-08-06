@@ -14,6 +14,7 @@ import httpx
 
 from database import db
 from models import REPORT_PAYLOAD_MAX_BYTES
+from services.prompt_tier import PromptTier, resolve_prompt_tier
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +196,92 @@ PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(
     "__REPORT_PAYLOAD_MAX__", f"{REPORT_PAYLOAD_MAX_BYTES // (1024 * 1024)} MB"
 )
 
+
+# ---------------------------------------------------------------------------
+# Model-conditional prompt tiers (ent#243)
+# ---------------------------------------------------------------------------
+#
+# The prompt stays ONE authored literal above. Sections are *derived* from it by
+# splitting on its top-level ``###`` headings, never re-typed into a parallel
+# list — maintaining two full prompt strings guarantees drift, and the drift that
+# matters is a security instruction added to one variant and not the other.
+#
+# The delimiter is ``\n\n###`` + space, which cannot match the ``####``
+# subsections inside Operator Communication (they carry a fourth ``#`` where this
+# pattern requires a space). ``split``/``join`` on the same delimiter round-trips
+# byte-exactly, which is what makes the VERBOSE render provably identical to the
+# pre-ent#243 constant.
+
+_SECTION_DELIMITER = "\n\n### "
+
+# Sections DROPPED at PromptTier.MINIMAL. Each is tool-usage guidance whose
+# real home is the corresponding MCP tool description — the "single source of
+# truth" rule. Dropping them is inert until _MINIMAL_PREFIXES is non-empty.
+_MINIMAL_DROP_SECTIONS = frozenset({
+    "Agent Collaboration",              # → list_agents / chat_with_agent descriptions
+    "Sharing Files with Users",         # → share_file description
+    "Publishing Reports",               # → report description (+ #1535 display_hint enum)
+})
+
+# Every top-level section, CI-pinned (tests/unit/test_ent243_prompt_tier.py).
+# A renamed heading must fail loudly: an unmapped section falls back to
+# always-render (see _iter_sections), which is safe but silent, and "silent" is
+# how a section intended to be dropped quietly stops being dropped — or worse,
+# how a rename makes a drop-list entry dead without anyone noticing.
+_KNOWN_SECTION_HEADINGS = frozenset({
+    "Agent Collaboration",
+    "Sharing Files with Users",
+    "Publishing Reports",
+    "Operator Communication",
+    "Package Persistence",
+    "Remembering Things About Users (Public & Channel Sessions)",
+})
+
+# Sections that render at EVERY tier, stated positively for the reader. These are
+# NOT tool-usage guidance and have no tool description to live in:
+#   * Operator Communication — the #1402 fire-and-park contract. Sentinel-locked
+#     by tests/unit/test_1402_prompt_contract.py and synced to
+#     config/trinity-meta-prompt/prompt.md; it documents a FILE protocol
+#     (~/.trinity/operator-queue.json), not an MCP tool.
+#   * Remembering Things About Users — carries the shared-memory-directory leak
+#     warning. A privacy guard, un-gateable by construction.
+#   * Package Persistence — a Trinity environment gotcha (~/.trinity/setup.sh)
+#     that no model can infer from tool signatures.
+# Derived, not hand-listed, so it cannot disagree with the drop set.
+_ALWAYS_SECTIONS = _KNOWN_SECTION_HEADINGS - _MINIMAL_DROP_SECTIONS
+
+
+def _iter_sections(text: str) -> list[tuple[str, str]]:
+    """Split the platform instructions into ``(heading, chunk)`` pairs.
+
+    The first chunk is the preamble (everything before the first ``###``); it
+    carries the empty heading ``""`` and always renders. Each subsequent chunk is
+    the raw split fragment — heading line included, WITHOUT the delimiter — so
+    that ``_SECTION_DELIMITER.join(chunk for _, chunk in ...)`` reconstructs the
+    input byte-for-byte.
+    """
+    chunks = text.split(_SECTION_DELIMITER)
+    sections: list[tuple[str, str]] = [("", chunks[0])]
+    for chunk in chunks[1:]:
+        sections.append((chunk.split("\n", 1)[0].strip(), chunk))
+    return sections
+
+
+def render_platform_instructions(tier: PromptTier = PromptTier.VERBOSE) -> str:
+    """Render PLATFORM_INSTRUCTIONS for a prompt tier (ent#243).
+
+    ``VERBOSE`` returns the constant unchanged — byte-identical, not merely
+    equivalent. An unknown/renamed heading renders (fail toward more instruction,
+    matching prompt_tier's own unknown→VERBOSE invariant).
+    """
+    if tier is not PromptTier.MINIMAL:
+        return PLATFORM_INSTRUCTIONS
+    kept = [
+        chunk
+        for heading, chunk in _iter_sections(PLATFORM_INSTRUCTIONS)
+        if heading not in _MINIMAL_DROP_SECTIONS
+    ]
+    return _SECTION_DELIMITER.join(kept)
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +466,9 @@ async def summarize_user_memory_background(
         )
 
 
-def get_platform_system_prompt(runtime: str = "claude-code") -> str:
+def get_platform_system_prompt(
+    runtime: str = "claude-code", model: Optional[str] = None
+) -> str:
     """
     Build the full platform system prompt.
 
@@ -391,11 +480,17 @@ def get_platform_system_prompt(runtime: str = "claude-code") -> str:
             Codex gets MCP-tool references without the Claude-only
             ``mcp__trinity__`` prefix; Claude/Gemini/unknown keep the canonical
             naming (#1187 F-MCP).
+        model: the model this turn will run on, when the caller knows it. Selects
+            the prompt tier (ent#243) — a frontier coding model gets the MINIMAL
+            render, everything else (including ``None``) gets VERBOSE. Orthogonal
+            to ``runtime``: that decides tool *naming*, this decides how much
+            prose. Inert until ``prompt_tier._MINIMAL_PREFIXES`` is non-empty.
 
     Returns:
         Combined system prompt string
     """
-    parts = [_adapt_instructions_for_runtime(PLATFORM_INSTRUCTIONS, runtime)]
+    instructions = render_platform_instructions(resolve_prompt_tier(model))
+    parts = [_adapt_instructions_for_runtime(instructions, runtime)]
 
     # Append custom prompt from database setting (operator-configurable)
     custom_prompt = db.get_setting_value("trinity_prompt", default=None)
@@ -648,8 +743,19 @@ def compose_system_prompt(
 
     ``runtime`` is threaded to :func:`get_platform_system_prompt` so the MCP-tool
     naming matches the agent's harness (Codex vs. Claude/Gemini, #1187 F-MCP).
+
+    ``execution_context.model`` selects the prompt tier (ent#243). It was already
+    carried on the context for *rendering* (the Execution Context block); this
+    also reads it for *selection*. A caller that does not know the model — the
+    chat path, where the container picks one after composition — leaves it
+    ``None`` and gets VERBOSE, which is the pre-ent#243 prompt.
     """
-    parts: List[str] = [get_platform_system_prompt(runtime=runtime)]
+    parts: List[str] = [
+        get_platform_system_prompt(
+            runtime=runtime,
+            model=execution_context.model if execution_context is not None else None,
+        )
+    ]
 
     if include_execution_context and execution_context is not None:
         # Auto-fill collaborators and platform URL without mutating the caller's

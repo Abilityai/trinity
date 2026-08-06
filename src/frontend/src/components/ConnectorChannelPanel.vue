@@ -103,6 +103,47 @@
         </div>
       </div>
 
+      <!-- Keyless share via email login (#848). Shown only when the platform
+           flag is on — otherwise an anonymous MCP session is rejected and this
+           config would not work. Independent of the key: it's an alternative
+           way to share, so a collaborator on this agent's sharing list can
+           connect and sign in with their email — no key changes hands. -->
+      <div v-if="status.inline_auth_available && status.keyless_snippets && status.keyless_snippets.length"
+           class="p-4 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50">
+        <div class="flex items-center justify-between mb-1">
+          <p class="text-sm font-medium text-gray-900 dark:text-white">Share without a key — sign in by email</p>
+          <button type="button" @click="showKeyless = !showKeyless"
+            class="text-xs text-action-primary-600 hover:underline">
+            {{ showKeyless ? 'Hide' : 'Show setup' }}
+          </button>
+        </div>
+        <p class="text-xs text-gray-500 dark:text-gray-400">
+          Give someone on this agent's sharing list the config below. They connect with no key,
+          then call <code class="text-xs">request_login</code> with their email and
+          <code class="text-xs">verify_login</code> with the code. Works only while they're signed in.
+        </p>
+        <div v-if="showKeyless" class="space-y-3 mt-3">
+          <div v-for="s in status.keyless_snippets" :key="'keyless-' + s.client">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-medium text-gray-700 dark:text-gray-200">{{ s.label }}</span>
+              <button
+                type="button"
+                @click="copy(s.content, 'keyless-' + s.client)"
+                class="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded transition-all duration-300"
+                :class="copied === 'keyless-' + s.client
+                  ? 'bg-status-success-600 text-white ring-2 ring-status-success-400 shadow-sm shadow-status-success-500/40 copied-btn-flash'
+                  : 'text-action-primary-600 hover:underline'"
+              >
+                <svg v-if="copied === 'keyless-' + s.client" class="h-3.5 w-3.5 copied-pop" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                {{ copied === 'keyless-' + s.client ? 'Copied!' : 'Copy' }}
+              </button>
+            </div>
+            <pre class="text-xs bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded p-2 overflow-x-auto"><code>{{ s.content }}</code></pre>
+            <p v-if="s.note" class="text-xs text-gray-500 dark:text-gray-400 mt-1">{{ s.note }}</p>
+          </div>
+        </div>
+      </div>
+
       <p v-if="message" class="text-xs" :class="messageError ? 'text-status-danger-600' : 'text-status-success-600'">{{ message }}</p>
     </div>
   </div>
@@ -121,8 +162,9 @@ const props = defineProps({
 const loading = ref(true)
 const busy = ref(false)
 const accessDenied = ref(false)
-const status = ref({ has_key: false, enabled: false, key_prefix: null, mcp_url: null })
+const status = ref({ has_key: false, enabled: false, key_prefix: null, mcp_url: null, inline_auth_available: false, keyless_snippets: [] })
 const freshSnippets = ref([])
+const showKeyless = ref(false)
 const message = ref('')
 const messageError = ref(false)
 
