@@ -316,6 +316,24 @@
   Continuing-red invariants don't re-post. The dashboard-notifications
   path (writing `agent_notifications` rows via `db.create_notification`)
   was rejected on the product call.
+- **Instance attribution (#1987)**: the payload names the instance that
+  fired it — a `[eu2]` prefix on both the Block Kit header and the `text`
+  fallback — so instances sharing one webhook (as `dev` and `eu2` do since
+  the #1766 soak) stay tellable apart. A webhook carries no sender
+  identity, and continuing-red gating makes each alert a one-shot, so
+  anything the message omits is not recoverable from a later one.
+  `services/instance_identity.py::get_instance_label()` resolves it:
+  optional `TRINITY_INSTANCE_NAME` override → first DNS label of
+  `FRONTEND_URL`'s host (`https://eu2.abilityai.dev` → `eu2`; an IP
+  literal keeps its whole host) → `installation_id[:8]` → unlabelled.
+  Deliberately no new *required* var: managed instances already carry
+  `FRONTEND_URL`, so attribution improves fleet-wide without an `.env`
+  rollout. Every tier degrades instead of raising — an unlabelled alert
+  is the prior behaviour, a lost alert is the failure the sink exists to
+  prevent. The label is sanitized (ASCII-alnum + hostname punctuation,
+  32-char cap) at resolution *and* at the render boundary, so it can
+  neither forge Slack markup (`<!channel>`) nor overflow the 150-char
+  header cap Slack rejects the whole message on.
 - **Determinism**: invariant checks are pure functions
   `check(snapshot) → list[ViolationReport]`. Same snapshot input always
   yields the same output. No LLM reasoning anywhere in the canary path.

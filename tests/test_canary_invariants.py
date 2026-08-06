@@ -122,6 +122,33 @@ def _restore_sys_modules():
 # ---------------------------------------------------------------------------
 
 
+class _FakePipeline:
+    """Records buffered commands and replays them against the parent FakeRedis.
+
+    Deliberately NOT a no-op passthrough: the point of the pipeline in
+    `_collect_redis_slot_state` is that both reads land in one round-trip, and
+    a double that executed eagerly would let a test pass against code that
+    issued them separately.
+    """
+
+    def __init__(self, parent: "FakeRedis"):
+        self._parent = parent
+        self._queued: List[tuple] = []
+
+    def ttl(self, key: str) -> "_FakePipeline":
+        self._queued.append(("ttl", (key,)))
+        return self
+
+    def hget(self, key: str, field: str) -> "_FakePipeline":
+        self._queued.append(("hget", (key, field)))
+        return self
+
+    def execute(self) -> List:
+        results = [getattr(self._parent, op)(*args) for op, args in self._queued]
+        self._queued.clear()
+        return results
+
+
 class FakeRedis:
     """Minimal Redis stand-in for canary tests (ZSET + HASH + SCAN)."""
 
@@ -222,11 +249,28 @@ class FakeRedis:
                 removed += 1
         return removed
 
+    def hgetall(self, key: str) -> Dict[str, str]:
+        return dict(self._hashes.get(key, {}))
+
     def hkeys(self, key: str) -> List[str]:
         return list(self._hashes.get(key, {}).keys())
 
     def hlen(self, key: str) -> int:
         return len(self._hashes.get(key, {}))
+
+    # PIPELINE --------------------------------------------------------------
+    # `_collect_redis_slot_state` reads each slot's TTL and its stored
+    # `timeout_seconds` in one round-trip (ent#336). Buffer the calls and
+    # replay them on execute(), mirroring redis-py's chaining API.
+
+    def pipeline(self):
+        return _FakePipeline(self)
+
+    def expire(self, key: str, seconds: int) -> bool:
+        exists = key in self._hashes or key in self._zsets or key in self._strings
+        if exists:
+            self._ttls[key] = seconds
+        return exists
 
     # TTL -------------------------------------------------------------------
     # Matches redis-py semantics: positive int = seconds remaining,
@@ -2000,19 +2044,32 @@ class TestInvariantS03:
         import time
         return time.time()
 
+    @staticmethod
+    def _store_timeout(redis, agent: str, eid: str, timeout: int) -> None:
+        """Write the `timeout_seconds` field `SlotService.acquire_slot` records.
+
+        ent#336: S-03's floor comes from THIS field, not the agent cap. Every
+        real slot has it; a test that omits it is exercising the
+        unobservable-timeout skip path, not the floor.
+        """
+        redis.hset(f"agent:slot:{agent}:{eid}", "timeout_seconds", str(timeout))
+
     def test_holds_when_ttl_above_floor(self, canary_db, reload_canary):
-        _add_agent(canary_db, "a1", timeout=60)  # floor = 60 + 300 = 360s
+        _add_agent(canary_db, "a1", timeout=60)
         reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
+        self._store_timeout(reload_canary["redis"], "a1", "e1", 60)  # floor 360
         reload_canary["redis"].set_ttl("agent:slot:a1:e1", 500)
         snap = reload_canary["canary"].collect_snapshot()
         from canary.invariants import s03_slot_ttl_floor as s03
         assert s03.check(snap) == []
 
     def test_fires_below_floor(self, canary_db, reload_canary):
-        _add_agent(canary_db, "a1", timeout=60)  # floor = 360s
-        # Slot acquired ~now with EXPIRE=100. Initial TTL = 100 + ~0 age
-        # = 100 < 360 floor — fires.
+        _add_agent(canary_db, "a1", timeout=60)
+        # Slot acquired ~now, stored timeout 60 → floor 360, but EXPIRE=100.
+        # Initial TTL = 100 + ~0 age = 100 < 360 — the EXPIRE and the HSET
+        # disagree, which is what `below_floor` now means (ent#336).
         reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
+        self._store_timeout(reload_canary["redis"], "a1", "e1", 60)
         reload_canary["redis"].set_ttl("agent:slot:a1:e1", 100)
         snap = reload_canary["canary"].collect_snapshot()
         from canary.invariants import s03_slot_ttl_floor as s03
@@ -2023,6 +2080,8 @@ class TestInvariantS03:
         assert v[0].observed_state["kind"] == "below_floor"
         assert v[0].observed_state["redis_ttl_seconds"] == 100
         assert v[0].observed_state["floor_seconds"] == 360
+        assert v[0].observed_state["floor_source"] == "stored"
+        assert v[0].observed_state["stored_timeout_seconds"] == 60
 
     def test_natural_decay_not_below_floor(self, canary_db, reload_canary):
         """#913 regression — a slot created with EXPIRE=floor and observed
@@ -2033,13 +2092,18 @@ class TestInvariantS03:
         # TTL now reads `360 - 5 = 355` — below the raw floor — but the
         # reconstructed initial TTL is 360, exactly at the floor.
         reload_canary["redis"].zadd("agent:slots:a1", {"e1": time.time() - 5})
+        self._store_timeout(reload_canary["redis"], "a1", "e1", 60)
         reload_canary["redis"].set_ttl("agent:slot:a1:e1", 355)
         snap = reload_canary["canary"].collect_snapshot()
         from canary.invariants import s03_slot_ttl_floor as s03
         assert s03.check(snap) == []
 
     def test_fires_when_metadata_missing(self, canary_db, reload_canary):
-        """ZSET points at a slot whose metadata HASH already expired (#226)."""
+        """ZSET points at a slot whose metadata HASH already expired (#226).
+
+        The HASH is gone, so `timeout_seconds` is unreadable — this arm must
+        still fire, because it is independent of the floor (ent#336).
+        """
         _add_agent(canary_db, "a1", timeout=60)
         reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
         # FakeRedis.ttl returns -2 when neither the hash nor the ttl is set.
@@ -2049,6 +2113,10 @@ class TestInvariantS03:
         assert len(v) == 1
         assert v[0].observed_state["kind"] == "missing"
         assert v[0].observed_state["redis_ttl_seconds"] == -2
+        # The floor could not be derived from the slot; the row says so rather
+        # than implying the agent cap was this slot's real bound.
+        assert v[0].observed_state["floor_source"] == "unknown"
+        assert v[0].observed_state["stored_timeout_seconds"] is None
 
     def test_fires_when_ttl_unset(self, canary_db, reload_canary):
         """Metadata HASH exists but no expire was set on it."""
@@ -2056,12 +2124,48 @@ class TestInvariantS03:
         reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
         # Populate the HASH so FakeRedis.ttl returns -1 (exists, no TTL).
         reload_canary["redis"].hset("agent:slot:a1:e1", "started_at", "x")
+        self._store_timeout(reload_canary["redis"], "a1", "e1", 60)
         snap = reload_canary["canary"].collect_snapshot()
         from canary.invariants import s03_slot_ttl_floor as s03
         v = s03.check(snap)
         assert len(v) == 1
         assert v[0].observed_state["kind"] == "no_expiry"
         assert v[0].observed_state["redis_ttl_seconds"] == -1
+
+    def test_explicit_short_timeout_below_agent_cap_does_not_fire(
+        self, canary_db, reload_canary
+    ):
+        """ent#336 — THE regression this issue is about.
+
+        Agent cap 3600 (floor 3900 under the old agent-cap rule), schedule
+        timeout 2700 → slot TTL 3000. Correct by construction, and it paged
+        critical on every normally-configured scheduled run before the fix.
+        """
+        _add_agent(canary_db, "a1", timeout=3600)
+        reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
+        self._store_timeout(reload_canary["redis"], "a1", "e1", 2700)
+        reload_canary["redis"].set_ttl("agent:slot:a1:e1", 3000)
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s03_slot_ttl_floor as s03
+        assert s03.check(snap) == []
+
+    def test_unobservable_timeout_skips_rather_than_using_agent_cap(
+        self, canary_db, reload_canary
+    ):
+        """A live TTL with no stored timeout must SKIP, not fall back.
+
+        The fallback would re-arm the exact false positive above whenever the
+        HASH expires between the two reads: TTL 3000 against an agent-cap floor
+        of 3900 fires, while against the slot's real 2700 bound it does not.
+        """
+        _add_agent(canary_db, "a1", timeout=3600)
+        reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
+        # TTL readable, `timeout_seconds` absent.
+        reload_canary["redis"].set_ttl("agent:slot:a1:e1", 3000)
+        snap = reload_canary["canary"].collect_snapshot()
+        assert snap.agents[0].slot_timeouts == {}
+        from canary.invariants import s03_slot_ttl_floor as s03
+        assert s03.check(snap) == []
 
     def test_drain_sentinels_skipped(self, canary_db, reload_canary):
         _add_agent(canary_db, "a1", timeout=60)
@@ -2290,32 +2394,51 @@ class TestInvariantB02:
 
 
 class TestInvariantR01:
+    # ent#337: the exec now emits one PID per line (empty output = no zombies),
+    # not a count. See `_collect_zombie_counts` for why the dwell needs PIDs.
     def test_holds_when_no_zombies(self, canary_db, reload_canary, fake_docker):
         _add_agent(canary_db, "a1")
-        fake_docker.add_container("agent-a1", exec_output="0")
+        fake_docker.add_container("agent-a1", exec_output="")
         snap = reload_canary["canary"].collect_snapshot()
         from canary.invariants import r01_no_zombie_claude as r01
         assert r01.check(snap) == []
         assert snap.zombie_counts == {"a1": 0}
+        assert snap.zombie_pids == {"a1": set()}
 
-    def test_fires_on_zombie_count(self, canary_db, reload_canary, fake_docker):
+    def test_collects_zombie_pids(self, canary_db, reload_canary, fake_docker):
+        """A single observation is collected but does NOT fire (ent#337).
+
+        Firing needs the dwell window; see the boundary suite in
+        `tests/unit/test_ent337_r01_zombie_dwell.py`.
+        """
         _add_agent(canary_db, "a1")
-        fake_docker.add_container("agent-a1", exec_output="3")
+        fake_docker.add_container("agent-a1", exec_output="811\n902\n1043\n")
         snap = reload_canary["canary"].collect_snapshot()
+        assert snap.zombie_counts == {"a1": 3}
+        assert snap.zombie_pids == {"a1": {811, 902, 1043}}
         from canary.invariants import r01_no_zombie_claude as r01
-        v = r01.check(snap)
-        assert len(v) == 1
-        assert v[0].invariant_id == "R-01"
-        assert v[0].severity == "critical"
-        assert v[0].observed_state["agent_name"] == "a1"
-        assert v[0].observed_state["zombie_count"] == 3
+        assert r01.check(snap) == []
+
+    def test_unparseable_ps_output_is_unavailable_not_green(
+        self, canary_db, reload_canary, fake_docker
+    ):
+        """A diagnostic on stdout must not read as 'no zombies'.
+
+        `ps` absent on a minimal image would otherwise report a silent
+        false-green on the one invariant that watches the process table.
+        """
+        _add_agent(canary_db, "a1")
+        fake_docker.add_container("agent-a1", exec_output="sh: ps: not found")
+        snap = reload_canary["canary"].collect_snapshot()
+        assert "a1" not in snap.zombie_counts
+        assert any("docker.exec[a1]" in s for s in snap.sources_unavailable)
 
     def test_per_container_exec_failure_does_not_kill_cycle(
         self, canary_db, reload_canary, fake_docker
     ):
         _add_agent(canary_db, "ok")
         _add_agent(canary_db, "broken")
-        fake_docker.add_container("agent-ok", exec_output="0")
+        fake_docker.add_container("agent-ok", exec_output="")
         fake_docker.add_container("agent-broken", exec_raises=RuntimeError("boom"))
         snap = reload_canary["canary"].collect_snapshot()
         # The healthy container is still measured; the broken one is in
