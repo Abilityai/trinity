@@ -101,7 +101,10 @@ class CanaryAlerts:
         "E-01": (
             "An execution stayed `running` past `execution_timeout_seconds + 300s` "
             "buffer. Cleanup watchdog should have fired — inspect "
-            "`cleanup_service` logs and the agent container for a wedged Claude."
+            "`cleanup_service` logs and the agent container for a wedged Claude. "
+            "A firing row is always NULL-lease (#1990 excludes #1081 pull-claimed "
+            "rows, which the lease-reaper owns), so this is `cleanup_service`'s "
+            "territory — not the reaper's."
         ),
         "E-02": (
             "An execution went terminal then non-terminal. Look for retry "

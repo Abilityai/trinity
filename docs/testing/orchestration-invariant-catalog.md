@@ -71,11 +71,26 @@ State machine: `queued → running → {success, failed, cancelled}`. See `src/b
 
 **E-01** Terminal-state closure *(Tier B ≤ timeout + 5 min, 🔴)*
 Every execution reaches a terminal state within its timeout + slot buffer.
-Signal: `status='running' AND started_at < now() - (timeout_seconds + 300s)` → must be 0.
+Signal: `status='running' AND lease_expires_at IS NULL AND started_at < now() - (timeout_seconds + 300s)` → must be 0.
+⚠️ **`lease_expires_at IS NULL` is load-bearing (#1990).** A #1081 pull-CLAIMED row is `running` but owned
+**exclusively** by the lease-reaper, which re-queues or poison-parks it at `MAX_REDELIVERY` — so its age is not
+evidence of a stuck execution. The windows are in fact identical (`claim_next_queued` stamps the lease at
+`started_at + timeout + SLOT_TTL_BUFFER`), so without the clause E-01 fired at the *instant* the reaper became
+eligible to act, with zero head-room, on every re-delivery — a **critical** stream indistinguishable from the
+real lights-out condition during the #1766 soak. Mirrors S-01, E-05 (#1982), and the six `lease_expires_at IS
+NULL` sweep exclusions in `db/schedules/` — including `mark_stale_executions_failed`, the sweep whose failure
+E-01 exists to detect. NULL-lease (push) rows are unaffected.
 
 **E-02** No phantom reversal *(Tier A, 🔴)* — the #378/#403 invariant.
 Once an execution is in a terminal state, its `status` is immutable for the rest of its life.
 Signal: audit-log every status transition; any `{success|failed|cancelled} → *` after that = violation.
+🚫 **No lease exclusion here — deliberately (#1990).** E-02 is the fourth reader of the running-row set and the
+only one that keeps seeing leased rows: a terminal→non-terminal reversal is corruption regardless of who owns
+the row, the reaper cannot produce one (`requeue_expired_lease` / `park_expired_lease` both CAS on
+`status='running'` with a past lease, so a terminal row is unreachable to them), and re-delivery *preserves*
+the `execution_id` (#1084/#525 are execution_id-scoped). Pull is **more** exposed to this bug class than push —
+a late worker result races a reaper pass for the same row — so copying #1990's exclusion here "for consistency"
+would blind E-02 on exactly the path #1081 adds.
 
 **E-03** Completed rows are fully populated *(Tier A, 🟡)* — ✅ **SHIPPED Phase 4, #1077** (registry id `E-03`).
 `status IN (success, failed, cancelled)` ⇒ `completed_at IS NOT NULL AND duration_ms IS NOT NULL`.

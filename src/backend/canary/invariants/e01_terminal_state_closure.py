@@ -37,6 +37,53 @@ Tier B, severity critical. A stuck-forever execution that the watchdog
 missed is a direct user-visible failure (the schedule never reports,
 the slot is never released, the agent is one parallel task lighter
 forever).
+
+## Pull-claimed rows are excluded (#1990)
+
+A `#1081` Phase 3 pull-CLAIMED row (`lease_expires_at IS NOT NULL`) is
+`status='running'` but is owned **exclusively by the lease-reaper**, which
+re-queues it (`redelivery_count` ++, `started_at` reset) or poison-parks it
+terminal at `MAX_REDELIVERY`. Its age is therefore not evidence of the
+stuck-execution class E-01 detects: the deadline that governs a leased row is
+its *lease*, not this window, and a different component owns the recovery.
+
+The overlap is not merely awkward, it is exact and total. `claim_next_queued`
+stamps `lease_expires_at = started_at + (execution_timeout_seconds +
+SLOT_TTL_BUFFER)` (`services/pull_coordination_service.py`) — the **same**
+threshold this check builds. So `age > threshold` becomes true at the precise
+instant the lease expires, which is the instant the reaper's recovery window
+*opens*. The 300s buffer above exists so E-01 fires only *after* the owning
+component has had its window to act; against a leased row that head-room is
+zero, and E-01 would page **critical** for the whole gap between lease expiry
+and the reaper's next sweep — on every re-delivery, per execution, while the
+machinery works exactly as designed.
+
+The db layer already encodes this ownership split, including on the very sweep
+whose failure E-01 exists to detect: `mark_stale_executions_failed` carries
+`lease_expires_at IS NULL`, as do `get_running_executions`,
+`get_running_executions_with_agent_info`, `fail_stale_slot_execution` and
+`mark_no_session_executions_failed` (the six sweep exclusions recorded in
+`docs/testing/PULL_MIGRATION_TESTING.md` §Appendix). The canary was the layer
+that had not caught up. Mirrors S-01's exclusion and E-05's (#1982).
+
+The exclusion is keyed on the lease, **not** a blanket silencing: a NULL-lease
+(push) row of identical age still fires, unchanged. Closes T3.7 in
+`docs/testing/PULL_MIGRATION_TESTING.md` §3.
+
+### Scope: E-02 was assessed and deliberately does NOT get this exclusion
+
+E-01, E-05, S-01 and E-02 are the four invariants that read
+`running_exec_ids`; the first three now exclude leased rows and E-02 must not.
+E-02 asks a different question — "was this id terminal in a previous cycle and
+is it non-terminal now?" — and the answer does not depend on who owns the row.
+The reaper cannot produce that transition (`requeue_expired_lease` /
+`park_expired_lease` both CAS on `status='running'` with a past lease, so a
+terminal row is unreachable to them), and re-delivery *preserves* the
+`execution_id` by construction (#1084/#525 are execution_id-scoped), so a
+terminal id reappearing as running/queued is exactly the corruption E-02
+exists to catch. Pull is more exposed to it than push, not less — a late
+worker result and a reaper pass race for the same row — so excluding leased
+rows there would blind E-02 precisely on the path #1081 introduces.
 """
 
 from datetime import datetime
@@ -75,6 +122,16 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
         threshold = agent.execution_timeout_seconds + SLOT_TTL_BUFFER_SECONDS
 
         for eid in sorted(agent.running_exec_ids):
+            # #1990: exclude pull-CLAIMED rows (mirrors S-01 and E-05, and the
+            # `lease_expires_at IS NULL` clause `mark_stale_executions_failed`
+            # — the sweep whose failure this invariant detects — already
+            # carries). A leased row is owned EXCLUSIVELY by the lease-reaper,
+            # and its lease is stamped at `started_at + execution_timeout +
+            # SLOT_TTL_BUFFER`: the identical window, so this check would fire
+            # at the exact instant the reaper first becomes eligible to act,
+            # with zero head-room, on every re-delivery. See module docstring.
+            if agent.running_lease_expires_at.get(eid) is not None:
+                continue
             started_at = agent.running_started_at.get(eid)
             if not started_at:
                 # No start timestamp — cannot age the row. Skip; either the

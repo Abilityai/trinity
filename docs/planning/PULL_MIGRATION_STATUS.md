@@ -70,8 +70,13 @@ needed for the local pilot.
    `get_all_states` / `get_slot_state`): read-only physical-occupancy term (`active = zcard + leased`) merged
    into the capacity **meter** for pilot agents. **SHADOW only** — admission stays on the ZSET
    (`acquire`/`acquire_slot`/`release` and `slot_service.py` untouched). Physical **admission** is Phase 5.
-8. **Canary S-01 lease-exclusion**: leased rows excluded from the slot–row bijection (additive
-   `snapshot.running_lease_expires_at`) so a pilot does not false-fire `in_sql_only`.
+8. **Canary lease-exclusions** (all read the additive `snapshot.running_lease_expires_at`): **S-01** excludes
+   leased rows from the slot–row bijection so a pilot does not false-fire `in_sql_only`; **E-05** (#1982)
+   because a claimed row is `running` with a NULL `claude_session_id` by design; **E-01** (#1990) because a
+   claimed row's deadline is its lease — stamped at exactly `timeout + SLOT_TTL_BUFFER`, so E-01 fired
+   **critical** the instant the reaper became eligible to act. **E-02 is the deliberate exception** — it reads
+   the same running set and must keep seeing leased rows: a terminal→non-terminal reversal is corruption
+   regardless of ownership, and pull (late worker result vs reaper pass) is the more exposed path.
 
 ## 4. Load-bearing invariants — DO NOT break
 
