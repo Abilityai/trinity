@@ -46,13 +46,16 @@ Renamed from `Templates.vue` via a **pure `git mv` commit** followed by a conten
 
 | Element | Purpose |
 |---------|---------|
-| h1 "Library" + subtitle | "Installable assets for your fleet — agent templates and skills" |
-| Header jump anchors | `#agent-templates` · `#skills` |
+| h1 "Library" + subtitle | "Installable assets for your fleet — agent templates, systems, and skills" (ent#126 added the third kind) |
+| Header jump anchors | `#agent-templates` · `#systems` (creator+ only) · `#skills` |
 | `<section id="agent-templates">` | The whole former Templates page content (heading "Agent Templates"; inner Starter/GitHub/Custom headings demoted h2→h3) |
+| `<section id="systems">` | `<SystemInstallPanel />` — install a multi-agent system from a manifest (ent#126). Placed **between** templates and skills: it and Agent Templates both *install agents*, while Skills configures agents that already exist. **Role-gated** (`hasMinRole('creator')`, mirroring `POST /api/systems/deploy`) and hidden outright below that role — with its jump anchor gated alongside, so the nav never points at an unrendered section |
 | `<section id="skills">` | `<LibrarySkillsSection />` |
 | `CreateAgentModal` | Opened by "Use Template" / "Create Blank Agent" with `initial-template`; `onAgentCreated` navigates to `/agents/{name}` |
 
-**Per-section failure isolation** is a page invariant: the templates fetch and the skills fetches are independent — each section owns its own loading/error/empty states, so a failure in one never blanks the other.
+**Per-section failure isolation** is a page invariant: the templates fetch, the systems catalog fetch and the skills fetches are independent — each section owns its own loading/error/empty states, so a failure in one never blanks the others.
+
+**Tabs were considered and rejected** (ent#263), and ent#126 conforms rather than reopening it: these are disjoint section shapes that stack, and a tab strip would hide two-thirds of the page behind a click on a surface whose whole job is browsing what is installable. A new asset kind is a new `<section>` + one jump anchor.
 
 **Agent Templates section** (unchanged behavior from the Templates page): single `GET /api/templates` fetch (now via the shared `api` client — Invariant #7; previously raw axios with a hand-built auth header), split client-side into Starter (`source === 'local' || !source`) and GitHub (`source === 'github'`) grids, plus the Custom/Blank Agent card and a "No templates configured" empty state. The backend already excludes hidden fixtures (#1513). `CreateAgentModal.vue`'s single `/api/templates` call was migrated to the shared client in the same change, so no half-migrated consumer of the endpoint remains.
 

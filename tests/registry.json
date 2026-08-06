@@ -1577,6 +1577,18 @@
       "description": "Per-source skills-library root (ent#332): catalog.yaml skills_root: declaration -> evidence-gated skills/ probe -> .claude/skills/ fallback, resolved per SkillSourceClone; packaging rewrites tar arcnames to the canonical agent-side .claude/skills/ destination at filter_skill_archive so manifests, prune confinement and the ent#236 removal machinery stay destination-canonical with zero migration. Covers: resolution order + zero-config back-compat; dual-layout (evidence under BOTH roots, no catalog) keeps .claude/skills/ and flags layout_conflict instead of silently flipping which executable content ent#236 auto-injects; segment-wise skills_root validation ('.', './skills', 'skills//x' all rejected -- a whole-string charset regex admits each and breaks archive-prefix math into per-skill empty-package failures); every bad catalog shape (unparseable, alias-bearing HardenedYamlError, non-mapping, unknown schema_version, oversized, symlinked) falls back to probe and never raises through list_skills; symlinked probe/declared roots fall to the next tier rather than blanking the source, and an escaping final tier empty/None-propagates without a TypeError; tree-SHA version parity across layouts (repo restructure with unchanged content keeps versions stable -- no spurious fleet re-inject); arcname rewrite identity for legacy layout, destination-canonical executable_paths, fail-visible layout-mismatch, unsafe source_root ValueError; cross-layout prune continuity; _legacy_fallback SKILL.md lookup with rewritten members; end-to-end mixed-layout merge through the real service with per-source skills_root in library status."
     },
     {
+      "file": "unit/test_1898_sys_modules_isolation.py",
+      "feature": "#1898",
+      "added": "2026-08-05",
+      "categories": [
+        "backend",
+        "unit",
+        "test-isolation",
+        "reliability"
+      ],
+      "description": "test_ent183_skill_packages wrote fake modules straight into sys.modules at IMPORT time and left them there. That is collection-time code and pytest imports every test module before running a single test, so every file collected afterwards resolved services.settings_service (plus database, services.agent_client, utils.url_validation) to a four-function fake, captured names from it at module scope, and kept those bindings for the session. Its own autouse sys.modules-restore fixture could not help: the damage is a BINDING in another module's namespace, which restoring the module table does not reach. Two symptom shapes, both looking like unrelated bugs - ImportError 'cannot import name X from services.settings_service (unknown location)' at collection (#1855), and silent wrong behaviour when the stub happens to define the name (7 failures in test_1081_physical_meter). Fixed by installing the stubs inside a mock.patch.dict context scoped to the single import that needs them, so nothing survives the with-block while the imported module keeps its stub bindings. Guards the mechanism statically (no module-scope sys.modules assignment - the AST walk deliberately allows assignments inside a with, since banning all of them would ban the fix; and the stubs must sit in a patch.dict) and the outcome behaviourally (a subprocess runs the cheapest known victim after the offender in one process). A first version of the fix also evicted cached services.skill* modules to force a fresh import; that broke 10 sibling tests by producing a second module object, and was reverted - caught by comparing the same selection with and without the change (435 passed without, 10 failed with)."
+    },
+    {
       "file": "unit/test_ent334_status_url_disclosure.py",
       "feature": "trinity-enterprise#334",
       "added": "2026-08-06",

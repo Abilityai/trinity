@@ -42,6 +42,7 @@ from services.skill_source_clone import (
     QUARANTINE_SUFFIX,
     SOURCE_ID_RE,
     SkillSourceClone,
+    redact,
 )
 from urllib.parse import urlparse, urlunparse
 
@@ -113,9 +114,21 @@ _SYNC_LOCK_TTL_SECONDS = 300
 
 
 def _scrub_pat(text: str) -> str:
-    """Replace credentials in any `https://<creds>@host` URL. Never raises."""
+    """Replace credentials in any `https://<creds>@host` URL. Never raises.
+
+    Delegates to `skill_source_clone.redact` (ent#347). These were two separate
+    hand-written patterns that had drifted apart and were each wrong in a
+    different way — the one duplication that matters, since the value it guards
+    lands in DURABLE admin-rendered state (`skills_library_last_error`) and in
+    an HTTP `detail`. One pattern, one place; see `_CREDENTIAL_URL_RE`.
+
+    The try/except stays: this wrapper's own contract is "never raises", and it
+    is called on a `str(e)` from an arbitrary exception whose `__str__` can
+    itself blow up. `redact` is total for `str`/`None`, so this is belt to its
+    suspenders rather than a live branch.
+    """
     try:
-        return re.sub(r"https://[^@\s]+@", "https://***@", text)
+        return redact(text)
     except Exception:  # noqa: BLE001
         return ""
 

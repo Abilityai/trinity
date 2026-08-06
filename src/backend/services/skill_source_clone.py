@@ -122,9 +122,44 @@ def validate_declared_root(value: Any) -> Optional[str]:
     return root
 
 
+# ent#347: THE credential pattern for free-text (git stderr / exception) scrubs.
+# One definition on purpose — the bug this fixes was two scrubbers carrying two
+# hand-written patterns that had drifted apart and were each wrong differently.
+#
+# `[^\s/?#]+` is greedy and cannot cross a path separator, a query/fragment
+# delimiter, or whitespace, which is what makes it correct on all four shapes:
+#
+#   * `https://PAT@LEGACY@github.com/o/r` — `_authenticated_url` splices the
+#     platform PAT in FRONT of userinfo the stored URL already carried, so a
+#     double-`@` authority is the normal shape here, not a curiosity. The class
+#     spans `PAT@LEGACY@github.com`, then backtracks to the LAST `@` before the
+#     path, so the whole credential run is replaced. The previous `[^@...]+`
+#     classes stopped dead at the FIRST `@` and left the second token verbatim.
+#   * `https://github.com/o/r?ref=a@b` — the class stops at `/`, so no `@`
+#     follows and the URL is untouched. An `@` in a path or query is not a
+#     credential.
+#   * `https://github.com?x=a@b` — stops at `?` for the same reason. This is why
+#     `?#` are excluded on top of `/`: neither is legal unencoded in userinfo
+#     (RFC 3986), so excluding them can only ever prevent a false positive.
+#   * a plain URL followed later in the same stderr by a credentialed one —
+#     `\s` in the class stops the match at the first whitespace/newline, so the
+#     two cannot be bridged. `redact`'s old `[^@]+` could cross `/` AND newlines
+#     and would swallow everything between them, mangling the message while
+#     hiding the token by accident.
+#
+# This is text-oriented by necessity: git stderr carries several URLs plus
+# prose, so the single-URL parser in `utils/url_validation.py` cannot drop in.
+# It must nonetheless AGREE with that parser on where the authority ends.
+_CREDENTIAL_URL_RE = re.compile(r"https://[^\s/?#]+@")
+
+
 def redact(text: str) -> str:
-    """Strip any embedded PAT from git output before it is logged or returned."""
-    return re.sub(r"https://[^@]+@", "https://***@", text or "")
+    """Strip any embedded PAT from git output before it is logged or returned.
+
+    Handles the double-`@` shape `_authenticated_url` produces (ent#347); see
+    `_CREDENTIAL_URL_RE`. Never raises.
+    """
+    return _CREDENTIAL_URL_RE.sub("https://***@", text or "")
 
 
 def canonical_remote(url: str) -> str:
