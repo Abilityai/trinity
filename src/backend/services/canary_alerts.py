@@ -68,6 +68,7 @@ class CanaryAlerts:
         "B-01": "Queue accessor drift",
         "B-02": "Stalled backlog drain",
         "R-01": "Zombie Claude process",
+        "H-01": "Canary is blind (collector sees no fleet)",
     }
 
     # One-line runbook hint per invariant. Kept short on purpose —
@@ -174,6 +175,17 @@ class CanaryAlerts:
             "a single stuck zombie from an accumulating leak. Restart the "
             "affected agent to clear; check agent-server's subprocess wait() "
             "path for the unreaped child."
+        ),
+        "H-01": (
+            "The harness itself cannot see the fleet, so EVERY other green this "
+            "cycle is meaningless — triage this before any other canary result. "
+            "Check `DATABASE_URL` and that the backend points at the live "
+            "database (#1540 class); `roster_read_failed` means the read raised, "
+            "`roster_empty_contradicted` means it returned zero while DOCKER "
+            "still saw running agent containers, `roster_empty_unverifiable` "
+            "means the independent sources were unreachable, never read, or "
+            "only Redis had anything to say (a slot key alone cannot tell a "
+            "blind collector from an L-03 leak)."
         ),
     }
 
@@ -624,6 +636,45 @@ class CanaryAlerts:
                 lines.append(f"  • _… +{len(violations) - 5} more_")
             return "\n".join(lines) if lines else None
 
+        if invariant_id == "H-01":
+            # H-01 is fleet-wide: at most one violation, no `agent_name`. The
+            # forensic block carries the two things triage needs and the
+            # summary line cannot hold — WHICH corroborating source still
+            # answered (a roster read failing while docker is also down is a
+            # host problem, not a collector bug), and the evidence sample that
+            # makes "the fleet is provably alive" checkable rather than
+            # asserted. Already capped at 10 by the check.
+            obs = violations[0].observed_state or {}
+
+            def _source(state) -> str:
+                # Tri-state, NOT a boolean (#1813). `None` means the collector
+                # never ran — `collect_snapshot` returns early on a roster-read
+                # failure, so on that arm Redis genuinely was not consulted.
+                # Rendering that as "unavailable" would blame a healthy Redis;
+                # rendering it as "up" (what a two-state ternary did) told the
+                # reader everything else was fine on the one alarm whose job is
+                # to say the opposite.
+                if state is None:
+                    return "not read"
+                return "up" if state else "unavailable"
+
+            lines: List[str] = [
+                f"*Reason:* `{_mrkdwn_safe(obs.get('reason'))}` "
+                f"({_mrkdwn_safe(obs.get('confirmation'), fallback='unconfirmed')})",
+                f"*Blind since:* {_mrkdwn_safe(obs.get('blind_since'), fallback='this cycle')}",
+                f"*Sources:* docker={_source(obs.get('docker_available'))} · "
+                f"redis={_source(obs.get('redis_available'))}",
+                f"*Roster vs evidence:* {_mrkdwn_safe(obs.get('known_agent_count'))} "
+                f"vs {_mrkdwn_safe(obs.get('evidence_agent_count'))} agent(s)",
+            ]
+            sample = obs.get("evidence_sample") or []
+            if sample:
+                lines.append(
+                    "*Agents seen by independent sources:* "
+                    f"`{', '.join(_mrkdwn_safe(a) for a in sample)}`"
+                )
+            return "\n".join(lines)
+
         # Fallback is deliberately STATE-FREE — an un-rendered invariant emits
         # no forensic block at all rather than a generic dump. Never replace
         # this with something that iterates `observed_state`: E-04 and G-04
@@ -828,6 +879,24 @@ class CanaryAlerts:
                 f"{len(violations)} queued row(s) matched a credential pattern "
                 f"({', '.join(patterns)[:80]}) across {len(agents)} agent(s): "
                 f"{', '.join(agents)[:160]}."
+            )
+        if invariant_id == "H-01":
+            # H-01 is fleet-wide, so it emits at most one violation and carries
+            # no `agent_name` — the generic "fired N violation(s)" line would be
+            # useless for the one alarm whose entire job is to be legible.
+            obs = violations[0].observed_state or {}
+            # `_mrkdwn_safe`, not `.get(k, default)`: the latter does not fire
+            # on a key present with value None (#1880). It tests `is None`, so
+            # `known_agent_count=0` still renders "0" — which is the whole
+            # point of this alert, not a value to swallow as "?".
+            return (
+                f"Canary cannot see the fleet "
+                f"({_mrkdwn_safe(obs.get('reason'), fallback='unknown')}): "
+                f"roster reported {_mrkdwn_safe(obs.get('known_agent_count'))} agents "
+                f"while independent sources saw "
+                f"{_mrkdwn_safe(obs.get('evidence_agent_count'))}. "
+                f"Blind since {_mrkdwn_safe(obs.get('blind_since'), fallback='this cycle')}. "
+                "Every other green this cycle is unreliable."
             )
         # Fallback is deliberately COUNT-ONLY and state-free — same contract as
         # `_render_forensic`'s terminal `return None`. Never widen it to render

@@ -86,9 +86,13 @@ the same reason.
 The clock is read from `snapshot.snapshot_time`, never `time.time()`. That is
 what makes the boundary testable with a fixed instant rather than a margin
 (learnings 2026-08-03 / #1909: a test that builds a boundary fixture from its
-own clock races the implementation's clock). It also biases the effective dwell
-slightly LONG — `snapshot_time` is stamped at the start of collection while the
-docker exec runs at the end — which is the safe direction.
+own clock races the implementation's clock). The two instants are now adjacent:
+since #1813 the Docker collector runs FIRST in `collect_snapshot`, immediately
+after `snapshot_time` is stamped, so the effective dwell is the nominal one.
+(It previously ran last, biasing the dwell slightly LONG — the safe direction —
+so nothing depended on the gap; do not reintroduce a dependency on it. The
+ordering is owned by H-01, which needs Docker evidence on the arm where the
+roster read early-returns.)
 
 ## Marker state
 

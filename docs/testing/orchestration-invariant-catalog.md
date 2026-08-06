@@ -367,6 +367,59 @@ Running cleanup twice back-to-back produces an empty second report. Failure here
 
 ---
 
+## 15. Harness health (self-check)
+
+Every invariant above answers *"is the system broken?"*. This family answers
+*"is the harness blind?"* — and carries its own `H-` prefix so a detector outage
+is never triaged as a platform defect. An `H-` violation invalidates every other
+green in the same cycle.
+
+**H-01** Collector not blind *(Tier A, 🔴 critical / 🟡 major)* — ✅ **SHIPPED Phase 5, #1813** (registry id `H-01`; follow-up to #1540).
+The SQL roster read (`_collect_known_agents`) must not return zero rows — or raise — while an **independent,
+non-SQL** source proves the fleet is alive. #1540 repointed the collectors at the configured engine but left the
+failure *shape* intact: a collector reading an empty or unreachable source returns zero rows, and zero rows is
+indistinguishable from a genuinely clean fleet, so both produce a green cycle. Signal: `known_agents == ∅`
+(or a `sqlite.agent_ownership` entry in `sources_unavailable`) **AND** `docker_agent_names ∪ orphan_redis_slots`
+non-empty.
+- **Evidence must not be circular.** Docker container presence (from the container LIST, before any `exec_run` —
+  `zombie_counts` is keyed by exec success and silently thins on a degraded container) and Redis slot keys.
+  Docker is collected **before** the roster read, so it is available even on the arm where the roster read raises
+  and `collect_snapshot` returns early.
+- **Redis is corroborating only, and that is enforced in the severity ladder, not just in prose.** Slot keys exist
+  solely while an execution holds a slot, so an idle fleet has none — and `orphan_redis_slots` is by definition
+  keys whose agent is ABSENT from `agent_ownership`, i.e. the leaked-slot state L-03 reports. Docker evidence is
+  required for `critical`; Redis-only evidence reports `roster_empty_unverifiable` (major), so a correct roster
+  plus one leaked slot key cannot page critical claiming the harness is blind.
+- **Source availability is tri-state**, not boolean: ran-and-fine / ran-and-failed / **never ran**. A skipped
+  collector writes nothing to `sources_unavailable`, which is byte-identical to success — so `Snapshot.collectors_ran`
+  carries the third state and H-01 renders it as `not read`. Without it the `roster_read_failed` arm reported
+  `docker=up · redis=up` on a cycle where neither source had been consulted.
+- **Confirmation on elapsed wall-clock** (`CONFIRMATION_MIN_SECONDS`, marker `canary:h01:suspect_since`, following
+  E-02's cross-cycle-state precedent) so the last-agent delete race — DB row deleted, container still tearing
+  down — cannot false-fire. Deliberately NOT "a second cycle": prod runs `--workers 2` and `canary_service` holds
+  no leader lease, so the two loops share the marker and worker B would confirm worker A's sighting seconds later,
+  collapsing the gate to nothing. Costs at most one extra cycle to alarm; irrelevant for a config regression that
+  persists until a human fixes it. The gate applies to **every** firing arm, `roster_read_failed` included — that
+  arm has no delete race to ride out, but a raised roster read is very often a momentary DB blip (connection
+  reset, PG restart, pool exhaustion), and paging critical on one of those is how a safety net gets muted.
+  The marker carries a **24h TTL, refreshed on every suspicious cycle**: `_clear_marker` is best-effort and a
+  `run-cycle` filtered to other `invariant_ids` never reaches it, so without an expiry an orphaned marker stays
+  armed forever and the next genuine episode confirms on its first cycle. Refreshing makes it an idle timeout
+  rather than an absolute lifetime, so a long episode cannot silently re-arm and re-alert.
+- **Fail-loud:** an unreadable marker fires *unconfirmed* rather than skipping, and an unavailable evidence source
+  fires `roster_empty_unverifiable` (major) rather than staying quiet — a dead smoke detector should chirp.
+  A whole-database outage reaches the check too: `_run_cycle_inner`'s pre-cycle latest-violation read is fail-open
+  (it used to raise before `collect_snapshot` ran, so H-01 never executed on the most total blindness there is),
+  with transition detection falling back to `canary:last_cycle_red` so a persistent outage still chirps once.
+- **Scope:** the roster read ONLY. On a live-but-quiet fleet `terminal_rows`, `enabled_schedules`, `orphan_refs`
+  and `terminal_exec_statuses` are all legitimately empty, so a general "any SQL collector reads zero" rule would
+  false-alarm on every idle install.
+- **Residual:** an entirely stopped fleet has no containers and no slots, so no evidence is available and H-01 can
+  only reach `roster_empty_unverifiable`. Partial blindness (roster returns 1 of 20) is out of scope — a count
+  comparison would false-fire on legitimate create/stop races between the two reads.
+
+---
+
 ## Design notes
 
 - **Every Tier-A invariant is a single SQL/Redis query** — make the canary compute it continuously. Tier-B invariants run every SLA window.

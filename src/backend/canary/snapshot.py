@@ -332,6 +332,22 @@ class Snapshot:
     # a load-bearing `observed_state` key read by the Slack renderers
     # (`canary_alerts._render_message` / `_render_forensic`).
     zombie_counts: Dict[str, int] = field(default_factory=dict)
+    # H-01 input (#1813): agent names Docker reports as RUNNING agent
+    # containers. Deliberately NOT derived from `zombie_counts` above, which is
+    # keyed by `exec_run` SUCCESS — a container that exists but cannot be
+    # exec'd (busy, restarting, degraded shell) drops out of that map into
+    # `sources_unavailable`, so it is a liveness signal, not a presence one.
+    # H-01 needs *presence*, taken from the container list itself before any
+    # exec, because it is the independent (non-SQL) proof that the fleet is
+    # non-empty when the SQL roster read comes back empty.
+    #
+    # Blind spot, documented rather than papered over: Docker is filtered to
+    # `status=running`, so a fleet whose agents are all STOPPED is invisible
+    # here — and stopped agents hold no Redis slots either. A blind SQL tier
+    # plus an entirely stopped fleet therefore has no available evidence and
+    # H-01 reports `roster_empty_unverifiable` at most, never a confirmed
+    # contradiction.
+    docker_agent_names: Set[str] = field(default_factory=set)
     # R-01 input (ent#337): per-agent container `State.StartedAt`. A PID is only
     # an identity within ONE PID namespace, so a container that restarts outside
     # the backend (`docker restart`, a restart policy after an OOM/crash) hands
@@ -363,6 +379,26 @@ class Snapshot:
     terminal_rows: List[Dict[str, Any]] = field(default_factory=list)
     # Diagnostics — empty on a clean cycle.
     sources_unavailable: List[str] = field(default_factory=list)
+    # H-01 input (#1813): which collectors actually EXECUTED this cycle.
+    # `sources_unavailable` distinguishes "ran and failed" from "ran and was
+    # fine"; it cannot distinguish either from "never ran", because a collector
+    # that was skipped records nothing at all. That third state is real —
+    # `collect_snapshot` returns early on a roster-read failure, so every
+    # collector below that point is skipped — and conflating it with success
+    # made H-01's most severe alarm report `docker=up · redis=up` on a cycle
+    # where neither source had been consulted. Use `collector_ran()` rather
+    # than inferring availability from `sources_unavailable` alone.
+    collectors_ran: Set[str] = field(default_factory=set)
+
+    def collector_ran(self, name: str) -> bool:
+        return name in self.collectors_ran
+
+
+# Collector names recorded in `Snapshot.collectors_ran`. These deliberately
+# match the `sources_unavailable` label prefixes so a consumer can pair
+# "did it run?" with "did it fail?" using one string.
+COLLECTOR_DOCKER = "docker"
+COLLECTOR_REDIS = "redis"
 
 
 # ---------------------------------------------------------------------------
@@ -553,9 +589,28 @@ def _collect_zombie_counts() -> Dict[str, Any]:
     in `container.attrs` before we ask. Deliberately NOT `attrs["Created"]` —
     a restart does not create a new container, so `Created` never moves.
 
-    Returns a dict with four keys:
+    ## Why the container NAMES come back too (#1813)
+
+    `counts`/`pids` are keyed by `exec_run` SUCCESS, so a container that exists
+    but cannot be exec'd (busy, restarting, degraded shell) drops out of them
+    into `sources_unavailable`. That makes them a LIVENESS signal. H-01 needs a
+    PRESENCE signal — the independent, non-SQL proof that the fleet is non-empty
+    when the SQL roster read comes back empty — so `names` is recorded from the
+    container list itself, before any exec is attempted, and must never be
+    conflated with `counts`.
+
+    Blind spot, documented rather than papered over: the list is filtered to
+    `status=running`, so a fleet whose agents are all STOPPED is invisible here
+    (and stopped agents hold no Redis slots either). A blind SQL tier plus an
+    entirely stopped fleet therefore has no available evidence, and H-01 reports
+    `roster_empty_unverifiable` at most, never a confirmed contradiction.
+
+    Returns a dict with five keys:
       "pids":        {agent_name: set[int]}  zombie claude PIDs per container.
       "counts":      {agent_name: int}       len(pids), for the render surfaces.
+      "names":       {agent_name, ...}       every running agent container Docker
+                                             listed, BEFORE any exec (#1813) —
+                                             H-01's presence signal.
       "started_at":  {agent_name: str}       container `State.StartedAt`, the
                                              PID-namespace generation marker
                                              R-01 invalidates its dwell on.
@@ -572,6 +627,7 @@ def _collect_zombie_counts() -> Dict[str, Any]:
     out: Dict[str, Any] = {
         "pids": {},
         "counts": {},
+        "names": set(),
         "started_at": {},
         "unavailable": [],
     }
@@ -604,6 +660,9 @@ def _collect_zombie_counts() -> Dict[str, Any]:
         # correctly per docker_service.list_all_agents_fast). Strip the
         # historical `agent-` prefix to align with agent_ownership.agent_name.
         agent_name = container.name.removeprefix("agent-")
+        # Record presence FIRST: H-01's evidence must not depend on the exec
+        # below succeeding (#1813).
+        out["names"].add(agent_name)
         # Read BEFORE the exec and outside its try: the PID-namespace
         # generation is a property of the container, not of the exec, and it
         # must still be recorded when a later per-container failure occurs.
@@ -1128,8 +1187,44 @@ def collect_snapshot() -> Snapshot:
     fail-open skips (a check would run against empty data and could false-fire).
     A future rename MUST update every consuming invariant's `startswith(...)` in
     the SAME PR. Guarded by the engine-down skip test in test_canary_invariants.
+
+    ⚠ Collector ORDER is load-bearing for H-01 (#1813). The roster read returns
+    early on failure, so anything below it is skipped on exactly the cycle where
+    the harness is most likely blind. Docker therefore runs FIRST (it has no
+    dependency on the roster), and every collector records itself in
+    `collectors_ran` so a consumer can tell "ran and was fine" from "never ran"
+    — `sources_unavailable` alone cannot, because a skipped collector writes
+    nothing. Adding a collector that H-01 treats as evidence means adding it
+    above the roster read, or accepting that it is unavailable on that arm.
     """
     snap = Snapshot(snapshot_time=utc_now_iso())
+
+    # Docker FIRST, before the roster read (#1813). It has no dependency on
+    # `agent_rows`, and the roster read below returns early on failure — the
+    # one path where H-01 most needs independent evidence is precisely the path
+    # that used to skip every collector that could supply it. Collected here,
+    # `docker_agent_names` is populated on the `roster_read_failed` arm too, so
+    # the alarm can say whether the fleet is actually alive instead of
+    # reporting an empty fleet and two sources it never consulted.
+    #
+    # (Redis cannot move with it: `_collect_redis_slot_state` takes
+    # `known_agents`. It stays below the roster read, and `collectors_ran`
+    # reports honestly that it did not run on that path.)
+    try:
+        z = _collect_zombie_counts()
+        snap.zombie_counts = z["counts"]
+        snap.zombie_pids = z.get("pids", {})
+        snap.zombie_container_started_at = z.get("started_at", {})
+        snap.docker_agent_names = z["names"]
+        snap.sources_unavailable.extend(z["unavailable"])
+    except Exception as exc:
+        logger.exception("canary snapshot: zombie collector raised")
+        snap.sources_unavailable.append(f"docker: {exc}")
+    finally:
+        # In `finally` on purpose: the collector RAN either way, and an
+        # unhandled raise is a failure to record, not a reason to claim it was
+        # never attempted.
+        snap.collectors_ran.add(COLLECTOR_DOCKER)
 
     # agent_ownership is the source of truth for "known agents" (engine seam).
     try:
@@ -1155,6 +1250,8 @@ def collect_snapshot() -> Snapshot:
     except Exception as exc:
         logger.exception("canary snapshot: redis read failed")
         snap.sources_unavailable.append(f"redis: {exc}")
+    finally:
+        snap.collectors_ran.add(COLLECTOR_REDIS)
 
     # SQLite: per-agent running/queued executions.
     for row in agent_rows:
@@ -1295,18 +1392,9 @@ def collect_snapshot() -> Snapshot:
         logger.exception("canary snapshot: drain-tick read failed")
         snap.sources_unavailable.append(f"redis.drain_tick: {exc}")
 
-    # Docker exec: per-agent zombie process count for R-01. New source
-    # type for the canary; treat individual container failures as
-    # per-agent skips (caller appends to sources_unavailable so the
-    # operator can see which agents got skipped this cycle).
-    try:
-        z = _collect_zombie_counts()
-        snap.zombie_counts = z["counts"]
-        snap.zombie_pids = z.get("pids", {})
-        snap.zombie_container_started_at = z.get("started_at", {})
-        snap.sources_unavailable.extend(z["unavailable"])
-    except Exception as exc:
-        logger.exception("canary snapshot: zombie collector raised")
-        snap.sources_unavailable.append(f"docker: {exc}")
+    # NOTE: the Docker collector (per-agent zombie counts for R-01, plus the
+    # container-name presence signal for H-01) runs at the TOP of this
+    # function, not here — see the comment there for why the order is
+    # load-bearing rather than incidental.
 
     return snap
