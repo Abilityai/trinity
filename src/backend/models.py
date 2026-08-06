@@ -3365,3 +3365,92 @@ class SkillSourceUpdate(BaseModel):
     ref_type: Optional[Literal["branch", "tag"]] = None
     enabled: Optional[bool] = None
     priority: Optional[int] = Field(None, ge=1, le=10000)
+
+
+class SkillsLibrarySourceStatus(BaseModel):
+    """One source's entry in the PUBLIC library-status projection (ent#334).
+
+    Every field the service emits per source EXCEPT `url`. Repo URLs are
+    admin-sensitive by ent#237's own classification — that is why
+    `GET /skills/sources` is `require_admin` + `reject_agent_principal` — but
+    `GET /skills/library/status` is open to any authenticated user (and to
+    agent-scoped keys, deliberately: the per-agent Skills tab and the MCP tool
+    both read it). Emitting the URL there handed the admin-gated value to
+    exactly the callers the gate excludes.
+    """
+    id: str
+    name: str
+    ref: Optional[str] = None
+    ref_type: Optional[str] = None
+    is_default: bool = False
+    enabled: bool = True
+    priority: Optional[int] = None
+    cloned: bool = False
+    # ent#332: resolved layout root; null until the source has been cloned.
+    skills_root: Optional[str] = None
+    layout_conflict: bool = False
+    last_sync: Optional[str] = None
+    last_sync_status: Optional[str] = None
+    commit_sha: Optional[str] = None
+    skill_count: int = 0
+    # `last_error` is deliberately NOT here (ent#334, found by /cso).
+    #
+    # It carries git's own failure text, which routinely echoes the remote
+    # URL — and the URL the clone path uses is `_authenticated_url`'s, with a
+    # PAT spliced in. `skill_source_clone.redact()` scrubs it on the way in,
+    # but that scrubber under-matches a double-`@` authority (ent#347), which
+    # is exactly the shape `_authenticated_url` produces when the stored URL
+    # ALREADY carries userinfo — and that combination reliably fails auth, so
+    # the failing branch is the guaranteed one.
+    #
+    # Dropping the field here costs nothing: its only consumer is
+    # `SkillSourcesPanel.vue`, which reads the admin-gated
+    # `GET /api/skills/sources` (raw dict, field intact). So the operator who
+    # needs the error still sees it, and a caller who should not see repo
+    # URLs cannot reach one through an error string. Do not add it back to
+    # this projection to "help" a non-admin surface debug a sync.
+
+
+class SkillsLibraryStatus(BaseModel):
+    """PUBLIC projection of `skill_service.get_library_status()` (ent#334).
+
+    **This model exists to be an allow-list, and that is the whole point** —
+    do not replace it with the raw dict, and do not add fields to it
+    reflexively. FastAPI serialises through an explicitly-constructed model, so
+    anything the service starts returning that is not named here is invisible
+    over REST until someone deliberately adds it. Fail-closed: the next
+    sensitive field the service grows leaks nothing by default. Same idiom, and
+    same reason, as `response_model=List[SkillInfo]` on `GET /skills/library`.
+
+    Omitted on purpose: the flat `url` and the per-source `url`. Those are the
+    admin-sensitive value — ent#237 classes source repo URLs that way, which is
+    why `GET /skills/sources` is `require_admin` + `reject_agent_principal` —
+    and this route is open to every authenticated caller including agent-scoped
+    keys.
+
+    `branch` and `commit_sha` are deliberately KEPT. They are a ref name and a
+    commit hash, not credentials and not a repo identity, and the Library
+    header renders both. Dropping them was considered and cut: it would have
+    been a second, unrelated behaviour change riding a security fix. If a
+    reason to drop them appears later it belongs in its own issue.
+
+    `configured` and `cloned` are load-bearing, not decoration: the frontend
+    stores derive their empty-state discriminator from them
+    (`stores/skillsLibrary.js` → `emptyReason === 'not_cloned'`,
+    `stores/skills.js` gates on `configured`). Dropping either turns a
+    configured-but-unsynced library into a wrong "no library" empty state.
+    """
+    configured: bool = False
+    cloned: bool = False
+    sources: List[SkillsLibrarySourceStatus] = Field(default_factory=list)
+    source_count: int = 0
+    enabled_source_count: int = 0
+    skill_count: int = 0
+    multi_file_count: int = 0
+    shadowed_count: int = 0
+    last_sync: Optional[str] = None
+    last_sync_status: Optional[str] = None
+    last_sync_error: Optional[str] = None
+    # Legacy flat fields (first source in resolution order). Not URLs.
+    branch: Optional[str] = None
+    commit_sha: Optional[str] = None

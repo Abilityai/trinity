@@ -45,8 +45,16 @@ interface SkillsLibraryStatus {
   last_sync: string | null;
   skill_count: number;
   // ent#237: multi-source. `sources` is the real shape now; the flat
-  // url/branch/commit_sha fields are retained by the backend for compatibility
-  // and reflect only the FIRST source in resolution order.
+  // url/branch/commit_sha fields reflected only the FIRST source in resolution
+  // order.
+  //
+  // ent#334: `url` is dropped here because the backend no longer sends it.
+  // `GET /api/skills/library/status` is reachable by agent-scoped keys, while
+  // repo URLs are admin-sensitive and served only by the admin-gated
+  // `GET /api/skills/sources`; the route's `response_model` is now an
+  // allow-list that omits the flat `url` and the per-source `url`. Only the
+  // URL — `branch` and `commit_sha` are still sent (a ref name and a commit
+  // hash are neither credentials nor a repo identity) and stay declared below.
   sources?: Array<{
     id: string;
     name: string;
@@ -60,7 +68,6 @@ interface SkillsLibraryStatus {
   source_count?: number;
   enabled_source_count?: number;
   shadowed_count?: number;
-  url: string | null;
   branch: string;
   commit_sha: string | null;
 }
