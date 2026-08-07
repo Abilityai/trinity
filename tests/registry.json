@@ -1660,6 +1660,18 @@
         "edge-cases"
       ],
       "description": "Two edge cases in ask_trinity (ent#328/#1981), found by /edge-cases. (1) truncate cut on UTF-16 CODE UNITS, so a boundary landing inside a surrogate pair left an unpaired surrogate - ill-formed Unicode that a strict UTF-8 encoder or JSON-RPC client replaces with U+FFFD or rejects; proven by construction (65,536-char answer with U+1F600 straddling the cut). Fixed by stepping back one unit off a high surrogate; only the final unit can be orphaned, so one check covers it. (2) The context-loss warning lived inside `if (responseSessionId)`, so a 200 that answered but OMITTED session_id produced no warning at all and the caller silently lost its conversation context - exactly what that warning exists to prevent; the 'different id returned' branch was covered and the neighbouring 'no id returned' one was not. The warning is now decided by the REQUEST's session, with distinct wording since 'a new session was started' is false when none came back. Both fixes are mirrored into src/helper-mcp/src/client.ts, which carries a byte-identical copy. Covers: the straddling cut, the limit still reported as the ORIGINAL max, a fully-fitting pair surviving, a BMP-only answer still cut at exactly max (the step-back must not misfire), a short answer untouched, the 200-char ERROR-path truncation (likelier to meet arbitrary bytes than the answer path), and all four session shapes. Two rows were also added to the existing PARITY_CASES table: mutating ONLY the helper copy previously changed nothing in the suite - the parity claim held just for the cases in its table - and both helper-only mutations now fail it."
+    },
+    {
+      "file": "unit/test_2006_deploy_residue.py",
+      "feature": "#2006",
+      "added": "2026-08-05",
+      "categories": [
+        "backend",
+        "unit",
+        "security",
+        "deploy"
+      ],
+      "description": "deploy-local validated an archive-supplied .mcp.json 32 lines AFTER shutil.copytree(extract_root, dest_path), and the finally block removed only temp_dir - so a config the ent#213 validator refused stayed on disk under /data/deployed-templates/<version_name>/, a live member of crud._LOCAL_TEMPLATE_ROOTS, addressable by the same caller via POST /api/agents {template: local:<version_name>}. A guard that runs after the persist is not a gate. Fix: the guard moved to step 6a, running on extract_root before the copy AND before the quota check and the stop-previous-version step (a doomed deploy no longer stops a running agent on its way to a 400), plus _remove_partial_deploy as a second layer for failures between copytree and create_agent_fn (_prepopulate_workspace_from_template's 500) - deliberately handed over before creation starts, since a directory a container may already reference must not be removed on a late failure. ent#213's suite tests _validate_archive_mcp_config in isolation ('the full deploy flow needs Docker'), which is exactly why the ordering was never covered; these drive the REAL deploy_local_agent_logic and assert on the filesystem, needing no Docker because the rejection path now reaches nothing external. Covers: the issue's reproduction, local:<name> resolving to nothing, the ordering pinned twice (behaviourally by exploding every post-guard step, and statically by source order - the behavioural residue assertion alone cannot distinguish the two candidate fixes once cleanup exists), the valid path reaching creation with the template in place, an archive with no .mcp.json, and both sides of the cleanup boundary."
     }
   ]
 }
