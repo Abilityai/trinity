@@ -430,6 +430,16 @@ _STUBS = {
         # source URL, so the real stripping is exercised by
         # test_ent334_status_url_disclosure, not stubbed away from it.
         "strip_url_credentials": lambda url: url,
+        # #2052 moved the free-text PAT scrub into this module so it shares one
+        # authority rule with `strip_url_credentials`; `skill_source_clone.redact`
+        # imports it, and this file imports that module — so a missing entry
+        # here is an ImportError at COLLECTION, which is exactly the fragility
+        # the comment above warns about. Identity for the same reason as its two
+        # neighbours: nothing in this file asserts on scrubbed output, so the
+        # stub cannot mask a leak. The real behaviour is pinned by
+        # test_2052_scrubber_authority_parity and
+        # test_ent347_pat_scrubber_double_at, which drive the genuine function.
+        "scrub_url_credentials_in_text": lambda text: text,
     },
 }
 # #1898: the stubs live ONLY for the duration of the import below.

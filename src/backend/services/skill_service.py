@@ -114,13 +114,18 @@ _SYNC_LOCK_TTL_SECONDS = 300
 
 
 def _scrub_pat(text: str) -> str:
-    """Replace credentials in any `https://<creds>@host` URL. Never raises.
+    """Replace credentials in the authority of any URL. Never raises.
 
     Delegates to `skill_source_clone.redact` (ent#347). These were two separate
     hand-written patterns that had drifted apart and were each wrong in a
     different way — the one duplication that matters, since the value it guards
     lands in DURABLE admin-rendered state (`skills_library_last_error`) and in
-    an HTTP `detail`. One pattern, one place; see `_CREDENTIAL_URL_RE`.
+    an HTTP `detail`. One pattern, one place; that place is now
+    `utils.url_validation.scrub_url_credentials_in_text`, which shares an
+    authority grammar with the single-URL `strip_url_credentials` (#2052 — the
+    same drift one level up: the free-text pattern was anchored on a literal
+    `https://`, so the protocol-relative, scheme-less and alternate-scheme URLs
+    a stored source row may legitimately carry slipped past it).
 
     The try/except stays: this wrapper's own contract is "never raises", and it
     is called on a `str(e)` from an arbitrary exception whose `__str__` can

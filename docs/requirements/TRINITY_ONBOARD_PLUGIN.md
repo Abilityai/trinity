@@ -3,9 +3,64 @@
 **Version**: 1.1
 **Created**: 2025-02-05
 **Updated**: 2026-02-09
-**Status**: Implemented
+**Status**: **Historical** — records the original spec, not current behaviour (marked 2026-08-07, #2055)
 
-> **System of Record**: All Trinity skills and onboarding are in the [abilityai/abilities](https://github.com/abilityai/abilities) repository.
+> ## ⚠️ This document is historical
+>
+> It captures the plugin as originally specified. The plugin has since been
+> restructured, and **several sections below describe things that no longer
+> exist**. Do not implement against it, and do not treat it as the onboarding
+> contract.
+>
+> **The live contract is the skill source itself:**
+> [`abilityai/abilities` → `plugins/trinity/`](https://github.com/abilityai/abilities/tree/main/plugins/trinity).
+> Each skill's `SKILL.md` carries its own version and changelog; read those.
+>
+> See [What changed since this spec](#what-changed-since-this-spec) for the
+> drifts verified when this banner was added.
+
+---
+
+## What changed since this spec
+
+Verified against `abilityai/abilities` → `plugins/trinity/` on 2026-08-07. This
+list is what was checked, not an exhaustive audit — assume anything below is
+stale unless the skill source confirms it.
+
+**`.mcp.json` is written by `/trinity:connect`, not by onboard** (#2055). This
+is the drift that prompted the banner. [Phase 7](#phase-7-configure-local-connection)
+below says onboard updates `.mcp.json`; onboard `v4.12` deleted that writer
+outright, along with the `.mcp.json.template` it produced. Its Step 4 now only
+*verifies* the connection, and the skill states the rule directly:
+
+> Authentication and MCP configuration are owned by **`/trinity:connect`** — the
+> single source of truth. onboard does **not** resolve credentials or write
+> `.mcp.json` itself (duplicating that is what drifted before).
+
+`onboard`, `sync` and `loop` all delegate to `connect`. A duplicated writer is
+exactly what drifted before and caused the refactor, so §3.2's `npx mcp-remote`
+config and every "creates `.mcp.json.template`" claim below are not just stale —
+re-implementing them would reintroduce the bug. Trinity connection credentials
+now live in `connect`'s `~/.trinity/config.json` + `.mcp.json`; the agent's
+`.env` is for the agent's *own* integration secrets only.
+
+**The skill set is different.** §4's table and §5's per-skill sections describe
+skills that are gone or renamed:
+
+| This doc describes | Actual `plugins/trinity/skills/` |
+|---|---|
+| `onboard`, `sync`, `connect` | still present (contents changed) |
+| `dashboard` | renamed `create-dashboard` |
+| `remote`, `schedules` | no longer exist as skills |
+| §5's `trinity-adopt`, `trinity-compatibility`, `trinity-remote`, `trinity-sync`, `trinity-schedules` | **none of these directories exist** |
+| — | new: `deploy-new-instance`, `loop`, `start-here` |
+
+**`plugins/trinity/templates/` does not exist.** §3 and §6 describe a templates
+directory (`template.yaml.example`, `gitignore.example`, `env.example`,
+`mcp-json.template.example`); the path returns 404.
+
+What has held up: the two-command install flow, `template.yaml` as the agent's
+manifest, and `abilityai/abilities` as the system of record.
 
 ---
 
@@ -139,6 +194,10 @@ plugins/trinity/
 
 ### 3.2 MCP Configuration
 
+> ⛔ **Superseded (#2055).** This `npx mcp-remote` shape is the writer onboard
+> deleted in `v4.12`. `/trinity:connect` owns `.mcp.json` now; do not
+> reimplement this from here.
+
 **File**: `.mcp.json`
 
 ```json
@@ -189,6 +248,13 @@ plugins/trinity/skills/
 ## 5. Skills Reference
 
 > **System of Record**: All skills are in `github.com/abilityai/abilities/plugins/trinity/skills/`
+>
+> ⛔ **Superseded (#2055).** **None of the five skill directories described in
+> this section still exist** (`trinity-adopt`, `trinity-compatibility`,
+> `trinity-remote`, `trinity-sync`, `trinity-schedules`). The actual set is
+> `connect`, `create-dashboard`, `deploy-new-instance`, `loop`, `onboard`,
+> `start-here`, `sync`. Read their `SKILL.md` files instead — every "required
+> files" list below, including the `.mcp.json.template` entries, is stale.
 
 ### 5.1 trinity-adopt
 
@@ -340,6 +406,10 @@ disable-model-invocation: false
 
 ## 6. Template Files
 
+> ⛔ **Superseded (#2055).** `plugins/trinity/templates/` **does not exist** —
+> the path 404s. §6.4's `mcp-json.template.example` is doubly gone: onboard
+> stopped emitting `.mcp.json.template` in `v4.12`.
+
 ### 6.1 template.yaml.example
 
 ```yaml
@@ -484,7 +554,14 @@ Or the onboard skill can copy from its own plugin directory.
 
 ### Phase 7: Configure Local Connection
 
-1. Update local `.mcp.json` to add Trinity server
+> ⛔ **Superseded (#2055).** Step 1 is wrong and must not be reimplemented:
+> onboard has no `.mcp.json` writer. `/trinity:connect` is the **single writer**
+> — onboard hands off to it, then only verifies (step 2 still holds). See
+> [What changed since this spec](#what-changed-since-this-spec).
+
+1. ~~Update local `.mcp.json` to add Trinity server~~ → run `/trinity:connect`,
+   which authenticates and writes `.mcp.json` (or refreshes it from a stored
+   profile)
 2. Verify connection: `mcp__trinity__list_agents()`
 
 ### Phase 8: Completion Report
