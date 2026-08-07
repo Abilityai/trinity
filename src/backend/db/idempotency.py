@@ -170,6 +170,26 @@ class IdempotencyOperations:
                 )
             )
 
+    def discard_completed(self, scope: str, key: str) -> None:
+        """Delete a COMPLETED row whose recorded resource no longer exists.
+
+        The completed-row-stays rule exists so a retry replays the original
+        result — but a replay is only truthful while the resource it reports
+        still exists. #2040 review F3: a delete-then-identical-recreate via a
+        deterministic client key would otherwise replay a 200 naming an agent
+        that is gone. Callers must verify non-existence BEFORE discarding.
+        """
+        with get_engine().begin() as conn:
+            conn.execute(
+                delete(idempotency_keys).where(
+                    and_(
+                        idempotency_keys.c.scope == scope,
+                        idempotency_keys.c.idempotency_key == key,
+                        idempotency_keys.c.status == STATE_COMPLETED,
+                    )
+                )
+            )
+
     def purge_expired(self, ttl_hours: int = 24) -> int:
         """Delete rows older than ttl_hours. Returns rows removed."""
         cutoff = iso_cutoff(hours=ttl_hours)

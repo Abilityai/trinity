@@ -2271,5 +2271,5 @@ Local and production use the same ports. Local URLs, auth, and admin credentials
 
 ## Data Persistence
 
-- **Bind mount** (survives `docker-compose down -v`): `~/trinity-data/` → `/data` — contains `trinity.db` (SQLite), `agent-files/` (FILES-001), and `agent-data-tmp/` (transient export staging, #1169).
+- **Bind mount** (survives `docker-compose down -v`): `~/trinity-data/` → `/data` — contains `trinity.db` (SQLite), `agent-files/` (FILES-001), `agent-data-tmp/` (transient export staging, #1169), and `agent-import-tmp/` (transient copy-intent snapshot staging, ent#15 — free-space preflighted, `AGENT_IMPORT_MAX_BYTES`-capped, swept after 24h).
 - **Docker volumes**: `redis-data` (Redis AOF), `agent-configs`, `audit-data`, `audit-logs`, per-agent `agent-{name}-workspace` (the durable home volume — declared `data_paths` runtime data lives under `/home/developer/data` here, #1169), `agent-{name}-public` (FILES-001), and shared-folder volumes.

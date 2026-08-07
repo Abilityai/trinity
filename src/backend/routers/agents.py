@@ -15,6 +15,8 @@ import logging
 import random
 from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Query, WebSocket
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 
 from models import (
     AgentConfig,
@@ -40,6 +42,7 @@ from services.docker_utils import (
     container_stop, container_remove,
 )
 from services import heartbeat_service
+from services import idempotency_service
 from services.platform_audit_service import (
     platform_audit_service,
     AuditEventType,
@@ -449,10 +452,6 @@ async def create_agent_endpoint(
     caller (2026-07-20 learning: another user's identical key must never replay
     a foreign create response).
     """
-    from fastapi.encoders import jsonable_encoder
-    from fastapi.responses import JSONResponse
-    from services import idempotency_service
-
     idem = None
     if idempotency_key:
         scope = f"agent_create:{current_user.id}"
@@ -471,9 +470,34 @@ async def create_agent_endpoint(
                         "code": "CREATE_IN_FLIGHT",
                     },
                 )
-            return JSONResponse(
-                content=idem.snapshot, headers={"X-Idempotent-Replay": "true"}
-            )
+            # A completed replay is only truthful while the agent it reports
+            # still exists (#2040 review F3): MCP derives a deterministic key
+            # over name+config, so delete-then-identical-recreate within 24h
+            # would otherwise replay a 200 naming an agent that is gone —
+            # and no agent gets created. Discard the stale row and fall
+            # through to a genuinely fresh create (which then answers
+            # honestly: name-reserved 409 for a soft-deleted agent, a real
+            # create for a hard-purged one).
+            recorded_name = (idem.snapshot or {}).get("name") or config.name
+            if db.is_agent_live(recorded_name):
+                return JSONResponse(
+                    content=idem.snapshot, headers={"X-Idempotent-Replay": "true"}
+                )
+            idempotency_service.discard_stale_replay(idem.scope, idem.key)
+            idem = idempotency_service.begin(scope, idempotency_key)
+            if idem.replay:
+                # Lost the re-claim race to a concurrent identical retry —
+                # let that attempt own the create.
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": (
+                            "An agent create with this Idempotency-Key is "
+                            "being retried concurrently."
+                        ),
+                        "code": "CREATE_IN_FLIGHT",
+                    },
+                )
 
     try:
         result = await create_agent_internal(config, current_user, request, skip_name_sanitization=False)

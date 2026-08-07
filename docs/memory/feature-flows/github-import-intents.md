@@ -52,6 +52,19 @@ POST /api/agents {template: "github:o/r[@b]", import_intent: "copy"}
 the pre-populated volume is removed and the #1667 leftover-volume guard cannot
 409 the retry.
 
+**Resource bounds (#2040 review)**: the clone streams caller-chosen bytes onto
+`/data` (the bind mount that also holds `trinity.db`), so the path is bounded
+three ways: a **free-space preflight** refuses to start a clone without
+`3 × cap` free (`507 COPY_STAGING_NO_SPACE` — structured, never a disk-full
+500); a **post-clone size cap** (`AGENT_IMPORT_MAX_BYTES`, default 1 GiB,
+measured via `lstat` so a symlink never counts its target) answers a named
+`400 COPY_SOURCE_TOO_LARGE`; and the shared volume pre-population primitive
+now **spools the tar to disk** beside the template tree instead of
+materializing it as one in-memory `BytesIO` (a large repo could otherwise OOM
+the backend process, which serves every other agent — the primitive was
+written for operator-bounded #950 deploy-local input). `CLONE_TIMEOUT_S` (120s)
+plus the preflight bounds the clone itself.
+
 ## Intent gates (`crud._resolve_template`, pre-side-effect)
 
 | Condition | Result |
@@ -123,6 +136,19 @@ must never replay a foreign create response). Replay → original response +
 (named distinctly from name-taken). Header-only server-side; MCP
 `create_agent` derives a deterministic key from call args (name included, so
 two agents from one repo never collide).
+
+**Replay is liveness-gated (#2040 review F3)**: a completed replay is only
+truthful while the agent it reports still exists. Because the MCP key is
+deterministic over name+config, delete-then-identical-recreate inside the 24h
+TTL would otherwise replay a 200 naming an agent that is gone — and create
+nothing. The endpoint re-checks `db.is_agent_live(recorded_name)` before
+replaying; a dead recorded agent **discards** the stored row
+(`idempotency_service.discard_stale_replay` → the new
+`db.idempotency_discard_completed`, which deletes ONLY completed rows) and
+falls through to a genuinely fresh create — which then answers honestly:
+name-reserved 409 for a soft-deleted agent, a real create for a hard-purged
+one. Losing the re-claim race to a concurrent retry yields 409
+`CREATE_IN_FLIGHT`.
 
 ## Surfaces
 

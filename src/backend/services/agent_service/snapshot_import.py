@@ -40,6 +40,22 @@ logger = logging.getLogger(__name__)
 
 CLONE_TIMEOUT_S = 120
 
+# Snapshot size ceiling (review #2040 F1): the clone streams attacker-chosen
+# bytes onto /data — the bind mount that also holds trinity.db — and the tar
+# built from it transits backend memory/disk. 120s of clone bandwidth is
+# multiple GB on a decent link, and filling /data takes SQLite down. The cap
+# is enforced post-clone (git has no download ceiling flag that GitHub honors
+# for a full checkout) with the free-space preflight below bounding the clone
+# itself. Env-tunable; a template repo is source + docs, not a data lake.
+IMPORT_MAX_SNAPSHOT_BYTES = int(
+    os.environ.get("AGENT_IMPORT_MAX_BYTES", str(1 * 1024**3))  # 1 GiB
+)
+
+# Free-disk preflight headroom: the staged clone holds tree + .git (a depth-1
+# .git is roughly the compressed tree, so ~2× cap), and the tar spool adds up
+# to one more tree. Refuse to even start the clone below this.
+_PREFLIGHT_FREE_BYTES_FACTOR = 3
+
 # Disk-backed staging (the backend /tmp is a small RAM tmpfs — the exact trap
 # the legacy in-container shallow-clone branch still carries, #1098/#1439).
 _STAGING_ROOT = Path("/data/agent-import-tmp")
@@ -72,6 +88,7 @@ class SnapshotStaging:
     source_branch: str
     head_sha: str
     file_count: int
+    total_bytes: int = 0
 
 
 def _http_error(status_code: int, code: str, message: str) -> HTTPException:
@@ -140,6 +157,37 @@ def _count_snapshot_files(root: Path) -> int:
     )
 
 
+def _measure_snapshot_bytes(root: Path) -> int:
+    """Total bytes of the staged tree via ``lstat`` (symlinks not followed)."""
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+        for name in filenames:
+            try:
+                total += (Path(dirpath) / name).lstat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def _preflight_free_space() -> None:
+    """Refuse to start a clone without headroom for the worst allowed case
+    (review #2040 F1). Fail-open on an unreadable statvfs — the post-clone cap
+    still bounds the outcome."""
+    try:
+        free = shutil.disk_usage(str(_STAGING_ROOT)).free
+    except OSError:
+        return
+    needed = IMPORT_MAX_SNAPSHOT_BYTES * _PREFLIGHT_FREE_BYTES_FACTOR
+    if free < needed:
+        raise _http_error(
+            507,
+            "COPY_STAGING_NO_SPACE",
+            "The server does not have enough free staging space to import a "
+            "repository right now. Nothing was created — contact the operator "
+            "or retry later.",
+        )
+
+
 async def stage_github_snapshot(
     repo_path: str,
     branch: Optional[str],
@@ -152,6 +200,8 @@ async def stage_github_snapshot(
     failure path. The caller owns the returned staging dir — it must be
     released via ``cleanup_staging`` on both success and failure paths.
     """
+    _STAGING_ROOT.mkdir(parents=True, exist_ok=True)
+    _preflight_free_space()
     staging_dir = _make_staging_dir()
     url = f"https://github.com/{repo_path}.git"
     clone_args = ["clone", "--depth", "1", "--single-branch"]
@@ -200,6 +250,21 @@ async def stage_github_snapshot(
         shutil.rmtree(Path(staging_dir) / ".git", ignore_errors=True)
         _prune_escaping_symlinks(Path(staging_dir))
 
+        total_bytes = _measure_snapshot_bytes(Path(staging_dir))
+        if total_bytes > IMPORT_MAX_SNAPSHOT_BYTES:
+            # Named 4xx, never a disk-full 500 (review #2040 F1). The clone
+            # already ran (bounded by the preflight + timeout); the tree is
+            # released by the except-path cleanup below.
+            raise _http_error(
+                400,
+                "COPY_SOURCE_TOO_LARGE",
+                f"Repository '{repo_path}' is {total_bytes // (1024 * 1024)} MB "
+                f"— larger than the "
+                f"{IMPORT_MAX_SNAPSHOT_BYTES // (1024 * 1024)} MB import cap "
+                f"(AGENT_IMPORT_MAX_BYTES). Import a smaller repo, or raise "
+                f"the cap.",
+            )
+
         file_count = _count_snapshot_files(Path(staging_dir))
         if file_count == 0:
             # Mirrors FORK_TEMPLATE_EMPTY — never a green blank agent (a
@@ -221,6 +286,7 @@ async def stage_github_snapshot(
             source_branch=resolved_branch,
             head_sha=head_sha,
             file_count=file_count,
+            total_bytes=total_bytes,
         )
     except Exception:
         cleanup_staging(staging_dir)

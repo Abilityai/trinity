@@ -461,6 +461,21 @@ def endpoint_env(monkeypatch):
     monkeypatch.setattr(
         _agents_router.platform_audit_service, "log", AsyncMock()
     )
+
+    # #2040 F3: the replay path re-verifies the recorded agent still exists.
+    # Default TRUE so the plain-replay tests exercise the honest-replay arm.
+    env["agent_live"] = True
+    env["discard_calls"] = []
+    monkeypatch.setattr(
+        _agents_router.db,
+        "is_agent_live",
+        lambda name: env["agent_live"],
+    )
+    monkeypatch.setattr(
+        _idem,
+        "discard_stale_replay",
+        lambda scope, key: env["discard_calls"].append((scope, key)),
+    )
     return env
 
 
@@ -540,3 +555,225 @@ async def test_create_idempotency_in_flight_is_named_409(endpoint_env):
     assert exc.value.detail["code"] == "CREATE_IN_FLIGHT"
     assert endpoint_env["create_mock"].await_count == 0
     assert endpoint_env["fail_calls"] == []  # raised before the claim's try
+
+
+@pytest.mark.asyncio
+async def test_replay_of_deleted_agent_runs_a_fresh_create(endpoint_env):
+    """#2040 review F3: MCP derives a deterministic key over name+config, so
+    delete-then-identical-recreate inside 24h hit the stored snapshot and
+    returned a 200 naming an agent that no longer exists — with no agent
+    created. A completed replay must be verified against the LIVE agent set;
+    a dead recorded agent discards the row and the create runs for real."""
+    replay = _idem.IdempotencyDecision(
+        enabled=True,
+        replay=True,
+        in_flight=False,
+        scope="agent_create:1",
+        key="k1",
+        snapshot={"name": "ghost-agent"},
+    )
+    fresh = _idem.IdempotencyDecision(enabled=True, replay=False, in_flight=False)
+    results = [replay, fresh]
+    endpoint_env["begin_result"] = None  # unused — begin below pops the list
+
+    def sequenced_begin(scope, key):
+        endpoint_env["begin_calls"].append((scope, key))
+        return results.pop(0)
+
+    import unittest.mock as _mock
+
+    with _mock.patch.object(_idem, "begin", sequenced_begin):
+        endpoint_env["agent_live"] = False
+        config = _models.AgentConfig(name="ghost-agent")
+        resp = await _agents_router.create_agent_endpoint(
+            config, MagicMock(), current_user=_user(), idempotency_key="k1"
+        )
+
+    # The stale row was discarded and a REAL create ran.
+    assert endpoint_env["discard_calls"] == [("agent_create:1", "k1")]
+    assert endpoint_env["create_mock"].await_count == 1
+    assert resp == {"name": "ghost-agent"}
+    # The fresh claim was completed with the new response.
+    assert len(endpoint_env["complete_calls"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_replay_of_live_agent_still_short_circuits(endpoint_env):
+    """The honest-replay arm is untouched: recorded agent still live -> the
+    stored snapshot comes back with the replay header and no second create."""
+    endpoint_env["begin_result"] = _idem.IdempotencyDecision(
+        enabled=True,
+        replay=True,
+        in_flight=False,
+        scope="agent_create:1",
+        key="k1",
+        snapshot={"name": "prior-agent"},
+    )
+    endpoint_env["agent_live"] = True
+
+    resp = await _agents_router.create_agent_endpoint(
+        _models.AgentConfig(name="prior-agent"),
+        MagicMock(),
+        current_user=_user(),
+        idempotency_key="k1",
+    )
+
+    assert resp.headers["x-idempotent-replay"] == "true"
+    assert endpoint_env["discard_calls"] == []
+    assert endpoint_env["create_mock"].await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_replay_discard_race_is_named_409(endpoint_env):
+    """If the re-claim after a discard hits another attempt's row, this
+    request yields rather than double-creating."""
+    replay = _idem.IdempotencyDecision(
+        enabled=True, replay=True, in_flight=False,
+        scope="agent_create:1", key="k1", snapshot={"name": "ghost-agent"},
+    )
+    raced = _idem.IdempotencyDecision(
+        enabled=True, replay=True, in_flight=True,
+        scope="agent_create:1", key="k1",
+    )
+    results = [replay, raced]
+
+    def sequenced_begin(scope, key):
+        endpoint_env["begin_calls"].append((scope, key))
+        return results.pop(0)
+
+    import unittest.mock as _mock
+
+    with _mock.patch.object(_idem, "begin", sequenced_begin):
+        endpoint_env["agent_live"] = False
+        with pytest.raises(_agents_router.HTTPException) as exc:
+            await _agents_router.create_agent_endpoint(
+                _models.AgentConfig(name="ghost-agent"),
+                MagicMock(),
+                current_user=_user(),
+                idempotency_key="k1",
+            )
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "CREATE_IN_FLIGHT"
+    assert endpoint_env["create_mock"].await_count == 0
+
+
+# ===========================================================================
+# 4. Snapshot resource bounds (#2040 review F1)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_stage_oversized_snapshot_is_named_400_and_cleans_up(
+    monkeypatch, staging_root
+):
+    """A staged tree over AGENT_IMPORT_MAX_BYTES answers a NAMED 400 (never a
+    disk-full 500) and releases the staging dir."""
+
+    def populate(staging: Path):
+        (staging / ".git").mkdir(parents=True, exist_ok=True)
+        (staging / "big.bin").write_bytes(b"x" * 4096)
+        return None
+
+    fake, _calls = _clone_fake(populate)
+    monkeypatch.setattr(_snapshot_import, "_run_git", fake)
+    monkeypatch.setattr(_snapshot_import, "IMPORT_MAX_SNAPSHOT_BYTES", 1024)
+
+    with pytest.raises(_snapshot_import.HTTPException) as exc:
+        await _snapshot_import.stage_github_snapshot("o/r", None, None)
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail["code"] == "COPY_SOURCE_TOO_LARGE"
+    # Staging released — no import dirs left behind.
+    leftovers = [p for p in staging_root.iterdir()] if staging_root.exists() else []
+    assert leftovers == []
+
+
+@pytest.mark.asyncio
+async def test_stage_low_disk_preflight_refuses_before_cloning(
+    monkeypatch, staging_root
+):
+    """The free-space preflight refuses BEFORE any git subprocess runs, with a
+    structured 507 — the clone is the thing being bounded, so it must never
+    start."""
+    fake, calls = _clone_fake(lambda staging: None)
+    monkeypatch.setattr(_snapshot_import, "_run_git", fake)
+
+    import shutil as _shutil
+
+    class _Usage:
+        free = 0
+        total = 100
+        used = 100
+
+    monkeypatch.setattr(
+        _snapshot_import.shutil, "disk_usage", lambda path: _Usage
+    )
+
+    with pytest.raises(_snapshot_import.HTTPException) as exc:
+        await _snapshot_import.stage_github_snapshot("o/r", None, None)
+
+    assert exc.value.status_code == 507
+    assert exc.value.detail["code"] == "COPY_STAGING_NO_SPACE"
+    assert calls == []  # the clone never started
+
+
+def test_measure_snapshot_bytes_does_not_follow_symlinks(tmp_path):
+    """The size measure lstat()s — a symlink to a huge out-of-tree file must
+    count as the link, not the target."""
+    (tmp_path / "real.txt").write_bytes(b"x" * 100)
+    (tmp_path / "link").symlink_to("/etc/passwd")
+    measured = _snapshot_import._measure_snapshot_bytes(tmp_path)
+    assert measured < 4096  # ~100 bytes file + link size, never the target
+
+
+# ===========================================================================
+# 5. Copy-artifact rollback cleanup (#2040 review — F4 regression cover)
+# ===========================================================================
+
+
+def test_cleanup_copy_artifacts_removes_staging_and_volume(monkeypatch):
+    removed = []
+
+    class _Vol:
+        def remove(self, force=False):
+            removed.append(force)
+
+    class _Volumes:
+        def get(self, name):
+            assert name == "agent-x-workspace"
+            return _Vol()
+
+    class _Client:
+        volumes = _Volumes()
+
+    cleanup_calls = []
+    monkeypatch.setattr(
+        _crud.snapshot_import, "cleanup_staging",
+        lambda d: cleanup_calls.append(d),
+    )
+    monkeypatch.setattr(_crud, "docker_client", _Client())
+
+    handles = _crud._RollbackHandles(
+        copy_staging_dir="/data/agent-import-tmp/import-abc",
+        copy_volume_name="agent-x-workspace",
+    )
+    _crud._cleanup_copy_artifacts(handles)
+
+    assert cleanup_calls == ["/data/agent-import-tmp/import-abc"]
+    assert removed == [True]
+
+
+def test_cleanup_copy_artifacts_tolerates_missing_volume(monkeypatch):
+    class _Volumes:
+        def get(self, name):
+            raise RuntimeError("no such volume")
+
+    class _Client:
+        volumes = _Volumes()
+
+    monkeypatch.setattr(_crud.snapshot_import, "cleanup_staging", lambda d: None)
+    monkeypatch.setattr(_crud, "docker_client", _Client())
+
+    handles = _crud._RollbackHandles(copy_volume_name="agent-x-workspace")
+    _crud._cleanup_copy_artifacts(handles)  # must not raise
