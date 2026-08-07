@@ -395,14 +395,22 @@ class TestWriteTerminalAndGateEmit:
 
     def _run(self, *, won, agent_name="worker-a"):
         from services import task_execution_service as tes
-        from models import TaskExecutionStatus, ActivityState
+        from models import TaskExecutionStatus
 
         mock_db = MagicMock()
         mock_db.update_execution_status.return_value = won
         mock_eds = MagicMock()
         with (
             patch.object(tes, "db", mock_db),
-            patch.object(tes, "activity_service", MagicMock(complete_activity=AsyncMock())),
+            patch.object(
+                tes,
+                "activity_service",
+                # #1804: _write_terminal_and_gate closes through the shared owner.
+                MagicMock(
+                    complete_activity=AsyncMock(),
+                    close_execution_activity=AsyncMock(return_value=True),
+                ),
+            ),
             patch.object(tes, "event_dispatch_service", mock_eds),
         ):
             _await(
@@ -410,7 +418,6 @@ class TestWriteTerminalAndGateEmit:
                     "exec-1578",
                     "act-1",
                     status=TaskExecutionStatus.FAILED,
-                    activity_status=ActivityState.FAILED,
                     error="Task execution timed out after 600 seconds",
                     agent_name=agent_name,
                 )

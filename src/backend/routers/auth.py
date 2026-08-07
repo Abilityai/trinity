@@ -141,6 +141,69 @@ def check_login_rate_limit(client_ip: str, account: Optional[str] = None) -> boo
         return True
 
 
+def check_login_rate_limit_account_only(account: str) -> bool:
+    """Per-ACCOUNT login limit only — never touches the per-IP bucket.
+
+    For callers whose client IP is structurally meaningless: the MCP inline-auth
+    surface (#848) is reached only by the MCP server container, so every end
+    user collapses into one IP bucket. Sharing that bucket would turn a single
+    anonymous client's 30 bad codes into a fleet-wide lockout (and, since
+    ``_ip_key`` is one namespace, would spill into real web logins from the same
+    egress). That is the platform-wide DoS the #591 split-bucket redesign
+    removed — see the note at the top of this module.
+
+    Returns True if allowed; raises 429 if the account bucket is exhausted.
+    """
+    r = get_redis_client()
+    if r is None:
+        logger.warning("Rate limiting unavailable - Redis not connected")
+        return True
+
+    try:
+        acct_key = _account_key(account)
+        if acct_key is None:
+            return True
+        acct_attempts = r.get(acct_key)
+        if acct_attempts is not None and int(acct_attempts) >= LOGIN_ACCOUNT_LIMIT:
+            ttl = r.ttl(acct_key)
+            logger.warning(
+                "[Auth] Per-account login lockout triggered (account-only): account=%s attempts=%s ttl=%ss",
+                account, acct_attempts, ttl,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Too many failed attempts for this account. Try again in {ttl} seconds.",
+            )
+        return True
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Rate limit check failed: {e}")
+        return True
+
+
+def record_login_attempt_account_only(account: str, success: bool):
+    """Update ONLY the per-account counter. Companion to
+    ``check_login_rate_limit_account_only`` — see its docstring for why the
+    per-IP bucket must not be written from the inline-auth path."""
+    r = get_redis_client()
+    if r is None:
+        return
+    try:
+        acct_key = _account_key(account)
+        if acct_key is None:
+            return
+        if success:
+            r.delete(acct_key)
+        else:
+            pipe = r.pipeline()
+            pipe.incr(acct_key)
+            pipe.expire(acct_key, LOGIN_ACCOUNT_WINDOW)
+            pipe.execute()
+    except Exception as e:
+        logger.warning(f"Failed to record login attempt: {e}")
+
+
 def record_login_attempt(client_ip: str, success: bool, account: Optional[str] = None):
     """Update per-IP and (optionally) per-account login attempt counters.
 

@@ -4,13 +4,51 @@ pytest-asyncio>=0.24.0
 pytest-timeout>=2.3.0
 pytest-html>=4.1.0
 pytest-cov>=6.0.0
+# Property-based testing (#1771 / P-38 `/edge-cases`). Used by
+# tests/unit/test_1771*_properties.py.
+#
+# EXACT pin, deliberately breaking this file's `>=` convention: Hypothesis's
+# example generation and shrinking change between releases, and the #1771
+# property suites run under a `derandomize=True` profile whose frozen input set
+# is stable only per version. A floating floor would make a failure
+# irreproducible across machines and could surface as a head-only failure in
+# CI's base-vs-head regression diff — the one thing the derandomized profile
+# exists to prevent.
+#
+# Unlike pytest-randomly (deliberately kept OUT of this file — see
+# backend-unit-test.yml:93-99 — because pytest auto-discovers installed plugins
+# and it would silently randomize every local run), Hypothesis's auto-loaded
+# plugin changes neither collection order nor the behaviour of tests that don't
+# use @given; it only adds --hypothesis-* options and a statistics reporter.
+#
+# Every #1771 slice adds this block byte-identically at this exact position, so
+# the slices merge cleanly in any order and the file keeps ONE hypothesis line.
+hypothesis==6.161.5
 httpx>=0.28.0
 websockets>=13.0
 python-dotenv>=1.0.1
 docker>=7.1.0
 apscheduler>=3.11.0
 pydantic[email]>=2.10.0
-fastapi>=0.115.0
+# Cap fastapi to prod's 0.115.x line. `docker/backend/Dockerfile` pins
+# `fastapi==0.115.6` EXACTLY, so an unbounded floor here resolved 0.140.13 —
+# ~25 minor versions ahead of what production actually ships, i.e. the unit
+# suite was validating against a different FastAPI than the one that runs.
+#
+# It surfaced as `test_1069_voip_call_path_param` failing with
+# `ImportError: cannot import name 'get_flat_dependant'`. Note the ceiling is
+# NOT `<0.141`: `0.140.13 < 0.141` is true, so that bound still admits the
+# breaking version. Bisected against the real wheels, the symbol is present in
+# 0.140.6 and gone in 0.140.7 — a PRIVATE api dropped in a PATCH release, so no
+# minor-level bound is trustworthy. Tracking prod's line is the durable fix.
+#
+# CI was green only because of a warm pip cache: backend-unit-test.yml keys
+# `cache-dependency-path` on THIS file, and 0.140.13 allows py3.11, so the next
+# edit to this file for any reason would have busted the key, re-resolved, and
+# broken CI for everyone. Capping is therefore the safe way to bust that cache.
+# Verified: full `tests/unit` suite is 5861 passed / 0 failed at 0.115.14
+# (it is 1 failed / 5860 passed at 0.140.13).
+fastapi>=0.115.0,<0.116
 pyyaml>=6.0.0
 python-jose[cryptography]>=3.3.0
 python-multipart>=0.0.20
@@ -37,6 +75,12 @@ croniter>=5.0.0
 psutil>=6.1.0
 aiofiles>=24.1.0
 python-magic>=0.4.27
+# idna: UTS-46 host canonicalisation in services/setup_url_display.py, which
+# tests/unit/test_ent127_setup_url.py imports directly. httpx pulls it in
+# transitively, but an undeclared direct import is exactly the dependency a
+# resolver change drops silently. Floor matches docker/backend/Dockerfile's
+# exact pin. (trinity-enterprise#127)
+idna>=3.10
 slack_sdk[socket-mode]>=3.41.0
 slackify-markdown>=0.2.0
 twilio>=9.10.0
@@ -50,6 +94,36 @@ bcrypt>=4.2.0,<5
 pydantic-settings>=2.0.0
 google-genai>=1.0.0
 payments-py>=1.0.0
+# tzdata: the IANA database as a pure-Python fallback for `zoneinfo`. The #1771
+# timestamp properties draw real IANA zones (`st.timezones()`) deliberately —
+# DST transitions, quarter-hour offsets and historical LMT offsets are what stop
+# the ordering property from degenerating into "a zero-padded format sorts
+# correctly". `zoneinfo` reads the SYSTEM database first and falls back to this
+# package; without either, `available_timezones()` is empty, `st.timezones()`
+# cannot generate, and `ZoneInfo("Europe/London")` raises at import — which is
+# the intended failure mode (the fallback that would have degraded silently to
+# fixed offsets, i.e. to a vacuous green, was deliberately removed). Declaring
+# it makes the properties independent of whatever the runner image ships.
+# A FLOOR here, deliberately NOT the exact pin used for `hypothesis` above.
+# That pin exists to freeze a reproducible derandomized input SET; these
+# properties are zone-agnostic format/ordering invariants, so a tz-database
+# revision changes WHICH zones are drawn but cannot change whether the property
+# holds. An exact pin would instead freeze a stale IANA database — a real
+# hazard for any future test that does assert real-world DST behaviour.
+# `hypothesis[zoneinfo]` declares tzdata as a floor for the same reason.
+tzdata>=2024.1
+# Python 3.13 removed the `audioop` stdlib module. The backend image pins the
+# replacement (docker/backend/Dockerfile: "audioop-lts; python_version >= '3.13'"),
+# so VoIP mu-law transcoding works in production — but CI installs THIS file, not
+# the image, so without the same pin `tests/unit/test_voip_audio.py` skips at
+# collection on 3.13 and 7 codec tests silently stop running.
+#
+# That is the exact failure this repo has already paid for twice (`crypt`,
+# `audioop`) and the reason #1891 moved CI onto the shipped interpreter. Note the
+# regression-diff job compares FAILURES, not test counts, so a vanished module is
+# invisible to it — the pin is what keeps the coverage, not the diff.
+audioop-lts; python_version >= '3.13'
+
 # NOTE: trinity-cli (needed by test_cli_*.py) is intentionally NOT listed here.
 # An editable local path (`-e ./src/cli`) breaks GitHub's dependency-graph
 # updater — it resolves `-e` targets relative to THIS file's dir (tests/src/cli,
@@ -57,3 +131,8 @@ payments-py>=1.0.0
 # release. The local run-*.sh wrappers install the editable CLI via
 # tests/setup-env.sh instead; unit/ (the #660 one-liner contract) never imports
 # trinity_cli, so CI — which only runs unit/ — is unaffected.
+
+# #1536 report export — the builders are exercised for real (a mocked workbook
+# would prove nothing about cell mapping). Mirrors the backend image pins.
+openpyxl==3.1.5
+reportlab==4.2.5

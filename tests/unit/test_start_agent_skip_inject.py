@@ -90,6 +90,11 @@ def _load_lifecycle():
         check_full_capabilities_match=Mock(return_value=True),
         check_guardrails_env_matches=Mock(return_value=True),
         validate_base_image=Mock(),
+        # #1816: MUST be stubbed explicitly. A bare Mock auto-creates missing
+        # attributes and returns a truthy Mock, so an unstubbed
+        # `is_system_agent_name` reads as "every agent is the system agent" and
+        # the AC2 gate silently suppresses every recreate in this harness.
+        is_system_agent_name=Mock(return_value=False),
     )
     read_only_mod = Mock(inject_read_only_hooks=AsyncMock(
         return_value={"success": True}

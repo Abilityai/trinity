@@ -87,9 +87,12 @@ from routers.system_views import router as system_views_router
 from routers.notifications import router as notifications_router, set_websocket_manager as set_notifications_ws_manager, set_filtered_websocket_manager as set_notifications_filtered_ws_manager
 from routers.reports import router as reports_router
 from routers.product_events import router as product_events_router
+from routers.evaluations import router as evaluations_router  # ent#206 behavioral-eval referee surface
 from routers.reminders import router as reminders_router
 from services.report_service import set_websocket_manager as set_reports_ws_manager, set_filtered_websocket_manager as set_reports_filtered_ws_manager
 from routers.connector import router as connector_router  # per-agent MCP connector (ent#46, OSS-core #118)
+from routers.mcp_auth import router as mcp_auth_router  # MCP inline email auth (#848)
+from routers.agent_mcp_key import router as agent_mcp_key_router  # per-agent Trinity MCP key (#1854)
 from routers.subscriptions import router as subscriptions_router
 from routers.monitoring import router as monitoring_router, set_websocket_manager as set_monitoring_ws_manager, set_filtered_websocket_manager as set_monitoring_filtered_ws_manager
 from routers.slack import public_router as slack_public_router, auth_router as slack_auth_router
@@ -512,6 +515,20 @@ async def lifespan(app: FastAPI):
             logger.error(f"Error starting sync health service: {e}")
     asyncio.create_task(_start_sync_health_delayed())
 
+    # trinity-enterprise#236: skills-library auto-sync + fleet re-inject.
+    # The loop always runs; it self-gates on the (default-OFF) setting each
+    # cycle and only the Redis leader performs a cycle, so starting it in every
+    # worker is safe. Staggered +11s to stay clear of the other boot loops.
+    async def _start_skills_sync_delayed():
+        await asyncio.sleep(11)
+        try:
+            from services.skills_sync_service import skills_sync_service
+            skills_sync_service.start()
+            logger.info("Skills library sync service started (staggered +11s)")
+        except Exception as e:
+            logger.error(f"Error starting skills library sync service: {e}")
+    asyncio.create_task(_start_skills_sync_delayed())
+
     # CANARY-001 / Issue #411: Canary watcher — 5-min cycle. Disabled by
     # default (CANARY_ENABLED=1 to enable on staging/dev). Service self-
     # gates internally; the start() call is a no-op when not enabled.
@@ -806,9 +823,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error stopping sync health service: {e}")
 
+    # Shutdown skills library sync service (trinity-enterprise#236)
+    try:
+        from services.skills_sync_service import skills_sync_service
+        skills_sync_service.stop()
+        logger.info("Skills library sync service stopped")
+    except Exception as e:
+        logger.error(f"Error stopping skills library sync service: {e}")
+
     # Shutdown canary service (CANARY-001 / Issue #411)
     try:
-        canary_service.stop()
+        await canary_service.stop()
         logger.info("Canary service stopped")
     except Exception as e:
         logger.error(f"Error stopping canary service: {e}")
@@ -859,6 +884,18 @@ app = FastAPI(
 # Initialize OpenTelemetry distributed tracing (RELIABILITY-002)
 # Must be called after app creation but before middleware/routers
 _otel_enabled = setup_opentelemetry(app)
+
+
+# 422 bodies must not echo the value that failed validation (ent#109 /cso):
+# Pydantic v2 puts the rejected value in `input` and FastAPI's default handler
+# returns `exc.errors()` verbatim, so a failed `SecretStr` validation returns the
+# SECRET. Load-bearing for the ent#109 PAT charset guard — see the handler's own
+# docstring in `error_handlers.py`, which is where it lives so it is testable
+# without standing the whole app up.
+from fastapi.exceptions import RequestValidationError as _RequestValidationError
+from error_handlers import validation_error_without_input as _validation_error_without_input
+
+app.add_exception_handler(_RequestValidationError, _validation_error_without_input)
 
 # Add CORS middleware
 app.add_middleware(
@@ -969,8 +1006,11 @@ app.include_router(system_views_router)  # System Views (ORG-001 Phase 2)
 app.include_router(notifications_router)  # Agent Notifications (NOTIF-001)
 app.include_router(reports_router)  # Agent Reports (#918)
 app.include_router(product_events_router)  # Local product-event capture (ent#184)
+app.include_router(evaluations_router)  # Behavioral evaluations (ent#206)
 app.include_router(reminders_router)  # Agent Self-Reminders (#1296)
 app.include_router(connector_router)  # Per-agent MCP connector (ent#46, OSS-core #118)
+app.include_router(mcp_auth_router)  # MCP inline email auth (#848) — internal-secret gated
+app.include_router(agent_mcp_key_router)  # Per-agent Trinity MCP key: read/verify/rotate (#1854)
 app.include_router(messages_router)  # Proactive Messaging (#321)
 app.include_router(public_memory_router)  # MEM-001 write path (#888)
 app.include_router(subscriptions_router)  # Subscription Management (SUB-001)

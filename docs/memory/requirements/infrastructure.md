@@ -28,6 +28,36 @@
 - **Key Features**: Optional full capabilities mode for containers needing system access, base image allowlist validation (SEC-172)
 - **Base Image Allowlist** (SEC-172): Agent creation validates `base_image` against configurable allowlist (`base_image_allowlist` system setting, default `["trinity-agent-base:*"]`). Blocks arbitrary Docker image pulls that could access internal network services. Returns HTTP 403 for disallowed images.
 
+### 8.5b Base-Image Adoption Semantics (#1809, #1816)
+- **Status**: ✅ Implemented (2026-07-28)
+- **GitHub Issues**: #1809 (regular agents), #1816 (`trinity-system`)
+- **Description**: A rebuilt `trinity-agent-base:latest` must be adopted by existing agent containers, which stay pinned to the image **id** they were created from. Adoption happens only at a **cold boundary**.
+- **Requirements**:
+  - **ADOPT-001**: An agent container whose own `Config.Image` tag no longer resolves to the image id it runs is recreated on its next **cold** start (`check_base_image_matches`, the lazy ninth predicate). Fail-open: any unreadable state skips the evaluation and logs a WARNING.
+  - **ADOPT-002**: A **running** agent is never image-recreated. A start of a running agent is a load-bearing idempotent no-op (MCP ensure-running, the SUB-003 auto-switch restart, `restart_system`); image drift is armed fleet-wide by any `build-base-image.sh` run and must never turn it into a container kill. Ephemeral ghosts are excluded outright (volume-less by design).
+  - **ADOPT-003** (`trinity-system`): the platform orchestrator adopts at the same cold boundary — backend boot with the container **stopped**, or an explicit `POST /api/system-agent/restart`. `ensure_deployed`'s running branch is **read-only**: it reports `base_image_state` ∈ `stale | current | unknown` and raises an edge-triggered operator-queue alarm on `stale` only (never on `unknown` — a fail-open probe must not manufacture an alert).
+  - **ADOPT-004** (AC2, structural): **no** code path may replace the container of a *running* `trinity-system` without an explicit operator stop. Enforced in `start_agent_internal` as an `is_system AND was_already_running` gate over the whole `needs_recreation` block — deliberately independent of predicate count — returning `recreate_deferred: "system_agent_running"` rather than silently doing nothing.
+  - **ADOPT-005** (convergence invariant): the container produced by `_create_system_agent` and the container produced by `recreate_container_with_updated_config` must both leave **all eight** config predicates `True`. A permanently-false predicate is an ADOPT-004 hole by construction, because a config-drift recreate resolves the image from a *tag* and is therefore also an image adoption.
+  - **ADOPT-006** (rebuild fences): `recreate_missing_container` — the #1559 soft-delete recovery rebuild — **refuses** `trinity-system` with a 409. It reconstructs a regular agent and would irreversibly downgrade the orchestrator (deactivates the **system-scoped** MCP key and mints an agent-scoped replacement, drops `trinity.is-system` / the `/template` bind / `unless-stopped`, arms the scope-403 `TRINITY_BACKEND_URL`). `ensure_deployed`'s create branch is the only supported rebuild. Reachable because `ensure_deployed` runs per uvicorn worker with no leader lock — the race itself is #1817.
+  - **ADOPT-007** (operator remedy is human-only): `POST /api/system-agent/restart` and `/reinitialize` require an admin **and** a human principal (`reject_agent_principal`). `assert_admin` alone lets an agent-scoped key through on a default admin-owned install, and #1816 turns `/restart` into a container replacement.
+- **Tests**: `tests/unit/test_1809_image_drift_recreate.py`, `tests/unit/test_1816_system_agent_convergence.py`, `tests/unit/test_1816_system_agent_adoption.py`
+- **Docs**: [internal-system-agent.md](../feature-flows/internal-system-agent.md) → Base-image adoption; [agent-lifecycle.md](../feature-flows/agent-lifecycle.md)
+
+### 8.5c Container Log Rotation (#1871)
+- **Status**: ✅ Implemented (2026-07-29)
+- **GitHub Issue**: #1871
+- **Description**: Docker's `json-file` driver ships with **no** `max-size` and **no** `max-file`, so every platform and agent container log grew without bound under `/var/lib/docker/containers/`. Nothing fails while it happens; then the Docker data root reaches 100%, dockerd can no longer parse its own logs, and the entire fleet wedges at once (2026-07-27 incident). Trinity's existing retention (`log_archive_service`, `LOG_RETENTION_DAYS`) governs only Vector's aggregate copy at `/data/logs` — the raw Docker copy had no owner.
+- **Requirements**:
+  - **LOG-001** (platform services): every service in **both** `docker-compose.yml` and `docker-compose.prod.yml` carries a bounded `logging:` block, sourced from one shared `x-logging` anchor so the two files cannot drift. Operator-tunable via `CONTAINER_LOG_MAX_SIZE` / `CONTAINER_LOG_MAX_FILE`.
+  - **LOG-002** (agent containers): compose's `logging:` **cannot** reach agent containers — they are created through the Docker SDK, not compose. `AGENT_LOG_CONFIG` (`services/agent_service/capabilities.py`) is the agent-side half, defined once and imported by all three agent-container create sites beside `AGENT_TMPFS_MOUNT`. Operator-tunable via `AGENT_LOG_MAX_SIZE` / `AGENT_LOG_MAX_FILE`.
+  - **LOG-003** (fail-safe in **both** directions): a malformed value falls back to the bounded default, **and so does a well-formed but out-of-range one** (>`1g` per file, >`10` files, or zero). A format-only check is insufficient: `1000g` parses cleanly while effectively removing the cap — the exact failure this control exists to prevent, so magnitude is bounded too. A typo must never silently disable rotation (same principle as #1638).
+  - **LOG-004** (discoverability): an *explicitly set* value that is rejected logs a `WARNING` naming the variable, the rejected value and the applied default; an **unset** variable is the normal case and stays silent. A silently-ignored knob is the #1039 inert-by-obscurity class.
+  - **LOG-005** (apply semantics): `log_config` is **creation-time**, like the tmpfs spec. Platform services adopt on the next `docker compose up`; existing agents adopt on **recreate**, not on a plain restart. Capping does not shrink logs already on disk — reclaiming those on deployed instances is ops-tooling follow-up, out of scope here.
+  - **LOG-006** (drift guard): a CI guard fails when a **new** durable-container create site ships without `log_config`, closing the `learnings.md` (2026-07-10) "the create path is never one call site" class. Ephemeral `remove=True` helpers are exempt — Docker deletes their log with the container.
+- **Non-goal**: a host-level `/etc/docker/daemon.json`. That belongs to ops provisioning and is defense-in-depth; this makes Trinity correct regardless of host configuration.
+- **Tests**: `tests/unit/test_1871_container_log_rotation.py`, `tests/unit/test_1871_log_config_parity.py`
+- **Docs**: [container-capabilities.md](../feature-flows/container-capabilities.md) → Container Log Rotation; [vector-logging.md](../feature-flows/vector-logging.md) → Interaction with Docker Log Rotation
+
 ### 8.5a SSRF Prevention — Skills Library URL Validation (SEC-179)
 - **Status**: ✅ Implemented (2026-03-27)
 - **GitHub Issue**: #179
@@ -145,7 +175,16 @@
   - Dispatch grace period: 60s grace for newly created executions before orphan detection
   - Systemic failure detection: Warns if >50% of recovery attempts fail in a single cycle
   - **Passive stale cleanup**: Marks stale executions (`status='running'` > 120 min) as `failed`
-  - Marks stale activities (`activity_state='started'` > 120 min) as `failed`
+  - Marks stale activities (`activity_state='started'` > 120 min) as `failed` — a **backstop for
+    the unclaimed only** (#1804): every writer that wins a terminal CAS now closes the paired
+    dispatch activity itself (§10.15 in `scheduling.md`), so a row reaching this sweep means a
+    producer is unowned. Runs **after** `_sweep_stale_slots` in the cycle (it used to run one line
+    before the stale-slot reaper, so within a single cycle the 120-minute duration fabricator could
+    beat a legitimate closer).
+  - Recovery paths (watchdog `_recover_execution`, startup recovery, the two bulk sweeps via
+    `_close_bulk_swept_activities`, the lease reaper, both backend-shutdown `CancelledError`
+    handlers) close their execution's activity on the CAS-won branch — counted in
+    `CleanupReport.activities_closed_on_recovery` (#1804)
   - Cleans up stale Redis slots (entries older than TTL)
   - One-shot startup sweep on backend restart
   - Periodic cleanup every 5 minutes
@@ -261,7 +300,68 @@
 - **Storage**: `canary_violations` table; observed_state JSON column.
 - **Activation**: gated by `CANARY_ENABLED=1` env var; disabled by
   default. Production deployment is staging/dev — the harness watches
-  there, not in user-facing prod.
+  there, not in user-facing prod. `CANARY_ENABLED` and
+  `CANARY_SLACK_WEBHOOK_URL` must be forwarded under `backend.environment:`
+  in **both** `docker-compose.yml` and `docker-compose.prod.yml` (#1881
+  part 1, shipped as #1876): prod compose launches standalone — no base-compose merge and no
+  `env_file:` — so the explicit `environment:` list is the only path into
+  the container, and the vars were wired into the dev file only. Staging/dev
+  runs prod compose, so the harness was un-enableable on exactly the
+  deployment it exists for: a documented `.env` lever that silently did
+  nothing (#1039/#1056 packaging-gap class), and a silent-green one level
+  above H-01 that no invariant can catch, since invariants only run inside
+  the thing that isn't running. Pinned by
+  `tests/unit/test_canary_env_prod_parity.py`.
+- **Single-cycling-worker lease** (#1881 part 2): the FastAPI lifespan
+  starts `canary_service` in **every** uvicorn worker (prod runs
+  `--workers 2`) and the service held only a per-process `asyncio.Lock`,
+  which guards re-entrancy inside one process and says nothing about
+  cross-worker exclusion. Enabling the harness therefore meant two full
+  cycles per interval — R-01 `docker exec`ing into every running agent
+  container twice per 5 min, violations double-persisted (11,942
+  `canary_violations` rows in 24h, measured on eu2), and two independent
+  writers on every shared marker (`canary:last_cycle_at`,
+  `canary:last_cycle_red`, `canary:e02:terminal_seen`,
+  `canary:h01:suspect_since`). The two defects had to ship together: the
+  compose fix alone converts a dormant bug into a live one. The scheduled
+  loop now runs only when it holds the Redis `canary:leader` lease — SET
+  NX, TTL `max(3×interval, 900s)`, own-lease-only refresh, best-effort
+  release on `stop()` — mirroring `monitoring:leader` (#1464) and
+  `opqueue:leader` (#1632). Every worker still runs its loop and re-checks
+  each cycle, so leadership fails over when the holder dies with no
+  restart; non-leaders log on the **transition** only, never per cycle.
+  - **TTL floor**, the one deviation from `interval × 3`: a canary cycle's
+    cost is dominated by R-01's `container.exec_run` sweep, which is bounded
+    by no timeout and scales with *fleet size*, not with how often we look.
+    A shortened interval must not shorten the lease below one sweep, or it
+    lapses mid-cycle and leadership flaps — restoring the concurrent
+    probing the lease exists to remove. The floor is a no-op at the default
+    300s interval.
+  - **Fail-open to leader** when Redis is unreachable. The precedents' own
+    justification does not transfer — a duplicate canary cycle is *not*
+    inert (it re-runs the sweep and double-persists rows) — so it is taken
+    on different grounds: this is the one subsystem whose purpose is
+    noticing that something went quiet, and a canary that stops is the
+    silent-green failure H-01 exists to catch, one level up where nothing
+    can see it. Duplicated probes are noisy and visible; silence is not.
+    A Redis outage is also already a degraded state the harness announces
+    (`sources_unavailable`; H-01 fires unconfirmed on an unreadable
+    marker), and failing closed would suppress precisely those paths.
+  - Consequently the lease is **best-effort, not mutual exclusion**:
+    H-01's `CONFIRMATION_MIN_SECONDS` and R-01's `DWELL_SECONDS`
+    elapsed-wall-clock gates stay load-bearing and must not be relaxed to
+    "seen in a second cycle" on the strength of it. Both also ride out a
+    real-time transient, which is a single-worker property.
+  - Knock-on: a leader failover leaves up to ~1200s (TTL + interval) with
+    nobody cycling, which exceeds R-01's `_MAX_OBSERVATION_GAP_SECONDS`
+    (600) and restarts its dwell. Correct — a crashed leader is a genuine
+    observation outage, and restarting is the fail-safe direction.
+  - `run_cycle()` is deliberately **not** gated: `POST /api/canary/run-cycle`
+    lands on an arbitrary worker, so gating it would make an explicit admin
+    request return an empty payload roughly half the time under
+    `--workers 2` — structurally identical to a green cycle, the exact
+    ambiguity the 409 `"cycle in progress"` contract exists to remove.
+  - Guard: `tests/unit/test_1881_canary_leader_lease.py`.
 - **Fleet**: `config/canary-fleet.yaml` deploys two synthetic agents
   (`canary-fleet-burst` minute-cron, `canary-fleet-long` 5-min cron) via
   the existing `/api/systems/deploy` endpoint. Without the fleet, the
@@ -277,6 +377,24 @@
   Continuing-red invariants don't re-post. The dashboard-notifications
   path (writing `agent_notifications` rows via `db.create_notification`)
   was rejected on the product call.
+- **Instance attribution (#1987)**: the payload names the instance that
+  fired it — a `[eu2]` prefix on both the Block Kit header and the `text`
+  fallback — so instances sharing one webhook (as `dev` and `eu2` do since
+  the #1766 soak) stay tellable apart. A webhook carries no sender
+  identity, and continuing-red gating makes each alert a one-shot, so
+  anything the message omits is not recoverable from a later one.
+  `services/instance_identity.py::get_instance_label()` resolves it:
+  optional `TRINITY_INSTANCE_NAME` override → first DNS label of
+  `FRONTEND_URL`'s host (`https://eu2.abilityai.dev` → `eu2`; an IP
+  literal keeps its whole host) → `installation_id[:8]` → unlabelled.
+  Deliberately no new *required* var: managed instances already carry
+  `FRONTEND_URL`, so attribution improves fleet-wide without an `.env`
+  rollout. Every tier degrades instead of raising — an unlabelled alert
+  is the prior behaviour, a lost alert is the failure the sink exists to
+  prevent. The label is sanitized (ASCII-alnum + hostname punctuation,
+  32-char cap) at resolution *and* at the render boundary, so it can
+  neither forge Slack markup (`<!channel>`) nor overflow the 150-char
+  header cap Slack rejects the whole message on.
 - **Determinism**: invariant checks are pure functions
   `check(snapshot) → list[ViolationReport]`. Same snapshot input always
   yields the same output. No LLM reasoning anywhere in the canary path.
@@ -296,10 +414,75 @@
   after it. **Credential safety:** E-04/G-04 violations persist to
   `canary_violations`, so neither ever echoes the raw `backlog_metadata` — E-04
   reports the failed-predicate reason code, G-04 the matched pattern name only.
+- **Phase 5 (shipped, #1813)**: **H-01 collector blindness** — the harness's
+  first *self*-check, and the reason the `H-` (harness health) id family exists:
+  every other invariant means "the system is broken", H-01 means "the observer
+  is blind", and an H-01 violation invalidates every other green in that cycle.
+  #1540 repointed the SQL-tier collectors onto the configured engine but left
+  the failure *shape* untouched — a collector reading an empty or unreachable
+  source returns zero rows, which is indistinguishable from a genuinely clean
+  fleet, so both report green. H-01 fires when the roster read
+  (`_collect_known_agents`) returns zero rows or raises **while an independent,
+  non-SQL source proves the fleet is alive**: Docker container presence
+  (`docker_agent_names`, read from the container list *before* any `exec_run`,
+  since `zombie_counts` is keyed by exec success and thins on a degraded
+  container) ∪ Redis slot keys (`orphan_redis_slots`, corroborating only — slot
+  keys exist solely while an execution holds a slot). Docker is collected
+  **before** the roster read, so it still supplies evidence on the arm where
+  that read raises and the collector returns early; Redis needs `known_agents`
+  and cannot. Reason codes
+  (stable — trinity-enterprise#202 scores on them): `roster_read_failed` /
+  `roster_empty_contradicted` (critical) / `roster_empty_unverifiable` (major —
+  the evidence source was unreachable, was never read, or **only Redis** had
+  anything to say: `orphan_redis_slots` is by definition slot keys whose agent
+  is absent from `agent_ownership`, i.e. L-03's leaked-slot state, so treating
+  it as a contradiction would page critical over a correct roster plus an
+  unrelated leak). `docker_available`/`redis_available` are **tri-state**
+  (`None` = the collector never ran) because `sources_unavailable` cannot
+  express a skipped collector. **Confirmation on elapsed
+  wall-clock** (`CONFIRMATION_MIN_SECONDS`, marker `canary:h01:suspect_since`,
+  E-02's cross-cycle-state precedent) so the last-agent delete race — DB row
+  gone, container still tearing down — cannot false-fire. Deliberately NOT "a
+  second cycle": prod runs `--workers 2` and, when the gate was written,
+  `canary_service` held no leader lease, so both loops shared the marker and
+  worker B would confirm worker A's sighting seconds later, collapsing the
+  gate. The #1881 `canary:leader` lease does not retire the rule — it fails
+  open to leader on a Redis outage, restoring concurrent loops over the shared
+  marker, and the transient being ridden out is real-time regardless of worker
+  count. An unreadable *or unwritable*
+  marker fires *unconfirmed* rather than skipping,
+  because a guard that cannot self-check must say so; the marker carries a 24h
+  TTL refreshed every suspicious cycle, so a `_clear_marker` that silently
+  failed cannot leave the gate armed forever. The gate applies to **every**
+  arm including `roster_read_failed` — a raised roster read is often a
+  momentary DB blip, and paging critical on one is how a safety net gets muted.
+  A whole-database outage now reaches the check at all: `_run_cycle_inner`'s
+  pre-cycle latest-violation read is fail-open (it previously raised before
+  `collect_snapshot` ran, so H-01 never executed), with transition detection
+  falling back to `canary:last_cycle_red` so a persistent outage chirps once
+  rather than every cycle. Scoped to the roster read
+  ONLY: on a live-but-quiet fleet `terminal_rows`/`enabled_schedules`/
+  `orphan_refs`/`terminal_exec_statuses` are all legitimately empty, so a
+  general "any SQL collector reads zero" rule would false-alarm on every idle
+  install. Dual-track by construction (a pure function over the `Snapshot`; it
+  issues no SQL). **Residual:** an entirely *stopped* fleet has no containers
+  and no slots, so no evidence exists and H-01 can only reach
+  `roster_empty_unverifiable`; partial blindness (roster returns 1 of 20) is out
+  of scope, since a count comparison would false-fire on create/stop races.
 - **Registration**: each new invariant is a new file under
   `src/backend/canary/invariants/` + a registry entry (per the catalog at
   `docs/testing/orchestration-invariant-catalog.md`); the service and API
-  surface stay unchanged.
+  surface stay unchanged. **It must also carry all four per-invariant alert
+  surfaces in `services/canary_alerts.py`** — `_INVARIANT_NAMES`,
+  `_INVARIANT_RUNBOOKS`, and an id branch in each of `_render_message` and
+  `_render_forensic` — or its green→red Slack alert degrades to a bare-id
+  fallback with no name, evidence, or next step (#1880). Enforced by
+  `tests/unit/test_1880_canary_alert_parity.py`, bidirectionally (a stale or
+  typo'd id fails too). Source the name from the invariant module's own
+  docstring title, **not** the catalog: catalog ids are not registry ids
+  (catalog `E-06` is the unimplemented #129 check, while registry `E-06` is
+  "no overdue `next_run_at`"), so a catalog-sourced name can confidently
+  mislabel a live alert.
 
 ---
 

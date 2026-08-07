@@ -268,11 +268,33 @@
       </div>
     </div>
 
+    <!-- Action failure (#1926) — enable/disable used to fail to console only
+         (the row silently snapped back), and delete/trigger used a native
+         alert(). Both now surface here and persist until dismissed. -->
+    <InlineError
+      v-if="actionError"
+      class="mb-4"
+      :message="actionError"
+      :detail="actionErrorDetail"
+      @dismiss="clearActionError"
+    />
+
     <!-- Schedules List -->
     <div v-if="loading" class="text-center py-8">
       <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500 mx-auto"></div>
       <p class="text-sm text-gray-500 dark:text-gray-400 mt-2">Loading schedules...</p>
     </div>
+
+    <!-- Failed list fetch (#1926) — "No schedules configured" on a failed fetch
+         invites the user to create a duplicate schedule. -->
+    <LoadFailed
+      v-else-if="loadError"
+      title="Couldn't load schedules"
+      message="The schedule list didn't load, so what you see may be incomplete. Try again."
+      :detail="loadError"
+      :retrying="loading"
+      @retry="loadSchedules"
+    />
 
     <div v-else-if="schedules.length === 0" class="text-center py-12 bg-gray-50 dark:bg-gray-800 rounded-lg">
       <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -803,6 +825,9 @@ import { parseUTC } from '@/utils/timestamps'
 import ConfirmDialog from './ConfirmDialog.vue'
 import ModelSelector from './ModelSelector.vue'
 import ScheduleAnalyticsCard from './ScheduleAnalyticsCard.vue'
+import LoadFailed from './LoadFailed.vue'
+import InlineError from './InlineError.vue'
+import { apiErrorMessage } from '../utils/apiError'
 import { useAuthStore } from '../stores/auth'
 import { useExecutionsStore } from '../stores/executions'
 
@@ -852,6 +877,11 @@ const formLoading = ref(false)
 const formError = ref('')
 const triggerLoading = ref(null)
 const toggleLoading = ref(null)
+// #1926: a failed list fetch is not an empty list; a failed verb is not a
+// silent no-op. Both get their own state instead of console.error/alert().
+const loadError = ref('')
+const actionError = ref('')
+const actionErrorDetail = ref('')
 const deleteLoading = ref(null)
 const expandedSchedule = ref(null)
 const executions = ref({})
@@ -1120,13 +1150,16 @@ function toggleAllTools() {
 // Load schedules
 async function loadSchedules() {
   loading.value = true
+  loadError.value = ''
   try {
     const response = await axios.get(`/api/agents/${props.agentName}/schedules`, {
       headers: authStore.authHeader
     })
     schedules.value = response.data
+    loadError.value = ''
   } catch (error) {
     console.error('Failed to load schedules:', error)
+    loadError.value = apiErrorMessage(error, 'Request failed')
   } finally {
     loading.value = false
   }
@@ -1243,14 +1276,16 @@ function deleteSchedule(schedule) {
   confirmDialog.variant = 'danger'
   confirmDialog.onConfirm = async () => {
     deleteLoading.value = schedule.id
+    clearActionError()
     try {
       await axios.delete(`/api/agents/${props.agentName}/schedules/${schedule.id}`, {
         headers: authStore.authHeader
       })
       await loadSchedules()
     } catch (error) {
-      console.error('Failed to delete schedule:', error)
-      alert(error.response?.data?.detail || 'Failed to delete schedule')
+      // alert() blocks the page and dies on OK, leaving no record of what
+      // failed; an inline error persists next to the row (#1926).
+      reportActionFailure(error, `delete the schedule "${schedule.name}"`)
     } finally {
       deleteLoading.value = null
     }
@@ -1258,17 +1293,32 @@ function deleteSchedule(schedule) {
   confirmDialog.visible = true
 }
 
+function clearActionError() {
+  actionError.value = ''
+  actionErrorDetail.value = ''
+}
+
+// #1926 — one place that turns a failed verb into a persistent, named error.
+function reportActionFailure(error, what) {
+  console.error(`Failed to ${what}:`, error)
+  actionError.value = `Couldn't ${what}. Nothing was changed — try again.`
+  actionErrorDetail.value = apiErrorMessage(error, 'Request failed')
+}
+
 // Toggle schedule enabled/disabled
 async function toggleSchedule(schedule) {
   toggleLoading.value = schedule.id
+  clearActionError()
+  const wanted = schedule.enabled ? 'disable' : 'enable'
   try {
-    const endpoint = schedule.enabled ? 'disable' : 'enable'
-    await axios.post(`/api/agents/${props.agentName}/schedules/${schedule.id}/${endpoint}`, {}, {
+    await axios.post(`/api/agents/${props.agentName}/schedules/${schedule.id}/${wanted}`, {}, {
       headers: authStore.authHeader
     })
     await loadSchedules()
   } catch (error) {
-    console.error('Failed to toggle schedule:', error)
+    // The row reverts to its server state on reload, so without this the user
+    // sees the toggle snap back with no explanation (#1926).
+    reportActionFailure(error, `${wanted} the schedule "${schedule.name}"`)
   } finally {
     toggleLoading.value = null
   }
@@ -1277,6 +1327,7 @@ async function toggleSchedule(schedule) {
 // Trigger schedule manually
 async function triggerSchedule(schedule) {
   triggerLoading.value = schedule.id
+  clearActionError()
   try {
     await axios.post(`/api/agents/${props.agentName}/schedules/${schedule.id}/trigger`, {}, {
       headers: authStore.authHeader
@@ -1286,8 +1337,7 @@ async function triggerSchedule(schedule) {
       await loadExecutions(schedule.id)
     }
   } catch (error) {
-    console.error('Failed to trigger schedule:', error)
-    alert(error.response?.data?.detail || 'Failed to trigger schedule')
+    reportActionFailure(error, `run the schedule "${schedule.name}" now`)
   } finally {
     triggerLoading.value = null
   }

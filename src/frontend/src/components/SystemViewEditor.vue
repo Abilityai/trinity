@@ -121,8 +121,25 @@
               </button>
             </div>
 
+            <!-- Tag-suggestion fetch failed (#1926) — the "Available:" row used
+                 to vanish silently, which reads as "this agent fleet has no
+                 tags" rather than "we couldn't fetch them". Typing a tag by
+                 hand still works, so this is a note plus a retry, not a block. -->
+            <div
+              v-if="tagsError"
+              class="flex items-center gap-2 text-xs text-status-danger-600 dark:text-status-danger-400"
+              role="status"
+            >
+              <span>Couldn't load existing tags — you can still type one above.</span>
+              <button
+                type="button"
+                class="font-medium underline hover:no-underline"
+                @click="fetchAvailableTags"
+              >Try again</button>
+            </div>
+
             <!-- Available Tags -->
-            <div v-if="availableTags.length > 0" class="text-xs text-gray-500 dark:text-gray-400">
+            <div v-else-if="availableTags.length > 0" class="text-xs text-gray-500 dark:text-gray-400">
               Available:
               <button
                 v-for="tag in availableTags"
@@ -252,6 +269,8 @@ const form = reactive({
 
 const tagInput = ref('')
 const availableTags = ref([])
+// #1926: distinguishes "no tags exist" from "the tag fetch failed".
+const tagsError = ref(false)
 const isSubmitting = ref(false)
 const error = ref(null)
 
@@ -290,12 +309,14 @@ watch(() => props.isOpen, async (open) => {
 })
 
 async function fetchAvailableTags() {
+  tagsError.value = false
   try {
     const response = await axios.get('/api/tags')
     // Hide org-overlay namespaces (dept-*/reports-to-*) — see gridOrg.isOrgTag
     availableTags.value = (response.data.tags || []).filter((t) => !isOrgTag(t.tag))
   } catch (err) {
     console.error('Failed to fetch tags:', err)
+    tagsError.value = true
   }
 }
 

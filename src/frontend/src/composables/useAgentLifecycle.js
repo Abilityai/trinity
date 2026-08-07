@@ -53,7 +53,10 @@ export function useAgentLifecycle(agentRef, agentsStore, router, showNotificatio
     confirmDialog.onConfirm = async () => {
       try {
         await agentsStore.deleteAgent(agentRef.value.name)
-        router.push('/agents')
+        // ent#260: the Agents page is retired — go to the Dashboard (bare `/`,
+        // not `?view=list`: a post-delete nav is "go somewhere sensible", not
+        // a list intent, and must not override the user's saved view mode).
+        router.push('/')
       } catch (err) {
         showNotification(err.message || 'Failed to delete agent', 'error')
       }

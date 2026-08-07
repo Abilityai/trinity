@@ -1,9 +1,18 @@
 import { defineStore } from 'pinia'
 import axios from 'axios'
 import { useAuthStore } from './auth'
-import { useNetworkStore } from './network'
 import { agentDisplayName } from '../utils/agentName'
+import api from '../api'
 
+// ent#260 composition contract: with the Agents page retired, the Dashboard's
+// List panel (AgentListPanel.vue) runs on networkStore as its data spine and
+// composes THIS store in for exactly two members — `sortBy`/`setSortBy`
+// (session-lived sort state) and `syncHealth`/`fetchSyncHealth` (#389).
+// `agents` stays warm via networkStore.fetchAgents' write-through (the #1643
+// displayNameForSlug base fetch — gated: a quick-tag-FILTERED fetch never
+// clobbers this full-fleet list) plus the utils/websocket.js handlers that
+// merge agent_created / agent_label_changed rows in. The sort comparator
+// itself lives in utils/agentSort.js (pure function — no store access).
 export const useAgentsStore = defineStore('agents', {
   state: () => ({
     agents: [],
@@ -47,56 +56,11 @@ export const useAgentsStore = defineStore('agents', {
     },
     stoppedAgents() {
       return this.userAgents.filter(agent => agent.status === 'stopped')
-    },
-    // Sorted agents excluding system agent (for regular users)
-    sortedAgents() {
-      return this._getSortedAgents(false)
-    },
-    // Sorted agents including system agent pinned at top (for admins)
-    sortedAgentsWithSystem() {
-      return this._getSortedAgents(true)
-    },
-    // Internal getter for sorted agents with optional system agent inclusion
-    _getSortedAgents() {
-      return (includeSystem) => {
-        const sorted = [...this.userAgents]
-        switch (this.sortBy) {
-          case 'created_desc':
-            sorted.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0))
-            break
-          case 'created_asc':
-            sorted.sort((a, b) => new Date(a.created || 0) - new Date(b.created || 0))
-            break
-          // #1642: "Name (A-Z/Z-A)" sorts by what the user sees — the display
-          // name when set, else the slug (agentDisplayName). Sorting by the slug
-          // while the row renders the label would order the list by an invisible
-          // key. Actions still key on the slug elsewhere; only the sort comparator
-          // changes.
-          case 'name_asc':
-            sorted.sort((a, b) => agentDisplayName(a).localeCompare(agentDisplayName(b)))
-            break
-          case 'name_desc':
-            sorted.sort((a, b) => agentDisplayName(b).localeCompare(agentDisplayName(a)))
-            break
-          case 'status':
-            sorted.sort((a, b) => (b.status === 'running' ? 1 : 0) - (a.status === 'running' ? 1 : 0))
-            break
-          case 'success_desc':
-            sorted.sort((a, b) => {
-              const networkStore = useNetworkStore()
-              const aRate = networkStore.executionStats[a.name]?.successRate || 0
-              const bRate = networkStore.executionStats[b.name]?.successRate || 0
-              return bRate - aRate
-            })
-            break
-        }
-        // Pin system agent at top if requested and exists
-        if (includeSystem && this.systemAgent) {
-          return [this.systemAgent, ...sorted]
-        }
-        return sorted
-      }
     }
+    // ent#260: sortedAgents / sortedAgentsWithSystem / _getSortedAgents were
+    // deleted with their sole consumer (views/Agents.vue). The comparator
+    // moved to utils/agentSort.js (sortAgents), which the List panel calls
+    // with networkStore.executionStats as a parameter.
   },
 
   actions: {
@@ -154,8 +118,15 @@ export const useAgentsStore = defineStore('agents', {
         }
         return this.selectedAgent
       } catch (error) {
+        // #1914: re-throw. Swallowing here returned `undefined` to the caller,
+        // which is indistinguishable from a successful empty fetch — that is
+        // how a 404 rendered AgentDetail as a blank page (neither the error
+        // banner nor the agent body had a truthy condition). Callers that
+        // genuinely tolerate a failure (the post-stop status poll in
+        // AgentDetail) already wrap this in their own try/catch.
         this.error = error.message
         console.error('Failed to fetch agent:', error)
+        throw error
       } finally {
         this.loading = false
       }
@@ -357,6 +328,16 @@ export const useAgentsStore = defineStore('agents', {
         {},
         { headers: authStore.authHeader }
       )
+      return response.data
+    },
+
+    // ent#127: written against `api.js` rather than the raw-axios idiom of its
+    // neighbours above. `api.js` is the single client (Invariant #7) — it owns
+    // the auth interceptor and the 401 -> login redirect — and the neighbours
+    // predate it (`Library.vue` and `CreateAgentModal.vue` have already
+    // migrated). Copying them would be citing Invariant #7 to violate it.
+    async getCredentialRequirements(name) {
+      const response = await api.get(`/api/agents/${name}/credential-requirements`)
       return response.data
     },
 
@@ -630,6 +611,34 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // Post-creation repo binding (ent#109)
+    async bindAgentToOwnRepo(name, payload) {
+      const authStore = useAuthStore()
+      // Follows the surrounding raw-axios idiom rather than the shared `api.js`
+      // instance, whose 30s instance-wide timeout is FAR below this call's
+      // worst case (repo create + GitHub visibility poll + a full-history push
+      // + a container replacement). Aborting the client mid-bind lands the user
+      // after the commit point with no response, which is exactly the case the
+      // GET .../bind-to-own-repo/status companion exists to rescue — so don't
+      // manufacture it. 300s is generous against `initializeGitHub`'s 120s
+      // because binding does strictly more work.
+      const response = await axios.post(
+        `/api/agents/${name}/git/bind-to-own-repo`,
+        payload,
+        { headers: authStore.authHeader, timeout: 300000 }
+      )
+      return response.data
+    },
+
+    async getBindToOwnRepoStatus(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(
+        `/api/agents/${name}/git/bind-to-own-repo/status`,
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
     // Per-agent GitHub PAT methods (#347)
     async getGitHubPATStatus(name) {
       const authStore = useAuthStore()
@@ -774,7 +783,11 @@ export const useAgentsStore = defineStore('agents', {
         return {
           success: true,
           enabled: newState,
-          schedulesUpdated: response.data.schedules_updated
+          // #1945: autonomy is a gate, not a bulk edit — it no longer rewrites
+          // per-schedule `enabled`. These are counts, not "how many we changed".
+          totalSchedules: response.data.total_schedules,
+          enabledSchedules: response.data.enabled_schedules,
+          message: response.data.message
         }
       } catch (error) {
         console.error('Failed to toggle autonomy:', error)

@@ -1,0 +1,90 @@
+# Trinity bundled-template .gitignore -- GENERATED, do not hand-edit.
+#
+# Mirrors `_GITIGNORE_PATTERNS` in src/backend/services/git_service.py, the
+# single source of truth the platform re-appends to every agent's .gitignore on
+# each git sync. Shipping it in the template moves that protection from *first
+# sync* to *first boot* -- the window a freshly created agent's compatibility
+# report observes (#1908).
+#
+# Regenerate every bundled template with:
+#   python tests/unit/test_1908_bundled_template_gitignore.py --regenerate
+#
+# Do NOT add a bare `.claude/` line: Claude Code commands/skills/agents must
+# stay committed (compatibility check G-001 is HARD and fails on it).
+
+# Shell init / history (instance-specific)
+.bash_logout
+.bashrc
+.profile
+.bash_history
+.sudo_as_admin_successful
+
+# Credentials - NEVER COMMIT
+.env
+.env.*
+.mcp.json
+credentials.json
+*.pem
+*.key
+
+# Instance-specific directories - DO NOT COMMIT
+.cache/
+.local/
+.npm/
+.ssh/
+.trinity/
+.tmp/
+.trinity-clone-tmp/
+
+# Large generated content - DO NOT COMMIT
+content/
+
+# Bulk data / deps / cache / index dirs - DO NOT COMMIT (#1596)
+# These churn on every run and bloat .git unboundedly under auto-sync.
+# Git sync is for code + state, not datasets/indexes/deps — those belong
+# in data_paths (#1169). Negate per-repo if genuinely needed (e.g. !keep.db).
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+*.sqlite
+*.sqlite3
+*.db
+
+# Claude Code - commit commands/skills/agents, exclude runtime data
+.claude.json
+.claude.json.backup
+.claude/projects/
+.claude/statsig/
+.claude/todos/
+.claude/debug/
+.claude/sessions/
+.claude/shell-snapshots/
+.claude/plugins/
+# settings.json is baked by the Trinity base image with container-only hook
+# paths (/opt/trinity/hooks/*.py). Committing it bricks any clone made outside
+# the container: the missing hook script exits 2, which Claude Code reads as
+# "block this tool call", so every Bash/Edit/Write fails there. (#2036)
+.claude/settings.json
+.claude/remote-settings.json
+.claude/policy-limits.json
+.claude/backups/
+.claude/.last-cleanup
+# Keep: .claude/commands/, .claude/skills/, .claude/agents/
+
+# Temporary files
+*.log
+*.tmp
+.DS_Store
+
+# Local overrides
+*.local.md
+*.local.json
+!.env.example
+!.mcp.json.template

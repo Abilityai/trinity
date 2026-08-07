@@ -10,6 +10,18 @@
 #   - 4318: OTel Collector HTTP (OTLP)
 #   - 8889: OTel Prometheus metrics
 
+# #1871: bound every container's json-file log. Docker's json-file driver has
+# NO max-size and NO max-file by default, so each container's log under
+# /var/lib/docker/containers/ grows forever — silently, until the Docker data
+# root hits 100% and dockerd wedges. Agent containers are created through the
+# Docker SDK, not compose, so they are capped separately by AGENT_LOG_CONFIG in
+# src/backend/services/agent_service/capabilities.py.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${CONTAINER_LOG_MAX_SIZE:-10m}"
+    max-file: "${CONTAINER_LOG_MAX_FILE:-3}"
+
 services:
   backend:
     build:
@@ -27,6 +39,7 @@ services:
         GIT_BRANCH: ${GIT_BRANCH:-unknown}
         BUILD_DATE: ${BUILD_DATE:-unknown}
     container_name: trinity-backend
+    logging: *default-logging
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -97,6 +110,10 @@ services:
       # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
       # Prod compose launches standalone (no base merge / env_file), so wire it here too.
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
+      # Skills library lifecycle automation (ent#236).
+      # Prod compose launches standalone (no base merge / env_file), so wire it here too.
+      - SKILLS_RECONCILE_MAX_REMOVALS=${SKILLS_RECONCILE_MAX_REMOVALS:-10}   # per-agent blast-radius cap
+      - SKILLS_FLEET_INJECT_CONCURRENCY=${SKILLS_FLEET_INJECT_CONCURRENCY:-5}  # parallel agents per sweep
       # Public webhook trigger hardening (#1023, #1424) — 60s windows fixed in code.
       # Prod compose launches standalone (no base merge / env_file), so wire it here too.
       - WEBHOOK_RATE_LIMIT=${WEBHOOK_RATE_LIMIT:-10}             # triggers per token per 60s
@@ -143,10 +160,24 @@ services:
       # operator manifest, or `disabled` to skip seeding. Empty = bundled
       # config/manifests/default-system.yaml.
       - TRINITY_DEFAULT_SYSTEM_MANIFEST=${TRINITY_DEFAULT_SYSTEM_MANIFEST:-}
+      # ent#126: directory the bundled-manifest catalog
+      # (GET /api/systems/manifests) reads. Empty = the image's own
+      # config/manifests (already bind-mounted :ro below). Point it at another
+      # bind-mounted directory to offer your own curated fleet manifests; an
+      # unreadable path is an EMPTY catalog, not an error, so mount the
+      # directory too — setting this alone silently lists nothing.
+      - TRINITY_MANIFESTS_DIR=${TRINITY_MANIFESTS_DIR:-}
       # Agent /tmp tmpfs size (#1231) — read by capabilities.py to build the
       # agent container mount spec. noexec,nosuid stay fixed; only size tunes.
       # Existing agents pick up a change on recreate, not restart.
       - AGENT_TMP_SIZE=${AGENT_TMP_SIZE:-512m}
+      # Agent container log cap (#1871) — read by capabilities.py to build the
+      # agent container's json-file log_config. The x-logging anchor above bounds
+      # the PLATFORM services; agents are SDK-created, so these must reach the
+      # backend process itself or the knobs are inert (#1039 class).
+      # Existing agents pick up a change on recreate, not restart.
+      - AGENT_LOG_MAX_SIZE=${AGENT_LOG_MAX_SIZE:-10m}
+      - AGENT_LOG_MAX_FILE=${AGENT_LOG_MAX_FILE:-3}
       # Headless per-tool stall-watchdog ceiling (#1369) — seconds; scoped to
       # mcp__* tools. Threaded into agent containers by crud.py/lifecycle.py, so
       # it must reach the backend here or the .env lever is inert (#1039 class).
@@ -154,6 +185,12 @@ services:
       - AGENT_TOOL_STALL_LIMIT_S=${AGENT_TOOL_STALL_LIMIT_S:-}
       # #946 pull-pilot routing flag (observability mirror of the mcp-server gate).
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # #848 inline email auth — read by BOTH processes from this one key. The
+      # backend gates the /api/internal/mcp-auth/* surface on it (404 when off)
+      # and gates the keyless connector snippet. Prod compose launches standalone
+      # (no env_file merge), so without this the .env lever never reaches the
+      # container and the feature is un-flippable (#1056/#1039 class).
+      - MCP_INLINE_AUTH_ENABLED=${MCP_INLINE_AUTH_ENABLED:-false}
       # Pull / work-stealing pilot opt-in (#1081 Phase 2) + lease-reaper poison
       # cap (#429/#1402). Backend-only, process-env (needs a backend restart).
       # PULL_MODE_PILOT_AGENTS empty = pull fully dark; MAX_REDELIVERY default 3.
@@ -247,6 +284,25 @@ services:
       # packaging-gap class).
       - TELEMETRY_CONTAINER_STATS_TTL=${TELEMETRY_CONTAINER_STATS_TTL:-10}
       - TELEMETRY_DOCKER_POOL_SIZE=${TELEMETRY_DOCKER_POOL_SIZE:-16}
+      # Canary invariant harness (CANARY-001 / Issue #411). Mirrors
+      # docker-compose.yml; without these lines the .env knobs are inert in prod
+      # (the #1039 packaging-gap class). Load-bearing here specifically: the
+      # harness is documented as "CANARY_ENABLED=1 on staging/dev", and the dev
+      # instance deploys via THIS file (.github/workflows/deploy-dev.yml,
+      # scripts/deploy/gcp-deploy.sh) — so omitting them made the watcher
+      # un-enableable on the very instance it exists to watch.
+      # Default 0 — production users see no canary activity.
+      - CANARY_ENABLED=${CANARY_ENABLED:-0}
+      # Slack alert sink for canary green→red transitions. URL is the
+      # credential — leaking it lets anyone post to that one channel.
+      # Unset = canary cycles run silently (still persists violations).
+      - CANARY_SLACK_WEBHOOK_URL=${CANARY_SLACK_WEBHOOK_URL:-}
+      # Optional label naming THIS instance in outbound alerts (#1987). Mirrors
+      # docker-compose.yml. Unset is the norm — services/instance_identity.py
+      # derives one from FRONTEND_URL's host (already forwarded above), which is
+      # why alert attribution improves on every managed instance without an .env
+      # rollout. Set it only to override that derivation.
+      - TRINITY_INSTANCE_NAME=${TRINITY_INSTANCE_NAME:-}
       # SSH access host override (read by services/ssh_service.py). Mirrors
       # docker-compose.yml; without this line the .env value is inert in prod (the
       # #1039 packaging-gap class) and SSH host detection falls back to localhost.
@@ -337,6 +393,7 @@ services:
         - VITE_BUG_INTAKE_URL=${VITE_BUG_INTAKE_URL:-https://intake.abilityai.dev/v1/report-bug}
     image: trinity-frontend:prod
     container_name: trinity-frontend
+    logging: *default-logging
     restart: unless-stopped
     # Issue #874: container nginx binds 8080 (unprivileged). Host port 80
     # preserved so external URLs do not change.
@@ -362,6 +419,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: trinity-redis
+    logging: *default-logging
     restart: unless-stopped
     # Redis not exposed externally in production
     expose:
@@ -455,6 +513,7 @@ services:
       context: .
       dockerfile: docker/scheduler/Dockerfile
     container_name: trinity-scheduler
+    logging: *default-logging
     restart: unless-stopped
     environment:
       - DATABASE_PATH=/data/trinity.db
@@ -501,6 +560,7 @@ services:
   logs-init:
     image: alpine:3.20
     container_name: trinity-logs-init
+    logging: *default-logging
     command: ["sh", "-c", "chown 1000:1000 /data/logs && chmod 775 /data/logs"]
     volumes:
       - trinity-logs:/data/logs
@@ -512,6 +572,7 @@ services:
   vector:
     image: timberio/vector:0.43.1-alpine
     container_name: trinity-vector
+    logging: *default-logging
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -552,6 +613,7 @@ services:
       context: ./src/mcp-server
       dockerfile: Dockerfile
     container_name: trinity-mcp-server
+    logging: *default-logging
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -567,6 +629,17 @@ services:
       # #946 pull-pilot routing gate — see docker-compose.yml. Without this the
       # flag cannot be enabled in prod (the #1056/#1039 packaging-gap class).
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # #848 inline email auth — THIS is the session-tier gate: with it OFF a
+      # keyless MCP connection is refused outright and no login tools register.
+      # Same packaging-gap class as the line above; the backend reads the same key
+      # to gate /api/internal/mcp-auth/*.
+      - MCP_INLINE_AUTH_ENABLED=${MCP_INLINE_AUTH_ENABLED:-false}
+      # #848 ceiling for the four backend relay fetches on the inline-auth path.
+      # Functional via its 15000ms default; wired so the lever is not inert.
+      - MCP_INLINE_AUTH_TIMEOUT_MS=${MCP_INLINE_AUTH_TIMEOUT_MS:-15000}
+      # ent#328: `ask_trinity` POSTs here for grounded Trinity docs answers.
+      # Empty = the public Cloud Function default baked into the client.
+      - ASK_TRINITY_ENDPOINT=${ASK_TRINITY_ENDPOINT:-}
       # INTERNAL_API_SECRET (SEC-001) — shared secret for POST /api/internal/audit
       # so MCP tool-call audit reaches the backend. Mirrors docker-compose.yml;
       # without it audit.ts (postAudit) early-returns and ALL MCP tool-call audit
@@ -602,6 +675,7 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: trinity-cloudflared
+    logging: *default-logging
     restart: unless-stopped
     command: tunnel run
     environment:
@@ -627,6 +701,7 @@ services:
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.120.0
     container_name: trinity-otel-collector
+    logging: *default-logging
     restart: unless-stopped
     ports:
       - "4317:4317"   # gRPC receiver (OTLP)

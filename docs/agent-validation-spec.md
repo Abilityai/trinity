@@ -50,6 +50,7 @@
 | T-015 | SOFT | STATIC | template.yaml | `credentials` schema lists all variables referenced in `.mcp.json.template` |
 | T-016 | INFO | STATIC | template.yaml | `schedules` entries (if any) reference existing `.claude/commands/` files |
 | T-017 | HARD | STATIC | template.yaml | No conflicting Trinity-injected files named in commit paths (`.env`, `.mcp.json`) |
+| T-018 | SOFT | STATIC | template.yaml | `schedules` block entries are well-formed (structure only — A-002 owns cron syntax) |
 | C-001 | HARD | STATIC | CLAUDE.md | Valid UTF-8 markdown, non-empty |
 | C-002 | HARD | AI | CLAUDE.md | Has an identity/purpose section (who the agent is and what it does) |
 | C-003 | SOFT | AI | CLAUDE.md | Contains domain-specific instructions (not just generic Claude guidance) |
@@ -286,6 +287,29 @@ If `schedules[].message` starts with `/`, verify a corresponding file exists in 
 Severity: HARD | Type: STATIC  
 `git.commit_paths` must not include `.env`, `.mcp.json`, `.mcp.json.template`. These are managed by Trinity.
 
+**T-018** — `schedules` block entries are well-formed  
+Severity: SOFT | Type: STATIC  
+Trinity materializes a template's declared `schedules:` at agent creation
+(trinity-enterprise#89), so a malformed block silently costs the agent its recurring tasks.
+Validates **structure**: the block is a list; each entry is a mapping carrying non-empty string
+`name`, `cron` and `message`; `timezone`/`description` are strings when present; `name` and
+`description` are within their length bounds; names are unique within the block; and the block is
+within the 20-entry cap. Shares one reader — `services/template_schedules.py` — with the
+materializer and the catalog surface, so the report cannot drift from what creation actually does.
+
+**Cron syntax is deliberately NOT reported here — A-002 owns it.** Two checks disagreeing about
+the same field is worse than either alone. (The reader *does* validate cron strictly, but that is
+a materialization gate — drop the entry — not a report verdict.)
+
+SOFT, not HARD: a malformed block costs the agent its declared schedules, not its usability.
+
+**Fails closed.** Unlike every other check, T-018 catches its own exception and returns `fail`.
+`run_static` converts a raise into `skipped`, and the report counts only `fail` — so a raising
+SOFT check drops `soft_count` 1→0 and flips `overall_status` from `issues` to `compatible`
+precisely when this check's finding was the only failure, then persists that clean bill of health
+into every degraded report. A check whose whole purpose is malformed-input tolerance must not rely
+on the fail-open outer net.
+
 ---
 
 ### Category: CLAUDE.md
@@ -444,7 +468,12 @@ Severity: SOFT | Type: AI
 
 **A-002** — Cron expressions are valid  
 Severity: SOFT | Type: STATIC  
-Validate against standard 5-field cron syntax. Flag invalid expressions.
+Validated with `services/schedule_validation.validate_cron_expression` — the **same** parser the
+dedicated scheduler registers the job with (#1472): exactly 5 fields, Unix→APScheduler day-name
+translation, real range checking, and the declared `timezone`. Flags anything `_add_job` would
+reject. Until trinity-enterprise#89 this was a per-field `^[\d*/,\-]+$` regex that was wrong in
+both directions — it rejected `0 9 * * MON` and accepted `99 99 * * *`. A-002 is the single cron
+authority in this catalog; T-018 reports the `schedules:` block's structure only.
 
 **A-003** — Agent has a clear autonomy model  
 Severity: SOFT | Type: AI  
@@ -649,6 +678,13 @@ test-locked ways:
 - **Runtime-aware.** Claude-specific checks (`CLAUDE.md` content, `.claude/`
   skills/commands) are **omitted** for non-Claude runtimes (Codex/Gemini, #1187)
   so those agents aren't flagged with false HARDs.
+- **T-018 fails closed** (trinity-enterprise#89) — the only check that catches
+  its own exception and returns `fail`. `run_static`'s swallow turns a raise
+  into `skipped`, which the report's counts ignore, so a broken validator
+  reports "healthy" and that verdict persists into every degraded report. A
+  check whose entire purpose is malformed-input tolerance cannot rest on that
+  net. The swallow itself is now logged (`logger.error`), which is the
+  instrument for deciding later whether to flip it to `fail` for all checks.
 - **Persistence (departs from the issue's "no DB table" note).** The latest
   report per agent is persisted in `agent_compatibility_results` (one row,
   upserted) so AI verdicts show on every Overview load without re-spending

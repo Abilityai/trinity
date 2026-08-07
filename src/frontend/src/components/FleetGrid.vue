@@ -274,6 +274,13 @@ import { useOrgOverlay } from '@/composables/useOrgOverlay'
  */
 const props = defineProps({
   agents: { type: Array, required: true },
+  // ent#261 × ent#305: `agents` is the visibleAgents seam (type-to-filter
+  // narrows it live), but the org overlay derives its WORLD from its roster —
+  // filtering out the only dept-* agent would flip the fleet into bootstrap
+  // mode and drop reporting lines as you type. The overlay therefore reads
+  // this unfiltered roster for org DATA; geometry stays naturally gated on
+  // placed/rendered tiles (computeZones/computeEdges skip absent layout).
+  orgAgents: { type: Array, default: null },
 })
 
 const gridStore = useFleetGridStore()
@@ -459,7 +466,7 @@ const {
   cancelOrgDrags,
   destroy: destroyOrg,
 } = useOrgOverlay({
-  agents: computed(() => props.agents),
+  agents: computed(() => props.orgAgents || props.agents),
   layout,
   canvasEl,
   vz,
@@ -869,8 +876,17 @@ onBeforeUnmount(() => {
 :root.dark .fleet-canvas {
   --gv-text: #f9fafb;
   --gv-muted: #9ca3af;
-  --gv-faint: #6b7280;
-  --gv-ghost: #4b5563;
+  /* #1922: dark ink ladder — gray-500 is the floor (disabled/decoration only).
+     Both of these carry READABLE text (--gv-faint: the zoom readout, the
+     far-tile placeholder and the empty stat line; --gv-ghost: the repo label
+     and the dimmed half of a stat), so neither may sit below tertiary.
+     They collapse onto gray-400 with --gv-muted because the dark ladder has
+     exactly ONE legal step for tertiary text — there is no darker ink left to
+     spend. Re-separating them needs weight or size, not a darker gray; that is
+     a design call for #1430, not a color sweep. The light block keeps all three
+     distinct (it has headroom below tertiary). */
+  --gv-faint: #9ca3af;
+  --gv-ghost: #9ca3af;
   --gv-border: #374151;
   --gv-border-soft: rgba(55, 65, 81, 0.5);
   --gv-panel: #1f2937;

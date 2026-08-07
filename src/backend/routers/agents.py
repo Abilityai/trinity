@@ -637,6 +637,14 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
                     if result.get("recreated")
                     else {}
                 ),
+                # #1816: a recreate the AC2 gate suppressed (running
+                # trinity-system). Audited so "I clicked Start and my config
+                # change did not apply" is answerable from the trail.
+                **(
+                    {"recreate_deferred": result.get("recreate_deferred")}
+                    if result.get("recreate_deferred")
+                    else {}
+                ),
             },
         )
 
@@ -660,11 +668,24 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
             # answers "why did my container id change / uptime reset".
             "recreated": bool(result.get("recreated")),
             "recreate_reason": result.get("recreate_reason"),
+            # #1816: set when the AC2 gate suppressed a recreate the predicates
+            # asked for — a running trinity-system is never replaced
+            # mid-operation. None on every normal start. This dict is a fresh
+            # whitelist, NOT start_agent_internal's return value, so a field
+            # added there does not reach the API unless it is also added here.
+            "recreate_deferred": result.get("recreate_deferred"),
         }
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to start agent: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            # py/stack-trace-exposure (#1917, the PR #1912 pattern).
+            detail=(
+                f"Failed to start agent "
+                f"({e.__class__.__name__} — details in backend logs)"
+            ),
+        )
 
 
 @router.post("/{agent_name}/stop")
@@ -707,7 +728,14 @@ async def stop_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reques
 
         return {"message": f"Agent {agent_name} stopped"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to stop agent: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            # py/stack-trace-exposure (#1917, the PR #1912 pattern).
+            detail=(
+                f"Failed to stop agent "
+                f"({e.__class__.__name__} — details in backend logs)"
+            ),
+        )
 
 
 # ============================================================================
@@ -730,7 +758,14 @@ async def get_agent_logs_endpoint(
 
         return {"logs": logs}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get logs: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            # py/stack-trace-exposure (#1917, the PR #1912 pattern).
+            detail=(
+                f"Failed to get logs "
+                f"({e.__class__.__name__} — details in backend logs)"
+            ),
+        )
 
 
 @router.get("/{agent_name}/stats")
@@ -1414,7 +1449,14 @@ async def agent_execution_result(
     result = await svc.apply_result(
         agent_name,
         envelope,
-        activity_id=db.get_open_activity_id_for_execution(execution_id),
+        # #1804: `include_failed=True` — this endpoint IS the late-SUCCESS path.
+        # A lease reaper that beat the callback already FAILED the row and closed
+        # the activity FAILED; the CAS lets a genuine late SUCCESS correct the
+        # row, and the activity must follow. A `started`-only lookup returns None
+        # here, so the pair would settle at execution=success, activity=failed —
+        # permanently. Harmless for a FAILED callback: the close CAS refuses to
+        # overwrite an already-closed activity.
+        activity_id=db.get_open_activity_id_for_execution(execution_id, include_failed=True),
         breaker_enabled=dispatch_breaker_active(agent_name),
         release_slot=True,
     )

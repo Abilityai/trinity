@@ -61,7 +61,7 @@ agents:
         message: "Check progress and adjust"
 
   writer:
-    template: local:business-assistant
+    template: local:default
     folders:
       expose: true
       consume: true
@@ -69,7 +69,7 @@ agents:
       - worker
 
   editor:
-    template: local:business-assistant
+    template: local:default
     folders:
       expose: false
       consume: true
@@ -140,6 +140,16 @@ permissions:
 - **Details**: `GET /api/systems/{name}` - Get system details
 - **Restart**: `POST /api/systems/{name}/restart` - Restart all system agents
 - **Export**: `GET /api/systems/{name}/manifest` - Export system as YAML
+- **Bundled catalog** (ent#126): `GET /api/systems/manifests` - List the manifests
+  shipped in `config/manifests/`
+- **Bundled manifest** (ent#126): `GET /api/systems/manifests/{manifest_id}` - The same
+  summary plus the raw YAML, for loading into the install editor
+
+> **Naming adjacency**: `/api/systems/manifests` (the bundled *catalog*) and
+> `/api/systems/{name}/manifest` (export an *already-deployed* system) read alike and are
+> unrelated. Both catalog routes must stay declared **above** the parameterized routes —
+> Invariant #4 applies **twice** here: `/manifests` collides with `GET /{system_name}`, and
+> `/manifests/manifest` collides with `GET /{system_name}/manifest`.
 
 ### MCP Tools
 - `deploy_system` - Deploy from YAML manifest
@@ -148,17 +158,109 @@ permissions:
 - `get_system_manifest` - Export system configuration as YAML
 
 ### UI
-- **Status**: Not yet implemented (Phase 1-3 are API/MCP only)
-- **Planned**: Manifest editor with syntax highlighting, deployment history
+- **Status**: ✅ Implemented (trinity-enterprise#126, 2026-07-30) — install surface only
+- **Where**: the `#systems` section of the Library page (`/library#systems`). `/templates` redirects, hash preserved.
+- **Not built**: a browser for *already-deployed* systems (see Frontend Layer below)
 
 ## Frontend Layer
 
-**Status**: No UI implementation yet (API-only feature)
+**Status**: ✅ Install surface implemented (trinity-enterprise#126, 2026-07-30).
 
-**Planned Components**:
-- `SystemManifestEditor.vue` - YAML editor with validation
-- `SystemsList.vue` - View deployed systems
-- `SystemDetail.vue` - System overview with agents, permissions, schedules
+Pick a bundled manifest / upload a file / paste YAML → preview → deploy. Home is a
+stacked `#systems` section on the **Library** page rather than a new NavBar entry (the bar
+already has six). It first shipped as a `?tab=` strip on `Templates.vue`; ent#263 then
+renamed that page to Library and deliberately chose stacked sections + jump anchors over
+tabs, so this conforms to the page's model instead of reintroducing a competing one.
+Systems sits directly after Agent Templates because both **install agents** — one template
+makes one agent, one manifest makes a whole wired fleet — leaving Skills last as the kind
+that configures agents that already exist.
+
+**Components** (`src/frontend/src/components/systems/`):
+
+| Component | Responsibility |
+|---|---|
+| `SystemInstallPanel.vue` | Source picker (bundled cards / upload / paste), the manifest textarea, Preview + Deploy actions, and the outcome-unknown state |
+| `ManifestPreview.vue` | Dry-run render: agents table, permission topology grouped by source, schedules table, blockers, warnings, and the acknowledgement gate |
+| `DeployResult.vue` | Post-deploy render: switches on all five `status` values, created/failed lists, prominent warnings, next-action navigation |
+
+**Store**: `src/frontend/src/stores/systems.js` — a new domain-scoped store (Invariant
+#6), deliberately **not** added to `systemViews.js`: a *System* is a manifest-deployed
+set of agents sharing a name prefix; a *System View* is a saved tag filter over agents.
+Different domains that share a word. All calls go through the single `api` axios
+instance (Invariant #7).
+
+**Host**: `views/Library.vue` gained a third `<section id="systems">`, plus a "Systems"
+jump anchor in the header nav. It is gated on `hasMinRole('creator')`, mirroring
+`POST /api/systems/deploy`, and is **hidden outright** below that role rather than
+shown-and-disabled — a browse surface gains nothing from a dead panel, and the anchor is
+gated with it so the nav never points at a section that is not rendered. `/templates`
+still redirects to `/library` with query **and** hash preserved, so older links survive. Note `hasMinRole` is a plain **function** — `composables/useRole.js`'s
+own usage docstring says `hasMinRole.value(...)` and is stale.
+
+**Editor**: a plain `<textarea>`. The repo's orphaned monaco-based `components/YamlEditor.vue`
+(zero consumers since the Process Engine was decommissioned) was **not** revived: the
+production CSP is `script-src 'self'` with no `unsafe-eval` and no `worker-src`, while the
+dev CSP *does* allow `unsafe-eval` — so `npm run dev` cannot prove production. Every
+acceptance criterion is satisfiable without it. Reviving it (or deleting the unreachable
+`monaco-editor` dependency) is a scoped follow-up gated on proving it against the real
+nginx CSP.
+
+### Error contract the store must honour
+
+The store never switches on the HTTP status code, because the code alone identifies
+none of the six outcomes:
+
+| Outcome | HTTP | Body |
+|---|---|---|
+| `deployed` / `partial` / `valid` / `invalid` | **200** | full report |
+| `failed` (0 agents created) | **500** | **full report AS THE BODY** |
+| parse / validation error | 400 | `{detail: "<string>"}` |
+| request-model violation (e.g. over the size cap) | 422 | `{detail: [ … ]}` — a **list** |
+| unexpected error, possibly after agents exist | 500 | `{detail: "<string>"}` |
+| client timeout — **the server keeps deploying** | — | none |
+
+Two are traps. `partial` is a 200, so a naive `.then()` renders a degraded outcome as
+clean success. `failed` is a 500 whose body *is* the report, so a naive `catch` discards
+exactly the `failed[]` list the "show created + failed" requirement needs. `normalizeError`
+in the store collapses all six into one renderable shape and returns the 500-with-a-report
+as a **result**, not an error.
+
+### Honesty constraints in the UI
+
+Each corresponds to a real way the backend can mislead a reader:
+
+- **"agents created", never "success"** — `status` describes agent creation only.
+  Folder/permission/schedule/tag/start failures land in `warnings[]` with `status` still
+  `deployed`, so warnings render as their own prominent panel rather than a footnote.
+- **Never "this will deploy"** — `github:` templates are not probed by the preview, and the
+  permission topology is resolved against *all* agents while a partial deploy wires up only
+  those created. Both limits are stated in the UI.
+- **Acknowledgement, not a banner** — a manifest setting `prompt:` replaces the
+  platform-wide `trinity_prompt` for **every agent on the instance**, and enabled schedules
+  start recurring autonomous executions that spend API budget. Deploy is gated on an
+  explicit checkbox.
+- **Duplicate names are confirm-grade** — on a fresh install, re-installing a bundled
+  manifest resolves to `_N` suffixes by default and recovery is manual, per agent.
+- **No blind retry** — a timeout or bare 5xx renders "outcome unknown — may still be
+  running" and offers the agent list instead of a retry, because cancelling the request does
+  not cancel the (synchronous, serial) server-side deploy.
+- **Preview is bound to its text** — `previewedText` is compared against the textarea, so
+  editing after a preview disables Deploy until re-previewed.
+- **Plain text only** — manifest descriptions, failure `reason`s and warnings never render
+  via `v-html` (H-005). `reason` is credential-sanitized server-side but **not**
+  HTML-sanitized.
+
+### Still not built (deliberately out of scope)
+
+- **`SystemDetail.vue` / a deployed-systems browser.** `GET /api/systems` and
+  `GET /api/systems/{name}` exist and have no frontend consumer. Unowned; ent#126 scoped
+  itself to *installing*, not browsing. This doc previously listed `SystemManifestEditor.vue`,
+  `SystemsList.vue` and `SystemDetail.vue` as "planned"; only the install surface shipped, so
+  the other two names are retired rather than left as a standing promise.
+- **Async deploy with a job id + reconciliation** — the real fix for the timeout window.
+- **Remote / registry manifest sources** — ent#14 and ent#108 own those; this ships the tab
+  they slot into.
+- **Per-agent credential setup after deploy** — ent#127.
 
 ## Backend Layer
 
@@ -168,7 +270,7 @@ permissions:
 ```python
 class SystemAgentConfig(BaseModel):
     """Configuration for a single agent in a system manifest."""
-    template: str  # e.g., "github:Org/repo" or "local:business-assistant"
+    template: str  # e.g., "github:Org/repo" or "local:default"
     resources: Optional[dict] = None  # {"cpu": "2", "memory": "4g"}
     folders: Optional[dict] = None  # {"expose": bool, "consume": bool}
     schedules: Optional[List[dict]] = None  # [{name, cron, message, ...}]
@@ -414,6 +516,26 @@ def create_schedules(
         Number of schedules created
     """
 ```
+
+**Name-match skip (trinity-enterprise#89).** `deploy_manifest` creates each agent
+(`create_agent_internal`) and calls `create_schedules` **afterwards**. Since ent#89,
+creation itself materializes the *template's* declared `schedules:` block — so this
+function is now the **second** schedule producer for the same agent, and a manifest
+declaring a name the template also declares would insert a duplicate row (there is no
+`UNIQUE(agent_name, name)` index on `agent_schedules`, and adding one is a dual-track
+schema change that would fail on installs already holding duplicates).
+
+It therefore reads the agent's existing schedule names once per agent and skips any
+manifest entry whose `name` already exists — the same read-then-skip the creation-time
+materializer uses — adding each created name to the set so a manifest that repeats a
+name within its own block also yields one row. The skip **does not overwrite**: the
+template's row survives, including its `enabled` value (manifest entries default
+`enabled=True`, template entries default `False`). An unreadable existing set **fails
+open** and creates unfiltered — dropping a manifest's schedules would be worse than the
+duplicate the guard prevents.
+
+Full flow: [scheduling.md](scheduling.md#1c-template-declared-schedules-at-creation-trinity-enterprise89).
+Coverage: `tests/unit/test_ent89_manifest_no_duplicate.py`.
 
 #### configure_tags() (Lines 429-480) - ORG-001 Phase 4
 ```python
@@ -684,7 +806,7 @@ async def list_systems(current_user: User = Depends(get_current_user)):
         {
           "name": "content-production-writer",
           "status": "running",
-          "template": "local:business-assistant"
+          "template": "local:default"
         }
       ],
       "created_at": "2025-12-18T10:00:00Z"
@@ -822,7 +944,7 @@ agents:
       enabled: true
       timezone: UTC
   writer:
-    template: local:business-assistant
+    template: local:default
     folders:
       expose: true
       consume: true
@@ -836,6 +958,53 @@ prompt: |
 - Lines 405-415: Filter agents by prefix, return 404 if none
 - Line 418: Call `export_manifest(system_name, system_agents)` from service
 - Line 420: Return YAML content as PlainTextResponse
+
+#### GET /api/systems/manifests + /manifests/{manifest_id} (ent#126)
+
+The read-only bundled-manifest catalog backing the install surface's "pick a bundled
+manifest" source. Both are `require_role("creator")` — mirroring `POST /deploy`, since the
+catalog exists only to feed it — and both reject connector principals. Thin routers over
+`system_service.list_bundled_manifests()` / `read_bundled_manifest(id)`; **not** exported
+over MCP (Invariant #13): this is a UI affordance, and `deploy_system` already exists there.
+
+```
+GET /api/systems/manifests        → [BundledManifestSummary]   (200 always; see fail-soft)
+GET /api/systems/manifests/{id}   → BundledManifestDetail      (400 malformed id, 404 unknown)
+```
+
+**Root**: `TRINITY_MANIFESTS_DIR`, read **at call time**, defaulting to the bundled
+`config/manifests/` — already bind-mounted `:ro` into the backend in both compose files. The
+var is wired into `docker-compose.yml`, `docker-compose.prod.yml` and `.env.example` (prod
+compose launches standalone, so dev-only wiring would not carry over — the #1056 packaging
+class).
+
+**`valid` = parse + validate + the dry-run's own template/resource preflight.** Not
+parse-only: `parse_manifest` alone accepts invalid agent names, unsupported template prefixes
+and bogus presets, so a parse-only check would advertise an undeployable manifest as valid.
+The field is named `valid` only because all three ran; if it is ever reduced to parsing,
+rename it `parseable`.
+
+**Fail-soft per file.** An unreadable / oversized / invalid manifest is listed with
+`valid: false` and a short `reason` — never a 500 for the whole catalog, because one bad file
+must not hide the others. Every `reason` leaves through `_failure_reason`, the same exit point
+the deploy report's `failed[].reason` uses (credential-sanitized, URL-userinfo redacted,
+length-capped) — PyYAML parse errors **echo the offending source line**, and a joined list of
+blockers grows with the manifest, so both the individual reasons and their join are capped.
+
+**Path confinement on `{manifest_id}` is layered** — no single check is load-bearing:
+
+| Layer | Guards against |
+|-------|----------------|
+| Character allowlist | Separators, NUL, control bytes |
+| **Explicit** reject of `""` / `.` / `..` / embedded `..` | Traversal — the regex does **not** reject these; `.` is inside its character class |
+| Length cap | Overlong ids |
+| Suffix appended by us | Reading arbitrary file types |
+| `resolve()` + `is_relative_to(base)` | A symlink whose target escapes the directory |
+| `entry.is_symlink()` on the **unresolved** entry | A symlink whose target stays *inside* the directory — checked pre-`resolve()`, because `resolve()` has already erased the link. Parity with `list_bundled_manifests`, which skips symlinks outright; without it a symlink is invisible in the catalog yet readable by id, and "not listed" stops meaning "not served" |
+
+**Reads open once**, with `O_NOFOLLOW`, and `fstat` **that descriptor**, capping at
+`MANIFEST_MAX_BYTES + 1`. `config/manifests` is a host bind mount, so a stat-then-read
+sequence has a real swap window.
 
 ### Agent Creation Integration
 
@@ -2063,14 +2232,32 @@ installs must not accumulate failing crons), no `prompt:` (never mutates the
 platform-wide `trinity_prompt`). Content is data — ent#137's curated public
 fleet replaces the manifest without touching the mechanism.
 
+**Other bundled manifests are inert** — `system_seed_service.BUNDLED_MANIFEST_PATH`
+is hard-coded to `default-system.yaml` and nothing globs the directory, so
+adding a manifest to `config/manifests/` ships **data, not a trigger**. #1931
+added `vc-due-diligence.yaml` (the eleven `hidden: true` `dd-*` demo templates,
+~40 GB of declared memory limits) on exactly that basis: it can only be
+incurred by a deliberate authenticated `POST /api/systems/deploy`.
+
 **Tests**: `tests/unit/test_ent124_default_system_seed.py` (includes
 executor's-own-parser validation of the real bundled manifest + in-tree
-template existence — learnings 2026-07-23 blank-agent trap).
+template existence — learnings 2026-07-23 blank-agent trap). #1931 widened the
+two on-disk checks (`local:` → `template.yaml` + `CLAUDE.md`; declared
+`commands:` → `.claude/commands/<n>.md`) from `default-system.yaml` to a
+**glob** over `config/manifests/*.yaml`, parametrised so a failure names the
+manifest — they are properties of any bundled manifest, and this is what
+auto-enrols the next one. `tests/unit/test_1931_manifest_roster.py` adds
+`validate_manifest` over the same glob plus the roster check: a template's
+CLAUDE.md may name its collaborators literally (`acme-scout`,
+`research-network-researcher`, `vc-due-diligence-dd-founder`), and since
+deployed names are `f"{manifest.name}-{short}"`, a renamed system or short name
+deploys a healthy fleet that cannot talk to itself.
 
 ## Revision History
 
 | Date | Changes |
 |------|---------|
+| 2026-07-31 | **trinity-enterprise#126**: UI install surface (a stacked `#systems` section on the Library page — rebased onto ent#263, which renamed Templates -> Library and chose stacked sections over the `?tab=` strip this originally shipped; `components/systems/*` over the new `stores/systems.js`) + the read-only bundled-manifest catalog `GET /manifests` / `/manifests/{id}`. Dry-run gains `permission_edges` / `schedules_preview` / `system_view_requested` from **pure resolvers shared with the writers** (`configure_permissions` / `create_schedules` now loop over them), pinned by characterization tests captured green before the refactor. `_preflight_template` now validates **merged** resources through the create path's own `normalize_cpu` / `normalize_memory` — a shipped bundled manifest carried `cpu: 1.0`, previewed `valid`, and failed 100% of its agents (that manifest, a broken duplicate of the live seed, is deleted). `status` becomes five-valued (`invalid` added). `parse_manifest` warns on unrecognised top-level keys (coercing them with `str()` — YAML 1.1 renders bare `on`/`off`/`yes`/`no` as booleans, so a mixed-type key set made `sorted` raise and turned the hygiene check into the unnamed 500 it existed to prevent). Catalog `reason`s exit through `_failure_reason`; symlinked manifests are refused for catalog/read parity. Merged with trinity#1884 (landed on `dev` mid-review), which moves the manifest size cap into `parse_manifest` alongside its alias-budget and duplicate-key guards — so ent#126's request-model cap is dropped and `MANIFEST_MAX_BYTES` stays a single definition in `models.py` that both modules import. |
 | 2026-07-24 | **trinity-enterprise#124**: deploy orchestration extracted to `system_service.deploy_manifest` (router now a thin HTTP wrapper; `create_agent_fn` seam defaults to the ws-broadcasting `routers/agents` facade); first-run default seed added (`system_seed_service.py`, persisted `first_run_fresh` verdict shared with the Cornelius seeder, bundled `config/manifests/default-system.yaml`, `TRINITY_DEFAULT_SYSTEM_MANIFEST` override/disable). Partial-deploy warning no longer points at #124 for converge support. |
 | 2026-02-17 | **ORG-001 Phase 4**: Added tags and System View integration - `default_tags`, `system_view`, per-agent `tags` in manifest. Updated models.py (221-273), system_service.py (configure_tags, create_system_view), routers/systems.py (steps 10-11 in deploy flow). Added response fields `tags_configured`, `system_view_created`. |
 | 2026-02-11 | Fixed Docker volume mount path - now mounts to `/home/developer` (not workspace subdirectory) |

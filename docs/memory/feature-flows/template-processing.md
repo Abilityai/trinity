@@ -7,7 +7,7 @@ Template processing enables agent creation from pre-configured templates, suppor
 As a platform user, I want to create agents from templates so that I can quickly deploy pre-configured agents with the correct MCP servers and credential requirements.
 
 ## Entry Points
-- **UI**: `src/frontend/src/views/Templates.vue` - Dedicated templates page (primary)
+- **UI**: `src/frontend/src/views/Library.vue` - Library page's Agent Templates section (primary; renamed from `Templates.vue` in trinity-enterprise#263 — see [library-page.md](library-page.md))
 - **UI**: `src/frontend/src/components/CreateAgentModal.vue` - Create agent form with template selection
 - **API**: `GET /api/templates` - List available templates
 - **API**: `GET /api/templates/{template_id}` - Get template details
@@ -17,9 +17,9 @@ As a platform user, I want to create agents from templates so that I can quickly
 
 ## Frontend Layer
 
-### Templates.vue (`src/frontend/src/views/Templates.vue`)
+### Library.vue (`src/frontend/src/views/Library.vue`)
 
-Dedicated templates page that dynamically loads templates from the API (previously static hardcoded cards).
+The Library page's Agent Templates section (formerly the standalone `Templates.vue` page, ent#263) dynamically loads templates from the API (previously static hardcoded cards).
 
 | Line | Element | Purpose |
 |------|---------|---------|
@@ -115,11 +115,12 @@ const selectedTemplate = computed(() => {
 
 ### Template Endpoints (`src/backend/routers/templates.py`)
 
-| Line | Endpoint | Purpose |
-|------|----------|---------|
-| 19-59 | `GET /api/templates` | List all templates (GitHub + local) |
-| 62-172 | `GET /api/templates/env-template` | Get .env template for bulk import |
-| 174-220 | `GET /api/templates/{template_id:path}` | Get template details |
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/templates` | List all templates (GitHub + local) |
+| `GET /api/templates/{template_id:path}` | Get template details |
+
+(`GET /api/templates/env-template` no longer exists — removed alongside `POST /api/templates/refresh`; the router carries exactly these two GET routes.)
 
 ### List Templates (`routers/templates.py:19-59`)
 ```python
@@ -143,9 +144,40 @@ user-facing list hides them. Both `_build_local_template` and `_build_template`
 now surface a coerced-int `priority` (`_coerce_priority`; a present-but-null or
 string value would otherwise `TypeError` the router sort), so the step-5 sort
 actually orders the real starters (`scout`/`sage`/`scribe`, `priority: 20`)
-ahead of the rest. `Templates.vue` renders a **Starter Templates** (local)
-section in addition to GitHub, so it shows the same curated set as
-`CreateAgentModal`.
+ahead of the rest. `Library.vue` (the Agent Templates section; renamed from
+`Templates.vue` in ent#263) renders a **Starter Templates** (local) section in
+addition to GitHub, so it shows the same curated set as `CreateAgentModal`.
+
+**Since #1931 there is no "rest"**: the 11 `dd-*` VC-demo directories declare
+`hidden: true`, so the visible local catalog is exactly those three starters and
+the ordering clause guards nothing today. It is kept because it is the mechanism
+a fourth starter would rely on; what is now enforced instead is that each starter
+still declares `priority: 20`, and that every bundled directory declares `hidden:`
+at all (see requirements/core-agent.md §4.1).
+
+**Read-path containment (#1900).** `get_local_template("local:<name>")` — the
+single-template resolver behind `GET /api/templates/{template_id:path}` — routes
+`<name>` through the public `contained_template_dir(name, root)` before any
+filesystem call. That is the same two-step barrier the create path has had since
+#950 (name allowlist first, so CodeQL sees a `py/path-injection` barrier; then
+`resolve()` on **both** sides plus `is_relative_to`, which is what catches the
+sibling escape `<root>-evil` that a `str.startswith` check passes, and the
+root-escaping symlink the allowlist cannot see). Previously the id was joined
+onto the root unvalidated, and because `:path` captures `/`, `local:../<x>`,
+`local:/<abs>/<x>` and a symlink each disclosed any parseable `template.yaml` on
+the backend filesystem — including other tenants' uploads under
+`/data/deployed-templates` — to any authenticated caller of any role. A rejected
+id returns `None`, so the router's 404 is byte-identical to an unknown template
+(no error code, no path, no root name): a distinguishable rejection would be a
+new enumeration oracle, the thing #1759's single-sentence 404 exists to close.
+The barrier reads the *name*, never the `hidden` flag, so the #1513 contract
+above is preserved.
+
+*Known, deliberate asymmetry:* `get_local_templates()` enumerates via
+`iterdir()`, which follows symlinks, so a root-escaping symlink **planted inside
+the root** could still be listed while detail and create both refuse it. The
+listing is the outlier — create has rejected it since #950 — and planting one
+requires local filesystem write access, not a request.
 
 ### Template Response Schema
 ```json
@@ -155,11 +187,37 @@ section in addition to GitHub, so it shows the same curated set as
   "source": "github",
   "resources": {"cpu": "2", "memory": "4g"},
   "mcp_servers": ["heygen", "twitter-mcp"],
-  "required_credentials": [
-    {"name": "HEYGEN_API_KEY", "source": "mcp:heygen"}
-  ]
+  "required_credentials": ["HEYGEN_API_KEY", "TWITTER_API_KEY"],
+  "credential_requirements": [
+    {
+      "name": "HEYGEN_API_KEY",
+      "title": "HeyGen API key",
+      "description": "Renders the avatar videos.",
+      "required": true,
+      "secret": true,
+      "format": "secret",
+      "setup_url": "https://app.heygen.com/settings/api",
+      "default": null,
+      "source": "template:mcp:heygen",
+      "platform_injected": false
+    }
+  ],
+  "credential_errors": []
 }
 ```
+
+**Two shapes, two owners — this is the reconciliation** (ent#128). The doc used to
+show objects here and strings further down, which read as a contradiction:
+
+| field | shape | owner |
+|---|---|---|
+| `required_credentials` (**catalog**) | list of **names** | `operator_supplied_credential_names()` — declared minus platform-injected. `Templates.vue` reads only `.length`, so this is the "N credentials" badge feed |
+| `credential_requirements` (**catalog**) | list of **objects** | `normalize_credential_requirements()` — the ent#128 per-variable records |
+| `required_credentials` (**extractor**) | list of `{name, source}` | `extract_agent_credentials()`, a repo-scanning helper with **no production caller**. Same key name, different function, different shape — do not conflate them |
+
+`credential_errors` (trinity-enterprise#128) carries one named message per
+structural problem in the template's `credentials:` block — empty on a healthy
+template. See [Malformed `credentials:` resilience](#malformed-credentials-resilience-trinity-enterprise128).
 
 ---
 
@@ -199,33 +257,92 @@ if config.template.startswith("github:"):
     git_working_branch = git_service.generate_working_branch(config.name, git_instance_id)
 ```
 
-### Local Templates (`services/agent_service/crud.py:145-182`)
+### Local Templates (`services/agent_service/crud.py::_resolve_local_template`)
+
+Two roots, tried in order (#950): the **curated catalog** and the **deploy-local
+writable store**. Both go through `_safe_local_template_path`, which is the
+CodeQL `py/path-injection` barrier (regex allowlist on the name, then
+`.resolve()` + `is_relative_to(root)`), so every subsequent filesystem call on
+the returned path is untainted.
+
 ```python
-elif config.template.startswith("local:"):
-    template_name = config.template[6:]  # Remove "local:" prefix (line 147)
-    templates_dir = Path("/agent-configs/templates")
-    if not templates_dir.exists():
-        templates_dir = Path("./config/agent-templates")
+_LOCAL_TEMPLATE_ROOTS = (
+    _curated_templates_root(),                  # /agent-configs/templates, or the
+                                                # in-repo config/agent-templates
+                                                # when that bind mount is absent
+    Path("/data/deployed-templates").resolve(),  # deploy-local store (#950)
+)
 
-    template_path = templates_dir / template_name
-    template_yaml = template_path / "template.yaml"
+raw_name = config.template[6:]                   # strip "local:"
+template_path = _resolve_local_template_dir(raw_name)   # the ladder, extracted (#1900)
+template_yaml = template_path / "template.yaml"
 
-    if template_yaml.exists():
+# _resolve_local_template_dir is the SINGLE definition of "where does
+# local:<name> live" — extracted in #1900 so the three seams below cannot drift:
+def _resolve_local_template_dir(raw_name: str) -> Path:
+    candidate = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[0])
+    if not (candidate / "template.yaml").exists():
+        candidate = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[1])
+    return candidate
+
+# The if/else shape is load-bearing — see "CodeQL" below. Do not flatten it.
+if template_yaml.exists():
+    try:
         with open(template_yaml) as f:
             template_data = yaml.safe_load(f)
-            config.type = template_data.get("type", config.type)
-            config.resources = template_data.get("resources", config.resources)
-            config.tools = template_data.get("tools", config.tools)
-            # Extract MCP servers from credentials section (lines 162-165)
-            creds = template_data.get("credentials", {})
-            mcp_servers = list(creds.get("mcp_servers", {}).keys())
-            if mcp_servers:
-                config.mcp_servers = mcp_servers
-            # Multi-runtime support (lines 167-172)
-            runtime_config = template_data.get("runtime", {})
-            # Shared folder config (lines 173-179)
-            shared_folders_config = template_data.get("shared_folders", {})
+    except (OSError, yaml.YAMLError):
+        raise HTTPException(400, {"error": ..., "code": "LOCAL_TEMPLATE_INVALID"})   # #1759
+    if not isinstance(template_data, dict):                                          # yaml.safe_load("") -> None
+        raise HTTPException(400, {"error": ..., "code": "LOCAL_TEMPLATE_INVALID"})   # #1759
+
+    # then mutate config from the template: type / resources / tools /
+    # credentials.mcp_servers / runtime / shared_folders
+else:
+    raise HTTPException(404, {"error": ..., "code": "UNKNOWN_LOCAL_TEMPLATE"})       # #1793
 ```
+
+**Failure contract (#1793 + #1759).** Before this, an unresolvable `local:` id
+returned empty `template_data` and the agent was created anyway — HTTP 200,
+blank container, no warning; only *malformed* names failed. The two halves were
+filed and fixed separately: #1793 (PR #1803) closed the **absent** case, #1759
+the **present-but-invalid** one. Now:
+
+| Condition | Status | Code |
+|---|---|---|
+| Name fails the regex / traversal barrier | 400 | `INVALID_LOCAL_TEMPLATE_NAME` (checked first) |
+| No `template.yaml` under either root | **404** | `UNKNOWN_LOCAL_TEMPLATE` (#1793) |
+| `template.yaml` empty / not a mapping / unparseable | 400 | `LOCAL_TEMPLATE_INVALID` (#1759) |
+| `template` is `null` or `""` (Blank Agent) | 200 | — never enters this branch |
+
+Both raises sit in the same pre-side-effect band as `FORK_REQUIRES_GITHUB_TEMPLATE`
+and the #843 reject: no container, MCP key, volume or slot has been allocated
+yet, so there is nothing to roll back, and it is outside the caller's docker
+try-block so the 4xx is not flattened to a 500. `create_agent_internal` gains
+zero lines (#1484).
+
+**CodeQL — do not flatten the `if/else` into a guard clause.** Dedenting the
+load block moves the `.exists()` and `open()` expressions onto new lines and
+re-fingerprints `py/path-injection` alerts already dismissed as false positives
+on `dev`. #1793 hit this and reverted its own guard-clause refactor for it;
+#1759 re-hit it at merge. New bands go **inside** the existing block.
+
+**Disclosure rule:** one identical message whichever root missed, carrying no
+filesystem path and no root name. Deploy-local templates are named after *agent*
+names, so a root-distinguishing message would let a `creator`-role caller probe
+another user's agents (#186 adjacency).
+
+**Three seams read `_LOCAL_TEMPLATE_ROOTS`** and must stay in agreement: this
+resolver, the `/template` bind-mount decision in `_stage_config_files` (curated
+templates bind their host path read-only at `/template`; deploy-local ones do
+not, because `deploy.py` already pre-populated the workspace volume via
+`put_archive`), and — since #1900 — the **credential-file stager**, which used
+to re-derive the directory from the template's own untrusted `name:` field
+instead of reusing this one (see `generate_credential_files` below). #1759 named
+the first two; extracting `_resolve_local_template_dir` makes the agreement
+structural across all three rather than a convention. The bind source is
+`os.getenv("HOST_TEMPLATES_PATH") or _default_host_templates_base()` — an
+**empty** env value would otherwise make `Path("") / name` collapse to a bare
+name, which Docker resolves as an empty *named volume* at `/template`.
 
 ---
 
@@ -248,8 +365,16 @@ def extract_agent_credentials(repo_path: Path) -> Dict:
             "env_file_vars": ["VAR3"]
         }
     """
-    pattern = r'\$\{([A-Z][A-Z0-9_]*)\}'  # Matches ${VAR_NAME}
+    pattern = CREDENTIAL_DETECTOR_REF_RE  # \$\{([A-Za-z_][A-Za-z0-9_]*)\}
 ```
+
+The pattern is **no longer uppercase-only** (ent#128). Trinity's substitution
+engines impose no charset — `${my_var}` IS substituted at runtime — so an
+uppercase-only *detector* read narrower than what it audits, which HARD-failed
+K-001 on a template that documented every variable it referenced. The shared
+constant and its NON-MEMBERS list (patterns that must NOT adopt it, notably the
+fail-closed `mcp_validator._ENV_VAR_REF_RE`) live in
+`services/credential_charset.py`.
 
 ### extract_env_vars_from_mcp_json (`services/template_service.py:64-103`)
 ```python
@@ -257,7 +382,7 @@ def extract_env_vars_from_mcp_json(file_path: Path) -> Dict[str, List[str]]:
     # Parse JSON and extract ${VAR_NAME} patterns from:
     # - env section of each MCP server config (lines 88-92)
     # - args array of each MCP server config (lines 94-98)
-    pattern = r'\$\{([A-Z][A-Z0-9_]*)\}'
+    pattern = CREDENTIAL_DETECTOR_REF_RE  # shared detector charset (ent#128)
     for server_name, server_config in mcp_servers.items():
         if "env" in server_config:
             matches = re.findall(pattern, value)  # ${VAR_NAME}
@@ -279,7 +404,7 @@ def extract_credentials_from_env_example(file_path: Path) -> List[str]:
     # Parses KEY=value lines, returns list of uppercase variable names
 ```
 
-### generate_credential_files (`services/template_service.py:228-299`)
+### generate_credential_files (`services/template_service.py::generate_credential_files`)
 ```python
 def generate_credential_files(
     template_data: dict,
@@ -291,12 +416,157 @@ def generate_credential_files(
     Generate credential files (.mcp.json, .env, config files) with real values.
     Returns dict of {filepath: content} to write into container.
 
-    1. Generate .mcp.json with credentials (lines 241-276)
-       - Replace ${VAR_NAME} with actual credential values
-    2. Generate .env file (lines 278-285)
-    3. Generate config files from templates (lines 287-297)
+    1. Generate .mcp.json with credentials — replace ${VAR_NAME} with real values
+    2. Generate .env file
+    3. Generate config files from templates
     """
 ```
+
+**Where the `.mcp.json` template comes from (#1900).** `crud._stage_config_files`
+passes `template_base_path` = the directory `_resolve_local_template_dir`
+already validated, so the live path performs **no** derivation of its own.
+
+Before #1900 this arm joined the template.yaml's own `name:` field onto a
+hard-coded root and read the resulting `.mcp.json` **into the new agent's**
+credential files. `name:` is untrusted — any `creator` supplies one via
+`deploy_local_agent_logic` — so `name: ../../data/deployed-templates/<victim>`
+read another tenant's credential-bearing `.mcp.json` into the attacker's own
+agent. It was also wrong on its own terms: `name:` is a *display string* in 5
+shipped templates ("Test Echo Agent"), not a directory name, so
+`local:test-echo` looked for `<curated>/Test Echo Agent/.mcp.json`.
+
+The residual `template_base_path is None` arm has no caller today (`github:`
+templates never reach this function — their `template_data` stays `{}` and
+`_stage_config_files` guards on it) but is kept fail-closed for future callers
+of a public function: it resolves through `contained_template_dir`, which also
+absorbs a non-string `name:` that previously raised `TypeError` out of agent
+creation as an uncaught 500.
+
+*Behaviour delta — measured, not the flattering version.* A **deploy-local**
+template that both declares `credentials.mcp_servers` and ships a `.mcp.json`
+now has that file staged at all, where the old curated-root lookup always
+missed. Two consequences, and the second is a loss, not a gain:
+
+* the staged file **wins** over the archive's raw copy, because `startup.sh`
+  copies `/generated-creds/.mcp.json` unconditionally and *after* the
+  template-copy block (which is gated on `.trinity-initialized`);
+* the sole production caller — `crud._stage_config_files` — passes an **empty**
+  `agent_credentials` map (CRED-002: real values are injected after creation,
+  not at staging), so `agent_credentials.get(var_name, "")` rewrites every
+  `${VAR}` to `""`. The agent's `.mcp.json` therefore lands with blank env
+  values / blank `args` entries instead of the archive's placeholders.
+  Hardcoded (non-`${VAR}`) entries are preserved verbatim. This mirrors what
+  the `.env` arm of this same function has always done for a template
+  declaring `credentials.env_file`; it is the platform's staging model, not a
+  new one. The durable record of which variables a server needs is
+  `.mcp.json.template` (compatibility check S-009), which is pre-populated
+  untouched.
+
+Do **not** restate this as "deploy-local templates finally get `${VAR}`
+substitution" — nothing is substituted *in* at this seam. No curated template
+ships a `.mcp.json`, so those rows are unchanged either way.
+`tests/unit/test_ent128a_catalog_resilience.py::test_1900_staging_with_an_empty_credential_map_blanks_placeholders`
+pins the measured behaviour against exactly that drift.
+
+### Malformed `credentials:` resilience (trinity-enterprise#128)
+
+A `template.yaml` is untrusted input — `github:` templates come from arbitrary
+repos and `local:` ones can be uploaded by any authenticated user via
+`deploy_local_agent_logic`. Every reader used to reach straight through the
+block (`data.get("credentials", {}).get("mcp_servers", {}).keys()`), which made
+one malformed template fatal to the whole catalog.
+
+Four tolerant readers in `template_service.py` are now the only way in:
+
+| Helper | Contract |
+|---|---|
+| `credential_shape_errors(block)` | Named errors for a malformed block. Never raises. Absent / null / `{}` = zero credentials, **not** an error |
+| `credential_mcp_server_names(block)` | Server names, `[]` for any odd shape at either level |
+| `credential_env_file_names(block)` | `env_file` variable names, non-empty strings only |
+| `CredentialDeclarationError` | HTTP-free domain error (Invariant #1) raised by the **write** path only |
+
+Two deliberately different contracts:
+
+- **Read paths never raise.** `_build_local_template` / `_build_template` degrade
+  the derived field to empty, attach `credential_errors` to the entry, and log
+  exactly one WARNING naming the template id. The template **still lists** — a
+  broken block costs that template its credential metadata, not the catalog.
+  `get_local_templates` additionally fences each per-template build, so a future
+  unguarded field can't regress the property. The `except` around the YAML parse
+  is deliberately `Exception`, not `(OSError, yaml.YAMLError)`: deeply nested
+  YAML raises `RecursionError`, a `RuntimeError` that escapes a `YAMLError`
+  handler entirely.
+- **The write path fails loud.** `generate_credential_files` validates first and
+  raises `CredentialDeclarationError`; `crud._stage_config_files` maps it 1:1 to
+  **400 `INVALID_CREDENTIAL_DECLARATION`**. Emitting an agent's `.env` from a
+  declaration nobody could parse is the silent failure this closes — a string
+  `env_file: "OPENAI_API_KEY"` (the list dash forgotten) used to be iterated
+  character by character into fifteen single-letter variables, never writing the
+  real credential, with no error, warning or crash.
+
+`credentials.config_files[].path` is additionally rejected when absolute or
+carrying a `..` segment (it becomes `open(cred_files_dir / path, "w")`, i.e. an
+arbitrary-file-write primitive), and re-checked at the write sink by
+`crud._safe_cred_file_path` → **400 `INVALID_CREDENTIAL_FILE_PATH`**
+(validate-at-boundary **and** at-sink; the same resolve + `is_relative_to`
+CodeQL barrier as `_safe_local_template_path`).
+
+`credentials.env_file` stays a **names-only list**. The enriched per-variable
+declaration (trinity-enterprise#128 PR-B) lands under its own top-level key
+precisely so an older Trinity reading a newer template is structurally
+untouched.
+
+### Declared `schedules:` (trinity-enterprise#89)
+
+The same tolerant-reader shape, applied to the second untrusted block Trinity
+now acts on. `services/template_schedules.py` is a **leaf** (stdlib +
+`services.schedule_validation`) with two public functions over one private
+`_parse`, so the reported errors and the accepted entries cannot drift:
+
+| Helper | Contract |
+|---|---|
+| `schedule_shape_errors(block)` | Named errors for a malformed block. Never raises. Absent / null / `[]` = no declared schedules, **not** an error |
+| `normalize_declared_schedules(block)` | Well-formed entries only, each `{name, cron, message, enabled, timezone, description}` — type-checked, bounded, cron/timezone-validated, name-deduped, capped at `MAX_DECLARED_SCHEDULES` (20) |
+
+**Totality is the contract, and three consumers depend on it.** A raise here
+would (a) empty the catalog, (b) enter creation's destructive rollback fence, or
+(c) fail-open compatibility check T-018. A 40-row matrix plus a Hypothesis
+property over recursive JSON-ish values pin it
+(`tests/unit/test_ent89_template_schedules.py`).
+
+Three things differ from the `credentials:` readers, each deliberate:
+
+- **The catalog surfaces the NORMALIZED list**, not the raw block (unlike
+  `data_paths`, which is surfaced raw). Normalizing at the builder is what makes
+  it safe for the frontend to render, and it matches
+  `credential_mcp_server_names`.
+- **Both GitHub list paths are now fenced.** ent#128 PR-A fenced
+  `_build_local_template` only; `get_all_templates`' two GitHub call sites were
+  bare list comprehensions. Adding a new untrusted-input reader inside
+  `_build_template` would have put a raise-capable call on an unfenced path —
+  re-opening the exact bug (#1835) this convention exists to prevent. Both now
+  route through `_safe_build_github_template` (log-and-skip per template).
+- **Creation does not read the catalog's copy.** `_get_cached_metadata` fetches
+  with the **global platform** PAT, off the **default branch**, through a
+  10-minute per-process cache. Creation resolves its PAT differently (per-agent
+  → per-user → global, ent#162) and may target `@branch`, so
+  `fetch_template_metadata_for_create(repo, pat, ref)` does a fresh, pinned,
+  authenticated read — and logs a WARNING naming the repo and reason on any
+  failure. A silently empty declaration on the `github:` path is precisely the
+  class this feature exists to close, and the catalog dict would have
+  reintroduced it one layer up.
+
+Errors carry the **entry index, the key, and a YAML type name** — never the
+`name`/`message`/`description` *value*, since the list is persisted into
+`agent_compatibility_results.checks_json`, rendered in the UI, and returned in
+the catalog response. The cron and timezone strings are the one echo, bounded
+and printable-filtered by a local twin of `_sanitize_for_warning` (the leaf
+cannot import it back without closing a cycle; the two are comment-linked).
+
+Consumption at creation is in
+[scheduling.md](scheduling.md#template-declared-schedules-at-creation-trinity-enterprise89);
+the compatibility check is T-018 in
+[agent-compatibility-validation.md](agent-compatibility-validation.md).
 
 ### Trinity-Compatible Validation (`services/template_service.py:608-728`)
 ```python
@@ -464,6 +734,9 @@ GITHUB_TEMPLATES = [
         "resources": {"cpu": "2", "memory": "4g"},
         "mcp_servers": [],
         "required_credentials": ["HEYGEN_API_KEY", "TWITTER_API_KEY", "CLOUDINARY_API_KEY"]
+        # ^ the CATALOG shape: a list of names (the badge feed). The objects shape
+        #   belongs to `credential_requirements` / the caller-less extractor — see
+        #   "Two shapes, two owners" above (ent#128).
     },
     # ... more templates (cornelius, corbin, ruby multi-agent system)
 ]
@@ -572,10 +845,6 @@ curl http://localhost:8000/api/templates \
 curl http://localhost:8000/api/templates/local:ruby-social-media-agent \
   -H "Authorization: Bearer $TOKEN"
 
-# Get .env template for bulk import
-curl "http://localhost:8000/api/templates/env-template?template_id=github:abilityai/agent-ruby" \
-  -H "Authorization: Bearer $TOKEN"
-
 # Create agent from GitHub template
 curl -X POST http://localhost:8000/api/agents \
   -H "Authorization: Bearer $TOKEN" \
@@ -604,8 +873,9 @@ A GitHub template can declare `fork_to_own: required` in its `template.yaml`; `_
 **Request**: `POST /api/agents` with `fork_to_own: {destination_repo: "owner/name", github_pat (SecretStr), private: true}`. Backend enforces the `required` flag (400 `FORK_TO_OWN_REQUIRED`), rejects `@branch` syntax and non-`github:` templates with the block, and pins `source_mode=True` + `source_branch=<template default branch>`.
 
 **Copy pipeline** (`services/agent_service/fork_to_own.py`, runs in the `github:` branch of `create_agent_internal` BEFORE the docker try-block so structured `FORK_*` errors reach the UI):
-1. `validate_token(user_pat)` → login; USER-owner mismatch → 400 `FORK_DESTINATION_FORBIDDEN`.
-2. Destination state: missing → `create_repository(private=…)` (user PAT) + REST visibility poll (≤10s); exists+empty → reuse; exists holding exactly the template tip (single branch, head SHA match) → idempotent reuse, skip push; else → 409 `FORK_DESTINATION_EXISTS`.
+1. `validate_destination_pat(user_pat)` → login; USER-owner mismatch → 400 `FORK_DESTINATION_FORBIDDEN`. Called **before** `_resolve_template_tip` so a bad PAT reports `FORK_PAT_INVALID` even when the template is also unreachable.
+2. Destination state via `inspect_or_create_destination_repo()` → `created | empty | branches`: missing → `create_repository(private=…)` (user PAT) + REST visibility poll (≤10s); exists+empty → reuse. The **reuse/refuse policy stays in this caller** — exists holding exactly the template tip (single branch, head SHA match) → idempotent reuse, skip push; else → 409 `FORK_DESTINATION_EXISTS`.
+   > **ent#109**: steps 1–2 are now the *shared* half, reused verbatim by the post-creation rebind ([agent-repo-binding.md](agent-repo-binding.md)). The seam is deliberately one level below the triage: the reuse branch **is** the template-tip SHA comparison, which is meaningless to a caller whose content source is an agent's workspace volume — so the primitive **reports** `created|empty|branches` and each caller decides. Behaviour here is unchanged and pinned by the 40 tests below.
 3. Bare single-branch full-history clone of the template (read auth: platform PAT or none) staged under `/data/agent-fork-tmp` (backend `/tmp` is a 100 MB tmpfs), push to destination with the **user PAT via `GIT_CONFIG_*` env** (`http.extraHeader` — token never on argv/URL), `git ls-remote` poll (≤15s) so the agent's startup clone can't race an empty repo (#1439 class). All output passes `scrub_secret` (plain + b64 forms) before logging.
 
 **Binding guard**: destination already referenced by any `agent_git_config` row → 409 `FORK_DESTINATION_IN_USE` (agent name disclosed only when the caller can access it, #186). Re-checked **after** `reserve_and_generate_instance_id` (source-mode rows bypass the partial UNIQUE index; the whole copy sits between check and act) — concurrent losers (all but the lexicographically-first name) roll back their row deterministically.
@@ -614,9 +884,9 @@ A GitHub template can declare `fork_to_own: required` in its `template.yaml`; `_
 
 **Frontend** (`CreateAgentModal.vue`): templates with `fork_to_own === 'required'` render as featured cards (tagline subtitle) above the standard list; selecting one reveals destination/PAT/visibility fields. Private is the default; Public sits behind a loud warning. PAT hint steers to a fine-grained single-repo token (the agent can read its own git credential — see `docs/security-reports/cso-2026-07-06.md`). The PAT ref is cleared after create.
 
-**Known limitations**: `fork_to_own: required` enforcement is fail-open when the template.yaml metadata fetch fails (advisory gate; empty metadata → flag unseen for that 10-min cache window). MCP `create_agent` deliberately does NOT accept `fork_to_own` (tool args are audit-logged — a PAT arg would persist in plaintext). Repos pre-created WITH a README are non-empty → 409. Soft-deleted agents keep their destination binding until purge (blocking is intentional — admin recovery would resurrect it). Upstream template flag for `Abilityai/cornelius` ships separately in that repo.
+**Known limitations**: `fork_to_own: required` enforcement is fail-open when the template.yaml metadata fetch fails (advisory gate; empty metadata → flag unseen for that 10-min cache window). MCP `create_agent` deliberately does NOT accept `fork_to_own` (tool args are audit-logged — a PAT arg would persist in plaintext). Repos pre-created WITH a README are non-empty → 409. Soft-deleted agents keep their destination binding until purge (blocking is intentional — admin recovery would resurrect it). Upstream template flag for `Abilityai/cornelius` ships separately in that repo. This is the **create-time** path only; retrofitting an already-created agent onto a user-owned repo is [agent-repo-binding.md](agent-repo-binding.md) (ent#109).
 
-Tests: `tests/unit/test_fork_to_own.py` (40 — model validation, orchestrator collision/scrub/timeout paths, crud gates, deep-slice env/PAT-persist/rollback, destination race, facade delegation, startup.sh static).
+Tests: `tests/unit/test_fork_to_own.py` (40 — model validation, orchestrator collision/scrub/timeout paths, crud gates, deep-slice env/PAT-persist/rollback, destination race, facade delegation, startup.sh static); `tests/unit/test_ent109_fork_to_own_extraction.py` (13 — the shared primitive's three states + error registry, and the validate-before-template ordering the split must preserve).
 
 ---
 
@@ -643,3 +913,7 @@ Tests: `tests/unit/test_fork_to_own.py` (40 — model validation, orchestrator c
 
 - **Upstream**: User authentication
 - **Downstream**: Credential Injection (hot-reload), Agent Lifecycle (start after creation)
+- **Per-agent runtime companion**: [guided-credential-setup.md](guided-credential-setup.md) —
+  this flow is catalog/template-time (what a template *declares*); ent#127 is the
+  per-agent runtime half (what a **deployed** agent declares and which of those
+  variables are actually set in its `.env`).

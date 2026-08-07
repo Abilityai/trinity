@@ -31,6 +31,7 @@ from config import MAX_REDELIVERY
 from database import db
 from models import TaskExecutionStatus
 from services import event_dispatch_service
+from services.activity_service import activity_service
 from services.platform_prompt_service import (
     ExecutionContext,
     compose_system_prompt,
@@ -72,11 +73,17 @@ def _compose_pull_system_prompt(
     caller_prompt: Optional[str],
     *,
     execution_id: Optional[str],
+    model: Optional[str] = None,
 ) -> Optional[str]:
     """Compose platform prompt + execution context + caller override for a
     pull-claimed turn (#1629). Fail-open: on ANY composition error the turn runs
     with the caller prompt only (parity with the pre-#1629 pull path) + a WARN —
-    a prompt failure never blocks dispatch."""
+    a prompt failure never blocks dispatch.
+
+    ``model`` (ent#243) selects the prompt tier. It is passed explicitly rather
+    than left to default because this context previously omitted the field
+    entirely — not ``None``-valued, absent — so every pull-claimed turn would
+    have resolved VERBOSE forever with nothing to indicate why."""
     runtime = _resolve_agent_runtime(agent_name)
     try:
         exec_ctx = ExecutionContext(
@@ -84,6 +91,7 @@ def _compose_pull_system_prompt(
             mode=ExecutionContext.derive_mode(triggered_by),
             triggered_by=triggered_by,
             execution_id=execution_id,
+            model=model,
         )
         return compose_system_prompt(
             execution_context=exec_ctx,
@@ -214,11 +222,14 @@ def _build_claim_response(row: Dict[str, Any]) -> Dict[str, Any]:
     # worker reads (`execute_headless(system_prompt=overrides.get("system_prompt"))`).
     # Fold in any caller override; fail-open leaves the caller prompt (or None).
     overrides: Dict[str, Any] = dict(meta.get("task_overrides") or {})
+    # ent#243: a caller override is what the worker will actually run, so it wins
+    # over the row's recorded model_used; either may be absent → VERBOSE.
     overrides["system_prompt"] = _compose_pull_system_prompt(
         row.get("agent_name"),
         row.get("triggered_by"),
         overrides.get("system_prompt"),
         execution_id=row["id"],
+        model=overrides.get("model") or row.get("model_used"),
     )
     payload["task_overrides"] = overrides
 
@@ -393,6 +404,18 @@ def apply_task_result(
             terminal_status=row_status,
             summary_or_error=summary,
             cost=cost,
+        )
+        # #1804: the pull sink is a CAS-won terminal writer, so it owns closing
+        # the paired dispatch activity — the issue names this as one of the next
+        # two victims of the old per-site model. Sync function, async caller:
+        # use the spawn wrapper (mirrors spawn_task_terminal_event above).
+        # An authoritative SUCCESS may upgrade an activity a reaper already
+        # FAILED, matching this function's own late-SUCCESS-corrects-FAILED rule.
+        # Dark until a pull pilot is enabled, wired now exactly as #1578 did.
+        activity_service.spawn_close_execution_activity(
+            execution_id,
+            row_status,
+            error=(None if row_status == TaskExecutionStatus.SUCCESS else (err_text or None)),
         )
         return ResultApplyOutcome("applied", row_status)
 

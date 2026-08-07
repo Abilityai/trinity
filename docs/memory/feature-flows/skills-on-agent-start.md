@@ -59,7 +59,7 @@ Return result with skills_injection status
 
 ### Entry Points
 
-**Agents List Page** - `src/frontend/src/views/Agents.vue:200`
+**Dashboard List rows** - `src/frontend/src/components/AgentListPanel.vue` (ent#260 — the Agents page retired into the Dashboard List mode; Run control is `RunningStateToggle` via `networkStore.toggleAgentRunning`, not the historical button below)
 ```html
 <button
   v-if="agent.status === 'stopped'"
@@ -579,7 +579,7 @@ async def update_file(path: str, request: FileUpdateRequest):
             "success": True,
             "path": path,
             "size": stat.st_size,
-            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            "modified": _iso_z_from_mtime(stat.st_mtime)  # ISO-Z UTC, TZ-independent (#1795)
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update file: {str(e)}")

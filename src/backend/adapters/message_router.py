@@ -505,24 +505,142 @@ class ChannelMessageRouter:
                 context_prompt = f"{context_prompt}\n\n{file_block}"
                 logger.info(f"[ROUTER] Step 7b - {len(file_descriptions)} file(s) processed for agent")
 
-        # 8. Show processing indicator (⏳ on Slack, typing on Telegram, etc.)
-        await adapter.indicate_processing(message)
+        # 8. Show processing indicator (⏳/👀 reaction, typing, etc.) and arm
+        # the ent#264 progress driver. Wrapped so an adapter hook that raises
+        # (the upgraded Telegram hook adds DB + HTTP surface) can never abort
+        # the turn — one wrap protecting every adapter, now and future.
+        try:
+            await adapter.indicate_processing(message)
+            self._arm_progress_driver(adapter, message)
+        except Exception as e:
+            logger.warning(
+                f"[ROUTER:{channel}] indicate_processing/arm failed (non-fatal): {e}"
+            )
 
-        # 9. Execute via TaskExecutionService (same path as web public chat).
-        # None ⇒ failure/exception already surfaced to the user + uploads cleaned.
-        result = await self._run_agent_task(
-            adapter, message, agent_name, bot_token, channel, is_group,
-            container, upload_dir, context_prompt, verified_email, image_data,
-        )
-        if result is None:
+        try:
+            # 9. Execute via TaskExecutionService (same path as web public chat).
+            # None ⇒ failure/exception already surfaced to the user + uploads cleaned.
+            result = await self._run_agent_task(
+                adapter, message, agent_name, bot_token, channel, is_group,
+                container, upload_dir, context_prompt, verified_email, image_data,
+            )
+            if result is None:
+                return
+            response_text = result.response or ""
+
+            # 10–14. Done indicator, persist, MEM-001, outbound files, send, hooks, cleanup.
+            await self._finalize_response(
+                adapter, message, agent_name, bot_token, channel, is_group,
+                container, upload_dir, session_id, verified_email, result, response_text,
+            )
+        finally:
+            # ent#264 backstop: an unexpected raise outside the three terminal
+            # paths must not leak a ticking driver task. Idempotent — the
+            # terminal _resolve_indicator already popped the handle on normal
+            # paths, so this is a safe no-op double-pop there. (A reaction/
+            # placeholder may strand on such a raise — same accepted class as
+            # a backend restart.)
+            await self._cancel_progress_driver(message)
+
+    # =========================================================================
+    # In-flight progress driver (ent#264) — channel-agnostic start/progress/
+    # resolve seam. The router owns the ticker loop; adapters implement the
+    # default-no-op `indicate_progress` hook. All per-turn state rides
+    # `message.metadata` (adapters are long-lived singletons — see base.py).
+    # =========================================================================
+
+    # Metadata keys (per-turn; die with the NormalizedMessage):
+    _INDICATOR_DRIVER_KEY = "_indicator_driver"      # asyncio.Task handle
+    _INDICATOR_INFLIGHT_KEY = "_indicator_inflight"  # shielded first-send future
+    _INDICATOR_TERMINAL_OK_KEY = "_indicator_terminal_ok"  # success flag for adapters
+
+    def _arm_progress_driver(
+        self, adapter: ChannelAdapter, message: NormalizedMessage
+    ) -> None:
+        """Start the per-turn progress ticker for adapters that declare a
+        threshold. `progress_threshold_seconds is None` (Slack/WhatsApp/VoIP
+        today) ⇒ no task is ever created — byte-identical behavior.
+
+        Strong-ref note: the metadata dict is held by the router coroutine
+        frame for the whole turn, so the task handle stored there keeps a live
+        strong reference — the bare-`create_task` GC footgun (#1083) doesn't
+        apply here.
+        """
+        if adapter.progress_threshold_seconds is None:
             return
-        response_text = result.response or ""
+        task = asyncio.create_task(self._progress_loop(adapter, message))
+        message.metadata[self._INDICATOR_DRIVER_KEY] = task
 
-        # 10–14. Done indicator, persist, MEM-001, outbound files, send, hooks, cleanup.
-        await self._finalize_response(
-            adapter, message, agent_name, bot_token, channel, is_group,
-            container, upload_dir, session_id, verified_email, result, response_text,
-        )
+    async def _progress_loop(
+        self, adapter: ChannelAdapter, message: NormalizedMessage
+    ) -> None:
+        """Sleep past the threshold, then tick `indicate_progress` on the
+        adapter's cadence until cancelled. The elapsed origin is captured
+        BEFORE the threshold sleep, so the first tick reports ~threshold
+        seconds, not ~0. A raising tick never kills the loop (the adapter is
+        itself fail-soft; this is the second layer). Exits only via
+        cancellation."""
+        start = time.monotonic()
+        await asyncio.sleep(adapter.progress_threshold_seconds)
+        while True:
+            try:
+                await adapter.indicate_progress(message, time.monotonic() - start)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — tick failures are non-fatal
+                logger.debug(f"[ROUTER] indicate_progress tick failed (non-fatal): {e}")
+            await asyncio.sleep(adapter.progress_interval_seconds)
+
+    async def _await_dead(self, task: asyncio.Task) -> None:
+        """Cancel-and-await a driver task fully dead. A cancel-and-drop emits
+        'Task was destroyed but it is pending' warnings; awaiting guarantees
+        the driver can never tick after the indicator is resolved."""
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def _resolve_indicator(
+        self,
+        adapter: ChannelAdapter,
+        message: NormalizedMessage,
+        *,
+        success: bool = True,
+    ) -> None:
+        """Terminal resolve (ent#264): stop the driver, settle any in-flight
+        placeholder send, then run the adapter's `indicate_done` — in that
+        order, so the placeholder id is recorded before the delete looks for
+        it and no tick can land after the resolve. Fail-soft throughout: the
+        terminal path (the real reply / error surface) is never masked."""
+        task = message.metadata.pop(self._INDICATOR_DRIVER_KEY, None)
+        if task is not None:
+            await self._await_dead(task)
+
+        # Resolve-vs-first-send race: if the driver was cancelled while the
+        # FIRST placeholder sendMessage was mid-await, the shielded future is
+        # still running — settle it (bounded) so its message_id is recorded
+        # and `indicate_done` can delete it instead of stranding a "working…".
+        fut = message.metadata.pop(self._INDICATOR_INFLIGHT_KEY, None)
+        if fut is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(fut), timeout=10)
+            except Exception as e:  # noqa: BLE001 — best-effort settle
+                logger.debug(f"[ROUTER] in-flight placeholder settle failed: {e}")
+
+        message.metadata[self._INDICATOR_TERMINAL_OK_KEY] = success
+        try:
+            await adapter.indicate_done(message)
+        except Exception as e:  # noqa: BLE001 — never mask the terminal path
+            logger.debug(f"[ROUTER] indicate_done failed (non-fatal): {e}")
+
+    async def _cancel_progress_driver(self, message: NormalizedMessage) -> None:
+        """Backstop (ent#264): idempotent driver teardown for raises outside
+        the three terminal paths. Pops the handle if still present, cancels,
+        and awaits it dead — a safe no-op double-pop after a normal
+        `_resolve_indicator`. Does NOT run `indicate_done` (the reaction/
+        placeholder may strand on such a raise — same accepted class as a
+        backend restart)."""
+        task = message.metadata.pop(self._INDICATOR_DRIVER_KEY, None)
+        if task is not None:
+            await self._await_dead(task)
 
     async def _run_agent_task(
         self,
@@ -626,7 +744,7 @@ class ChannelMessageRouter:
                 # notice instead of posting the empty response as if it succeeded.
                 error_msg = result.error or "Unknown error"
                 logger.info(f"[ROUTER:{channel}] Step 9 - task {result.status}: {error_msg}")
-                await adapter.indicate_done(message)
+                await self._resolve_indicator(adapter, message, success=False)
 
                 # Reply with the actual error if available, otherwise generic message
                 if error_msg and error_msg != "Unknown error":
@@ -648,7 +766,7 @@ class ChannelMessageRouter:
 
         except Exception as e:
             logger.error(f"[ROUTER:{channel}] Step 9 - execution error: {e}", exc_info=True)
-            await adapter.indicate_done(message)
+            await self._resolve_indicator(adapter, message, success=False)
             await adapter.send_response(
                 message.channel_id,
                 ChannelResponse(
@@ -679,8 +797,11 @@ class ChannelMessageRouter:
         count/summarize, extract outbound files, honor the [NO_REPLY] marker,
         send the reply, run the post-response hook, and clean up uploads.
         """
-        # 10. Done processing — show completion indicator
-        await adapter.indicate_done(message)
+        # 10. Done processing — resolve the in-flight indicator (ent#264: driver
+        # cancelled + awaited dead, in-flight placeholder settled, THEN
+        # indicate_done). Fires BEFORE the [NO_REPLY] early-return below, so
+        # observe-mode no-reply turns still clean up their indicator.
+        await self._resolve_indicator(adapter, message, success=True)
 
         # 11. Persist messages in session, with per-speaker attribution (#903).
         # The user turn carries verified_email (drives sender-filtered MEM-001

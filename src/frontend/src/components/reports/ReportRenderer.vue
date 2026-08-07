@@ -1,5 +1,5 @@
 <template>
-  <component :is="rendererComponent" :payload="payload" />
+  <component :is="rendererComponent" :payload="payload" :meta="meta" :load-more="loadMore" />
 </template>
 
 <script setup>
@@ -18,6 +18,11 @@ const props = defineProps({
   reportType: { type: String, default: '' },
   displayHint: { type: String, default: null },
   payload: { type: [Object, Array], default: () => ({}) },
+  // #1537 paging handles, forwarded to ReportTable; every other renderer
+  // ignores them (Vue drops unknown props onto the root, which is harmless for
+  // a null default).
+  meta: { type: Object, default: null },
+  loadMore: { type: Function, default: null },
 })
 
 const COMPONENTS = {

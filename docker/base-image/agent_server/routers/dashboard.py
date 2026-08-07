@@ -6,10 +6,12 @@ Reads and serves dashboard configuration from dashboard.yaml file.
 import logging
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from datetime import datetime
 
 from fastapi import APIRouter
 import yaml
+
+from ..safe_yaml import AliasPolicy, HardenedYamlError, load_hardened_yaml
+from ..utils.helpers import iso_z_from_mtime
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -202,7 +204,13 @@ async def get_dashboard():
     try:
         # Read and parse YAML
         content = dashboard_path.read_text()
-        config = yaml.safe_load(content)
+        # #1965: REJECT, matching the backend policy for agent-authored
+        # workspace YAML (`compatibility/static_checks._parse_yaml`). The
+        # backend proxies this endpoint and every consumer walks the parsed
+        # structure, so an anchor bomb here amplifies twice.
+        config = load_hardened_yaml(
+            content, kind="workspace_yaml", alias_policy=AliasPolicy.REJECT
+        )
 
         if config is None:
             return {
@@ -227,7 +235,7 @@ async def get_dashboard():
 
         # Get file modification time
         stat = dashboard_path.stat()
-        last_modified = datetime.fromtimestamp(stat.st_mtime).isoformat()
+        last_modified = iso_z_from_mtime(stat.st_mtime)
 
         # Ensure defaults
         if 'refresh' not in config:
@@ -241,6 +249,19 @@ async def get_dashboard():
             "warnings": errors if errors else None
         }
 
+    except HardenedYamlError as e:
+        # #1965: listed BEFORE the YAMLError arm and separately from it, because
+        # HardenedYamlError is a ValueError — not a YAMLError. Without its own
+        # arm a refused bomb would fall through to the generic `except
+        # Exception` below and surface as an unnamed "Failed to read
+        # dashboard.yaml", which is the timeout-shaped answer the AC rules out.
+        # `static_checks._parse_yaml` records the same trap on the backend side.
+        return {
+            "has_dashboard": False,
+            "config": None,
+            "last_modified": None,
+            "error": f"{e.code}: {e}",
+        }
     except yaml.YAMLError as e:
         # Get line number from YAML error if available
         error_msg = str(e)

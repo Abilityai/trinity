@@ -261,6 +261,101 @@ class ScheduleGitConfigMixin:
             rows = conn.execute(query).all()
             return {row[0] for row in rows}
 
+    def rebind_git_config(
+        self,
+        agent_name: str,
+        *,
+        new_github_repo: str,
+        expected_github_repo: str,
+        source_branch: str,
+    ) -> bool:
+        """Compare-and-swap an agent's git binding onto a repo the user owns
+        (trinity-enterprise#109).
+
+        **The CAS predicate, stated explicitly:**
+
+            WHERE agent_name = :agent_name
+              AND github_repo = :expected_github_repo
+
+        ``expected_github_repo`` is the value the caller READ before it started
+        creating GitHub state. Returning ``False`` (rowcount 0) therefore means
+        "the row moved under us" — a concurrent rebind, a delete, or an unknown
+        agent — and the caller must surface 409 ``BIND_CONCURRENT_MODIFICATION``
+        rather than retry: **nothing partial is written**, because this single
+        statement is the whole commit point.
+
+        The comparison is exact, NOT case-folded. GitHub slugs are
+        case-insensitive, so a same-repo-different-case value would be the
+        "same" repo to GitHub — but the point of the predicate is detecting
+        that *the row changed*, and any write is a change worth losing the race
+        over. Folding case here would let a concurrent writer that only
+        re-cased the value slip through undetected.
+
+        ``auto_sync_enabled`` is set to 1: the user now owns the destination,
+        and auto-pushing captures to their own default branch is the whole
+        point of the operation (the same carve-out ent#93's create path makes
+        for fork-to-own agents).
+
+        Deliberately NOT written: ``source_mode`` (stays 1 — see requirements
+        §11.12 FR-2; flipping it would carve a ``trinity/<agent>/<id>`` branch
+        and move the row *into* ``idx_git_config_repo_branch_unique``) and
+        ``working_branch`` (untouched for the same reason).
+
+        Returns True when exactly the intended row was updated.
+        """
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_git_config)
+                .where(
+                    and_(
+                        agent_git_config.c.agent_name == agent_name,
+                        agent_git_config.c.github_repo == expected_github_repo,
+                    )
+                )
+                .values(
+                    github_repo=new_github_repo,
+                    source_branch=source_branch,
+                    auto_sync_enabled=1,
+                )
+            )
+            return result.rowcount == 1
+
+    def restore_git_config_binding(
+        self,
+        agent_name: str,
+        *,
+        github_repo: str,
+        source_branch: str,
+        auto_sync_enabled: bool,
+    ) -> bool:
+        """Compensating UPDATE that puts a rebind's captured previous values back
+        (trinity-enterprise#109).
+
+        The loser path of a post-commit guard, and deliberately **not**
+        ``delete_git_config``. ent#93's create-path rollback can delete because
+        the row was INSERTed microseconds earlier and the whole agent creation
+        aborts with it. Here the row **pre-exists** a live agent: deleting it
+        strips that agent's binding entirely, so its next container recreate
+        finds no row, drops ``GITHUB_REPO`` from the baked env, and the agent
+        comes back with no repo at all — the silently-empty-agent class
+        (#843/#1439). Restoring the captured values is the only shape that is
+        a rollback rather than a second, worse mutation.
+
+        Unconditional by design: it runs only when the caller has already
+        established it lost, and the values it writes are the ones it read.
+        """
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_git_config)
+                .where(agent_git_config.c.agent_name == agent_name)
+                .values(
+                    github_repo=github_repo,
+                    source_branch=source_branch,
+                    auto_sync_enabled=1 if auto_sync_enabled else 0,
+                )
+            )
+            return result.rowcount > 0
+
     def delete_git_config(self, agent_name: str) -> bool:
         """Delete git configuration for an agent (when agent is deleted)."""
         with get_engine().begin() as conn:

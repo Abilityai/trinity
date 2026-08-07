@@ -407,6 +407,50 @@ class AgentOperations(
         with get_engine().begin() as conn:
             return self._deactivate_agent_keys_in_txn(conn, agent_name, active=False)
 
+    def reconcile_spawn_key_id(self, agent_name: str, current_key_id: str) -> int:
+        """Re-point this parent's children at its CURRENT agent-key id (#1854).
+
+        ``enforce_agent_spawn_scope`` 403s unless
+        ``get_agent_mcp_api_key(parent).id == child.spawned_by_key_id``, so
+        rotating a parent's key silently severs parenthood for every child it
+        spawned — unrecoverably, because the old id is gone.
+
+        Keyed on ``!= :current_id``, deliberately NOT ``= :old_id``:
+
+        * ``get_agent_mcp_api_key`` is ``ORDER BY created_at DESC LIMIT 1``, so
+          the moment the new key commits it returns the NEW id — re-reading it
+          to build an ``= :old_id`` predicate makes the UPDATE a no-op.
+        * #1811 recorded 50 accumulated active rows on one instance, so children
+          can be stranded on any of several superseded ids; only the ``!=`` form
+          converges them.
+
+        Idempotent and convergent: it repairs children stranded by an earlier
+        crashed rotation, and serves the rollback direction too (after the
+        superseded rows are deleted, the surviving key is newest-active again).
+
+        Security: the predicate is scoped to ``spawned_by_agent = :agent`` —
+        rows whose provenance ALREADY names this parent, written server-side at
+        creation. It cannot grant parenthood over an agent this parent never
+        spawned, and it does not widen the gate's matching rule (relaxing
+        ``enforce_agent_spawn_scope`` to accept "any active key" was rejected:
+        that edits shared auth code on behalf of one caller's transient state).
+
+        Returns the number of children re-pointed.
+        """
+        if not current_key_id:
+            return 0
+        stmt = (
+            update(agent_ownership)
+            .where(
+                agent_ownership.c.spawned_by_agent == agent_name,
+                agent_ownership.c.spawned_by_key_id.isnot(None),
+                agent_ownership.c.spawned_by_key_id != current_key_id,
+            )
+            .values(spawned_by_key_id=current_key_id)
+        )
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount or 0
+
     def delete_agent_ownership(self, agent_name: str) -> bool:
         """Soft-delete the agent ownership row (Issue #834 Phase 1a).
 

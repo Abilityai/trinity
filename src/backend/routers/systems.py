@@ -9,13 +9,19 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from models import (
+    BundledManifestDetail,
+    BundledManifestSummary,
     User,
     SystemDeployRequest,
     SystemDeployResponse,
 )
 from database import db
 from dependencies import get_current_user, require_role
-from services.system_service import deploy_manifest
+from services.system_service import (
+    deploy_manifest,
+    list_bundled_manifests,
+    read_bundled_manifest,
+)
 from services.docker_utils import container_stop
 
 logger = logging.getLogger(__name__)
@@ -40,7 +46,13 @@ async def deploy_system(
     is reported in `failed[]` and the remaining agents still deploy; callers
     must check `status`, not just the HTTP code. `status` is "deployed" (all
     created), "partial" (some failed, HTTP 200), "failed" (none created,
-    HTTP 500 with the full report as the body), or "valid" (dry_run).
+    HTTP 500 with the full report as the body), "valid" (dry_run, no blockers)
+    or "invalid" (dry_run, blockers in `failed` — #1841).
+
+    Note that `status` describes AGENT CREATION only: a folder, permission,
+    schedule, tag or start failure lands in `warnings[]` while `status` stays
+    "deployed" (trinity-enterprise#125), so a caller rendering the outcome must
+    surface `warnings` too.
 
     Args:
         body.manifest: YAML string defining the system
@@ -114,6 +126,72 @@ async def list_systems(current_user: User = Depends(get_current_user)):
     except Exception as e:
         logger.exception(f"Failed to list systems: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list systems: {str(e)}")
+
+
+# ============================================================================
+# Bundled-manifest catalog (ent#126)
+#
+# ⚠️ Invariant #4 — BOTH routes must stay above the parameterized routes below,
+# and for TWO separate collisions:
+#   * `GET /manifests` would otherwise be captured by `GET /{system_name}` and
+#     404 as "system 'manifests' not found" — a silent, plausible-looking failure.
+#   * `GET /manifests/manifest` would otherwise be captured by
+#     `GET /{system_name}/manifest` with system_name="manifests".
+# Both collisions are covered by real request tests in
+# tests/unit/test_ent126_manifest_catalog.py.
+#
+# Naming adjacency worth knowing: `/api/systems/manifests` (this bundled catalog)
+# and `/api/systems/{name}/manifest` (export a DEPLOYED system as YAML) read
+# alike and are unrelated.
+#
+# `require_role("creator")` mirrors POST /deploy rather than the looser
+# get_current_user on the neighbouring list/get routes: a surface you cannot act
+# on should not be advertised, and require_role also rejects connector principals.
+# ============================================================================
+
+@router.get("/manifests", response_model=list[BundledManifestSummary])
+async def list_manifests(
+    current_user: User = Depends(require_role("creator"))
+):
+    """
+    List the system manifests bundled in `config/manifests/`.
+
+    Read-only. Fail-soft per file: a manifest that cannot be parsed, validated or
+    read is returned with `valid: false` and a short `reason` rather than failing
+    the whole listing — one bad file must not hide the others.
+
+    `valid: true` means parse + validate + the same side-effect-free
+    template/resource preflight the dry-run uses all passed. It still cannot
+    promise a `github:`-template manifest deploys, because those are not probed.
+    """
+    return list_bundled_manifests()
+
+
+@router.get("/manifests/{manifest_id}", response_model=BundledManifestDetail)
+async def get_manifest(
+    manifest_id: str,
+    current_user: User = Depends(require_role("creator"))
+):
+    """
+    Read one bundled manifest's YAML, for loading into the install editor.
+
+    A malformed id is 400; an unknown one is 404.
+    """
+    try:
+        return read_bundled_manifest(manifest_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404, detail=f"Bundled manifest '{manifest_id}' not found"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Failed to read bundled manifest '{manifest_id}': {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to read bundled manifest: {str(e)}"
+        )
 
 
 @router.get("/{system_name}")

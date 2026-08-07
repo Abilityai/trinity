@@ -22,6 +22,7 @@ Redis is still used for:
 """
 
 import os
+import secrets
 from datetime import datetime
 from pathlib import Path
 
@@ -114,6 +115,7 @@ from db.sessions import SessionOperations
 from db.activities import ActivityOperations
 from db.reports import ReportOperations
 from db.product_events import ProductEventOperations
+from db.evaluations import EvaluationOperations
 from db.reminders import RemindersOperations
 from db.connector import ConnectorOperations
 from db.permissions import PermissionOperations
@@ -123,6 +125,7 @@ from db.settings import SettingsOperations
 from db.public_links import PublicLinkOperations
 from db.email_auth import EmailAuthOperations
 from db.skills import SkillsOperations
+from db.skill_sources import SkillSourcesOperations
 from db.public_chat import PublicChatOperations
 from db.tags import TagOperations
 from db.system_views import SystemViewOperations
@@ -167,6 +170,8 @@ def init_database():
         upgrade_to_head()
         # #1638: seed BEFORE _ensure_admin_user_engine — see the sqlite path.
         _seed_fresh_install_retention_engine()
+        # ent#237: same fresh-install window, same ordering requirement.
+        _seed_fresh_install_skill_source_engine()
         _ensure_admin_user_engine()
         return
 
@@ -199,6 +204,11 @@ def init_database():
             # BEFORE _ensure_admin_user (which makes `users` non-empty and so
             # would make this install look pre-existing).
             _seed_fresh_install_retention(cursor, conn)
+
+            # ent#237: seed the bundled community skills source. Same
+            # fresh-install window and the same must-precede-_ensure_admin_user
+            # ordering, since that is what makes `users` non-empty.
+            _seed_fresh_install_skill_source(cursor, conn)
 
             # Create default admin user if not exists
             _ensure_admin_user(cursor, conn)
@@ -259,6 +269,113 @@ def _seed_fresh_install_retention(cursor, conn):
     except Exception as e:
         print(f"WARNING: [#1638] retention seed skipped ({e}); "
               f"install keeps the default (wider) retention windows")
+
+
+_DEFAULT_SOURCE_SEED_NOTE = (
+    "[ent#237] Fresh install: seeded default skills source %s @ %s "
+    "(admin can disable or remove it in Settings)."
+)
+
+
+def _default_skill_source_values():
+    """The seed row, or None when seeding is disabled/misconfigured."""
+    from config import (
+        DEFAULT_SKILL_SOURCE_NAME,
+        DEFAULT_SKILL_SOURCE_REF,
+        DEFAULT_SKILL_SOURCE_URL,
+    )
+    from db.skill_sources import DEFAULT_SOURCE_PRIORITY
+
+    url = (DEFAULT_SKILL_SOURCE_URL or "").strip()
+    ref = (DEFAULT_SKILL_SOURCE_REF or "").strip()
+    if not url or not ref:
+        return None
+    return {
+        "id": "src_" + secrets.token_hex(8),
+        "name": DEFAULT_SKILL_SOURCE_NAME,
+        "url": url,
+        "ref": ref,
+        # AC#5: the community catalog is TAG-pinned, never branch-tracking.
+        "ref_type": "tag",
+        "is_default": 1,
+        "enabled": 1,
+        "priority": DEFAULT_SOURCE_PRIORITY,
+        "last_sync_status": "never",
+        "created_by": "seed:ent237",
+    }
+
+
+def _seed_fresh_install_skill_source(cursor, conn):
+    """Seed the bundled community skills source on a fresh install (ent#237 AC#3).
+
+    Fresh-install ONLY, for the reason spelled out in config: an existing
+    install must not silently acquire a source it never chose, and a deleted or
+    disabled source must stay that way across restarts — which a read-time code
+    default could not honour.
+
+    Priority is DEFAULT_SOURCE_PRIORITY (the highest number = lowest
+    precedence), so any custom source the operator adds later wins a name
+    collision without them having to reorder anything (AC#4).
+
+    Same fail-safe contract as the retention seed: never raises. `init_database`
+    runs at import, so raising here would crash-loop boot; a skipped seed just
+    means an empty library, which is the pre-ent#237 status quo.
+    """
+    try:
+        if not _is_fresh_install_sqlite(cursor):
+            return
+        values = _default_skill_source_values()
+        if values is None:
+            return
+        now = utc_now_iso()
+        # OR IGNORE on the partial-unique default index: two workers racing the
+        # fail-open migration lock must not produce two default sources.
+        cursor.execute(
+            "INSERT OR IGNORE INTO skill_sources "
+            "(id, name, url, ref, ref_type, is_default, enabled, priority, "
+            " last_sync_status, created_by, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                values["id"], values["name"], values["url"], values["ref"],
+                values["ref_type"], values["is_default"], values["enabled"],
+                values["priority"], values["last_sync_status"],
+                values["created_by"], now, now,
+            ),
+        )
+        conn.commit()
+        print(_DEFAULT_SOURCE_SEED_NOTE % (values["url"], values["ref"]))
+    except Exception as e:
+        print(f"WARNING: [ent#237] default skills source seed skipped ({e}); "
+              f"the library starts empty until an admin adds a source")
+
+
+def _seed_fresh_install_skill_source_engine():
+    """Default-source seed — engine-based path for PostgreSQL (#300).
+
+    Mirrors `_seed_fresh_install_skill_source`; see it for the rationale.
+    """
+    from sqlalchemy import func, select
+
+    from db.engine import get_engine, make_insert
+    from db.tables import skill_sources, users
+
+    try:
+        values = _default_skill_source_values()
+        if values is None:
+            return
+        with get_engine().begin() as conn:
+            if conn.execute(select(func.count()).select_from(users)).scalar():
+                return
+            now = utc_now_iso()
+            conn.execute(
+                make_insert(skill_sources)
+                .values(created_at=now, updated_at=now, **values)
+                .on_conflict_do_nothing()
+            )
+        print(_DEFAULT_SOURCE_SEED_NOTE % (values["url"], values["ref"]))
+    except Exception as e:
+        print(f"WARNING: [ent#237] default skills source seed skipped ({e}); "
+              f"the library starts empty until an admin adds a source")
 
 
 def _seed_fresh_install_retention_engine():
@@ -434,6 +551,7 @@ class DatabaseManager:
         self._activity_ops = ActivityOperations()
         self._report_ops = ReportOperations()
         self._product_event_ops = ProductEventOperations()
+        self._evaluation_ops = EvaluationOperations()
         self._reminder_ops = RemindersOperations()
         self._connector_ops = ConnectorOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
@@ -443,6 +561,7 @@ class DatabaseManager:
         self._public_link_ops = PublicLinkOperations(self._user_ops, self._agent_ops)
         self._email_auth_ops = EmailAuthOperations(self._user_ops)
         self._skills_ops = SkillsOperations()
+        self._skill_sources_ops = SkillSourcesOperations()
         self._public_chat_ops = PublicChatOperations()
         self._tag_ops = TagOperations()
         self._system_view_ops = SystemViewOperations()
@@ -565,6 +684,10 @@ class DatabaseManager:
         """Deactivate an agent's agent/connector-scoped MCP keys (#1811)."""
         return self._agent_ops.deactivate_agent_mcp_keys(agent_name)
 
+    def reconcile_spawn_key_id(self, agent_name: str, current_key_id: str) -> int:
+        """#1854: re-point a parent's spawned children at its current key id."""
+        return self._agent_ops.reconcile_spawn_key_id(agent_name, current_key_id)
+
     def purge_agent_ownership(self, agent_name: str):
         return self._agent_ops.purge_agent_ownership(agent_name)
 
@@ -660,6 +783,9 @@ class DatabaseManager:
 
     def get_shared_agents(self, username: str):
         return self._agent_ops.get_shared_agents(username)
+
+    def get_agents_shared_with_email(self, email: str):
+        return self._agent_ops.get_agents_shared_with_email(email)
 
     def is_agent_shared_with_user(self, agent_name: str, username: str):
         return self._agent_ops.is_agent_shared_with_user(agent_name, username)
@@ -859,6 +985,9 @@ class DatabaseManager:
     def delete_connector_config(self, agent_name: str):
         return self._connector_ops.delete_config(agent_name)
 
+    def list_connector_enabled_agents(self):
+        return self._connector_ops.list_enabled_agents()
+
     def mint_connector_key(self, agent_name, user_id):
         return self._connector_ops.mint_key(agent_name, user_id)
 
@@ -902,6 +1031,54 @@ class DatabaseManager:
 
     def set_max_backlog_depth(self, agent_name: str, depth: int) -> bool:
         return self._agent_ops.set_max_backlog_depth(agent_name, depth)
+
+    # =========================================================================
+    # Business validation (delegated to db/schedules/cleanup.py) — VALIDATE-001
+    # =========================================================================
+    #
+    # These two were MISSING from the facade (found while building ent#277).
+    # `ScheduleCleanupMixin` defines them and `ScheduleOperations` composes it,
+    # but nothing re-exported them here — so every call in
+    # `services/validation_service.py` raised AttributeError on the first line
+    # of `validate_execution`.
+    #
+    # The failure was invisible: the internal endpoint answers "accepted"
+    # immediately and runs validation in a background task whose `except
+    # Exception` turns the crash into one log line. An operator who enabled
+    # `validation_enabled` got an accepted request, no verdict, no operator-queue
+    # item, and a `business_status` that was never even set to
+    # `pending_validation` — the very silent-failure mode validation exists to
+    # prevent. Same class as the #1539 facade-delegation bug: a mixin method
+    # nothing re-exported, which no test using a mocked `db` can see.
+    # Keyword-forwarded so a future signature change can't rebind positionally.
+
+    def update_business_status(
+        self,
+        execution_id: str,
+        business_status: str,
+        validation_execution_id: str = None,
+    ) -> bool:
+        return self._schedule_ops.update_business_status(
+            execution_id=execution_id,
+            business_status=business_status,
+            validation_execution_id=validation_execution_id,
+        )
+
+    def create_validation_execution(
+        self,
+        validates_execution_id: str,
+        agent_name: str,
+        schedule_id: str,
+        message: str,
+        timeout_seconds: int = 120,
+    ):
+        return self._schedule_ops.create_validation_execution(
+            validates_execution_id=validates_execution_id,
+            agent_name=agent_name,
+            schedule_id=schedule_id,
+            message=message,
+            timeout_seconds=timeout_seconds,
+        )
 
     # =========================================================================
     # Backlog Execution Queries (delegated to db/schedules.py) - BACKLOG-001
@@ -1030,6 +1207,18 @@ class DatabaseManager:
     def get_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.get_agent_mcp_api_key(agent_name)
 
+    def list_active_agent_key_ids(self, agent_name: str):
+        """#1854: ids of the agent's ACTIVE scope='agent' keys (rotation capture)."""
+        return self._mcp_key_ops.list_active_agent_key_ids(agent_name)
+
+    def delete_superseded_agent_keys(self, agent_name: str, keep_id: str, key_ids):
+        """#1854: DELETE the named superseded scope='agent' rows (connector-safe)."""
+        return self._mcp_key_ops.delete_superseded_agent_keys(agent_name, keep_id, key_ids)
+
+    def find_mcp_key_by_hash(self, key_hash: str):
+        """#1854: metadata-only key lookup by SHA-256 hash (probe + drift predicate)."""
+        return self._mcp_key_ops.find_mcp_key_by_hash(key_hash)
+
     def set_agent_keys_active(self, agent_name: str, active: bool) -> int:
         """#1745: activate/deactivate an agent's per-agent MCP keys."""
         return self._mcp_key_ops.set_agent_keys_active(agent_name, active)
@@ -1156,6 +1345,7 @@ class DatabaseManager:
         source_channel: str = None,
         source_channel_chat_id: str = None,
         source_channel_thread: str = None,
+        source_channel_agent: str = None,
     ):
         """Create an execution record for a manual/API-triggered task (no schedule)."""
         return self._schedule_ops.create_task_execution(
@@ -1172,6 +1362,9 @@ class DatabaseManager:
             source_channel=source_channel,
             source_channel_chat_id=source_channel_chat_id,
             source_channel_thread=source_channel_thread,
+            # ent#265: binding-agent for channel report-back (set only at the
+            # /task inheritance point; None for direct rows).
+            source_channel_agent=source_channel_agent,
         )
 
     def create_schedule_execution(
@@ -1302,6 +1495,36 @@ class DatabaseManager:
     def get_freeze_schedules_if_sync_failing(self, agent_name: str):
         return self._schedule_ops.get_freeze_schedules_if_sync_failing(agent_name)
 
+    def rebind_git_config(
+        self,
+        agent_name: str,
+        *,
+        new_github_repo: str,
+        expected_github_repo: str,
+        source_branch: str,
+    ):
+        return self._schedule_ops.rebind_git_config(
+            agent_name,
+            new_github_repo=new_github_repo,
+            expected_github_repo=expected_github_repo,
+            source_branch=source_branch,
+        )
+
+    def restore_git_config_binding(
+        self,
+        agent_name: str,
+        *,
+        github_repo: str,
+        source_branch: str,
+        auto_sync_enabled: bool,
+    ):
+        return self._schedule_ops.restore_git_config_binding(
+            agent_name,
+            github_repo=github_repo,
+            source_branch=source_branch,
+            auto_sync_enabled=auto_sync_enabled,
+        )
+
     def delete_git_config(self, agent_name: str):
         return self._schedule_ops.delete_git_config(agent_name)
 
@@ -1416,13 +1639,18 @@ class DatabaseManager:
         return self._activity_ops.create_activity(activity)
 
     def complete_activity(self, activity_id: str, status: str = "completed", details: dict = None, error: str = None):
+        """#1804: returns an ``ActivityCloseOutcome`` (tri-state), not a bool."""
         return self._activity_ops.complete_activity(activity_id, status, details, error)
+
+    def close_open_activities_for_executions(self, execution_ids, status: str = "failed", error: str = None):
+        """#1804: batched bulk-sweep close (one transaction, no per-row WS)."""
+        return self._activity_ops.close_open_activities_for_executions(execution_ids, status, error)
 
     def get_activity(self, activity_id: str):
         return self._activity_ops.get_activity(activity_id)
 
-    def get_open_activity_id_for_execution(self, execution_id: str):
-        return self._activity_ops.get_open_activity_id_for_execution(execution_id)
+    def get_open_activity_id_for_execution(self, execution_id: str, include_failed: bool = False):
+        return self._activity_ops.get_open_activity_id_for_execution(execution_id, include_failed)
 
     def get_agent_activities(self, agent_name: str, activity_type: str = None, activity_state: str = None, limit: int = 100):
         return self._activity_ops.get_agent_activities(agent_name, activity_type, activity_state, limit)
@@ -1452,8 +1680,20 @@ class DatabaseManager:
         return self._report_ops.get_report(report_id)
 
     def get_reports_for_agent(self, agent_name: str, report_type: str = None,
+                              hours: int = None, search: str = None,
                               limit: int = 50, offset: int = 0):
-        return self._report_ops.get_reports_for_agent(agent_name, report_type, limit, offset)
+        # Keyword-forwarded on purpose: this facade previously passed the tail
+        # positionally, so adding `hours`/`search` to the ops signature (#1539)
+        # silently rebound `limit`→`hours`. Positional delegation makes every
+        # future parameter an ordering hazard.
+        return self._report_ops.get_reports_for_agent(
+            agent_name,
+            report_type=report_type,
+            hours=hours,
+            search=search,
+            limit=limit,
+            offset=offset,
+        )
 
     def get_fleet_reports(self, agent_names, report_type: str = None, hours: int = None,
                           search: str = None, limit: int = 50, offset: int = 0):
@@ -1827,14 +2067,20 @@ class DatabaseManager:
     def get_agent_skill_names(self, agent_name: str):
         return self._skills_ops.get_agent_skill_names(agent_name)
 
-    def assign_skill(self, agent_name: str, skill_name: str, assigned_by: str):
-        return self._skills_ops.assign_skill(agent_name, skill_name, assigned_by)
+    def assign_skill(self, agent_name: str, skill_name: str, assigned_by: str,
+                     source_id: str = None):
+        return self._skills_ops.assign_skill(
+            agent_name, skill_name, assigned_by, source_id
+        )
 
     def unassign_skill(self, agent_name: str, skill_name: str):
         return self._skills_ops.unassign_skill(agent_name, skill_name)
 
-    def set_agent_skills(self, agent_name: str, skill_names: list, assigned_by: str):
-        return self._skills_ops.set_agent_skills(agent_name, skill_names, assigned_by)
+    def set_agent_skills(self, agent_name: str, skill_names: list, assigned_by: str,
+                         source_ids: dict = None):
+        return self._skills_ops.set_agent_skills(
+            agent_name, skill_names, assigned_by, source_ids
+        )
 
     def delete_agent_skills(self, agent_name: str):
         return self._skills_ops.delete_agent_skills(agent_name)
@@ -1844,6 +2090,34 @@ class DatabaseManager:
 
     def get_agents_with_skill(self, skill_name: str):
         return self._skills_ops.get_agents_with_skill(skill_name)
+
+    # =========================================================================
+    # Skill Sources (delegated to db/skill_sources.py) — ent#237 multi-source
+    # =========================================================================
+
+    def list_skill_sources(self, enabled_only: bool = False):
+        return self._skill_sources_ops.list_sources(enabled_only)
+
+    def get_skill_source(self, source_id: str):
+        return self._skill_sources_ops.get_source(source_id)
+
+    def get_default_skill_source(self):
+        return self._skill_sources_ops.get_default_source()
+
+    def count_skill_sources(self):
+        return self._skill_sources_ops.count_sources()
+
+    def create_skill_source(self, **kwargs):
+        return self._skill_sources_ops.create_source(**kwargs)
+
+    def update_skill_source(self, source_id: str, **fields):
+        return self._skill_sources_ops.update_source(source_id, **fields)
+
+    def delete_skill_source(self, source_id: str):
+        return self._skill_sources_ops.delete_source(source_id)
+
+    def record_skill_source_sync(self, source_id: str, **kwargs):
+        return self._skill_sources_ops.record_sync(source_id, **kwargs)
 
     # =========================================================================
     # Public Chat Sessions (delegated to db/public_chat.py) - Phase 12.2.5
@@ -1888,6 +2162,22 @@ class DatabaseManager:
         return self._public_chat_ops.delete_link_sessions(link_id)
 
     # Public User Memory (MEM-001 + #895 split storage)
+    # --- Behavioral evaluations (ent#206) — referee surface ---------------
+    def create_agent_evaluation(self, agent_name, **kw):
+        return self._evaluation_ops.create_evaluation(agent_name, **kw)
+
+    def get_agent_evaluation(self, eval_id):
+        return self._evaluation_ops.get_evaluation(eval_id)
+
+    def list_agent_evaluations(self, agent_name, limit=50):
+        return self._evaluation_ops.list_evaluations_for_agent(agent_name, limit)
+
+    def list_fleet_evaluations(self, agent_names, limit=100):
+        return self._evaluation_ops.list_evaluations_for_agents(agent_names, limit)
+
+    def latest_evaluation_for_execution(self, execution_id):
+        return self._evaluation_ops.latest_for_execution(execution_id)
+
     def get_or_create_public_user_memory(self, agent_name: str, user_email: str) -> dict:
         return self._public_link_ops.get_or_create_user_memory(agent_name, user_email)
 
@@ -2160,6 +2450,10 @@ class DatabaseManager:
     def get_agent_execution_stats(self, agent_name: str, hours: int = 24):
         return self._schedule_ops.get_agent_execution_stats(agent_name, hours)
 
+    def get_agent_last_execution_at(self, agent_name: str):
+        """#1854: all-time MAX(started_at) for the agent (MCP-key `stale` health)."""
+        return self._schedule_ops.get_agent_last_execution_at(agent_name)
+
     def get_schedule_analytics(self, schedule_id: str, hours: int,
                                 agent_name: str):
         return self._schedule_ops.get_schedule_analytics(
@@ -2313,6 +2607,15 @@ class DatabaseManager:
     def get_telegram_bot_token(self, agent_name):
         return self._telegram_channel_ops.get_decrypted_bot_token(agent_name)
 
+    def decrypt_telegram_bot_token(self, encrypted):
+        # ent#264: decrypt from a binding row already in hand (single binding
+        # read per turn in the adapter's indicate_processing).
+        return self._telegram_channel_ops.decrypt_bot_token(encrypted)
+
+    def set_telegram_progress_indicator(self, agent_name, enabled):
+        # ent#264: per-binding in-progress indicator toggle (default ON).
+        return self._telegram_channel_ops.set_progress_indicator_enabled(agent_name, enabled)
+
     def get_all_telegram_bindings(self):
         return self._telegram_channel_ops.get_all_bindings()
 
@@ -2340,6 +2643,11 @@ class DatabaseManager:
     def clear_telegram_verified_email(self, binding_id, telegram_user_id):
         return self._telegram_channel_ops.clear_verified_email(binding_id, telegram_user_id)
 
+    def get_telegram_chat_link(self, binding_id, telegram_user_id):
+        # ent#265: DM destination check for the completion reporter (a chat link
+        # proves the user cold-started this bot — consent-by-construction).
+        return self._telegram_channel_ops.get_chat_link(binding_id, telegram_user_id)
+
     def get_telegram_chat_link_by_verified_email(self, binding_id, email):
         """Reverse lookup: find chat link by verified email for proactive messaging (#321)."""
         return self._telegram_channel_ops.get_chat_link_by_verified_email(binding_id, email)
@@ -2355,8 +2663,19 @@ class DatabaseManager:
     def get_telegram_groups_for_agent(self, agent_name):
         return self._telegram_channel_ops.get_groups_for_agent(agent_name)
 
-    def update_telegram_group_config(self, group_config_id, trigger_mode=None, welcome_enabled=None, welcome_text=None):
-        return self._telegram_channel_ops.update_group_config(group_config_id, trigger_mode, welcome_enabled, welcome_text)
+    def update_telegram_group_config(
+        self, group_config_id, trigger_mode=None, welcome_enabled=None,
+        welcome_text=None, allow_proactive=None,
+    ):
+        # Keyword passthrough (ent#265 / eng M3): a positional append here risks a
+        # silent allow_proactive→welcome_text swap if the ops signature ever moves.
+        return self._telegram_channel_ops.update_group_config(
+            group_config_id,
+            trigger_mode=trigger_mode,
+            welcome_enabled=welcome_enabled,
+            welcome_text=welcome_text,
+            allow_proactive=allow_proactive,
+        )
 
     def deactivate_telegram_group_config(self, binding_id, chat_id):
         return self._telegram_channel_ops.deactivate_group_config(binding_id, chat_id)

@@ -30,8 +30,11 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import List, Literal
 
 from fastapi import HTTPException
+
+from utils.credential_sanitizer import scrub_secret as _scrub_secret
 
 from services.github_service import GitHubService, GitHubError, OwnerType
 
@@ -69,15 +72,33 @@ class ForkToOwnResult:
     reused_existing: bool
 
 
-def scrub_secret(text: str, secret: str) -> str:
-    """Replace every occurrence of ``secret`` (and its b64 form) in ``text``."""
-    if not text:
-        return text or ""
-    if secret:
-        text = text.replace(secret, "***")
-        b64 = base64.b64encode(f"x-access-token:{secret}".encode()).decode()
-        text = text.replace(b64, "***")
-    return text
+@dataclass
+class DestinationState:
+    """Observed (or freshly created) state of a fork/bind destination repo.
+
+    Deliberately LOW-level: it reports *what is there* and leaves "may I push
+    into that?" to the caller, because the two callers' policies genuinely
+    differ and cannot be unified (ent#109 review decision #11):
+
+    - ``fork_template_to_own_repo`` treats a destination holding exactly the
+      template's tip as an idempotent no-op. That reuse branch **is** the
+      template-SHA comparison, so it cannot be lifted out of the create path.
+    - The post-creation rebind (``services/agent_service/repo_binding.py``)
+      has no template to compare against — its content source is the agent's
+      workspace volume — so ANY existing branch is a refusal.
+
+    ``branches`` is populated only when ``state == "branches"``.
+    """
+
+    state: Literal["created", "empty", "branches"]
+    branches: List[dict]
+
+
+# Re-exported from `utils.credential_sanitizer`, which is the home for the
+# whole family (ent#109 moved it there so the repo-binding path and this one
+# cannot drift). Kept importable from here for the create path's existing
+# callers and tests.
+scrub_secret = _scrub_secret
 
 
 def _http_error(status_code: int, code: str, message: str) -> HTTPException:
@@ -196,6 +217,95 @@ async def _resolve_template_tip(template_repo: str, read_pat: str) -> tuple:
     return default_branch, head_sha
 
 
+async def validate_destination_pat(user_gh: GitHubService) -> str:
+    """Validate the user's PAT and return its GitHub login.
+
+    Kept as a sibling of ``inspect_or_create_destination_repo`` rather than
+    folded into it so each caller controls WHEN the token is validated
+    relative to its own preconditions. ``fork_template_to_own_repo``
+    validates before resolving the template tip, so "bad PAT + unreachable
+    template" still reports ``FORK_PAT_INVALID``; folding the check into the
+    inspect primitive would silently reorder that into a template error.
+    Behaviour preservation here is asserted by test, not by inspection.
+    """
+    valid, login = await user_gh.validate_token()
+    if not valid:
+        raise _http_error(
+            400, "FORK_PAT_INVALID",
+            "GitHub token is invalid or expired. It must be able to create "
+            "repositories (classic PAT with 'repo' scope, or a fine-grained "
+            "token with Administration + Contents write).",
+        )
+    return login or ""
+
+
+async def inspect_or_create_destination_repo(
+    user_gh: GitHubService,
+    destination_repo: str,
+    login: str,
+    *,
+    private: bool,
+    description: str,
+    user_pat: str,
+) -> DestinationState:
+    """Resolve ``destination_repo`` to a pushable state, creating it if absent.
+
+    The shared destination half of fork-to-own (trinity-enterprise#93) and the
+    post-creation repo binding (ent#109), so both speak ONE error registry
+    (``FORK_DESTINATION_*`` / ``FORK_REPO_*``) and one eventual-consistency
+    contract instead of a parallel path (ent#109 AC #4).
+
+    Reports, never decides — see ``DestinationState``:
+      ``created``   the repo did not exist and was created; REST visibility has
+                    already been polled, so it is safe to push to
+      ``empty``     the repo existed and holds no branches
+      ``branches``  the repo existed and holds refs (up to 10 returned) — the
+                    caller applies its own reuse/refuse policy
+
+    Raises ``HTTPException`` with structured ``detail={"error","code"}`` on
+    every failure path.
+    """
+    dest_owner, dest_name = destination_repo.split("/", 1)
+
+    try:
+        dest_info = await user_gh.check_repo_exists(dest_owner, dest_name)
+    except GitHubError as e:
+        raise _http_error(502, "FORK_DESTINATION_UNREACHABLE",
+                          f"Could not check '{destination_repo}': {e}")
+
+    if dest_info.exists:
+        try:
+            dest_branches = await user_gh.list_branches(destination_repo, limit=10)
+        except GitHubError as e:
+            raise _http_error(502, "FORK_DESTINATION_UNREACHABLE",
+                              f"Could not inspect '{destination_repo}': {e}")
+        if not dest_branches:
+            return DestinationState("empty", [])
+        return DestinationState("branches", dest_branches)
+
+    # PAT can only create under its own user account (or an org it has
+    # rights in — the org endpoint enforces that itself).
+    owner_type = await user_gh.get_owner_type(dest_owner)
+    if owner_type == OwnerType.USER and login and dest_owner.lower() != login.lower():
+        raise _http_error(
+            400, "FORK_DESTINATION_FORBIDDEN",
+            f"The token belongs to '{login}' and cannot create a "
+            f"repository under user '{dest_owner}'. Use your own account "
+            f"or an organization you can create repositories in.",
+        )
+    result = await user_gh.create_repository(
+        dest_owner, dest_name, private=private, description=description,
+    )
+    if not result.success:
+        raise _http_error(
+            400, "FORK_REPO_CREATE_FAILED",
+            f"Could not create '{destination_repo}': "
+            f"{scrub_secret(result.error or 'unknown error', user_pat)}",
+        )
+    await _wait_for_repo_visible(user_gh, destination_repo)
+    return DestinationState("created", [])
+
+
 async def fork_template_to_own_repo(
     template_repo: str,
     destination_repo: str,
@@ -211,40 +321,32 @@ async def fork_template_to_own_repo(
     """
     user_gh = GitHubService(user_pat)
 
-    valid, login = await user_gh.validate_token()
-    if not valid:
-        raise _http_error(
-            400, "FORK_PAT_INVALID",
-            "GitHub token is invalid or expired. It must be able to create "
-            "repositories (classic PAT with 'repo' scope, or a fine-grained "
-            "token with Administration + Contents write).",
-        )
+    # Validated BEFORE the template tip is resolved: a bad PAT must report
+    # FORK_PAT_INVALID even when the template is also unreachable.
+    login = await validate_destination_pat(user_gh)
 
-    dest_owner, dest_name = destination_repo.split("/", 1)
     template_default, template_sha = await _resolve_template_tip(template_repo, read_pat)
 
-    # Destination state → create / reuse / refuse.
-    try:
-        dest_info = await user_gh.check_repo_exists(dest_owner, dest_name)
-    except GitHubError as e:
-        raise _http_error(502, "FORK_DESTINATION_UNREACHABLE",
-                          f"Could not check '{destination_repo}': {e}")
+    # Destination state comes from the shared primitive; the reuse/refuse
+    # POLICY stays HERE because this path's reuse branch IS the template-tip
+    # SHA comparison and is meaningless to the rebind caller (ent#109 §4.5).
+    dest = await inspect_or_create_destination_repo(
+        user_gh, destination_repo, login,
+        private=private,
+        description=f"Trinity agent workspace (from {template_repo})",
+        user_pat=user_pat,
+    )
 
     reused = False
-    if dest_info.exists:
-        try:
-            dest_branches = await user_gh.list_branches(destination_repo, limit=10)
-        except GitHubError as e:
-            raise _http_error(502, "FORK_DESTINATION_UNREACHABLE",
-                              f"Could not inspect '{destination_repo}': {e}")
-        if not dest_branches:
-            # Empty repo (prior failed attempt, or pre-created without a
-            # README) — push into it.
-            reused = True
-        elif (
-            len(dest_branches) == 1
-            and dest_branches[0]["name"] == template_default
-            and dest_branches[0]["sha"] == template_sha
+    if dest.state == "empty":
+        # Empty repo (prior failed attempt, or pre-created without a
+        # README) — push into it.
+        reused = True
+    elif dest.state == "branches":
+        if (
+            len(dest.branches) == 1
+            and dest.branches[0]["name"] == template_default
+            and dest.branches[0]["sha"] == template_sha
         ):
             # Exactly the template tip and nothing else: a prior attempt got
             # through the copy but failed later. Idempotent — skip the push.
@@ -253,37 +355,14 @@ async def fork_template_to_own_repo(
                 destination_repo,
             )
             return ForkToOwnResult(destination_repo, template_default, True)
-        else:
-            raise _http_error(
-                409, "FORK_DESTINATION_EXISTS",
-                f"Repository '{destination_repo}' already exists and contains "
-                f"data. Choose another name, or delete the repository if it "
-                f"was created by a previous failed attempt. (A repo "
-                f"pre-created WITH a README also lands here — create it "
-                f"empty, or let Trinity create it.)",
-            )
-    else:
-        # PAT can only create under its own user account (or an org it has
-        # rights in — the org endpoint enforces that itself).
-        owner_type = await user_gh.get_owner_type(dest_owner)
-        if owner_type == OwnerType.USER and login and dest_owner.lower() != login.lower():
-            raise _http_error(
-                400, "FORK_DESTINATION_FORBIDDEN",
-                f"The token belongs to '{login}' and cannot create a "
-                f"repository under user '{dest_owner}'. Use your own account "
-                f"or an organization you can create repositories in.",
-            )
-        result = await user_gh.create_repository(
-            dest_owner, dest_name, private=private,
-            description=f"Trinity agent workspace (from {template_repo})",
+        raise _http_error(
+            409, "FORK_DESTINATION_EXISTS",
+            f"Repository '{destination_repo}' already exists and contains "
+            f"data. Choose another name, or delete the repository if it "
+            f"was created by a previous failed attempt. (A repo "
+            f"pre-created WITH a README also lands here — create it "
+            f"empty, or let Trinity create it.)",
         )
-        if not result.success:
-            raise _http_error(
-                400, "FORK_REPO_CREATE_FAILED",
-                f"Could not create '{destination_repo}': "
-                f"{scrub_secret(result.error or 'unknown error', user_pat)}",
-            )
-        await _wait_for_repo_visible(user_gh, destination_repo)
 
     # Copy: bare single-branch clone of the template (read auth), push the
     # branch to the destination (user auth). Full history — upstream pulls

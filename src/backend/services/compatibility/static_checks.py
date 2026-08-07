@@ -16,13 +16,26 @@ Secret-bearing values are NEVER echoed: S-003 / S-009 / K-004 report the file an
 line and a pattern label, never the matched secret.
 """
 
+import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from services.template_service import _is_platform_injected
+from utils.safe_yaml import (
+    AliasPolicy,
+    HardenedYamlError,
+    load_hardened_yaml,
+)
+
+from services.credential_charset import (
+    CREDENTIAL_DETECTOR_NAME_RE,
+    CREDENTIAL_DETECTOR_REF_RE,
+)
+from services.template_service import _is_platform_injected, declared_credential_names
 from services.git_service import _GITIGNORE_PATTERNS
+
+logger = logging.getLogger(__name__)
 
 # A check result: (status, message, detail)
 Result = Tuple[str, str, Optional[Dict[str, Any]]]
@@ -76,8 +89,15 @@ def _parse_yaml(content: Optional[str]) -> Tuple[Optional[Any], Optional[str]]:
     if content is None:
         return None, "content unavailable"
     try:
-        return yaml.safe_load(content), None
-    except yaml.YAMLError as e:
+        # ent#314: the snapshot is agent-authored workspace content. REJECT,
+        # because every check here walks the parsed structure and no legitimate
+        # workspace file needs an alias.
+        return load_hardened_yaml(
+            content, kind="workspace_yaml", alias_policy=AliasPolicy.REJECT
+        ), None
+    except (yaml.YAMLError, HardenedYamlError) as e:
+        # HardenedYamlError is a ValueError: without it a refused document would
+        # escape this helper instead of becoming the (None, reason) it promises.
         return None, str(e).splitlines()[0] if str(e) else "invalid YAML"
 
 
@@ -92,7 +112,12 @@ def _template(snap: Dict[str, Any]) -> Tuple[Optional[dict], Optional[str]]:
     return (data if isinstance(data, dict) else {}), None
 
 
-_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# The shared detector charset (services/credential_charset.py). This finder was
+# already the wide one; naming the constant is what stops a future "align the
+# regexes" pass from narrowing it to match `_env_example_vars` — the wrong
+# direction, because the substitution engines accept the wide form. Read that
+# module's NON-MEMBERS list before touching any sibling pattern.
+_VAR_RE = CREDENTIAL_DETECTOR_REF_RE
 
 
 def _mcp_vars(snap: Dict[str, Any]) -> List[str]:
@@ -124,8 +149,14 @@ def _env_example_vars(snap: Dict[str, Any]) -> List[str]:
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        # The shared detector charset, NOT uppercase-only. This reader is the
+        # `provided` side of K-001 (HARD) and the `has_vars` precondition of
+        # K-003 (SOFT): an uppercase-only view made a correctly documented
+        # `my_var=` invisible, so K-001 HARD-failed a template that documents
+        # every variable it references. `.strip()` above is load-bearing — the
+        # validator anchors with `\Z`. (ent#128)
         name = line.split("=", 1)[0].strip()
-        if re.match(r"^[A-Z][A-Z0-9_]*$", name):
+        if CREDENTIAL_DETECTOR_NAME_RE.match(name):
             out.append(name)
     return out
 
@@ -495,6 +526,19 @@ def c_t012(snap):
     return _with_template(snap, f)
 
 
+# The `credentials:` SECTION names — structure, never variable names. `listed`
+# used to be a bare `set(creds.keys())`, i.e. "whichever section names this
+# template happens to use", so `${env_file}` and `${mcp_servers}` PASSED the gate
+# while a genuinely-declared variable one level deeper did not. A blind spot that
+# depends on the template's own contents is the worst kind: it cannot be found by
+# reading the check.
+#
+# The remaining keys are deliberately still admitted — a flat
+# `credentials: {STRIPE_API_KEY: '...'}` mapping is a legitimate legacy shape and
+# must keep passing.
+_CREDENTIAL_SECTION_KEYS = frozenset({"mcp_servers", "env_file", "config_files"})
+
+
 def c_t015(snap):
     def f(d):
         mcp_vars = set(_mcp_vars(snap))
@@ -503,13 +547,37 @@ def c_t015(snap):
         creds = d.get("credentials") or {}
         listed = set()
         if isinstance(creds, dict):
-            listed = set(creds.keys())
+            listed = set(creds.keys()) - _CREDENTIAL_SECTION_KEYS
         elif isinstance(creds, list):
             for c in creds:
                 if isinstance(c, dict) and c.get("name"):
                     listed.add(c["name"])
                 elif isinstance(c, str):
                     listed.add(c)
+        # The STRUCTURED form is the documented one, and it declares variables one
+        # level deeper than `creds.keys()` ever looked — so
+        # `credentials.mcp_servers.stripe.env_vars: [STRIPE_API_KEY]` satisfied
+        # nothing and this HARD gate failed a correctly-declared template.
+        #
+        # Fails CLOSED, and only this term is wrapped. A raise degrades to the
+        # narrower set above — which makes `missing` LARGER, i.e. errs toward
+        # failing — and never to `skipped`. That direction is the whole point: a
+        # HARD gate that cannot evaluate must not become indistinguishable from a
+        # HARD gate that passed, and `c_k002` delegates here, so one raise would
+        # otherwise take BOTH gates dark together on four lines of untrusted YAML.
+        # The `isinstance` filter is redundant against
+        # `declared_credential_names`' own contract, deliberately: the gate must
+        # not depend on that contract holding.
+        try:
+            listed |= {
+                name for name in declared_credential_names(creds) if isinstance(name, str)
+            }
+        except Exception as e:  # noqa: BLE001 — fail CLOSED, keep the narrow verdict
+            logger.warning(
+                "T-015: credential declaration unreadable (%s); comparing against "
+                "section names only",
+                e,
+            )
         missing = sorted(v for v in mcp_vars if v not in listed and not _is_platform_injected(v))
         if missing:
             return _fail("MCP ${VAR}s not listed in template.yaml credentials", {"missing": missing})
@@ -530,6 +598,46 @@ def c_t016(snap):
         if missing:
             return _fail("schedule messages reference missing commands", {"missing": sorted(set(missing))})
         return _ok("schedule messages reference existing commands")
+    return _with_template(snap, f)
+
+
+def c_t018(snap):
+    """STATIC: the `schedules:` block is STRUCTURALLY well-formed (ent#89).
+
+    Structure only — presence and type of `name`/`cron`/`message`, entry shape,
+    block shape, and the declared-schedule cap. It deliberately does NOT report
+    cron syntax: A-002 already ships as "cron expressions are valid", and two
+    contradicting cron authorities in the same report on the same field is
+    worse than either alone. (The *reader* validates cron strictly, but that is
+    a materialization gate — drop the entry — not a report verdict.)
+    """
+    def f(d):
+        try:
+            from services.template_schedules import schedule_shape_errors
+            errors = schedule_shape_errors(d.get("schedules"))
+        except Exception as e:  # noqa: BLE001
+            # Fail CLOSED, deliberately, and against the grain of every other
+            # check here. `run_static` converts a raise into `skipped`, and
+            # `_counts` (compatibility/__init__.py) counts only `status ==
+            # "fail"` — so a raising SOFT check drops soft_count 1->0 and, since
+            # `overall` is a bare `> 0` test, flips the whole report from
+            # `issues` to `compatible` exactly when this check's finding was the
+            # only failure. That is the entire population T-018 exists to serve.
+            # Worse, `build_report` persists `checks_json` and
+            # `_report_from_persisted` recomputes counts from it, so one
+            # transient raise is replayed as a clean bill of health on every
+            # stopped-agent read. A check whose whole purpose is
+            # malformed-input tolerance must not rely on that fail-open net.
+            #
+            # Type name ONLY: `detail` is persisted to
+            # agent_compatibility_results.checks_json and rendered in the UI,
+            # and `str(e)` can embed untrusted template content.
+            return _fail("schedules block could not be evaluated",
+                         {"error_type": type(e).__name__})
+        if errors:
+            return _fail("template.yaml `schedules:` entries are malformed",
+                         {"errors": errors[:25]})
+        return _ok("schedules block entries are well-formed")
     return _with_template(snap, f)
 
 
@@ -764,7 +872,15 @@ def c_p006(snap):
     data, _err = _template(snap)
     scheduled_cmds = set()
     if isinstance(data, dict):
-        for s in (data.get("schedules") or []):
+        # ent#89: `isinstance(..., list)` was MISSING here, unlike all four
+        # sibling readers of this field (c_t016, c_a001, c_a002, c_x007). A
+        # template with `schedules: 5` raised `TypeError: 'int' object is not
+        # iterable`, `run_static` swallowed it into `skipped`, and `_counts`
+        # ignores `skipped` — so this HARD check silently vanished from
+        # hard_count. A live instance of the exact fail-open class T-018 above
+        # guards against.
+        schedules = data.get("schedules")
+        for s in (schedules if isinstance(schedules, list) else []):
             msg = (s.get("message") if isinstance(s, dict) else "") or ""
             name = _slash_command(msg)
             if name:
@@ -810,14 +926,32 @@ def _command_names(snap) -> List[str]:
     return sorted(set(out))
 
 
-_CRON_FIELD = re.compile(r"^[\d*/,\-]+$")
-
-
 def _valid_cron(expr: str) -> bool:
-    parts = (expr or "").split()
-    if len(parts) != 5:
+    r"""True if the dedicated scheduler would accept this cron expression.
+
+    ent#89: this was a per-field `^[\d*/,\-]+$` regex, which was wrong in BOTH
+    directions — it rejected `0 9 * * MON` (valid; the scheduler translates
+    named days) and accepted `99 99 * * *` (invalid; no range check). So A-002
+    reported "cron expressions are valid" for an expression creation silently
+    drops, and flagged one that works. Delegate to the same validator the
+    scheduler registers with (#1472): *validate a config with the SAME parser
+    the executor uses.*
+
+    Imported inside the function so `apscheduler`/`pytz` stay off this module's
+    load path — `static_checks` is imported by the templates router on every
+    catalog request.
+    """
+    from services.schedule_validation import (
+        ScheduleValidationError,
+        validate_cron_expression,
+    )
+    try:
+        validate_cron_expression(expr)
+    except ScheduleValidationError:
         return False
-    return all(_CRON_FIELD.match(p) for p in parts)
+    except Exception:  # noqa: BLE001 — an unexpected shape is still "not valid"
+        return False
+    return True
 
 
 def c_a001(snap):
@@ -1087,7 +1221,7 @@ STATIC_CHECKS = {
     "T-001": c_t001, "T-002": c_t002, "T-003": c_t003, "T-004": c_t004,
     "T-005": c_t005, "T-006": c_t006, "T-007": c_t007, "T-008": c_t008,
     "T-010": c_t010, "T-011": c_t011, "T-012": c_t012, "T-015": c_t015,
-    "T-016": c_t016, "T-017": c_t017,
+    "T-016": c_t016, "T-017": c_t017, "T-018": c_t018,
     "C-001": c_c001, "C-007": c_c007,
     "K-001": c_k001, "K-002": c_k002, "K-003": c_k003, "K-004": c_k004,
     "G-001": c_g001, "G-002": c_g002, "G-003": c_g003, "G-004": c_g004,
@@ -1104,8 +1238,23 @@ STATIC_CHECKS = {
 def run_static(snapshot: Dict[str, Any], check_ids: List[str]) -> Dict[str, Result]:
     """Run the requested static checks against a snapshot. Returns {id: result}.
 
-    A check that raises is captured as a "skipped" result with the error reason
-    rather than failing the whole report.
+    A check that raises is captured rather than propagated — one bad check must
+    never break the whole report — but it is captured as a **FAIL**, not a skip.
+
+    It used to be a skip, and `_counts` counts only `status == "fail"`, so a raise
+    inside a HARD check DROPPED `hard_count` and could flip `overall_status` from
+    `issues` to `compatible` on an agent with a real problem. Four lines of
+    untrusted `template.yaml` were enough (`env_vars: [{K: v}]` → the gate's set
+    comprehension raises `TypeError: unhashable type: 'dict'`), and because
+    `c_k002` delegates to `c_t015` one raise took both HARD gates dark together —
+    a result indistinguishable from a clean pass. `template.yaml` is read from the
+    agent's own workspace, so that is a self-attestation bypass on the surface
+    whose job is to police it.
+
+    A check that could not evaluate is not a check that passed. Individual checks
+    that CAN degrade meaningfully do so themselves and fail closed (see `c_t015`);
+    reaching this handler means an unanticipated shape, which is exactly what
+    should be visible.
     """
     out: Dict[str, Result] = {}
     for cid in check_ids:
@@ -1116,5 +1265,19 @@ def run_static(snapshot: Dict[str, Any], check_ids: List[str]) -> Dict[str, Resu
         try:
             out[cid] = fn(snapshot)
         except Exception as e:  # noqa: BLE001 — one bad check never breaks the report
-            out[cid] = _skip(f"check error: {e}", "check_error")
+            # This swallow previously left NO trace anywhere AND dropped out of
+            # `_counts` (which counted only `status == "fail"`), so a broken
+            # validator reported "healthy" with nothing in the logs saying
+            # otherwise. Both halves are now closed: ent#128 flipped the result
+            # from `_skip` to `_fail` so a crashed check is counted, and ent#89
+            # added the log so all ~100 checks' failures are observable.
+            #
+            # ERROR with `exc_info`, not WARNING: the status alone says a check
+            # crashed but not where, and this handler is only reached by an
+            # unanticipated shape — the traceback is the whole diagnostic value.
+            logger.error("Static compatibility check %s raised: %s", cid, e,
+                         exc_info=True)
+            out[cid] = _fail(
+                f"check could not be evaluated: {e}", {"check_error": str(e)}
+            )
     return out

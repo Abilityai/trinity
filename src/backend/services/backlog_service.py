@@ -152,6 +152,26 @@ class BacklogService:
 
         Returns True if a row was drained, False otherwise.
         """
+        # ---- #1766: a pull pilot's queue has exactly one consumer ----------
+        # The backend and the agent's worker pool both claim through
+        # `db.claim_next_queued`, so before this guard they raced for every
+        # queued row — the atomic UPDATE meant no double-run, but the winner was
+        # whoever polled first, and the backend was structurally favoured (it
+        # drains on slot release plus the 60s `drain_orphans_all` sweep, while a
+        # worker idles up to 15s between polls). That made pull coverage
+        # nondeterministic and drain-biased: exactly the thing a soak is supposed
+        # to measure. One guard here covers every drain path, since the release
+        # callback, the orphan sweep, and `drain_on_release` all funnel through
+        # this method.
+        from services.pull_pilot import is_pull_pilot_agent
+
+        if is_pull_pilot_agent(agent_name):
+            logger.debug(
+                f"[Backlog] Drain skipped for pull pilot '{agent_name}': "
+                "its worker pool is the sole consumer (#1766)"
+            )
+            return False
+
         from database import db
 
         if db.get_queued_count(agent_name) == 0:

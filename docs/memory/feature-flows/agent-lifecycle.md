@@ -15,14 +15,14 @@ As a Trinity platform user, I want to create, start, stop, and delete agents so 
 ## Entry Points
 
 ### Create Agent
-- **UI**: `src/frontend/src/views/Agents.vue:34-39` - "Create Agent" button
+- **UI**: `src/frontend/src/views/Dashboard.vue` - chassis-header "Create Agent" button (all dashboard modes; the Agents page was retired into the Dashboard List mode in trinity-enterprise#260)
 - **API**: `POST /api/agents`
 
 ### Start/Stop Agent (Toggle)
 - **UI**: Unified toggle control across all pages (all use `size="sm"` as of 2026-02-18):
   - `src/frontend/src/components/AgentHeader.vue:38-43` - Detail page header
-  - `src/frontend/src/views/Agents.vue:242-247` - Agents list page
-  - `src/frontend/src/components/AgentNode.vue` - Dashboard network view
+  - `src/frontend/src/components/AgentListPanel.vue` - Dashboard List rows (hidden on system rows — grid-tile guard; ent#260)
+  - `src/frontend/src/components/AgentTile.vue` - Dashboard Grid tiles
 - **Component**: `src/frontend/src/components/RunningStateToggle.vue` - Reusable toggle (default size changed from 'md' to 'sm')
 - **API**: `POST /api/agents/{agent_name}/start` or `POST /api/agents/{agent_name}/stop`
 
@@ -49,10 +49,9 @@ As a Trinity platform user, I want to create, start, stop, and delete agents so 
 - Loading spinner overlay during API calls
 - **2026-02-18**: Default size changed from 'md' to 'sm' for consistency across all toggle locations
 
-**Agents List View** - `src/frontend/src/views/Agents.vue`
-- Line 34-39: Create Agent button opens modal
-- Lines 187-204: RunningStateToggle for each agent card
-- Line 391-405: `toggleAgentRunning()` method (unified toggle)
+**Dashboard List View** - `src/frontend/src/components/AgentListPanel.vue` (ent#260 — replaces the retired `views/Agents.vue`)
+- Create Agent button lives in the Dashboard chassis header (opens `CreateAgentModal`)
+- RunningStateToggle per row, rewired to `networkStore.toggleAgentRunning` (+ `isTogglingRunning` loading map; result-object toasts)
 
 **Agent Detail View** - `src/frontend/src/views/AgentDetail.vue`
 - Lines 28-59: AgentHeader with `@toggle="toggleRunning"` event
@@ -420,6 +419,15 @@ async def start_agent_internal(agent_name: str) -> dict:
         if not await check_base_image_matches(container, agent_name):
             needs_recreation = True  # recreate_reason = "image_drift"
 
+    # #1816: structural AC2 gate — a RUNNING trinity-system is never recreated,
+    # whatever the predicates say. Independent of predicate count, so a future
+    # tenth predicate cannot reopen the hole. Honest, not silent: the caller
+    # gets recreate_deferred="system_agent_running" and the remedy is named.
+    recreate_deferred = None
+    if needs_recreation and was_already_running and is_system_agent_name(agent_name):
+        needs_recreation, recreate_reason = False, None
+        recreate_deferred = "system_agent_running"
+
     if needs_recreation:
         # Recreate container with updated config
         # (sets CLAUDE_CODE_OAUTH_TOKEN if subscription, removes ANTHROPIC_API_KEY, or vice versa).
@@ -483,7 +491,60 @@ async def start_agent_internal(agent_name: str) -> dict:
 - **Auth env var changes** (SUB-002): `ANTHROPIC_API_KEY` and/or `CLAUDE_CODE_OAUTH_TOKEN` added/removed based on `use_platform_api_key` AND subscription assignment. Three-way check ensures mutual exclusion.
 - **Resource limit changes**: Memory/CPU limits updated in database
 - **Capabilities changes**: System-wide full_capabilities setting changed
+- **Base image drift** (#1809): the container's own `Config.Image` **tag** no longer resolves to the image id it runs. Evaluated lazily and **only on a cold start** — see below.
 - API key retrieval uses `get_anthropic_api_key()` from `services/settings_service.py`
+
+**Base-image drift — 3-state core, boolean wrapper (#1809 / #1816):**
+
+```python
+async def check_base_image_state(container, agent_name) -> Literal["match", "drift", "unknown"]
+async def check_base_image_matches(container, agent_name) -> bool:   # unchanged signature
+    return await check_base_image_state(container, agent_name) != "drift"
+```
+
+The four fail-open exits (no image id/reference on the container, `ImageNotFound`, any other Docker error)
+return `"unknown"` instead of a bare `True`, so a caller that wants to *report* drift can tell "the image
+is current" from "the check could not run". `start_agent_internal` consumes only the boolean, so #1809's
+behaviour is byte-identical: `unknown → True`, `match → True`, `drift → False`. The 3-state exists because
+`system_agent_service`'s staleness alarm (#1816) cannot be built on a boolean whose `True` conflates
+"current" with "the check failed" — alarming on that would recreate the #1809 symptom one layer up. One
+comparison, one place: `system_agent_service` must contain **no** hand-rolled image-id comparison
+(source-pinned).
+
+**System-aware `check_full_capabilities_match` (#1816):** the predicate compares the
+`trinity.full-capabilities` label against the admin-settable **fleet** default, but `trinity-system` runs
+`FULL_CAPABILITIES` by contract (package installation). On an `agent_full_capabilities=false` install,
+pinning the system agent's label to `'true'` would produce a mismatch that can never converge — a recreate
+on every start, forever. So the predicate returns `True` for the system agent, and
+`recreate_container_with_updated_config` takes a keyword-only `full_capabilities: Optional[bool]` override
+so the writer honours the same contract. Both sit behind **one** shared `helpers.is_system_agent_name()` — deliberately a NAME test rather than the
+DB-backed `db.is_system_agent`, which can fail and which also honours the `is_system` ownership flag (a
+failure that flipped this answer would either recreate the orchestrator or leak full capabilities to any
+`is_system`-flagged row). So
+writer and checker cannot disagree. `None` (every existing caller) = today's fleet-derived behaviour.
+
+**Restart-policy carry-forward (#1816):** `_provision_folders_and_run_agent_container` takes a keyword-only
+`restart_policy: Optional[dict]` and forwards it to `containers_run` only when `Name` is non-empty.
+`recreate_container_with_updated_config` reads it from the old container's `HostConfig` — previously an
+extracted-but-never-read variable, which is precisely why `unless-stopped` silently vanished on every
+recreate. Read null-safely as `(old_host_config.get("RestartPolicy") or {}).get("Name")`: the key can exist
+with a `null` value, and `.get` on `None` would abort the recreate.
+
+**Canonical cold restart — `restart_agent_internal` (#1860)** (`src/backend/services/agent_service/lifecycle.py:469-488`, directly after `start_agent_internal` :257):
+
+```python
+async def restart_agent_internal(agent_name: str, *, stop_timeout: int = 30) -> dict
+```
+
+Explicit `container_stop(container, timeout=stop_timeout)` (:487), then the full `start_agent_internal` path (:488); returns its result dict unchanged. The explicit stop is **load-bearing**: the #1809 image-drift predicate runs only on a COLD start (`not was_already_running`), and starting a running agent is a deliberate idempotent no-op — so a restart that should adopt a rebuilt base image must stop first. A missing container falls through to `start_agent_internal`, which rebuilds it from persisted config (#1559, live ownership row) or 404s. This helper is the one home for the stop→start shape and the future home of #1817's per-agent start lock; `routers/system_agent.py`, `routers/systems.py`, and `services/subscription_auto_switch.py` still carry inline copies (consolidation deferred to #1817).
+
+**First consumer — `restart_fleet`** (`POST /api/ops/fleet/restart`, `src/backend/routers/ops.py:234-560`): each agent routes `container is None` guard → `restart_agent_internal(agent_name)` (:425-427) instead of the old raw `container_stop`+`container_start`, so a fleet restart applies pending config drift and adopts a rebuilt base image exactly like a manual stop → start. Semantics:
+
+- **Skips**: system agent (:302-312) AND ephemeral ghosts (:314-330) — the config-drift predicates are not ephemeral-gated, so a cold start could recreate a drifted ghost and destroy its volume-less workspace (ent#69 "ghosts never recreate"); GC owns ghost lifecycle. Pre-existing `filter_status` / `system_prefix` / not-running skips unchanged.
+- **Principals**: `reject_agent_principal` beside `assert_admin` (:256-260) — the endpoint now *replaces* containers, and escalating a handler's destructiveness re-prices every principal that could already reach it (Invariant #8, the #1816 rule).
+- **Single-flight** (#1919-hardened): Redis SETNX lock `ops:fleet_restart` (:42-48, :267-282) — a second caller gets 409 `fleet_restart_in_progress`; **2100s TTL** bounds a crashed holder, sized above the slowest single agent (skill injection is bounded by `skill_service._INJECT_LOCK_TTL_SECONDS`=1800; constants comment-linked so retuning either side re-opens the math visibly). The per-iteration refresh is an **ownership-checked pre-action gate** (:310-362): GET-compare (`redis_breaker_util.lock_token_matches` — shared with the release so the two predicates can't drift) → EXPIRE, with EXPIRE→0 (key vanished in the sliver) routed to the absent path. **Foreign** token ⇒ a concurrent caller holds the lock: warn (token *state* only, never values) + stop the loop — completed restarts stand, `summary`/audit carry `stopped_early="lease_lost_foreign"` + `processed` (partial-run honesty; the gate *shrinks* the dual-run window to one in-flight agent, it cannot eliminate it — per-agent start locks are #1817). **Absent** token ⇒ lapsed unclaimed: re-acquire via SETNX and continue (`lease_reacquired` audited); abort only if the re-acquire loses. A refresh Redis error is fail-open (throttled single warning per run, :352-362) — never treated as loss. `list_all_agents_fast()` sits INSIDE the `try` (:300-304, `agents` pre-initialized for the `finally`-audit read) so nothing can leak the lock between acquire and release; an abnormal exit marks the audit `stopped_early="error"` + exception class name (:493-499), distinguishing an aborted run from an empty fleet. Release is compare-and-delete of the holder's own token (:506-517), attempted even after detected loss (foreign-safe by construction — skipping it on a false "absent" would self-lockout the fleet for the TTL); fail-open when Redis is down. Guards the client-timeout-retry race (a retried POST interleaving stop/start with the still-running first loop — the #799/#1817 wedge class).
+- **Result surfacing**: per-agent entries explicitly copy `recreated` / `recreate_reason` / `credentials_injection` / `skills_injection` (:369-377) — the #1809 allowlist learning: this router builds its own result dicts, service fields do NOT flow through on their own — and `summary.recreated` counts replacements (:481). Failure rows never carry a raw exception message — HTTPException `.detail` (platform-authored) or the exception class name only, full text + traceback in the backend log (`py/stack-trace-exposure`, :396-418); a failed recreate that leaves NO container gets an actionable error naming `POST /api/agents/{name}/start` (#1559) as the recovery path (:414-418).
+- **Audit as durable record**: a partial-safe `fleet_restart` entry (`AuditEventType.SYSTEM`) is written in `finally` (:518-543) with totals + a per-agent `recreated: {name: reason}` map + the #1919 honesty keys (`processed`, `stopped_early`, `error` class, `lease_reacquired`) — the sequential loop can outlast proxy timeouts (nginx 60s / Cloudflare ~100s), so a client 504/524 does NOT mean the restart failed; the outcome lands here. `invalidate_context_stats_cache()` (:505) and the lock release run before the awaited audit call, so a shutdown `CancelledError` at the await can't leave the lock held for a full TTL.
 
 **Authentication Model** (Updated 2026-03-03 for SUB-002):
 
@@ -749,8 +810,14 @@ cap_drop=['ALL'],
 # Add back only the capabilities needed for the mode
 cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
 read_only=False,
-# Always apply noexec,nosuid to /tmp for security
-tmpfs={'/tmp': 'noexec,nosuid,size=100m'}
+# Always apply noexec,nosuid to /tmp for security (#1231: size is
+# operator-tunable via AGENT_TMP_SIZE, default 512m; the flags are fixed)
+tmpfs=AGENT_TMPFS_MOUNT,          # {'/tmp': 'noexec,nosuid,size=512m'}
+# #1871: always bound the container's json-file log. Docker's driver has no
+# default max-size/max-file, so an uncapped log grows until the Docker data
+# root fills and dockerd wedges. Creation-time — existing agents adopt on
+# recreate, not restart.
+log_config=AGENT_LOG_CONFIG,      # {'type': 'json-file', 'config': {'max-size': '10m', 'max-file': '3'}}
 ```
 
 **Files Using These Constants**:
@@ -976,6 +1043,8 @@ await log_audit_event(
 - [ ] Delete any remaining test agents
 - [ ] `docker ps -a | grep test-` - verify no orphans
 
+**Unit tests (#1860 + #1919)**: `tests/unit/test_1860_fleet_restart_adoption.py` — 27 mocked tests for the fleet-restart path (adoption surfaced per agent, failure isolation, system/ephemeral skips, agent-principal 403, single-flight 409, audit `recreated` map, fail-open lock paths; #1919: 2-agent happy-path lease baseline, foreign-token stop + release-leaves-foreign, absent re-acquire win/lose, refresh-error scoped fail-open with release still deleting, EXPIRE→0 and EXPIRE-raise branches, first-iteration loss, bytes-token match, no-token-values-in-logs, listing-failure releases the lock + `stopped_early="error"` audit).
+
 ---
 
 **Last Updated**: 2026-03-26
@@ -988,6 +1057,10 @@ await log_audit_event(
 
 | Date | Changes |
 |------|---------|
+| 2026-07-31 | **#1919 — fleet-restart lock hardening** (PR #1912 review follow-up): the per-iteration lease refresh became an ownership-checked pre-action gate (`lock_token_matches` shared helper in `redis_breaker_util`, foreign ⇒ stop with `stopped_early="lease_lost_foreign"` + `processed` partial-run honesty in summary/audit, absent ⇒ SETNX re-acquire + `lease_reacquired` audit flag, EXPIRE→0 = absent, refresh errors fail-open with one throttled warning); `list_all_agents_fast()` moved inside the `try/finally` (abnormal exit audited as `stopped_early="error"` + class name); TTL 900→2100 sized above `skill_service._INJECT_LOCK_TTL_SECONDS` (1800) so one slow agent can no longer outlive the whole lease. +11 unit tests. |
+| 2026-07-31 | **#1860 — fleet restart adopts a rebuilt base image**: new canonical cold-restart helper `restart_agent_internal(agent_name, *, stop_timeout=30)` (`lifecycle.py:469-488` — explicit stop is load-bearing so the #1809 cold-start-only drift predicate can fire); `POST /api/ops/fleet/restart` routes each agent through it instead of raw stop+start, skips ephemeral ghosts (ent#69), adds `reject_agent_principal`, a single-flight `ops:fleet_restart` SETNX lock (409, 900s TTL, compare-and-delete release), explicit `recreated`/`recreate_reason`/injection field copy + `summary.recreated`, and a partial-safe `fleet_restart` audit entry written in `finally` with a per-agent `recreated: {name: reason}` map. Inline stop→start copies in `system_agent.py`/`systems.py`/`subscription_auto_switch.py` consolidate under #1817. See "Canonical cold restart" above. |
+| 2026-07-30 | **ent#109 — one owner for git env across both rebuild paths**: `_apply_git_env_from_db(agent_name, env_vars, *, pat_gate)` is now the sole writer of the GitHub-sync env block for **both** `recreate_container_with_updated_config` (config drift) and `_apply_persisted_auth_env` → `recreate_missing_container` (rebuild from nothing). The first path seeds `env_vars` from the **old container** and re-derived only `GITHUB_PAT`, replaying whatever `GITHUB_REPO`/`GIT_SYNC_*` it happened to carry — and its one production caller, `start_agent_internal`, fires on nine config-drift predicates **and base-image drift at cold start**, so a base-image rebuild armed that replay fleet-wide. The **PAT gate is a required per-call-site parameter, never a default**: `per_agent_only` (config drift) preserves #211 verbatim so a global-only platform PAT is never injected into a previously-tokenless container; `effective` (rebuild-from-nothing) uses the 2-tier per-agent → global resolver. Sharing one gate is the ent#162 credential leak (`configure_push_remote` clears the push blackhole ⇒ a private KB can reach the shared public upstream), so an AST guard pins the whole writer set (`{recreate_container_with_updated_config: per_agent_only, _apply_persisted_auth_env: effective}`) and fails CI on a flipped gate *or* a third writer on any container-seeded path. Also: **set-or-clear** over `_GIT_ENV_KEYS` (a deleted `agent_git_config` row pops the whole set incl. an orphaned `GITHUB_PAT`; a `source_mode` flip clears the mode/branch pair), `GIT_SYNC_AUTO` derived as **DB flag OR baked env** (derive-only — no write-back, because "baked true / DB 0" is also exactly an owner's explicit `PUT .../git/auto-sync {enabled:false}`, and the write would cross an `OwnedAgentByName` → `AuthorizedAgentByName` privilege boundary via Start), and **correct, never introduce** on the config-drift path (the block is written only when the old container already carried `GITHUB_REPO` or a PAT resolves — otherwise startup.sh scrubs the `.git/config` credential of an agent bound via `POST /{agent}/git/initialize` and blackholes its push remote; `effective` is exempt). Tests: `tests/unit/test_ent109_git_env_seam.py` (22). See [github-sync.md](github-sync.md) → Container-rebuild env, [git-sync-health.md](git-sync-health.md). |
+| 2026-07-28 | **#1816 — base-image adoption for `trinity-system`**: `check_base_image_matches` split into a 3-state `check_base_image_state` core + an unchanged boolean wrapper (`state != "drift"`); `check_full_capabilities_match` made system-aware and `recreate_container_with_updated_config` gained a keyword-only `full_capabilities` override behind one shared `helpers.is_system_agent_name()`; `_provision_folders_and_run_agent_container` gained a keyword-only `restart_policy` and the recreate now carries `unless-stopped` forward (it was silently dropped); `start_agent_internal` gained the structural AC2 gate (`is_system AND was_already_running` ⇒ `recreate_deferred="system_agent_running"`, surfaced through `routers/agents.py`). See [internal-system-agent.md](internal-system-agent.md) → Base-image adoption. |
 | 2026-07-18 | **#1484 — `create_agent_internal` decomposition (no behavior change)**: the CC-187 / 945-SLOC monolith was cut into a thin orchestrator + fenced private phase-helpers (each CC<20 / <100 SLOC), reading a single orchestrator-populated `_RollbackHandles` dataclass; the `if docker_client: try/except/else` and CC-trivial gates stay inline. Signature/callers unchanged. Characterization-tests-first (`tests/unit/test_1484_create_agent_characterization.py`, 40 tests) pin the byte-identical contract. See `architecture.md` (Services → `agent_service/crud.py`, Network Topology `_create_agent_container`). The numbered "Business Logic" line references above are now stale (helper-relocated). |
 | 2026-03-26 | **Line number refresh + Trinity injection removal**: Updated all line numbers across agents.py (647 lines), lifecycle.py (403 lines), crud.py (552 lines), helpers.py (467 lines), terminal.py (320 lines). Removed all `inject_trinity_meta_prompt()` references and AgentClient injection code (Issue #136). Updated startup injection order to: Credentials, Skills, Read-Only Hooks. Added documentation for bulk endpoints (context-stats :157, execution-stats :163, autonomy-status :232, slots :240), queue endpoints (queue :537, clear :546, release :555), and activity endpoints (activities :568, timeline :594). Updated delete flow for EVT-001 event subscriptions (:381) and AVATAR-002 emotion image cleanup (:410-425). |
 | 2026-03-07 | **AVATAR-001: Avatar lifecycle integration**: Delete agent now cleans up avatar files. Rename agent now renames avatar file from old to new name. Get agent response enriched with `avatar_url` field from `db.get_avatar_identity()`. Added avatar file to cascading deletes list. |

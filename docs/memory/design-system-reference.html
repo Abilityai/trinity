@@ -1,0 +1,825 @@
+<title>Trinity Design System — Component Reference</title>
+<style>
+  :root {
+    /* chrome — Trinity gray scale (Tailwind gray + custom 750) */
+    --ground: #f9fafb;        /* gray-50  */
+    --surface: #ffffff;
+    --chrome: #f3f4f6;        /* gray-100 */
+    --field: #ffffff;
+    --border: #e5e7eb;        /* gray-200 */
+    --border-strong: #d1d5db; /* gray-300 */
+    --ink: #111827;           /* gray-900 */
+    --ink-2: #4b5563;         /* gray-600 */
+    --ink-3: #6b7280;         /* gray-500 */
+    --shadow: 0 1px 2px rgba(17,24,39,.06), 0 1px 3px rgba(17,24,39,.08);
+    --shadow-lg: 0 10px 30px rgba(17,24,39,.18);
+
+    /* action-primary → indigo */
+    --accent: #4f46e5;        /* action-primary-600 */
+    --accent-hover: #4338ca;  /* action-primary-700 */
+    --accent-soft: #e0e7ff;   /* action-primary-100 */
+    --ring: rgba(99,102,241,.38);
+
+    /* status / state semantic pairs (bg / text) */
+    --b-success-bg:#dcfce7; --b-success-tx:#15803d; --success:#16a34a;
+    --b-warning-bg:#fef9c3; --b-warning-tx:#a16207; --warning:#ca8a04;
+    --b-danger-bg:#fee2e2;  --b-danger-tx:#b91c1c;  --danger:#dc2626; --danger-hover:#b91c1c;
+    --b-info-bg:#dbeafe;    --b-info-tx:#1d4ed8;    --info:#2563eb;
+    --b-urgent-bg:#ffedd5;  --b-urgent-tx:#c2410c;  --urgent:#ea580c;
+    --b-auto-bg:#fef3c7;    --b-auto-tx:#b45309;
+    --b-locked-bg:#ffe4e6;  --b-locked-tx:#be123c;
+    --b-claude-bg:#ffedd5;  --b-claude-tx:#c2410c;
+    --b-gemini-bg:#dbeafe;  --b-gemini-tx:#1d4ed8;
+    --b-purple-bg:#f3e8ff;  --b-purple-tx:#7e22ce;
+    --b-neutral-bg:#f3f4f6; --b-neutral-tx:#4b5563;
+
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #111827;        /* gray-900 */
+      --surface: #1f2937;       /* gray-800 */
+      --chrome: #2a303c;        /* gray-750 — Trinity custom shade */
+      --field: #111827;
+      --border: #2a303c;
+      --border-strong: #374151; /* gray-700 */
+      --ink: #f3f4f6;           /* gray-100 */
+      --ink-2: #d1d5db;         /* gray-300 — one step lighter than naive inversion (readability, operator 2026-07-31) */
+      --ink-3: #9ca3af;         /* gray-400 — gray-500 is the floor: disabled/decoration only */
+      --shadow: 0 1px 2px rgba(0,0,0,.35);
+      --shadow-lg: 0 14px 40px rgba(0,0,0,.5);
+
+      --accent: #6366f1;        /* action-primary-500 */
+      --accent-hover: #818cf8;  /* action-primary-400 */
+      --accent-soft: rgba(99,102,241,.16);
+      --ring: rgba(129,140,248,.42);
+
+      --b-success-bg:rgba(34,197,94,.16);  --b-success-tx:#86efac; --success:#4ade80;
+      --b-warning-bg:rgba(234,179,8,.16);  --b-warning-tx:#fde047; --warning:#facc15;
+      --b-danger-bg:rgba(239,68,68,.16);   --b-danger-tx:#fca5a5;  --danger:#ef4444; --danger-hover:#f87171;
+      --b-info-bg:rgba(59,130,246,.16);    --b-info-tx:#93c5fd;    --info:#60a5fa;
+      --b-urgent-bg:rgba(249,115,22,.16);  --b-urgent-tx:#fdba74;  --urgent:#fb923c;
+      --b-auto-bg:rgba(245,158,11,.16);    --b-auto-tx:#fcd34d;
+      --b-locked-bg:rgba(244,63,94,.16);   --b-locked-tx:#fda4af;
+      --b-claude-bg:rgba(249,115,22,.16);  --b-claude-tx:#fdba74;
+      --b-gemini-bg:rgba(59,130,246,.16);  --b-gemini-tx:#93c5fd;
+      --b-purple-bg:rgba(168,85,247,.16);  --b-purple-tx:#d8b4fe;
+      --b-neutral-bg:#2a303c;              --b-neutral-tx:#9ca3af;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#111827; --surface:#1f2937; --chrome:#2a303c; --field:#111827;
+    --border:#2a303c; --border-strong:#374151;
+    --ink:#f3f4f6; --ink-2:#d1d5db; --ink-3:#9ca3af;
+    --shadow:0 1px 2px rgba(0,0,0,.35); --shadow-lg:0 14px 40px rgba(0,0,0,.5);
+    --accent:#6366f1; --accent-hover:#818cf8; --accent-soft:rgba(99,102,241,.16); --ring:rgba(129,140,248,.42);
+    --b-success-bg:rgba(34,197,94,.16);  --b-success-tx:#86efac; --success:#4ade80;
+    --b-warning-bg:rgba(234,179,8,.16);  --b-warning-tx:#fde047; --warning:#facc15;
+    --b-danger-bg:rgba(239,68,68,.16);   --b-danger-tx:#fca5a5;  --danger:#ef4444; --danger-hover:#f87171;
+    --b-info-bg:rgba(59,130,246,.16);    --b-info-tx:#93c5fd;    --info:#60a5fa;
+    --b-urgent-bg:rgba(249,115,22,.16);  --b-urgent-tx:#fdba74;  --urgent:#fb923c;
+    --b-auto-bg:rgba(245,158,11,.16);    --b-auto-tx:#fcd34d;
+    --b-locked-bg:rgba(244,63,94,.16);   --b-locked-tx:#fda4af;
+    --b-claude-bg:rgba(249,115,22,.16);  --b-claude-tx:#fdba74;
+    --b-gemini-bg:rgba(59,130,246,.16);  --b-gemini-tx:#93c5fd;
+    --b-purple-bg:rgba(168,85,247,.16);  --b-purple-tx:#d8b4fe;
+    --b-neutral-bg:#2a303c;              --b-neutral-tx:#9ca3af;
+  }
+  :root[data-theme="light"] {
+    --ground:#f9fafb; --surface:#ffffff; --chrome:#f3f4f6; --field:#ffffff;
+    --border:#e5e7eb; --border-strong:#d1d5db;
+    --ink:#111827; --ink-2:#4b5563; --ink-3:#6b7280;
+    --shadow:0 1px 2px rgba(17,24,39,.06), 0 1px 3px rgba(17,24,39,.08);
+    --shadow-lg:0 10px 30px rgba(17,24,39,.18);
+    --accent:#4f46e5; --accent-hover:#4338ca; --accent-soft:#e0e7ff; --ring:rgba(99,102,241,.38);
+    --b-success-bg:#dcfce7; --b-success-tx:#15803d; --success:#16a34a;
+    --b-warning-bg:#fef9c3; --b-warning-tx:#a16207; --warning:#ca8a04;
+    --b-danger-bg:#fee2e2;  --b-danger-tx:#b91c1c;  --danger:#dc2626; --danger-hover:#b91c1c;
+    --b-info-bg:#dbeafe;    --b-info-tx:#1d4ed8;    --info:#2563eb;
+    --b-urgent-bg:#ffedd5;  --b-urgent-tx:#c2410c;  --urgent:#ea580c;
+    --b-auto-bg:#fef3c7;    --b-auto-tx:#b45309;
+    --b-locked-bg:#ffe4e6;  --b-locked-tx:#be123c;
+    --b-claude-bg:#ffedd5;  --b-claude-tx:#c2410c;
+    --b-gemini-bg:#dbeafe;  --b-gemini-tx:#1d4ed8;
+    --b-purple-bg:#f3e8ff;  --b-purple-tx:#7e22ce;
+    --b-neutral-bg:#f3f4f6; --b-neutral-tx:#4b5563;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: var(--sans); font-size: 14px; line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 40px 28px 80px; }
+
+  /* ---------- page chrome ---------- */
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .14em;
+    color: var(--ink-3); text-transform: uppercase;
+  }
+  h1 { font-size: 27px; font-weight: 700; margin: 6px 0 10px; letter-spacing: -.02em; text-wrap: balance; }
+  .meta { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; color: var(--ink-2); font-size: 13px; }
+  .meta code { font-family: var(--mono); font-size: 12px; background: var(--chrome); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; }
+
+  .toc { display: flex; flex-wrap: wrap; gap: 8px; margin: 26px 0 8px; }
+  .toc a {
+    font-size: 12.5px; color: var(--ink-2); text-decoration: none;
+    border: 1px solid var(--border); background: var(--surface);
+    border-radius: 999px; padding: 4px 12px;
+  }
+  .toc a:hover { color: var(--accent); border-color: var(--accent); }
+
+  /* ---------- spec sections ---------- */
+  .spec { margin-top: 44px; scroll-margin-top: 20px; }
+  .spec-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+  .spec-num { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+  .spec-head h2 { font-size: 17px; font-weight: 650; margin: 0; letter-spacing: -.01em; }
+  .rule { color: var(--ink-2); font-size: 13.5px; margin: 0 0 14px; max-width: 68ch; }
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 22px; box-shadow: var(--shadow);
+  }
+  .tok {
+    font-family: var(--mono); font-size: 11.5px; color: var(--ink-3);
+    margin-top: 14px; line-height: 1.8; overflow-x: auto;
+  }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .stack { display: flex; flex-direction: column; gap: 16px; }
+  .demo-note { font-size: 12px; color: var(--ink-3); }
+
+  /* ---------- 1 · color tokens ---------- */
+  .fam { display: grid; grid-template-columns: 190px 1fr; gap: 10px 18px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .fam:last-child { border-bottom: 0; }
+  .fam-name { font-family: var(--mono); font-size: 12.5px; }
+  .fam-use { font-size: 11.5px; color: var(--ink-3); margin-top: 2px; font-family: var(--sans); }
+  .strip { display: flex; gap: 6px; flex-wrap: wrap; }
+  .sw { width: 64px; }
+  .sw i { display: block; height: 30px; border-radius: 5px; border: 1px solid rgba(127,127,127,.22); }
+  .sw b { display: block; font-family: var(--mono); font-size: 10px; font-weight: 400; color: var(--ink-3); margin-top: 3px; }
+  .sw.hot b { color: var(--accent); }
+  @media (max-width: 720px) { .fam { grid-template-columns: 1fr; } }
+
+  /* ---------- 2 · typography ---------- */
+  .type-row { display: grid; grid-template-columns: 150px 1fr; gap: 4px 20px; align-items: baseline; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .type-row:last-child { border-bottom: 0; }
+  .type-spec { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+  @media (max-width: 720px) { .type-row { grid-template-columns: 1fr; } }
+
+  /* ---------- 3 · spacing & radius ---------- */
+  .space-bar { background: var(--accent-soft); border: 1px dashed var(--accent); border-radius: 3px; height: 22px; }
+  .radius-demo { background: var(--chrome); border: 1px solid var(--border-strong); width: 84px; height: 52px; display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); }
+
+  /* ---------- buttons ---------- */
+  .btn {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: var(--sans); font-size: 13.5px; font-weight: 500;
+    border-radius: 6px; border: 1px solid transparent;
+    padding: 7px 14px; cursor: pointer; line-height: 1.35;
+    transition: background .12s ease, border-color .12s ease, color .12s ease;
+  }
+  .btn.sm { font-size: 12.5px; padding: 4px 10px; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-secondary { background: var(--surface); color: var(--ink); border-color: var(--border-strong); }
+  .btn-secondary:hover { background: var(--chrome); }
+  .btn-danger { background: var(--danger); color: #fff; }
+  .btn-danger:hover { background: var(--danger-hover); }
+  .btn-ghost { background: transparent; color: var(--accent); }
+  .btn-ghost:hover { background: var(--accent-soft); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn:focus-visible, .focus-demo { outline: none; box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--ring); }
+
+  /* ---------- forms ---------- */
+  .field { display: flex; flex-direction: column; gap: 5px; max-width: 340px; }
+  .field label { font-size: 13px; font-weight: 550; }
+  .field .help { font-size: 12px; color: var(--ink-3); }
+  .input, .select {
+    font-family: var(--sans); font-size: 13.5px; color: var(--ink);
+    background: var(--field); border: 1px solid var(--border-strong);
+    border-radius: 6px; padding: 8px 11px; width: 100%;
+  }
+  .input:focus, .select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+  textarea.input { min-height: 84px; resize: vertical; line-height: 1.5; }
+  .input.mono { font-family: var(--mono); font-size: 12.5px; }
+  .input.invalid { border-color: var(--danger); }
+  .input.invalid:focus { box-shadow: 0 0 0 3px rgba(239,68,68,.25); }
+  .err { display: flex; gap: 6px; align-items: flex-start; font-size: 12.5px; color: var(--b-danger-tx); }
+  .err svg { flex: none; margin-top: 1px; }
+  .selwrap { position: relative; }
+  .selwrap svg { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); pointer-events: none; color: var(--ink-3); }
+  .select { appearance: none; -webkit-appearance: none; padding-right: 32px; }
+
+  .toggle { display: inline-flex; align-items: center; gap: 10px; font-size: 13.5px; cursor: pointer; }
+  .tg { width: 36px; height: 20px; border-radius: 999px; background: var(--border-strong); position: relative; transition: background .15s ease; flex: none; }
+  .tg::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 999px; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: left .15s ease; }
+  .toggle.on .tg { background: var(--accent); }
+  .toggle.on .tg::after { left: 18px; }
+
+  /* ---------- badges ---------- */
+  .bdg {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11.5px; font-weight: 550; letter-spacing: .01em;
+    border-radius: 999px; padding: 2.5px 9px; line-height: 1.4; white-space: nowrap;
+  }
+  .bdg i { width: 6px; height: 6px; border-radius: 999px; background: currentColor; }
+  .bdg.success { background: var(--b-success-bg); color: var(--b-success-tx); }
+  .bdg.warning { background: var(--b-warning-bg); color: var(--b-warning-tx); }
+  .bdg.danger  { background: var(--b-danger-bg);  color: var(--b-danger-tx); }
+  .bdg.info    { background: var(--b-info-bg);    color: var(--b-info-tx); }
+  .bdg.urgent  { background: var(--b-urgent-bg);  color: var(--b-urgent-tx); }
+  .bdg.auto    { background: var(--b-auto-bg);    color: var(--b-auto-tx); }
+  .bdg.locked  { background: var(--b-locked-bg);  color: var(--b-locked-tx); }
+  .bdg.claude  { background: var(--b-claude-bg);  color: var(--b-claude-tx); }
+  .bdg.gemini  { background: var(--b-gemini-bg);  color: var(--b-gemini-tx); }
+  .bdg.purple  { background: var(--b-purple-bg);  color: var(--b-purple-tx); }
+  .bdg.neutral { background: var(--b-neutral-bg); color: var(--b-neutral-tx); }
+
+  /* ---------- cards ---------- */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; box-shadow: var(--shadow); }
+  .demo-ground { background: var(--ground); border: 1px solid var(--border); border-radius: 8px; padding: 18px; }
+  .stat-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); }
+  .stat-value { font-size: 30px; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin: 2px 0; }
+  .stat-delta { font-size: 12.5px; color: var(--b-success-tx); display: inline-flex; gap: 4px; align-items: center; }
+  .tile-head { display: flex; align-items: center; gap: 10px; }
+  .avatar { width: 34px; height: 34px; border-radius: 7px; background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 14px; display: flex; align-items: center; justify-content: center; flex: none; }
+  .tile-name { font-weight: 650; font-size: 14px; }
+  .tile-meta { font-size: 12px; color: var(--ink-3); margin-top: 1px; }
+  .tile-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+
+  /* ---------- modal ---------- */
+  .overlay-demo { background: rgba(10,14,22,.55); border-radius: 8px; padding: 40px 20px; display: flex; justify-content: center; }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-lg); max-width: 400px; width: 100%; padding: 20px; }
+  .modal h3 { margin: 0 0 8px; font-size: 15.5px; font-weight: 650; }
+  .modal p { margin: 0 0 18px; color: var(--ink-2); font-size: 13.5px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
+
+  /* ---------- tabs ---------- */
+  .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); align-items: center; }
+  .tab { font-size: 13.5px; color: var(--ink-2); padding: 9px 13px; border: 0; background: none; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab:hover { color: var(--ink); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 550; }
+  .tab-more { font-size: 12px; color: var(--ink-3); background: var(--chrome); border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; margin-left: 6px; }
+
+  /* ---------- table ---------- */
+  .tbl-scroll { overflow: auto; max-height: 232px; }
+  .tbl thead th { position: sticky; top: 0; z-index: 1; }
+  .tbl-count { font-size: 12px; color: var(--ink-3); padding: 8px 14px; border-top: 1px solid var(--border); background: var(--surface); }
+  table.tbl { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 560px; }
+  .tbl th { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; font-weight: 500; color: var(--ink-3); text-align: left; background: var(--chrome); padding: 8px 14px; border-bottom: 1px solid var(--border); }
+  .tbl td { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  .tbl tr:last-child td { border-bottom: 0; }
+  .tbl tbody tr:hover td { background: var(--chrome); }
+  .tbl .num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 12.5px; }
+
+  /* ---------- empty / loading / failed ---------- */
+  .empty { border: 1px dashed var(--border-strong); border-radius: 8px; padding: 34px 20px; text-align: center; }
+  .empty .ic { width: 40px; height: 40px; border-radius: 999px; background: var(--chrome); color: var(--ink-3); display: inline-flex; align-items: center; justify-content: center; margin-bottom: 10px; }
+  .empty h4 { margin: 0 0 4px; font-size: 14.5px; font-weight: 650; }
+  .empty p { margin: 0 0 14px; color: var(--ink-3); font-size: 13px; }
+
+  /* scanline data-loading standard (ent#245 concept C + ent#253) */
+  .chartzone { margin-top: 10px; }
+  .chartzone .zlabel { display: flex; justify-content: space-between; align-items: baseline; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); letter-spacing: .06em; text-transform: uppercase; margin-bottom: 4px; }
+  .chartzone .hval { font-size: 12px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .chartbox { position: relative; height: 44px; border-radius: 5px; background: var(--chrome); overflow: hidden; }
+  .chartbox .track { position: absolute; inset: 0; opacity: .5; background-image: linear-gradient(var(--border-strong) 1px, transparent 1px); background-size: 100% 11px; background-position: 0 8px; }
+  .chartbox .chart { position: absolute; inset: 5px 6px 4px; width: calc(100% - 12px); height: 35px; opacity: 0; }
+  .chartbox .beam { position: absolute; top: 0; bottom: 0; left: -8%; width: 18px; opacity: 0; background: linear-gradient(90deg, transparent, var(--ring), transparent); }
+  .chartbox .beam::after { content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 1.5px; background: var(--info); box-shadow: 0 0 7px var(--info); }
+  .cload.is-loading .beam { opacity: 1; animation: beam-sweep 1.5s ease-in-out infinite alternate; }
+  .cload.is-revealing .beam { opacity: 1; animation: beam-final .55s linear forwards; }
+  .cload.is-revealing .chart { animation: wipe-in .55s linear forwards; }
+  .cload.is-loaded .chart { opacity: 1; }
+  .cload.is-loaded .track { opacity: .15; }
+  @keyframes beam-sweep { from { left: -8%; } to { left: 100%; } }
+  @keyframes beam-final { 0% { left: -8%; opacity: 1; } 92% { opacity: 1; } 100% { left: 102%; opacity: 0; } }
+  @keyframes wipe-in { from { clip-path: inset(0 100% 0 0); opacity: 1; } to { clip-path: inset(0 0 0 0); opacity: 1; } }
+
+  .spin { width: 16px; height: 16px; border-radius: 999px; border: 2px solid var(--border-strong); border-top-color: var(--accent); animation: rot .7s linear infinite; flex: none; }
+  @keyframes rot { to { transform: rotate(360deg); } }
+
+  /* header theme switch */
+  .tswitch { margin-left: auto; display: inline-flex; gap: 3px; background: var(--chrome); border: 1px solid var(--border); border-radius: 999px; padding: 3px; }
+  .tswitch button { border: 0; background: none; font-family: var(--sans); font-size: 12px; color: var(--ink-2); border-radius: 999px; padding: 3px 11px; cursor: pointer; }
+  .tswitch button.on { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); font-weight: 550; }
+
+  /* side-by-side forced themes */
+  .dual { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 18px; }
+  @media (max-width: 720px) { .dual { grid-template-columns: 1fr; } }
+  .dual > div { border-radius: 8px; padding: 16px; background: var(--ground); border: 1px solid var(--border); }
+  .dual-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 12px; }
+  .tset-light {
+    --ground:#f9fafb; --surface:#ffffff; --chrome:#f3f4f6; --field:#ffffff;
+    --border:#e5e7eb; --border-strong:#d1d5db;
+    --ink:#111827; --ink-2:#4b5563; --ink-3:#6b7280;
+    --shadow:0 1px 2px rgba(17,24,39,.06), 0 1px 3px rgba(17,24,39,.08);
+    --accent:#4f46e5; --accent-hover:#4338ca; --accent-soft:#e0e7ff; --ring:rgba(99,102,241,.38);
+    --b-success-bg:#dcfce7; --b-success-tx:#15803d; --success:#16a34a;
+    --b-danger-bg:#fee2e2; --b-danger-tx:#b91c1c; --danger:#dc2626; --danger-hover:#b91c1c;
+    --b-info-bg:#dbeafe; --b-info-tx:#1d4ed8; --info:#2563eb;
+    --b-auto-bg:#fef3c7; --b-auto-tx:#b45309;
+    color: var(--ink);
+  }
+  .tset-dark {
+    --ground:#111827; --surface:#1f2937; --chrome:#2a303c; --field:#111827;
+    --border:#2a303c; --border-strong:#374151;
+    --ink:#f3f4f6; --ink-2:#d1d5db; --ink-3:#9ca3af;
+    --shadow:0 1px 2px rgba(0,0,0,.35);
+    --accent:#6366f1; --accent-hover:#818cf8; --accent-soft:rgba(99,102,241,.16); --ring:rgba(129,140,248,.42);
+    --b-success-bg:rgba(34,197,94,.16); --b-success-tx:#86efac; --success:#4ade80;
+    --b-danger-bg:rgba(239,68,68,.16); --b-danger-tx:#fca5a5; --danger:#ef4444; --danger-hover:#f87171;
+    --b-info-bg:rgba(59,130,246,.16); --b-info-tx:#93c5fd; --info:#60a5fa;
+    --b-auto-bg:rgba(245,158,11,.16); --b-auto-tx:#fcd34d;
+    color: var(--ink);
+  }
+
+  .inline-fail { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); }
+  .inline-fail a { color: var(--accent); font-weight: 550; text-decoration: none; }
+  .inline-fail a:hover { text-decoration: underline; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .spin, .chartbox .beam, .chartbox .chart { animation: none !important; }
+  }
+
+  /* ---------- alerts & toast ---------- */
+  .alert { display: flex; gap: 10px; border-radius: 8px; padding: 12px 14px; font-size: 13.5px; align-items: flex-start; }
+  .alert svg { flex: none; margin-top: 1px; }
+  .alert b { font-weight: 650; }
+  .alert .act { margin-left: 6px; font-weight: 600; text-decoration: underline; color: inherit; cursor: pointer; }
+  .alert.success { background: var(--b-success-bg); color: var(--b-success-tx); }
+  .alert.info    { background: var(--b-info-bg);    color: var(--b-info-tx); }
+  .alert.warning { background: var(--b-warning-bg); color: var(--b-warning-tx); }
+  .alert.danger  { background: var(--b-danger-bg);  color: var(--b-danger-tx); }
+  .toast { display: inline-flex; align-items: center; gap: 9px; background: var(--surface); border: 1px solid var(--border-strong); box-shadow: var(--shadow-lg); border-radius: 8px; padding: 10px 16px; font-size: 13.5px; }
+  .toast .ok { color: var(--success); }
+
+  .footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border); color: var(--ink-3); font-size: 12.5px; max-width: 72ch; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Trinity · Design System v2</div>
+    <h1>Component Reference</h1>
+    <div class="meta">
+      <span class="bdg auto"><i></i>Draft v0 — awaiting operator review</span>
+      <span>Proposal for <code>trinity#1430</code></span>
+      <span>Tokens: <code>src/frontend/tailwind.config.js</code> (#67)</span>
+      <span class="tswitch" role="group" aria-label="Theme">
+        <button type="button" data-set-theme="auto" class="on">Auto</button>
+        <button type="button" data-set-theme="light">Light</button>
+        <button type="button" data-set-theme="dark">Dark</button>
+      </span>
+    </div>
+    <nav class="toc">
+      <a href="#s1">1 Color tokens</a><a href="#s2">2 Typography</a><a href="#s3">3 Spacing &amp; radius</a>
+      <a href="#s4">4 Buttons</a><a href="#s5">5 Form controls</a><a href="#s6">6 Badges</a>
+      <a href="#s7">7 Cards</a><a href="#s8">8 Modal</a><a href="#s9">9 Tabs</a>
+      <a href="#s10">10 Table</a><a href="#s11">11 Empty states</a><a href="#s12">12 Data loading</a>
+      <a href="#s13">13 Alerts &amp; toasts</a>
+    </nav>
+  </header>
+
+  <!-- 1 · COLOR TOKENS -->
+  <section class="spec" id="s1">
+    <div class="spec-head"><span class="spec-num">01</span><h2>Color tokens</h2></div>
+    <p class="rule">Every color in the product is a semantic token. Raw Tailwind palette classes (<code style="font-family:var(--mono);font-size:12px">bg-green-500</code>) are migration debt — the ratchet drives them to zero. Highlighted shades are the workhorses; the full palette stays available per family.</p>
+    <div class="panel">
+      <div class="fam"><div><div class="fam-name">status-success</div><div class="fam-use">healthy · completed · passing</div></div>
+        <div class="strip"><div class="sw"><i style="background:#dcfce7"></i><b>100</b></div><div class="sw"><i style="background:#86efac"></i><b>300</b></div><div class="sw hot"><i style="background:#22c55e"></i><b>500</b></div><div class="sw hot"><i style="background:#16a34a"></i><b>600</b></div><div class="sw"><i style="background:#15803d"></i><b>700</b></div><div class="sw"><i style="background:#14532d"></i><b>900</b></div></div></div>
+      <div class="fam"><div><div class="fam-name">status-warning</div><div class="fam-use">degraded · needs attention soon</div></div>
+        <div class="strip"><div class="sw"><i style="background:#fef9c3"></i><b>100</b></div><div class="sw"><i style="background:#fde047"></i><b>300</b></div><div class="sw hot"><i style="background:#eab308"></i><b>500</b></div><div class="sw hot"><i style="background:#ca8a04"></i><b>600</b></div><div class="sw"><i style="background:#a16207"></i><b>700</b></div><div class="sw"><i style="background:#713f12"></i><b>900</b></div></div></div>
+      <div class="fam"><div><div class="fam-name">status-danger</div><div class="fam-use">failed · destructive actions</div></div>
+        <div class="strip"><div class="sw"><i style="background:#fee2e2"></i><b>100</b></div><div class="sw"><i style="background:#fca5a5"></i><b>300</b></div><div class="sw hot"><i style="background:#ef4444"></i><b>500</b></div><div class="sw hot"><i style="background:#dc2626"></i><b>600</b></div><div class="sw"><i style="background:#b91c1c"></i><b>700</b></div><div class="sw"><i style="background:#7f1d1d"></i><b>900</b></div></div></div>
+      <div class="fam"><div><div class="fam-name">status-info</div><div class="fam-use">running · queued · neutral notice</div></div>
+        <div class="strip"><div class="sw"><i style="background:#dbeafe"></i><b>100</b></div><div class="sw"><i style="background:#93c5fd"></i><b>300</b></div><div class="sw hot"><i style="background:#3b82f6"></i><b>500</b></div><div class="sw hot"><i style="background:#2563eb"></i><b>600</b></div><div class="sw"><i style="background:#1d4ed8"></i><b>700</b></div><div class="sw"><i style="background:#1e3a8a"></i><b>900</b></div></div></div>
+      <div class="fam"><div><div class="fam-name">status-urgent</div><div class="fam-use">escalated · act now</div></div>
+        <div class="strip"><div class="sw"><i style="background:#ffedd5"></i><b>100</b></div><div class="sw"><i style="background:#fdba74"></i><b>300</b></div><div class="sw hot"><i style="background:#f97316"></i><b>500</b></div><div class="sw hot"><i style="background:#ea580c"></i><b>600</b></div><div class="sw"><i style="background:#c2410c"></i><b>700</b></div><div class="sw"><i style="background:#7c2d12"></i><b>900</b></div></div></div>
+      <div class="fam"><div><div class="fam-name">state-autonomous</div><div class="fam-use">operating mode: autonomous loop</div></div>
+        <div class="strip"><div class="sw"><i style="background:#fef3c7"></i><b>100</b></div><div class="sw"><i style="background:#fcd34d"></i><b>300</b></div><div class="sw hot"><i style="background:#f59e0b"></i><b>500</b></div><div class="sw hot"><i style="background:#d97706"></i><b>600</b></div><div class="sw"><i style="background:#b45309"></i><b>700</b></div><div class="sw"><i style="background:#78350f"></i><b>900</b></div></div></div>
+      <div class="fam"><div><div class="fam-name">state-locked</div><div class="fam-use">operating mode: locked / restricted</div></div>
+        <div class="strip"><div class="sw"><i style="background:#ffe4e6"></i><b>100</b></div><div class="sw"><i style="background:#fda4af"></i><b>300</b></div><div class="sw hot"><i style="background:#f43f5e"></i><b>500</b></div><div class="sw hot"><i style="background:#e11d48"></i><b>600</b></div><div class="sw"><i style="background:#be123c"></i><b>700</b></div><div class="sw"><i style="background:#881337"></i><b>900</b></div></div></div>
+      <div class="fam"><div><div class="fam-name">brand-claude</div><div class="fam-use">third-party identity: Claude</div></div>
+        <div class="strip"><div class="sw"><i style="background:#ffedd5"></i><b>100</b></div><div class="sw"><i style="background:#fdba74"></i><b>300</b></div><div class="sw hot"><i style="background:#f97316"></i><b>500</b></div><div class="sw hot"><i style="background:#ea580c"></i><b>600</b></div><div class="sw"><i style="background:#c2410c"></i><b>700</b></div><div class="sw"><i style="background:#7c2d12"></i><b>900</b></div></div></div>
+      <div class="fam"><div><div class="fam-name">brand-gemini</div><div class="fam-use">third-party identity: Gemini</div></div>
+        <div class="strip"><div class="sw"><i style="background:#dbeafe"></i><b>100</b></div><div class="sw"><i style="background:#93c5fd"></i><b>300</b></div><div class="sw hot"><i style="background:#3b82f6"></i><b>500</b></div><div class="sw hot"><i style="background:#2563eb"></i><b>600</b></div><div class="sw"><i style="background:#1d4ed8"></i><b>700</b></div><div class="sw"><i style="background:#1e3a8a"></i><b>900</b></div></div></div>
+      <div class="fam"><div><div class="fam-name">accent-purple</div><div class="fam-use">decorative highlight, non-status</div></div>
+        <div class="strip"><div class="sw"><i style="background:#f3e8ff"></i><b>100</b></div><div class="sw"><i style="background:#d8b4fe"></i><b>300</b></div><div class="sw hot"><i style="background:#a855f7"></i><b>500</b></div><div class="sw hot"><i style="background:#9333ea"></i><b>600</b></div><div class="sw"><i style="background:#7e22ce"></i><b>700</b></div><div class="sw"><i style="background:#581c87"></i><b>900</b></div></div></div>
+      <div class="fam"><div><div class="fam-name">action-primary</div><div class="fam-use">interactive: buttons · links · focus</div></div>
+        <div class="strip"><div class="sw"><i style="background:#e0e7ff"></i><b>100</b></div><div class="sw"><i style="background:#a5b4fc"></i><b>300</b></div><div class="sw hot"><i style="background:#6366f1"></i><b>500</b></div><div class="sw hot"><i style="background:#4f46e5"></i><b>600</b></div><div class="sw"><i style="background:#4338ca"></i><b>700</b></div><div class="sw"><i style="background:#312e81"></i><b>900</b></div></div></div>
+      <div class="fam"><div><div class="fam-name">gray</div><div class="fam-use">chrome — 750 is Trinity's custom dark-surface shade</div></div>
+        <div class="strip"><div class="sw"><i style="background:#f3f4f6"></i><b>100</b></div><div class="sw"><i style="background:#d1d5db"></i><b>300</b></div><div class="sw"><i style="background:#6b7280"></i><b>500</b></div><div class="sw"><i style="background:#374151"></i><b>700</b></div><div class="sw hot"><i style="background:#2a303c"></i><b>750</b></div><div class="sw"><i style="background:#1f2937"></i><b>800</b></div></div></div>
+      <div class="dual">
+        <div class="tset-light">
+          <div class="dual-label">Light — first-class</div>
+          <div class="row" style="margin-bottom:12px">
+            <button class="btn sm btn-primary">Deploy</button>
+            <button class="btn sm btn-secondary">View logs</button>
+            <span class="bdg success"><i></i>Healthy</span>
+            <span class="bdg danger"><i></i>Failed</span>
+            <span class="bdg auto">Autonomous</span>
+          </div>
+          <div class="card">
+            <div class="stat-label">Active agents</div>
+            <div class="stat-value" style="font-size:24px">24</div>
+            <input class="input" style="margin-top:10px" value="0 9 * * 1" />
+          </div>
+        </div>
+        <div class="tset-dark">
+          <div class="dual-label">Dark — first-class</div>
+          <div class="row" style="margin-bottom:12px">
+            <button class="btn sm btn-primary">Deploy</button>
+            <button class="btn sm btn-secondary">View logs</button>
+            <span class="bdg success"><i></i>Healthy</span>
+            <span class="bdg danger"><i></i>Failed</span>
+            <span class="bdg auto">Autonomous</span>
+          </div>
+          <div class="card">
+            <div class="stat-label">Active agents</div>
+            <div class="stat-value" style="font-size:24px">24</div>
+            <input class="input" style="margin-top:10px" value="0 9 * * 1" />
+          </div>
+        </div>
+      </div>
+      <div class="tok">rule → status-* = result of an event · state-* = operating mode · brand-* = third-party identity · accent-* = decoration · action-* = interaction. If it isn't one of these, it's gray.<br>themes → both modes ship together: every component is specced light AND dark (darkMode: 'class'); primitives consume tokens so a component never carries per-theme hardcoded color. Use the header switch to flip the whole page.</div>
+    </div>
+  </section>
+
+  <!-- 2 · TYPOGRAPHY -->
+  <section class="spec" id="s2">
+    <div class="spec-head"><span class="spec-num">02</span><h2>Typography</h2></div>
+    <p class="rule">System UI stack — what the product already ships. Six sizes, no more. Data and durations always get <code style="font-family:var(--mono);font-size:12px">tabular-nums</code>; uppercase labels get letter-spacing.</p>
+    <div class="panel">
+      <div class="type-row"><div class="type-spec">text-2xl · 24/700</div><div style="font-size:24px;font-weight:700;letter-spacing:-.02em">Page title — Agents</div></div>
+      <div class="type-row"><div class="type-spec">text-xl · 18/650</div><div style="font-size:18px;font-weight:650">Section heading — Recent executions</div></div>
+      <div class="type-row"><div class="type-spec">text-base · 14/550</div><div style="font-size:14px;font-weight:550">Card title / control label — Schedule name</div></div>
+      <div class="type-row"><div class="type-spec">text-base · 14/400</div><div style="font-size:14px">Body — This agent runs a weekly digest of backlog health across both trackers.</div></div>
+      <div class="type-row"><div class="type-spec">text-sm · 12.5/400</div><div style="font-size:12.5px;color:var(--ink-2)">Meta — Last run 12 minutes ago · 3 schedules · 428 executions</div></div>
+      <div class="type-row"><div class="type-spec">mono · 11/500 caps</div><div class="stat-label">Overline label — Active agents</div></div>
+      <div class="tok">font-family → system-ui stack (product default) · numerals in tables/stats → font-variant-numeric: tabular-nums · overlines → mono, tracking .12em<br>dark ink ladder → primary gray-100 · secondary gray-300 · tertiary gray-400 · <b>gray-500 is the floor</b> — disabled/decoration only, never meta text (≥4.5:1 AA on gray-800 surfaces; operator ruling 2026-07-31)</div>
+    </div>
+  </section>
+
+  <!-- 3 · SPACING & RADIUS -->
+  <section class="spec" id="s3">
+    <div class="spec-head"><span class="spec-num">03</span><h2>Spacing &amp; radius</h2></div>
+    <p class="rule">A 4-px base grid, spent in five named steps. Two radii do all the work: 6&nbsp;px on controls, 8–10&nbsp;px on surfaces. Pills are reserved for badges and toggles.</p>
+    <div class="panel">
+      <div class="stack">
+        <div class="row" style="align-items:flex-end">
+          <div><div class="space-bar" style="width:16px"></div><div class="tok" style="margin-top:6px">4 · tight</div></div>
+          <div><div class="space-bar" style="width:32px"></div><div class="tok" style="margin-top:6px">8 · related</div></div>
+          <div><div class="space-bar" style="width:48px"></div><div class="tok" style="margin-top:6px">12 · grouped</div></div>
+          <div><div class="space-bar" style="width:64px"></div><div class="tok" style="margin-top:6px">16 · card padding</div></div>
+          <div><div class="space-bar" style="width:96px"></div><div class="tok" style="margin-top:6px">24 · section</div></div>
+        </div>
+        <div class="row">
+          <div class="radius-demo" style="border-radius:6px">6 · controls</div>
+          <div class="radius-demo" style="border-radius:10px">10 · cards</div>
+          <div class="radius-demo" style="border-radius:999px;width:110px;height:34px">999 · pills</div>
+        </div>
+      </div>
+      <div class="tok">rounded-md (6px) → buttons, inputs · rounded-lg/xl (8–10px) → cards, modals · rounded-full → badges, toggles, avatars only</div>
+    </div>
+  </section>
+
+  <!-- 4 · BUTTONS -->
+  <section class="spec" id="s4">
+    <div class="spec-head"><span class="spec-num">04</span><h2>Buttons — BaseButton</h2></div>
+    <p class="rule">Four variants, two sizes. One primary action per view. Destructive verbs are named ("Delete agent", never "OK"), and every button states exactly what happens.</p>
+    <div class="panel">
+      <div class="stack">
+        <div class="row">
+          <button class="btn btn-primary">Deploy agent</button>
+          <button class="btn btn-secondary">View logs</button>
+          <button class="btn btn-danger">Delete agent</button>
+          <button class="btn btn-ghost">Cancel</button>
+        </div>
+        <div class="row">
+          <button class="btn sm btn-primary">New schedule</button>
+          <button class="btn sm btn-secondary">Export</button>
+          <button class="btn sm btn-ghost">Learn more</button>
+          <span class="demo-note">← size sm, for card footers and table rows</span>
+        </div>
+        <div class="row">
+          <button class="btn btn-primary" disabled>Deploy agent</button>
+          <button class="btn btn-primary"><span class="spin" style="border-top-color:#fff;border-color:rgba(255,255,255,.35);border-top-color:#fff"></span>Deploying…</button>
+          <button class="btn btn-secondary focus-demo">Focused</button>
+          <span class="demo-note">← disabled · in-flight (honest state) · keyboard focus ring</span>
+        </div>
+      </div>
+      <div class="tok">primary → bg action-primary-600 · hover 700 (dark: 500 → 400) · danger → status-danger-600 · focus → 2px ring action-primary-500/40 on all variants · radius 6px</div>
+    </div>
+  </section>
+
+  <!-- 5 · FORM CONTROLS -->
+  <section class="spec" id="s5">
+    <div class="spec-head"><span class="spec-num">05</span><h2>Form controls — BaseInput · BaseSelect · BaseToggle</h2></div>
+    <p class="rule">Label above, help below, and validation errors that name the problem and the fix — never a bare red border (quality bar #6).</p>
+    <div class="panel">
+      <div class="row" style="gap:28px;align-items:flex-start">
+        <div class="field">
+          <label>Agent name</label>
+          <input class="input" value="scout" />
+          <span class="help">Lowercase slug — used for the workspace folder and MCP identity.</span>
+        </div>
+        <div class="field">
+          <label>Cron schedule</label>
+          <input class="input invalid" value="0 9 * *" />
+          <span class="err"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4.5"/><path d="M12 16h.01"/></svg>Invalid cron expression — expected 5 fields, got 4. Example: <span style="font-family:var(--mono)">0 9 * * 1</span></span>
+        </div>
+      </div>
+      <div class="row" style="gap:28px;align-items:flex-start;margin-top:18px">
+        <div class="field">
+          <label>Model</label>
+          <div class="selwrap">
+            <select class="select"><option>claude-fable-5</option><option>claude-opus-5</option><option>claude-sonnet-5</option></select>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+          </div>
+        </div>
+        <div class="field" style="gap:12px;padding-top:26px">
+          <span class="toggle on"><span class="tg"></span>Schedule enabled</span>
+          <span class="toggle"><span class="tg"></span>Autonomous loop</span>
+        </div>
+      </div>
+      <div class="row" style="gap:28px;align-items:flex-start;margin-top:18px">
+        <div class="field">
+          <label>Description</label>
+          <textarea class="input">Weekly digest agent — sweeps both trackers every Monday morning and posts a backlog-health summary to the product room.</textarea>
+          <span class="help">Shown on the agent tile and in the fleet grid.</span>
+        </div>
+        <div class="field">
+          <label>Instructions</label>
+          <textarea class="input mono">You are the weekly-digest agent.
+Rules:
+- read-only tracker access
+- post summaries to #product
+- never @-mention on weekends</textarea>
+          <span class="help">Monospace variant for prompts and config — preserves line breaks and indentation.</span>
+        </div>
+      </div>
+      <div class="tok">field bg → white / gray-900 · border gray-300 / gray-700 · focus → border action-primary + 3px ring · error → status-danger-600 border + named message with example<br>textarea → min-height 84px, resize vertical only (horizontal resize breaks layout — principle 6/7) · mono variant for prompt/config text · same focus + error treatment as inputs</div>
+    </div>
+  </section>
+
+  <!-- 6 · BADGES -->
+  <section class="spec" id="s6">
+    <div class="spec-head"><span class="spec-num">06</span><h2>Badges — BaseBadge</h2></div>
+    <p class="rule">Driven directly by the token families: tinted ground, saturated text, optional status dot. A badge answers one question — status, mode, or identity — never two at once.</p>
+    <div class="panel">
+      <div class="stack">
+        <div class="row">
+          <span class="bdg success"><i></i>Healthy</span>
+          <span class="bdg info"><i></i>Running</span>
+          <span class="bdg warning"><i></i>Degraded</span>
+          <span class="bdg danger"><i></i>Failed</span>
+          <span class="bdg urgent"><i></i>Attention</span>
+          <span class="bdg neutral">Queued</span>
+          <span class="demo-note">← status-*</span>
+        </div>
+        <div class="row">
+          <span class="bdg auto">Autonomous</span>
+          <span class="bdg locked">Locked</span>
+          <span class="demo-note">← state-* (operating modes)</span>
+        </div>
+        <div class="row">
+          <span class="bdg claude">Claude</span>
+          <span class="bdg gemini">Gemini</span>
+          <span class="bdg purple">Beta</span>
+          <span class="demo-note">← brand-* identity · accent-* decoration</span>
+        </div>
+      </div>
+      <div class="tok">light → token-100 bg + token-700 text · dark → token-500/16% bg + token-300 text · dot = currentColor · radius full · 11.5/550</div>
+    </div>
+  </section>
+
+  <!-- 7 · CARDS -->
+  <section class="spec" id="s7">
+    <div class="spec-head"><span class="spec-num">07</span><h2>Cards — BaseCard</h2></div>
+    <p class="rule">One surface recipe everywhere: surface fill, 1-px border, soft shadow, 16-px padding. Stat cards and agent tiles are compositions of it, not new inventions.</p>
+    <div class="demo-ground">
+      <div class="row" style="align-items:stretch">
+        <div class="card" style="min-width:180px">
+          <div class="stat-label">Active agents</div>
+          <div class="stat-value">24</div>
+          <div class="stat-delta"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>+3 this week</div>
+        </div>
+        <div class="card" style="min-width:290px;flex:1;max-width:360px">
+          <div class="tile-head">
+            <div class="avatar">S</div>
+            <div style="flex:1">
+              <div class="tile-name">scout</div>
+              <div class="tile-meta">Last run 12 min ago · 3 schedules</div>
+            </div>
+            <span class="bdg success"><i></i>Healthy</span>
+          </div>
+          <div class="tile-foot">
+            <span class="bdg claude">Claude</span>
+            <span><button class="btn sm btn-ghost">Open</button><button class="btn sm btn-secondary">Chat</button></span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="tok">surface → white / gray-800 · border gray-200 / gray-750 · shadow-sm · radius 8–10px · padding 16 · stat value 30/700 tabular-nums</div>
+  </section>
+
+  <!-- 8 · MODAL -->
+  <section class="spec" id="s8">
+    <div class="spec-head"><span class="spec-num">08</span><h2>Modal — ConfirmDialog on the modal shell</h2></div>
+    <p class="rule">One shell for every dialog: dimmed overlay, 400-px card, actions right-aligned with the safe choice first. Destructive confirms restate the consequence.</p>
+    <div class="panel" style="padding:0;overflow:hidden">
+      <div class="overlay-demo">
+        <div class="modal">
+          <h3>Delete agent “scout”?</h3>
+          <p>This permanently removes the agent and its workspace. 3 schedules will be cancelled. This cannot be undone.</p>
+          <div class="modal-actions">
+            <button class="btn btn-secondary">Cancel</button>
+            <button class="btn btn-danger">Delete agent</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="tok">overlay → gray-950/55% · card → surface, radius 10, shadow-lg, max-w 400 · esc + click-outside close · focus trapped, initial focus on the safe action</div>
+  </section>
+
+  <!-- 9 · TABS -->
+  <section class="spec" id="s9">
+    <div class="spec-head"><span class="spec-num">09</span><h2>Tabs — OverflowTabs</h2></div>
+    <p class="rule">Underline style, action-primary active. Tabs that don't fit collapse into a counted overflow menu instead of wrapping.</p>
+    <div class="panel">
+      <div class="tabs">
+        <button class="tab active">Overview</button>
+        <button class="tab">Sessions</button>
+        <button class="tab">Schedules</button>
+        <button class="tab">Settings</button>
+        <span class="tab-more">+3 more</span>
+      </div>
+      <div style="padding:16px 2px 2px;color:var(--ink-3);font-size:13px">Tab panel content…</div>
+      <div class="tok">active → text action-primary + 2px underline · inactive → gray-600 / gray-400, hover ink · overflow chip → chrome bg, count of hidden tabs</div>
+    </div>
+  </section>
+
+  <!-- 10 · TABLE -->
+  <section class="spec" id="s10">
+    <div class="spec-head"><span class="spec-num">10</span><h2>Data table — bounded viewport</h2></div>
+    <p class="rule">Mono uppercase headers on chrome, generous row height, badges for status, right-aligned tabular numbers. Unbounded sets never grow the page (principle 28): the table scrolls inside a max-height container with a sticky header — both axes contained — and states its total so what's beyond the fold is known.</p>
+    <div class="panel" style="padding:0;overflow:hidden">
+      <div class="tbl-scroll">
+        <table class="tbl">
+          <thead><tr><th>Agent</th><th>Status</th><th>Last execution</th><th style="text-align:right">Duration</th></tr></thead>
+          <tbody>
+            <tr><td style="font-weight:550">scout</td><td><span class="bdg success"><i></i>Healthy</span></td><td>2 min ago</td><td class="num">42s</td></tr>
+            <tr><td style="font-weight:550">sage</td><td><span class="bdg info"><i></i>Running</span></td><td>in flight</td><td class="num">1m 08s</td></tr>
+            <tr><td style="font-weight:550">scribe</td><td><span class="bdg danger"><i></i>Failed</span></td><td>1 h ago</td><td class="num">3m 40s</td></tr>
+            <tr><td style="font-weight:550">trinity-pm</td><td><span class="bdg neutral">Queued</span></td><td>—</td><td class="num">—</td></tr>
+            <tr><td style="font-weight:550">recon</td><td><span class="bdg success"><i></i>Healthy</span></td><td>18 min ago</td><td class="num">55s</td></tr>
+            <tr><td style="font-weight:550">receptionist</td><td><span class="bdg success"><i></i>Healthy</span></td><td>26 min ago</td><td class="num">31s</td></tr>
+            <tr><td style="font-weight:550">ghostwriter</td><td><span class="bdg warning"><i></i>Degraded</span></td><td>2 h ago</td><td class="num">4m 02s</td></tr>
+            <tr><td style="font-weight:550">prospector</td><td><span class="bdg success"><i></i>Healthy</span></td><td>3 h ago</td><td class="num">1m 44s</td></tr>
+            <tr><td style="font-weight:550">webmaster</td><td><span class="bdg neutral">Queued</span></td><td>—</td><td class="num">—</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="tbl-count">412 executions · latest 50 shown — scroll for more, older pages load on demand</div>
+    </div>
+    <div class="tok">header → chrome bg, mono 10.5 caps tracking .1em, position:sticky while scrolling · rows 40px+, divider gray-200 / gray-750 · hover → chrome · numbers → tabular-nums right<br>bounded viewport (principle 28) → max-height + overflow:auto on the container, never page growth · total stated below the fold line · virtualize/paginate past ~200 rows</div>
+  </section>
+
+  <!-- 11 · EMPTY STATES -->
+  <section class="spec" id="s11">
+    <div class="spec-head"><span class="spec-num">11</span><h2>Empty states</h2></div>
+    <p class="rule">No dead ends (quality bar #3): every empty state says what this surface is for and names the next action. Dashed border distinguishes "nothing yet" from a loading or failed card.</p>
+    <div class="panel">
+      <div class="empty" style="max-width:420px;margin:0 auto">
+        <span class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg></span>
+        <h4>No schedules yet</h4>
+        <p>Schedules run this agent automatically on a cron cadence.</p>
+        <button class="btn sm btn-primary">New schedule</button>
+      </div>
+      <div class="tok">dashed gray-300 / gray-700 border · icon in chrome circle · title 14.5/650 · one-line purpose · exactly one primary action</div>
+    </div>
+  </section>
+
+  <!-- 12 · DATA LOADING -->
+  <section class="spec" id="s12">
+    <div class="spec-head"><span class="spec-num">12</span><h2>Data loading — the scanline standard</h2></div>
+    <p class="rule">The app has one data-loading motion (ent#245, concept C): while loading, a glowing beam sweeps the dimmed chart track; when data arrives, one final left→right pass wipes the chart in behind it and headline values flip from the em-dash. First load animates — scheduled background refreshes are invisible (ent#253): stale-while-revalidate, values swap in place, no re-flash, no scroll reset. Loading means "no data yet", never "fetch in flight"; cache hits skip the beam entirely.</p>
+    <div class="demo-ground">
+      <div class="row" style="align-items:stretch">
+        <div class="card cload is-loading" id="loaddemo" style="min-width:250px;flex:1;max-width:310px">
+          <div class="tile-head">
+            <div class="avatar">S</div>
+            <div style="flex:1">
+              <div class="tile-name">sage</div>
+              <div class="tile-meta">agent tile — live demo</div>
+            </div>
+            <button class="btn sm btn-secondary" id="replay" type="button">Replay</button>
+          </div>
+          <div class="chartzone">
+            <div class="zlabel"><span>Activity · 14d</span><span class="hval" id="hv1">—</span></div>
+            <div class="chartbox">
+              <div class="track"></div>
+              <svg class="chart" viewBox="0 0 100 32" preserveAspectRatio="none" aria-hidden="true"><g fill="var(--accent)"><rect x="0" y="22" width="5" height="10" rx="1"/><rect x="7.2" y="16" width="5" height="16" rx="1"/><rect x="14.4" y="24" width="5" height="8" rx="1"/><rect x="21.6" y="12" width="5" height="20" rx="1"/><rect x="28.8" y="18" width="5" height="14" rx="1"/><rect x="36" y="8" width="5" height="24" rx="1"/><rect x="43.2" y="14" width="5" height="18" rx="1"/><rect x="50.4" y="20" width="5" height="12" rx="1"/><rect x="57.6" y="6" width="5" height="26" rx="1"/><rect x="64.8" y="10" width="5" height="22" rx="1"/><rect x="72" y="2" width="5" height="30" rx="1"/><rect x="79.2" y="12" width="5" height="20" rx="1"/><rect x="86.4" y="4" width="5" height="28" rx="1"/><rect x="93.6" y="8" width="5" height="24" rx="1"/></g></svg>
+              <div class="beam"></div>
+            </div>
+          </div>
+          <div class="chartzone">
+            <div class="zlabel"><span>Context · 7d</span><span class="hval" id="hv2">—</span></div>
+            <div class="chartbox">
+              <div class="track"></div>
+              <svg class="chart" viewBox="0 0 100 32" preserveAspectRatio="none" aria-hidden="true"><path d="M0,24 L8,20 L16,22 L24,16 L32,18 L40,12 L48,14 L56,9 L64,12 L72,7 L80,10 L88,5 L96,8 L100,6 L100,32 L0,32 Z" fill="var(--info)" opacity=".22"/><path d="M0,24 L8,20 L16,22 L24,16 L32,18 L40,12 L48,14 L56,9 L64,12 L72,7 L80,10 L88,5 L96,8 L100,6" fill="none" stroke="var(--info)" stroke-width="1.6"/></svg>
+              <div class="beam"></div>
+            </div>
+          </div>
+        </div>
+        <div class="card" style="min-width:220px;flex:1;max-width:280px">
+          <div class="stat-label">Executions today</div>
+          <div class="stat-value" id="bgval">428</div>
+          <div class="tile-meta" id="bgmeta">background refresh — watch the number</div>
+          <div class="demo-note" style="margin-top:12px">refresh is invisible: in-place swap, no skeleton re-flash, no layout shift, no scroll reset (ent#253)</div>
+        </div>
+        <div class="card" style="min-width:220px;flex:1;max-width:280px;display:flex;flex-direction:column;gap:12px;justify-content:center">
+          <div class="inline-fail"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--danger)" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="m15 9-6 6M9 9l6 6"/></svg>Refresh failed — showing data from 10:42 · <a href="#s12">Retry</a></div>
+          <div class="demo-note">honest state: a failing refresh never presents stale data as fresh; failure names itself and offers retry</div>
+        </div>
+      </div>
+    </div>
+    <div class="tok">loading → dim track + beam (gradient halo, 1.5px glowing core, 1.5s ease-in-out alternate) · arrival → one 550ms linear pass, chart wiped in behind via clip-path, values — → n · keyed off store state, never a timer · cache hit → no beam, instant content · reduced-motion → static placeholder, instant reveal · no layout shift · bespoke per-component spinners/skeletons don't survive adoption (ent#253)</div>
+  </section>
+
+  <!-- 13 · ALERTS & TOASTS -->
+  <section class="spec" id="s13">
+    <div class="spec-head"><span class="spec-num">13</span><h2>Alerts &amp; toasts</h2></div>
+    <p class="rule">Tinted ground, icon, bold lead, plain-language body. Errors say what went wrong and how to fix it; warnings carry their action inline. Toasts confirm completed verbs.</p>
+    <div class="panel">
+      <div class="stack" style="max-width:640px">
+        <div class="alert success"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.2 2.3 2.3 4.7-5"/></svg><span><b>Deploy complete.</b> scout is live and its 3 schedules are active.</span></div>
+        <div class="alert info"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg><span><b>Trinity v0.8.6 is available.</b> Release notes cover the schedule-retention change.</span></div>
+        <div class="alert warning"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4 2.5 20h19L12 4z"/><path d="M12 10v4.5"/><path d="M12 17.5h.01"/></svg><span><b>2 schedules reference a deleted playbook.</b> They will fail on next run.<span class="act">Review schedules</span></span></div>
+        <div class="alert danger"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="m15 9-6 6M9 9l6 6"/></svg><span><b>Execution failed — exit 137 (out of memory).</b> Raise the agent's memory limit in Settings → Resources.</span></div>
+        <div class="row" style="margin-top:4px">
+          <span class="toast"><svg class="ok" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.2 2.3 2.3 4.7-5"/></svg>Schedule created — next run Mon 09:00 UTC</span>
+          <span class="demo-note">← toast: completed verb + the fact you'd check next</span>
+        </div>
+      </div>
+      <div class="tok">alert → token-100 bg + token-700 text (dark: token-500/16% + token-300) · icon 16 stroke · toast → surface + border-strong + shadow-lg, auto-dismiss 5s, never for errors</div>
+    </div>
+  </section>
+
+  <footer class="footer">
+    Draft v3 · dark-mode ink ladder brightened, textareas added, bounded-viewport table (operator feedback 2026-07-31) · rendered from the token taxonomy in <span style="font-family:var(--mono)">src/frontend/tailwind.config.js</span> (#67) as the proposed visual spec for trinity#1430 · data-loading motion per ent#245 (scanline + wipe reveal) with the ent#253 refresh rule · both themes first-class — flip with the header switch or review side-by-side in §01. On approval: this page becomes the style guide's component catalog, primitives are built to match it, and it is ultimately re-rendered from the real components so it cannot drift.
+  </footer>
+</div>
+
+<script>
+(function () {
+  var rm = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // scanline load → reveal → loaded demo cycle (ent#245)
+  var demo = document.getElementById('loaddemo');
+  var v1 = document.getElementById('hv1'), v2 = document.getElementById('hv2');
+  var timers = [];
+  function state(s) {
+    demo.classList.remove('is-loading', 'is-revealing', 'is-loaded');
+    demo.classList.add(s);
+  }
+  function later(fn, ms) { timers.push(setTimeout(fn, ms)); }
+  function run() {
+    timers.forEach(clearTimeout); timers = [];
+    if (rm) { state('is-loaded'); v1.textContent = '428'; v2.textContent = '62%'; return; }
+    v1.textContent = '—'; v2.textContent = '—';
+    state('is-loading');
+    later(function () {
+      state('is-revealing');
+      later(function () {
+        state('is-loaded'); v1.textContent = '428'; v2.textContent = '62%';
+        later(run, 3600);
+      }, 560);
+    }, 2700);
+  }
+  document.getElementById('replay').addEventListener('click', run);
+  run();
+
+  // invisible background refresh demo (ent#253)
+  var bg = document.getElementById('bgval'), bgmeta = document.getElementById('bgmeta');
+  var n = 428, tick = 0;
+  setInterval(function () {
+    n += (tick % 2 ? 2 : 3); tick++;
+    bg.textContent = n;
+    bgmeta.textContent = 'updated just now — no motion, no shift';
+  }, 3000);
+
+  // page theme switch (same data-theme mechanism as the app's darkMode:'class')
+  var root = document.documentElement;
+  var btns = document.querySelectorAll('[data-set-theme]');
+  btns.forEach(function (b) {
+    b.addEventListener('click', function () {
+      var v = b.getAttribute('data-set-theme');
+      if (v === 'auto') { delete root.dataset.theme; } else { root.dataset.theme = v; }
+      btns.forEach(function (x) { x.classList.toggle('on', x === b); });
+    });
+  });
+})();
+</script>

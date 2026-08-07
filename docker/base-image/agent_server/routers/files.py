@@ -4,7 +4,7 @@ File browser endpoints.
 import logging
 import mimetypes
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -18,6 +18,17 @@ class FileUpdateRequest(BaseModel):
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _iso_z_from_mtime(mtime: float) -> str:
+    """Format an mtime (epoch seconds) as canonical ISO-Z UTC.
+
+    Defined locally rather than imported from ``..utils.helpers`` so this router
+    stays standalone-importable: tests/unit/test_ent183_skill_packages.py loads
+    this file by path (no package context) to verify its protected-path logic,
+    and a relative import would break that load (#1795).
+    """
+    return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 @router.get("/api/files")
@@ -70,7 +81,7 @@ async def list_files(path: str = "/home/developer", show_hidden: bool = False):
                             "type": "directory",
                             "children": subtree["children"],
                             "file_count": subtree["file_count"],
-                            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+                            "modified": _iso_z_from_mtime(stat.st_mtime)
                         })
                         total_files += subtree["file_count"]
                     else:
@@ -80,7 +91,7 @@ async def list_files(path: str = "/home/developer", show_hidden: bool = False):
                             "path": str(relative_path),
                             "type": "file",
                             "size": stat.st_size,
-                            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+                            "modified": _iso_z_from_mtime(stat.st_mtime)
                         })
                         total_files += 1
 
@@ -238,11 +249,37 @@ _DEFAULT_PERSISTENT_STATE = [
 def _read_persistent_state() -> list[str]:
     """Read the persistent-state allowlist from disk, with defaults."""
     import yaml
+
+    # #1965 + #1795: imported HERE, not at module scope. `files.py` must stay
+    # loadable by `spec_from_file_location` with NO package context — a
+    # module-level `from ..safe_yaml import …` raises `attempted relative import
+    # with no known parent package` and breaks
+    # `test_files_router_stays_standalone_importable` and the ent#183
+    # protected-path test. That constraint is why this file duplicates
+    # `_iso_z_from_mtime` instead of importing it, and why `yaml` is already
+    # function-local above. In production the package context always exists, so
+    # the deferred import is free.
+    from ..safe_yaml import AliasPolicy, HardenedYamlError, load_hardened_yaml
+
     if not _PERSISTENT_STATE_PATH.exists():
         return list(_DEFAULT_PERSISTENT_STATE)
     try:
-        data = yaml.safe_load(_PERSISTENT_STATE_PATH.read_text()) or {}
-    except (OSError, yaml.YAMLError):
+        # #1965: `~/.trinity/persistent-state.yaml` is written by the agent
+        # itself (S4, #383) — the most agent-writable document of the set — and
+        # the returned patterns drive what survives a reset. REJECT: no
+        # legitimate allowlist needs an anchor.
+        #
+        # HardenedYamlError is a ValueError, NOT a YAMLError, so it is named in
+        # the except tuple explicitly. Falling back to the defaults on a refused
+        # document is the right failure here: this helper already treats an
+        # unreadable file as "use the defaults", and a bomb is a species of
+        # unreadable.
+        data = load_hardened_yaml(
+            _PERSISTENT_STATE_PATH.read_text(),
+            kind="persistent_state",
+            alias_policy=AliasPolicy.REJECT,
+        ) or {}
+    except (OSError, yaml.YAMLError, HardenedYamlError):
         return list(_DEFAULT_PERSISTENT_STATE)
     patterns = data.get("persistent_state")
     if not isinstance(patterns, list) or not patterns:
@@ -421,7 +458,7 @@ async def update_file(path: str, request: FileUpdateRequest, platform: bool = Fa
             "success": True,
             "path": path,
             "size": stat.st_size,
-            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            "modified": _iso_z_from_mtime(stat.st_mtime)
         }
 
     except Exception as e:
@@ -489,7 +526,7 @@ async def create_folder(path: str):
             "success": True,
             "path": path,
             "type": "directory",
-            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+            "modified": _iso_z_from_mtime(stat.st_mtime)
         }
 
     except HTTPException:

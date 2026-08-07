@@ -264,6 +264,9 @@ schedule_executions = Table(
     Column("source_channel", Text),           # ent#117: originating channel for voice-reply delivery
     Column("source_channel_chat_id", Text),   # ent#117: channel destination (chat/channel id)
     Column("source_channel_thread", Text),    # ent#117: channel thread id (nullable)
+    # ent#265: binding-agent for channel report-back — the agent whose channel
+    # binding owns this execution's INHERITED context (NULL = executing agent).
+    Column("source_channel_agent", Text),
 )
 
 agent_loops = Table(
@@ -470,6 +473,21 @@ product_events = Table(
     Column("created_at", Text),
 )
 
+agent_evaluations = Table(
+    "agent_evaluations",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("execution_id", Text),
+    Column("archetype", Text),
+    Column("completion", Integer),
+    Column("quality", Float),
+    Column("checks_json", Text),
+    Column("judge_json", Text),
+    Column("evaluator", Text),
+    Column("created_at", Text),
+)
+
 agent_notifications = Table(
     "agent_notifications",
     metadata,
@@ -665,6 +683,35 @@ agent_skills = Table(
     Column("skill_name", Text),
     Column("assigned_by", Text),
     Column("assigned_at", Text),
+    # ent#237: which source this assignment resolved from. Recorded, not keyed
+    # — see the agent_skills note in db/schema.py.
+    Column("source_id", Text),
+)
+
+# ent#237: one row per git repo the skills library syncs from.
+skill_sources = Table(
+    "skill_sources",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("name", Text),
+    Column("url", Text),
+    # `ref` is a branch OR tag name; `ref_type` says which. The bundled
+    # community source pins to a tag (ent#237 AC#5) so a merged upstream PR
+    # never reaches a fleet unattended; custom sources track a branch.
+    Column("ref", Text),
+    Column("ref_type", Text),
+    Column("is_default", Integer),
+    Column("enabled", Integer),
+    # Lower wins on a name collision. Custom sources default to 100, the
+    # bundled default source to 1000 — i.e. custom-wins (ent#237 AC#4).
+    Column("priority", Integer),
+    Column("last_sync_at", Text),
+    Column("last_sync_status", Text),
+    Column("last_commit_sha", Text),
+    Column("last_error", Text),
+    Column("created_by", Text),
+    Column("created_at", Text),
+    Column("updated_at", Text),
 )
 
 agent_tags = Table(
@@ -835,6 +882,7 @@ telegram_bindings = Table(
     Column("webhook_url", Text),
     Column("telegram_secret_token", Text),
     Column("last_update_id", Integer),
+    Column("progress_indicator_enabled", Integer),  # ent#264: default ON (1)
     Column("created_at", Text),
     Column("updated_at", Text),
 )
@@ -870,6 +918,8 @@ telegram_group_configs = Table(
     Column("updated_at", Text),
     Column("verified_by_email", Text),
     Column("verified_at", Text),
+    # ent#265: per-group consent for completion reports (default allow, opt-out mute)
+    Column("allow_proactive", Integer),
 )
 
 whatsapp_bindings = Table(

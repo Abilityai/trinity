@@ -2500,6 +2500,43 @@ def _migrate_agent_loops_tables(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_evaluations_table(cursor, conn):
+    """Create the agent_evaluations table + indexes (ent#206).
+
+    The behavioral-eval referee surface: a run's completion (clean-exit mirror)
+    and its separate quality score, written ONLY by the platform/evaluator, never
+    by the graded agent's key. Also defined in db/schema.py for fresh installs;
+    this handles existing installs. Idempotent. Mirrored by Alembic
+    0033_agent_evaluations for PostgreSQL (#1183 dual-track).
+    """
+    cursor.execute("PRAGMA table_info(agent_evaluations)")
+    if cursor.fetchall():
+        return
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_evaluations (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            execution_id TEXT,
+            archetype TEXT,
+            completion INTEGER,
+            quality REAL,
+            checks_json TEXT,
+            judge_json TEXT,
+            evaluator TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (execution_id) REFERENCES schedule_executions(id)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_agent "
+        "ON agent_evaluations(agent_name, created_at DESC)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_execution "
+        "ON agent_evaluations(execution_id)"
+    )
+
+
 def _migrate_agent_reminders_table(cursor, conn):
     """Create the agent_reminders table + indexes (#1296).
 
@@ -2540,6 +2577,58 @@ def _migrate_agent_reminders_table(cursor, conn):
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_agent_reminders_active "
         "ON agent_reminders(fire_at) WHERE status IN ('pending', 'firing')"
+    )
+    conn.commit()
+
+
+def _migrate_skill_sources_table(cursor, conn):
+    """Create skill_sources + add agent_skills.source_id (ent#237).
+
+    Multi-source skills library: one row per git repo the platform syncs
+    skills from, replacing the single `skills_library_url` system setting.
+    Mirrored by Alembic 0034_skill_sources and the DDL in `db/schema.py` /
+    MetaData in `db/tables.py`. Kept consistent across all four.
+
+    The pre-existing `skills_library_url` row is NOT read here — adopting it
+    as a source is a filesystem operation too (the legacy clone at
+    /data/skills-library/ has to move into a per-source subdir), so it lives
+    in `skill_service` where both halves can succeed or fail together. A
+    migration that moved only the DB half would leave the clone orphaned.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS skill_sources (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            ref TEXT NOT NULL DEFAULT 'main',
+            ref_type TEXT NOT NULL DEFAULT 'branch',
+            is_default INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            priority INTEGER NOT NULL DEFAULT 100,
+            last_sync_at TEXT,
+            last_sync_status TEXT,
+            last_commit_sha TEXT,
+            last_error TEXT,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(url, ref)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_sources_resolution "
+        "ON skill_sources(priority, created_at) WHERE enabled = 1"
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_sources_one_default "
+        "ON skill_sources(is_default) WHERE is_default = 1"
+    )
+    # Nullable with no default: NULL means "assigned before multi-source, or
+    # the source row was removed" and resolves by precedence like any other
+    # bare name. Backfilling it would be a guess.
+    _safe_add_column(
+        cursor, "agent_skills", "source_id",
+        "ALTER TABLE agent_skills ADD COLUMN source_id TEXT",
     )
     conn.commit()
 
@@ -3151,6 +3240,63 @@ def _migrate_slack_channel_allow_proactive(cursor, conn):
         )
 
 
+def _migrate_telegram_progress_indicator(cursor, conn):
+    """ent#264 — per-binding toggle for the Telegram in-progress indicator.
+
+    Adds ``progress_indicator_enabled INTEGER DEFAULT 1`` to
+    ``telegram_bindings``. Default ON for EVERYONE (the AC), unlike ent#223's
+    deny-for-new posture: no backfill UPDATE is needed because SQLite's
+    ``ALTER TABLE ADD COLUMN ... DEFAULT 1`` physically populates existing
+    rows with 1 (no NULLs arise from the migration itself). The Python-side
+    ``v is None or v != 0`` read predicate is defense-in-depth for edge
+    writes, not the backfill mechanism.
+
+    Mirrored by Alembic 0032_telegram_progress_indicator.
+    """
+    _safe_add_column(
+        cursor,
+        "telegram_bindings",
+        "progress_indicator_enabled",
+        "ALTER TABLE telegram_bindings ADD COLUMN progress_indicator_enabled INTEGER DEFAULT 1",
+    )
+
+
+def _migrate_channel_report_back_columns(cursor, conn):
+    """ent#265 — channel completion report-back: Telegram leg + binding identity.
+
+    Two ADD COLUMNs in one entry (multi-table precedent: ``_migrate_access_control``):
+
+    * ``schedule_executions.source_channel_agent`` (nullable TEXT) — "the agent
+      whose channel binding owns this execution's inherited context". Written
+      ONLY at the /task row-creation point when channel context is inherited
+      from a parent execution (parent's own ``source_channel_agent``, else the
+      parent's agent name — transitive across A→B→C). NULL for direct rows;
+      the completion reporter falls back to the executing agent, which is
+      byte-identical legacy behavior.
+    * ``telegram_group_configs.allow_proactive INTEGER DEFAULT 1`` — per-group
+      consent for completion reports (the Telegram analog of ent#223's Slack
+      channel-binding flag). DEFAULT 1 fills existing rows on read AND covers
+      new inserts, so no backfill UPDATE is needed. Allow is the deliberate
+      default (unlike Slack's new-deny split): the reporter posts only into
+      chats that initiated the work — the group-scale analog of DM
+      consent-by-construction — and the toggle is an opt-out mute.
+
+    Mirrored by Alembic 0031_channel_report_back for PostgreSQL.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "source_channel_agent",
+        "ALTER TABLE schedule_executions ADD COLUMN source_channel_agent TEXT",
+    )
+    _safe_add_column(
+        cursor,
+        "telegram_group_configs",
+        "allow_proactive",
+        "ALTER TABLE telegram_group_configs ADD COLUMN allow_proactive INTEGER DEFAULT 1",
+    )
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -3253,4 +3399,8 @@ MIGRATIONS = [
     ("agent_reminders_table", _migrate_agent_reminders_table),
     ("slack_channel_allow_proactive", _migrate_slack_channel_allow_proactive),
     ("product_events_table", _migrate_product_events_table),
+    ("channel_report_back_columns", _migrate_channel_report_back_columns),
+    ("telegram_progress_indicator", _migrate_telegram_progress_indicator),
+    ("agent_evaluations_table", _migrate_agent_evaluations_table),
+    ("skill_sources_table", _migrate_skill_sources_table),
 ]
