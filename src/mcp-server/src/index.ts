@@ -18,7 +18,7 @@ async function main() {
       client,
       agentChatPullEnabled,
       trinityApiUrl,
-      connectorDenied,
+      operatorOnly,
       builtinToolNames,
       registerDynamicTool,
       unregisterDynamicTool,
@@ -105,7 +105,7 @@ async function main() {
         agentChatPullEnabled,
         registerDynamicTool,
         unregisterDynamicTool,
-        connectorDenied,
+        operatorOnly,
         builtinToolNames,
       });
       console.log("[#846] Exposed-agents reconciler started (poll interval ~20s)");

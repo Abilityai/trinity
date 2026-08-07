@@ -268,6 +268,17 @@
       </div>
     </div>
 
+    <!-- Action failure (#1926) — enable/disable used to fail to console only
+         (the row silently snapped back), and delete/trigger used a native
+         alert(). Both now surface here and persist until dismissed. -->
+    <InlineError
+      v-if="actionError"
+      class="mb-4"
+      :message="actionError"
+      :detail="actionErrorDetail"
+      @dismiss="clearActionError"
+    />
+
     <!-- Schedules List -->
     <!-- #1634: the spinner means "no data yet", never "fetch in flight"
          (design-system p4/p5/p13/p14). Gating on the in-flight flag alone
@@ -280,6 +291,21 @@
       <p class="text-sm text-gray-500 dark:text-gray-400 mt-2">Loading schedules...</p>
     </div>
 
+    <!-- Failed list fetch (#1926) — "No schedules configured" on a failed fetch
+         invites the user to create a duplicate schedule. Gated on "no data":
+         once rows are on screen, letting this panel replace them would unmount
+         the list mid-refetch — the #1634 scroll clamp by another door. The
+         data-on-screen refetch failure renders as a dense banner above the
+         list instead (below). -->
+    <LoadFailed
+      v-else-if="loadError && schedules.length === 0"
+      title="Couldn't load schedules"
+      message="The schedule list didn't load, so what you see may be incomplete. Try again."
+      :detail="loadError"
+      :retrying="loading"
+      @retry="loadSchedules"
+    />
+
     <div v-else-if="schedules.length === 0" class="text-center py-12 bg-gray-50 dark:bg-gray-800 rounded-lg">
       <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -289,6 +315,18 @@
     </div>
 
     <div v-else class="space-y-4">
+      <!-- Refetch failed with data on screen (#1926 × #1634): same failure,
+           non-unmounting form — the stale rows stay put and keep their scroll
+           position; the banner names the staleness and carries the retry. -->
+      <LoadFailed
+        v-if="loadError"
+        dense
+        title="Couldn't refresh schedules"
+        message="Showing the last loaded list — it may be stale."
+        :detail="loadError"
+        :retrying="loading"
+        @retry="loadSchedules"
+      />
       <div
         v-for="schedule in schedules"
         :key="schedule.id"
@@ -818,6 +856,9 @@ import { parseUTC } from '@/utils/timestamps'
 import ConfirmDialog from './ConfirmDialog.vue'
 import ModelSelector from './ModelSelector.vue'
 import ScheduleAnalyticsCard from './ScheduleAnalyticsCard.vue'
+import LoadFailed from './LoadFailed.vue'
+import InlineError from './InlineError.vue'
+import { apiErrorMessage } from '../utils/apiError'
 import { useAuthStore } from '../stores/auth'
 import { useExecutionsStore } from '../stores/executions'
 
@@ -869,6 +910,11 @@ const triggerLoading = ref(null)
 // #1634: a Set, not one id — two rows can be in flight at once, and a single ref
 // let the first completion re-enable the second row's control mid-request (AC #6).
 const toggleLoading = ref(new Set())
+// #1926: a failed list fetch is not an empty list; a failed verb is not a
+// silent no-op. Both get their own state instead of console.error/alert().
+const loadError = ref('')
+const actionError = ref('')
+const actionErrorDetail = ref('')
 const deleteLoading = ref(null)
 const expandedSchedule = ref(null)
 const executions = ref({})
@@ -1145,15 +1191,18 @@ let loadSeq = 0
 async function loadSchedules() {
   const seq = ++loadSeq
   loading.value = true
+  loadError.value = ''
   try {
     const response = await axios.get(`/api/agents/${props.agentName}/schedules`, {
       headers: authStore.authHeader
     })
     if (seq !== loadSeq) return
     schedules.value = response.data
+    loadError.value = ''
   } catch (error) {
     if (seq !== loadSeq) return
     console.error('Failed to load schedules:', error)
+    loadError.value = apiErrorMessage(error, 'Request failed')
   } finally {
     if (seq === loadSeq) loading.value = false
   }
@@ -1279,14 +1328,16 @@ function deleteSchedule(schedule) {
   confirmDialog.variant = 'danger'
   confirmDialog.onConfirm = async () => {
     deleteLoading.value = schedule.id
+    clearActionError()
     try {
       await axios.delete(`/api/agents/${props.agentName}/schedules/${schedule.id}`, {
         headers: authStore.authHeader
       })
       await loadSchedules()
     } catch (error) {
-      console.error('Failed to delete schedule:', error)
-      alert(error.response?.data?.detail || 'Failed to delete schedule')
+      // alert() blocks the page and dies on OK, leaving no record of what
+      // failed; an inline error persists next to the row (#1926).
+      reportActionFailure(error, `delete the schedule "${schedule.name}"`)
     } finally {
       deleteLoading.value = null
     }
@@ -1294,17 +1345,32 @@ function deleteSchedule(schedule) {
   confirmDialog.visible = true
 }
 
+function clearActionError() {
+  actionError.value = ''
+  actionErrorDetail.value = ''
+}
+
+// #1926 — one place that turns a failed verb into a persistent, named error.
+function reportActionFailure(error, what) {
+  console.error(`Failed to ${what}:`, error)
+  actionError.value = `Couldn't ${what}. Nothing was changed — try again.`
+  actionErrorDetail.value = apiErrorMessage(error, 'Request failed')
+}
+
 // Toggle schedule enabled/disabled
 async function toggleSchedule(schedule) {
   toggleLoading.value.add(schedule.id)
+  clearActionError()
+  const wanted = schedule.enabled ? 'disable' : 'enable'
   try {
-    const endpoint = schedule.enabled ? 'disable' : 'enable'
-    await axios.post(`/api/agents/${props.agentName}/schedules/${schedule.id}/${endpoint}`, {}, {
+    await axios.post(`/api/agents/${props.agentName}/schedules/${schedule.id}/${wanted}`, {}, {
       headers: authStore.authHeader
     })
     await loadSchedules()
   } catch (error) {
-    console.error('Failed to toggle schedule:', error)
+    // The row reverts to its server state on reload, so without this the user
+    // sees the toggle snap back with no explanation (#1926).
+    reportActionFailure(error, `${wanted} the schedule "${schedule.name}"`)
   } finally {
     toggleLoading.value.delete(schedule.id)
   }
@@ -1313,6 +1379,7 @@ async function toggleSchedule(schedule) {
 // Trigger schedule manually
 async function triggerSchedule(schedule) {
   triggerLoading.value = schedule.id
+  clearActionError()
   try {
     await axios.post(`/api/agents/${props.agentName}/schedules/${schedule.id}/trigger`, {}, {
       headers: authStore.authHeader
@@ -1322,8 +1389,7 @@ async function triggerSchedule(schedule) {
       await loadExecutions(schedule.id)
     }
   } catch (error) {
-    console.error('Failed to trigger schedule:', error)
-    alert(error.response?.data?.detail || 'Failed to trigger schedule')
+    reportActionFailure(error, `run the schedule "${schedule.name}" now`)
   } finally {
     triggerLoading.value = null
   }
@@ -1499,6 +1565,9 @@ watch(() => props.agentName, () => {
   // both writes land in one flush — no empty-state frame. Keep that line first.
   schedules.value = []
   perfBySchedule.value = {}
+  // #1926 state is per-agent too: a failed verb on agent A must not show as an
+  // error banner under agent B. (loadError clears inside loadSchedules().)
+  clearActionError()
   loadSchedules()
 })
 

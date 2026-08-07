@@ -12,10 +12,38 @@ from typing import Optional, Dict, Any, List
 from fastapi import APIRouter
 
 from ..models import AgentInfo
+from ..safe_yaml import AliasPolicy, load_hardened_yaml
 from ..state import agent_state
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _credential_mcp_server_names(block) -> List[str]:
+    """Server names under `credentials.mcp_servers`, tolerant of any shape.
+
+    A DUPLICATE of `services.template_service.credential_mcp_server_names`
+    (trinity-enterprise#128), not an import: the agent server ships in its own
+    image and structurally cannot import `src/backend`. The two copies must
+    agree on every malformed shape, so a BEHAVIOURAL parity test drives one
+    shared table through both — see
+    `tests/unit/test_ent128b2_credential_setup.py`. (The vendored-byte-identical
+    variant of this pattern is `services/credential_paths.py` and
+    `services/model_context.py`; a 6-line reader does not earn a whole vendored
+    module, but it does earn the same guard, because before ent#128 NO parity
+    test covered this file and the copies could diverge freely.)
+
+    Returns `[]` — never raises — for a null, list, string or scalar block at
+    either level. `template.yaml` here is read from the agent's own workspace,
+    which the agent itself can rewrite, so a crash is reachable without an
+    operator ever touching it.
+    """
+    if not isinstance(block, dict):
+        return []
+    servers = block.get("mcp_servers")
+    if not isinstance(servers, dict):
+        return []
+    return [str(name) for name in servers]
 
 
 def _diagnostics() -> Dict[str, Any]:
@@ -103,10 +131,19 @@ async def get_agent_info():
 
     if os.path.exists(config_path):
         try:
-            import yaml
-            with open(config_path) as f:
-                config = yaml.safe_load(f)
-                mcp_servers = config.get("agent", {}).get("mcp_servers", [])
+            # #1965: BUDGET, and deliberately the odd one out in this file.
+            # `/config/agent-config.yaml` is written by the platform
+            # (`agent_service/crud.py`) and bind-mounted `mode: 'ro'`, so the
+            # agent cannot author it — it is not the surface ent#314 is about.
+            # REJECT could refuse a legitimate document here, since `yaml.dump`
+            # emits an anchor for any shared object reference. The size and
+            # duplicate-key guards still apply.
+            config = load_hardened_yaml(
+                Path(config_path).read_text(),
+                kind="agent_config",
+                alias_policy=AliasPolicy.BUDGET,
+            )
+            mcp_servers = (config or {}).get("agent", {}).get("mcp_servers", [])
         except Exception as e:
             logger.error(f"Failed to read agent config: {e}")
 
@@ -163,14 +200,25 @@ async def get_template_info():
     Get template metadata from template.yaml if available.
     Returns information about what this agent is, its capabilities, commands, etc.
     """
-    template_path = Path("/home/developer/template.yaml")
+    # Via the shared helper (as `/api/metrics` already does) rather than a second
+    # copy of the literal, so the tolerant-reader regression below is testable
+    # without patching `Path` itself. (trinity-enterprise#128)
+    template_path = get_template_path()
     template_data = None
 
     if template_path.exists():
         try:
-            import yaml
-            with open(template_path) as f:
-                template_data = yaml.safe_load(f)
+            # #1965: REJECT, matching the backend policy for the SAME document
+            # read from a live container (`credential_requirements_service`).
+            # This copy of `template.yaml` sits in the agent's own workspace and
+            # is agent-writable, and the backend proxies this endpoint — so the
+            # graph walk that turns a 416 B level-6 anchor bomb into ~110 MB
+            # happens here first, then again across the wire.
+            template_data = load_hardened_yaml(
+                template_path.read_text(),
+                kind="template",
+                alias_policy=AliasPolicy.REJECT,
+            )
         except Exception as e:
             logger.warning(f"Failed to read template.yaml: {e}")
 
@@ -187,8 +235,13 @@ async def get_template_info():
     # Handle mcp_servers - can be in new format (list of {name, description}) or old format (in credentials)
     mcp_servers_raw = template_data.get("mcp_servers", [])
     if not mcp_servers_raw:
-        # Fallback to old format: extract from credentials.mcp_servers keys
-        mcp_servers_raw = list(template_data.get("credentials", {}).get("mcp_servers", {}).keys())
+        # Fallback to old format: extract from credentials.mcp_servers keys.
+        # Read through the tolerant accessor — the raw
+        # `.get("credentials", {}).get("mcp_servers", {}).keys()` chain raises
+        # AttributeError on a null / list / string block at EITHER level, and
+        # the `try/except` above wraps only the YAML load, so the crash escaped
+        # as a 500 on this endpoint. (trinity-enterprise#128)
+        mcp_servers_raw = _credential_mcp_server_names(template_data.get("credentials"))
 
     return {
         "has_template": True,
@@ -248,8 +301,12 @@ async def get_metrics():
         }
 
     try:
-        import yaml
-        template_data = yaml.safe_load(template_path.read_text())
+        # #1965: same document, same REJECT policy as `/api/template-info`.
+        template_data = load_hardened_yaml(
+            template_path.read_text(),
+            kind="template",
+            alias_policy=AliasPolicy.REJECT,
+        )
     except Exception as e:
         logger.warning(f"Failed to read template.yaml: {e}")
         return {

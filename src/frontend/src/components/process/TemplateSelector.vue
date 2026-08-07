@@ -25,7 +25,18 @@
       </svg>
     </div>
 
-    <!-- Empty state -->
+    <!-- Failed state (#1926) — a failed fetch is NOT "no templates found":
+         that copy sends the user to create a template when the fix is retry. -->
+    <LoadFailed
+      v-else-if="loadError"
+      title="Couldn't load templates"
+      message="The template list didn't load. Check your connection and try again."
+      :detail="loadError"
+      :retrying="loading"
+      @retry="fetchTemplates"
+    />
+
+    <!-- Empty state — only after a fetch SUCCEEDED and returned zero -->
     <div
       v-else-if="filteredTemplates.length === 0"
       class="text-center py-12 text-gray-500 dark:text-gray-400"
@@ -185,6 +196,8 @@ import {
   DocumentPlusIcon,
   ArrowsRightLeftIcon,
 } from '@heroicons/vue/24/outline'
+import LoadFailed from '../LoadFailed.vue'
+import { apiErrorMessage } from '../../utils/apiError'
 
 const props = defineProps({
   selectedId: {
@@ -200,6 +213,9 @@ const templates = ref([])
 const categories = ref([])
 const selectedCategory = ref('')
 const loading = ref(false)
+// #1926: distinct from `templates.length === 0` — a failed fetch must render as
+// failed, not as the empty state.
+const loadError = ref('')
 const previewTemplate = ref(null)
 
 // Computed
@@ -226,6 +242,7 @@ watch(selectedCategory, () => {
 // Methods
 async function fetchTemplates() {
   loading.value = true
+  loadError.value = ''
   try {
     const token = localStorage.getItem('token')
     const response = await axios.get('/api/process-templates', {
@@ -234,6 +251,7 @@ async function fetchTemplates() {
     templates.value = response.data.templates || []
   } catch (err) {
     console.error('Failed to fetch templates:', err)
+    loadError.value = apiErrorMessage(err, 'Request failed')
   } finally {
     loading.value = false
   }

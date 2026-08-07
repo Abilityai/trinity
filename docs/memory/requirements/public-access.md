@@ -306,7 +306,7 @@
   - Credentials: AuthToken encrypted AES-256-GCM via `CredentialEncryptionService`; AccountSid plaintext (public identifier)
   - Webhook: dual-factor auth — URL `webhook_secret` routes to binding, `X-Twilio-Signature` HMAC-SHA1 validated via `twilio.request_validator.RequestValidator` (handles Twilio's empty-param inclusion gotcha)
   - Dedup by `MessageSid` (2048-entry in-memory ring) to absorb Twilio retries
-  - Media inbound: images/audio/PDFs via Twilio-hosted URLs with HTTP Basic auth; SSRF-gated to `*.twilio.com` domain suffix; `follow_redirects=False` with allowlisted single-redirect follow for signed-URL media
+  - Media inbound via Twilio-hosted URLs with HTTP Basic auth. Any type is **fetched**, but only **images** (plus text/CSV/JSON) reach the workspace — `upload_service.UNSUPPORTED_MIMES` rejects `application/pdf`, `audio/`, `video/` and archives channel-agnostically, so a PDF or voice note surfaces as `"— unsupported format"` (a deliberate policy gate, not a download failure). SSRF-gated two-tier — the credentialed source hop stays `*.twilio.com`, validated redirect targets also allow `*.twiliocdn.com` (Twilio's media CDN, #1932); `follow_redirects=False` with every hop re-validated against the allowlist before it is issued (bounded follow budget)
   - Message splitting at 1600-char Twilio WhatsApp limit (paragraph → sentence → word boundaries)
   - Sandbox auto-detection from well-known number `whatsapp:+14155238886`
   - Empty TwiML (`<Response/>`) returned to Twilio ack; response delivered asynchronously via REST (no TwiML body response path)
@@ -335,7 +335,7 @@
 - **Security**:
   - AuthToken AES-256-GCM encrypted at rest; never logged in full
   - Webhook signature verification via `twilio>=9.10.5` `RequestValidator` (constant-time compare)
-  - SSRF allowlist on media downloads: `*.twilio.com` only, no redirects to other hosts
+  - SSRF allowlist on media downloads (#1932): the credentialed source hop is `*.twilio.com` only; a 30x is followed only to a re-validated `*.twilio.com`/`*.twiliocdn.com` target, always without auth. `s3-external-1.amazonaws.com` is deliberately excluded (path-style ⇒ allowlisting it admits arbitrary buckets)
   - Phone number masking in logs: `whatsapp:+141***5309`
   - Unknown webhook secrets return 200 empty TwiML (no binding-existence oracle)
   - Rate limiting via `ChannelMessageRouter` defaults (30 msg/min per sender)

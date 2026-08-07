@@ -220,10 +220,29 @@ class AgentSnapshot:
     # `lease_expires_at` per running id (ISO str, or None). A non-NULL value
     # marks a #1081-Phase-3 pull-CLAIMED row: it is `status='running'` but is
     # owned EXCLUSIVELY by the lease-reaper and NEVER enters the slot ZSET (a
-    # claim is a pure SQL UPDATE with no ZADD). S-01 uses this to exclude leased
-    # rows from the SQL side of its slot–row bijection, so a legitimately-
-    # unslotted pull row is not flagged `in_sql_only`. Only S-01 reads this;
-    # E-01/E-02/E-05 keep seeing the full `running_exec_ids` unchanged.
+    # claim is a pure SQL UPDATE with no ZADD).
+    #
+    # Read by S-01, E-05 and E-01 — the three invariants whose predicate the
+    # lease-reaper's ownership makes false:
+    #   * S-01 (#1081) excludes leased rows from the SQL side of its slot–row
+    #     bijection, so a legitimately-unslotted pull row is not `in_sql_only`.
+    #   * E-05 (#1766) — a leased row is `running` with a NULL
+    #     claude_session_id by design, and `mark_no_session_executions_failed`
+    #     (the sweep E-05 watches) already excludes leased rows for that reason.
+    #   * E-01 (#1990) — a leased row's deadline is its LEASE, not
+    #     `execution_timeout + 300s`; the two windows are in fact identical
+    #     (`claim_next_queued` stamps the lease at exactly that), so E-01 fired
+    #     at the instant the reaper became eligible to act, with zero head-room.
+    #
+    # E-02 is the fourth reader of `running_exec_ids` and deliberately does NOT
+    # exclude leased rows (#1990): a terminal→non-terminal reversal is corruption
+    # regardless of who owns the row, the reaper's CAS on `status='running'`
+    # cannot produce one, and re-delivery preserves the `execution_id` — so
+    # excluding leased rows would blind E-02 on the very path #1081 adds.
+    #
+    # Absent key ⇒ treat as NULL (`.get(eid) is None`): a collector that never
+    # populated the field (older image, pre-#1081 columns) must fail OPEN, i.e.
+    # keep checking the row.
     running_lease_expires_at: Dict[str, Optional[str]] = field(default_factory=dict)
     # `claude_session_id` per running id (str or None); used by E-05 to detect
     # dispatched rows that never acquired a backing session.
@@ -273,6 +292,17 @@ class AgentSnapshot:
     # (#226 bug class). Empty dict means the per-slot read was skipped
     # this cycle (Redis unavailable); the check skips silently.
     slot_ttls: Dict[str, int] = field(default_factory=dict)
+    # ent#336: the `timeout_seconds` field written into the same
+    # `agent:slot:{name}:{eid}` HASH by `SlotService.acquire_slot` — THIS
+    # execution's effective timeout, which since #929 may legitimately be lower
+    # than the agent's `execution_timeout_seconds` cap. S-03 builds its floor
+    # from this, mirroring `SlotService._cleanup_stale_slots_for_agent`, which
+    # already reads the same field back for exactly the same reason (#869).
+    # An eid present in `slot_ttls` but ABSENT here means the field could not be
+    # observed (HASH expired between the two reads, or a pre-#913 slot) — S-03
+    # SKIPS that slot rather than falling back to the agent cap, because the
+    # fallback would re-arm the very false positive ent#336 removes.
+    slot_timeouts: Dict[str, int] = field(default_factory=dict)
     # #506: stored `max_parallel` clamped to the fleet ceiling. S-01/S-02/S-03
     # keep using the raw `max_parallel` (clamping only lowers ZCARD vs stored,
     # so the no-overbooking bound stays valid), but B-02 must compare slot
@@ -308,13 +338,48 @@ class Snapshot:
     # (cold cluster or Redis unavailable) — B-02 treats that as "no
     # drain has ever run" and skips its time-window arm.
     drain_tick_at: Optional[float] = None
-    # R-01 input: per-agent zombie process count (`ps -eo stat,comm | grep
-    # ' Z.*claude' | wc -l`). Populated by docker_exec'ing into every
-    # running `trinity.platform=agent` container. Missing agent name in
-    # this map means the exec failed for that container — recorded in
-    # `sources_unavailable` and the R-01 check skips that agent rather
-    # than firing.
+    # R-01 input: per-agent zombie `claude` process count. Populated by
+    # docker_exec'ing into every running `trinity.platform=agent` container.
+    # Missing agent name in this map means the exec failed for that container —
+    # recorded in `sources_unavailable` and the R-01 check skips that agent
+    # rather than firing.
+    #
+    # Derived as `len(zombie_pids[agent])`. Kept as its own field because it is
+    # a load-bearing `observed_state` key read by the Slack renderers
+    # (`canary_alerts._render_message` / `_render_forensic`).
     zombie_counts: Dict[str, int] = field(default_factory=dict)
+    # H-01 input (#1813): agent names Docker reports as RUNNING agent
+    # containers. Deliberately NOT derived from `zombie_counts` above, which is
+    # keyed by `exec_run` SUCCESS — a container that exists but cannot be
+    # exec'd (busy, restarting, degraded shell) drops out of that map into
+    # `sources_unavailable`, so it is a liveness signal, not a presence one.
+    # H-01 needs *presence*, taken from the container list itself before any
+    # exec, because it is the independent (non-SQL) proof that the fleet is
+    # non-empty when the SQL roster read comes back empty.
+    #
+    # Blind spot, documented rather than papered over: Docker is filtered to
+    # `status=running`, so a fleet whose agents are all STOPPED is invisible
+    # here — and stopped agents hold no Redis slots either. A blind SQL tier
+    # plus an entirely stopped fleet therefore has no available evidence and
+    # H-01 reports `roster_empty_unverifiable` at most, never a confirmed
+    # contradiction.
+    docker_agent_names: Set[str] = field(default_factory=set)
+    # R-01 input (ent#337): per-agent container `State.StartedAt`. A PID is only
+    # an identity within ONE PID namespace, so a container that restarts outside
+    # the backend (`docker restart`, a restart policy after an OOM/crash) hands
+    # out low PIDs again and would let a fresh transient zombie inherit the
+    # previous incarnation's dwell. R-01 restarts the dwell when this value
+    # moves. An agent MISSING from this map means the value was not observable
+    # this cycle — R-01 then leaves the marker untouched rather than treating a
+    # non-signal as a restart.
+    zombie_container_started_at: Dict[str, str] = field(default_factory=dict)
+    # R-01 input (ent#337): the actual zombie `claude` PIDs per agent. R-01
+    # fires only once a SPECIFIC pid has persisted across its dwell window; a
+    # bare count cannot distinguish one stuck zombie from a succession of
+    # distinct transients, which is what made R-01 page on the sampling window
+    # rather than on the #407 leak. An agent present in `zombie_counts` is
+    # always present here (both are written together).
+    zombie_pids: Dict[str, Set[int]] = field(default_factory=dict)
     # E-06 input: enabled, non-deleted schedules → {schedule_id, agent_name,
     # next_run_at}. The check flags any whose next_run_at is more than the
     # misfire grace behind the snapshot time (a stale projection the scheduler
@@ -330,6 +395,26 @@ class Snapshot:
     terminal_rows: List[Dict[str, Any]] = field(default_factory=list)
     # Diagnostics — empty on a clean cycle.
     sources_unavailable: List[str] = field(default_factory=list)
+    # H-01 input (#1813): which collectors actually EXECUTED this cycle.
+    # `sources_unavailable` distinguishes "ran and failed" from "ran and was
+    # fine"; it cannot distinguish either from "never ran", because a collector
+    # that was skipped records nothing at all. That third state is real —
+    # `collect_snapshot` returns early on a roster-read failure, so every
+    # collector below that point is skipped — and conflating it with success
+    # made H-01's most severe alarm report `docker=up · redis=up` on a cycle
+    # where neither source had been consulted. Use `collector_ran()` rather
+    # than inferring availability from `sources_unavailable` alone.
+    collectors_ran: Set[str] = field(default_factory=set)
+
+    def collector_ran(self, name: str) -> bool:
+        return name in self.collectors_ran
+
+
+# Collector names recorded in `Snapshot.collectors_ran`. These deliberately
+# match the `sources_unavailable` label prefixes so a consumer can pair
+# "did it run?" with "did it fail?" using one string.
+COLLECTOR_DOCKER = "docker"
+COLLECTOR_REDIS = "redis"
 
 
 # ---------------------------------------------------------------------------
@@ -463,30 +548,105 @@ def _collect_executions(agent_name: str) -> Dict[str, Any]:
 
 
 def _collect_zombie_counts() -> Dict[str, Any]:
-    """Per-running-agent zombie-process count via Docker exec.
+    """Per-running-agent zombie `claude` PIDs via Docker exec.
 
     For every running container labeled `trinity.platform=agent`, runs
-    `sh -c "ps -eo stat,comm | grep '^Z.*claude' | wc -l"` and parses
-    the integer result. Used by R-01 to detect unreaped Claude child
-    processes (#407 bug class).
+    `ps -eo stat,pid,comm` and extracts the PID of every zombie `claude`
+    process. Used by R-01 to detect unreaped Claude child processes
+    (#407 bug class).
 
-    The shell command pattern matters: `STAT` is the first column from
-    `ps -eo stat,comm`, and a zombie's STAT field is `Z` (sometimes
-    with suffixes like `Z+`). `^Z` anchors at the start of the line —
-    procps-ng on the agent base image emits STAT left-aligned with no
-    leading space for single-letter codes, so the catalog's space-Z
-    pattern misses. Verified live against a real zombie spawned via
-    `os.fork()` + `prctl(PR_SET_NAME, "claude")`.
+    ## Why PIDs and not just a count (ent#337)
 
-    Returns a dict with two keys:
-      "counts":     {agent_name: int}   for containers we successfully exec'd.
-      "unavailable": [str, ...]         per-agent failure messages for the
-                                        caller to append to sources_unavailable.
+    R-01 pages only after a zombie has PERSISTED for a dwell window, and a
+    count cannot support that: three consecutive samples that each catch a
+    DIFFERENT short-lived zombie are indistinguishable from one zombie stuck
+    for the whole window, and on a busy agent that is a routine occurrence.
+    A PID present at the first observation AND still present now has
+    demonstrably dwelled — that is a measurement, not an inference. It also
+    makes "the count is growing" a real signal (new PIDs appearing while the
+    old ones persist) rather than an artifact of sampling.
 
-    All-or-nothing failure (e.g. docker_client None) returns
-    {"counts": {}, "unavailable": ["docker: <reason>"]}.
+    `counts` is still emitted, derived as `len(pids)`, because it is a
+    load-bearing `observed_state` key that the Slack renderers read.
+
+    ## Command shape
+
+    `STAT` is the first column of `ps -eo stat,pid,comm`, and a zombie's STAT
+    field is `Z` (sometimes with suffixes like `Z+`). The awk predicate
+    anchors on `$1 ~ /^Z/` — procps-ng on the agent base image emits STAT
+    left-aligned with no leading space for single-letter codes, so the
+    catalog's space-Z pattern misses. Verified live against a real zombie
+    spawned via `os.fork()` + `prctl(PR_SET_NAME, "claude")`.
+
+    awk replaces the previous `grep '^Z.*claude' | wc -l` for precision: the
+    old regex would also match a non-zombie line whose *command* happened to
+    contain "claude" after a Z-initial STAT, and it could not have yielded a
+    PID at all. Matching per-field is both narrower and what makes the PID
+    available. `comm` is truncated to 15 chars by the kernel, so an exact
+    `$3 == "claude"` is correct and avoids matching e.g. `claude-wrapper`.
+
+    ## Why the container's start time comes back too
+
+    A PID is only a process identity WITHIN one PID namespace. A container that
+    restarts outside the backend — `docker restart`, a restart policy firing
+    after an OOM kill or a crash — gets a fresh namespace that hands out low
+    PIDs immediately, and a zombie `claude` in a freshly restarted agent is
+    exactly the low-PID case. Without a restart signal R-01's marker would
+    survive the restart, and a brand-new transient zombie landing on a PID still
+    in the marker would inherit a dwell-old `first_seen` and page critical on
+    its first sample — the false positive ent#337 exists to remove. The module
+    docstring's PID-reuse dismissal argues from `pid_max` wrap-around, which is
+    the right argument for a RUNNING container and the wrong one for a restarted
+    one.
+
+    `State.StartedAt` is the cheapest signal that distinguishes them, and it
+    costs nothing: docker-py's `containers.list()` defaults to `sparse=False`,
+    which already issues a full inspect per container, so the field is sitting
+    in `container.attrs` before we ask. Deliberately NOT `attrs["Created"]` —
+    a restart does not create a new container, so `Created` never moves.
+
+    ## Why the container NAMES come back too (#1813)
+
+    `counts`/`pids` are keyed by `exec_run` SUCCESS, so a container that exists
+    but cannot be exec'd (busy, restarting, degraded shell) drops out of them
+    into `sources_unavailable`. That makes them a LIVENESS signal. H-01 needs a
+    PRESENCE signal — the independent, non-SQL proof that the fleet is non-empty
+    when the SQL roster read comes back empty — so `names` is recorded from the
+    container list itself, before any exec is attempted, and must never be
+    conflated with `counts`.
+
+    Blind spot, documented rather than papered over: the list is filtered to
+    `status=running`, so a fleet whose agents are all STOPPED is invisible here
+    (and stopped agents hold no Redis slots either). A blind SQL tier plus an
+    entirely stopped fleet therefore has no available evidence, and H-01 reports
+    `roster_empty_unverifiable` at most, never a confirmed contradiction.
+
+    Returns a dict with five keys:
+      "pids":        {agent_name: set[int]}  zombie claude PIDs per container.
+      "counts":      {agent_name: int}       len(pids), for the render surfaces.
+      "names":       {agent_name, ...}       every running agent container Docker
+                                             listed, BEFORE any exec (#1813) —
+                                             H-01's presence signal.
+      "started_at":  {agent_name: str}       container `State.StartedAt`, the
+                                             PID-namespace generation marker
+                                             R-01 invalidates its dwell on.
+                                             An agent is ABSENT here when the
+                                             field could not be read — R-01
+                                             then leaves the dwell alone rather
+                                             than restarting it on a non-signal.
+      "unavailable": [str, ...]              per-agent failure messages for the
+                                             caller to append to sources_unavailable.
+
+    All-or-nothing failure (e.g. docker_client None) returns empty maps plus
+    {"unavailable": ["docker: <reason>"]}.
     """
-    out: Dict[str, Any] = {"counts": {}, "unavailable": []}
+    out: Dict[str, Any] = {
+        "pids": {},
+        "counts": {},
+        "names": set(),
+        "started_at": {},
+        "unavailable": [],
+    }
     try:
         from services.docker_service import docker_client
     except Exception as exc:
@@ -504,23 +664,58 @@ def _collect_zombie_counts() -> Dict[str, Any]:
         out["unavailable"].append(f"docker.list: {exc}")
         return out
 
-    # The catalog spec uses ` Z.*claude` (leading-space), but procps-ng on
-    # the agent base image emits STAT left-aligned with NO leading space
-    # for single-letter codes. Anchor at start-of-line instead — same
-    # intent (STAT field begins with Z), works across both formatters.
-    cmd = ["sh", "-c", "ps -eo stat,comm | grep '^Z.*claude' | wc -l"]
+    # Field-wise match on STAT and comm; prints one PID per line. See the
+    # docstring for why this replaced `grep '^Z.*claude' | wc -l`.
+    cmd = [
+        "sh",
+        "-c",
+        "ps -eo stat,pid,comm | awk '$1 ~ /^Z/ && $3 == \"claude\" {print $2}'",
+    ]
     for container in containers:
         # Container name is the canonical agent identifier (handles renames
         # correctly per docker_service.list_all_agents_fast). Strip the
         # historical `agent-` prefix to align with agent_ownership.agent_name.
         agent_name = container.name.removeprefix("agent-")
+        # Record presence FIRST: H-01's evidence must not depend on the exec
+        # below succeeding (#1813).
+        out["names"].add(agent_name)
+        # Read BEFORE the exec and outside its try: the PID-namespace
+        # generation is a property of the container, not of the exec, and it
+        # must still be recorded when a later per-container failure occurs.
+        # Guarded because `attrs["State"]` is a plain status STRING on the
+        # sparse list path — if anything ever flips `sparse=True`, this must
+        # degrade to "not observed" (leave the dwell alone), never to a
+        # constant that silently invalidates every marker each cycle.
+        try:
+            started_at = (container.attrs or {}).get("State", {}).get("StartedAt")
+            if isinstance(started_at, str) and started_at:
+                out["started_at"][agent_name] = started_at
+        except Exception:  # pragma: no cover - defensive, attrs shape only
+            logger.debug(
+                "canary snapshot: no State.StartedAt for %s; "
+                "R-01 dwell continuity unverified this cycle",
+                agent_name,
+            )
         try:
             result = container.exec_run(cmd)
             raw = result.output
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8", errors="replace")
-            count = int((raw or "0").strip().splitlines()[-1])
-            out["counts"][agent_name] = count
+            pids: Set[int] = set()
+            for line in (raw or "").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # A non-numeric line means the shell/awk emitted a diagnostic
+                # rather than a PID (e.g. `ps` absent on a minimal image).
+                # Treat the whole container as unreadable rather than silently
+                # reporting "no zombies" — a quiet false-green is exactly what
+                # R-01 must not do.
+                if not line.isdigit():
+                    raise ValueError(f"unexpected ps output: {line[:80]!r}")
+                pids.add(int(line))
+            out["pids"][agent_name] = pids
+            out["counts"][agent_name] = len(pids)
         except Exception as exc:
             # Per-container failure should not poison the cycle — just
             # record and skip; R-01 will skip this agent.
@@ -709,18 +904,62 @@ def _collect_terminal_rows(window_seconds: int) -> Dict[str, Any]:
 
 def _collect_enabled_schedules() -> List[Dict[str, Any]]:
     """Enabled, non-deleted schedules → {schedule_id, agent_name, next_run_at}
-    for E-06 (stale next_run_at detection, #1472). Mirrors the scheduler's own
-    read predicate (`enabled = 1 AND deleted_at IS NULL`)."""
+    for E-06 (stale next_run_at detection, #1472).
+
+    Mirrors the scheduler's own read predicate — **all** of it. The authority is
+    `db/schedules/crud.py::list_all_enabled_schedules`, which is the list the
+    scheduler actually registers jobs from, and it applies BOTH #834 soft-delete
+    filters. This collector previously carried only the second one, so a schedule
+    whose PARENT AGENT was soft-deleted still read as "enabled" (ent#335).
+
+    That is the mirror image of the `_collect_known_agents` decision below at the
+    `deleted_at` comment — the two collectors are a MATCHED PAIR, not two
+    unrelated calls:
+
+    - `known_agents` deliberately **includes** soft-deleted agents so L-03 does
+      not report their legitimately-preserved child rows as orphans (#834 Phase
+      1a keeps child rows until the retention sweep, up to 180 days).
+    - E-06 must therefore deliberately **exclude** them here: those same
+      preserved rows keep `enabled = 1 AND deleted_at IS NULL` with a
+      permanently frozen `next_run_at`, because the scheduler correctly stopped
+      registering them the moment the agent was deleted. Flagging that is not a
+      stale projection — it is the soft-delete design working. On eu2 this was
+      6,220 of 6,605 total violations (94%) in ~13h, from 20 schedules of 4
+      agents deleted 26 days earlier.
+
+    The INNER join additionally drops schedules whose `agent_ownership` row is
+    gone entirely. Those are L-03's orphans to report, not E-06's:
+    `ORPHAN_SCAN_TABLES` carries `("agent_schedules", "agent_name", None)` with
+    no extra filter, so they are genuinely covered there.
+    """
     from sqlalchemy import select
     from db.engine import get_engine
-    from db.tables import agent_schedules
+    from db.tables import agent_ownership, agent_schedules
 
     # `enabled` is INTEGER on both backends (Trinity keeps SQLite-style integer
     # booleans; the Alembic baseline reuses the same DDL), so `== 1` is correct
     # on PostgreSQL too — no boolean-type surprise.
-    stmt = select(
-        agent_schedules.c.id, agent_schedules.c.agent_name, agent_schedules.c.next_run_at
-    ).where(agent_schedules.c.enabled == 1, agent_schedules.c.deleted_at.is_(None))
+    #
+    # `agent_ownership.agent_name` is UNIQUE NOT NULL, so this join is at most
+    # 1:1 and cannot duplicate schedule rows — no DISTINCT needed.
+    stmt = (
+        select(
+            agent_schedules.c.id,
+            agent_schedules.c.agent_name,
+            agent_schedules.c.next_run_at,
+        )
+        .select_from(
+            agent_schedules.join(
+                agent_ownership,
+                agent_ownership.c.agent_name == agent_schedules.c.agent_name,
+            )
+        )
+        .where(
+            agent_schedules.c.enabled == 1,
+            agent_schedules.c.deleted_at.is_(None),
+            agent_ownership.c.deleted_at.is_(None),
+        )
+    )
     with get_engine().connect() as conn:
         return [
             {
@@ -851,8 +1090,12 @@ def _collect_redis_slot_state(known_agents: Set[str]) -> Dict[str, Dict[str, Any
       "by_agent": {agent_name: set(execution_ids)} for known agents
       "scores":   {agent_name: {execution_id: zset_score}}
       "slot_ttls": {agent_name: {execution_id: ttl_seconds}} — per-slot
-                   metadata HASH TTLs read for S-03 (one TTL call per slot;
-                   bounded by ZCARD which is ≤ max_parallel_tasks).
+                   metadata HASH TTLs read for S-03 (bounded by ZCARD which is
+                   ≤ max_parallel_tasks).
+      "slot_timeouts": {agent_name: {execution_id: timeout_seconds}} — the
+                   effective per-execution timeout stored in the same HASH at
+                   acquire time (ent#336). Read in the SAME pipeline round-trip
+                   as the TTL, so the pair is one RTT per slot rather than two.
       "orphan_slots": {agent_name_in_key: count} for keys matching agents
                       NOT in agent_ownership
     """
@@ -866,6 +1109,7 @@ def _collect_redis_slot_state(known_agents: Set[str]) -> Dict[str, Dict[str, Any
     by_agent: Dict[str, Set[str]] = {}
     scores: Dict[str, Dict[str, float]] = {}
     slot_ttls: Dict[str, Dict[str, int]] = {}
+    slot_timeouts: Dict[str, Dict[str, int]] = {}
     orphan_slots: Dict[str, int] = {}
 
     # Per-agent ZRANGE for known agents (with scores for S-01 grace).
@@ -878,18 +1122,40 @@ def _collect_redis_slot_state(known_agents: Set[str]) -> Dict[str, Dict[str, Any
         by_agent[name] = {m for m, _ in with_scores}
         scores[name] = {m: float(s) for m, s in with_scores}
         ttl_map: Dict[str, int] = {}
+        timeout_map: Dict[str, int] = {}
         for eid, _ in with_scores:
             # Drain sentinels are intentionally short-lived; skip the TTL
             # check for them (S-03 only cares about real execution slots).
             if eid.startswith("drain-"):
                 continue
+            # Per-slot failure must not poison the whole map. Note the parse is
+            # INSIDE the try alongside the reads: an unguarded `int()` on a
+            # corrupt HASH value would raise out of this loop, and
+            # `collect_snapshot` wraps this whole function in a single
+            # `except → sources_unavailable`, so one bad slot would blind
+            # S-01, S-02, S-03 AND L-03's orphan-slot arm for the cycle.
             try:
-                ttl_map[eid] = int(redis_client.ttl(f"{metadata_prefix}{name}:{eid}"))
+                metadata_key = f"{metadata_prefix}{name}:{eid}"
+                # One round-trip for the pair (ent#336). This is the canary's
+                # hottest loop and Redis may be remote; an un-pipelined HGET
+                # beside the existing TTL would double fleet-wide RTTs every
+                # 5 minutes.
+                pipe = redis_client.pipeline()
+                pipe.ttl(metadata_key)
+                pipe.hget(metadata_key, "timeout_seconds")
+                raw_ttl, raw_timeout = pipe.execute()
+                ttl_map[eid] = int(raw_ttl)
+                if raw_timeout is not None:
+                    # `decode_responses=True` on the slot_service client, so
+                    # this is a str. `acquire_slot` writes `str(timeout_seconds)`;
+                    # anything unparseable is treated as unobservable (absent),
+                    # which makes S-03 skip the slot rather than guess a floor.
+                    timeout_map[eid] = int(raw_timeout)
             except Exception:
-                # Per-slot TTL failure should not poison the whole map; the
-                # missing entry simply means S-03 skips that slot.
+                # The missing entry simply means S-03 skips that slot.
                 continue
         slot_ttls[name] = ttl_map
+        slot_timeouts[name] = timeout_map
 
     # SCAN for orphan keys (agent name in the key but not in known set).
     cursor = 0
@@ -909,6 +1175,7 @@ def _collect_redis_slot_state(known_agents: Set[str]) -> Dict[str, Dict[str, Any
         "by_agent": by_agent,
         "scores": scores,
         "slot_ttls": slot_ttls,
+        "slot_timeouts": slot_timeouts,
         "orphan_slots": orphan_slots,
     }
 
@@ -936,8 +1203,44 @@ def collect_snapshot() -> Snapshot:
     fail-open skips (a check would run against empty data and could false-fire).
     A future rename MUST update every consuming invariant's `startswith(...)` in
     the SAME PR. Guarded by the engine-down skip test in test_canary_invariants.
+
+    ⚠ Collector ORDER is load-bearing for H-01 (#1813). The roster read returns
+    early on failure, so anything below it is skipped on exactly the cycle where
+    the harness is most likely blind. Docker therefore runs FIRST (it has no
+    dependency on the roster), and every collector records itself in
+    `collectors_ran` so a consumer can tell "ran and was fine" from "never ran"
+    — `sources_unavailable` alone cannot, because a skipped collector writes
+    nothing. Adding a collector that H-01 treats as evidence means adding it
+    above the roster read, or accepting that it is unavailable on that arm.
     """
     snap = Snapshot(snapshot_time=utc_now_iso())
+
+    # Docker FIRST, before the roster read (#1813). It has no dependency on
+    # `agent_rows`, and the roster read below returns early on failure — the
+    # one path where H-01 most needs independent evidence is precisely the path
+    # that used to skip every collector that could supply it. Collected here,
+    # `docker_agent_names` is populated on the `roster_read_failed` arm too, so
+    # the alarm can say whether the fleet is actually alive instead of
+    # reporting an empty fleet and two sources it never consulted.
+    #
+    # (Redis cannot move with it: `_collect_redis_slot_state` takes
+    # `known_agents`. It stays below the roster read, and `collectors_ran`
+    # reports honestly that it did not run on that path.)
+    try:
+        z = _collect_zombie_counts()
+        snap.zombie_counts = z["counts"]
+        snap.zombie_pids = z.get("pids", {})
+        snap.zombie_container_started_at = z.get("started_at", {})
+        snap.docker_agent_names = z["names"]
+        snap.sources_unavailable.extend(z["unavailable"])
+    except Exception as exc:
+        logger.exception("canary snapshot: zombie collector raised")
+        snap.sources_unavailable.append(f"docker: {exc}")
+    finally:
+        # In `finally` on purpose: the collector RAN either way, and an
+        # unhandled raise is a failure to record, not a reason to claim it was
+        # never attempted.
+        snap.collectors_ran.add(COLLECTOR_DOCKER)
 
     # agent_ownership is the source of truth for "known agents" (engine seam).
     try:
@@ -954,6 +1257,7 @@ def collect_snapshot() -> Snapshot:
         "by_agent": {},
         "scores": {},
         "slot_ttls": {},
+        "slot_timeouts": {},
         "orphan_slots": {},
     }
     try:
@@ -962,6 +1266,8 @@ def collect_snapshot() -> Snapshot:
     except Exception as exc:
         logger.exception("canary snapshot: redis read failed")
         snap.sources_unavailable.append(f"redis: {exc}")
+    finally:
+        snap.collectors_ran.add(COLLECTOR_REDIS)
 
     # SQLite: per-agent running/queued executions.
     for row in agent_rows:
@@ -1036,6 +1342,7 @@ def collect_snapshot() -> Snapshot:
                 slot_ids=redis_state["by_agent"].get(name, set()),
                 slot_scores=redis_state["scores"].get(name, {}),
                 slot_ttls=redis_state["slot_ttls"].get(name, {}),
+                slot_timeouts=redis_state.get("slot_timeouts", {}).get(name, {}),
                 running_exec_ids=execs["running"],
                 running_started_at=execs.get("started_at", {}),
                 running_claude_session_ids=execs.get("claude_session_ids", {}),
@@ -1101,16 +1408,9 @@ def collect_snapshot() -> Snapshot:
         logger.exception("canary snapshot: drain-tick read failed")
         snap.sources_unavailable.append(f"redis.drain_tick: {exc}")
 
-    # Docker exec: per-agent zombie process count for R-01. New source
-    # type for the canary; treat individual container failures as
-    # per-agent skips (caller appends to sources_unavailable so the
-    # operator can see which agents got skipped this cycle).
-    try:
-        z = _collect_zombie_counts()
-        snap.zombie_counts = z["counts"]
-        snap.sources_unavailable.extend(z["unavailable"])
-    except Exception as exc:
-        logger.exception("canary snapshot: zombie collector raised")
-        snap.sources_unavailable.append(f"docker: {exc}")
+    # NOTE: the Docker collector (per-agent zombie counts for R-01, plus the
+    # container-name presence signal for H-01) runs at the TOP of this
+    # function, not here — see the comment there for why the order is
+    # load-bearing rather than incidental.
 
     return snap

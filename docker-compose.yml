@@ -113,6 +113,13 @@ services:
       # operator manifest, or `disabled` to skip seeding. Empty = bundled
       # config/manifests/default-system.yaml.
       - TRINITY_DEFAULT_SYSTEM_MANIFEST=${TRINITY_DEFAULT_SYSTEM_MANIFEST:-}
+      # ent#126: directory the bundled-manifest catalog
+      # (GET /api/systems/manifests) reads. Empty = the image's own
+      # config/manifests (already bind-mounted :ro below). Point it at another
+      # bind-mounted directory to offer your own curated fleet manifests; an
+      # unreadable path is an EMPTY catalog, not an error, so mount the
+      # directory too — setting this alone silently lists nothing.
+      - TRINITY_MANIFESTS_DIR=${TRINITY_MANIFESTS_DIR:-}
       # Agent /tmp tmpfs size (#1231) — read by capabilities.py to build the
       # agent container mount spec. noexec,nosuid stay fixed; only size tunes.
       # Existing agents pick up a change on recreate, not restart.
@@ -220,6 +227,11 @@ services:
       # credential — leaking it lets anyone post to that one channel.
       # Unset = canary cycles run silently (still persists violations).
       - CANARY_SLACK_WEBHOOK_URL=${CANARY_SLACK_WEBHOOK_URL:-}
+      # Optional label naming THIS instance in outbound alerts (#1987). Unset
+      # is the norm — services/instance_identity.py then derives one from
+      # FRONTEND_URL's host, so multiple instances sharing one webhook are
+      # already distinguishable. Set it only to override that derivation.
+      - TRINITY_INSTANCE_NAME=${TRINITY_INSTANCE_NAME:-}
       # Backend agent-call budget (#904 RC-1). Caps how many concurrent
       # outbound agent HTTP calls the backend will hold at once, plus
       # the per-acquire queue wait before returning 503. Default
@@ -259,6 +271,12 @@ services:
       # (observability). The actual routing gate is the mcp-server's read of the
       # SAME env key; keep both in sync via this single .env var.
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # #848 inline email auth — read by BOTH processes from this one key. The
+      # backend gates the /api/internal/mcp-auth/* surface on it (404 when off)
+      # and gates the keyless connector snippet; the mcp-server gates the keyless
+      # session tier. Must be wired in both services or the whole feature is
+      # un-flippable on deploy (#1056/#1039 packaging-gap class).
+      - MCP_INLINE_AUTH_ENABLED=${MCP_INLINE_AUTH_ENABLED:-false}
       # #1081 pull/work-stealing pilot allowlist — the SINGLE switch that opts an
       # agent into pull mode. Backend-only, process-env (needs a backend restart),
       # default empty = pull fully dark. Forwarded here (G1) because the backend
@@ -470,6 +488,23 @@ services:
       # gate (the backend reads the same key only for feature-flags observability).
       # Must be wired here or the flag is un-flippable on deploy (#1056/#1039 class).
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
+      # #848 inline email auth — THIS is the session-tier gate: with it OFF a
+      # keyless MCP connection is refused outright and no login tools register.
+      # The backend reads the same key to gate /api/internal/mcp-auth/*. Both
+      # must be wired or the feature can never be switched on (#1056/#1039 class).
+      - MCP_INLINE_AUTH_ENABLED=${MCP_INLINE_AUTH_ENABLED:-false}
+      # #848 ceiling for the mcp-server's four backend relay fetches on the
+      # inline-auth path (request/verify/playbooks/chat). Functional via its
+      # 15000ms default; wired so the lever is not inert.
+      - MCP_INLINE_AUTH_TIMEOUT_MS=${MCP_INLINE_AUTH_TIMEOUT_MS:-15000}
+      # ent#328: `ask_trinity` POSTs here for grounded Trinity docs answers.
+      # Empty = the public Cloud Function default baked into the client. Wired
+      # through compose because an env var the container never receives is not
+      # actually configurable — the same "un-flippable on deploy" trap called
+      # out for the flag above. Point it at an internal mirror, or at an
+      # unreachable value to effectively disable the tool (it degrades to a
+      # structured error, never a crash).
+      - ASK_TRINITY_ENDPOINT=${ASK_TRINITY_ENDPOINT:-}
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-}  # SEC-001: for audit logging to backend
     depends_on:
       - backend

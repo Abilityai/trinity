@@ -55,6 +55,14 @@ CLEARED_KEYSPACES: Tuple[str, ...] = (
     "agent:dispatch:",   # + :probe-lock            — dispatch_breaker.reset_dispatch
     "agent:slots:",      # ZSET of execution ids    — slot_service.force_clear_slots
     "agent:slot:",       # per-execution metadata   — ditto
+    # ent#337: canary R-01's zombie-dwell marker HASH ({pid: first_seen}).
+    # Carries a TTL of its own, but must ALSO be cleared on the lifecycle
+    # events here: a recycled agent name would otherwise inherit its
+    # predecessor's dwell and page critical on the fresh container's first
+    # transient zombie — #1560 verbatim. Clearing it is always safe: a new
+    # container has a new process table, so no dwell can legitimately span
+    # the boundary.
+    "agent:canary_zombie:",
 )
 
 # Deliberately NOT cleared here, each with the reason. Registered so the parity
@@ -70,6 +78,34 @@ EXEMPT_KEYSPACES: Dict[str, str] = {
     "agent:data_op:": (
         "Short-lived SETNX export/import lock carrying its own TTL. Deleting it "
         "would let a second data operation run concurrently with an in-flight one."
+    ),
+    "agent:bind_op:": (
+        "Short-lived SETNX repo-binding lock (ent#109) carrying its own TTL, "
+        "guarding double-submit on ONE agent. Same reasoning as agent:data_op: "
+        "— clearing it mid-operation would admit a second binder. It is also "
+        "held ACROSS the container recreate this module's start-path caller "
+        "triggers, so clearing there would drop the lock protecting the very "
+        "operation that asked for the recreate."
+    ),
+    "agent:bind_dest:": (
+        "Repo-binding DESTINATION lock (ent#109), keyed by sha256 of the "
+        "destination repo — NOT by agent name at all, so the name-keyed "
+        "lifecycle this module implements cannot address it. It exists "
+        "precisely because the collision is between two DIFFERENT agents "
+        "targeting one repo; clearing it on any single agent's lifecycle event "
+        "would unserialize the other. Registered here so the parity test stays "
+        "green and the omission stays a decision."
+    ),
+    "agent:mcp_key_regen:": (
+        "Short-lived SETNX MCP-key rotation lock carrying its own TTL (#1854). "
+        "Same shape as agent:data_op: above, and clearing it would be actively "
+        "harmful: this lock is deliberately FAIL-CLOSED because two interleaved "
+        "rotations end at 'the container holds K1 while the only active row is "
+        "K2', permanently 401-ing the heartbeat, the result callback, the pull "
+        "worker and the MCP client — with the surviving plaintext unrecoverable. "
+        "Deleting it mid-rotation would manufacture exactly that interleave, and "
+        "the rotation itself replaces the container, so a lifecycle clear on the "
+        "start path could fire against its own in-flight operation."
     ),
 }
 
@@ -104,6 +140,24 @@ def clear_agent_breakers(agent_name: str) -> None:
         reset_dispatch(agent_name)
     except Exception as e:  # noqa: BLE001
         logger.warning("clear_agent_breakers: dispatch reset failed for %s: %s", agent_name, e)
+
+    # ent#337: canary R-01's zombie-dwell marker. A fresh container has a fresh
+    # process table, so no dwell can legitimately span the boundary — and left
+    # behind, a recycled agent name inherits the previous incarnation's
+    # `first_seen` and pages critical on its first transient zombie (#1560).
+    # Imported from the canary package (a leaf) rather than reaching into Redis
+    # here, so the key name has exactly one definition.
+    try:
+        from canary.invariants.r01_no_zombie_claude import REDIS_KEY_PREFIX
+        from services.slot_service import get_slot_service
+
+        get_slot_service().redis.delete(f"{REDIS_KEY_PREFIX}{agent_name}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "clear_agent_breakers: canary zombie-marker clear failed for %s: %s",
+            agent_name,
+            e,
+        )
 
 
 async def clear_agent_runtime_state(agent_name: str) -> None:

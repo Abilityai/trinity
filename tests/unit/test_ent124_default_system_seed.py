@@ -49,6 +49,13 @@ pytestmark = pytest.mark.unit
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REAL_MANIFEST = REPO_ROOT / "config" / "manifests" / "default-system.yaml"
 
+# #1931: the two on-disk checks below are properties of ANY bundled manifest,
+# not just the auto-seeded one — a demo manifest referencing a template that
+# ships no CLAUDE.md deploys an agent with no instructions just as silently.
+# Enumerate by glob so the next bundled manifest is guarded on arrival.
+ALL_MANIFESTS = sorted((REPO_ROOT / "config" / "manifests").glob("*.yaml"))
+ALL_MANIFEST_IDS = [p.name for p in ALL_MANIFESTS]
+
 TEST_MANIFEST = """
 name: testsys
 agents:
@@ -150,7 +157,8 @@ def test_bundled_manifest_parses_and_validates():
     assert manifest.permissions.preset == "full-mesh"
 
 
-def test_bundled_manifest_local_templates_exist_in_tree():
+@pytest.mark.parametrize("manifest_path", ALL_MANIFESTS, ids=ALL_MANIFEST_IDS)
+def test_bundled_manifest_local_templates_exist_in_tree(manifest_path):
     """learnings 2026-07-23: an absent local: template used to create a BLANK
     agent — deploy reported success and the seed flag latched. #1759 closed
     that (create now 404s `UNKNOWN_LOCAL_TEMPLATE`), so this check is now
@@ -158,34 +166,44 @@ def test_bundled_manifest_local_templates_exist_in_tree():
     fails at collection time with a precise message naming the offending
     manifest entry, whereas the runtime gate would surface as a first-run seed
     landing in the operator queue. It also still covers the CLAUDE.md half
-    (ent#239), which the create gate does not check at all."""
-    manifest = system_service.parse_manifest(REAL_MANIFEST.read_text(encoding="utf-8"))
+    (ent#239), which the create gate does not check at all.
+
+    #1931: widened from `default-system.yaml` to every bundled manifest. Every
+    manifest the repo ships is `local:`-only today, which is the property that
+    keeps a deploy PAT-free — asserting it here is what keeps it true."""
+    manifest = system_service.parse_manifest(manifest_path.read_text(encoding="utf-8"))
     for short, cfg in manifest.agents.items():
-        assert cfg.template.startswith("local:"), f"{short}: PAT-free seed requires local: templates"
+        assert cfg.template.startswith("local:"), (
+            f"{manifest_path.name}/{short}: PAT-free deploy requires local: templates"
+        )
         template_dir = REPO_ROOT / "config" / "agent-templates" / cfg.template.split(":", 1)[1]
         assert (template_dir / "template.yaml").is_file(), (
-            f"{short}: bundled manifest references '{cfg.template}' but "
+            f"{manifest_path.name}/{short}: manifest references '{cfg.template}' but "
             f"{template_dir}/template.yaml does not exist — this would seed a blank agent"
         )
         # ent#239: template.yaml alone still deploys "successfully" but seeds an
         # agent with no instructions — CLAUDE.md is the zero-cred usefulness bar.
         assert (template_dir / "CLAUDE.md").is_file(), (
-            f"{short}: '{cfg.template}' ships no CLAUDE.md — the agent would "
-            f"deploy but have no instructions (fails the zero-cred useful bar)"
+            f"{manifest_path.name}/{short}: '{cfg.template}' ships no CLAUDE.md — the "
+            f"agent would deploy but have no instructions (fails the zero-cred useful bar)"
         )
 
 
-def test_bundled_manifest_templates_ship_declared_commands():
+@pytest.mark.parametrize("manifest_path", ALL_MANIFESTS, ids=ALL_MANIFEST_IDS)
+def test_bundled_manifest_templates_ship_declared_commands(manifest_path):
     """ent#239 live finding: Claude Code intercepts any leading-`/` message
     before the model sees it, so a command that is only *documented* (in
     template.yaml / CLAUDE.md prose) fails as typed — `/research` returned
     "Unknown command: /research" and `/status` hit the built-in. Every command
     a seeded template declares must ship a real `.claude/commands/<name>.md`
     (the pattern trinity-system / demo-* templates already follow); a shipped
-    file also shadows same-named built-ins (verified live for /status)."""
+    file also shadows same-named built-ins (verified live for /status).
+
+    #1931: widened to every bundled manifest — a demo fleet's commands fail as
+    typed exactly the same way the seeded fleet's would."""
     import yaml
 
-    manifest = system_service.parse_manifest(REAL_MANIFEST.read_text(encoding="utf-8"))
+    manifest = system_service.parse_manifest(manifest_path.read_text(encoding="utf-8"))
     for short, cfg in manifest.agents.items():
         template_dir = REPO_ROOT / "config" / "agent-templates" / cfg.template.split(":", 1)[1]
         declared = [
@@ -195,9 +213,10 @@ def test_bundled_manifest_templates_ship_declared_commands():
         for cmd in declared:
             cmd_file = template_dir / ".claude" / "commands" / f"{cmd}.md"
             assert cmd_file.is_file(), (
-                f"{short}: template.yaml declares command '{cmd}' but ships no "
-                f"{cmd_file.relative_to(REPO_ROOT)} — as typed, /{cmd} is "
-                f"intercepted by the CLI and fails ('Unknown command')"
+                f"{manifest_path.name}/{short}: template.yaml declares command "
+                f"'{cmd}' but ships no {cmd_file.relative_to(REPO_ROOT)} — as "
+                f"typed, /{cmd} is intercepted by the CLI and fails "
+                f"('Unknown command')"
             )
 
 

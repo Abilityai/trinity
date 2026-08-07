@@ -10,6 +10,8 @@
 
 | Date | Changes |
 |------|---------|
+| 2026-08-02 | **Issue #1870 - completed turn discarded on `error_during_execution`**: the #1673 branch treated an `is_error` result as terminal and raised 502 even when the session transcript showed the turn had reached `stop_reason: end_turn` — the reproduction being a fan-out turn whose background subagent `<task-notification>` lands after the answer, making the CLI's terminal-state check see a non-terminal last message. New additive `jsonl_recovery._recover_completed_turn_from_jsonl(session_id, since_iso)` consulted from `headless_executor._try_recover_completed_turn(ctx)` inside that branch; `_recover_response_from_jsonl` (#678) is unmodified, since its end-of-file boundary walk anchors on the `<task-notification>` itself and no `since` parameter could have fixed that. Three required gates — main-thread only (`isSidechain`/`isMeta` excluded from marker selection, boundary walk and text collection), turn-scoped (marker timestamp within `[task_start_iso, now+300s]`, fail-closed both ends), and finished (the **last** qualifying assistant record must **itself** be `end_turn`; `max_tokens`/`stop_sequence` rejected). The recovered answer is the marker message's **`message.id` group, fail-closed when it holds no text** — never a text window: a thinking-enabled final message is two records sharing one `message.id` and both carry `end_turn`, 40.6% of markers are thinking-only (measured over 1,075 transcripts / 6,663 markers), and `_read_jsonl_records` drops the final partial line on an interrupted write, so a window rule would store the turn's narration *without* the answer as a 200 SUCCESS. On a hit: `ctx.response_parts` is **replaced** (not appended — partial stdout survives on this subtype), `metadata.recovered_from_jsonl` and the new agent-side `metadata.recovered_terminal` are set, a `_RECOVERY_NOTICE` naming the partial-checkpoint risk is prepended, and the turn returns 200/SUCCESS with no new `TaskExecutionStatus`. On a miss the 502 raise is character-identical, preserving every #1673 pin. Both a hit and **every** decline are logged with a reason. ⚠️ Permanent coverage bound: agents with `execution_timeout_seconds <= 600` write no JSONL and are not fixed, with no fallback (stream-json's `message.stop_reason` is `None` in 179/179 real records). Requires a base-image rebuild + cold agent recreate. Tests: `tests/unit/test_1870_completed_turn_recovery.py` (81, driven off a committed real captured transcript tail) + 5 new #1673 pins. The `message.id`-less window fallback is itself guarded (the marker record must carry text before the window is consulted), so it cannot launder narration into an answer, and every decline reason is split by the action it implies. |
+| 2026-08-01 | **Issue #1849 - Claude Code's internal `[ede_diagnostic]` header must never be surfaced as the error cause**: #1673 made `error_during_execution` fall back to `msg["errors"]` (reading `errors[0]`) when `msg["result"]` is empty. On current Claude Code (observed 2.1.215) `errors[0]` is *never* a real error — the CLI builds the array as `[`[ede_diagnostic] result_type=… last_content_type=… stop_reason=…`, ...realErrors]` and its own consumer filters every `[ede_diagnostic]`-prefixed entry out before showing anything to a user (a second variant reads `turn aborted (…) stop_reason=…`; upstream `anthropics/claude-code#82235`). Consequences, all reproduced end to end: every failure on this path was labelled with a meaningless marker that exists nowhere in this codebase (unsearchable, so ops taxonomy bucketed it uncategorized and investigators were sent to the wrong repo — see the closed #262); real causes at `errors[1..]` were dropped; and the backend's resume-not-found self-healing (`src/backend/routers/sessions.py::_is_resume_not_found`, a substring match on the 502 detail) stopped matching, re-wedging exactly the sessions #1673 was filed to unwedge. Fix: two private helpers in `docker/base-image/agent_server/services/stream_parser.py` — `_entry_text` (whitespace-normalized, dict-unwrapping best-effort text for one entry) and `_split_claude_errors` (returns `(real_errors, diagnostics)`) — applied at **BOTH** `errors[0]` reads, the `execution_error` branch **and** the pre-existing `max_turns` branch (#361), which reads the same array from the same emitter and has the same defect shape. Both branches now `", ".join(...)` the surviving real errors instead of taking `[0]`, so a multi-error result is preserved. **Degenerate all-diagnostics case** (the modal production shape — all four observed rows were marker-only): the diagnostic's `key=value` payload is kept as clearly-labelled context, `Claude Code reported no error detail (diagnostic: …)`, with the unsearchable `[ede_diagnostic]` token stripped and the tail capped at `_DIAGNOSTIC_MAX=180`. Nothing else on this path is recorded (`cost`, `tool_calls`, `response`, `claude_session_id` are all empty — see #1853), so discarding it would be a net telemetry loss; the fallback literal is deliberately NOT the bare `"Execution error"`, which `headless_executor`'s `f"Execution error: {…}"` would render as `"Execution error: Execution error"`. The diagnostic also stays in the existing **WARNING** log at both call sites — not DEBUG, as the issue suggested, because `agent_server/main.py` pins `logging.basicConfig(level=logging.INFO)` and a DEBUG record would emit nothing. Four latent defects in the same two expressions are fixed with it: a malformed `errors` shape (a dict, an int, a bool) made `errors[0]` **raise** inside the parser, and since the raise is swallowed by the per-line `except Exception` while `cost_usd`/`duration_ms` are already set, the execution fell through to the #160 `context: fork` placeholder — HTTP 200, `status=success` (#1673's own bug in a new shape); a bare-string `errors` was indexed character-by-character (`"boom"` → `'b'`); a blank/`None` entry could join to `""` and re-introduce the empty `error_message` #1673 fixed; and a leading newline slipped a marker past the prefix test (the prefix test is now `casefold()`-insensitive, deliberately more lenient than the CLI's own case-sensitive filter). No new imports; input is already credential-sanitized upstream by `sanitize_subprocess_line` at both call sites and again at the HTTP egress, so no third sanitization is added. **Behaviour change worth noting:** real error text on this path now reaches the backend's `is_auth_failure` substring classifier, so an `execution_error` can trigger a SUB-003 subscription switch (and, via the pre-raise `classify_switch_failure`, one same-`execution_id` retry) that the inert marker previously suppressed. Because `AUTH_INDICATORS` contains bare `"401"`/`"403"`, a hex session UUID trips it ~1.73% of the time (measured 1.727% over 500,000 `uuid4()`s — ~1 in 58; note the plan's cited 1.09% was an under-measurement); the turn still self-heals, so the cost is a spurious rotation, not a wrong outcome — pinned by `test_resume_fallback_survives_a_403_bearing_uuid`, with word-boundary anchoring filed as a follow-up (the classifier is a byte-identical vendored mirror affecting every path, so it is a strictly larger blast radius than this fix). **This exposure covers BOTH branches, not just `execution_error`** (corrected at review — the plan asserted `max_turns` text was "substring-matched by nothing", which is wrong): `classify_switch_failure` returns `"auth"` for *any* `>= 400` response body that trips `is_auth_failure`, and the `except httpx.HTTPError` handler calls `is_auth_failure(error_msg)` independently of status code — so the `max_turns` 422 detail is matched on the same two sites. In practice the branch stays inert, because a `max_turns` result whose `errors[]` carries real entries is unobserved and a marker-only/absent array still yields the fixed `Task stopped after N turns` string; the difference from `execution_error` is that a spurious switch there re-runs a turn that legitimately hit its turn limit, so the misfire costs tokens rather than a fast-failing duplicate. The dispatch circuit breaker is unaffected — it counts `error_code == AUTH`, gated on HTTP 503 on the sync path and mapped to `error_code=None` for 502 by `result_callback._STATUS_MAP` on the async #1083 path. Known residual: `headless_executor` applies `err[:300]` **after** the join, so a long first error can push a later resume marker past the budget (pinned by `test_multi_error_truncation_limit_is_known`). Tests: `tests/unit/test_1849_ede_diagnostic_filtered.py` (19 tests / 23 cases), whose acceptance test drives a marker-first `errors[]` through the real parser and `_finalize_headless_result` to the **real** `routers/sessions.py::_is_resume_not_found` (loaded via `spec_from_file_location`, not `from routers.sessions import …`, which raises `ImportError` under CI's randomized seeds). **Agent containers need a base-image rebuild to pick this up.** |
 | 2026-07-04 | **Issue #1444 - fail-loud + owner-gated `save_to_session` persistence**: the CHAT-001 `/task` persistence writer (`_persist_chat_session`, shared by the sync branch and the async `_run_async_task_with_persistence` wrapper; guarded on a SUCCESS terminal) no longer swallows DB errors with a `logger.warning; return None`. It now logs at ERROR with a stack trace (message carries agent + execution_id + exception-type only — never `user_message`/`user_email`/`result.response`, Security F3), does NOT re-raise past a completed, billed turn, and the sync branch surfaces a `chat_persist_failed` marker on the response. The `chat_session_id` branch is owner-checked (`session.user_id == caller`) before appending — a forged/leaked id falls through to `get_or_create_chat_session` for the caller (IDOR fix). Triage (direct call, wrapper with stubbed `execute_task`, and wrapper with the REAL `execute_task` + terminal-CAS row write) confirmed the in-process path is correct on stock config; the #1083 fire-and-forget callback path (which does not persist) is structurally unreachable by a manual `/task` (`ASYNC_DISPATCH_ELIGIBLE_TRIGGERS`={schedule,webhook}), so callback-path persistence is deferred to the pull-mode epic (#1045/#1081). Fast CI guard: `tests/unit/test_1444_chat_session_persistence.py` (6 tests, incl. a `hide_parameters=True` engine-config guard asserting a real `DBAPIError` can't leak bound values through the fail-loud log); the slow `requires_agent` `test_dynamic_thinking_status.py::TestAsyncModeSessionPersistence` tests now assert `success` before demanding a session. Full flow in [authenticated-chat-tab.md](authenticated-chat-tab.md). |
 | 2026-05-18 | **Issue #873 - Pipe-drop handler ported to refactored `headless_executor.py`**: After PR #122 extracted `execute_headless_task()` into its own module (`services/headless_executor.py`), the `except (BrokenPipeError, ConnectionResetError)` handler from #474 needed to be present in the new file's outer `try/except` chain. PR #873 applied the same pattern — handler at `headless_executor.py:856-874`, semantically identical to the `gemini_runtime.py:665-676` sibling — ensuring the pipe-drop → HTTP 502 reclassification and INFO-level logging survive the module split. No behaviour change; pure carry-forward of the #474 fix. `src/frontend/src/composables/useProcessWebSocket.js` was deleted as part of this cleanup (composable was no longer used after the SSE streaming surface was consolidated). |
 | 2026-05-13 | **Issue #678 - executor refactor + salvage/auto-retry pipeline**: PR #797 breaks the monolithic `docker/base-image/agent_server/services/claude_code.py` (was ~3000 LOC) into focused modules so the headless path can be reasoned about and tested in isolation: `claude_code.py` itself loses 1278 LOC of orchestration; new `headless_executor.py` (+956) owns `execute_headless_task`, `HeadlessRunContext`, `_finalize_headless_result`, `_attempt_empty_result_recovery`, and subprocess lifecycle; new `error_classifier.py` (+465) owns `_classify_empty_result`, `_classify_signal_exit`, `_is_auth_failure_message`, `_is_rate_limit_message`, `_diagnose_exit_failure`, `_recover_metadata_from_raw_messages`; new `jsonl_recovery.py` (+461) hosts the JSONL session-file readers for cost/context/text recovery; new `stream_parser.py` (+448) owns stdout line parsing; new `subprocess_lifecycle.py` (+79), `_runtime_config.py` (+32), `state.py` (+24), `runtime_adapter.py` (+6) split out the remaining concerns. Behaviorally the most load-bearing shift is that `_classify_empty_result` now returns a structured dict body — `{message, metadata, raw_message_count, parse_failure_count, recovery_attempted}` — instead of the prior plain string (was a string until 2026-05-11, see `error_classifier.py:391` docstring); `message` carries the human-readable diagnostic and `metadata` is the sanitized `ExecutionMetadata.model_dump()`, which lets the backend's HTTPError handler salvage cost/context onto the FAILED row (sibling 2026-05-13 update in [task-execution-service.md](task-execution-service.md)) instead of silently zeroing them out as #520 used to. A new shared helper `_attempt_empty_result_recovery(metadata, raw_messages, response_parts, parse_failure_count, parse_failure_sample, task_start_iso, session_id_fallback)` at `headless_executor.py:67-155` is invoked from both async and sync paths and runs a two-step JSONL salvage: (1) call `_classify_empty_result` and return `None` if metadata is already complete so the caller continues on the success path; (2) call `_recover_metadata_from_jsonl(session_id, since_iso, metadata)` to back-fill `cost_usd`, `duration_ms`, `num_turns`, per-call `usage` (input/output/cache_creation/cache_read tokens), and `model_name` in place; (3) if `response_parts` is empty, try `_recover_response_from_jsonl(session_id)` and set `metadata.recovered_from_jsonl = True` on success; (4) on hard failure return a structured `(502, body)` carrying a refreshed metadata snapshot (since JSONL may have populated `cost_usd` even when no response text was recovered). The `session_id_fallback` argument is the UUID we passed to `claude --session-id` (`HeadlessRunContext.claude_session_uuid`), required for the reader-race window where stdout never produced an `init` line and `metadata.session_id` is unset — without it, recovery would silently no-op. Headless tasks whose `timeout_seconds > 600` now auto-enable JSONL persistence (the `persist_session=True` path) so this stdout-race recovery can actually fire on long-running work; those headless-task UUIDs aren't in `agent_sessions`, so they fall out of the session-cleanup keep set automatically and are reaped by the existing `session_cleanup_service` 6h sweep (1h mtime race guard) — no new reaper required, see `architecture.md` (#678 Option B). The JSONL reader hardens path containment: session-file paths under `/root/.claude/projects/...` are resolved via `Path.resolve()` and validated with `Path.is_relative_to()`, and `session_id` is regex-gated to `^[a-zA-Z0-9_-]+$` before path construction so traversal attempts (`../`, absolute paths, NUL bytes, etc.) are rejected at the gate. New `ExecutionMetadata` token-accounting fields `cache_creation_tokens` and `cache_read_tokens` are populated from each assistant message's `usage` dict in `stream_parser.py`; the accounting invariant is that `input_tokens + cache_read_tokens` represents the actual prompt size and cached tokens are NOT added on top (using them as a fallback would double-count). Together with the in-line auto-retry in [task-execution-service.md](task-execution-service.md) (one retry with the same `execution_id`, 300 s cap, rolled-up cost) this closes the symptom class tracked under #520 and the prior drain reorder fix #531, and ticks the executor-refactor box on the orchestration plan (#408). Tests: `tests/unit/test_auto_retry_reader_race.py` covers the auto-retry gate behavior, `tests/unit/test_error_classifier_dict_body.py` pins the dict-body classifier shape, `tests/unit/test_jsonl_metadata_recovery.py` covers metadata recovery plus 12 parametrized hostile-input path-containment cases, `tests/unit/test_empty_result_classification.py` is migrated to the dict-body shape, and `tests/unit/test_session_persistence_flag.py` asserts `effective_persist = persist_session OR timeout_seconds > 600`. |
@@ -360,19 +362,39 @@ The `ExecutionMetadata` model (`docker/base-image/agent_server/models.py:77-93`)
 
 ### How Errors Are Classified
 
-Errors are detected during stream-json parsing in `docker/base-image/agent_server/services/claude_code.py`:
+Errors are detected during stream-json parsing in
+`docker/base-image/agent_server/services/stream_parser.py::process_stream_line`
+(the #122 extraction moved this out of `claude_code.py`):
 
-**Source 1 -- `result` message with `is_error=true`** (line 304-311):
+**Source 1 -- `result` message with `is_error=true`** (`stream_parser.py:366-420`):
 ```python
 if msg.get("is_error") and not metadata.error_type:
-    metadata.error_message = result_text
-    if _is_rate_limit_message(result_text):
+    if terminal_reason == "max_turns" or subtype == "error_max_turns":
+        # #1849: filter Claude Code's internal [ede_diagnostic] entries, join the rest
+        errors, diagnostics = _split_claude_errors(msg.get("errors"))
+        metadata.error_type = "max_turns"
+        metadata.error_message = (
+            ", ".join(errors) or f"Task stopped after {metadata.num_turns} turns"
+        )
+    elif _is_rate_limit_message(result_text):
         metadata.error_type = "rate_limit"
+        metadata.error_message = result_text
     else:
+        # #1673 + #1849: error_during_execution carries its text in `errors`,
+        # not `result` (which is "") — minus the CLI's own diagnostic header.
+        errors, diagnostics = _split_claude_errors(msg.get("errors"))
         metadata.error_type = "execution_error"
+        if result_text:
+            metadata.error_message = result_text
+        elif errors:
+            metadata.error_message = ", ".join(errors)
+        elif diagnostics:                       # keep the payload, strip the token
+            metadata.error_message = f"{_NO_ERROR_DETAIL} (diagnostic: {…})"
+        else:
+            metadata.error_message = _NO_ERROR_DETAIL
 ```
 
-**Source 2 -- `assistant` message with `error` field** (line 341-349):
+**Source 2 -- `assistant` message with `error` field** (`stream_parser.py:456-464`):
 ```python
 if msg_type == "assistant" and msg.get("error"):
     metadata.error_type = msg["error"]  # e.g., "rate_limit"
@@ -389,12 +411,131 @@ After execution completes, `error_type` determines the HTTP response:
 | `error_type` | HTTP Status | Handler Location |
 |--------------|-------------|------------------|
 | `"rate_limit"` | 429 | `claude_code.py:583-589` (chat), `claude_code.py:967-973` (headless) |
-| `"execution_error"` | 503 | Falls through to non-zero return code handling |
+| `"execution_error"` | **502**, or **200 + recovered response** when the transcript shows an in-turn `stop_reason=end_turn` (#1870) | Dedicated branch in `headless_executor._finalize_headless_result` (#1673); recovery via `_try_recover_completed_turn` (#1870) |
 | `null` | 200 | Normal success path |
+
+> The `execution_error` row said **503 / "falls through to non-zero return code
+> handling"** until 2026-08-02. That has been wrong since #1673 gave the case its
+> own **502** branch; corrected here rather than left to contradict the section
+> below.
 
 **Pipe-drop reclassification (#474 / #873):** When the subprocess stdin write fails because the Claude child already exited (`BrokenPipeError` / `ConnectionResetError`), both `headless_executor.py` (lines 856–874) and `gemini_runtime.py` (lines 665–676) raise HTTP **502** instead of falling through to the generic `except Exception` → 500 path. 502 ("Bad Gateway to Claude subprocess") is semantically correct and avoids the SUB-003 auto-switch predicate in `task_execution_service.py:628`, which only triggers on 503. Log level for this path is `logger.info` (not `logger.error`) because the cause is a benign race (auth abort, permission-mode kill, upstream backend cancel), not a server-side fault.
 
 The `_format_rate_limit_error()` helper (`claude_code.py:674-683`) uses `metadata.error_message` to build an actionable error detail string that suggests resolution steps (wait for reset, set API key, or reassign subscription).
+
+## Completed-Turn Recovery on `error_during_execution` (#1870)
+
+Claude Code can report `is_error: true` / `subtype: error_during_execution` for a
+turn that actually **finished**. The reproduction is a fan-out turn: the model
+reaches `stop_reason: end_turn`, a background subagent's `<task-notification>`
+lands *after* it, the follow-on turn is interrupted, and the CLI's terminal-state
+check sees a non-terminal last message — so it reports the whole turn as failed
+(`[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null`). The
+#1673 branch above then raised 502 and discarded a complete answer that was
+sitting on disk.
+
+**Why the #678 recovery could not be reused.** `_recover_response_from_jsonl`
+picks its boundary by walking backward *from the end of file* to the newest
+string-content user record — and the trailing `<task-notification>` **is** one. The
+boundary therefore lands *past* the completed answer and the forward scan returns
+nothing. It is inside any plausible time window, so adding a `since` parameter
+would not have helped either: the boundary rule itself is the defect. #1870 adds a
+**new** function; the #678 path is untouched and carries zero regression risk.
+
+**The gate** (`jsonl_recovery._recover_completed_turn_from_jsonl`, called from
+`headless_executor._try_recover_completed_turn`) — three independent conditions,
+all required:
+
+| Gate | Rule |
+|---|---|
+| main-thread only | `_is_main_thread` (`not isSidechain and not isMeta`) applied to marker selection, the boundary walk **and** text collection. A subagent's `end_turn` plus its string-content prompt satisfy both the marker and boundary tests; ungated, a crashed main thread returns 200 carrying a subagent's internal thought |
+| turn-scoped | The marker's timestamp must parse and fall within `[task_start_iso, now + 300s]`. Without the lower bound, an aborted turn on a `--resume` session recovers the *previous* turn's answer. The upper bound exists because `task_start_iso` is naive-UTC stamped `Z`, so a container clock ahead of UTC would fail **open** |
+| finished | The **last** qualifying assistant record must **itself** carry `stop_reason == "end_turn"` — stricter than "the last `end_turn` in scope", so an interrupted-mid-tool thread cannot be rescued by an earlier marker. `max_tokens` and `stop_sequence` are rejected |
+
+**The recovered answer is the marker message's `message.id` group, fail-closed when
+that group holds no text** — never a text window ending at the marker. This is the
+load-bearing property. A thinking-enabled final message is written as *two* records
+sharing one `message.id`, and **both** carry `end_turn`:
+
+```
+idx 130  assistant  message.id=msg_X  end_turn  content=[thinking]
+idx 131  assistant  message.id=msg_X  end_turn  content=[text]    ← THE ANSWER
+```
+
+Measured over 1,075 real transcripts (6,663 main-thread markers): **40.6% are
+thinking-only**, and `message.id` grouping yields text for 6,660 of them.
+`_read_jsonl_records` drops the final partial line on an interrupted write — and
+#1870 *is* the interrupted-tail case — so a window rule would silently store the
+turn's *narration without the answer* as a 200 SUCCESS, with no error and no retry:
+strictly worse than the bug being fixed. Grouping is also the right artifact, since a
+normal success stores only `result_text` while a window stores intermediate
+narration (measured window/final ratio p90 2.19×, max 79.5×).
+
+A marker with **no** `message.id` (unobserved — 0 of 6,663 corpus markers) falls back
+to a `(boundary, marker]` window walk, where the boundary is the newest main-thread
+string-content user record searched backward **from the marker**. That fallback is
+itself guarded: the marker record must be confirmed to carry text **before** the
+window is consulted. Without an id the thinking/text split cannot be grouped, so an
+unguarded window would return the turn's earlier narration — answer absent — as a 200
+SUCCESS, i.e. re-open the exact regression above on the one path that would ever run
+if Claude Code stopped emitting `message.id`.
+
+**On a hit** the recovered text replaces `ctx.response_parts` (never appends — the
+parser leaves partial stdout in place on this subtype, so appending would duplicate
+it), control falls through the unmodified pipeline, and the turn returns **200 /
+SUCCESS**. No new `TaskExecutionStatus` value; `apply_result` writes SUCCESS
+naturally and the #1083 async callback path inherits the fix with no extra wiring.
+**On a miss** the 502 is character-identical to before, so every #1673 pin — including
+the resume-not-found string the Sessions-tab self-heal matches on — is preserved.
+
+**A recovered turn is never indistinguishable from a clean one.**
+`ExecutionMetadata.recovered_terminal` is the machine-readable marker, deliberately
+**separate** from `recovered_from_jsonl` (which #678 already sets for mere telemetry
+back-fill, so it cannot express "a reported failure became a success"); both are set
+on recovery. A `_RECOVERY_NOTICE` line is prepended to the response for the operator
+reading the deliverable, and it names the partial-checkpoint risk explicitly — a
+recovered answer can legitimately be a mid-turn checkpoint rather than the final
+deliverable. The notice is part of the stored response and so flows into
+`{{previous_response}}` templating and fan-out joins; that is deliberate and pinned
+by test.
+
+Where those signals land was traced, not assumed: `apply_result`'s success branch
+cherry-picks exactly six metadata keys (`cache_read_tokens`/`cache_creation_tokens`/
+`input_tokens`, `context_window`, `cost_usd`, `session_id`, `compact_events`) and
+drops the rest, and `schedule_executions` has no metadata column — so
+`recovered_terminal`, like `error_type` and `recovered_from_jsonl` before it, is
+**agent-side and on-the-wire only, not persisted to a DB column**. What actually
+survives onto the execution row is the **notice** (inside the stored `response`) and
+the **log line**. Teaching the backend to read `recovered_terminal` is a follow-up;
+`apply_result`'s success branch is the single chokepoint.
+
+**Observability**: a hit logs `event=completed_turn_recovered_from_jsonl`; **every**
+decline logs `event=completed_turn_recovery_declined reason=<…>`. A fail-closed gate
+that silently stops firing is otherwise indistinguishable from "the bug never
+happened", so the reasons are split by **the action they imply**:
+`marker_no_timestamp` / `malformed_message` = the on-disk format moved (fix the
+parser), `future_marker` = the container clock is wrong (fix the clock), while
+`not_finished` (carrying a shape-validated `stop_reason=<token>`), `stale_marker` and
+`sub_thread_only` are the guard working as designed — `not_finished` being the
+expected steady-state decline. Collapsing a format change into `stale_marker` would
+read to an operator as "working as intended" and is precisely how this gate would rot
+unnoticed.
+
+> ⚠️ **Coverage bound — permanent, no fallback.** This reads a JSONL that exists only
+> when session persistence is on. It is auto-enabled for `timeout_seconds > 600`
+> only, and `task_execution_service.execute_task` never passes
+> `persist_session=True` — so **every schedule or webhook whose agent has
+> `execution_timeout_seconds <= 600` writes no JSONL and #1870 stays unfixed for it,
+> silently.** There is no in-memory alternative: stream-json carries no completion
+> signal (`message.stop_reason` measured `None` in 179/179 real assistant records vs
+> 99.96% populated on disk). The only lever is raising the agent's timeout above
+> 600s. When diagnosing "the fix isn't firing", check for
+> `event=jsonl_persistence_auto_enabled` in the agent's logs **first**.
+
+Requires a base-image rebuild plus a cold agent recreate to take effect (#1809).
+Tests: `tests/unit/test_1870_completed_turn_recovery.py` (81, driven off a committed
+**real captured** transcript tail — `tests/unit/fixtures/`), plus the #1673 pins in
+`tests/unit/test_1673_execution_error_not_success.py`.
 
 ## Key Differences: Chat vs Task
 

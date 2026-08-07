@@ -157,6 +157,7 @@ async def get_public_feature_flags(
         VOICE_ENABLED,
         VOIP_ENABLED,
         MCP_AGENT_CHAT_PULL_ENABLED,
+        MCP_INLINE_AUTH_ENABLED,
         REDELIVERY_GOVERNOR_ENABLED,
     )
     from services.entitlement_service import entitlement_service
@@ -197,6 +198,14 @@ async def get_public_feature_flags(
         # of the same env var. Lets an operator confirm, via the API, whether the
         # treatment window is active during the soak. NOT a UI surface.
         "mcp_agent_chat_pull_enabled": MCP_AGENT_CHAT_PULL_ENABLED,
+        # MCP inline email auth (#848) — default OFF. Observability-only here,
+        # mirroring the two flags around it: the real gates are the mcp-server's
+        # own read of the same env var (the keyless session tier) and
+        # require_inline_auth_enabled on /api/internal/mcp-auth/*. Both processes
+        # read ONE key, so this is also how an operator confirms the two halves
+        # actually agree after a deploy — the failure mode that shipped this PR
+        # with the flag wired into neither container. NOT a UI surface.
+        "mcp_inline_auth_enabled": MCP_INLINE_AUTH_ENABLED,
         # Re-delivery governor (#1085) — default OFF. Observability-only here:
         # the actual gates live at the callback endpoint / reaper / drain read
         # points. Lets an operator confirm via the API whether the correlated-
@@ -2383,6 +2392,31 @@ async def update_setting(
             ),
         )
 
+    # ent#297: the retention WINDOWS themselves. #1644 blocked the guard's ack
+    # keys here but left the windows falling through to a bare `db.set_setting`
+    # with no type or range check — so the generic PUT was a second, completely
+    # unvalidated write path to the values that drive irreversible deletion
+    # (execution history, health checks, and via agent_soft_delete_retention_days
+    # the #1581 volume purge, which is unrecoverable).
+    #
+    # Route them to `PUT /api/settings/ops/config`, which validates and audits.
+    # Same 422-with-a-pointer shape as max_parallel_tasks_ceiling (#506),
+    # PROACTIVE_RATE_LIMIT_DEFAULTS (#1609) and telemetry_sharing_* (ent#12):
+    # a settings key whose value has a safe range gets a route that knows the
+    # range, and the catch-all refuses to be a way around it.
+    from services.settings_service import RETENTION_OPS_KEYS
+
+    if key in RETENTION_OPS_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is a retention window and must be set via "
+                "PUT /api/settings/ops/config (type- and range-validated, "
+                "audit-logged). See GET /api/settings/retention for the "
+                "effective values (ent#297)"
+            ),
+        )
+
     # ent#236: the automation keys go through the dedicated validated route.
     # The interval especially: this generic PUT takes `Dict[str, str]` with no
     # type or range check, so "10" would be accepted verbatim and the auto-sync
@@ -2555,25 +2589,79 @@ async def update_ops_settings(
 
     Admin-only. Only accepts valid ops setting keys.
     Invalid keys are ignored with a warning.
+
+    ent#297 — the OSS write path for the eight retention windows (the enterprise
+    `retention` module has its own already-validated `PUT /api/enterprise/
+    retention/config`, which clamps to the community floor and covers 7 of the 8
+    — `agent_reminders_retention_days` is absent there). This one used to write
+    `Dict[str, str]` straight through with no type or range check.
+    Two things changed:
+
+    * **Values are validated** (`config.validate_ops_setting`); the request is
+      rejected 422 on the first bad one. Validation is deliberately NOT sold as
+      the fix for ent#297 — a small valid integer is the dangerous input, and no
+      range check can tell it apart from a legitimate short window. What it buys
+      is a loud failure instead of a silent coercion to 0 ("sweep disabled"),
+      which is the one thing the old shape got exactly backwards.
+    * **Writes are audited.** Neither this endpoint nor `/ops/reset` logged
+      anything, while the generic `PUT /{key}` directly above them does — so the
+      one route that can shrink a retention window was also the one route that
+      left no trace of having done so. ent#297 lists the audit surface in its
+      blast radius; this closes the half of it that was self-inflicted.
+
+    Validation is **all-or-nothing on purpose**: a partial apply would leave the
+    operator with some windows moved and some not, and no way to tell which from
+    the response.
     """
     assert_admin(current_user)
 
+    from config import validate_ops_setting
+
+    # Validate EVERYTHING before writing ANYTHING.
+    to_write: list = []
+    ignored: list = []
+    for key, value in body.settings.items():
+        if key not in OPS_SETTINGS_DEFAULTS:
+            ignored.append(key)
+            continue
+        try:
+            to_write.append((key, validate_ops_setting(key, value)))
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
     try:
         updated = []
-        ignored = []
+        for key, value in to_write:
+            db.set_setting(key, value)
+            updated.append(key)
 
-        for key, value in body.settings.items():
-            if key in OPS_SETTINGS_DEFAULTS:
-                db.set_setting(key, value)
-                updated.append(key)
-            else:
-                ignored.append(key)
+        if updated:
+            from services.settings_service import RETENTION_OPS_KEYS
+
+            touched = sorted(k for k in updated if k in RETENTION_OPS_KEYS)
+            await platform_audit_service.log(
+                event_type=AuditEventType.CONFIGURATION,
+                event_action="ops_settings_change",
+                source="api",
+                actor_user=current_user,
+                actor_ip=request.client.host if request.client else None,
+                endpoint=str(request.url.path),
+                request_id=getattr(request.state, "request_id", None),
+                # Values are operator config, not secrets, and the whole point is
+                # being able to answer "who shortened retention, to what, when".
+                details={
+                    "settings": dict(to_write),
+                    "retention_windows_changed": touched or None,
+                },
+            )
 
         return {
             "success": True,
             "updated": updated,
             "ignored": ignored if ignored else None
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update ops settings: {str(e)}")
 
@@ -2607,6 +2695,40 @@ async def reset_ops_settings(
                 continue
             if db.delete_setting(key):
                 deleted.append(key)
+
+        # #1966: ent#297 added the audit entry to `/ops/config` but not here,
+        # while its own prose ("neither this route nor /ops/reset logged
+        # anything before") read as though it had covered both. So the exact
+        # asymmetry ent#297 objected to survived one route over: the generic
+        # `PUT /{key}` audits, `/ops/config` audits, this one did not.
+        #
+        # Retention windows genuinely cannot be reset here (#1638 skips them),
+        # but `ssh_access_enabled` can — resetting it changes whether ephemeral
+        # SSH credentials may be minted at all, and that left no trace.
+        #
+        # Logged unconditionally, NOT gated on `deleted` the way /ops/config
+        # gates on `updated`: there the empty case means nothing was asked for,
+        # whereas an admin pressing reset on already-default settings is a real
+        # administrative act whose absence from the log is indistinguishable
+        # from it never having been attempted.
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="ops_settings_reset",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=str(request.url.path),
+            request_id=getattr(request.state, "request_id", None),
+            # Keys and counts only. Unlike /ops/config there is no value worth
+            # recording — every one of these is being DELETED, so the durable
+            # fact is which keys reverted to their code default and which were
+            # protected, not what they held on the way out.
+            details={
+                "reset": deleted,
+                "reset_count": len(deleted),
+                "skipped": sorted(RETENTION_OPS_KEYS),
+            },
+        )
 
         return {
             "success": True,

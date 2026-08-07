@@ -20,6 +20,7 @@ Issue:  https://github.com/abilityai/trinity/issues/735
 from __future__ import annotations
 
 import os
+import re
 import sys
 import importlib
 import types
@@ -234,9 +235,28 @@ class TestCallsiteStaticCheck:
         assert "get_github_pat_for_agent" in fn_body
 
     def test_lifecycle_pat_update_uses_for_agent_not_bare(self):
+        """The lifecycle block that derives GITHUB_PAT resolves the effective
+        per-agent PAT, never the platform-only `get_github_pat()`.
+
+        ent#109 moved that derivation out of an inline block in
+        `recreate_container_with_updated_config` (anchored on the comment
+        "Update GITHUB_PAT") and into the shared `_apply_git_env_from_db`,
+        which now owns it for BOTH rebuild paths. Re-anchored on the function
+        rather than the old comment, and the anchor is asserted first: a
+        `str.find` miss returns -1, which silently sliced from the END of the
+        file and made this guard assert against an empty string.
+        """
         src = self._read("services/agent_service/lifecycle.py")
-        pat_block_start = src.find("Update GITHUB_PAT")
-        block = src[pat_block_start:pat_block_start + 300]
+        anchor = "def _apply_git_env_from_db("
+        start = src.find(anchor)
+        assert start != -1, (
+            f"guard anchor {anchor!r} not found in lifecycle.py — the PAT "
+            "derivation moved again; re-point this guard, do not delete it"
+        )
+        rest = src[start + len(anchor):]
+        end = re.search(r"^(async def |def )", rest, re.M)
+        block = rest[: end.start()] if end else rest
+
         assert "get_github_pat_for_agent" in block
         # Platform-only call must NOT be in this block
         assert "= get_github_pat()" not in block

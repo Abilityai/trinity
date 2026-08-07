@@ -28,12 +28,12 @@
                   <span>agents</span>
                 </span>
                 <!-- Working-now count (trinity-enterprise#47) -->
-                <span class="text-gray-300 dark:text-gray-600" data-sep="working">·</span>
+                <span class="text-gray-300 dark:text-gray-500" data-sep="working">·</span>
                 <span class="flex items-center space-x-1" data-stat="working">
                   <span class="font-medium text-status-info-600 dark:text-status-info-400">{{ workingNowCount }}</span>
                   <span>working now</span>
                 </span>
-                <span class="text-gray-300 dark:text-gray-600" data-sep="messages">·</span>
+                <span class="text-gray-300 dark:text-gray-500" data-sep="messages">·</span>
                 <span class="flex items-center space-x-1" data-stat="messages">
                   <span class="font-medium text-status-info-600 dark:text-status-info-400">{{ totalCollaborationCount }}</span>
                   <span>messages ({{ timeRangeHours }}h)</span>
@@ -105,7 +105,7 @@
                     ]"
                   >
                     <span>#{{ tagInfo.tag }}</span>
-                    <span class="text-gray-400 dark:text-gray-500 text-[10px]">{{ tagInfo.count }}</span>
+                    <span class="text-gray-400 dark:text-gray-400 text-[10px]">{{ tagInfo.count }}</span>
                   </button>
                 </div>
               </div>
@@ -123,7 +123,7 @@
                 </option>
               </select>
 
-              <span v-if="availableTags.length > 0 || availableOwners.length > 1" class="text-gray-300 dark:text-gray-600">|</span>
+              <span v-if="availableTags.length > 0 || availableOwners.length > 1" class="text-gray-300 dark:text-gray-500">|</span>
 
               <!-- Type-to-filter hint (ent#261) — mouse/touch parity for the
                    `/` hotkey. TOGGLES: opens the pill when closed,
@@ -786,6 +786,40 @@ const stoppedCount = computed(() => {
   return agents.value.filter(a => a.status?.toLowerCase() !== 'running').length
 })
 
+// ent#126: land here filtered to a freshly installed system.
+//
+// A manifest deploy always tags every agent it creates with the system name, so
+// `?tags=<system>` is the fallback that ALWAYS works; `?view=<id>` is preferred
+// when the manifest also declared a `system_view:` and it was created.
+// Additive and deliberately narrow: it seeds the same state the tag chips and the
+// view sidebar already drive, and does nothing when the query is absent.
+function applyDeepLinkFilters() {
+  const viewId = route.query.view
+  if (typeof viewId === 'string' && viewId) {
+    // A view carries its own filter tags; selecting it wins over ?tags=.
+    systemViewsStore.selectView(viewId)
+    return
+  }
+
+  const tagsParam = route.query.tags
+  if (typeof tagsParam !== 'string' || !tagsParam.trim()) return
+  const tags = tagsParam.split(',').map(t => t.trim().toLowerCase()).filter(Boolean)
+  if (!tags.length) return
+
+  // An explicit ?tags= wins over a PERSISTED view selection, exactly as picking a
+  // tag chip does (`toggleQuickTag` clears the selection for the same reason).
+  // Bailing out instead would silently no-op the post-deploy "View this fleet"
+  // link for anyone who happens to have a view selected from a previous session —
+  // `initialize()` above restores it from localStorage before this runs, and the
+  // `activeFilterTags` watcher would then overwrite these tags once the views
+  // load. That is a dead end for AC #5, not deference.
+  systemViewsStore.clearSelection()
+
+  selectedQuickTags.value = tags
+  networkStore.setFilterTags([...tags])
+  localStorage.setItem('trinity-dashboard-quick-tags', JSON.stringify(tags))
+}
+
 onMounted(async () => {
   // Initialize system views store (restores persisted view selection)
   systemViewsStore.initialize()
@@ -797,6 +831,9 @@ onMounted(async () => {
   if (!systemViewsStore.activeViewId && selectedQuickTags.value.length > 0) {
     networkStore.setFilterTags([...selectedQuickTags.value])
   }
+
+  // ent#126: ?view= / ?tags= override the persisted selection above.
+  applyDeepLinkFilters()
 
   // PERF-269: Parallelize independent mount calls
   await Promise.allSettled([

@@ -87,9 +87,36 @@
           <ReportRenderer
             v-else
             :report-type="report.report_type"
+            :meta="store.rowMeta[report.id]"
+            :load-more="() => store.loadMoreRows(report.id)"
             :display-hint="report.display_hint"
             :payload="store.payloads[report.id].payload"
           />
+          <div class="mt-3 flex items-center justify-between gap-2">
+            <div class="flex items-center gap-2">
+              <!-- #1536: buttons, NOT plain links. A raw navigation to the export
+                   URL sends no Authorization header — Trinity's JWT lives in
+                   localStorage and is attached by the api.js interceptor — so an
+                   <a href> download answered 401. Goes through the store. -->
+              <button
+                type="button"
+                class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-wait"
+                :disabled="exporting === report.id + ':xlsx'"
+                @click="onExport(report.id, 'xlsx')"
+              >{{ exporting === report.id + ':xlsx' ? 'Exporting…' : 'Export .xlsx' }}</button>
+              <button
+                type="button"
+                class="text-xs px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-wait"
+                :disabled="exporting === report.id + ':pdf'"
+                @click="onExport(report.id, 'pdf')"
+              >{{ exporting === report.id + ':pdf' ? 'Exporting…' : 'Export PDF' }}</button>
+            </div>
+            <button
+              v-if="false"
+              class="text-xs px-2 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
+              @click="store.deleteReport(report.id)"
+            >Delete</button>
+          </div>
         </div>
       </li>
     </ul>
@@ -97,8 +124,8 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted } from 'vue'
-import { useFleetReportsStore } from '../stores/reports'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useFleetReportsStore, downloadReportExport } from '../stores/reports'
 import { useAgentsStore } from '../stores/agents'
 import { agentOptionLabel } from '../utils/agentName'
 import ReportRenderer from './reports/ReportRenderer.vue'
@@ -127,4 +154,21 @@ onUnmounted(() => {
   store.setActive(false)
   if (_searchTimer) clearTimeout(_searchTimer)
 })
+
+// #1536: export goes through the store so the api.js auth interceptor runs.
+// A plain <a href> download sent no Bearer token and got 401.
+const exporting = ref(null)
+async function onExport(reportId, format) {
+  exporting.value = `${reportId}:${format}`
+  try {
+    await downloadReportExport(reportId, format)
+  } catch (e) {
+    // Surface it rather than failing silently — a 503 here is the #1814
+    // "code upgraded without rebuilding the image" case and the detail says so.
+    const detail = e?.response?.data?.detail
+    window.alert(detail || 'Export failed. Please try again.')
+  } finally {
+    exporting.value = null
+  }
+}
 </script>

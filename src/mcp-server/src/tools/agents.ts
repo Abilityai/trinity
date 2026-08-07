@@ -227,8 +227,10 @@ export function createAgentTools(
           .optional()
           .describe(
             "Template to use for agent configuration. Supports: " +
-            "(1) Pre-defined templates from list_templates (e.g., 'github:abilityai/agent-ruby'), " +
-            "(2) Any GitHub repo with 'github:owner/repo' format - requires system GITHUB_PAT to have access, " +
+            "(1) Any id returned by list_templates (e.g., 'local:scout'), " +
+            "(2) Any GitHub repo with 'github:owner/repo' format - requires system GITHUB_PAT to have access; " +
+            "this works whether or not the repo appears in list_templates, which on a default install " +
+            "returns local templates only until an admin curates GitHub repos in Settings, " +
             "(3) Local templates with 'local:template-name'. " +
             "Templates include pre-configured .claude directories, MCP servers, and instructions."
           ),

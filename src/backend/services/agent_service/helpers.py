@@ -554,6 +554,79 @@ def check_agent_auth_token_env_matches(container, agent_name: str) -> bool:
     return env_dict.get("TRINITY_AGENT_AUTH_TOKEN") == derive_agent_token(agent_name)
 
 
+def check_agent_mcp_key_matches(container, agent_name: str) -> bool:
+    """#1854: verify the container is configured with a LIVE agent-scoped MCP key.
+
+    Returns ``True`` if it matches, ``False`` (→ recreate) when the container
+    either cannot inject at all or is carrying a key the platform no longer
+    recognizes. The self-heal half of #1854.
+
+    Drift when:
+      * ``TRINITY_MCP_API_KEY`` **or** ``TRINITY_MCP_URL`` is absent — the agent
+        server's ``inject_trinity_mcp_if_configured`` early-returns unless BOTH
+        are set, so a hand-written or stale ``trinity`` entry in ``.mcp.json`` is
+        never overwritten, on any start, forever. The creation-time mint is
+        ``try/except``-swallowed and sets the two together, so a failed mint
+        produces exactly this state permanently; or
+      * ``sha256(env value)`` matches no **active** ``scope='agent'`` row for
+        this agent — the key was rotated, revoked, or belongs to somebody else.
+
+    The env plaintext is hashed and discarded. It is NEVER logged.
+
+    Exemptions, both structural:
+      * ``trinity-system`` — its key is ``scope='system'``, so
+        ``get_agent_mcp_api_key`` (scope='agent' only) can never match it and
+        this would demand a recreate on every single start; worse, the recreate
+        would mint a ``scope='agent'`` replacement, an irreversible privilege
+        downgrade of the platform orchestrator (#1816).
+      * ephemeral ghosts — volume-less by design ("ghosts never recreate"), so a
+        recreate silently destroys the workspace mid-budget, including
+        ``~/.trinity/pending-results/`` (trinity-enterprise#69, #1083).
+
+    Loop safety: a successful mint satisfies this predicate on the next
+    evaluation (the recreate bakes the value this function hashes), so it
+    converges in a single pass — the same contract as the guardrails/PAT/auth-
+    token matchers. A *failed* mint leaves it unsatisfied, but
+    ``start_agent_internal`` runs on an explicit start, never on a timer, so the
+    worst case is one extra recreate per manual start — bounded, not hot.
+
+    Fail-SAFE on any error: a transient DB blip must not turn every start in the
+    fleet into a container recreate, so an exception reads as "no drift".
+    """
+    try:
+        if is_system_agent_name(agent_name):
+            return True
+        try:
+            eph = db.get_agent_ephemeral_info(agent_name)
+        except Exception:
+            return True
+        if isinstance(eph, dict) and eph.get("is_ephemeral"):
+            return True
+
+        env_list = container.attrs.get("Config", {}).get("Env", [])
+        env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
+        env_key = env_dict.get("TRINITY_MCP_API_KEY")
+        env_url = env_dict.get("TRINITY_MCP_URL")
+        if not env_key or not env_url:
+            return False
+
+        from db.mcp_keys import hash_mcp_api_key
+
+        row = db.find_mcp_key_by_hash(hash_mcp_api_key(env_key))
+        return bool(
+            row
+            and row.get("is_active")
+            and row.get("scope") == "agent"
+            and row.get("agent_name") == agent_name
+        )
+    except Exception as e:  # noqa: BLE001 — never churn the fleet on an error
+        logger.warning(
+            "check_agent_mcp_key_matches failed for %s (%s: %s) — treating as no drift",
+            agent_name, type(e).__name__, e,
+        )
+        return True
+
+
 def needs_per_agent_pat_injection(agent_name: str) -> bool:
     """#1264: True when the agent has a **per-agent** GitHub PAT configured AND
     git sync — i.e. the container SHOULD carry that token.
