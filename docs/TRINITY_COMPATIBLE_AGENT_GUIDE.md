@@ -192,7 +192,16 @@ __pycache__/
 .claude/sessions/
 .claude/shell-snapshots/
 .claude/plugins/
-# Keep: .claude/commands/, .claude/skills/, .claude/agents/, settings.local.json
+# settings.json is baked by the Trinity base image with container-only hook
+# paths (/opt/trinity/hooks/*.py). Committing it bricks any clone made outside
+# the container: the missing hook script exits 2, which Claude Code reads as
+# "block this tool call", so every Bash/Edit/Write fails there. (#2036)
+.claude/settings.json
+.claude/remote-settings.json
+.claude/policy-limits.json
+.claude/backups/
+.claude/.last-cleanup
+# Keep: .claude/commands/, .claude/skills/, .claude/agents/
 
 # Temporary files
 *.log

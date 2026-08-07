@@ -764,12 +764,24 @@ class SchedulerService:
         except Exception as e:
             logger.error(f"Error recording skipped execution for schedule {schedule_id}: {e}")
 
-    def _record_skipped_process_schedule(self, schedule_id: str):
+    def _record_skipped_process_schedule(
+        self,
+        schedule_id: str,
+        skip_reason: str = "Previous execution still running (max_instances reached)",
+        event_reason: str = "Previous execution still running",
+    ):
         """
         Record a skipped process schedule execution in the database.
 
         Creates an execution record with status='skipped' so it appears in
         the execution history and provides an audit trail.
+
+        `skip_reason` / `event_reason` are parameterised (#1994) so the
+        lock-denial branch of `_execute_process_schedule` can reuse this exact
+        audit path and still name the mechanism that actually suppressed the
+        run; the defaults preserve the original max_instances wording for the
+        EVENT_JOB_MAX_INSTANCES caller. Mirrors the agent-schedule sibling,
+        which gained the same parameters in #1808.
         """
         try:
             schedule = self.db.get_process_schedule(schedule_id)
@@ -783,7 +795,7 @@ class SchedulerService:
                 process_id=schedule.process_id,
                 process_name=schedule.process_name,
                 triggered_by="schedule",
-                skip_reason="Previous execution still running (max_instances reached)"
+                skip_reason=skip_reason
             )
 
             if execution:
@@ -797,7 +809,7 @@ class SchedulerService:
                     "schedule_id": schedule.id,
                     "trigger_id": schedule.trigger_id,
                     "execution_id": execution.id,
-                    "reason": "Previous execution still running"
+                    "reason": event_reason
                 }))
             else:
                 logger.error(f"Failed to create skipped execution record for process schedule {schedule_id}")
@@ -2230,6 +2242,25 @@ class SchedulerService:
         lock = self.lock_manager.try_acquire_schedule_lock(f"process_{schedule_id}")
         if not lock:
             logger.info(f"Process schedule {schedule_id} already being executed by another instance")
+            # #1994: the sibling of #1969, on the process-schedule path.
+            # Suppression is correct — two concurrent runs of one schedule is
+            # what the lock exists to prevent. What was missing is the evidence
+            # it happened: with only the INFO line above, a denied tick is
+            # indistinguishable from a tick that never fired, in the execution
+            # history, the UI, and monitoring alike.
+            #
+            # The two suppression paths do not overlap, which is what makes
+            # calling the same helper from both safe (no #91-style duplicate
+            # skipped+success pairing). APScheduler's `max_instances=1` refusal
+            # fires EVENT_JOB_MAX_INSTANCES -> _on_job_max_instances -> a skipped
+            # row, and the job never starts, so this function is never entered.
+            # Reaching this line means APScheduler already let the job start,
+            # so no max-instances event fires. Exactly one of the two per tick.
+            self._record_skipped_process_schedule(
+                schedule_id,
+                skip_reason="Previous execution still running (distributed lock held)",
+                event_reason="Previous execution still running",
+            )
             return
 
         try:

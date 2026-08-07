@@ -42,11 +42,13 @@ from services.skill_source_clone import (
     QUARANTINE_SUFFIX,
     SOURCE_ID_RE,
     SkillSourceClone,
+    redact,
 )
 from urllib.parse import urlparse, urlunparse
 
 from utils.url_validation import (
     ALLOWED_SKILLS_LIBRARY_HOSTS,
+    strip_url_credentials,
     validate_skills_library_url,
 )
 
@@ -112,9 +114,21 @@ _SYNC_LOCK_TTL_SECONDS = 300
 
 
 def _scrub_pat(text: str) -> str:
-    """Replace credentials in any `https://<creds>@host` URL. Never raises."""
+    """Replace credentials in any `https://<creds>@host` URL. Never raises.
+
+    Delegates to `skill_source_clone.redact` (ent#347). These were two separate
+    hand-written patterns that had drifted apart and were each wrong in a
+    different way — the one duplication that matters, since the value it guards
+    lands in DURABLE admin-rendered state (`skills_library_last_error`) and in
+    an HTTP `detail`. One pattern, one place; see `_CREDENTIAL_URL_RE`.
+
+    The try/except stays: this wrapper's own contract is "never raises", and it
+    is called on a `str(e)` from an arbitrary exception whose `__str__` can
+    itself blow up. `redact` is total for `str`/`None`, so this is belt to its
+    suspenders rather than a live branch.
+    """
     try:
-        return re.sub(r"https://[^@\s]+@", "https://***@", text)
+        return redact(text)
     except Exception:  # noqa: BLE001
         return ""
 
@@ -988,7 +1002,14 @@ class SkillService:
             source_status.append({
                 "id": src.id,
                 "name": src.name,
-                "url": src.url,
+                # ent#334: stripped HERE, not only in the REST projection.
+                # `SkillSourcesPanel.vue` renders this straight onto the admin
+                # route, and `GET /skills/sources` returns this dict verbatim —
+                # so the service is the only place that covers every consumer.
+                # Rows predating `reject_embedded_credentials`, and the
+                # legacy-adoption path (which validates nothing), still carry
+                # `https://<token>@host/...`.
+                "url": strip_url_credentials(src.url),
                 "ref": src.ref,
                 "ref_type": src.ref_type,
                 "is_default": src.is_default,
@@ -1026,6 +1047,13 @@ class SkillService:
             stored_sync = last_status = last_error = None
 
         first = source_status[0] if source_status else {}
+        # Second emitter of the same value (ent#334). Stripped again rather
+        # than trusted to be clean via `first`: the two are edited
+        # independently, and `strip_url_credentials` is idempotent. The
+        # `if` preserves the no-sources `None` — coercing it to `""` would
+        # silently change what an unconfigured install reports.
+        first_url = first.get("url")
+        first_url = strip_url_credentials(first_url) if first_url else first_url
         return {
             "configured": bool(sources),
             "sources": source_status,
@@ -1039,7 +1067,7 @@ class SkillService:
             "last_sync_status": last_status,
             "last_sync_error": last_error,
             # Legacy single-library fields (deprecated, first source wins).
-            "url": first.get("url"),
+            "url": first_url,
             "branch": first.get("ref"),
             "cloned": any(s["cloned"] for s in source_status),
             "commit_sha": first.get("commit_sha"),

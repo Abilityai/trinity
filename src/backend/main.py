@@ -832,7 +832,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown canary service (CANARY-001 / Issue #411)
     try:
-        canary_service.stop()
+        await canary_service.stop()
         logger.info("Canary service stopped")
     except Exception as e:
         logger.error(f"Error stopping canary service: {e}")

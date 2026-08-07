@@ -364,7 +364,8 @@ class TestRestoreRoundTrip:
 
 # Stub heavy backend deps ONLY if a real module isn't already loaded (combined
 # runs where the full backend imported first must keep their real modules).
-import types as _types  # noqa: E402
+import types as _types
+import unittest.mock as _mock  # noqa: E402
 
 _STUBBED_MODULE_NAMES = [
     "database",
@@ -376,11 +377,17 @@ _STUBBED_MODULE_NAMES = [
 
 @pytest.fixture(autouse=True)
 def _restore_sys_modules():
-    """Snapshot sys.modules before each test and restore after.
+    """Per-test safety net. NOT the mechanism any more — see the import below.
 
-    The stubs below are installed at import time (skill_service reaches them
-    at module scope, before any fixture could run), so without this they would
-    leak into other files in the same pytest session — the #762 class.
+    This fixture used to be the only defence, and it could not work: the stubs
+    were installed at IMPORT time, i.e. during collection, and pytest imports
+    every test module before running any test. So by the time a fixture first
+    ran, later modules had already been collected against the stubs and had
+    captured names from them — bindings no amount of `sys.modules` restoration
+    can reach (#1898).
+
+    Kept because it is nearly free and it does catch a test that stubs at RUN
+    time, which is a different and still-live hazard.
     """
     saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
     try:
@@ -418,18 +425,58 @@ _STUBS = {
     "utils.url_validation": {
         "validate_skills_library_url": lambda url: url,
         "ALLOWED_SKILLS_LIBRARY_HOSTS": {"github.com", "www.github.com"},
+        # ent#334 added this import to skill_service. Identity here, matching
+        # `validate_skills_library_url` above: nothing in this module renders a
+        # source URL, so the real stripping is exercised by
+        # test_ent334_status_url_disclosure, not stubbed away from it.
+        "strip_url_credentials": lambda url: url,
     },
 }
+# #1898: the stubs live ONLY for the duration of the import below.
+#
+# They used to be written straight into `sys.modules` and left there. That is
+# import-time code, so it runs during COLLECTION — and pytest imports every
+# test module before running a single test. Every file collected after this one
+# therefore resolved `services.settings_service` (and the other three) to a
+# four-function fake, captured names from it at its own module scope, and kept
+# those bindings for the rest of the session. Restoring `sys.modules` later
+# cannot reach a name another module has already bound.
+#
+# The symptoms were order-dependent and looked like unrelated bugs: 7 failures
+# in `test_1081_physical_meter.py` when it happened to be collected after this
+# file, and `ImportError: cannot import name ... from 'services.settings_service'
+# (unknown location)` at collection for anything importing a real name the stub
+# does not define (#1855).
+#
+# `patch.dict` restores the whole mapping on exit, so nothing survives the
+# `with`. The module objects bound below keep referencing the stubs, which is
+# exactly what these tests want — the stubbing was never meant to outlive this
+# import.
+_stub_modules = {}
 for _name, _attrs in _STUBS.items():
-    if _name not in sys.modules:
-        _mod = _types.ModuleType(_name)
-        for _k, _v in _attrs.items():
-            setattr(_mod, _k, _v)
-        sys.modules[_name] = _mod
+    _mod = _types.ModuleType(_name)
+    for _k, _v in _attrs.items():
+        setattr(_mod, _k, _v)
+    _stub_modules[_name] = _mod
 
-import services.skill_service as skill_service_module  # noqa: E402
-from services.skill_service import SkillService, SkillInjectionBusy  # noqa: E402
-from services.skill_source_clone import SkillSourceClone  # noqa: E402
+with _mock.patch.dict(sys.modules, _stub_modules):
+    # Deliberately NOT evicting a cached `services.skill*` here.
+    #
+    # A first version of this fix did, to force a fresh import against the
+    # stubs regardless of collection order. It broke 10 sibling tests
+    # (`test_ent236_skills_lifecycle`, `test_ent237_skill_sources`): evicting
+    # and re-importing produces a SECOND module object, so this file's
+    # `skill_service_module` and the one those files patch stop being the same
+    # object, and their monkeypatching lands on a module the code under test is
+    # not using.
+    #
+    # The pre-existing behaviour — take whatever `import` returns — is kept. It
+    # means the stubs are ignored when something imported `skill_service`
+    # first, which is a separate wart and not what #1898 is about. Scope creep
+    # in a test-isolation fix is how a test-isolation fix breaks tests.
+    import services.skill_service as skill_service_module  # noqa: E402
+    from services.skill_service import SkillService, SkillInjectionBusy  # noqa: E402
+    from services.skill_source_clone import SkillSourceClone  # noqa: E402
 
 
 def _run(coro):
