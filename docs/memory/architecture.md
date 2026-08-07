@@ -930,7 +930,7 @@ Full flow: [cornelius-default-agent.md](feature-flows/cornelius-default-agent.md
 | GET | `/api/agents/context-stats` | Context & activity state for all agents |
 | GET | `/api/agents/autonomy-status` | Autonomy status for all accessible agents |
 | GET | `/api/agents/sync-health` | Per-agent git sync health for dashboard dots (#389) |
-| POST | `/api/agents` | Create agent. Accepts an optional `display_label` (ent#1640) — the human-facing name set at creation (normalized + named-error validated like `PUT /label`); omit/blank → renders under the slug |
+| POST | `/api/agents` | Create agent. Accepts an optional `display_label` (ent#1640) — the human-facing name set at creation (normalized + named-error validated like `PUT /label`); omit/blank → renders under the slug. Accepts `import_intent: fork\|copy\|clone` for `github:` templates (ent#15 — copy = backend-materialized snapshot, no sync/row/PAT; see [github-import-intents.md](feature-flows/github-import-intents.md)) and an `Idempotency-Key` header (Invariant #18, scope `agent_create:{user_id}`) |
 | GET | `/api/agents/{name}` | Get agent details |
 | GET/PUT | `/api/agents/{name}/label` | Get / set-or-clear the agent's human-facing **display label** (ent#181/#1640). Owner-only (`OwnedAgentByName`); `label` nullable — blank/None clears to the slug fallback; presentation-only (the slug never moves, unlike `PUT /rename`); trims + rejects control chars/line-breaks with a **named** error, **not** unique (the slug guarantees uniqueness), audit-logged, broadcasts `agent_label_changed` |
 | DELETE | `/api/agents/{name}` | Soft-delete agent (see [Soft Delete](#soft-delete-retention--recovery-834-772)) |
@@ -2271,5 +2271,5 @@ Local and production use the same ports. Local URLs, auth, and admin credentials
 
 ## Data Persistence
 
-- **Bind mount** (survives `docker-compose down -v`): `~/trinity-data/` → `/data` — contains `trinity.db` (SQLite), `agent-files/` (FILES-001), and `agent-data-tmp/` (transient export staging, #1169).
+- **Bind mount** (survives `docker-compose down -v`): `~/trinity-data/` → `/data` — contains `trinity.db` (SQLite), `agent-files/` (FILES-001), `agent-data-tmp/` (transient export staging, #1169), and `agent-import-tmp/` (transient copy-intent snapshot staging, ent#15 — free-space preflighted, `AGENT_IMPORT_MAX_BYTES`-capped, swept after 24h).
 - **Docker volumes**: `redis-data` (Redis AOF), `agent-configs`, `audit-data`, `audit-logs`, per-agent `agent-{name}-workspace` (the durable home volume — declared `data_paths` runtime data lives under `/home/developer/data` here, #1169), `agent-{name}-public` (FILES-001), and shared-folder volumes.

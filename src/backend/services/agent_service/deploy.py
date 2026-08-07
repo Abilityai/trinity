@@ -164,27 +164,39 @@ def _prepopulate_workspace_from_template(version_name: str, template_dir: Path) 
     # Stream template + .trinity-initialized marker into the volume.
     # Both files captured under uid=1000/gid=1000 so the agent container
     # (running as `developer`, UID 1000 per #874) can read & write them.
-    tar_buf = BytesIO()
-    with tarfile.open(fileobj=tar_buf, mode="w") as tar:
-        def _set_owner(info: tarfile.TarInfo) -> tarfile.TarInfo:
-            info.uid = 1000
-            info.gid = 1000
-            info.uname = "developer"
-            info.gname = "developer"
-            return info
+    #
+    # Disk-spooled, not BytesIO (review #2040 F2): this primitive was written
+    # for operator-bounded deploy-local templates, but the copy-intent import
+    # points it at user-specified GitHub content — materializing the whole
+    # tree as one in-memory tar would let a large repo OOM the backend
+    # process, which serves every other agent. The spool file lives beside
+    # the template tree (disk-backed /data in both callers — NEVER inside
+    # `template_dir`, which would tar the growing tar into itself; and never
+    # the default tmp, which is a small RAM tmpfs, #1098). requests streams a
+    # file object, so put_archive never holds the full tar in memory either.
+    def _set_owner(info: tarfile.TarInfo) -> tarfile.TarInfo:
+        info.uid = 1000
+        info.gid = 1000
+        info.uname = "developer"
+        info.gname = "developer"
+        return info
 
-        tar.add(str(template_dir), arcname=".", filter=_set_owner)
+    tar_spool = tempfile.TemporaryFile(dir=str(Path(template_dir).parent))
+    try:
+        with tarfile.open(fileobj=tar_spool, mode="w") as tar:
+            tar.add(str(template_dir), arcname=".", filter=_set_owner)
 
-        marker = tarfile.TarInfo(name=".trinity-initialized")
-        marker.size = 0
-        marker.uid = 1000
-        marker.gid = 1000
-        marker.uname = "developer"
-        marker.gname = "developer"
-        tar.addfile(marker, BytesIO(b""))
-
-    tar_buf.seek(0)
-    tar_bytes = tar_buf.read()
+            marker = tarfile.TarInfo(name=".trinity-initialized")
+            marker.size = 0
+            marker.uid = 1000
+            marker.gid = 1000
+            marker.uname = "developer"
+            marker.gname = "developer"
+            tar.addfile(marker, BytesIO(b""))
+        tar_spool.seek(0)
+    except Exception:
+        tar_spool.close()
+        raise
 
     transient = None
     try:
@@ -204,7 +216,7 @@ def _prepopulate_workspace_from_template(version_name: str, template_dir: Path) 
             command=["sh", "-c", "chown 1000:1000 /dest && chmod 755 /dest"],
             volumes={workspace_vol: {"bind": "/dest", "mode": "rw"}},
         )
-        ok = transient.put_archive("/dest", tar_bytes)
+        ok = transient.put_archive("/dest", tar_spool)
         if not ok:
             raise RuntimeError("put_archive returned False")
         transient.start()
@@ -226,6 +238,7 @@ def _prepopulate_workspace_from_template(version_name: str, template_dir: Path) 
             },
         )
     finally:
+        tar_spool.close()
         if transient is not None:
             try:
                 transient.remove(force=True)

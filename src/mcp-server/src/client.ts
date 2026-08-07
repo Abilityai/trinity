@@ -453,9 +453,17 @@ export class TrinityClient {
 
   /**
    * Create a new agent
+   *
+   * RELIABILITY-006 (#525): forward idempotency key so a transport-level retry
+   * of the same create replays the original response instead of colliding on
+   * the agent name.
    */
-  async createAgent(config: AgentConfig): Promise<Agent> {
-    return this.request<Agent>("POST", "/api/agents", config);
+  async createAgent(config: AgentConfig, idempotencyKey?: string): Promise<Agent> {
+    const headers: Record<string, string> = {};
+    if (idempotencyKey) {
+      headers["Idempotency-Key"] = idempotencyKey;
+    }
+    return this.request<Agent>("POST", "/api/agents", config, false, undefined, headers);
   }
 
   /**

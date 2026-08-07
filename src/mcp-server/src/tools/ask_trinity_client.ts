@@ -67,7 +67,16 @@ export function resolveEndpoint(): string {
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
-  return `${text.slice(0, max)}\n\n[output truncated at ${max} characters]`;
+  // Step back off a high surrogate (#2027). `length`/`slice` count UTF-16 code
+  // units, so a cut landing inside a surrogate pair leaves half of one — an
+  // unpaired surrogate is ill-formed Unicode, and a strict UTF-8 encoder or
+  // JSON-RPC client replaces it with U+FFFD or rejects the message outright.
+  // Cheaper and clearer than re-slicing by code point: only the final unit can
+  // be orphaned, so one check covers it.
+  let end = max;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${text.slice(0, end)}\n\n[output truncated at ${max} characters]`;
 }
 
 function formatAnswer(
@@ -92,16 +101,24 @@ function formatAnswer(
     parts.push(`Sources:\n${rendered}`);
   }
 
+  // #2027: the context-loss warning is decided by the REQUEST's session, not by
+  // whether a new one came back. It used to live inside `if (responseSessionId)`,
+  // so a 200 that answered but omitted `session_id` produced no warning at all —
+  // the caller silently lost its conversation context, which is exactly what
+  // this warning exists to prevent. That branch was covered; the neighbouring
+  // one was not.
+  if (requestSessionId && requestSessionId !== responseSessionId) {
+    parts.push(
+      responseSessionId
+        ? "⚠️ The previous session expired — a new session was started and prior " +
+            "conversation context was lost. Re-state any needed context."
+        : "⚠️ The docs service returned no session_id, so your previous session " +
+            "was not continued and prior conversation context was lost. " +
+            "Re-state any needed context.",
+    );
+  }
+
   if (responseSessionId) {
-    if (requestSessionId && requestSessionId !== responseSessionId) {
-      // The silent-expiry case. Without this the caller silently loses its
-      // conversation context and cannot tell why the answer stopped making
-      // sense — the endpoint reports success either way.
-      parts.push(
-        "⚠️ The previous session expired — a new session was started and prior " +
-          "conversation context was lost. Re-state any needed context.",
-      );
-    }
     parts.push(
       `session_id: ${responseSessionId} (pass this to ask_trinity to continue ` +
         "the conversation; sessions expire after ~30 minutes of inactivity)",

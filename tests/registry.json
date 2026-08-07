@@ -1,6 +1,19 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent15_import_intents.py",
+      "feature": "trinity-enterprise#15",
+      "added": "2026-08-06",
+      "categories": [
+        "backend",
+        "unit",
+        "agent-lifecycle",
+        "github",
+        "security"
+      ],
+      "description": "GitHub import intents (ent#15): stage_github_snapshot with an object-patched async _run_git fake that plays the clone into the staging dir — success (head SHA capture, .git strip, escaping-symlink prune with in-tree symlink survival, regular-file count, PAT only on the clone call), COPY_SOURCE_UNREADABLE 400 (auth/not-found/remote-branch shapes) + staging cleanup, COPY_CLONE_FAILED 502 transient, COPY_SOURCE_EMPTY 400, --branch flag presence/absence; crud._resolve_template intake gates pre-side-effect (INTENT_REQUIRES_GITHUB_TEMPLATE, FORK_PARAMS_REQUIRED, INTENT_FORK_BLOCK_CONFLICT), intent-less local:default resolving gate-free, and copy-branch wiring (snapshot staged, github_repo/git_instance_id stay None, tokenless source-mode gate never fires — source_mode parametrized None/False/True); create_agent_endpoint idempotency — scope folds the caller (two principals, same key → different scopes), replay returns snapshot + X-Idempotent-Replay without re-creating, in-flight → 409 CREATE_IN_FLIGHT. Real modules owned per test (2026-07-12 learning); no Docker/DB."
+    },
+    {
       "file": "unit/test_1870_completed_turn_recovery.py",
       "feature": "#1870",
       "added": "2026-08-02",
@@ -1635,6 +1648,18 @@
         "regression"
       ],
       "description": "Claude Code's internal [ede_diagnostic] header must never be surfaced as the error cause (#1849): stream_parser filters diagnostic entries from result.errors at BOTH the max_turns and execution_error branches, joins the remaining real errors, keeps the token-stripped diagnostic payload as labelled context, and no longer raises on a malformed errors shape (which previously landed as HTTP 200 success). Acceptance test drives a marker-first errors[] through _finalize_headless_result to routers/sessions.py::_is_resume_not_found."
+    },
+    {
+      "file": "mcp-server/src/tools/ask_trinity_edges.test.ts",
+      "feature": "#2027",
+      "added": "2026-08-05",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "unit",
+        "edge-cases"
+      ],
+      "description": "Two edge cases in ask_trinity (ent#328/#1981), found by /edge-cases. (1) truncate cut on UTF-16 CODE UNITS, so a boundary landing inside a surrogate pair left an unpaired surrogate - ill-formed Unicode that a strict UTF-8 encoder or JSON-RPC client replaces with U+FFFD or rejects; proven by construction (65,536-char answer with U+1F600 straddling the cut). Fixed by stepping back one unit off a high surrogate; only the final unit can be orphaned, so one check covers it. (2) The context-loss warning lived inside `if (responseSessionId)`, so a 200 that answered but OMITTED session_id produced no warning at all and the caller silently lost its conversation context - exactly what that warning exists to prevent; the 'different id returned' branch was covered and the neighbouring 'no id returned' one was not. The warning is now decided by the REQUEST's session, with distinct wording since 'a new session was started' is false when none came back. Both fixes are mirrored into src/helper-mcp/src/client.ts, which carries a byte-identical copy. Covers: the straddling cut, the limit still reported as the ORIGINAL max, a fully-fitting pair surviving, a BMP-only answer still cut at exactly max (the step-back must not misfire), a short answer untouched, the 200-char ERROR-path truncation (likelier to meet arbitrary bytes than the answer path), and all four session shapes. Two rows were also added to the existing PARITY_CASES table: mutating ONLY the helper copy previously changed nothing in the suite - the parity claim held just for the cases in its table - and both helper-only mutations now fail it."
     },
     {
       "file": "unit/test_2006_deploy_residue.py",
