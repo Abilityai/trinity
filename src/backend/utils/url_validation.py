@@ -10,6 +10,7 @@ Related: SEC-179 (pentest finding 3.2.2)
 import ipaddress
 import re
 import socket
+from typing import List
 from urllib.parse import urlparse
 
 # Allowed hostnames for skills library URLs
@@ -20,10 +21,56 @@ ALLOWED_SKILLS_LIBRARY_HOSTS = {"github.com", "www.github.com"}
 # never emitted into the return value.
 _ASSUMED_SCHEME = "https://"
 
+# --- Shared authority grammar (#2052) --------------------------------------
+# ONE definition of where an authority's userinfo ends, used by the single-URL
+# fallback below AND by the free-text scrubber `scrub_url_credentials_in_text`.
+#
+# #2052 was exactly these two drifting: the free-text pattern was anchored on a
+# literal `https://`, so the protocol-relative, scheme-less and alternate-scheme
+# shapes `strip_url_credentials` handles slipped past it and leaked a token into
+# `system_settings['skills_library_last_error']` — durable, admin-rendered.
+# Those shapes are reachable because `_adopt_legacy_clone` writes source rows
+# with no validation at all and `validate_skills_library_url` accepts the
+# scheme-less shorthand, so a *stored* URL is legitimately allowed to take them.
+
+# RFC 3986 §3.1 scheme, plus the `//` that opens an authority. Optional scheme
+# so a protocol-relative `//tok@host` is covered by the same fragment.
+_AUTHORITY_PREFIX = r"(?:[A-Za-z][A-Za-z0-9+.\-]*:)?//"
+
 # Fallback for input `urlparse` refuses (see `strip_url_credentials`). Anchored
 # at the authority so a `@` in a path or query is out of reach, and `[^/]*` is
 # greedy so the LAST `@` before the path wins — the double-`@` case.
-_AUTHORITY_USERINFO_RE = re.compile(r"^((?:[A-Za-z][A-Za-z0-9+.\-]*:)?//)[^/]*@")
+_AUTHORITY_USERINFO_RE = re.compile(rf"^({_AUTHORITY_PREFIX})[^/]*@")
+
+# A maximal run of characters that could sit inside an authority. `\s/?#` end a
+# run because none is legal unencoded in userinfo (RFC 3986) — which is also
+# what stops one run bridging two URLs in the same stderr blob.
+#
+# The free-text scrub walks these runs rather than matching userinfo directly,
+# and that is a PERFORMANCE contract, not a style choice. The obvious pattern —
+# `(?:scheme:)?//[^\s/?#]*@` with a bare alternative — has no literal for the
+# engine to skip to, so on a long run containing no `@` it rescans from every
+# offset: 200 KB of one run took 24 SECONDS, 500 KB took 151. The input here is
+# raw `git stderr`, unbounded and attacker-influenced (a remote controls branch
+# and path names it echoes), and the old pattern only escaped this by being
+# anchored on a literal `https://` that `str.find` could jump to — the very
+# anchor #2052 removes. `finditer` over this run pattern consumes each character
+# once, so the scrub is linear no matter what the blob contains.
+_AUTHORITY_RUN_RE = re.compile(r"[^\s/?#]+")
+
+# Characters that may precede a BARE `tok@host` run (no scheme, no `//`) for it
+# to still be an authority. Without this the scrub reads the `@` in
+# `https://github.com/o/r?ref=a@b` as userinfo and mangles a legitimate URL —
+# the removed `https://` anchor was also what kept the old pattern off a query
+# `@`. Quotes/parens/angles/brackets count because git stderr habitually wraps a
+# URL in them (`for 'https://…'`); start-of-string counts too.
+_BARE_RUN_BOUNDARY = frozenset("'\"(<[")
+
+# What replaces the userinfo in free text. Unlike `strip_url_credentials`, which
+# DROPS userinfo for display, the free-text scrub leaves a marker: an operator
+# reading a scrubbed git error needs to see that a credential was present and
+# redacted, not a URL that silently never had one.
+_USERINFO_PLACEHOLDER = "***"
 
 
 class EmbeddedCredentialError(ValueError):
@@ -128,6 +175,74 @@ def strip_url_credentials(url: str) -> str:
             return _AUTHORITY_USERINFO_RE.sub(r"\1", url or "")
         except Exception:  # noqa: BLE001
             return ""
+
+
+def scrub_url_credentials_in_text(text: str) -> str:
+    """Replace the userinfo of every URL in free text with `***`. Never raises.
+
+    The free-text counterpart of `strip_url_credentials`, and it lives beside it
+    on purpose (#2052): this module already owns what "userinfo" means for
+    Trinity's repo URLs, and the two answers have to move together. They had
+    already drifted once — the free-text pattern was anchored on a literal
+    `https://` while the parser accepted protocol-relative, scheme-less and
+    alternate-scheme authorities, so three shapes a stored source URL may
+    legitimately take were echoed verbatim into durable admin-rendered state.
+    Both now agree on where an authority's userinfo ends, and
+    `tests/unit/test_2052_scrubber_authority_parity.py` pins them equal over a
+    shared corpus.
+
+    It does NOT call the parser, and that is not a shortcut: the input is git
+    stderr, which carries prose plus several URLs at once, so there is no single
+    URL for `urlparse` to be handed. What the two share is the *rule*, not the
+    call.
+
+    Structure: walk `_AUTHORITY_RUN_RE` runs and rewrite the ones that are an
+    authority, rather than pattern-matching userinfo directly. That keeps the
+    scan LINEAR — see `_AUTHORITY_RUN_RE` for why a direct pattern is quadratic
+    here and why it matters on this input. A run qualifies when it sits right
+    after the `//` that opens an authority, or at the start of a non-whitespace
+    run (the scheme-less shorthand `validate_skills_library_url` accepts).
+    Everything up to the run's LAST `@` goes, which is how `urlparse` itself
+    resolves `.hostname` and what keeps `https://PAT@LEGACY@host` from leaking
+    `LEGACY`.
+
+    Deliberate over-match: a bare `user@host` in prose (an email, or the scp-like
+    `git@github.com:o/r`) is treated as userinfo and redacted. That is the same
+    reading `strip_url_credentials` gives those strings — the two agreeing is the
+    property under test — and the asymmetry justifies it: a false positive costs
+    a mangled word in a diagnostic, a false negative costs a PAT persisted in
+    `system_settings` and rendered to admins.
+    """
+    try:
+        source = text or ""
+        out: List[str] = []
+        cursor = 0
+        for run in _AUTHORITY_RUN_RE.finditer(source):
+            at = run.group(0).rfind("@")
+            if at < 0:
+                continue
+            start = run.start()
+            # Right after the `//` of `scheme://host` or a protocol-relative
+            # `//host`, or opening a fresh run — otherwise this `@` is data
+            # (a path segment, a query value) and must survive.
+            after_slashes = start >= 2 and source[start - 2:start] == "//"
+            prev = source[start - 1] if start else ""
+            if not (
+                after_slashes
+                or start == 0
+                or prev.isspace()
+                or prev in _BARE_RUN_BOUNDARY
+            ):
+                continue
+            out.append(source[cursor:start])
+            out.append(f"{_USERINFO_PLACEHOLDER}@")
+            cursor = start + at + 1
+        if not out:
+            return source
+        out.append(source[cursor:])
+        return "".join(out)
+    except Exception:  # noqa: BLE001 — mirrors the never-raises contract above
+        return ""
 
 
 def validate_skills_library_url(url: str) -> str:
