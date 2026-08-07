@@ -6,6 +6,16 @@ The official agent development toolkit for Claude Code. Curated plugins covering
 
 ## Quick Start
 
+**New to Trinity?** Install the `trinity` plugin and run `/trinity:start-here` — a guided, resumable journey from "what is Trinity?" to your first agent running on your own instance. It sequences everything below, so you don't have to pick a starting point:
+
+```bash
+/plugin marketplace add abilityai/abilities
+/plugin install trinity@abilityai
+/trinity:start-here
+```
+
+Prefer to drive yourself?
+
 ```bash
 # Add the abilities marketplace (one-time)
 /plugin marketplace add abilityai/abilities
@@ -32,7 +42,7 @@ claude plugin install create-agent@abilityai
 |--------|--------|---------|------------|
 | [create-agent](create-agent-plugin.md) | 14 | Agent creation wizards | `/create-agent:prospector`, `/create-agent:custom` |
 | [agent-dev](agent-dev-plugin.md) | 20 | Extend existing agents | `/agent-dev:create-playbook`, `/agent-dev:add-memory`, `/agent-dev:add-orchestrator`, `/agent-dev:work-loop` |
-| [trinity](trinity-plugin.md) | 6 | Deploy to and operate on Trinity | `/trinity:connect`, `/trinity:onboard`, `/trinity:loop` |
+| [trinity](trinity-plugin.md) | 7 | Deploy to and operate on Trinity | `/trinity:start-here`, `/trinity:connect`, `/trinity:onboard`, `/trinity:loop` |
 | [dev-methodology](dev-methodology-plugin.md) | 24 | Development workflow | `/dev-methodology:implement`, `/dev-methodology:validate-pr` |
 | [utilities](utilities-plugin.md) | 7 | Ops and productivity | `/utilities:safe-deploy`, `/utilities:docker-ops` |
 
