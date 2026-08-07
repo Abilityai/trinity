@@ -452,9 +452,13 @@
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
               </svg>
             </button>
+            <!-- #1634: also gate Edit while THIS row's toggle refetch is in
+                 flight — editSchedule() copies `enabled` into the form and
+                 saveSchedule() PUTs it back (recomputing next_run_at), so an
+                 Edit+Save inside the toggle window rewrites the fire time. -->
             <button
               @click="editSchedule(schedule)"
-              :disabled="deleteLoading === schedule.id"
+              :disabled="deleteLoading === schedule.id || toggleLoading.has(schedule.id)"
               class="p-1.5 text-gray-400 hover:text-action-primary-600 rounded transition-colors"
               title="Edit"
             >

@@ -113,6 +113,16 @@ test.beforeAll(async ({ baseURL }) => {
     AGENT_A = usable[0]
   }
   AGENT_B = usable.find((n) => n !== AGENT_A) || ''
+  // HARD requirement, not a skip: T4/T5 are the only evidence that the watcher
+  // clear and the loadSeq guard aren't dead code. A "3 passed, 2 skipped" run
+  // reads as green while the red-first matrix silently never executed.
+  if (!AGENT_B) {
+    throw new Error(
+      'This spec needs TWO non-system, non-ephemeral agents (T4/T5 exercise ' +
+        'the agent-switch path). Create a second agent, or set ' +
+        'SCHEDULES_TEST_AGENT to pick which one gets the fixture rows.'
+    )
+  }
 
   // A previous crashed run may have left fixture rows behind.
   await sweepFixtures(AGENT_A)
@@ -191,6 +201,13 @@ async function openSchedulesTab(page) {
 
 /**
  * Same-document A→B agent switch.
+ *
+ * PREMISE (load-bearing): the A→Dashboard→B legs PRESERVE the AgentDetail
+ * component rather than remounting it — App.vue wraps <router-view> in
+ * `<KeepAlive :include="['SystemAgent','AgentDetail']">` and AgentDetail sets
+ * `defineOptions({ name: 'AgentDetail' })` so the include matches. Had it
+ * remounted, T4/T5 would pass even with the watcher-clear and loadSeq guard
+ * deleted — the exact tautology the notes below warn about.
  *
  * This MUST NOT use `page.goto()`: a goto is a full document navigation that
  * tears down Vue and remounts SchedulesPanel, so the `props.agentName` watcher
@@ -341,12 +358,15 @@ test.describe('Schedules tab toggle scroll stability (#1634)', () => {
 
     await button.click()
 
-    await expect(row.locator('svg.animate-spin')).toBeVisible({ timeout: 10000 })
+    // Scoped to the toggle button: the row holds three conditional
+    // animate-spin SVGs (trigger/toggle/delete) and this test is about the
+    // toggle's own affordance.
+    await expect(button.locator('svg.animate-spin')).toBeVisible({ timeout: 10000 })
     await expect(button).toBeDisabled()
 
     release()
 
-    await expect(row.locator('svg.animate-spin')).toHaveCount(0, { timeout: 20000 })
+    await expect(button.locator('svg.animate-spin')).toHaveCount(0, { timeout: 20000 })
     await expect(button).toBeEnabled()
   })
 
@@ -393,8 +413,6 @@ test.describe('Schedules tab toggle scroll stability (#1634)', () => {
    * suppresses the spinner AND agent A's rows render under agent B's header.
    */
   test('@interactive switching agents in-app still shows the panel spinner (AC #4, switch)', async ({ page }) => {
-    test.skip(!AGENT_B, 'needs a second non-system, non-ephemeral agent')
-
     await page.setViewportSize({ width: 1600, height: 800 })
     await forceDashboardListMode(page)
 
@@ -434,8 +452,6 @@ test.describe('Schedules tab toggle scroll stability (#1634)', () => {
    * after B's and repaints A's rows under B's header.
    */
   test('@interactive a superseded schedules load never paints over the newer agent', async ({ page }) => {
-    test.skip(!AGENT_B, 'needs a second non-system, non-ephemeral agent')
-
     await page.setViewportSize({ width: 1600, height: 800 })
     await forceDashboardListMode(page)
 
