@@ -804,13 +804,13 @@ export const useNetworkStore = defineStore('network', () => {
 
   function handleAgentTagsChanged(event) {
     // trinity-enterprise#305: tags drive the Grid org overlay (dept-* zones,
-    // reports-to-* lines). Patch by name so every open browser converges on a
-    // tag edit without waiting for a roster poll (which only fires on name
-    // changes and would replace the objects wholesale).
-    const agent = agents.value.find(a => a.name === event.agent_name)
-    if (agent) {
-      agent.tags = event.tags || []
-    }
+    // reports-to-* lines). The broadcast is a THIN trigger — {type, agent_name}
+    // only, no tag values, because /ws is SCOPE_ALL and unfiltered (the #918
+    // rule): a payload carrying org tags would leak every tenant's org chart
+    // to any authenticated socket. Refetch through the access-controlled
+    // per-agent route instead; an agent this user can't access 403s and the
+    // refetch no-ops.
+    if (event?.agent_name) _refetchAgentTags(event.agent_name)
   }
 
   // --- org-overlay tag writes (trinity-enterprise#305) ---

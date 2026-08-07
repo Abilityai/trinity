@@ -37,7 +37,22 @@ async function setTags(page, agent, tags) {
   expect(status).toBe(200)
 }
 
+async function getTags(page, agent) {
+  return page.evaluate(async (name) => {
+    const res = await fetch(`/api/agents/${name}/tags`, {
+      headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+    })
+    if (!res.ok) return []
+    return (await res.json()).tags || []
+  }, agent)
+}
+
 test.describe('grid org overlay (trinity-enterprise#305)', () => {
+  // trinity-system is SHARED state — snapshot its tags before each test and
+  // restore exactly that set after, instead of blind-PUTting [] (which wiped
+  // any pre-existing tags on the operator's live agent).
+  let priorSystemTags = null
+
   test.beforeEach(async ({ page }) => {
     await page.addInitScript(
       ([layoutKey, orgKey]) => {
@@ -46,11 +61,15 @@ test.describe('grid org overlay (trinity-enterprise#305)', () => {
       },
       [LAYOUT_KEY, ORG_KEY]
     )
+    priorSystemTags = null
   })
 
   test.afterEach(async ({ page }) => {
-    // Never leave org tags on the shared system agent.
-    await setTags(page, 'trinity-system', [])
+    // Restore the pre-test tag set (drops test-added org tags, keeps
+    // whatever was already there).
+    if (priorSystemTags !== null) {
+      await setTags(page, 'trinity-system', priorSystemTags)
+    }
   })
 
   test('@smoke org controls render and a dept-* tag produces a zone with ribbon', async ({
@@ -66,6 +85,7 @@ test.describe('grid org overlay (trinity-enterprise#305)', () => {
 
     // Tag the system agent into a department via the API; the
     // agent_tags_changed broadcast re-derives zones without a reload.
+    if (priorSystemTags === null) priorSystemTags = await getTags(page, 'trinity-system')
     await setTags(page, 'trinity-system', ['dept-e2e-platform'])
 
     const zone = page.locator('.gv-zone', { hasText: 'e2e-platform' })
@@ -98,6 +118,7 @@ test.describe('grid org overlay (trinity-enterprise#305)', () => {
 
   test('Zones toggle hides and shows zone frames', async ({ page }) => {
     await gotoGrid(page)
+    if (priorSystemTags === null) priorSystemTags = await getTags(page, 'trinity-system')
     await setTags(page, 'trinity-system', ['dept-e2e-platform'])
     await expect(page.locator('.gv-zone')).toBeVisible({ timeout: 15000 })
 
