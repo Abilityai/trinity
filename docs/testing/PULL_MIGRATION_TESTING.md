@@ -361,10 +361,16 @@ PostgreSQL flavour. All timestamp columns are `Text` holding ISO-Z strings
 (Invariant #16), hence the explicit `::timestamptz` casts. Substitute the pilot
 name for `'<agent>'`.
 
-### Pre-flight — capture a baseline BEFORE the flip
+### Pre-flight — pick a viable pilot, then capture a baseline
 
-Run M4 + M6 + M7 on the pilot for the 7 days *preceding* the flip and keep the
-output. Without a baseline, a 4% success-rate dip during the soak is
+**First, check the candidate can be piloted at all.** Only `agent` and `event`
+traffic can reach the durable queue (#2048) — a cron-driven agent will read ~0
+`pulled` on M1 no matter how the flag is set. Run the pull-eligible-volume query
+under M1 below and pick from its `pull_eligible` column *before* flipping
+anything; a week of soak on a cron-only agent measures nothing.
+
+Then run M4 + M6 + M7 on the pilot for the 7 days *preceding* the flip and keep
+the output. Without a baseline, a 4% success-rate dip during the soak is
 unattributable and the write-up degrades to "felt fine".
 
 ### The set
@@ -391,8 +397,10 @@ WHERE agent_name = '<agent>'
   AND started_at::timestamptz > now() - interval '24 hours';
 ```
 
-Expected after the #1766 gate: autonomous triggers ~100% `pulled`; anything still
-`pushed` should be interactive (`manual`/`user`/`chat`) — confirm with:
+Expected after the #1766 gate: **`agent` and `event` rows ~100% `pulled`; every
+other trigger 100% `pushed`.** That second half is correct behaviour, not a
+fault — read the reach table below before concluding anything from it. Confirm
+the split per trigger with:
 
 ```sql
 SELECT triggered_by,
@@ -404,8 +412,65 @@ WHERE agent_name = '<agent>'
 GROUP BY 1 ORDER BY 1;
 ```
 
-A pushed **autonomous** row means the producer gate did not engage — check the
-backend actually has `PULL_MODE_PILOT_AGENTS` in its env.
+#### Which triggers can be pulled at all (#2048)
+
+`PULL_MODE_PILOT_AGENTS` routes **agent-to-agent work only**. `capacity_manager`
+offers a row to the durable queue solely when its producer passed
+`overflow_policy="queue_persistent"`, and one of the three producers does:
+
+| Producer | Carries | `overflow_policy` | Pullable? |
+|---|---|---|---|
+| `task_execution_service` | scheduler — **all cron** — + fan-out | `reject` | **No** |
+| `dispatch_admission_service` | sequential `chat_with_agent`, human chat | `queue_in_memory` | **No** |
+| `chat_execution_service` (`POST /task`) | parallel `chat_with_agent`, MCP/manual task | `queue_persistent` | **Yes** |
+
+`POST /task` can only derive `triggered_by ∈ {self_task, agent, mcp, manual,
+event}`; intersect with `_AUTONOMOUS_TRIGGERS` and the pullable set is exactly
+**`{agent, event}`** (`pull_pilot.PULL_REACHABLE_TRIGGERS`). `schedule`,
+`webhook`, `loop`, `fan_out` and `reminder` are declared autonomous but reach
+dispatch through the `reject` producer, so **they are pushed no matter what the
+flag says.**
+
+**Reading a pushed autonomous row.** Two different situations, previously
+indistinguishable:
+
+- `triggered_by` ∈ `{schedule, webhook, loop, fan_out, reminder}` → **expected.**
+  The flag is applied and correct; the dispatch topology is the limit. The
+  backend logs this once per (agent, trigger) — grep `[#2048]` to confirm:
+  ```bash
+  docker logs trinity-backend 2>&1 | grep '\[#2048\]'
+  ```
+- `triggered_by` ∈ `{agent, event}` → **a real fault.** This is the only case
+  where the old advice applies: check the backend actually has
+  `PULL_MODE_PILOT_AGENTS` in its env (and see G1 in §6 — compose must forward
+  it).
+
+#### Choosing a pilot: a cron-only agent cannot be piloted
+
+Because cron cannot reach the queue, **an agent whose traffic is mostly
+`schedule` will read ~0 `pulled` on M1 no matter how the flag is set, and the
+soak measures nothing.** Verify pull-eligible volume *before* selecting a pilot,
+not after a week of soak:
+
+```sql
+SELECT agent_name,
+       COUNT(*)                                          AS total,
+       COUNT(*) FILTER (WHERE triggered_by = 'schedule') AS cron,
+       COUNT(*) FILTER (WHERE triggered_by IN ('agent','event')) AS pull_eligible
+FROM schedule_executions
+WHERE started_at::timestamptz > now() - interval '7 days'
+GROUP BY 1 ORDER BY pull_eligible DESC;
+```
+
+Pick from the `pull_eligible` column. In practice that means a **fan-in hub fed
+by parallel `chat_with_agent`** — on `eu2` exactly one agent
+(`cornelius-oracle`, 329/329) had the volume, while the cron-driven oracles sat
+at 2–5 and `brier-hq` at 0.
+
+Extending pull to cron is the issue's deferred Option 2 (give
+`task_execution_service` a `queue_persistent` policy under the pilot flag); it is
+**not** implemented. `tests/unit/test_2048_pull_pilot_reach.py` fails if that
+producer's policy changes, so this section cannot go stale silently.
 
 **M2 — split over time.** Confirms the flip took effect at the moment you think
 it did, and shows drift.
