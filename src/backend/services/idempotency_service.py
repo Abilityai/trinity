@@ -460,6 +460,19 @@ def upgrade_snapshot(scope: Optional[str], key: Optional[str], snapshot: Optiona
         logger.warning("Idempotency upgrade_snapshot failed (scope=%s): %s", scope, e)
 
 
+def discard_stale_replay(scope: Optional[str], key: Optional[str]) -> None:
+    """Drop a completed replay row whose recorded resource no longer exists
+    (#2040 review F3) so the caller can run a genuinely fresh attempt.
+    Fail-open — a failed discard just means the stale replay survives until
+    the 24h purge."""
+    if not scope or not key:
+        return
+    try:
+        db.idempotency_discard_completed(scope, key)
+    except Exception as e:
+        logger.warning("Idempotency discard_stale_replay failed (scope=%s): %s", scope, e)
+
+
 def fail(decision: IdempotencyDecision) -> None:
     """Release a fresh in-flight claim so a failed first attempt can be retried."""
     if not decision.enabled or decision.replay:

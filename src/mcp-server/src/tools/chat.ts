@@ -17,7 +17,7 @@ import type { McpAuthContext, AgentAccessCheckResult } from "../types.js";
  * the duplicate instead of dispatching a second execution. Byte-identical
  * requests within the 24h TTL dedupe — standard idempotency semantics.
  */
-function deriveMcpIdempotencyKey(parts: (string | undefined)[]): string {
+export function deriveMcpIdempotencyKey(parts: (string | undefined)[]): string {
   const h = createHash("sha256");
   h.update(parts.map((p) => p ?? "").join(" "));
   return `mcp:${h.digest("hex")}`;

@@ -215,6 +215,11 @@ class AgentConfig(BaseModel):
     # Fork-to-own creation (trinity-enterprise#93): copy the github: template
     # into a user-owned repo first; the agent is created from that copy.
     fork_to_own: Optional[ForkToOwnRequest] = None
+    # trinity-enterprise#15: explicit GitHub import intent. None → legacy
+    # behavior (clone semantics; fork when a fork_to_own block is present).
+    # "copy" is a backend-materialized snapshot: no git sync, no git-config
+    # row, no GitHub env in the container.
+    import_intent: Optional[Literal["fork", "copy", "clone"]] = None
     # Ephemeral "ghost" agent (trinity-enterprise#69): budgeted, volume-less,
     # hard-discarded at budget. Entitlement-gated at the creation path.
     ephemeral: Optional[EphemeralConfig] = None
@@ -285,6 +290,9 @@ class AgentStatus(BaseModel):
     base_image_version: Optional[str] = None  # Version of trinity-agent-base image
     ephemeral: Optional[bool] = False  # trinity-enterprise#69: ghost agent (budgeted, hard-discarded)
     display_label: Optional[str] = None  # ent#181: human-facing name; None = render `name` (the slug)
+    # trinity-enterprise#15: copy-intent provenance — {source_repo, source_branch,
+    # head_sha, file_count}; set only on the create response of a snapshot import.
+    import_snapshot: Optional[Dict[str, Any]] = None
 
     class Config:
         json_encoders = {

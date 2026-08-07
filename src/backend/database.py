@@ -3095,6 +3095,10 @@ class DatabaseManager:
         """Delete an in-flight idempotency claim so a failed attempt can retry."""
         return self._idempotency_ops.release(scope, key)
 
+    def idempotency_discard_completed(self, scope: str, key: str) -> None:
+        """Delete a completed replay row whose recorded resource is gone (#2040 F3)."""
+        return self._idempotency_ops.discard_completed(scope, key)
+
     def idempotency_purge_expired(self, ttl_hours: int = 24) -> int:
         """Purge idempotency rows older than ttl_hours. Returns rows removed."""
         return self._idempotency_ops.purge_expired(ttl_hours=ttl_hours)
