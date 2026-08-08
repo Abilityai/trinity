@@ -5,7 +5,7 @@ import os
 import re
 import unicodedata
 
-from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator, model_validator
 from typing import Any, Dict, List, Literal, Optional, Union
 from datetime import datetime
 from enum import Enum
@@ -267,8 +267,18 @@ class AgentLabelUpdate(BaseModel):
     `label=None` (or blank) clears it, and the agent renders under its slug
     again. Presentation only: the slug never moves, which is the entire point —
     a slug rename re-keys ~20 tables and strands the agent's volumes (#1664).
+
+    #1821: `label` is REQUIRED-but-nullable, and unknown fields are rejected.
+    Clearing is a legitimate operation expressed as an explicit null, but with
+    an ignored-extras model and a `None` default it was also what you got from
+    any body the server did not recognise — so `{"display_label": "..."}` (an
+    easy mistake: `display_label` is the DB column and `display_name` the
+    response field) returned 200 and silently wiped the label. Both an unknown
+    field and an empty `{}` now 422 instead of destroying data.
     """
-    label: Optional[str] = None
+    model_config = ConfigDict(extra="forbid")
+
+    label: Optional[str]
 
     @field_validator("label")
     @classmethod
