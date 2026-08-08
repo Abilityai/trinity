@@ -738,19 +738,39 @@ export function createAgentTools(
       name: "deploy_local_agent",
       description:
         "Deploy a Trinity-compatible local agent to the remote Trinity platform. " +
-        "IMPORTANT: The calling agent must package the directory locally before calling this tool. " +
+        "IMPORTANT: the calling agent must package the directory locally AND embed an integrity manifest (#2060) before calling this tool. " +
         "Steps for the calling agent: " +
-        "1. Create tar.gz archive: `tar -czf agent.tar.gz --exclude='.git' --exclude='node_modules' --exclude='__pycache__' --exclude='.venv' -C /path/to agent-dir` " +
-        "2. Base64 encode: `base64 -i agent.tar.gz` (macOS) or `base64 agent.tar.gz` (Linux) " +
-        "3. Call this tool with the base64 archive. " +
+        "1. Write the manifest INTO the agent directory (it ships inside the archive) — run from the agent directory: " +
+        "`python3 -c \"import hashlib,json,os; ex={'.git','node_modules','__pycache__','.venv'}; es=[]\n" +
+        "for dp,dn,fn in os.walk('.'):\n" +
+        " dn[:]=[d for d in dn if d not in ex]\n" +
+        " for d in list(dn):\n" +
+        "  p=os.path.join(dp,d)\n" +
+        "  if os.path.islink(p): es.append({'path':os.path.relpath(p,'.'),'link_target':os.readlink(p)}); dn.remove(d)\n" +
+        " for f in fn:\n" +
+        "  p=os.path.join(dp,f); r=os.path.relpath(p,'.')\n" +
+        "  if r=='.trinity-manifest.json' or f.startswith('._'): continue\n" +
+        "  if os.path.islink(p): es.append({'path':r,'link_target':os.readlink(p)})\n" +
+        "  elif os.path.isfile(p): es.append({'path':r,'sha256':hashlib.sha256(open(p,'rb').read()).hexdigest()})\n" +
+        "json.dump(es,open('.trinity-manifest.json','w'))\"` " +
+        "(files carry sha256, symlinks carry link_target, dirs omitted; the manifest never lists itself). " +
+        "2. Create the archive with the SAME excludes: `COPYFILE_DISABLE=1 tar -czf agent.tar.gz --exclude='.git' --exclude='node_modules' --exclude='__pycache__' --exclude='.venv' -C /path/to agent-dir` " +
+        "(COPYFILE_DISABLE=1 prevents macOS '._*' AppleDouble pollution; such members are skipped server-side with a warning). " +
+        "3. Base64 encode: `base64 -i agent.tar.gz` (macOS) or `base64 agent.tar.gz` (Linux) " +
+        "4. Call this tool with the base64 archive. " +
+        "The backend verifies the extracted tree against the embedded manifest and REFUSES drift (400 MANIFEST_DRIFT naming missing/altered/extra paths) — a pruned or mangled archive can never deploy silently; a missing manifest is refused (MANIFEST_REQUIRED). " +
+        "In-root symlinks are preserved end to end; symlinks escaping the archive root are refused. " +
+        "Caps: 50 MB compressed, 500 MB extracted, 10000 files. " +
+        "HONEST CEILING: the archive rides this tool call's arguments, which are token-bound (~100-200 KB of base64 per turn in practice). Deploy LARGER agents from bash instead — `pip install trinity-cli && trinity deploy .` or curl POST /api/agents/deploy-local — same endpoint, same manifest verification, no token ceiling. " +
         "The archive must contain a template.yaml with 'name' and 'resources' fields. " +
         "Include .env and other credential files in the archive — they are deployed as-is. " +
-        "If agent name exists, creates new version (my-agent-2) and stops old one.",
+        "If agent name exists, creates new version (my-agent-2) and stops old one. " +
+        "Transport retries of the identical call are idempotent (an Idempotency-Key is derived from the arguments); re-running the packaging pipeline produces new bytes and deliberately deploys a new version.",
       parameters: z.object({
         archive: z
           .string()
           .describe(
-            "Base64-encoded tar.gz archive of the agent directory. " +
+            "Base64-encoded tar.gz archive of the agent directory, with .trinity-manifest.json embedded (see tool description). " +
             "The archive should contain the agent files at the root level (template.yaml, CLAUDE.md, .env, etc.). " +
             "Exclude .git, node_modules, __pycache__, and .venv from the archive."
           ),
@@ -786,6 +806,19 @@ export function createAgentTools(
           `[deploy_local_agent] Deploying archive: ~${archiveSize}KB`
         );
 
+        // RELIABILITY-006 (#525) / #2060: deterministic key so a transport
+        // retry of this exact call replays instead of minting ANOTHER version
+        // (versioning makes an un-keyed retry fork twice). Same-args-only by
+        // design: a re-run packaging pipeline produces new gzip bytes ⇒ a new
+        // key ⇒ a visible new version — keying on content would false-replay
+        // an intentional identical-content redeploy.
+        const idempotencyKey = deriveMcpIdempotencyKey([
+          authContext?.userId,
+          "deploy_local_agent",
+          args.name,
+          args.archive,
+        ]);
+
         // Call backend
         interface DeployLocalResponse {
           status: string;
@@ -804,6 +837,12 @@ export function createAgentTools(
           warnings?: string[];
           error?: string;
           code?: string;
+          // #2060 evidence fields
+          verified?: boolean;
+          files_expected?: number;
+          files_deployed?: number;
+          symlinks_deployed?: number;
+          compatibility_hard_count?: number;
         }
 
         const response = await apiClient.request<DeployLocalResponse>(
@@ -812,7 +851,13 @@ export function createAgentTools(
           {
             archive: args.archive,
             name: args.name,
-          }
+            // #2060: set in tool CODE, not a model-controlled parameter — the
+            // MCP surface gets the integrity contract unconditionally.
+            require_manifest: true,
+          },
+          false,
+          undefined,
+          { "Idempotency-Key": idempotencyKey }
         );
 
         return JSON.stringify(response, null, 2);
