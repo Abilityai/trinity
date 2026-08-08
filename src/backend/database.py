@@ -971,6 +971,16 @@ class DatabaseManager:
     def get_mcp_exposed_agents(self):
         return self._agent_ops.get_mcp_exposed_agents()
 
+    # ent#157 — A2A inbound-server exposure toggle (OSS primitive; enterprise setter)
+    def get_a2a_exposed(self, agent_name: str) -> bool:
+        return self._agent_ops.get_a2a_exposed(agent_name)
+
+    def set_a2a_exposed(self, agent_name: str, enabled: bool) -> bool:
+        return self._agent_ops.set_a2a_exposed(agent_name, enabled)
+
+    def get_a2a_exposed_agents(self):
+        return self._agent_ops.get_a2a_exposed_agents()
+
     # =========================================================================
     # Per-agent MCP connector (ent#46; OSS-core since #118)
     # =========================================================================
