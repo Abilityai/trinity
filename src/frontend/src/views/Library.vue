@@ -8,7 +8,7 @@
           <div>
             <h1 class="text-3xl font-bold text-gray-900 dark:text-white">Library</h1>
             <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-              Installable assets for your fleet — agent templates and skills
+              Installable assets for your fleet — agent templates, systems, and skills
             </p>
           </div>
           <!-- In-page jump anchors — deliberately NOT ?kind= filter pills:
@@ -16,6 +16,8 @@
           <nav class="hidden sm:flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
             <a href="#agent-templates" class="hover:text-gray-700 dark:hover:text-gray-200 hover:underline">Agent templates</a>
             <span aria-hidden="true">·</span>
+            <a v-if="canInstallSystems" href="#systems" class="hover:text-gray-700 dark:hover:text-gray-200 hover:underline">Systems</a>
+            <span v-if="canInstallSystems" aria-hidden="true">·</span>
             <a href="#skills" class="hover:text-gray-700 dark:hover:text-gray-200 hover:underline">Skills</a>
           </nav>
         </div>
@@ -306,6 +308,28 @@
         </div>
         </section>
 
+        <!-- Systems section (ent#126: the Library's third asset kind).
+             Sits next to Agent Templates because both install agents — a
+             template creates one, a manifest creates a whole fleet with its
+             permissions, schedules and shared folders already wired. Skills
+             stays last: it configures agents that already exist.
+
+             Hidden entirely below `creator` rather than shown-and-disabled:
+             deploying is gated by POST /api/systems/deploy's own
+             require_role("creator") (AC #6), and an operator who cannot use
+             it gains nothing from seeing a dead panel in a browse surface.
+             Owns its own state, isolated from the fetches around it. -->
+        <section v-if="canInstallSystems" id="systems" class="mb-12">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-xl font-semibold text-gray-900 dark:text-white">Systems</h2>
+          </div>
+          <p class="mb-4 text-sm text-gray-500 dark:text-gray-400">
+            Install a multi-agent system from a manifest — pick a bundled one, upload a
+            file, or paste YAML. Preview shows exactly what it would create before anything runs.
+          </p>
+          <SystemInstallPanel />
+        </section>
+
         <!-- Skills section (ent#263): fleet-level browse over the shared
              skills library. Assignment stays on each agent's Skills tab
              (ent#182: one skill model, no parallel mechanisms); this section
@@ -333,14 +357,19 @@ import { useRouter } from 'vue-router'
 import NavBar from '../components/NavBar.vue'
 import CreateAgentModal from '../components/CreateAgentModal.vue'
 import LibrarySkillsSection from '../components/LibrarySkillsSection.vue'
-import { useRole } from '../composables/useRole'
+import SystemInstallPanel from '../components/systems/SystemInstallPanel.vue'
 import api from '../api'
+import { useRole } from '../composables/useRole'
 
 const router = useRouter()
 // #1931: same convention as LibrarySkillsSection.vue on this page — the
 // templates half must not ship the opposite empty-state convention to the
 // skills half. Store-backed (auth), so no page-level fetch is involved.
-const { isAdmin } = useRole()
+const { hasMinRole, isAdmin } = useRole()
+
+// Mirrors POST /api/systems/deploy's require_role("creator") (AC #6). The
+// server is the enforcement point; this only decides whether to render.
+const canInstallSystems = computed(() => hasMinRole('creator'))
 
 const templates = ref([])
 const loading = ref(false)

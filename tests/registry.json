@@ -1,6 +1,31 @@
 {
   "test_files": [
     {
+      "file": "unit/test_1999_execution_env.py",
+      "feature": "#1999",
+      "added": "2026-08-05",
+      "categories": [
+        "agent-server",
+        "unit",
+        "security",
+        "credentials"
+      ],
+      "description": "Credential injects mirrored every .env key into the long-lived agent-server process env, and all five runtime spawn sites (claude_code, headless_executor, codex_runtime, gemini_runtime x2) passed env={**os.environ, ...} - a one-way sync with NO delete phase. A key removed from .env by any non-mirroring write path (SSH, docker exec, or an agent editing its own .env) kept reaching every subsequently-spawned execution until container restart, and was invisible to /proc/<pid>/environ (an exec-time snapshot - runtime os.environ mutations never appear there) AND to docker exec (which shows the container baseline, not this process's mutated env), so credential revocation silently failed with no inspection route that could reveal it. Fix: services/execution_env.py rebuilds the execution env per spawn as INITIAL_ENV (boot baseline = what docker exec shows) + .env (parsed fresh, authoritative for credentials) + RUNTIME_OVERRIDES (#1089 token rotation - applied AFTER the file so a stale token in .env cannot beat an explicit rotation; None = force-unset, which a dict merge cannot express) + extra (EXECUTION_TAG_NAME last, #407). The process mirror gains a delete phase that restores the container baseline rather than popping blind, and only ever undoes keys it itself wrote. Covers: the issue's exact reproduction (inject, delete out-of-band, assert the next execution is clean), re-injecting a cleaned .env, baseline restore vs delete, the #1089 no-regression cases, EXECUTION_TAG_NAME non-displacement, tolerant .env parsing incl. the writer's own backslash escaping (.strip('\"') eats a legitimate trailing quote), unreadable/oversized files degrading to the baseline rather than raising on the spawn path, protected keys (.env is agent-writable and now read at every spawn, so PATH/LD_PRELOAD/BASH_ENV redirection is refused), the name-only drift report added to /api/credentials/status, and a static guard that fails if a sixth spawn site reintroduces the {**os.environ} form."
+    },
+    {
+      "file": "unit/test_ent15_import_intents.py",
+      "feature": "trinity-enterprise#15",
+      "added": "2026-08-06",
+      "categories": [
+        "backend",
+        "unit",
+        "agent-lifecycle",
+        "github",
+        "security"
+      ],
+      "description": "GitHub import intents (ent#15): stage_github_snapshot with an object-patched async _run_git fake that plays the clone into the staging dir — success (head SHA capture, .git strip, escaping-symlink prune with in-tree symlink survival, regular-file count, PAT only on the clone call), COPY_SOURCE_UNREADABLE 400 (auth/not-found/remote-branch shapes) + staging cleanup, COPY_CLONE_FAILED 502 transient, COPY_SOURCE_EMPTY 400, --branch flag presence/absence; crud._resolve_template intake gates pre-side-effect (INTENT_REQUIRES_GITHUB_TEMPLATE, FORK_PARAMS_REQUIRED, INTENT_FORK_BLOCK_CONFLICT), intent-less local:default resolving gate-free, and copy-branch wiring (snapshot staged, github_repo/git_instance_id stay None, tokenless source-mode gate never fires — source_mode parametrized None/False/True); create_agent_endpoint idempotency — scope folds the caller (two principals, same key → different scopes), replay returns snapshot + X-Idempotent-Replay without re-creating, in-flight → 409 CREATE_IN_FLIGHT. Real modules owned per test (2026-07-12 learning); no Docker/DB."
+    },
+    {
       "file": "unit/test_1870_completed_turn_recovery.py",
       "feature": "#1870",
       "added": "2026-08-02",
@@ -1577,16 +1602,113 @@
       "description": "Per-source skills-library root (ent#332): catalog.yaml skills_root: declaration -> evidence-gated skills/ probe -> .claude/skills/ fallback, resolved per SkillSourceClone; packaging rewrites tar arcnames to the canonical agent-side .claude/skills/ destination at filter_skill_archive so manifests, prune confinement and the ent#236 removal machinery stay destination-canonical with zero migration. Covers: resolution order + zero-config back-compat; dual-layout (evidence under BOTH roots, no catalog) keeps .claude/skills/ and flags layout_conflict instead of silently flipping which executable content ent#236 auto-injects; segment-wise skills_root validation ('.', './skills', 'skills//x' all rejected -- a whole-string charset regex admits each and breaks archive-prefix math into per-skill empty-package failures); every bad catalog shape (unparseable, alias-bearing HardenedYamlError, non-mapping, unknown schema_version, oversized, symlinked) falls back to probe and never raises through list_skills; symlinked probe/declared roots fall to the next tier rather than blanking the source, and an escaping final tier empty/None-propagates without a TypeError; tree-SHA version parity across layouts (repo restructure with unchanged content keeps versions stable -- no spurious fleet re-inject); arcname rewrite identity for legacy layout, destination-canonical executable_paths, fail-visible layout-mismatch, unsafe source_root ValueError; cross-layout prune continuity; _legacy_fallback SKILL.md lookup with rewritten members; end-to-end mixed-layout merge through the real service with per-source skills_root in library status."
     },
     {
-      "file": "unit/test_1999_execution_env.py",
-      "feature": "#1999",
+      "file": "unit/test_1898_sys_modules_isolation.py",
+      "feature": "#1898",
       "added": "2026-08-05",
       "categories": [
-        "agent-server",
+        "backend",
+        "unit",
+        "test-isolation",
+        "reliability"
+      ],
+      "description": "test_ent183_skill_packages wrote fake modules straight into sys.modules at IMPORT time and left them there. That is collection-time code and pytest imports every test module before running a single test, so every file collected afterwards resolved services.settings_service (plus database, services.agent_client, utils.url_validation) to a four-function fake, captured names from it at module scope, and kept those bindings for the session. Its own autouse sys.modules-restore fixture could not help: the damage is a BINDING in another module's namespace, which restoring the module table does not reach. Two symptom shapes, both looking like unrelated bugs - ImportError 'cannot import name X from services.settings_service (unknown location)' at collection (#1855), and silent wrong behaviour when the stub happens to define the name (7 failures in test_1081_physical_meter). Fixed by installing the stubs inside a mock.patch.dict context scoped to the single import that needs them, so nothing survives the with-block while the imported module keeps its stub bindings. Guards the mechanism statically (no module-scope sys.modules assignment - the AST walk deliberately allows assignments inside a with, since banning all of them would ban the fix; and the stubs must sit in a patch.dict) and the outcome behaviourally (a subprocess runs the cheapest known victim after the offender in one process). A first version of the fix also evicted cached services.skill* modules to force a fresh import; that broke 10 sibling tests by producing a second module object, and was reverted - caught by comparing the same selection with and without the change (435 passed without, 10 failed with)."
+    },
+    {
+      "file": "unit/test_ent334_status_url_disclosure.py",
+      "feature": "trinity-enterprise#334",
+      "added": "2026-08-06",
+      "categories": [
+        "backend",
         "unit",
         "security",
-        "credentials"
+        "skills"
       ],
-      "description": "Credential injects mirrored every .env key into the long-lived agent-server process env, and all five runtime spawn sites (claude_code, headless_executor, codex_runtime, gemini_runtime x2) passed env={**os.environ, ...} - a one-way sync with NO delete phase. A key removed from .env by any non-mirroring write path (SSH, docker exec, or an agent editing its own .env) kept reaching every subsequently-spawned execution until container restart, and was invisible to /proc/<pid>/environ (an exec-time snapshot - runtime os.environ mutations never appear there) AND to docker exec (which shows the container baseline, not this process's mutated env), so credential revocation silently failed with no inspection route that could reveal it. Fix: services/execution_env.py rebuilds the execution env per spawn as INITIAL_ENV (boot baseline = what docker exec shows) + .env (parsed fresh, authoritative for credentials) + RUNTIME_OVERRIDES (#1089 token rotation - applied AFTER the file so a stale token in .env cannot beat an explicit rotation; None = force-unset, which a dict merge cannot express) + extra (EXECUTION_TAG_NAME last, #407). The process mirror gains a delete phase that restores the container baseline rather than popping blind, and only ever undoes keys it itself wrote. Covers: the issue's exact reproduction (inject, delete out-of-band, assert the next execution is clean), re-injecting a cleaned .env, baseline restore vs delete, the #1089 no-regression cases, EXECUTION_TAG_NAME non-displacement, tolerant .env parsing incl. the writer's own backslash escaping (.strip('\"') eats a legitimate trailing quote), unreadable/oversized files degrading to the baseline rather than raising on the spawn path, protected keys (.env is agent-writable and now read at every spawn, so PATH/LD_PRELOAD/BASH_ENV redirection is refused), the name-only drift report added to /api/credentials/status, and a static guard that fails if a sixth spawn site reintroduces the {**os.environ} form."
+      "description": "Skills-library status disclosed source repo URLs (ent#334). GET /api/skills/library/status is Depends(get_current_user) - every authenticated caller including agent-scoped MCP keys, deliberately, since the per-agent Skills tab and the MCP get_skills_library_status tool both read it - but it returned skill_service.get_library_status() raw, and that dict carries the source repo URLs: exactly the value GET /api/skills/sources is require_admin PLUS reject_agent_principal to protect (ent#237 classes repo URLs admin-sensitive; ent#293 added the second gate because an agent-scoped key resolves to its owner carrying the owner's role). Two independent failure modes, tested apart because the fixes differ: the URL as a NAME (org/repo discloses what the fleet is taught from - so every route assertion is on KEY ABSENCE, since a 'secret not in body' assertion passes on a payload that still leaks the private repo), and embedded userinfo (reject_embedded_credentials guards only NEW writes; rows predating it and rows from the unvalidated legacy-adoption path still carry https://<token>@host). Covers the new never-raising, parse-based strip_url_credentials - urlparse itself raises ValueError on an unbalanced bracket and the only caller is get_library_status, whose comments say status must never 500 the panel, so the contract is never-raises and the test pins the premise that the input really does raise; scheme-less input, where urlparse('tok@github.com/o/r').username is None so a scheme must be assumed for the PARSE but never invented into the RETURN; userinfo with no host (hostname None, so _replace(netloc=None) would blow up in geturl); empty userinfo, which a parsed.username test reads as falsy; and the double-@ https://a@b@github.com/o/r that BOTH pre-existing scrubbers got wrong ([^@]+@ cannot cross the first @, leaving https://***@b@...). Parse-based, not regex, per skill_service._authenticated_url's house rule that the host is decided by PARSING - a looser pattern mangles a legitimate https://github.com/o/r?ref=a@b where the @ is in the query. The two free-text scrubbers (_scrub_pat, skill_source_clone.redact) stay text-oriented because git stderr carries several URLs and prose, but are widened to [^\\s/]+@ so the whole authority goes and an earlier plain URL no longer swallows a later credentialed one (redact's old [^@]+@ crossed / and newlines). Route coverage over a real TestClient rather than a direct handler call, because response_model filtering is applied by FastAPI's serialization layer and a direct call proves nothing about the wire; admin, non-admin and agent-scoped-key-on-an-admin-owned-install callers; that GET /skills/sources still returns the url (narrow the open route, don't blind the operator) and that it is userinfo-free because the strip is at the SERVICE, which is also what stops SkillSourcesPanel.vue rendering a token on the admin route. Plus a static AST guard that the route declares response_model=SkillsLibraryStatus - the allow-list IS the fix, and dropping the decorator kwarg reopens the leak with no behavioural test failing, since the handler's return value is unchanged."
+    },
+    {
+      "file": "unit/test_2019_pytest_timeout_guard.py",
+      "feature": "#2019",
+      "added": "2026-08-05",
+      "categories": [
+        "ci",
+        "unit",
+        "reliability",
+        "guard"
+      ],
+      "description": "backend-unit-test.yml installs pytest-timeout and never passed --timeout, so one stalled test consumed the whole 25-minute job budget, GitHub cancelled the job, the Upload JUnit XML step was skipped (no if: always()), and the failure read as 'The operation was canceled' against whichever PR was running - four times in one day across all three seeds AND both sides, the base side being plain dev. Guards the fix: a per-test --timeout is present, it is NOT the thread method (thread dumps stacks then kills the process, so the run aborts and the JUnit is incomplete - signal raises inside the test and the suite continues, giving the diff job a complete XML that names the hang as an ordinary new failure), and the value clears the slowest REAL test with room for runner variance. Bounds measured from a green run's JUnit rather than guessed: test_start_agent_skip_inject's two retry cases run ~60.6s, so the 60s the issue originally proposed would have failed them on every PR; a 2.5x-slow runner (the variance that caused #2019) puts them near 150s, hence >=180s, and <=600s so a stall still fails instead of eating the budget. Also pins if: always() on the artifact upload and the load-bearing '|| true' (#660 baseline). Assertions read the step's COMMAND with YAML comments stripped - the step documents its own flags in prose, and an earlier draft passed with '|| true' deleted because the comment still mentioned it (the #1871/ent#314 textual-scan trap, third occurrence). The step slice is indentation-bounded after a name-bounded version ran past the last step and matched the diff job's own 'if: always()'."
+    },
+    {
+      "file": "unit/test_2016_duplicate_pat_line.py",
+      "feature": "#2016",
+      "added": "2026-08-05",
+      "categories": [
+        "backend",
+        "unit",
+        "credentials",
+        "security"
+      ],
+      "description": "_patch_env_github_pat replaced only the FIRST matching line (count=1) while the agent's own .env reader is LAST-WINS, so on a file carrying a duplicate GITHUB_PAT line the rotation wrote the new token to line 1, the revoked token survived below it, and the agent kept authenticating with the revoked one - while propagate_pat_to_all_agents reported that agent as 'updated'. Same silent-success class #1967 exists to close, reached differently: there the rotation never touched the agent, here it touches it and the agent ignores the result. The duplicate is not created by this function (it appends only when the key is absent) - it arrives from an agent editing its own .env (#1999), an SSH/docker-exec append, or a restored file. Fixed by dropping the cap so every occurrence is levelled; NOT de-duplicated, since after levelling every copy carries the same value and removing lines would be a second behaviour change for no correctness gain. Every assertion goes through what the AGENT READS rather than what the file contains - the file did contain the new token, on a line nothing read. Covers the reproduction, the revoked token surviving nowhere in the file (shells and greps read .env too), 2/3/5 copies, each of the three #1574 mirrored keys independently (each runs its own substitution, so a cap left on one reopens the bug for that key), interleaved duplicates of different keys, the messy real-world duplicate shapes (indented/tabbed/unquoted/single-quoted/empty-value), a commented duplicate deliberately left alone, lookalike keys untouched, and the single-line path unchanged incl. idempotence. Structural guard reads the CALL via ast, not the source text: this function's docstring explains the bug and therefore contains the string 'count=1', so a textual scan passes on the prose with the cap restored (the #1871/ent#314 trap; the first draft of this test failed exactly that way). Mutation-verified against BOTH spellings - count=1 and the positional third argument - 15 of 21 fail on each."
+    },
+    {
+      "file": "unit/test_1849_ede_diagnostic_filtered.py",
+      "feature": "#1849",
+      "added": "2026-08-01",
+      "categories": [
+        "agent-runtime",
+        "unit",
+        "sessions",
+        "regression"
+      ],
+      "description": "Claude Code's internal [ede_diagnostic] header must never be surfaced as the error cause (#1849): stream_parser filters diagnostic entries from result.errors at BOTH the max_turns and execution_error branches, joins the remaining real errors, keeps the token-stripped diagnostic payload as labelled context, and no longer raises on a malformed errors shape (which previously landed as HTTP 200 success). Acceptance test drives a marker-first errors[] through _finalize_headless_result to routers/sessions.py::_is_resume_not_found."
+    },
+    {
+      "file": "mcp-server/src/tools/ask_trinity_edges.test.ts",
+      "feature": "#2027",
+      "added": "2026-08-05",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "unit",
+        "edge-cases"
+      ],
+      "description": "Two edge cases in ask_trinity (ent#328/#1981), found by /edge-cases. (1) truncate cut on UTF-16 CODE UNITS, so a boundary landing inside a surrogate pair left an unpaired surrogate - ill-formed Unicode that a strict UTF-8 encoder or JSON-RPC client replaces with U+FFFD or rejects; proven by construction (65,536-char answer with U+1F600 straddling the cut). Fixed by stepping back one unit off a high surrogate; only the final unit can be orphaned, so one check covers it. (2) The context-loss warning lived inside `if (responseSessionId)`, so a 200 that answered but OMITTED session_id produced no warning at all and the caller silently lost its conversation context - exactly what that warning exists to prevent; the 'different id returned' branch was covered and the neighbouring 'no id returned' one was not. The warning is now decided by the REQUEST's session, with distinct wording since 'a new session was started' is false when none came back. Both fixes are mirrored into src/helper-mcp/src/client.ts, which carries a byte-identical copy. Covers: the straddling cut, the limit still reported as the ORIGINAL max, a fully-fitting pair surviving, a BMP-only answer still cut at exactly max (the step-back must not misfire), a short answer untouched, the 200-char ERROR-path truncation (likelier to meet arbitrary bytes than the answer path), and all four session shapes. Two rows were also added to the existing PARITY_CASES table: mutating ONLY the helper copy previously changed nothing in the suite - the parity claim held just for the cases in its table - and both helper-only mutations now fail it."
+    },
+    {
+      "file": "unit/test_2006_deploy_residue.py",
+      "feature": "#2006",
+      "added": "2026-08-05",
+      "categories": [
+        "backend",
+        "unit",
+        "security",
+        "deploy"
+      ],
+      "description": "deploy-local validated an archive-supplied .mcp.json 32 lines AFTER shutil.copytree(extract_root, dest_path), and the finally block removed only temp_dir - so a config the ent#213 validator refused stayed on disk under /data/deployed-templates/<version_name>/, a live member of crud._LOCAL_TEMPLATE_ROOTS, addressable by the same caller via POST /api/agents {template: local:<version_name>}. A guard that runs after the persist is not a gate. Fix: the guard moved to step 6a, running on extract_root before the copy AND before the quota check and the stop-previous-version step (a doomed deploy no longer stops a running agent on its way to a 400), plus _remove_partial_deploy as a second layer for failures between copytree and create_agent_fn (_prepopulate_workspace_from_template's 500) - deliberately handed over before creation starts, since a directory a container may already reference must not be removed on a late failure. ent#213's suite tests _validate_archive_mcp_config in isolation ('the full deploy flow needs Docker'), which is exactly why the ordering was never covered; these drive the REAL deploy_local_agent_logic and assert on the filesystem, needing no Docker because the rejection path now reaches nothing external. Covers: the issue's reproduction, local:<name> resolving to nothing, the ordering pinned twice (behaviourally by exploding every post-guard step, and statically by source order - the behavioural residue assertion alone cannot distinguish the two candidate fixes once cleanup exists), the valid path reaching creation with the template in place, an archive with no .mcp.json, and both sides of the cleanup boundary."
+    },
+    {
+      "file": "unit/test_2048_pull_pilot_reach.py",
+      "feature": "#2048",
+      "added": "2026-08-07",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "pull-migration"
+      ],
+      "description": "PULL_MODE_PILOT_AGENTS can only route agent-to-agent work (#2048). _AUTONOMOUS_TRIGGERS declares seven triggers autonomous and pull_owns_dispatch consulted all seven, but capacity_manager only offers a row to the durable queue when its producer passed overflow_policy='queue_persistent', and exactly one of the three producers does: task_execution_service uses 'reject' (scheduler/ALL cron + fan-out), dispatch_admission_service uses 'queue_in_memory' (sequential chat, human chat), only chat_execution_service (POST /task) uses 'queue_persistent'. So on a cron-driven agent the pilot flag is INERT and #1766's soak measures nothing - silently, because the gate sits behind an overflow_policy short-circuit, so for a schedule row pull_owns_dispatch is never called at all and the row is pushed indistinguishably from the flag being unset, while PULL_MIGRATION_TESTING.md section 9 M1 told the operator to go check an env var that is present and correct. Issue decision was Option 1 (make the reach honest, do not extend it). Corrects the issue's own table: the reachable set is {agent, event}, not {agent} - #1578's task-completion loopback POSTs to the same /task route and is tagged 'event' via an internal-secret-gated X-Event-Trigger, with no capacity bypass. Tests pin: the reach set derived from what _derive_task_trigger can emit rather than hardcoded; every autonomous trigger classified as reachable or stranded so a new one cannot join the stranded set unreviewed; the narrowing is a runtime NO-OP over the only producer that consults the predicate (it stops a false claim, it does not change a verdict); and note_unreachable_pull_trigger reports a stranded row once per (agent, trigger), never for a non-pilot / reachable / interactive trigger, and never raises. A structural guard asserts the three producers' overflow_policy literals, so implementing the deferred Option 2 (wiring cron to queue_persistent) fails this test and forces PULL_REACHABLE_TRIGGERS and section 9's prose to be revisited in the same change - a silently-stale reach set being exactly the bug. Also updates test_1766: its 'pilot owns EVERY autonomous trigger' case asserted reach the system never had (it passed only by calling the predicate outside the context that constrains it), and its producer-gate case drove a queue_persistent acquire carrying 'schedule' - a combination production cannot produce - now driven with 'agent', the shape that actually occurs."
+    },
+    {
+      "file": "unit/test_2052_scrubber_authority_parity.py",
+      "feature": "#2052",
+      "added": "2026-08-07",
+      "categories": [
+        "backend",
+        "unit",
+        "security",
+        "skills",
+        "performance"
+      ],
+      "description": "The free-text PAT scrubbers only fired on a literal `https://` (#2052) - the follow-up ent#347 predicted. `skill_source_clone._CREDENTIAL_URL_RE` was `https://[^\\s/?#]+@`, anchored on the scheme, while the parse-based `utils.url_validation.strip_url_credentials` (ent#334) resolves an authority with no scheme at all. Three shapes therefore slipped past the regex and were echoed VERBATIM: protocol-relative `//tok@github.com/o/r`, the scheme-less shorthand `tok@github.com/o/r`, and an alternate scheme `git+ssh://tok@...` (plus the empty-userinfo `https://@host`, which the old `+` quantifier could not match). Reachable rather than theoretical: `_adopt_legacy_clone` writes source rows with no validation and `validate_skills_library_url` accepts the scheme-less form, so a stored URL may legitimately take them, and `_scrub_pat` then runs over `str(e)` of an ARBITRARY exception whose text is not constrained to what `_authenticated_url` built. Sink is `system_settings['skills_library_last_error']` - durable and admin-rendered. Fixed by moving the rule next to the parser as `scrub_url_credentials_in_text` rather than adding a fourth hand-written regex; `redact` delegates and `_CREDENTIAL_URL_RE` is deleted. The free-text side stays text-oriented on purpose - git stderr is prose plus several URLs, so there is no single URL to hand `urlparse`. Tests are mostly PARITY assertions over one shared corpus (the ent#334 cross-check shapes plus the three that regressed): the two must agree on the resolved authority, on WHETHER a credential is present at all (the actual defect), and no userinfo may survive. A structural test asserts `_CREDENTIAL_URL_RE` is gone so a local pattern cannot be reintroduced. Regression guards keep `?ref=a@b` untouched - the removed scheme anchor was also what kept the pattern off a query `@`, which is why the bare form carries a run-start boundary - plus multi-URL free text, idempotency and never-raises. 21 of these fail against the pre-fix scrubber, one with the token verbatim. Also pins the scan LINEAR: dropping the `https://` anchor also drops the literal `str.find` could jump to, and the first fix expressed the new rule as a class-first pattern, which rescanned a long no-`@` run from every offset - 24s on 200KB, 151s on 500KB, on RAW git stderr that is unbounded and partly remote-controlled, i.e. a DoS reachable from a hostile repo. Rewritten to walk maximal authority-legal runs; same 500KB now scrubs in 1.2ms."
     }
   ]
 }

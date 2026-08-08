@@ -294,7 +294,11 @@ def build_chat_payload(
         )
     except Exception as e:
         logger.warning(f"[Chat] execution context build failed, falling back: {e}")
-        payload["system_prompt"] = get_platform_system_prompt(runtime=agent_runtime)
+        # ent#243: pass the model here too — a context-build failure must not
+        # silently swap the prompt tier as well as the context block.
+        payload["system_prompt"] = get_platform_system_prompt(
+            runtime=agent_runtime, model=request.model
+        )
     # Pass execution ID so agent registers process under the same ID (enables termination)
     if task_execution_id:
         payload["execution_id"] = task_execution_id

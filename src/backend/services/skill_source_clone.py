@@ -51,6 +51,7 @@ from utils.safe_yaml import (
     HardenedYamlError,
     load_hardened_yaml,
 )
+from utils.url_validation import scrub_url_credentials_in_text
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +124,25 @@ def validate_declared_root(value: Any) -> Optional[str]:
 
 
 def redact(text: str) -> str:
-    """Strip any embedded PAT from git output before it is logged or returned."""
-    return re.sub(r"https://[^@]+@", "https://***@", text or "")
+    """Strip any embedded PAT from git output before it is logged or returned.
+
+    THE free-text scrub for this module — `skill_service._scrub_pat` delegates
+    here rather than carrying a second pattern (ent#347: the bug was two
+    hand-written patterns that had drifted apart and were each wrong
+    differently). Handles the double-`@` shape `_authenticated_url` produces.
+    Never raises.
+
+    The pattern itself now lives with the single-URL parser in
+    `utils/url_validation`, because ent#347's own argument turned out to apply
+    one level up (#2052): this pattern and `strip_url_credentials` were the
+    *next* pair to drift. Anchored on a literal `https://`, it never fired on
+    the protocol-relative, scheme-less and alternate-scheme URLs the parser
+    handles — all shapes a stored source row may legitimately carry, since
+    `_adopt_legacy_clone` writes with no validation. Both now derive from one
+    authority grammar; see `scrub_url_credentials_in_text` for why the free-text
+    side stays regex-oriented and what it deliberately over-matches.
+    """
+    return scrub_url_credentials_in_text(text)
 
 
 def canonical_remote(url: str) -> str:
