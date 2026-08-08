@@ -303,7 +303,11 @@ automatically.
    - Pattern: `my-agent` -> `my-agent-2` -> `my-agent-3`
    - Stops previous version if running; the stopped name is remembered for
      compensation (#2060 — a FAILED deploy restarts what it stopped,
-     including when `create_agent_fn` raised; success keeps it stopped)
+     including when `create_agent_fn` raised; success keeps it stopped. The
+     compensation window closes when `create_agent_fn` RETURNS: past that
+     point the new version is live, so a late failure — response
+     construction — must not restart the previous version alongside it,
+     which would run two live versions of one base name)
 
 8. **Persist Template** (#950, #2060)
    - Write the validated archive contents to `/data/deployed-templates/{version_name}/` (`dest_path`) for inspection and future `template.yaml` lookups. On write failure: HTTP 500 with `code=DEPLOYED_TEMPLATES_DIR_UNWRITABLE` (fail-fast, no silent fallback).
