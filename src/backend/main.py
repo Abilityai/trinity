@@ -91,6 +91,7 @@ from routers.evaluations import router as evaluations_router  # ent#206 behavior
 from routers.reminders import router as reminders_router
 from services.report_service import set_websocket_manager as set_reports_ws_manager, set_filtered_websocket_manager as set_reports_filtered_ws_manager
 from routers.connector import router as connector_router  # per-agent MCP connector (ent#46, OSS-core #118)
+from routers.mcp_auth import router as mcp_auth_router  # MCP inline email auth (#848)
 from routers.agent_mcp_key import router as agent_mcp_key_router  # per-agent Trinity MCP key (#1854)
 from routers.subscriptions import router as subscriptions_router
 from routers.monitoring import router as monitoring_router, set_websocket_manager as set_monitoring_ws_manager, set_filtered_websocket_manager as set_monitoring_filtered_ws_manager
@@ -831,7 +832,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown canary service (CANARY-001 / Issue #411)
     try:
-        canary_service.stop()
+        await canary_service.stop()
         logger.info("Canary service stopped")
     except Exception as e:
         logger.error(f"Error stopping canary service: {e}")
@@ -1007,6 +1008,7 @@ app.include_router(product_events_router)  # Local product-event capture (ent#18
 app.include_router(evaluations_router)  # Behavioral evaluations (ent#206)
 app.include_router(reminders_router)  # Agent Self-Reminders (#1296)
 app.include_router(connector_router)  # Per-agent MCP connector (ent#46, OSS-core #118)
+app.include_router(mcp_auth_router)  # MCP inline email auth (#848) — internal-secret gated
 app.include_router(agent_mcp_key_router)  # Per-agent Trinity MCP key: read/verify/rotate (#1854)
 app.include_router(messages_router)  # Proactive Messaging (#321)
 app.include_router(public_memory_router)  # MEM-001 write path (#888)

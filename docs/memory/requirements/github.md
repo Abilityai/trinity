@@ -399,3 +399,79 @@
 - **GitHub Issue**: trinity-enterprise#109 (Epic ent#122); supersedes ent#230
 
 ---
+
+### 11.13 GitHub-Repo Import Intents — fork / copy / clone (trinity-enterprise#15)
+
+- **Status**: 🔨 In development (2026-08-06)
+- **Description**: Creating an agent from a `github:owner/repo[@branch]` template
+  accepts an explicit **`import_intent`** — `fork` | `copy` | `clone` — so the three
+  user intents ("start from someone else's agent and own my changes" / "give me a
+  point-in-time snapshot, no upstream tie" / "this is my agent's repo") stop sharing
+  one one-size clone flow. Absent intent → today's behavior exactly (clone semantics;
+  fork when a `fork_to_own` block is present) — fully additive.
+- **FR-1 — Intent mapping (parameterizes existing machinery, no new clone engine)**:
+  - `fork` → the ent#93 fork-to-own path unchanged; requires the `fork_to_own` block
+    (400 `FORK_PARAMS_REQUIRED` without it).
+  - `clone` → today's default `github:` path unchanged (`source_mode` true/false as
+    before); a stray `fork_to_own` block with explicit `clone`/`copy` intent is a
+    400 `INTENT_FORK_BLOCK_CONFLICT` (presence-triggered forking would silently
+    create a GitHub repo against stated intent).
+  - `copy` → **backend-materialized snapshot** (new): staging clone
+    (`--depth 1 --single-branch --branch <source_branch or repo default>` — `@branch`
+    is honored) via the fork-to-own git machinery (disk-backed `/data` staging, PAT
+    via `GIT_CONFIG_*` env, output scrubbed), `.git` stripped, then the workspace
+    volume is pre-populated via the deploy-local primitive
+    (`_prepopulate_workspace_from_template`, `.trinity-initialized` included) BEFORE
+    the container exists. The container carries **no GitHub env and no PAT**; no
+    `agent_git_config` row is written (not sync-polled, git endpoints refuse as for
+    `local:` agents); the PAT is used server-side only and persisted nowhere.
+- **FR-2 — Copy-mode guards**: empty source (zero files staged) → 400
+  `COPY_SOURCE_EMPTY`, never a green blank agent. Private-no-PAT → the ent#123-style
+  combined named 400; transient staging failure → 502, fail-fast pre-side-effect.
+  Copy does NOT run the ent#123 tokenless source-mode gate (that 400 protects
+  boot-time push; copy never pushes — tokenless public copy is legal for any
+  `source_mode`). Symlinks in the staged tree are preserved only when their target
+  resolves inside the tree; escapers are dropped with a warning; never followed.
+  Copy + `ephemeral` → 400 `COPY_EPHEMERAL_UNSUPPORTED` (ghosts are volume-less by
+  the ent#69 invariant; the snapshot lives on the workspace volume).
+- **FR-3 — Provenance**: `import_intent` + source repo + cloned SHA are recorded in
+  the create audit entry's details; the container carries a `trinity.import-intent`
+  label. No schema column in v1 (volume-loss rebuild of a copy agent yields an empty
+  workspace by design — a snapshot must not silently re-clone CURRENT upstream; the
+  documented mitigations are #1169 data export + the advisory compat check going red).
+  Own-it-later path: **Initialize GitHub Sync** (copy agents are the same class as
+  `local:` agents; `bind-to-own-repo` refuses `BIND_NO_GIT_CONFIG` by design).
+- **FR-4 — Inline compatibility check (reuses #668 wholesale)**: the Create Agent
+  flow ends with a post-create validation step that polls the existing
+  `GET /api/agents/{name}/compatibility` (STATIC only; AI stays on-demand), gated on
+  agent-server readiness — a REAL `/info` response, discriminated as **200 without a
+  `message` key** (the backend proxy fail-opens to 200 + a fallback body carrying
+  `message` while the container is mid-clone, so a bare 200 is NOT readiness; Docker
+  "running" races the clone for fork/clone intents and false HARD failures would
+  persist via the results upsert; old agent images without the endpoint honestly land
+  in the timeout state) — with an honest "agent failed to start" branch on a
+  non-running container (checked periodically). Non-blocking — the agent exists
+  regardless.
+- **FR-5 — Trigger-boundary idempotency (Invariant #18)**: `POST /api/agents` accepts
+  `Idempotency-Key` (scope `agent_create:{user_id}` — the scope folds the caller so
+  another user's identical key can never replay a foreign create response); replay
+  returns the original response + `X-Idempotent-Replay: true`; in-flight duplicate
+  409 is named distinctly from name-taken 409. MCP `create_agent` derives a
+  deterministic key from call args (name included) so long fork creates survive MCP
+  client retries.
+- **FR-6 — Surfaces**: UI Create Agent modal gains a 3-way intent selector on the
+  free-form GitHub path (default `clone`; fork reveals the existing destination/PAT/
+  visibility fieldset; copy explains the no-upstream contract + own-it-later); MCP
+  `create_agent` gains `import_intent: "copy" | "clone"` only — fork stays UI-only
+  (standing decision: MCP tool args are audit-logged, a PAT arg would persist in
+  plaintext). Fork-scope failures name the alternative intents (never silent
+  auto-degrade). `fork_to_own: required` catalog templates reject non-fork intents.
+- **Source of truth**: `services/agent_service/snapshot_import.py` (copy staging),
+  `services/agent_service/crud.py` (intent gates + wiring),
+  `services/agent_service/deploy.py::_prepopulate_workspace_from_template` (reused),
+  `models.py::AgentConfig.import_intent`, `routers/agents.py` (idempotency),
+  `src/mcp-server/src/tools/agents.ts`,
+  `src/frontend/src/components/CreateAgentModal.vue` + `ImportValidationStep.vue`.
+- **GitHub Issue**: trinity-enterprise#15 (Epic ent#122)
+
+---

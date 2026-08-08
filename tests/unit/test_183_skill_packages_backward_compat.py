@@ -75,10 +75,13 @@ def test_legacy_skill_md_lists_and_loads(pkg, tmp_path, monkeypatch):
 
     svc = SkillService()
     # _parse_skill_info only calls _skill_files for file_count/size — stub it so
-    # this stays a pure parse test (no library dir needed).
-    monkeypatch.setattr(svc, "_skill_files", lambda name: [])
+    # this stays a pure parse test (no library dir needed). ent#237 added the
+    # owning-clone argument to both (the clone is passed explicitly rather than
+    # re-resolved, so a non-winning copy can't be described as a different
+    # source's files); a stub stands in for it here.
+    monkeypatch.setattr(svc, "_skill_files", lambda clone, name: [])
 
-    info = svc._parse_skill_info("legacy-skill", skill_md)
+    info = svc._parse_skill_info(None, "legacy-skill", skill_md)
     assert info["name"] == "legacy-skill"
     assert info["user_invocable"] is True
     assert info["description"] == "Runs the legacy thing."   # first-paragraph fallback

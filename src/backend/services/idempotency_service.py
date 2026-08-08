@@ -61,6 +61,28 @@ def make_agent_scope(agent_name: str) -> str:
     return f"agent:{agent_name}"
 
 
+def make_inline_auth_scope(agent_name: str, email: str) -> str:
+    """Scope an MCP inline-auth (#848) chat per (agent, verified email).
+
+    NOT ``make_agent_scope``. Every other ``make_agent_scope`` caller reaches
+    the boundary through an already-authenticated per-user dependency, so the
+    caller's identity is implicit and agent scope is sufficient. Inline auth is
+    the exception: the identity arrives in the request BODY, and the key is
+    caller-supplied — so an agent-only scope makes the (scope, key) tuple
+    identical for two different verified users of the same shared agent. The
+    second caller then replays the first caller's stored response snapshot and
+    execution_id: a cross-user disclosure, reachable by collision as well as by
+    malice (MCP clients derive deterministic keys from call args, so two users
+    asking the same agent the same question collide by design).
+
+    Folding the verified email in makes the tuple per-identity, which is what
+    every other boundary gets for free from its auth dependency. Compare
+    ``derive_payment_key`` (#1018), which solves the same problem for x402 by
+    binding the payer's signature into the key.
+    """
+    return f"agent:{agent_name}:mcp-inline:{(email or '').strip().lower()}"
+
+
 def make_webhook_scope(token: str) -> str:
     """Scope the webhook trigger boundary per webhook token."""
     return f"webhook:{token}"
@@ -436,6 +458,19 @@ def upgrade_snapshot(scope: Optional[str], key: Optional[str], snapshot: Optiona
         db.idempotency_complete(scope, key, None, snapshot)
     except Exception as e:
         logger.warning("Idempotency upgrade_snapshot failed (scope=%s): %s", scope, e)
+
+
+def discard_stale_replay(scope: Optional[str], key: Optional[str]) -> None:
+    """Drop a completed replay row whose recorded resource no longer exists
+    (#2040 review F3) so the caller can run a genuinely fresh attempt.
+    Fail-open — a failed discard just means the stale replay survives until
+    the 24h purge."""
+    if not scope or not key:
+        return
+    try:
+        db.idempotency_discard_completed(scope, key)
+    except Exception as e:
+        logger.warning("Idempotency discard_stale_replay failed (scope=%s): %s", scope, e)
 
 
 def fail(decision: IdempotencyDecision) -> None:
