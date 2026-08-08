@@ -395,7 +395,23 @@ class SkillsLibrarySyncService:
                 target_type="skills_library",
                 target_id=result.get("commit_sha") or "unknown",
                 details={
-                    "action": result.get("action"),
+                    # ent#237: a sweep spans N sources, so there is no single
+                    # `action` to record. The per-source breakdown is the honest
+                    # form — a lone top-level action would name one arbitrary
+                    # source's outcome and read as the whole library's.
+                    "sources": [
+                        {
+                            "source_id": s.get("source_id"),
+                            "name": s.get("name"),
+                            "action": s.get("action"),
+                            "success": bool(s.get("success")),
+                            "commit_sha": s.get("commit_sha"),
+                            "commit_changed": bool(s.get("commit_changed")),
+                        }
+                        for s in (result.get("sources") or [])
+                    ],
+                    "synced": result.get("synced"),
+                    "failed": result.get("failed"),
                     "commit_sha": result.get("commit_sha"),
                     "commit_changed": bool(result.get("commit_changed")),
                     "skill_count": result.get("skill_count"),

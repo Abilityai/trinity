@@ -75,13 +75,32 @@ def _format_pat_line(pat: str, key: str = "GITHUB_PAT") -> str:
 
 def _patch_env_github_pat(env_content: str, new_pat: str) -> str:
     """Return env_content with GITHUB_PAT (and the #1574 gh mirrors) set to
-    ``new_pat`` — each key replaced in place if present, else appended."""
+    ``new_pat`` — EVERY occurrence replaced in place if present, else appended.
+
+    Every occurrence, not the first (#2016). `count=1` left a second
+    ``GITHUB_PAT=`` line untouched, and the agent's own ``.env`` reader is
+    **last-wins** — so on a file carrying a duplicate the rotation wrote the new
+    token to line 1, the revoked token survived below it, and the agent went on
+    authenticating with the revoked one while the rotation reported the agent as
+    ``updated``. That is the same silent-success failure #1967 exists to close,
+    reached by a different route.
+
+    The duplicate is not created here (this function appends only when the key
+    is absent). It arrives from the paths that can also write the file: an agent
+    editing its own ``.env`` (#1999), an operator appending over SSH or
+    ``docker exec``, or a restored/hand-merged file.
+
+    Duplicates are levelled, not de-duplicated. After this every copy carries
+    the same value, so last-wins reads the right token whichever line it lands
+    on, and the file keeps whatever structure the operator gave it — removing
+    lines would be a second behaviour change for no correctness gain.
+    """
     out = env_content
     for key in _TOKEN_ENV_KEYS:
         line_re = re.compile(rf'(?m)^[ \t]*{key}=.*$')
         new_line = _format_pat_line(new_pat, key)
         if line_re.search(out):
-            out = line_re.sub(new_line, out, count=1)
+            out = line_re.sub(new_line, out)
         else:
             suffix = "" if (out == "" or out.endswith("\n")) else "\n"
             out = f"{out}{suffix}{new_line}\n"

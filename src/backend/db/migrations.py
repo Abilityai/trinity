@@ -2581,6 +2581,58 @@ def _migrate_agent_reminders_table(cursor, conn):
     conn.commit()
 
 
+def _migrate_skill_sources_table(cursor, conn):
+    """Create skill_sources + add agent_skills.source_id (ent#237).
+
+    Multi-source skills library: one row per git repo the platform syncs
+    skills from, replacing the single `skills_library_url` system setting.
+    Mirrored by Alembic 0034_skill_sources and the DDL in `db/schema.py` /
+    MetaData in `db/tables.py`. Kept consistent across all four.
+
+    The pre-existing `skills_library_url` row is NOT read here — adopting it
+    as a source is a filesystem operation too (the legacy clone at
+    /data/skills-library/ has to move into a per-source subdir), so it lives
+    in `skill_service` where both halves can succeed or fail together. A
+    migration that moved only the DB half would leave the clone orphaned.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS skill_sources (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            ref TEXT NOT NULL DEFAULT 'main',
+            ref_type TEXT NOT NULL DEFAULT 'branch',
+            is_default INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            priority INTEGER NOT NULL DEFAULT 100,
+            last_sync_at TEXT,
+            last_sync_status TEXT,
+            last_commit_sha TEXT,
+            last_error TEXT,
+            created_by TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(url, ref)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skill_sources_resolution "
+        "ON skill_sources(priority, created_at) WHERE enabled = 1"
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_sources_one_default "
+        "ON skill_sources(is_default) WHERE is_default = 1"
+    )
+    # Nullable with no default: NULL means "assigned before multi-source, or
+    # the source row was removed" and resolves by precedence like any other
+    # bare name. Backfilling it would be a guess.
+    _safe_add_column(
+        cursor, "agent_skills", "source_id",
+        "ALTER TABLE agent_skills ADD COLUMN source_id TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_agent_loops_failure_policy(cursor, conn):
     """Add per-loop failure-policy columns to agent_loops (#1167).
 
@@ -3350,4 +3402,5 @@ MIGRATIONS = [
     ("channel_report_back_columns", _migrate_channel_report_back_columns),
     ("telegram_progress_indicator", _migrate_telegram_progress_indicator),
     ("agent_evaluations_table", _migrate_agent_evaluations_table),
+    ("skill_sources_table", _migrate_skill_sources_table),
 ]

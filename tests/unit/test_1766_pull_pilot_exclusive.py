@@ -181,13 +181,32 @@ class TestPullOwnsDispatch:
 
         assert pull_owns_dispatch("bob", "schedule") is False
 
-    @pytest.mark.parametrize(
-        "trigger", ["schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder"]
-    )
-    def test_pilot_owns_every_autonomous_trigger(self, pilot, trigger):
+    @pytest.mark.parametrize("trigger", ["agent", "event"])
+    def test_pilot_owns_the_autonomous_triggers_dispatch_can_deliver(self, pilot, trigger):
+        """Narrowed from "every autonomous trigger" by #2048.
+
+        This case used to parametrize all seven of ``_AUTONOMOUS_TRIGGERS`` and
+        assert True for each — encoding reach the system never had. Only
+        ``POST /task`` dispatches with ``overflow_policy="queue_persistent"``,
+        which is the sole path on which ``capacity_manager`` consults this
+        predicate at all, and that route can only emit ``agent`` / ``event`` from
+        the autonomous set. The old assertion passed only because it called the
+        predicate directly, outside the context that constrains it. See
+        ``test_2048_pull_pilot_reach.py``.
+        """
         from services.agent_service.pull_mode import pull_owns_dispatch
 
         assert pull_owns_dispatch("alice", trigger) is True
+
+    @pytest.mark.parametrize(
+        "trigger", ["schedule", "webhook", "loop", "fan_out", "reminder"]
+    )
+    def test_pilot_does_not_own_a_trigger_dispatch_cannot_deliver(self, pilot, trigger):
+        """The #2048 correction as a positive assertion: declaring a trigger
+        autonomous gives the durable queue no way to receive it."""
+        from services.agent_service.pull_mode import pull_owns_dispatch
+
+        assert pull_owns_dispatch("alice", trigger) is False
 
     @pytest.mark.parametrize("trigger", ["manual", "user", "chat", "voip", "voice", None])
     def test_pilot_does_not_own_interactive_triggers(self, pilot, trigger):
@@ -220,7 +239,15 @@ class TestProducerGate:
     def test_pilot_autonomous_work_bypasses_admission(
         self, capacity, slot_service, backlog_service, pilot
     ):
-        """The core fix: a free slot no longer means a push for a pilot."""
+        """The core fix: a free slot no longer means a push for a pilot.
+
+        Driven with ``agent`` rather than the ``schedule`` this originally used
+        (#2048). A ``queue_persistent`` acquire carrying ``schedule`` is a
+        combination production cannot produce — cron dispatches through the
+        ``"reject"`` producer — so the old pairing asserted the fix over a shape
+        that does not exist while leaving the shape that does (agent-to-agent
+        ``chat_with_agent``, the only traffic a pilot actually pulls) uncovered.
+        """
         slot_service.acquire_slot = AsyncMock(return_value=True)  # slot IS free
         result = asyncio.run(
             capacity.acquire(
@@ -228,7 +255,7 @@ class TestProducerGate:
                 execution_id="exec-1",
                 max_concurrent=3,
                 overflow_policy="queue_persistent",
-                overflow_payload=_payload("schedule"),
+                overflow_payload=_payload("agent"),
             )
         )
         assert result.state == "queued_persistent"
