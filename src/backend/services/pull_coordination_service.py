@@ -73,11 +73,17 @@ def _compose_pull_system_prompt(
     caller_prompt: Optional[str],
     *,
     execution_id: Optional[str],
+    model: Optional[str] = None,
 ) -> Optional[str]:
     """Compose platform prompt + execution context + caller override for a
     pull-claimed turn (#1629). Fail-open: on ANY composition error the turn runs
     with the caller prompt only (parity with the pre-#1629 pull path) + a WARN —
-    a prompt failure never blocks dispatch."""
+    a prompt failure never blocks dispatch.
+
+    ``model`` (ent#243) selects the prompt tier. It is passed explicitly rather
+    than left to default because this context previously omitted the field
+    entirely — not ``None``-valued, absent — so every pull-claimed turn would
+    have resolved VERBOSE forever with nothing to indicate why."""
     runtime = _resolve_agent_runtime(agent_name)
     try:
         exec_ctx = ExecutionContext(
@@ -85,6 +91,7 @@ def _compose_pull_system_prompt(
             mode=ExecutionContext.derive_mode(triggered_by),
             triggered_by=triggered_by,
             execution_id=execution_id,
+            model=model,
         )
         return compose_system_prompt(
             execution_context=exec_ctx,
@@ -215,11 +222,14 @@ def _build_claim_response(row: Dict[str, Any]) -> Dict[str, Any]:
     # worker reads (`execute_headless(system_prompt=overrides.get("system_prompt"))`).
     # Fold in any caller override; fail-open leaves the caller prompt (or None).
     overrides: Dict[str, Any] = dict(meta.get("task_overrides") or {})
+    # ent#243: a caller override is what the worker will actually run, so it wins
+    # over the row's recorded model_used; either may be absent → VERBOSE.
     overrides["system_prompt"] = _compose_pull_system_prompt(
         row.get("agent_name"),
         row.get("triggered_by"),
         overrides.get("system_prompt"),
         execution_id=row["id"],
+        model=overrides.get("model") or row.get("model_used"),
     )
     payload["task_overrides"] = overrides
 

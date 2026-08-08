@@ -111,14 +111,51 @@ jobs:
         # || true: the existing 34 failures + 17 errors documented in #660
         # produce a non-zero pytest exit. The diff job (`diff` below) is
         # what fails this workflow on regression.
+        #
+        # --timeout (#2019): without it a single stalled test consumed the whole
+        # 25-minute job budget, GitHub cancelled the job, the upload step below
+        # was skipped, and the failure read as `The operation was canceled` on
+        # whichever PR was running. Four times in one day across all three seeds
+        # AND both sides — the base side being plain `dev`, i.e. nothing to do
+        # with the PR it reddened.
+        #
+        # 300s, not the 60s this issue first proposed. Measured from a green
+        # run's JUnit rather than guessed: the slowest legitimate unit tests are
+        # test_start_agent_skip_inject's two retry cases at ~60.6s (they exercise
+        # three real connection retries), then 39.9s and 26.6s in
+        # test_1083_result_callback. A 60s cap would have failed those two on
+        # every PR. The cap also has to survive the runner variance that caused
+        # this issue in the first place — a shard ran 2.5x slower than its
+        # siblings — so a 60.6s test can legitimately reach ~150s. 300s clears
+        # that with margin and still turns a hang into a named failure: the
+        # observed stalls were minutes long and the budget fits ~5 of them.
+        #
+        # --timeout-method=signal (the default, stated explicitly), NOT thread —
+        # also a correction. `thread` dumps stacks and then kills the whole
+        # process, so the run aborts, the remaining tests never execute and the
+        # JUnit is incomplete: the diff job still fails, just with a named
+        # culprit in the log. `signal` raises inside the test, the suite
+        # CONTINUES, and the complete JUnit lets the diff job report the hang as
+        # an ordinary new failure by name. The logs support that shape — #1952
+        # kept making progress after its 3m37s gap, so these are stalls that
+        # release, not one permanent hang. `signal` cannot interrupt a C call
+        # holding the GIL; if that ever turns out to be the case here, the
+        # symptom is another anonymous cancel and `thread` is the fallback.
         run: |
           cd tests
           python -m pytest unit/ -m "not slow" \
+            --timeout=300 --timeout-method=signal \
             -p randomly --randomly-seed=${{ matrix.seed }} \
             --junit-xml="$GITHUB_WORKSPACE/junit-${{ matrix.side }}-${{ matrix.seed }}.xml" \
             --tb=no -q || true
 
       - name: Upload JUnit XML
+        # always(): the timeout above should make an abnormal end unreachable,
+        # but the diff job is deliberately fail-closed on a missing artifact
+        # (correctly — a silent half-comparison is worse). Uploading whatever
+        # exists keeps one stalled shard from turning into a second, differently
+        # worded failure on the diff job (#2019).
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: junit-${{ matrix.side }}-${{ matrix.seed }}
