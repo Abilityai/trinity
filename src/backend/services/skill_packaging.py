@@ -216,10 +216,13 @@ def _is_excluded(rel_parts: Tuple[str, ...]) -> bool:
     return basename.endswith(_EXCLUDE_SUFFIXES)
 
 
+DEST_SKILLS_ROOT = ".claude/skills"
+
+
 def filter_skill_archive(
-    archive_bytes: bytes, skill_name: str
+    archive_bytes: bytes, skill_name: str, source_root: str = DEST_SKILLS_ROOT
 ) -> Tuple[List[Tuple[str, bytes, int]], List[str], int]:
-    """Vet ``git archive HEAD -- .claude/skills/<name>`` output.
+    """Vet ``git archive HEAD -- <source_root>/<name>`` output.
 
     Returns ``(members, warnings, total_bytes)`` where members are
     ``(arcname, content, mode)`` for REGULAR files only. Symlink/dir/device
@@ -227,8 +230,25 @@ def filter_skill_archive(
     an out-of-archive SYMTYPE member would raise KeyError inside the
     agent-server ``restore_from_tar`` mid-extraction, and a followed symlink
     at build time is an exfiltration vector, so links never ship at all.
+
+    ent#332: this is the ONE point where the source repo's layout becomes the
+    agent-side destination — every accepted member's arcname is REWRITTEN from
+    ``<source_root>/<name>/…`` to ``.claude/skills/<name>/…``, so everything
+    downstream (manifest, prune confinement, chmod/finalize paths, restore
+    accounting, the legacy-fallback SKILL.md lookup) stays destination-
+    canonical with no layout awareness. For the legacy layout the rewrite is
+    an identity. ``source_root`` is validated defensively even though the only
+    producer (`SkillSourceClone.skills_rel_root`) pre-validates: a traversal-
+    shaped root reaching prefix math is a programming error worth failing loud.
     """
-    prefix = f".claude/skills/{skill_name}/"
+    if (
+        not isinstance(source_root, str)
+        or source_root.startswith(("/", "-"))
+        or any(seg in ("", ".", "..") for seg in source_root.split("/"))
+    ):
+        raise ValueError(f"unsafe source_root: {source_root!r}")
+    src_prefix = f"{source_root}/{skill_name}/"
+    dest_prefix = f"{DEST_SKILLS_ROOT}/{skill_name}/"
     members: List[Tuple[str, bytes, int]] = []
     warnings: List[str] = []
     total = 0
@@ -237,10 +257,10 @@ def filter_skill_archive(
             name = member.name
             if member.isdir():
                 continue
-            if not name.startswith(prefix) or "/../" in f"/{name}/":
+            if not name.startswith(src_prefix) or "/../" in f"/{name}/":
                 warnings.append(f"restore_skipped:{name}")
                 continue
-            rel = name[len(prefix):]
+            rel = name[len(src_prefix):]
             if not rel:
                 continue
             parts = tuple(rel.split("/"))
@@ -259,7 +279,7 @@ def filter_skill_archive(
                 continue
             content = extracted.read()
             total += len(content)
-            members.append((name, content, member.mode))
+            members.append((dest_prefix + rel, content, member.mode))
     return members, warnings, total
 
 

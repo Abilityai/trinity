@@ -231,7 +231,7 @@ async updateSetting(key, value) {
 **Status Endpoint (lines 49-57)**
 
 ```python
-@router.get("/skills/library/status")
+@router.get("/skills/library/status", response_model=SkillsLibraryStatus)
 async def get_library_status(current_user: User = Depends(get_current_user)):
     """
     Get the current status of the skills library.
@@ -240,6 +240,17 @@ async def get_library_status(current_user: User = Depends(get_current_user)):
     """
     return skill_service.get_library_status()
 ```
+
+> **`response_model` here is a security boundary, not documentation (ent#334).**
+> The route stays open to every authenticated caller — the per-agent Skills tab
+> and the MCP `get_skills_library_status` tool both read it — but the same
+> service dict is *also* served by `GET /skills/sources`, which is
+> `require_admin` + `reject_agent_principal` precisely because source repo URLs
+> are sensitive. Returning the dict raw handed the admin-gated value to the
+> callers that gate excludes. `SkillsLibraryStatus` is an allow-list: the flat
+> `url`, the per-source `url`, and per-source `last_error` (git failure text
+> echoes the PAT-spliced clone URL — ent#347) are withheld; everything the
+> frontend actually derives state from is kept. Widening it re-opens the leak.
 
 **Sync Endpoint (lines 73-87)**
 
@@ -387,6 +398,14 @@ def _git_pull(self, branch: str) -> Dict[str, Any]:
 ```
 
 **Get Library Status (lines 271-294)**
+
+> **Stale snippet — pre-ent#237.** The block below shows the single-library
+> builder (one `url`, `self.library_path`). ent#237 replaced it with the
+> multi-source version that iterates `skill_sources` and emits a `sources[]`
+> array, and ent#334 wrapped both URL emitters in `strip_url_credentials`.
+> Read `skill_service.get_library_status()` for current truth; this is kept
+> only for the shape of the pre-multi-source flow. Rewriting it belongs with
+> the ent#237 doc sync, not with a security fix.
 
 ```python
 def get_library_status(self) -> Dict[str, Any]:

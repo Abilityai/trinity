@@ -19,15 +19,12 @@
             <template v-else>Configured — never synced</template>
             <span v-if="store.status.last_sync"> · last synced {{ new Date(store.status.last_sync).toLocaleString() }}</span>
           </p>
-          <!-- Repo URL: admin-only (source URLs are admin-sensitive — ent#237
-               classes them so), userinfo stripped (the clone path accepts and
-               stores https://user:token@host/... verbatim), labeled as the
-               PRIMARY source (post-#1901 the flat url/branch are just the
-               first source in resolution order) and hidden entirely once a
-               multi-source status reports more than one source. -->
-          <p v-if="isAdmin && primarySourceUrl" class="text-xs break-all">
-            Primary source: <span class="font-mono">{{ primarySourceUrl }}</span>
-          </p>
+          <!-- ent#334: the repo URL is gone from this payload. It was
+               admin-only in the template, but the template is not the
+               boundary — the response carried it to every authenticated
+               caller and to agent-scoped MCP keys. Per-source URLs now live
+               only on the admin-gated Settings sources panel, which reads
+               `GET /skills/sources`. -->
         </div>
       </div>
       <button
@@ -132,7 +129,7 @@ import { computed, onMounted } from 'vue'
 import { useSkillsLibraryStore } from '../stores/skillsLibrary'
 import { useRole } from '../composables/useRole'
 import SkillContractChips from './skills/SkillContractChips.vue'
-import { deps, stripUserinfo } from './skills/contract'
+import { deps } from './skills/contract'
 
 const store = useSkillsLibraryStore()
 const { isAdmin } = useRole()
@@ -141,20 +138,9 @@ const shortSha = computed(() =>
   store.status?.commit_sha ? String(store.status.commit_sha).slice(0, 7) : ''
 )
 
-/**
- * The flat `url` is the PRIMARY source post-#1901 (first in resolution
- * order) — hide the single-source presentation once status reports multiple
- * sources, and strip any embedded userinfo (user:token@host) before display
- * via the shared, adversarially-tested `stripUserinfo` in
- * `components/skills/contract.js`: the clone path accepts credentialed URLs
- * and stores them verbatim.
- */
-const primarySourceUrl = computed(() => {
-  const st = store.status
-  if (!st?.url) return null
-  if (Array.isArray(st.sources) && st.sources.length > 1) return null
-  return stripUserinfo(st.url)
-})
+// ent#334 removed `primarySourceUrl` — the flat `url` no longer ships in this
+// payload, so nothing here renders a URL. `stripUserinfo` moved to its one
+// remaining consumer, SkillSourcesPanel (the admin sources list).
 
 async function onSync() {
   await store.sync()
