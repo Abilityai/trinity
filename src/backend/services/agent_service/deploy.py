@@ -240,7 +240,8 @@ def _release_deploy_lock(lock: Optional[_DeployLock]) -> None:
     if lock is None or lock.client is None:
         return
     try:
-        if lock.client.get(lock.key) == lock.token:
+        from redis_breaker_util import lock_token_matches  # #1919 shared predicate
+        if lock_token_matches(lock.client.get(lock.key), lock.token):
             lock.client.delete(lock.key)
     except Exception:  # pragma: no cover — defensive
         logger.debug("deploy lock release failed for %s", lock.key, exc_info=True)
@@ -313,6 +314,11 @@ def _load_manifest(root: Path) -> Optional[List[DeployManifestEntry]]:
         p = entry.path
         if not p or len(p) > _MANIFEST_MAX_PATH_CHARS:
             raise _manifest_invalid("empty or over-long path")
+        if "\x00" in p:
+            # A NUL would raise ValueError inside os.path.lexists during
+            # verification — escaping this parse's named 400 into the
+            # catch-all 500. Refuse it here, where every other bad shape is.
+            raise _manifest_invalid("path contains a NUL byte")
         if p.startswith("/") or ".." in p.split("/"):
             raise _manifest_invalid(f"absolute or traversal path not allowed: {p}")
         if p == MANIFEST_FILE_NAME:
@@ -1032,7 +1038,10 @@ async def deploy_local_agent_logic(
             )
 
         manifest_entries = _load_manifest(extract_root)
-        if bool(getattr(body, "require_manifest", False)) and manifest_entries is None:
+        # Strict attribute access: DeployLocalRequest owns the field (default
+        # False) and the router is the only production caller — a duck-typed
+        # body missing it should fail loudly, not silently un-require.
+        if bool(body.require_manifest) and manifest_entries is None:
             raise HTTPException(
                 status_code=400,
                 detail={
@@ -1341,6 +1350,16 @@ async def deploy_local_agent_logic(
             # pre-existing volume (it would be another agent's leftover data).
             adopt_existing_workspace=True,
         )
+
+        # #2060 S6: the compensation window closes HERE, not at the return.
+        # Once create_agent_fn has returned, the NEW version is the live one —
+        # a failure past this point (realistically only response construction;
+        # the compat gate below is fully fail-open) must NOT restart the
+        # previous version alongside it, or one base name runs two live
+        # versions (the F5 double-run hazard: both fire schedules). The
+        # restart-on-create-raise path is unaffected: crud rollback + ent#313
+        # reclaim remove the failed container before the raise reaches us.
+        previous_stopped_name = None
 
         # 10a. Post-deploy compatibility evidence (#2060 / #668) — STATIC
         # only, fail-open: absent evidence yields None + a warning, never a

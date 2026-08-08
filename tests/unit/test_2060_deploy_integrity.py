@@ -150,11 +150,14 @@ def _agent_status(name: str) -> AgentStatus:
     )
 
 
-def _body(archive: str, name: str, credentials=None, require_manifest=None):
-    ns = SimpleNamespace(archive=archive, name=name, credentials=credentials)
-    if require_manifest is not None:
-        ns.require_manifest = require_manifest
-    return ns
+def _body(archive: str, name: str, credentials=None, require_manifest=False):
+    # Always carries `require_manifest`, mirroring DeployLocalRequest's field
+    # (default False) — deploy.py reads it strictly (`body.require_manifest`),
+    # so a body without the attribute fails loudly by design.
+    return SimpleNamespace(
+        archive=archive, name=name, credentials=credentials,
+        require_manifest=bool(require_manifest),
+    )
 
 
 async def _deploy(body, user, create_fn=None):
@@ -342,8 +345,12 @@ class TestManifestRequiredAndInvalid:
             [{"path": "a.md"}],
             # lists itself
             [{"path": MANIFEST_NAME, "sha256": "0" * 64}],
+            # NUL byte — would raise ValueError inside os.path.lexists during
+            # verification, escaping the named 400 into the catch-all 500
+            [{"path": "a\x00b.md", "sha256": "0" * 64}],
         ],
-        ids=["dup", "traversal", "absolute", "both-kinds", "no-kind", "self-listed"],
+        ids=["dup", "traversal", "absolute", "both-kinds", "no-kind",
+             "self-listed", "nul-byte"],
     )
     async def test_manifest_invalid_shapes_refused(
         self, flow_stubs, templates_dir, user, entries
@@ -713,6 +720,36 @@ class TestCompensation:
             await _deploy(_body(archive, "prepfail"), user)
 
         assert cleaned == ["agent-prepfail-workspace"]
+
+    @pytest.mark.asyncio
+    async def test_late_failure_after_create_does_not_restart_previous(
+        self, flow_stubs, templates_dir, user, monkeypatch
+    ):
+        """The compensation window closes when create_agent_fn RETURNS: a
+        failure past that point (e.g. response construction) must not restart
+        the previous version alongside the now-live new one — one base name
+        running two live versions is the F5 double-run hazard."""
+        stopped, started = {}, {}
+        _previous_version_stubs(monkeypatch, stopped, started)
+
+        async def create_then_late_failure(config, *a, **kw):
+            return _agent_status(config.name)
+
+        # Make the step AFTER a successful create raise: patch the response
+        # model so construction fails once the agent is already live.
+        class _Boom:
+            def __init__(self, *a, **kw):
+                raise RuntimeError("late response failure")
+
+        monkeypatch.setattr(deploy_mod, "DeployLocalResponse", _Boom, raising=True)
+
+        archive = _build_archive("lateboom")
+        with pytest.raises(HTTPException) as ei:
+            await _deploy(_body(archive, "lateboom"), user, create_then_late_failure)
+
+        assert ei.value.status_code == 500
+        assert stopped.get("agent-v1") is True
+        assert started == {}  # new version is live — previous stays stopped
 
     @pytest.mark.asyncio
     async def test_success_does_not_restart_previous(
