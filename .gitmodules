@@ -5,7 +5,15 @@
 	# skip it so a fresh OSS clone needs no credentials (#1443). Maintainers
 	# opt in — see CLAUDE.md → "Development Skills".
 	update = none
-	fetchRecurseSubmodules = true
+	# `on-demand` (not `true`): `true` unconditionally tries to recurse-fetch
+	# this submodule on every `git fetch`/`git pull`, even when it was never
+	# checked out — which fails with "Could not access submodule '.claude'"
+	# for anyone (or any self-hosting agent) without trinity-dev credentials.
+	# `on-demand` still auto-updates it for maintainers who HAVE it checked
+	# out (a submodule-bump commit triggers the fetch), matching the
+	# documented "handles git pull automatically" behavior in CLAUDE.md —
+	# it just stops trying for everyone who doesn't have it initialized.
+	fetchRecurseSubmodules = on-demand
 [submodule "src/backend/enterprise"]
 	path = src/backend/enterprise
 	url = git@github.com:Abilityai/trinity-enterprise.git

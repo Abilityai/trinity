@@ -11,7 +11,7 @@ table handle in ``db/tables.py``; the engine is resolved via ``db/engine.py``.
 """
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from sqlalchemy import select, insert, delete
 from sqlalchemy.exc import IntegrityError
@@ -33,7 +33,9 @@ class SkillsOperations:
             agent_name=row["agent_name"],
             skill_name=row["skill_name"],
             assigned_by=row["assigned_by"],
-            assigned_at=datetime.fromisoformat(row["assigned_at"])
+            assigned_at=datetime.fromisoformat(row["assigned_at"]),
+            # ent#237: None on rows written before multi-source.
+            source_id=row["source_id"],
         )
 
     # =========================================================================
@@ -57,6 +59,7 @@ class SkillsOperations:
                 agent_skills.c.skill_name,
                 agent_skills.c.assigned_by,
                 agent_skills.c.assigned_at,
+                agent_skills.c.source_id,
             )
             .where(agent_skills.c.agent_name == agent_name)
             .order_by(agent_skills.c.skill_name)
@@ -86,7 +89,8 @@ class SkillsOperations:
         self,
         agent_name: str,
         skill_name: str,
-        assigned_by: str
+        assigned_by: str,
+        source_id: Optional[str] = None,
     ) -> Optional[AgentSkill]:
         """
         Assign a skill to an agent.
@@ -95,6 +99,11 @@ class SkillsOperations:
             agent_name: Name of the agent
             skill_name: Name of the skill
             assigned_by: Username of who is assigning
+            source_id: ent#237 — which skill source the name resolved to at
+                assignment time. Recorded, not keyed: the UNIQUE stays
+                (agent_name, skill_name) because the agent-side identity is the
+                bare directory `.claude/skills/<name>/` and two sources' copies
+                cannot coexist there.
 
         Returns:
             AgentSkill object if created, None if already exists
@@ -106,6 +115,7 @@ class SkillsOperations:
             skill_name=skill_name,
             assigned_by=assigned_by,
             assigned_at=now,
+            source_id=source_id,
         )
         try:
             with get_engine().begin() as conn:
@@ -117,7 +127,8 @@ class SkillsOperations:
                 agent_name=agent_name,
                 skill_name=skill_name,
                 assigned_by=assigned_by,
-                assigned_at=datetime.fromisoformat(now)
+                assigned_at=datetime.fromisoformat(now),
+                source_id=source_id,
             )
         except IntegrityError:
             # Skill already assigned
@@ -146,7 +157,8 @@ class SkillsOperations:
         self,
         agent_name: str,
         skill_names: List[str],
-        assigned_by: str
+        assigned_by: str,
+        source_ids: Optional[Dict[str, str]] = None,
     ) -> int:
         """
         Set skills for an agent (full replacement).
@@ -157,11 +169,16 @@ class SkillsOperations:
             agent_name: Name of the agent
             skill_names: List of skill names to assign
             assigned_by: Username of who is assigning
+            source_ids: ent#237 — optional {skill_name: source_id} map recording
+                which source each name resolved to. Missing entries store NULL
+                rather than guessing, so an unrecorded origin is visibly unknown
+                instead of falsely attributed.
 
         Returns:
             Number of skills assigned
         """
         now = utc_now_iso()
+        source_ids = source_ids or {}
 
         with get_engine().begin() as conn:
             # Remove all existing skills for this agent
@@ -179,6 +196,7 @@ class SkillsOperations:
                                 skill_name=skill_name,
                                 assigned_by=assigned_by,
                                 assigned_at=now,
+                                source_id=source_ids.get(skill_name),
                             )
                         )
                 except IntegrityError:
