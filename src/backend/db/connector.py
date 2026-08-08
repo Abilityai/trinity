@@ -60,6 +60,21 @@ class ConnectorOperations:
             "updated_at": row["updated_at"],
         }
 
+    def list_enabled_agents(self) -> List[str]:
+        """Agent names whose connector config is enabled (#848).
+
+        The candidate pool for MCP inline email auth: only a connector-enabled
+        agent is reachable from an MCP client at all, so resolving what a
+        verified email may reach starts here and is then filtered per-agent by
+        ``email_has_agent_access``. Enumerating this (small) set rather than the
+        whole fleet keeps the resolve bounded regardless of fleet size.
+        """
+        stmt = select(enterprise_connectors.c.agent_name).where(
+            enterprise_connectors.c.enabled == 1
+        ).order_by(enterprise_connectors.c.agent_name)
+        with get_engine().connect() as conn:
+            return [row[0] for row in conn.execute(stmt)]
+
     def upsert_config(
         self,
         agent_name: str,

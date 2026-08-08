@@ -38,6 +38,13 @@ ride the queued-row metadata `_collect_executions` captures (both queued-only, s
 - G-04: no raw credentials in `backlog_metadata` (regex secret-prefix scan; the
   check reports the matched pattern NAME only, never the secret)
 
+Phase 5 (#1813) adds the harness's first **self**-check — the only invariant
+whose violation means "the observer is blind" rather than "the observed system
+is broken", hence its own `H-` id family:
+
+- H-01: collector blindness (SQL roster empty/unreadable while Docker or Redis
+  proves the fleet is alive; confirmed after a minimum elapsed interval)
+
 Subsequent phases register additional invariants here without changes to
 the snapshot collector or the run-cycle endpoint.
 """
@@ -56,6 +63,7 @@ from .e05_dispatched_rows_have_session import check as e05_check
 from .e06_no_overdue_next_run import check as e06_check
 from .g03_clock_sanity import check as g03_check
 from .g04_no_creds_in_backlog_metadata import check as g04_check
+from .h01_collector_blindness import check as h01_check
 from .l03_delete_cascades import check as l03_check
 from .b01_queue_status_coherence import check as b01_check
 from .b02_no_queued_without_slots_full import check as b02_check
@@ -76,6 +84,7 @@ INVARIANTS: Dict[str, Callable[[Snapshot], List[ViolationReport]]] = {
     "E-06": e06_check,
     "G-03": g03_check,
     "G-04": g04_check,
+    "H-01": h01_check,
     "L-03": l03_check,
     "B-01": b01_check,
     "B-02": b02_check,

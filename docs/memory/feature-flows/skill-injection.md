@@ -74,14 +74,21 @@ the fleet on the next restart — keeping files is the recoverable direction
 ## Architecture
 
 ```
-/data/skills-library (git clone)
-        │  git ls-tree HEAD .claude/skills/        → per-skill TREE SHA (= version)
-        │  git archive HEAD -- .claude/skills/<n>  → atomic tar source
+/data/skills-library/<source_id> (per-source git clone, ent#237)
+        │  skills_rel_root(): catalog.yaml skills_root: → skills/ probe →
+        │    .claude/skills/ fallback (ent#332 — per source, every invalid
+        │    tier falls through; dual-layout keeps legacy + layout_conflict)
+        │  git ls-tree HEAD -- <root>/         → per-skill TREE SHA (= version,
+        │    layout-independent: a restructure with same content keeps versions)
+        │  git archive HEAD -- <root>/<n>      → atomic tar source
         ▼
 services/skill_packaging.py (pure)
-        │  filter_skill_archive: REGTYPE only (symlinks NEVER ship — build-side
-        │    exfiltration guard + agent-side KeyError guard), litter + protected
-        │    basenames dropped w/ warnings, caps enforced
+        │  filter_skill_archive(source_root=…): REGTYPE only (symlinks NEVER
+        │    ship — build-side exfiltration guard + agent-side KeyError guard),
+        │    litter + protected basenames dropped w/ warnings, caps enforced;
+        │    ent#332: arcnames REWRITTEN <root>/<n>/… → .claude/skills/<n>/…
+        │    (identity for legacy) — the ONE point source layout becomes the
+        │    agent destination, so everything below stays destination-canonical
         │  build_injection_tar: uncompressed; generated .trinity-skill.json
         │    {version, commit, manifest, injected_at} appended LAST (partial-
         │    extraction ordering guard)
@@ -225,6 +232,7 @@ unmanaged-dir guard, caps, dep warnings, lock contention, CLAUDE.md rebuild).
 
 | Date | Change |
 |------|--------|
+| 2026-08-04 | **trinity-enterprise#332 per-source skills root**: source layout resolvable per source (`catalog.yaml` `skills_root:` → evidence-gated `skills/` probe → `.claude/skills/` fallback; segment-wise validation, ent#314 hardened parse, lstat/containment guards, dual-layout keeps legacy + `layout_conflict`); `filter_skill_archive(source_root=…)` rewrites arcnames to the canonical agent-side destination so manifests/prune/removal stay destination-canonical with zero migration. Requirements §21.1.4. |
 | 2026-07-29 | **trinity-enterprise#236 lifecycle automation**: removal-on-unassign (`remove_skills` + `compute_removal`, manifest-driven, same inject lock), start-path reconciliation with a blast-radius refusal, and fleet-wide re-inject after a commit-changing library sync. See also [skills-library-sync.md](skills-library-sync.md) for the scheduled sync. |
 | 2026-07-19 | **trinity-enterprise#183 full-directory packages**: git-archive tar source, agent-server restore transport, tree-SHA versioning + `.trinity-skill.json`, manifest prune, frontmatter contract + declaration-only dep check, honest per-skill warnings, gitignore/untrack guard, repair path, injection lock. Replaces the single-file `write_file`-per-skill design. |
 | 2026-01-25 | CLAUDE.md "Platform Skills" section; initial documentation |

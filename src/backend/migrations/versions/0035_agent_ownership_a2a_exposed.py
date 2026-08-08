@@ -21,14 +21,14 @@ the *filenames* from colliding as well, so the second rebase is a one-line edit
 instead of a rename plus an edit.
 
 Revision ID: 0035_agent_ownership_a2a_exposed
-Revises: 0032_telegram_progress_indicator
+Revises: 0034_skill_sources
 Create Date: 2026-07-15
 """
 from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "0035_agent_ownership_a2a_exposed"
-down_revision = "0033_agent_evaluations"
+down_revision = "0034_skill_sources"
 branch_labels = None
 depends_on = None
 

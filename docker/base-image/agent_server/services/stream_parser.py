@@ -42,6 +42,93 @@ from .error_classifier import _is_rate_limit_message
 logger = logging.getLogger(__name__)
 
 
+# #1849: Claude Code prepends its own internal diagnostic header to a result's
+# ``errors`` array — ``[ede_diagnostic] result_type=… last_content_type=…
+# stop_reason=…`` (a second variant reads ``turn aborted (…) stop_reason=…``) —
+# and then filters exactly those entries out of its own user-facing output.
+# Reading ``errors[0]`` surfaced the marker as the cause and dropped the real
+# errors at ``errors[1..]``. Upstream: anthropics/claude-code#82235.
+_EDE_DIAGNOSTIC_PREFIX = "[ede_diagnostic]"
+
+# Surfaced when a result is flagged is_error but carries no reportable cause.
+# Deliberately NOT the bare "Execution error": ``headless_executor`` renders the
+# detail as f"Execution error: {…}", which would read "Execution error:
+# Execution error". Word choice is load-bearing — it must trip none of
+# is_auth_failure / _is_resume_not_found / _is_rate_limit_message. Pinned by
+# tests/unit/test_1849_ede_diagnostic_filtered.py.
+_NO_ERROR_DETAIL = "Claude Code reported no error detail"
+
+# Bound the diagnostic tail so a chatty future variant cannot eat the 300-char
+# budget headless_executor applies to the whole message.
+_DIAGNOSTIC_MAX = 180
+
+
+def _entry_text(entry: object) -> str:
+    """Best-effort text for one ``errors`` entry, whitespace-normalized.
+
+    Dicts are unwrapped structurally rather than ``str()``-ed: a future CLI that
+    nests the marker (``{"type": "ede_diagnostic", …}``) would otherwise
+    stringify to a Python repr that does not start with ``[``, silently turning
+    the filter into a no-op and reopening #1849 with no signal. Normalizing
+    whitespace also stops a leading newline from slipping a marker past the
+    prefix test, and keeps one CRLF-bearing entry from forging extra log records.
+    """
+    if entry is None:
+        return ""
+    if isinstance(entry, dict):
+        raw = entry.get("message") or entry.get("error") or entry.get("text") or ""
+    else:
+        raw = entry
+    return " ".join(str(raw).split())
+
+
+def _split_claude_errors(raw: object) -> tuple[List[str], List[str]]:
+    """Split a Claude Code ``result.errors`` array into (real_errors, diagnostics).
+
+    Mirrors the CLI's own consumer, which drops every ``[ede_diagnostic]``-prefixed
+    entry before showing anything to a user, so a diagnostic can never be mistaken
+    for a cause. Returned diagnostics have the prefix token removed — the token is
+    unsearchable against this codebase and misdirects investigators (#1849), while
+    its ``key=value`` payload is the only technical context this failure produces.
+
+    Defensive about shape, because every case below was observed or is reachable:
+      * a bare string is ONE error, not N single-character errors (``errors[0]``
+        on ``"boom"`` returned ``'b'``);
+      * any other non-sequence yields nothing instead of raising — a dict or an
+        int previously raised inside the parser, and the swallowed raise landed
+        as HTTP 200 ``success`` via the #160 ``context: fork`` placeholder;
+      * blank/None entries are dropped, so a join can never produce ``""`` and
+        re-introduce the empty ``error_message`` bug #1673 fixed;
+      * the prefix test is case-insensitive — deliberately more lenient than the
+        CLI's own case-sensitive filter. No legitimate cause begins with this
+        token in any case, so leniency can only prevent a marker leaking.
+    """
+    if isinstance(raw, str):
+        raw = [raw]
+    elif not isinstance(raw, (list, tuple)):
+        return [], []
+
+    real: List[str] = []
+    diagnostics: List[str] = []
+    for entry in raw:
+        text = _entry_text(entry)
+        if not text:
+            continue
+        if text.casefold().startswith(_EDE_DIAGNOSTIC_PREFIX):
+            # Slicing the UNfolded text by a fixed length is safe: full case
+            # folding never SHORTENS a string, so those 16 folded chars came
+            # from at most 16 original ones — the slice starts at or AFTER the
+            # real payload, never inside the token. The token therefore cannot
+            # leak. Worst case on exotic input (a "st" ligature standing in for
+            # the "st" of "diagnostic") is one dropped payload character.
+            payload = text[len(_EDE_DIAGNOSTIC_PREFIX):].strip()
+            if payload:  # a bare prefix carries no information — drop it
+                diagnostics.append(payload)
+        else:
+            real.append(text)
+    return real, diagnostics
+
+
 def parse_stream_json_output(output: str) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata]:
     """
     Parse stream-json output from Claude Code.
@@ -287,10 +374,23 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
             terminal_reason = msg.get("terminal_reason")
             subtype = msg.get("subtype")
             if terminal_reason == "max_turns" or subtype == "error_max_turns":
-                errors = msg.get("errors", [])
+                # #1849: drop Claude Code's internal [ede_diagnostic] entries
+                # (see _split_claude_errors) so a marker can never masquerade as
+                # the stop reason. Joined for the same reason as the branch
+                # below: both read the same array from the same emitter.
+                errors, diagnostics = _split_claude_errors(msg.get("errors"))
                 metadata.error_type = "max_turns"
-                metadata.error_message = errors[0] if errors else f"Task stopped after {metadata.num_turns} turns"
-                logger.warning(f"Claude Code max_turns reached: {metadata.error_message}")
+                metadata.error_message = (
+                    ", ".join(errors) or f"Task stopped after {metadata.num_turns} turns"
+                )
+                logger.warning(
+                    f"Claude Code max_turns reached: {metadata.error_message}"
+                    + (
+                        f" | diagnostics: {'; '.join(diagnostics)[:_DIAGNOSTIC_MAX]}"
+                        if diagnostics
+                        else ""
+                    )
+                )
             elif _is_rate_limit_message(result_text):
                 metadata.error_type = "rate_limit"
                 metadata.error_message = result_text
@@ -299,11 +399,26 @@ def process_stream_line(line: str, execution_log: List[ExecutionLogEntry], metad
                 # ``errors``, not ``result`` (which is ""), so reading only
                 # result_text left error_message empty and the failure
                 # unattributable downstream.
-                errors = msg.get("errors", [])
+                # #1849: ...but errors[0] is Claude Code's own internal
+                # ``[ede_diagnostic]`` header, which the CLI filters out of its
+                # user-facing output. Surfacing it made every failure on this
+                # path read as a marker, dropped the real cause at errors[1..],
+                # and broke the backend's resume-not-found self-healing
+                # (routers/sessions.py::_is_resume_not_found substring-matches
+                # this exact text). Real errors win; when there are none the
+                # diagnostic payload is kept as clearly-labelled context rather
+                # than discarded, since nothing else on this path is recorded.
+                errors, diagnostics = _split_claude_errors(msg.get("errors"))
                 metadata.error_type = "execution_error"
-                metadata.error_message = (
-                    result_text or (errors[0] if errors else "Execution error")
-                )
+                if result_text:
+                    metadata.error_message = result_text
+                elif errors:
+                    metadata.error_message = ", ".join(errors)
+                elif diagnostics:
+                    tail = "; ".join(diagnostics)[:_DIAGNOSTIC_MAX]
+                    metadata.error_message = f"{_NO_ERROR_DETAIL} (diagnostic: {tail})"
+                else:
+                    metadata.error_message = _NO_ERROR_DETAIL
                 logger.warning(
                     f"Claude Code result is_error=true: type={metadata.error_type}, "
                     f"message={metadata.error_message}"
