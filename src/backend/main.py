@@ -82,7 +82,7 @@ from routers.canary import router as canary_router  # CANARY-001 / Issue #411
 from routers.compatibility import router as compatibility_router  # #668 agent compatibility
 from routers.skills import router as skills_router
 from routers.internal import router as internal_router, pull_router as internal_pull_router
-from routers.tags import router as tags_router
+from routers.tags import router as tags_router, set_websocket_manager as set_tags_ws_manager
 from routers.system_views import router as system_views_router
 from routers.notifications import router as notifications_router, set_websocket_manager as set_notifications_ws_manager, set_filtered_websocket_manager as set_notifications_filtered_ws_manager
 from routers.reports import router as reports_router
@@ -255,6 +255,7 @@ set_agents_filtered_ws_manager(filtered_manager)
 set_agent_rename_ws_manager(manager)
 set_agent_rename_filtered_ws_manager(filtered_manager)
 set_sharing_ws_manager(manager)
+set_tags_ws_manager(manager)  # agent_tags_changed (org overlay, ent#305)
 set_chat_persistence_ws_manager(manager)  # #1483: chat_response_ready broadcast
 set_chat_execution_ws_manager(manager)    # #1483: agent_collaboration + self_task broadcasts
 set_public_links_ws_manager(manager)

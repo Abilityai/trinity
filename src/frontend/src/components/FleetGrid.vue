@@ -10,6 +10,75 @@
     @pointercancel="endPan"
   >
     <div class="gv-world" :style="worldStyle">
+      <!-- PROTOTYPE org overlay — derived department zones (hull model):
+           frames follow wherever the member tiles sit; never a constraint. -->
+      <template v-if="showZones">
+        <div
+          v-for="z in zones"
+          :key="'z' + z.dept"
+          class="gv-zone"
+          :class="{
+            hot: dropZone === z.dept,
+            readonly: z.readOnly,
+            blockdragging: zoneDrag && zoneDrag.dept === z.dept,
+            invalid: zoneDrag && zoneDrag.dept === z.dept && !zoneDrag.valid,
+          }"
+          :style="zoneStyle(z)"
+        >
+          <div
+            class="gv-zonehead"
+            :title="z.readOnly
+              ? 'Derived from plain tags (read-only) — create a department to organize explicitly. Drag to move the whole group.'
+              : 'Drag to move the whole department'"
+            @pointerdown.stop.prevent="startZoneDrag(z, $event)"
+          >
+            <span class="zname">{{ z.dept }}</span>
+            <span class="zstat" title="Counts include only agents you can access">{{ z.count }} agent{{ z.count === 1 ? '' : 's' }} · {{ z.running }} running</span>
+          </div>
+        </div>
+      </template>
+
+      <!-- PROTOTYPE org overlay — reporting lines (manager → report) -->
+      <svg
+        v-if="wireLayer"
+        class="gv-wires"
+        :style="{ left: wireLayer.x + 'px', top: wireLayer.y + 'px' }"
+        :width="wireLayer.w"
+        :height="wireLayer.h"
+        :viewBox="`0 0 ${wireLayer.w} ${wireLayer.h}`"
+      >
+        <g :transform="`translate(${-wireLayer.x},${-wireLayer.y})`">
+          <g v-for="e in wireLayer.edges" :key="e.id" class="gv-wire" :class="edgeClass(e)">
+            <path
+              class="gv-wire-hit"
+              :d="e.d"
+              @click.stop="removeEdge(e)"
+              @pointerenter="onEdgeEnter(e)"
+              @pointerleave="onEdgeLeave(e)"
+            ></path>
+            <path class="gv-wire-line" :d="e.d"></path>
+            <path class="gv-wire-ah" :d="e.ah"></path>
+          </g>
+          <template v-if="connectDraft">
+            <path class="gv-wire-line adding" :d="connectDraft.d"></path>
+            <path class="gv-wire-ah adding" :d="connectDraft.ah"></path>
+          </template>
+        </g>
+      </svg>
+
+      <!-- Direction affordances (world space): hover chip on a line, and the
+           live pill naming the relationship the in-flight drag will create -->
+      <div
+        v-if="hoverEdge && !connecting"
+        class="gv-edgechip"
+        :style="{ left: hoverEdge.mid.x + 'px', top: hoverEdge.mid.y + 'px' }"
+      >{{ hoverEdge.manager }} → {{ hoverEdge.report }} · click line to remove</div>
+      <div
+        v-if="connecting && connectTarget"
+        class="gv-connectpill"
+        :style="{ left: connecting.x + 'px', top: connecting.y + 22 + 'px' }"
+      >{{ connectTarget }} will report to {{ connecting.source }}</div>
+
       <div
         class="gv-grid"
         :class="{ showcells: isDragging }"
@@ -36,6 +105,16 @@
           :style="{ width: CELL_W + 'px', height: CELL_H + 'px', transform: `translate(${socketX}px,${socketY}px)` }"
         ></div>
 
+        <!-- Block-move target sockets: one per member tile of the dragged
+             zone; red when any target cell is taken by a non-member -->
+        <div
+          v-for="s in zoneSockets"
+          :key="'zs' + s.key"
+          class="gv-socket show"
+          :class="{ invalid: zoneDrag && !zoneDrag.valid }"
+          :style="{ width: CELL_W + 'px', height: CELL_H + 'px', transform: `translate(${s.x}px,${s.y}px)` }"
+        ></div>
+
         <!-- Tiles -->
         <div
           v-for="agent in placedAgents"
@@ -46,6 +125,8 @@
             dragging: draggingName === agent.name,
             snapping: snappingName === agent.name,
             locked: lockedName === agent.name,
+            linktarget: connectTarget === agent.name,
+            blockdrag: zoneDrag && zoneDrag.memberSet.has(agent.name),
           }"
           :style="tileStyle(agent.name)"
           :data-agent="agent.name"
@@ -53,11 +134,27 @@
           tabindex="0"
           :aria-label="agent.name + ' — drag to any cell, or use arrow keys'"
           @transitionend="onTileTransitionEnd(agent.name, $event)"
+          @pointerenter="onTileEnter(agent.name)"
+          @pointerleave="onTileLeave(agent.name)"
         >
           <!-- Viewport-aware hydration: far-away tiles render a light
                placeholder and fetch nothing (#47 perf requirement). -->
-          <AgentTile v-if="visibleNames.has(agent.name)" :agent="agent" :now="now" />
+          <AgentTile
+            v-if="visibleNames.has(agent.name)"
+            :agent="agent"
+            :now="now"
+            :dept="deptByAgent[agent.name] || null"
+          />
           <div v-else class="gv-tile-far">{{ agent.name }}</div>
+          <!-- PROTOTYPE org overlay: bottom connector — drag DOWN onto
+               another agent to make it report to this one (org-chart
+               direction: manager above, report below) -->
+          <span
+            v-if="showLines && visibleNames.has(agent.name)"
+            class="gv-handle nodrag"
+            title="Drag down onto an agent — it will report to this one"
+            @pointerdown.stop.prevent="startConnect(agent.name, $event)"
+          ></span>
         </div>
       </div>
     </div>
@@ -76,11 +173,75 @@
     </div>
     <span class="gv-zoomlvl">{{ Math.round(vz * 100) }}%</span>
 
+    <!-- PROTOTYPE org overlay controls -->
+    <div class="gv-orgctl">
+      <button type="button" :class="{ on: showZones }" title="Show department zones (dept-* tags; plain tags as fallback)" @click="toggleZones">Zones</button>
+      <button type="button" :class="{ on: showLines }" title="Show reporting lines (reports-to-* tags)" @click="toggleLines">Lines</button>
+      <button
+        type="button"
+        class="act"
+        title="One-shot arrange into department blocks — tiles stay fully hand-editable after"
+        @click="arrangeNow"
+      >Group by dept</button>
+      <button
+        type="button"
+        class="act"
+        title="Create a department, then click agents to assign them"
+        @click="openNewDept"
+      >New dept</button>
+    </div>
+
+    <!-- New-department popover (field recipe: named validation, Esc/Enter) -->
+    <div v-if="newDeptOpen" class="gv-newdept">
+      <label for="gv-newdept-name">New department</label>
+      <input
+        id="gv-newdept-name"
+        v-model="newDeptName"
+        type="text"
+        placeholder="marketing"
+        autocomplete="off"
+        spellcheck="false"
+        @keydown.enter.prevent="confirmNewDept"
+        @keydown.esc.stop="closeNewDept"
+        @pointerdown.stop
+      />
+      <p v-if="newDeptError" class="err">{{ newDeptError }}</p>
+      <div class="row">
+        <button type="button" class="primary" @click="confirmNewDept">Create</button>
+        <button type="button" @click="closeNewDept">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Assign-mode banner -->
+    <div v-if="assignMode" class="gv-assignbanner">
+      Adding agents to <b>{{ assignMode.dept }}</b> — click tiles to assign
+      <span class="cnt">{{ assignMode.count }} so far</span>
+      <button type="button" @click="endAssignMode">Done</button>
+    </div>
+
+    <!-- Empty state: zones on, none derivable -->
+    <div v-if="showZones && zones.length === 0 && placedAgents.length && !assignMode" class="gv-emptyzones">
+      <b>No departments yet.</b>
+      <span>Zones appear when agents carry a department.</span>
+      <button type="button" @click="openNewDept">New department</button>
+    </div>
+
+    <!-- Org toast: completed verbs (+Undo); failures persist until dismissed -->
+    <div v-if="orgToast" class="gv-orgtoast" :class="orgToast.type" role="status">
+      <span class="msg">{{ orgToast.message }}</span>
+      <button v-if="orgToast.undo" type="button" class="undo" @click="undoToast">Undo</button>
+      <button type="button" class="x" aria-label="Dismiss" @click="dismissToast">✕</button>
+    </div>
+
     <!-- Board-level legend: the activity chart's trigger colors, once -->
     <div class="gv-legend" title="Execution trigger types (14-day activity chart)">
       <span><i class="ls"></i>Scheduled</span>
       <span><i class="lm"></i>Manual · MCP</span>
       <span><i class="le"></i>External</span>
+      <span v-if="showLines" class="lrep" title="Reporting line (manager → report)">
+        <svg viewBox="0 0 22 8" width="22" height="8" aria-hidden="true"><path d="M0 4 H14" stroke="currentColor" stroke-width="1.5" fill="none"></path><path d="M13 0.8 L21 4 L13 7.2 Z" fill="currentColor"></path></svg>
+        Reporting
+      </span>
     </div>
   </div>
 </template>
@@ -102,6 +263,7 @@ import {
   layoutBBox,
   occupantAt,
 } from '@/utils/gridLayout'
+import { useOrgOverlay } from '@/composables/useOrgOverlay'
 
 /**
  * FleetGrid (trinity-enterprise#47) — the Grid dashboard mode's magnetic
@@ -112,6 +274,13 @@ import {
  */
 const props = defineProps({
   agents: { type: Array, required: true },
+  // ent#261 × ent#305: `agents` is the visibleAgents seam (type-to-filter
+  // narrows it live), but the org overlay derives its WORLD from its roster —
+  // filtering out the only dept-* agent would flip the fleet into bootstrap
+  // mode and drop reporting lines as you type. The overlay therefore reads
+  // this unfiltered roster for org DATA; geometry stays naturally gated on
+  // placed/rendered tiles (computeZones/computeEdges skip absent layout).
+  orgAgents: { type: Array, default: null },
 })
 
 const gridStore = useFleetGridStore()
@@ -184,24 +353,9 @@ const placedAgents = computed(() =>
 function syncLayoutFromAgents() {
   const names = props.agents.map((a) => a.name)
   const systemNames = new Set(props.agents.filter((a) => a.is_system).map((a) => a.name))
-  gridStore.syncLayout(names, systemNames)
+  gridStore.syncLayout(names, systemNames, newcomerOriginFor)
 }
 
-// Sync immediately (setup, before first render) so the initial paint already
-// has positioned tiles, then re-sync whenever the fleet roster changes.
-syncLayoutFromAgents()
-watch(
-  () => props.agents.map((a) => a.name).join('\n'),
-  () => {
-    syncLayoutFromAgents()
-    // The dragged agent can vanish mid-drag (deleted, or filtered out by a
-    // roster refresh) — its tile unmounts and pointerup never reaches us, so
-    // drop the drag state instead of leaving the socket/shading stuck on.
-    if (draggingName.value && !props.agents.some((a) => a.name === draggingName.value)) {
-      cancelDrag()
-    }
-  }
-)
 
 // --- viewport culling (#47: render/hydrate only tiles near the viewport) ---
 const visibleNames = computed(() => {
@@ -265,10 +419,93 @@ function cancelDrag() {
   target = null
 }
 
+// --- org overlay (zones + reporting lines) — trinity-enterprise#305 ---
+// All org state/handlers live in the composable; FleetGrid owns the canvas.
+const {
+  showZones,
+  showLines,
+  toggleZones,
+  toggleLines,
+  deptByAgent,
+  zones,
+  wireLayer,
+  connectDraft,
+  zoneSockets,
+  hoverAgent,
+  hoverEdge,
+  connecting,
+  connectTarget,
+  dropZone,
+  zoneDrag,
+  onTileEnter,
+  onTileLeave,
+  onEdgeEnter,
+  onEdgeLeave,
+  edgeClass,
+  startConnect,
+  removeEdge,
+  trackDropZone,
+  commitDrop,
+  startZoneDrag,
+  zoneStyle,
+  arrangeNow,
+  tidyZones,
+  newcomerOriginFor,
+  newDeptOpen,
+  newDeptName,
+  newDeptError,
+  assignMode,
+  openNewDept,
+  closeNewDept,
+  confirmNewDept,
+  assignModeClick,
+  endAssignMode,
+  orgToast,
+  dismissToast,
+  undoToast,
+  cancelOrgDrags,
+  destroy: destroyOrg,
+} = useOrgOverlay({
+  agents: computed(() => props.orgAgents || props.agents),
+  layout,
+  canvasEl,
+  vz,
+  vtx,
+  vty,
+  draggingName,
+  fitView,
+})
+
+// Sync immediately (setup, before first render) so the initial paint already
+// has positioned tiles — newcomers with a department place beside their zone
+// hull — then re-sync whenever the fleet roster changes.
+syncLayoutFromAgents()
+watch(
+  () => props.agents.map((a) => a.name).join('\n'),
+  () => {
+    syncLayoutFromAgents()
+    // A drag's subject can vanish mid-gesture (deleted, or filtered out by a
+    // roster refresh) — drop ALL in-flight gestures rather than leaving a
+    // socket/highlight stuck or committing against a stale roster.
+    if (draggingName.value && !props.agents.some((a) => a.name === draggingName.value)) {
+      cancelDrag()
+    }
+    cancelOrgDrags()
+  }
+)
+
 function tileStyle(name) {
   const style = { width: CELL_W + 'px', height: CELL_H + 'px' }
   if (name === draggingName.value) {
     style.transform = dragTransform.value
+    return style
+  }
+  // Block move: member tiles follow the zone-header drag 1:1.
+  const zd = zoneDrag.value
+  if (zd && zd.memberSet.has(name)) {
+    const p = layout.value[name]
+    const [x, y] = cellXY(p.c, p.r)
+    style.transform = `translate(${x + zd.dx}px,${y + zd.dy}px)`
     return style
   }
   if (name === previewName.value && home) {
@@ -346,6 +583,9 @@ function onTilePointerMove(e) {
     socketX.value = sx
     socketY.value = sy
   }
+
+  // Org overlay: highlight the department zone the tile would join on drop.
+  trackDropZone(curX + CELL_W / 2, curY + CELL_H / 2, draggingName.value)
 }
 
 function onTilePointerUp(e) {
@@ -359,10 +599,24 @@ function onTilePointerUp(e) {
     target.r !== home.r ||
     Math.abs(curX - originX) > 0.5 ||
     Math.abs(curY - originY) > 0.5
+  // Assign mode: a plain click (no movement) on a tile adds it to the new
+  // department instead of being a no-op.
+  if (!moved && assignMode.value) {
+    cancelDrag()
+    assignModeClick(name)
+    return
+  }
+
   const dropCell = { c: target.c, r: target.r }
+  const dropCX = curX + CELL_W / 2
+  const dropCY = curY + CELL_H / 2
 
   cancelDrag()
   gridStore.moveTile(name, dropCell.c, dropCell.r)
+
+  // Org overlay: dropping inside another department's writable zone assigns
+  // it (re-validated at drop inside commitDrop; undo toast on success).
+  commitDrop(name, dropCX, dropCY)
 
   // Overshoot spring into the cell, then a one-shot lock-ring pulse.
   if (moved && !reducedMotion) {
@@ -445,7 +699,17 @@ let panTX = 0
 let panTY = 0
 
 function onCanvasPointerDown(e) {
-  if (e.target.closest('.gv-tile') || e.target.closest('.gv-zoomctl') || e.target.closest('.gv-legend')) return
+  if (
+    e.target.closest('.gv-tile') ||
+    e.target.closest('.gv-zoomctl') ||
+    e.target.closest('.gv-legend') ||
+    e.target.closest('.gv-orgctl') ||
+    e.target.closest('.gv-wire-hit') ||
+    e.target.closest('.gv-newdept') ||
+    e.target.closest('.gv-assignbanner') ||
+    e.target.closest('.gv-emptyzones') ||
+    e.target.closest('.gv-orgtoast')
+  ) return
   if (e.button > 0) return
   // A second touch during a tile drag must not start a pan (multi-touch).
   if (isPanning.value || draggingName.value) return
@@ -476,8 +740,17 @@ let tickTimer = null
 
 // --- public surface for the Dashboard header controls ---
 function tidyUp() {
-  gridStore.tidy()
+  // Zone-aware when zones are visible: compact each department in place;
+  // classic global compact otherwise.
+  if (!tidyZones()) gridStore.tidy()
   nextTick(fitView)
+}
+
+// Esc backs out of org modes (new-department popover, then assign mode).
+function onOrgKeydown(e) {
+  if (e.key !== 'Escape') return
+  if (newDeptOpen.value) closeNewDept()
+  else if (assignMode.value) endAssignMode()
 }
 
 function resetToDefault() {
@@ -509,6 +782,7 @@ onMounted(() => {
   resizeObserver.observe(canvasEl.value)
   // Wheel needs passive:false to preventDefault page scroll.
   canvasEl.value.addEventListener('wheel', onWheel, { passive: false })
+  window.addEventListener('keydown', onOrgKeydown)
   tickTimer = setInterval(() => {
     if (!document.hidden) now.value = Date.now()
   }, 1000)
@@ -523,6 +797,8 @@ onBeforeUnmount(() => {
   clearTimeout(lockTimer)
   clearTimeout(snapFallbackTimer)
   if (rafId) cancelAnimationFrame(rafId)
+  window.removeEventListener('keydown', onOrgKeydown)
+  destroyOrg()
 })
 </script>
 
@@ -864,6 +1140,408 @@ onBeforeUnmount(() => {
 .gv-legend i.ls { background: var(--gv-bk-sched); }
 .gv-legend i.lm { background: var(--gv-bk-man); }
 .gv-legend i.le { background: var(--gv-bk-ext); }
+
+/* --- org overlay: zones, reporting wires, connect handle (ent#305) --- */
+/* Department palette slots (stable hash → slot, gridOrg.deptSlot). Values are
+   Tailwind ramp constants per the design system: light theme 600 solids,
+   dark theme 400 solids. Swap to the semantic token layer when the accent
+   families land in tailwind.config.js. */
+.fleet-canvas {
+  --gv-wire: #64748b;
+  --gv-dept-0: #7c3aed; /* violet-600 */
+  --gv-dept-1: #db2777; /* pink-600 */
+  --gv-dept-2: #0d9488; /* teal-600 */
+  --gv-dept-3: #0891b2; /* cyan-600 */
+  --gv-dept-4: #c026d3; /* fuchsia-600 */
+  --gv-dept-5: #65a30d; /* lime-600 */
+  --gv-dept-6: #0284c7; /* sky-600 */
+  --gv-dept-7: #e11d48; /* rose-600 */
+}
+:root.dark .fleet-canvas {
+  --gv-wire: #8b96a8;
+  --gv-dept-0: #a78bfa; /* violet-400 */
+  --gv-dept-1: #f472b6; /* pink-400 */
+  --gv-dept-2: #2dd4bf; /* teal-400 */
+  --gv-dept-3: #22d3ee; /* cyan-400 */
+  --gv-dept-4: #e879f9; /* fuchsia-400 */
+  --gv-dept-5: #a3e635; /* lime-400 */
+  --gv-dept-6: #38bdf8; /* sky-400 */
+  --gv-dept-7: #fb7185; /* rose-400 */
+}
+
+.gv-zone {
+  position: absolute;
+  z-index: 0;
+  border: 1px solid color-mix(in srgb, var(--zc) 32%, transparent);
+  background: color-mix(in srgb, var(--zc) 5%, transparent);
+  border-radius: 16px;
+  pointer-events: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.gv-zone.hot {
+  border-color: color-mix(in srgb, var(--zc) 75%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--zc) 15%, transparent);
+}
+.gv-zone.readonly {
+  border-style: dashed;
+}
+/* Header band must fit the 34px top overhang (chrome budget in gridOrg.js).
+   It is also the block-move grab handle — the only pointer-active part of
+   the zone (the frame itself stays pointer-transparent for canvas pan). */
+.gv-zonehead {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  padding: 7px 14px 0;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.4;
+  letter-spacing: 0.13em;
+  font-weight: 700;
+  color: var(--zc);
+  white-space: nowrap;
+  pointer-events: auto;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+.gv-zone.blockdragging {
+  transition: none;
+  border-color: color-mix(in srgb, var(--zc) 60%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--zc) 12%, transparent);
+}
+.gv-zone.blockdragging .gv-zonehead {
+  cursor: grabbing;
+}
+.gv-zone.invalid {
+  border-color: color-mix(in srgb, var(--gv-red) 70%, transparent);
+  background: color-mix(in srgb, var(--gv-red) 6%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--gv-red) 12%, transparent);
+}
+/* Member tiles follow the block drag 1:1 — no transform transition while
+   moving; the transition returns on drop for the snap/spring-back. */
+.gv-tile.blockdrag {
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+  z-index: 15;
+}
+.gv-socket.invalid {
+  border-color: color-mix(in srgb, var(--gv-red) 60%, transparent);
+  background: color-mix(in srgb, var(--gv-red) 8%, transparent);
+}
+.gv-zonehead .zname {
+  text-transform: uppercase;
+}
+.gv-zonehead .zstat {
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  color: var(--gv-muted);
+}
+
+.gv-wires {
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+  overflow: visible;
+}
+.gv-wire-line {
+  fill: none;
+  stroke: var(--gv-wire);
+  stroke-width: 1.5;
+  opacity: 0.55;
+  transition: opacity 0.15s ease;
+}
+.gv-wire-ah {
+  fill: var(--gv-wire);
+  stroke: none;
+  opacity: 0.55;
+  transition: opacity 0.15s ease;
+}
+.gv-wire-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+.gv-wire.hot .gv-wire-line,
+.gv-wire.hot .gv-wire-ah {
+  opacity: 0.95;
+}
+.gv-wire.hot .gv-wire-line {
+  stroke-width: 2;
+}
+.gv-wire.dim .gv-wire-line,
+.gv-wire.dim .gv-wire-ah {
+  opacity: 0.12;
+}
+.gv-wire-line.adding {
+  stroke: var(--gv-blue);
+  stroke-dasharray: 5 4;
+  opacity: 0.95;
+}
+.gv-wire-ah.adding {
+  fill: var(--gv-blue);
+  opacity: 0.95;
+}
+
+/* Bottom connector — reporting lines are drawn vertically (org-chart:
+   manager above, report below), so the port sits at bottom-center. */
+.gv-handle {
+  position: absolute;
+  bottom: -7px;
+  left: 50%;
+  margin-left: -7px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--gv-blue);
+  border: 2px solid var(--gv-panel);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--gv-blue) 25%, transparent);
+  opacity: 0;
+  cursor: crosshair;
+  transition: opacity 0.15s ease;
+  z-index: 5;
+  touch-action: none;
+}
+.gv-tile:hover .gv-handle,
+.gv-handle:hover {
+  opacity: 1;
+}
+
+.gv-tile.linktarget {
+  border-color: color-mix(in srgb, var(--gv-blue) 70%, var(--gv-border));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--gv-blue) 20%, transparent), var(--gv-tile-shadow);
+}
+
+.gv-orgctl {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  z-index: 30;
+  display: flex;
+  gap: 4px;
+  background: var(--gv-panel);
+  border: 1px solid var(--gv-border);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+}
+.gv-orgctl button {
+  border: 0;
+  background: transparent;
+  color: var(--gv-muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.gv-orgctl button:hover {
+  background: var(--gv-btn-bg-hover);
+  color: var(--gv-btn-text);
+}
+.gv-orgctl button.on {
+  background: var(--gv-btn-bg);
+  color: var(--gv-btn-text);
+}
+.gv-orgctl button:focus-visible {
+  outline: 2px solid var(--gv-blue);
+  outline-offset: -2px;
+}
+
+/* --- org affordances --- */
+/* World-space chips (scale with zoom, anchored at world coords) */
+.gv-edgechip,
+.gv-connectpill {
+  position: absolute;
+  z-index: 6;
+  transform: translate(-50%, 0);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  white-space: nowrap;
+  padding: 4px 10px;
+  border-radius: 6px;
+  pointer-events: none;
+  background: var(--gv-panel);
+  border: 1px solid var(--gv-border);
+  color: var(--gv-text);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+.gv-connectpill {
+  border-color: color-mix(in srgb, var(--gv-blue) 55%, var(--gv-border));
+  color: var(--gv-btn-text);
+}
+
+/* Canvas-space panels (fixed size, do not scale with zoom) */
+.gv-newdept {
+  position: absolute;
+  top: 52px;
+  right: 16px;
+  z-index: 40;
+  width: 240px;
+  background: var(--gv-panel);
+  border: 1px solid var(--gv-border);
+  border-radius: 8px;
+  padding: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.gv-newdept label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--gv-muted);
+}
+.gv-newdept input {
+  background: var(--gv-panel);
+  color: var(--gv-text);
+  border: 1px solid var(--gv-border);
+  border-radius: 6px;
+  padding: 8px 11px;
+  font-size: 13px;
+  outline: none;
+}
+.gv-newdept input:focus {
+  border-color: var(--gv-blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--gv-blue) 40%, transparent);
+}
+.gv-newdept .err {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--gv-red-text);
+}
+.gv-newdept .row {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.gv-newdept .row button {
+  border: 1px solid var(--gv-border);
+  background: transparent;
+  color: var(--gv-muted);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.gv-newdept .row button.primary {
+  background: var(--gv-blue);
+  border-color: var(--gv-blue);
+  color: #fff;
+}
+.gv-newdept .row button:focus-visible {
+  outline: 2px solid var(--gv-blue);
+  outline-offset: 2px;
+}
+
+.gv-assignbanner,
+.gv-emptyzones {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 35;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--gv-panel);
+  border: 1px solid var(--gv-border);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  color: var(--gv-muted);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.16);
+  white-space: nowrap;
+}
+.gv-assignbanner b,
+.gv-emptyzones b {
+  color: var(--gv-text);
+}
+.gv-assignbanner .cnt {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--gv-faint);
+}
+.gv-assignbanner button,
+.gv-emptyzones button {
+  border: 1px solid var(--gv-btn-border);
+  background: var(--gv-btn-bg);
+  color: var(--gv-btn-text);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 11px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.gv-assignbanner button:hover,
+.gv-emptyzones button:hover {
+  background: var(--gv-btn-bg-hover);
+}
+
+.gv-orgtoast {
+  position: absolute;
+  bottom: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(560px, 90%);
+  background: var(--gv-panel);
+  border: 1px solid var(--gv-border);
+  border-radius: 8px;
+  padding: 9px 12px 9px 14px;
+  font-size: 12.5px;
+  color: var(--gv-text);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
+}
+.gv-orgtoast.error {
+  border-color: color-mix(in srgb, var(--gv-red) 55%, var(--gv-border));
+}
+.gv-orgtoast .msg {
+  line-height: 1.45;
+}
+.gv-orgtoast .undo {
+  border: 1px solid var(--gv-btn-border);
+  background: var(--gv-btn-bg);
+  color: var(--gv-btn-text);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  flex: none;
+}
+.gv-orgtoast .x {
+  border: 0;
+  background: transparent;
+  color: var(--gv-faint);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+  flex: none;
+}
+.gv-orgtoast .undo:focus-visible,
+.gv-orgtoast .x:focus-visible {
+  outline: 2px solid var(--gv-blue);
+  outline-offset: 2px;
+}
+
+.gv-legend .lrep {
+  color: var(--gv-muted);
+}
+.gv-legend .lrep svg {
+  color: var(--gv-wire);
+  display: block;
+}
 
 @media (prefers-reduced-motion: reduce) {
   .gv-tile,

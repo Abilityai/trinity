@@ -212,6 +212,19 @@ class MetadataMixin:
 
                 cascade_rename(conn, old_name, new_name)
 
+                # Org-overlay reporting refs (trinity-enterprise#305): tags on
+                # OTHER agents' rows whose VALUE names this agent
+                # (`reports-to-<old_name>`). Structurally different from the
+                # AGENT_REFS cascade above (which re-keys this agent's own
+                # rows): this rewrites a tag VALUE on other agents' rows, so it
+                # cannot fold into AGENT_REFS. Same transaction as the rename —
+                # a crash can never leave half the org chart pointing at a
+                # name that no longer exists. Cross-tenant by design (a report
+                # may belong to another owner) — covered by the rename's own
+                # audit row at the router.
+                from ..tags import rename_reports_to_refs
+                rename_reports_to_refs(conn, old_name, new_name)
+
                 # Entitled-module agent-scoped tables (ent#46) registered via
                 # db.agent_cleanup.register_agent_owned_table. Kept separate
                 # from the registry pass: these are runtime-registered by the

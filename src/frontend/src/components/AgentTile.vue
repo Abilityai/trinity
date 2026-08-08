@@ -1,5 +1,14 @@
 <template>
   <div class="gtile" :class="{ system: isSystemAgent, runner: isSkillRunner }">
+    <!-- Org overlay: department ribbon (dept-* tag / bootstrap fallback).
+         Color comes from the themed --gv-dept-N slot vars in FleetGrid.vue;
+         the tooltip names the department so identity never rides on hue. -->
+    <span
+      v-if="dept"
+      class="dept-ribbon"
+      :style="{ background: `var(--gv-dept-${dept.slot})` }"
+      :title="'Department: ' + dept.name"
+    ></span>
     <!-- Avatar half-out on the left edge -->
     <div class="gtile-avatar">
       <div
@@ -180,6 +189,8 @@ const props = defineProps({
   // Shared 1s tick from FleetGrid (single interval for all tiles) driving
   // the live "working" elapsed timer.
   now: { type: Number, default: 0 },
+  // PROTOTYPE org overlay: { name, color } of the agent's department, or null.
+  dept: { type: Object, default: null },
 })
 
 const router = useRouter()
@@ -492,6 +503,17 @@ watch(
   justify-content: space-between;
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* PROTOTYPE org overlay: colored department ribbon on the tile's left edge */
+.dept-ribbon {
+  position: absolute;
+  left: 0;
+  top: 12px;
+  bottom: 12px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  pointer-events: none;
 }
 
 .gtile-avatar {
