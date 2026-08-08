@@ -25,6 +25,12 @@ interface AuditEntry {
   mcp_key_name?: string;
   mcp_scope?: string;
   actor_agent_name?: string;
+  /**
+   * #848: an email-verified anonymous session has no key and no agentName, so
+   * without this the row records only mcp_scope:"anonymous" — unattributable.
+   * The verified email is the only identity such a caller has.
+   */
+  actor_email?: string;
   target_type?: string;
   target_id?: string;
   request_id?: string;
@@ -51,6 +57,12 @@ export function resolveTargetId(params: unknown): string | undefined {
   if (params && typeof params === "object") {
     const p = params as Record<string, unknown>;
     if (typeof p.agent_name === "string") return p.agent_name;
+    // #848: the connector tools take the agent as `agent`, not `agent_name`.
+    // Must be checked BEFORE the generic `name` fallback — run_playbook has
+    // both, and `name` there is the PLAYBOOK, which the caller then stamps as
+    // target_type:"agent". That mis-attributed the audit row rather than merely
+    // leaving it empty.
+    if (typeof p.agent === "string") return p.agent;
     if (typeof p.name === "string") return p.name;
   }
   return undefined;
@@ -120,6 +132,10 @@ export function logToolCall(
     mcp_key_name: authContext?.keyName,
     mcp_scope: authContext?.scope,
     actor_agent_name: authContext?.agentName,
+    // #848: falls back to the verified email for keyless inline-auth callers.
+    actor_email:
+      (authContext?.userEmail as string | undefined) ??
+      (authContext?.verifiedEmail as string | undefined),
     target_type: targetId ? "agent" : undefined,
     target_id: targetId,
     request_id: requestId,

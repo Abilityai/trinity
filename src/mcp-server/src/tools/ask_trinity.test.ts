@@ -90,6 +90,28 @@ const PARITY_CASES: Array<{ name: string; respond: () => Response; q: string; si
     respond: () => json({ answer: "Cron.", state: "SUCCEEDED", session_id: "77" }),
   },
   {
+    // #2027. Both copies truncate; a divergence here means one of them cuts a
+    // surrogate pair and the other does not — which is invisible until a user
+    // gets a mangled answer. Without this row, mutating the helper's truncate
+    // alone changed nothing in this suite (verified).
+    name: "over-long answer with an astral char at the cut",
+    q: "Q",
+    respond: () =>
+      json({
+        answer: "a".repeat(65_536 - 1) + "\u{1F600}" + "tail",
+        state: "SUCCEEDED",
+        session_id: "7",
+      }),
+  },
+  {
+    // #2027. The session-less response: the warning is decided by the REQUEST's
+    // session, so both copies must say the same thing when none comes back.
+    name: "session sent, none returned",
+    q: "Q",
+    sid: "had-one",
+    respond: () => json({ answer: "A.", state: "SUCCEEDED" }),
+  },
+  {
     name: "silent session expiry — new id returned for an old one",
     q: "Follow-up",
     sid: "11",
