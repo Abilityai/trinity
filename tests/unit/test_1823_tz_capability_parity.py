@@ -247,6 +247,61 @@ def test_base_image_exemption_is_still_justified() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Rule 5 — validator and executor resolve the SAME APScheduler
+# ---------------------------------------------------------------------------
+
+
+def _pinned_version(rel: str, package: str) -> str | None:
+    """The exact-pinned version of `package` in `rel`, or None if not `==`-pinned."""
+    pattern = re.compile(
+        rf"^{re.escape(package)}\s*==\s*([0-9][0-9A-Za-z.\-+!]*)$", re.IGNORECASE
+    )
+    for line in _uncommented_lines(rel):
+        token = line.strip().rstrip("\\").strip().strip('"').strip("'")
+        for word in token.split():
+            match = pattern.match(word.strip('"').strip("'"))
+            if match:
+                return match.group(1)
+    return None
+
+
+def test_backend_and_scheduler_pin_the_same_apscheduler() -> None:
+    """The two images that construct a `CronTrigger` run the same parser.
+
+    #1472's contract is that the API rejects exactly what the scheduler would,
+    and it holds that by building the *same* `CronTrigger` on both sides — so it
+    is only true while both sides resolve the same APScheduler. A floor on either
+    side does not merely risk drift, it produces it: `>=3.10.0,<4.0.0` resolves to
+    whatever is newest on PyPI at image-build time, and the two images are built
+    from different caches at different moments.
+
+    Not hypothetical, and not a general dependency-hygiene rule — `astimezone()`,
+    which re-resolves a pytz zone through `zoneinfo`, is the precise APScheduler
+    function whose behaviour caused #1823. This is the declaration-level guard
+    for the pin that fix added; without it the pin is two hand-maintained
+    numbers with nothing tying them together, which is the #1891 shape this
+    file exists to refuse.
+    """
+    backend = _pinned_version("docker/backend/Dockerfile", "apscheduler")
+    scheduler = _pinned_version("docker/scheduler/requirements.txt", "apscheduler")
+
+    assert backend is not None, (
+        "docker/backend/Dockerfile no longer pins `apscheduler` exactly, so the "
+        "backend's CronTrigger can drift away from the scheduler's (#1823)"
+    )
+    assert scheduler is not None, (
+        "docker/scheduler/requirements.txt no longer pins `APScheduler` exactly. "
+        "A floor here lets the executor resolve a different parser than the "
+        "validator the API rejects with (#1472 contract, #1823)."
+    )
+    assert backend == scheduler, (
+        f"APScheduler versions diverge: backend pins {backend}, scheduler pins "
+        f"{scheduler}. The backend validates a schedule by constructing the "
+        f"CronTrigger the scheduler will register, so these must move together."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Stale-path guard — a guard's dangerous failure is watching less than it claims
 # ---------------------------------------------------------------------------
 
