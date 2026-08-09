@@ -62,7 +62,12 @@
       </div>
 
       <ul v-else class="divide-y divide-gray-200 dark:divide-gray-700">
-        <li v-for="key in displayedKeys" :key="key.id" class="p-6 hover:bg-gray-50 dark:hover:bg-gray-700">
+        <!-- #1848: the dark hover surface is the chrome shade gray-750, not
+             gray-700 (which is border-strong). On gray-700 the row's tertiary
+             meta ink sits at 4.06:1 — below AA — whenever the cursor is on the
+             row, and the gray-700 prefix chip below becomes invisible (1.00:1).
+             On gray-750 they read 5.21:1 and 1.28:1. -->
+        <li v-for="key in displayedKeys" :key="key.id" class="p-6 hover:bg-gray-50 dark:hover:bg-gray-750">
           <div class="flex items-center justify-between">
             <div class="flex items-center flex-1">
               <div class="flex-shrink-0">
@@ -96,19 +101,37 @@
                   </span>
                 </div>
                 <p v-if="key.description" class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ key.description }}</p>
-                <div class="mt-1 flex items-center text-xs text-gray-400 dark:text-gray-500 space-x-4">
+                <!-- #1848: uniform inline flow. `space-x-4` is margin-left on every
+                     item after the first, which indents continuation lines the moment
+                     the row wraps — so a wrapping row needs `gap`, not `space-x`. Each
+                     label+value atom is nowrap so a timestamp can never orphan its
+                     AM/PM; the email instead gets min-w-0 + break-all, because an
+                     address has no spaces and so would otherwise be an unbreakable
+                     token that overflows the row. The Last-used slot always renders so
+                     every row has the same item set — that, not nowrap alone, is what
+                     stops rows breaking at different points. Ink is the tertiary ladder
+                     rung (gray-500/gray-400), which was inverted and failed AA in both
+                     themes at rest.
+
+                     The owner span is the one item that can now go multi-line (break-all
+                     is what made that reachable), so its icon is items-start + mt-0.5
+                     rather than items-center — it must sit on the FIRST line, not float
+                     to the vertical centre of two. text-xs is a 16px line box and the
+                     glyph is 12px, so mt-0.5 (2px) is exactly the offset items-center
+                     was already producing: single-line rows are pixel-identical. -->
+                <div class="mt-1 flex items-center flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
                   <span>
                     <code class="bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded font-mono">{{ key.key_prefix }}...</code>
                   </span>
-                  <span v-if="key.user_email" class="flex items-center">
-                    <svg class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <span v-if="key.user_email" class="flex items-start min-w-0 break-all">
+                    <svg class="h-3 w-3 mr-1 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
                     </svg>
                     {{ key.user_email }}
                   </span>
-                  <span>Created {{ formatDate(key.created_at) }}</span>
-                  <span v-if="key.last_used_at">Last used {{ formatDate(key.last_used_at) }}</span>
-                  <span class="flex items-center">
+                  <span class="whitespace-nowrap tabular-nums">Created {{ formatDate(key.created_at) }}</span>
+                  <span class="whitespace-nowrap tabular-nums">Last used {{ key.last_used_at ? formatDate(key.last_used_at) : 'never' }}</span>
+                  <span class="flex items-center whitespace-nowrap tabular-nums">
                     <svg class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                     </svg>
