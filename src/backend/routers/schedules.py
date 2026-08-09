@@ -309,10 +309,23 @@ async def update_schedule(
 
     # #1472: validate cron + timezone with the scheduler's parser (see
     # create_schedule). Cron-field validity is timezone-independent, so a cron
-    # update is checked under UTC; a timezone update is checked on its own.
+    # update is checked under the effective zone purely to keep the combined
+    # check faithful; a timezone update is checked on its own.
+    #
+    # #1823: the zone passed here used to be the literal "UTC". Cron parsing
+    # genuinely does not depend on it — that reasoning was and is correct — but
+    # the hardcoded literal meant a CRON-ONLY `PUT` (updates.timezone is None)
+    # never looked at the zone the row actually stores. A row holding a zone the
+    # scheduler cannot register was therefore mutated and returned 200 OK, while
+    # still never firing: the API and the scheduler disagreeing, which is the
+    # exact contract #1472 exists to hold. Passing the EFFECTIVE zone changes no
+    # cron verdict and makes the combined check honest.
     if updates.cron_expression is not None:
         try:
-            validate_cron_expression(updates.cron_expression, "UTC")
+            validate_cron_expression(
+                updates.cron_expression,
+                updates.timezone or schedule.timezone or "UTC",
+            )
         except ScheduleValidationError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
