@@ -14,13 +14,60 @@ these methods lived on `CanaryService` as classmethods. Tests pivoted from
 import logging
 import os
 from datetime import datetime
-from typing import Any, List, Optional, Tuple
+from enum import Enum
+from typing import Any, List, NamedTuple, Optional, Tuple
 
 from canary.snapshot import ViolationReport
 from services.instance_identity import get_instance_label, sanitize_instance_label
 
 
 logger = logging.getLogger(__name__)
+
+
+class AlertDelivery(str, Enum):
+    """Outcome of one `emit_transition` call (#1897).
+
+    THREE states, not a bool, because "no webhook configured" is not a
+    failed delivery. `CANARY_SLACK_WEBHOOK_URL` is unset on every install
+    that never wired the sink — the default — so a bool folding SKIPPED
+    into False would arm a retry for every transition on a correctly
+    configured silent sink, burn its budget, and end with a give-up ERROR.
+    That is a new alarm-fatigue bug shipped inside the fix for an
+    alarm-loss bug. (Same shape as #1813's "ran and was fine" vs "never
+    ran": the third state is the one a boolean destroys.)
+
+    An `Enum` rather than a `@dataclass`: architecture.md records the
+    fieldless-dataclass `__eq__` footgun from #1085, where two distinct
+    instances compared equal and a status check silently matched the wrong
+    branch. Enum members have identity semantics by construction. The
+    `str` mixin is only so it logs and formats readably.
+
+    Deliberately module-level rather than a `CanaryAlerts` attribute:
+    #1880's parity guard reads this module with `ast` and visits the
+    class body, so keeping the enum outside it leaves that guard's
+    surfaces untouched.
+    """
+
+    DELIVERED = "delivered"  # the webhook accepted the POST
+    SKIPPED = "skipped"      # sink deliberately silent (no webhook configured)
+    FAILED = "failed"        # webhook rejected / errored / timed out
+
+
+class AlertResult(NamedTuple):
+    """`(outcome, error)` — what happened, and why if it went wrong.
+
+    The error string exists so the give-up ERROR can name a cause: the
+    give-up frequently runs on a different worker (and several cycles
+    later) than the attempt that saw the rejection, so the enum alone
+    would strand "why" in a WARNING somebody has to go find. It is
+    Slack's response body verbatim, or `type(e).__name__` for a transport
+    error — `slack_service.post_webhook` never echoes the webhook URL,
+    which IS the credential. Callers must truncate before persisting it:
+    a misrouted URL answers with a whole HTML page.
+    """
+
+    outcome: AlertDelivery
+    error: Optional[str] = None
 
 
 class CanaryAlerts:
@@ -204,12 +251,12 @@ class CanaryAlerts:
         snapshot_time: str,
         previous_violation_at: Optional[str],
         persisted_ids: List[Optional[int]],
-    ) -> None:
+    ) -> AlertResult:
         """Fire a Slack alert for a green→red transition.
 
         Reads the webhook URL from the `CANARY_SLACK_WEBHOOK_URL` env var.
-        If unset, logs at debug and returns — green→red detection still
-        runs and rows are still persisted to `canary_violations`, the
+        If unset, logs at debug and returns `SKIPPED` — green→red detection
+        still runs and rows are still persisted to `canary_violations`, the
         sink is just silent. Mirrors the `CANARY_ENABLED` env-gating
         pattern for the watcher itself.
 
@@ -217,6 +264,19 @@ class CanaryAlerts:
         line. Failures are logged and swallowed so a hung webhook can't
         break the cycle — `slack_service.post_webhook` already enforces
         a 5s timeout.
+
+        **Returns the outcome, never raises it (#1897).** This used to be
+        `-> None`, so `post_webhook`'s `success` flag died here and the
+        caller read "did not raise" as "delivered": it counted the
+        transition, advanced the cycle cursor, and continuing-red
+        suppression then silenced the invariant forever. Raising instead
+        would buy nothing — the caller's own `except Exception` swallows
+        it, and it would collapse "Slack said 400" into "the payload
+        builder crashed". So the outcome is returned and the caller decides.
+
+        The parameter list is unchanged and must stay that way:
+        `tests/unit/test_1987_instance_label.py` calls this with keyword
+        arguments. A return value is transparent to an `await`.
         """
         webhook_url = os.getenv("CANARY_SLACK_WEBHOOK_URL", "").strip()
         if not webhook_url:
@@ -231,7 +291,7 @@ class CanaryAlerts:
                 len(violations),
                 snapshot_time,
             )
-            return
+            return AlertResult(AlertDelivery.SKIPPED)
 
         worst = max(violations, key=lambda v: severity_rank(v.severity))
         # #1987: name the instance in the payload. Resolved here rather than
@@ -259,13 +319,14 @@ class CanaryAlerts:
                 invariant_id,
                 error,
             )
-        else:
-            logger.info(
-                "canary slack alert sent: %s severity=%s violations_in_cycle=%d",
-                invariant_id,
-                worst.severity,
-                len(violations),
-            )
+            return AlertResult(AlertDelivery.FAILED, error)
+        logger.info(
+            "canary slack alert sent: %s severity=%s violations_in_cycle=%d",
+            invariant_id,
+            worst.severity,
+            len(violations),
+        )
+        return AlertResult(AlertDelivery.DELIVERED)
 
     @classmethod
     def _build_slack_payload(

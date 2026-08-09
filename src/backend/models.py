@@ -2214,11 +2214,18 @@ class CycleViolation(BaseModel):
 
 
 class CycleTransition(BaseModel):
-    """A green→red transition detected this cycle.
+    """A green→red transition this cycle **delivered an alert for**.
 
-    `CanaryService` posts exactly one Slack webhook message per entry,
+    `CanaryService` delivered exactly one Slack webhook message per entry,
     mapping severity to the message styling. Surfaced here so the run-cycle
-    response mirrors what the service actually emitted.
+    response mirrors what the service actually sent.
+
+    Since #1897 an entry means *notified*, not merely *detected*: a
+    transition whose webhook POST was rejected appears in
+    `RunCycleResponse.undelivered_invariant_ids` instead and is retried on
+    a later cycle while the invariant stays red. Conversely an entry here
+    may be a retry that finally landed, whose flip was detected on an
+    earlier cycle.
     """
 
     invariant_id: str
@@ -2247,6 +2254,18 @@ class RunCycleResponse(BaseModel):
     sources_unavailable: List[str]
     violations: List[CycleViolation]
     transitions: List[CycleTransition]
+    undelivered_invariant_ids: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Invariants this cycle tried to alert on and could not deliver — "
+            "a rejected webhook, a raised emit, or a retry held off by the "
+            "per-interval floor (#1897). Disjoint from `transitions`, which "
+            "since #1897 lists only what was actually sent; without this "
+            "field a webhook outage would render as zero transitions, which "
+            "is indistinguishable from a green cycle. Each entry is retried "
+            "on a later cycle while its invariant stays red."
+        ),
+    )
 
 
 # =============================================================================

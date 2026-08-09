@@ -57,13 +57,14 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 from canary import collect_snapshot, run_invariants
 from canary.snapshot import ViolationReport
 from database import db
 from redis_breaker_util import ScriptCache, get_breaker_redis
-from services.canary_alerts import CanaryAlerts
+from services.canary_alerts import AlertDelivery, CanaryAlerts
 
 
 @dataclass
@@ -74,10 +75,14 @@ class CycleResult:
     deterministic library produced (now persisted to `canary_violations`).
 
     `transition_invariant_ids` is the subset the service classified as
-    a fresh green→red flip this cycle, not a continuation of an
-    already-known violation. The router exposes this directly to
+    a fresh green→red flip this cycle — not a continuation of an
+    already-known violation — **and actually notified on**. Since #1897
+    it means *notified*, not merely *detected*: an alert the webhook
+    rejected lands in `undelivered_invariant_ids` instead, and a retry
+    that finally lands appears here on the cycle it succeeded rather than
+    the cycle its flip was detected. The router exposes this directly to
     operators so the on-demand `/api/canary/run-cycle` response matches
-    what the alert sink (when wired) will see.
+    what the alert sink actually sent.
 
     `persisted_violation_ids` is index-aligned with `violations`: for
     each `ViolationReport` in `violations[inv_id][i]`, the row id
@@ -94,11 +99,24 @@ class CycleResult:
     violations: Dict[str, List[ViolationReport]] = field(default_factory=dict)
     persisted_violation_ids: Dict[str, List[Optional[int]]] = field(default_factory=dict)
     transition_invariant_ids: List[str] = field(default_factory=list)
-    # snapshot_time of the most recent prior violation per transitioning
-    # invariant — used by the alert sink to render "last red 2h ago" and
-    # by the run-cycle endpoint to surface `previous_violation_at`. Only
-    # populated for invariants in `transition_invariant_ids`. Value is
-    # `None` if this is the first-ever violation for that invariant.
+    # #1897: the invariants this cycle tried to alert on and could NOT
+    # deliver — a rejected webhook, a raised emit, or a retry held off by
+    # the per-interval floor. Disjoint from `transition_invariant_ids`,
+    # which since #1897 means *notified*, not *detected*. Without this the
+    # admin run-cycle response would report zero transitions during a
+    # webhook outage — structurally identical to a green cycle, which is
+    # exactly the ambiguity #1881 spent a 409 on. An entry here is
+    # retried on a later cycle while its invariant stays red.
+    undelivered_invariant_ids: List[str] = field(default_factory=list)
+    # snapshot_time of the most recent prior violation per invariant this
+    # cycle attempted to alert on — used by the alert sink to render
+    # "last red 2h ago" and by the run-cycle endpoint to surface
+    # `previous_violation_at`. Populated for every emitting invariant,
+    # i.e. the union of `transition_invariant_ids` and
+    # `undelivered_invariant_ids`; on a #1897 retry the value is the one
+    # captured when the transition was first detected, which is the
+    # honest pre-episode "last red" rather than the failed episode
+    # itself. `None` = first-ever violation for that invariant.
     previous_violation_at: Dict[str, Optional[str]] = field(default_factory=dict)
     snapshot_time: str = ""
     sources_unavailable: List[str] = field(default_factory=list)
@@ -133,6 +151,72 @@ REDIS_KEY_LAST_CYCLE = "canary:last_cycle_at"
 # chirps once" property. Redis is a separate failure domain from the DB, so it
 # can still remember what was red while the DB cannot.
 REDIS_KEY_LAST_CYCLE_RED = "canary:last_cycle_red"
+
+# #1897: Redis HASH of transitions whose alert has NOT been delivered.
+# Field = invariant id, value = a small JSON record (`run start`, last
+# attempt, the `previous_violation_at` captured when the flip was
+# detected, an attempt counter, the last webhook error).
+#
+# ONE hash rather than `canary:alert_pending:{id}`: one `HGETALL` per cycle
+# instead of N `GET`s or a `SCAN` (discouraged in production Redis), and the
+# whole pending set is enumerable in a single read.
+#
+# Per-invariant, and deliberately NOT the cycle-global
+# `REDIS_KEY_LAST_CYCLE` cursor. Withholding that cursor on a failed post —
+# the obvious fix, and the one the issue pre-emptively rejects — retries
+# nothing: `previous_latest` is read BEFORE this cycle's inserts, so on the
+# next cycle it already carries the row this cycle wrote, which post-dates
+# the held-back cursor and reads as a continuation. What it *does* do is
+# suppress an unrelated invariant's genuine red→green→red flip, i.e. it
+# manufactures a fresh instance of the exact bug #1897 is about.
+#
+# NO TTL, and that is a decision rather than an omission. The structure is
+# bounded by the invariant REGISTRY (at most one field per registered
+# invariant, ≤16 today), and it is reaped by the success `HDEL` and the
+# give-up `HDEL`. A TTL would instead mean that a fleet quiet for longer
+# than the window — a long deploy, a rollback, `CANARY_ENABLED` off
+# overnight, a Redis failover — silently discards every pending alert with
+# no log line, while continuing-red suppression guarantees none of them is
+# ever re-detected. That is silent permanent loss reintroduced inside the
+# fix for silent permanent loss. A lingering field is inert: emission is
+# gated on the invariant being red in the current cycle.
+#
+# Global (not `agent:`-keyed) because invariant ids are a fixed code
+# registry that no user can recycle — the #1560 name-recycling hazard the
+# `agent:` prefix exists for cannot apply. So, like `canary:leader` and
+# `canary:e02:*`, it is legitimately absent from `CLEARED_KEYSPACES`:
+# clearing it on an agent lifecycle event would drop a pending fleet-level
+# alert.
+REDIS_KEY_ALERT_PENDING = "canary:alert_pending"
+
+# #1897: how long one contiguous failure run may keep retrying before we
+# give up loudly. An AGE, not an attempt count — age is monotonic by
+# construction, so it needs no inference about whether a "fresh" transition
+# is genuine, and unlike a count it can never hand a brand-new episode a
+# spent budget and drop its very first attempt.
+#
+# 30 minutes is chosen against the failure it has to survive, not picked
+# round: a transient Slack 5xx clears within one cycle, a revoked webhook
+# never clears, and a real Slack degradation routinely runs 30–60 minutes.
+# The attempt-count form of this bound (3 × 5 min) tolerated 15.
+#
+# A module constant, NOT an env var and NOT a `system_settings` knob.
+# #1644's `MAX_ROWS_PER_SWEEP` is the precedent: a mutable value read at
+# action time that gates a safety behaviour is the #1638 class, and nobody
+# outside this file can reason about the right number anyway.
+MAX_ALERT_PENDING_AGE_SECONDS = 1800
+
+# #1897: a gap longer than this many intervals between attempts ends the
+# contiguous failure run, so the next failure starts a fresh window.
+# Without the decay, brief separated flaps would consume the budget a later
+# long outage needs; with it, they cannot.
+_ALERT_RUN_DECAY_INTERVALS = 3
+
+# #1897: `post_webhook` returns Slack's response body VERBATIM, and a
+# misrouted webhook URL answers with a whole HTML page. The give-up ERROR
+# has to name a cause, so the string is persisted — truncated, because it
+# is otherwise unbounded third-party text going into a Redis value.
+_MAX_ALERT_ERROR_CHARS = 200
 
 # #1881: single Redis key holding the current canary leader's worker id. One
 # leader across all uvicorn workers — whoever holds it runs the scheduled cycle,
@@ -228,6 +312,54 @@ _LEASE_SCRIPTS = ScriptCache(
 )
 
 
+def _parse_iso_to_unix(ts: Optional[str]) -> Optional[float]:
+    """ISO-Z timestamp → unix epoch seconds, or None if unusable.
+
+    Mirrors R-01's helper (`canary/invariants/r01_no_zombie_claude.py`).
+    Total by contract: every caller here is inside a cycle that must not be
+    broken by a timestamp, and `None` routes to the fail-open branch.
+    """
+    if not ts or not isinstance(ts, str):
+        return None
+    if ts.endswith("Z"):
+        ts = ts[:-1]
+    try:
+        parsed = datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _coerce_int(value: Any) -> int:
+    """Read an integer out of a Redis-round-tripped record, or 0.
+
+    The pending record is parsed input: a poisoned or hand-edited
+    `attempts` must not raise inside a cycle, and it gates nothing (the
+    budget is an age), so 0 is a safe floor.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _truncate_error(error: Optional[str]) -> Optional[str]:
+    """Bound a webhook error string before it is persisted.
+
+    `slack_service.post_webhook` returns Slack's response body VERBATIM,
+    and a misrouted webhook URL answers with an entire HTML page. The URL
+    itself is never in this string — `post_webhook` returns only
+    `type(e).__name__` for transport errors, precisely because the URL is
+    the credential.
+    """
+    if error is None:
+        return None
+    text = error if isinstance(error, str) else str(error)
+    return text[:_MAX_ALERT_ERROR_CHARS]
+
+
 class CanaryService:
     """Background watcher loop for the canary invariant harness."""
 
@@ -250,9 +382,22 @@ class CanaryService:
         self._wedge_reported = False  # one ERROR per wedge, not one per beat
         # Counters surface in /api/health-style monitoring; useful for
         # confirming the service is actually firing on deployed instances.
+        #
+        # #1897 splits detection from delivery. `cumulative_transitions`
+        # takes the issue's literal semantics — it must not report a
+        # delivery that did not happen — which silently costs it its old
+        # meaning ("flips detected"), so that meaning gets its own counter
+        # rather than being lost to satisfy an alerting AC. One counter
+        # must not mean two things.
+        #
+        # These are in-process, per-worker, reset on restart and exposed by
+        # no endpoint: an introspection aid, NOT the "a give-up is never
+        # silent" surface. That is the distinct ERROR log.
         self.cumulative_cycles: int = 0
         self.cumulative_violations: int = 0
-        self.cumulative_transitions: int = 0
+        self.cumulative_transitions: int = 0  # alerts actually delivered
+        self.cumulative_transitions_detected: int = 0  # green→red flips seen
+        self.cumulative_alerts_dropped: int = 0  # gave up after the age budget
         self.last_run_at: Optional[str] = None
 
     # ------------------------------------------------------------------
@@ -719,10 +864,34 @@ class CanaryService:
                     )
             persisted_ids[inv_id] = inv_ids
 
-        # Detect green→red transitions and emit one notification per.
+        # Detect green→red transitions and emit one notification per — and
+        # (#1897) re-attempt any transition whose alert was never delivered,
+        # for as long as its invariant is still red.
+        #
+        # The pending read sits HERE, immediately above the loop, rather than
+        # beside the two Redis reads at the top of the cycle. Those run before
+        # `collect_snapshot`, whose R-01 sweep `docker exec`s into every
+        # running agent container and carries no timeout, so reading there
+        # would widen the window in which another worker's `HDEL` goes unseen
+        # from the insert loop to the entire cycle.
+        pending_alerts = self._read_pending_alerts()
+        # The cycle's clock, read from `snapshot.snapshot_time` and never
+        # `time.time()` — same rule as R-01's dwell (ent#337). It makes the
+        # budget boundary testable with a fixed instant instead of a margin,
+        # and it is the timestamp both workers already agree on. `None` (an
+        # unparseable stamp, which `utc_now_iso()` cannot actually produce)
+        # disables retry for the cycle rather than guessing at ages.
+        now = _parse_iso_to_unix(snapshot.snapshot_time)
         transition_ids: List[str] = []
+        undelivered_ids: List[str] = []
+        detected_count = 0
         previous_violation_at: Dict[str, Optional[str]] = {}
         for inv_id, vlist in results.items():
+            # The red gate — load-bearing twice over since #1897. A pending
+            # entry can only act on a cycle where its invariant is red, so a
+            # retry can never fire for something that has gone green; and the
+            # payload below is rebuilt from THIS cycle's violations, so a
+            # retried alert is never replayed stale content.
             if not vlist:
                 continue
             if previous_latest_available:
@@ -738,38 +907,62 @@ class CanaryService:
                 # first-ever run) keeps the historical verbose-on-failure
                 # behavior — the canary's reason to exist is catching flips.
                 is_transition = prev_red is None or inv_id not in prev_red
-            if not is_transition:
+            pending = pending_alerts.get(inv_id)
+            # Nothing fresh AND nothing owed — the continuing-red case, which
+            # stays silent exactly as before.
+            if not is_transition and pending is None:
                 continue
-            # Capture the prior snapshot_time BEFORE emit so the alert
-            # sink can render "last red Xm ago". `previous_latest` was
-            # loaded pre-cycle (line ~214) and is None when this is the
-            # first-ever violation for the invariant — pass that through
-            # honestly rather than papering over with the current cycle.
-            prev = previous_latest.get(inv_id) or {}
-            previous_violation_at[inv_id] = prev.get("snapshot_time")
-            try:
-                await CanaryAlerts.emit_transition(
-                    inv_id,
-                    vlist,
-                    snapshot.snapshot_time,
-                    previous_violation_at[inv_id],
-                    persisted_ids.get(inv_id, []),
-                )
-                transition_ids.append(inv_id)
-            except Exception:
-                logger.exception(
-                    "canary: failed to emit transition notification for %s",
-                    inv_id,
-                )
+            if is_transition:
+                detected_count += 1
+                # Capture the prior snapshot_time BEFORE emit so the alert
+                # sink can render "last red Xm ago". `previous_latest` was
+                # loaded pre-cycle (line ~214) and is None when this is the
+                # first-ever violation for the invariant — pass that through
+                # honestly rather than papering over with the current cycle.
+                prev = previous_latest.get(inv_id) or {}
+                previous_violation_at[inv_id] = prev.get("snapshot_time")
+            else:
+                # Retry-only emit. Prefer the value captured when the flip was
+                # first detected: recomputing it now would render "last red 5
+                # minutes ago" — the failed episode itself — instead of the
+                # honest pre-episode last-red.
+                previous_violation_at[inv_id] = pending.get("previous_violation_at")
+                if not self._retry_is_due(pending, now):
+                    # Held off by the per-interval floor. Still undelivered,
+                    # and reported as such.
+                    undelivered_ids.append(inv_id)
+                    continue
+            delivered = await self._emit_and_record(
+                inv_id,
+                vlist,
+                snapshot.snapshot_time,
+                previous_violation_at[inv_id],
+                persisted_ids.get(inv_id, []),
+                pending=pending,
+                now=now,
+            )
+            (transition_ids if delivered else undelivered_ids).append(inv_id)
 
         # Update counters + last-run.
         self.cumulative_cycles += 1
         self.cumulative_violations += persisted_count
         self.cumulative_transitions += len(transition_ids)
+        self.cumulative_transitions_detected += detected_count
         self.last_run_at = snapshot.snapshot_time
         # Persist this cycle's snapshot_time for the NEXT cycle's transition
-        # check. Done AFTER notifications so a crash mid-emit doesn't
-        # advance the cursor and silence a real transition on retry.
+        # check. UNCONDITIONAL, and it must stay that way (#1897).
+        #
+        # This line used to be annotated as a defense — "done AFTER
+        # notifications so a crash mid-emit doesn't advance the cursor and
+        # silence a real transition on retry". That defense never fired: the
+        # emit loop's own `except Exception` swallows the raise well before it
+        # could reach here. And withholding the cursor would not retry the
+        # failed alert even if it did fire — the invariant's own freshly
+        # inserted row already post-dates the held-back cursor, so it still
+        # reads as a continuation, while an unrelated red→green→red flip gets
+        # silently swallowed (the walk is in REDIS_KEY_ALERT_PENDING's
+        # comment). The ordering here is now purely conventional; the retry
+        # mechanism is the per-invariant pending store.
         self._write_prev_cycle_at(snapshot.snapshot_time)
         # Companion record for the DB-down fallback above. Written on EVERY
         # cycle, not just when the DB is unreadable: the fallback is only
@@ -777,10 +970,15 @@ class CanaryService:
         self._write_prev_cycle_red([i for i, v in results.items() if v])
 
         if persisted_count or snapshot.sources_unavailable:
+            # `detected` and `delivered` are reported separately since #1897:
+            # collapsing them is what let a rejected POST read as a sent one.
             logger.info(
-                "canary cycle: violations=%d transitions=%d unavailable=%s",
+                "canary cycle: violations=%d transitions_detected=%d "
+                "alerts_delivered=%d alerts_undelivered=%d unavailable=%s",
                 persisted_count,
+                detected_count,
                 len(transition_ids),
+                len(undelivered_ids),
                 snapshot.sources_unavailable,
             )
 
@@ -788,10 +986,220 @@ class CanaryService:
             violations=results,
             persisted_violation_ids=persisted_ids,
             transition_invariant_ids=transition_ids,
+            undelivered_invariant_ids=undelivered_ids,
             previous_violation_at=previous_violation_at,
             snapshot_time=snapshot.snapshot_time,
             sources_unavailable=list(snapshot.sources_unavailable),
         )
+
+    async def _emit_and_record(
+        self,
+        invariant_id: str,
+        violations: List[ViolationReport],
+        snapshot_time: str,
+        previous_violation_at: Optional[str],
+        persisted_ids: List[Optional[int]],
+        *,
+        pending: Optional[dict],
+        now: Optional[float],
+    ) -> bool:
+        """Emit one alert and reconcile the pending store. True iff delivered.
+
+        Extracted rather than inlined: `_run_cycle_inner` is already long,
+        and this is the unit the retry tests actually want to drive.
+
+        ## Ordering: ARM, then POST, then `HDEL` on success
+
+        Not arm-on-failure, and the difference is not stylistic.
+        `asyncio.CancelledError` is **not** a subclass of `Exception`, and
+        `stop()` cancels a live cycle on lifespan shutdown — so a SIGTERM
+        landing inside `post_webhook`'s 5s await propagates straight out of
+        the cycle: the `except` below never runs, nothing gets armed, the
+        cursor write never happens, and the next cycle classifies the still
+        red invariant as a continuation. That is #1897 verbatim, on every
+        deploy that coincides with a red cycle. Arming first makes the
+        pending entry survive cancellation, crash, OOM and SIGKILL alike,
+        and it subsumes the raise case too — under arm-on-failure, an
+        `emit_transition` that raises on its FIRST call has no entry to
+        arm and degrades to exactly the bug.
+
+        Cost is one `HSET` + one `HDEL` per delivered transition, and only
+        on installs that actually have a webhook configured.
+        """
+        record = self._pending_record(
+            pending,
+            snapshot_time=snapshot_time,
+            now=now,
+            previous_violation_at=previous_violation_at,
+        )
+        # Silent-sink shortcut: with no webhook configured the outcome is
+        # SKIPPED, so arming would be pure churn on the default deployment
+        # (`CANARY_SLACK_WEBHOOK_URL` unset). Correctness never depends on
+        # the guess — if the emit fails anyway we arm below.
+        armed = pending is not None or self._alert_sink_configured()
+        if armed:
+            self._write_pending_alert(invariant_id, record)
+
+        outcome: Any = AlertDelivery.FAILED
+        error: Optional[str] = None
+        try:
+            result = await CanaryAlerts.emit_transition(
+                invariant_id,
+                violations,
+                snapshot_time,
+                previous_violation_at,
+                persisted_ids,
+            )
+        except Exception:
+            # A raise — a payload-builder bug of the #1987 over-long-header
+            # class, say — is a failed delivery, not a third silent state.
+            # `outcome` is already FAILED, so it falls through to exactly the
+            # same bookkeeping and everything below keys off `outcome` alone.
+            logger.exception(
+                "canary: failed to emit transition notification for %s",
+                invariant_id,
+            )
+            error = "emit_transition raised"
+        else:
+            # Normalised with `getattr`, deliberately: a test double that
+            # returns a bare enum — or `None`, as
+            # `tests/unit/test_1813_h01_collector_blindness.py` does — then
+            # degrades to the pre-#1897 reading. Keying off an explicit
+            # FAILED rather than `is DELIVERED` is what makes the permissive
+            # direction identical to today's behaviour, so no stub can be
+            # reclassified into a failure and arm a phantom retry.
+            outcome = getattr(result, "outcome", result)
+            error = getattr(result, "error", None)
+
+        if outcome is not AlertDelivery.FAILED:
+            if armed:
+                self._clear_pending_alert(invariant_id)
+            return True
+
+        record["last_error"] = _truncate_error(error)
+        if not armed:
+            # The shortcut guessed wrong (the emit raised with no webhook
+            # configured). Arm now so the retry still exists.
+            self._write_pending_alert(invariant_id, record)
+            armed = True
+
+        elapsed = self._pending_run_age(record, now)
+        if elapsed is not None and elapsed > MAX_ALERT_PENDING_AGE_SECONDS:
+            self._clear_pending_alert(invariant_id)
+            self.cumulative_alerts_dropped += 1
+            # The ONLY ERROR on this path — a per-attempt failure stays a
+            # WARNING — so "we stopped trying" is never silent. It names the
+            # cause because the give-up routinely runs several cycles later,
+            # and often on a different worker, than the attempt that saw the
+            # rejection. `last_error` is Slack's own response body;
+            # `post_webhook` guarantees the webhook URL (which IS the
+            # credential) is never in it, and the payload — agent names,
+            # execution ids, G-04 credential pointers — is never logged here
+            # at all.
+            logger.error(
+                "canary: GIVING UP on the %s alert after %ds and %d attempt(s); "
+                "it was detected and never delivered. Last webhook error: %s",
+                invariant_id,
+                int(elapsed),
+                record.get("attempts", 0),
+                record.get("last_error"),
+            )
+            return False
+
+        self._write_pending_alert(invariant_id, record)
+        logger.warning(
+            "canary: %s alert undelivered (attempt %d); will retry while it "
+            "stays red. Last webhook error: %s",
+            invariant_id,
+            record.get("attempts", 0),
+            record.get("last_error"),
+        )
+        return False
+
+    def _pending_record(
+        self,
+        pending: Optional[dict],
+        *,
+        snapshot_time: str,
+        now: Optional[float],
+        previous_violation_at: Optional[str],
+    ) -> dict:
+        """Build the pending record for this attempt. Pure — writes nothing.
+
+        `first_failed_at` is **first-write-wins within a run**: carried
+        forward verbatim, never re-stamped while the run continues. It is
+        the budget anchor, so this is load-bearing rather than cosmetic —
+        re-stamping an anchor every cycle is behaviourally indistinguishable
+        from a correct implementation right up until the thing it anchors
+        stops working, which is precisely how R-01's dwell went permanently
+        blind (learnings 2026-08-05).
+
+        A gap of more than `_ALERT_RUN_DECAY_INTERVALS` intervals since the
+        last attempt ends the run and starts a fresh window, so brief
+        separated flaps cannot spend the budget a later long outage needs.
+        """
+        prior = pending or {}
+        first_failed_at = prior.get("first_failed_at")
+        attempts = _coerce_int(prior.get("attempts"))
+        last_error = prior.get("last_error")
+        last_attempt = _parse_iso_to_unix(prior.get("last_attempt_at"))
+        run_start = _parse_iso_to_unix(first_failed_at)
+
+        new_run = (
+            run_start is None
+            or now is None
+            or last_attempt is None
+            or (now - last_attempt) > self.interval * _ALERT_RUN_DECAY_INTERVALS
+        )
+        if new_run:
+            first_failed_at = snapshot_time
+            attempts = 0
+            last_error = None
+
+        return {
+            "first_failed_at": first_failed_at,
+            "last_attempt_at": snapshot_time,
+            "previous_violation_at": previous_violation_at,
+            # Diagnostic only — the budget is the age below. Logged at
+            # give-up so the ERROR can say how hard we tried.
+            "attempts": attempts + 1,
+            "last_error": last_error,
+        }
+
+    @staticmethod
+    def _pending_run_age(record: dict, now: Optional[float]) -> Optional[float]:
+        """Seconds since this contiguous failure run started, or None.
+
+        None (an unparseable clock at either end) means the budget cannot be
+        evaluated, and the caller keeps the entry armed rather than dropping
+        an alert on the strength of a timestamp it could not read.
+        """
+        run_start = _parse_iso_to_unix(record.get("first_failed_at"))
+        if now is None or run_start is None:
+            return None
+        return now - run_start
+
+    def _retry_is_due(self, pending: dict, now: Optional[float]) -> bool:
+        """One retry per invariant per interval, on EVERY path.
+
+        `run_cycle()` is deliberately not leader-gated, so an admin
+        smoke-testing during a Slack blip — far and away the most likely
+        reason anyone touches that endpoint — could otherwise spend the
+        whole 30-minute window in about thirty seconds and force a give-up
+        before the scheduled loop ever retried once. This floor is what
+        makes "the cycle interval IS the retry spacing" true on the manual
+        path too, and it collapses most of the two-worker duplicate window
+        as a side effect.
+
+        An unreadable clock returns False: no retry rather than an
+        unspaced one.
+        """
+        if now is None:
+            return False
+        last_attempt = _parse_iso_to_unix(pending.get("last_attempt_at"))
+        if last_attempt is None:
+            return True
+        return (now - last_attempt) >= self.interval
 
 
     # ------------------------------------------------------------------
@@ -801,7 +1209,14 @@ class CanaryService:
     @staticmethod
     def _redis():
         """Redis client shared with the slot service. Lazy import so this
-        module stays loadable in tests without a live Redis."""
+        module stays loadable in tests without a live Redis.
+
+        Deliberately NOT the same client the leader lease uses: that one is
+        `redis_breaker_util.get_breaker_redis()`, whose fail-open wrapper is
+        calibrated for the breaker path. Everything in this section is
+        cycle-state bookkeeping and handles its own errors, so the two
+        coexist on purpose — do not "unify" them.
+        """
         from services.slot_service import get_slot_service
 
         return get_slot_service().redis
@@ -866,6 +1281,82 @@ class CanaryService:
             )
         except Exception:
             logger.exception("canary: failed to persist previous-cycle red set")
+
+    @staticmethod
+    def _alert_sink_configured() -> bool:
+        """Whether an outbound webhook exists at all (#1897).
+
+        Read directly rather than plumbed back from `CanaryAlerts`, which is
+        a stateless composer and should stay one. This only decides whether
+        to pay an `HSET`+`HDEL` on a transition that is going to be SKIPPED
+        anyway — never whether an alert is retried.
+        """
+        return bool(os.getenv("CANARY_SLACK_WEBHOOK_URL", "").strip())
+
+    def _read_pending_alerts(self) -> Dict[str, dict]:
+        """Undelivered alerts by invariant id (#1897). Fail-open to `{}`.
+
+        Parsed PER FIELD. The whole hash arrives in a single `HGETALL`, so a
+        naive parse would let one corrupt value disable retry for every
+        other invariant at once. And it IS parsed input — read back out of
+        Redis, not trusted because we wrote it — so a value that is not a
+        JSON object is treated as absent with a WARNING, mirroring
+        `_read_prev_cycle_red`.
+
+        Redis unreadable ⇒ no retries this cycle, which is exactly the
+        pre-#1897 behaviour and never worse. A retry mechanism that could
+        wedge the harness would be worse than the bug it fixes.
+        """
+        try:
+            raw = self._redis().hgetall(REDIS_KEY_ALERT_PENDING) or {}
+        except Exception:
+            logger.exception("canary: failed to read the pending-alert store")
+            return {}
+
+        pending: Dict[str, dict] = {}
+        for invariant_id, value in raw.items():
+            try:
+                parsed = json.loads(value)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "canary: unparseable pending alert for %s; treating as absent",
+                    invariant_id,
+                )
+                continue
+            if not isinstance(parsed, dict):
+                logger.warning(
+                    "canary: pending alert for %s is not an object; treating as absent",
+                    invariant_id,
+                )
+                continue
+            pending[invariant_id] = parsed
+        return pending
+
+    def _write_pending_alert(self, invariant_id: str, record: dict) -> None:
+        """Arm/refresh one pending alert. Never raises (#1897).
+
+        A write failure means the alert is lost exactly as it was before
+        #1897 — degraded, never worse, and never a reason to break a cycle.
+        """
+        try:
+            self._redis().hset(
+                REDIS_KEY_ALERT_PENDING, invariant_id, json.dumps(record)
+            )
+        except Exception:
+            logger.exception(
+                "canary: failed to record the undelivered %s alert; it will not "
+                "be retried",
+                invariant_id,
+            )
+
+    def _clear_pending_alert(self, invariant_id: str) -> None:
+        """Drop one pending alert — on delivery, or on give-up."""
+        try:
+            self._redis().hdel(REDIS_KEY_ALERT_PENDING, invariant_id)
+        except Exception:
+            logger.exception(
+                "canary: failed to clear the pending %s alert", invariant_id
+            )
 
     @staticmethod
     def _is_green_to_red(
