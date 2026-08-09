@@ -321,11 +321,22 @@ async def update_schedule(
     # exact contract #1472 exists to hold. Passing the EFFECTIVE zone changes no
     # cron verdict and makes the combined check honest.
     if updates.cron_expression is not None:
+        # `is not None`, NOT `or`: an empty-string `timezone` is a SET value that
+        # means "use the scheduler default", not "field absent". `_add_job` reads
+        # `pytz.timezone(s.timezone) if s.timezone else pytz.UTC`, and
+        # `db.update_schedule` writes `""` through verbatim, so a PUT carrying
+        # `{"cron_expression": …, "timezone": ""}` leaves the row on UTC. An `or`
+        # chain treats that as unset and falls back to the STORED zone — so the
+        # validator would judge a zone the write is removing. On a runtime
+        # lacking the tz links that rejected the one request that REPAIRS such a
+        # row (clearing a stale `Europe/Kiev` back to the default), inverting
+        # this check's whole justification. Resolve the effective post-write zone
+        # first, then apply the scheduler's own empty->UTC rule.
+        effective_timezone = (
+            updates.timezone if updates.timezone is not None else schedule.timezone
+        ) or "UTC"
         try:
-            validate_cron_expression(
-                updates.cron_expression,
-                updates.timezone or schedule.timezone or "UTC",
-            )
+            validate_cron_expression(updates.cron_expression, effective_timezone)
         except ScheduleValidationError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

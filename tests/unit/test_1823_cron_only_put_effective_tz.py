@@ -215,6 +215,53 @@ def test_put_carrying_both_fields_uses_the_incoming_timezone(monkeypatch):
     assert seen == [("0 5 * * *", "Asia/Tokyo")]
 
 
+def test_an_explicitly_cleared_timezone_validates_under_utc(monkeypatch):
+    """`timezone: ""` is a SET value meaning "scheduler default", not "absent".
+
+    The zone handed to the validator must be the one the row will hold AFTER the
+    write. `db.update_schedule` writes `""` through verbatim (it has no falsy
+    guard) and `_add_job` reads `pytz.timezone(s.timezone) if s.timezone else
+    pytz.UTC`, so the effective zone here is UTC — not the stored one this PUT is
+    removing. An `or` chain cannot express that: `"" or schedule.timezone` picks
+    the value being discarded, which is how the validator and the persisted row
+    came to disagree.
+    """
+    router = _load_sched_router(monkeypatch)
+    _wire(monkeypatch, router, _StoredSchedule(tz="Europe/Kiev"))
+
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        router, "validate_cron_expression", lambda cron, tz: seen.append((cron, tz))
+    )
+
+    _put(router, router.ScheduleUpdateRequest(cron_expression="0 5 * * *", timezone=""))
+
+    assert seen == [("0 5 * * *", "UTC")], (
+        "an explicitly cleared timezone was resolved back to the stored zone — "
+        "the validator is judging a zone the write removes (#1823)"
+    )
+
+
+def test_clearing_an_unregisterable_timezone_is_not_rejected(monkeypatch):
+    """The repair gesture must go through, not 400.
+
+    This is the harm the `or` chain caused, and the reason it is a defect rather
+    than a stylistic nit. On a runtime lacking the tz links, a PUT that clears a
+    stale `Europe/Kiev` to the default is the request that FIXES the row — and it
+    was rejected against the very zone it was removing, leaving the schedule dead
+    and inverting the justification for the 200->400 trade this file exists for.
+    """
+    router = _load_sched_router(monkeypatch)
+    writes = _wire(monkeypatch, router, _StoredSchedule(tz="Europe/Kiev"))
+
+    from services import schedule_validation
+    monkeypatch.setattr(schedule_validation, "zoneinfo", _MissingOneZone)
+
+    _put(router, router.ScheduleUpdateRequest(cron_expression="0 5 * * *", timezone=""))
+
+    assert len(writes) == 1, "the repairing PUT was rejected instead of applied"
+
+
 def test_falls_back_to_utc_when_the_row_stores_no_timezone(monkeypatch):
     """A NULL/empty stored zone still validates, under UTC — as the scheduler does.
 
