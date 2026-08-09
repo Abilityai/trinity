@@ -24,14 +24,23 @@ T1 = "2026-07-29T12:05:00Z"
 
 
 class StringRedis:
-    """String-only Redis double with real `ex=` / `expire` / `ttl` semantics.
+    """Redis double with real `ex=` / `expire` / `ttl` semantics.
 
     The TTL behaviour is the point of finding 4, so a fake that ignored `ex=`
     would let the regression through.
+
+    The hash commands are here for #1897's `canary:alert_pending` store, which
+    `_run_cycle_inner` reads on every cycle. Without them the fixture below
+    (which monkeypatches this over `CanaryService._redis`) would hit
+    `AttributeError` inside the service's fail-open handlers — the tests would
+    still pass, but for the wrong reason: the retry machinery would be entirely
+    inert here and a bug in it undetectable, with a `logger.exception`
+    traceback on every cycle for company.
     """
 
     def __init__(self) -> None:
         self.strings: Dict[str, str] = {}
+        self.hashes: Dict[str, Dict[str, str]] = {}
         self.ttls: Dict[str, int] = {}
         self.fail_get = False
         self.fail_set = False
@@ -65,6 +74,33 @@ class StringRedis:
     def delete(self, key: str) -> int:
         self.ttls.pop(key, None)
         return 1 if self.strings.pop(key, None) is not None else 0
+
+    # HASH — #1897's pending-alert store.
+
+    def hset(self, key: str, field: str, value: str) -> int:
+        if self.fail_set:
+            raise RuntimeError("read-only replica")
+        bucket = self.hashes.setdefault(key, {})
+        added = 0 if field in bucket else 1
+        bucket[field] = str(value)
+        return added
+
+    def hgetall(self, key: str) -> Dict[str, str]:
+        if self.fail_get:
+            raise RuntimeError("redis down")
+        return dict(self.hashes.get(key, {}))
+
+    def hdel(self, key: str, *fields: str) -> int:
+        bucket = self.hashes.get(key)
+        if not bucket:
+            return 0
+        removed = sum(1 for f in fields if bucket.pop(f, None) is not None)
+        # Real Redis deletes a hash that loses its last field; the difference
+        # matters to any assertion phrased as key-absence rather than
+        # field-absence.
+        if not bucket:
+            self.hashes.pop(key, None)
+        return removed
 
 
 @pytest.fixture()

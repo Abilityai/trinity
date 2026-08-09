@@ -134,9 +134,11 @@ async def run_canary_cycle(
       - confirming a violation cleared after a fix
       - integration tests that need deterministic cycle timing
 
-    The response surfaces exactly the transitions the service emitted —
+    The response surfaces exactly the transitions the service delivered —
     no recomputation here — so the endpoint and the Slack webhook cannot
-    disagree.
+    disagree. Anything detected but NOT delivered is reported beside them
+    in `undelivered_invariant_ids` (#1897), so a webhook outage reads as an
+    outage rather than as a green cycle.
     """
     body = body or RunCycleRequest()
     requested_ids = body.invariants or list(INVARIANTS.keys())
@@ -185,7 +187,9 @@ async def run_canary_cycle(
 
         # Build a transition entry only for invariants the SERVICE actually
         # decided fired a notification this cycle. Continuing-red invariants
-        # have rows in `persisted` but are absent from `transition_set`.
+        # have rows in `persisted` but are absent from `transition_set` — and
+        # since #1897 so does a transition whose webhook POST was rejected,
+        # which is why `undelivered_invariant_ids` rides alongside below.
         if invariant_id in transition_set and vlist:
             worst = max(vlist, key=lambda v: severity_rank(v.severity))
             transitions_out.append(CycleTransition(
@@ -206,4 +210,5 @@ async def run_canary_cycle(
         sources_unavailable=cycle.sources_unavailable,
         violations=persisted,
         transitions=transitions_out,
+        undelivered_invariant_ids=cycle.undelivered_invariant_ids,
     )
