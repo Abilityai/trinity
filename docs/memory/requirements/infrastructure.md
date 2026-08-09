@@ -374,9 +374,70 @@
   line with snapshot_time + violation count + "last red Xm ago"
   badge). Unset = silent sink: cycles still run, violations still
   persist to `canary_violations`, only the outbound POST is skipped.
-  Continuing-red invariants don't re-post. The dashboard-notifications
+  Continuing-red invariants don't re-post — **except to complete an
+  alert that was never delivered** (#1897). The dashboard-notifications
   path (writing `agent_notifications` rows via `db.create_notification`)
   was rejected on the product call.
+  **Delivery is an outcome, not an assumption (#1897).**
+  `emit_transition` reports `DELIVERED` / `SKIPPED` (no webhook
+  configured — deliberately *not* a failure, or every default install
+  would arm a retry per transition) / `FAILED`, and only a non-FAILED
+  outcome counts the transition in `cumulative_transitions` or lists it
+  under `transitions` in the run-cycle response; the undelivered set is
+  surfaced beside it as `undelivered_invariant_ids`, so a webhook outage
+  cannot make an admin `POST /api/canary/run-cycle` look like a green
+  cycle. An undelivered transition is **re-attempted on a later cycle
+  while the invariant is still red**, at most once per cycle interval
+  (a floor, because `run_cycle()` is deliberately not leader-gated and
+  manual polling would otherwise spend the whole window in seconds), for
+  up to `MAX_ALERT_PENDING_AGE_SECONDS` (1800s, a module constant per
+  the #1644 `MAX_ROWS_PER_SWEEP` precedent) per *contiguous failure run*
+  — failures separated by more than 3× the interval start a fresh run,
+  so brief flaps cannot consume the window a later long outage needs.
+  Past the window a distinct ERROR names the invariant, the elapsed
+  seconds and the last webhook error, and `cumulative_alerts_dropped`
+  increments; `cumulative_transitions_detected` keeps counting flips so
+  no single counter has to mean both "detected" and "delivered".
+  **The exact bound, because "up to 1800s" reads tighter than it is:**
+  the budget is evaluated AFTER each attempt (so the ERROR quotes the
+  elapsed and error of the attempt that actually just failed, not a
+  stale one), which means a run ends on the first attempt whose age
+  *exceeds* the window rather than the last one inside it — at the
+  5-minute default, **8 POSTs spanning 2100s (35 min)** per run, then
+  silence. The **dual of the run-decay**, stated so it is not
+  rediscovered as a bug: an invariant flapping red→green→red on a
+  period longer than 3× the interval never accumulates run age and so
+  never reaches a give-up — but it also never *retries* (it is green
+  again before the floor opens), so it costs exactly one POST per red
+  episode, which is the detection rate and is precisely the pre-#1897
+  behaviour. A delivery-layer budget deliberately does not bound its
+  own detector.
+  The retried payload is always rebuilt from the CURRENT cycle's
+  violations, and a pending entry only acts on a cycle where its
+  invariant is red, so a retry is never stale content and never fires
+  for something that went green. Retry state is **per-invariant**, in
+  the Redis hash `canary:alert_pending` (field = invariant id),
+  deliberately independent of the cycle-global `canary:last_cycle_at`
+  cursor: withholding that cursor retries nothing (the invariant's own
+  freshly-inserted row already post-dates it) and silently swallows an
+  unrelated red→green→red flip instead. The entry is armed BEFORE the
+  POST and `HDEL`'d on success, not armed on failure, because
+  `asyncio.CancelledError` is not an `Exception` and `stop()` cancels a
+  live cycle — a SIGTERM landing inside the webhook await would
+  otherwise lose the alert on every deploy that coincides with a red
+  cycle. Everything fails open: an unreadable or unwritable pending
+  store degrades to exactly the pre-#1897 behaviour, never worse, and
+  the *evidence* is never at risk because it lives in
+  `canary_violations` (SQL) rather than in Redis. The alternative of an
+  `alert_state` column on `canary_violations` — delivery state in the
+  same failure domain as the evidence, queryable via
+  `GET /api/canary/violations` — was rejected on scope (a dual-track
+  SQLite + Alembic migration for a delivery bug), not on merit. Two
+  workers can both retry one pending entry, which costs at most one
+  duplicate message; #1881's posture on this same subsystem ("choose the
+  duplicate over the silence") decides it. Guard:
+  `tests/unit/test_1897_canary_alert_delivery.py` — under `tests/unit/`
+  because no CI workflow runs the canary suite itself (#2037).
 - **Instance attribution (#1987)**: the payload names the instance that
   fired it — a `[eu2]` prefix on both the Block Kit header and the `text`
   fallback — so instances sharing one webhook (as `dev` and `eu2` do since
