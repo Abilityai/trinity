@@ -18,8 +18,24 @@ Coverage mirrors the acceptance criteria:
   (e) an existing-but-EMPTY version directory exits 0 with "skipped";
   (f) a directory holding `*.py` files that parse to ZERO revisions FAILS —
       a guard that reports green when it understood nothing is worse than none.
+
+Three further pins guard the mechanism AROUND the script, each of which fails
+only after merge if left untested:
+
+  (g) every revision on each live line parses — the fail-closed rule in (f)
+      covers only the all-files case, so a single dropped file that happens to
+      be a fork head reads as a clean graph (pinned as a known residual);
+  (h) the vendored copy in the private repo is byte-identical — the private
+      job's `alembic heads` cross-check proves that copy agrees with alembic,
+      not that the two copies agree with each other;
+  (i) the boot-log literals `deploy-dev` greps are the literals `main.py`
+      prints — a coupling neither file can see.
+
+(g) and (h) read the optional private submodule and SKIP when it is absent,
+which is the normal state of an OSS clone, a fork, and public CI.
 """
 import importlib.util
+import re
 from pathlib import Path
 
 import pytest
@@ -34,6 +50,17 @@ guard = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(guard)
 
 OSS_VERSIONS = REPO_ROOT / "src" / "backend" / "migrations" / "versions"
+
+# The private submodule is optional (`.gitmodules` sets `update = none`), so
+# everything below that reads it must SKIP when it is absent — the same rule the
+# guard itself follows. These paths are live on a populated checkout (local dev,
+# the dev VM) and absent on public CI and every OSS clone.
+PRIVATE_SUBMODULE = REPO_ROOT / "src" / "backend" / "enterprise"
+PRIVATE_VERSIONS = PRIVATE_SUBMODULE / "backend" / "migrations" / "versions"
+VENDORED_GUARD = PRIVATE_SUBMODULE / "scripts" / "ci" / "check_alembic_heads.py"
+
+_MAIN_PY = REPO_ROOT / "src" / "backend" / "main.py"
+_DEPLOY_DEV = REPO_ROOT / ".github" / "workflows" / "deploy-dev.yml"
 
 
 def _revision_file(
@@ -316,3 +343,142 @@ def test_every_real_oss_revision_parses():
 def test_blank_revision_id_is_not_a_revision(bad):
     source = f'revision = "{bad}"\ndown_revision = None\n'
     assert guard.parse_revision_source(source) == (None, ())
+
+
+# --- the enterprise version-line, when the submodule is populated -------------
+
+
+@pytest.mark.skipif(
+    not PRIVATE_VERSIONS.is_dir(),
+    reason="private submodule not initialised (the normal state of an OSS clone)",
+)
+def test_every_real_enterprise_revision_parses():
+    """The twin of the OSS assertion above — and the thing that closes the
+    blind spot pinned by `test_unparsed_file_can_hide_a_head` for this line.
+
+    `collect_graph` DROPS a file it cannot read, and `check_directory` only
+    fails when *every* file is unreadable — so one silently-dropped revision
+    that happens to be a fork head reads as a clean single-head graph. That
+    cannot happen while every file parses, which is what this asserts.
+
+    Counts only, never filenames: this line is private and a failure message
+    is CI output.
+    """
+    files = guard.revision_files(PRIVATE_VERSIONS)
+    parsed = guard.collect_graph(PRIVATE_VERSIONS)
+    assert len(parsed) == len(files), (
+        f"{len(files) - len(parsed)} of {len(files)} enterprise revision file(s) "
+        "did not yield a parseable `revision` — the guard is partially blind on "
+        "this line"
+    )
+
+
+@pytest.mark.skipif(
+    not VENDORED_GUARD.is_file(),
+    reason="private submodule not initialised (the normal state of an OSS clone)",
+)
+def test_vendored_guard_copy_is_byte_identical():
+    """Invariant #5's shape, applied across the repo boundary.
+
+    The guard is vendored into the private repo rather than fetched, so that
+    job needs no cross-repo checkout of executable code. That copy's own CI
+    cross-checks it against `alembic heads` — which proves the PRIVATE copy
+    agrees with alembic, NOT that the two copies still agree with each other.
+    A public-side edit (the likelier direction: this is where contributors
+    work) is invisible to both CI runs. This is the check that sees it, in
+    every populated checkout.
+
+    Compares digests, not contents — a diff of the private file has no place
+    in a test failure message.
+    """
+    import hashlib
+
+    public = hashlib.sha256(_GUARD_PATH.read_bytes()).hexdigest()
+    private = hashlib.sha256(VENDORED_GUARD.read_bytes()).hexdigest()
+    assert public == private, (
+        "the vendored copy of check_alembic_heads.py has drifted "
+        f"(public sha256 {public[:12]}…, private {private[:12]}…) — update both "
+        "copies together, then advance the submodule pointer"
+    )
+
+
+# --- known residual, pinned so it cannot be re-asserted away ------------------
+
+
+def test_unparsed_file_can_hide_a_head(tmp_path, capsys):
+    """A file the parser cannot read is DROPPED, and dropping a fork head
+    hides the fork. Characterization, not endorsement.
+
+    The fail-closed rule in `check_directory` covers only the all-files case
+    (`test_unparseable_revisions_fail_closed`); a single unreadable file among
+    readable ones is silently omitted. Reaching it takes a revision that sets
+    `revision` non-literally — tuple-unpacking, a call, a name — which
+    Alembic's own template never emits.
+
+    Why it is left rather than fixed here: real `alembic` reads the module
+    attribute, so it sees such a revision and the neighbouring layers still
+    fire — `pg-migrations` runs a real `alembic upgrade head` on this line,
+    and the private version-line's own job cross-checks `alembic heads`. The
+    per-line "every file parses" assertions above are what close it inside
+    this guard. Tightening `check_directory` itself would have to land in the
+    public and vendored copies in the same change (see the byte-identity test).
+    """
+    _linear_chain(tmp_path)
+    # A fork off 0002 whose `revision` is set by tuple-unpacking, so the AST
+    # target is an ast.Tuple and `_literal_assignments` skips it.
+    (tmp_path / "0003_fork.py").write_text(
+        'revision, down_revision = "0003_fork", "0002_two"\n', encoding="utf-8"
+    )
+    assert guard.parse_revision_source(
+        (tmp_path / "0003_fork.py").read_text(encoding="utf-8")
+    ) == (None, ())
+    # Two heads exist on disk; the guard sees one and passes.
+    assert guard.check_directory(tmp_path) == 0
+    assert "1 head" in capsys.readouterr().out
+
+
+# --- deploy-dev boot-log assertion: both sides of the string contract ---------
+#
+# The post-merge layer greps `docker logs` for literals that main.py prints.
+# That coupling is invisible to both files, so a rename on either side is only
+# discovered by a red deploy. These pin it to a red unit test instead.
+#
+# Note the failure DIRECTION, which is what makes the coupling tolerable at
+# all: the success assertion is a required-PRESENCE check, so if either literal
+# drifts the deploy takes the else-branch and FAILS. String drift degrades to a
+# loud false alarm, never to a silent pass.
+
+BOOT_LOG_LITERALS = (
+    "Trinity Enterprise modules registered",
+    "Trinity Enterprise registration FAILED",
+)
+
+
+@pytest.mark.parametrize("literal", BOOT_LOG_LITERALS)
+def test_boot_log_literal_is_printed_by_main_and_grepped_by_deploy(literal):
+    assert literal in _MAIN_PY.read_text(encoding="utf-8"), (
+        f"main.py no longer prints {literal!r} — deploy-dev.yml greps for it "
+        "and will fail every dev deploy until both sides move together"
+    )
+    assert literal in _DEPLOY_DEV.read_text(encoding="utf-8"), (
+        f"deploy-dev.yml no longer greps {literal!r} — the #2068 boot-log "
+        "assertion is the only layer that catches a silent enterprise "
+        "degradation post-merge"
+    )
+
+
+def test_every_enterprise_grep_in_deploy_dev_matches_a_string_main_prints():
+    """Catches a THIRD grep added later without its main.py counterpart.
+
+    Scoped to patterns beginning `Trinity Enterprise`, which is exactly the set
+    main.py owns. The partial-degradation pattern is deliberately outside it —
+    that line is emitted by the private submodule, so this repo cannot assert
+    on it without either a submodule dependency or naming private internals.
+    """
+    workflow = _DEPLOY_DEV.read_text(encoding="utf-8")
+    main_src = _MAIN_PY.read_text(encoding="utf-8")
+    patterns = set(re.findall(r"grep[^\n]*?'(Trinity Enterprise[^']*)'", workflow))
+    assert patterns, "expected deploy-dev.yml to grep the enterprise boot log"
+    assert set(BOOT_LOG_LITERALS) <= patterns
+    missing = sorted(p for p in patterns if p not in main_src)
+    assert missing == [], f"deploy-dev.yml greps strings main.py never prints: {missing}"

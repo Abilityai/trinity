@@ -203,6 +203,15 @@ jobs:
             if [ -f src/backend/enterprise/backend/__init__.py ]; then
               # Scope the read to the CURRENT container run, so a FAILED line
               # left over from a previous boot cannot fail today's deploy.
+              #
+              # The --tail fallback below does NOT carry that property, and is
+              # sound only here: `up -d` just recreated this container, so its
+              # whole log is a few hundred lines and every boot line is inside
+              # the window. On a long-running container it would be wrong in
+              # both directions — deep enough to catch a previous boot's FAILED
+              # line, and too shallow to reach the current boot's success line
+              # (a live instance measured 14k lines since start). Don't lift
+              # this block somewhere the container isn't newly started.
               ENT_SINCE=$(sudo docker inspect -f '{{.State.StartedAt}}' trinity-backend 2>/dev/null || echo "")
               if [ -n "$ENT_SINCE" ]; then
                 ENT_LOG=$(sudo docker logs trinity-backend --since "$ENT_SINCE" 2>&1 || true)
