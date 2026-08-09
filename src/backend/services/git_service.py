@@ -1413,14 +1413,82 @@ def _build_rm_cached_ignored_command(git_dir: str) -> str:
     return f"bash -c {shlex.quote(script)}"
 
 
+# Probe git itself for the repo root. `--show-toplevel` walks UP from the cwd,
+# so starting inside `workspace/` finds a workspace-rooted legacy repo first and
+# falls through to the home-rooted repo otherwise: nearest-enclosing repo wins,
+# which is the legacy/standard split the old content heuristic was approximating.
+#
+# GIT_DISCOVERY_ACROSS_FILESYSTEM=1 because `workspace/` is a plausible mount
+# point and git's default is to stop discovery at a filesystem boundary — which
+# would silently reintroduce the very misclassification this fixes. Letting
+# discovery cross the boundary is safe here only because `_parse_git_root`
+# refuses any answer outside `/home/developer`.
+_GIT_ROOT_PROBE = (
+    "cd /home/developer/workspace 2>/dev/null || cd /home/developer || exit 1; "
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM=1 git rev-parse --show-toplevel 2>/dev/null"
+)
+
+
+def _parse_git_root(output: str) -> Optional[str]:
+    """The repo root from ``git rev-parse --show-toplevel`` output, or None.
+
+    Deliberately defensive: the container exec channel returns stdout and
+    stderr merged, so the payload can arrive with noise around it. Only a line
+    that is exactly ``/home/developer`` or lives beneath it is accepted — ``/``,
+    ``/home`` (an accidental repo above the agent) and look-alikes such as
+    ``/home/developer2`` are rejected rather than acted on.
+    """
+    for line in (output or "").splitlines():
+        candidate = line.strip()
+        if candidate == "/home/developer" or candidate.startswith("/home/developer/"):
+            return candidate
+    return None
+
+
 async def _detect_git_dir(container_name: str) -> str:
     """Pick the directory git operations should run in for an agent container.
 
-    Standard path is ``/home/developer``. Returns ``/home/developer/workspace``
-    only for legacy agents (created before 2026-02) that have content under
-    that subdirectory. Mirrors the detection ``initialize_git_in_container``
-    has always used so init and the post-init migration agree.
+    Asks git, not the filesystem. ``git rev-parse --show-toplevel``, run from
+    ``/home/developer/workspace`` when that exists and from ``/home/developer``
+    otherwise, returns the root of the *nearest enclosing* repository — so a
+    legacy agent (created before 2026-02) whose repo really is rooted at
+    ``workspace/`` still gets ``workspace/``, while a standard agent gets
+    ``/home/developer`` even when ``workspace/`` holds unrelated data.
+
+    The previous implementation inferred the root from whether ``workspace/``
+    had any content, which tests *content* rather than *legacy-ness*: an agent
+    that keeps a populated non-git data directory there was reported as
+    workspace-rooted, and every path-based consumer (the compatibility
+    collector, the `.gitignore` migration and its `.git` guard, the fix
+    endpoint) then read and wrote a subdirectory's files as if they were the
+    repo root's.
+
+    The content heuristic is retained VERBATIM as the no-repository fallback:
+    ``initialize_git_in_container`` uses this result to CHOOSE where to run
+    ``git init``, so placement on a fresh agent must stay exactly what it has
+    always been.
     """
+    probe = await execute_command_in_container(
+        container_name=container_name,
+        command=f"bash -c {shlex.quote(_GIT_ROOT_PROBE)}",
+        timeout=5,
+    )
+    if probe.get("exit_code") == 0:
+        git_root = _parse_git_root(probe.get("output", ""))
+        if git_root:
+            return git_root
+
+    # No repository yet (or an unreadable probe) — fall back to the historical
+    # content heuristic, unchanged, so a fresh agent's `git init` lands where it
+    # always has. `git rev-parse` output carries no credentials, so the probe
+    # result is safe to log verbatim (truncated for volume, not for secrecy).
+    logger.warning(
+        "_detect_git_dir: no repository resolved for %s (exit=%s, output=%r); "
+        "falling back to the workspace-content heuristic",
+        container_name,
+        probe.get("exit_code"),
+        (probe.get("output") or "")[:200],
+    )
     check_workspace = await execute_command_in_container(
         container_name=container_name,
         command=(
