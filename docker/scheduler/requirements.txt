@@ -2,7 +2,19 @@
 # Standalone scheduler for agent task execution
 
 # Core scheduling
-APScheduler>=3.10.0,<4.0.0
+#
+# #1823: EXACT, and equal to `docker/backend/Dockerfile`'s `apscheduler==3.11.0`
+# — the one deliberate exception to this file's floor convention. The backend
+# validates a schedule by constructing the same `CronTrigger` this service will
+# register ("reject exactly what the scheduler would", #1472), so a floor here
+# lets the validator and the executor resolve DIFFERENT APScheduler versions and
+# quietly re-opens the gap the contract exists to close. `astimezone()` — which
+# re-resolves a pytz zone through `zoneinfo` — is the precise function whose
+# behaviour caused #1823, so "same version both sides" is not a tidy-up.
+#
+# Nothing ties these two declarations together yet; keep them equal by hand when
+# either moves.
+APScheduler==3.11.0
 croniter>=2.0.1
 
 # Async HTTP
