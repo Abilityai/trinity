@@ -43,7 +43,12 @@ import services.template_service as ts
 
 
 def _config(**over):
-    base = dict(template="github:acme/second-brain", fork_to_own=None, source_branch=None)
+    base = dict(
+        template="github:acme/second-brain", fork_to_own=None, source_branch=None,
+        # ent#15 (#2040) added an import-intent gate ahead of the fork gate;
+        # None is the "no intent supplied" default this suite exercises.
+        import_intent=None,
+    )
     base.update(over)
     return types.SimpleNamespace(**base)
 
@@ -290,6 +295,7 @@ def github(monkeypatch):
             config = types.SimpleNamespace(
                 template=template, fork_to_own=None,
                 source_branch=None, source_mode=True,
+                import_intent=None,  # ent#15 (#2040)
             )
             return catalog, asyncio.run(crud._resolve_template(config, _user()))
 

@@ -157,11 +157,22 @@ def test_an_admin_owned_agent_key_cannot_reset_the_registry(env):
     assert env.settings.rows["template_registry_url"] == "https://ours.example.com/r.yaml"
 
 
-def test_an_agent_key_may_still_READ(env):
-    """GET reads an operator-set URL — same gate as TMPL-001's GET. The human
-    check is on the writes, where the consequence is."""
+def test_an_agent_key_cannot_READ_either(env):
+    """The READ is admin-gated too, and since #1890 `require_admin` itself
+    rejects an agent principal — so the whole surface, not just the writes, is
+    human-only.
+
+    This assertion used to be `200`, on the reasoning that a read is harmless
+    and the human check belongs on the writes. #1890 overruled that at the GATE
+    rather than per-endpoint (third recurrence of the class: trinity-ops-agent
+    #232, #1644, #1816), and it is the stronger call here: this GET returns the
+    registry URL plus a live `status` block, which on a private/per-customer
+    catalog is exactly the pointer an agent should not be able to enumerate.
+    The explicit `reject_agent_principal` on PUT/DELETE is now belt-and-braces
+    over the same gate, and is kept deliberately — it states the intent locally
+    and survives any future relaxation of `require_admin`."""
     env.as_(_principal(role="admin", agent_name="scout"))
-    assert env.client.get("/api/settings/template-registry").status_code == 200
+    assert env.client.get("/api/settings/template-registry").status_code == 403
 
 
 # ---------------------------------------------------------------------------
