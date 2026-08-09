@@ -1730,6 +1730,56 @@
         "performance"
       ],
       "description": "The free-text PAT scrubbers only fired on a literal `https://` (#2052) - the follow-up ent#347 predicted. `skill_source_clone._CREDENTIAL_URL_RE` was `https://[^\\s/?#]+@`, anchored on the scheme, while the parse-based `utils.url_validation.strip_url_credentials` (ent#334) resolves an authority with no scheme at all. Three shapes therefore slipped past the regex and were echoed VERBATIM: protocol-relative `//tok@github.com/o/r`, the scheme-less shorthand `tok@github.com/o/r`, and an alternate scheme `git+ssh://tok@...` (plus the empty-userinfo `https://@host`, which the old `+` quantifier could not match). Reachable rather than theoretical: `_adopt_legacy_clone` writes source rows with no validation and `validate_skills_library_url` accepts the scheme-less form, so a stored URL may legitimately take them, and `_scrub_pat` then runs over `str(e)` of an ARBITRARY exception whose text is not constrained to what `_authenticated_url` built. Sink is `system_settings['skills_library_last_error']` - durable and admin-rendered. Fixed by moving the rule next to the parser as `scrub_url_credentials_in_text` rather than adding a fourth hand-written regex; `redact` delegates and `_CREDENTIAL_URL_RE` is deleted. The free-text side stays text-oriented on purpose - git stderr is prose plus several URLs, so there is no single URL to hand `urlparse`. Tests are mostly PARITY assertions over one shared corpus (the ent#334 cross-check shapes plus the three that regressed): the two must agree on the resolved authority, on WHETHER a credential is present at all (the actual defect), and no userinfo may survive. A structural test asserts `_CREDENTIAL_URL_RE` is gone so a local pattern cannot be reintroduced. Regression guards keep `?ref=a@b` untouched - the removed scheme anchor was also what kept the pattern off a query `@`, which is why the bare form carries a run-start boundary - plus multi-URL free text, idempotency and never-raises. 21 of these fail against the pre-fix scrubber, one with the token verbatim. Also pins the scan LINEAR: dropping the `https://` anchor also drops the literal `str.find` could jump to, and the first fix expressed the new rule as a class-first pattern, which rescanned a long no-`@` run from every offset - 24s on 200KB, 151s on 500KB, on RAW git stderr that is unbounded and partly remote-controlled, i.e. a DoS reachable from a hostile repo. Rewritten to walk maximal authority-legal runs; same 500KB now scrubs in 1.2ms."
+    },
+    {
+      "file": "unit/test_1823_tz_capability_parity.py",
+      "feature": "#1823",
+      "added": "2026-08-09",
+      "categories": [
+        "backend",
+        "unit",
+        "packaging",
+        "reliability",
+        "scheduling"
+      ],
+      "description": "TZ-capability packaging parity (#1823), #1891-shaped static guard. Both tz-resolving images (backend, scheduler) install `tzdata-legacy` AND declare the `tzdata` wheel; tests/requirements-test.txt declares it too (CI must not be MORE capable than production — that inversion kept this bug green on CI and red in the image for months); the base image's exemption is asserted against the reason that holds (its tree registers no CronTrigger) rather than inherited; and both images pin the SAME APScheduler exactly, since the #1472 contract ('reject exactly what the scheduler would') is only true while validator and executor build the same CronTrigger — a floor on either side does not merely risk drift, it produces it, as `>=3.10.0,<4.0.0` resolves to whatever is newest at build time. Stale-path guard. Comments are stripped before matching, so the fix's own explanatory comments cannot make the guard vacuous. Plus one runtime assertion resolving `Europe/Kiev` — the one that goes red INSIDE a mis-packaged image. Pure stdlib, no Docker."
+    },
+    {
+      "file": "unit/test_1823_scheduler_permanent_classification.py",
+      "feature": "#1823",
+      "added": "2026-08-09",
+      "categories": [
+        "backend",
+        "unit",
+        "scheduler",
+        "reliability",
+        "scheduling"
+      ],
+      "description": "`src/scheduler/service.py::_add_job` permanent-vs-transient classification (#1823 D5, a gap in #1472's own bounded-retry machinery). `zoneinfo.ZoneInfoNotFoundError` is a KeyError subclass, so it fell through to the transient arm and retried every 60s forever with a frozen next_run_at (canary E-06 fires on it). Both directions pinned: RuntimeError and a plain KeyError must STAY transient, because the permanent arm suppresses retries. Plus log-once bounding, the recovery path (a parked row registers and clears its flag once the runtime can resolve the zone), and one un-injected case registering a real legacy alias. Injected fake DB/scheduler, no Docker."
+    },
+    {
+      "file": "unit/test_1823_update_route_timezone.py",
+      "feature": "#1823",
+      "added": "2026-08-09",
+      "categories": [
+        "backend",
+        "unit",
+        "api",
+        "scheduling"
+      ],
+      "description": "`PUT /api/agents/{name}/schedules/{id}` timezone gate (#1823 D4 — the silent persist that was quieter and worse than the create path's 500: the alias was written to the row and the failure deferred to a fire time that never came). Every case asserts the WRITE did not happen, not just the status code. Non-admin caller. Real-input (`Not/AZone`), fault-injected unresolvable-but-pytz-known, and a resolvable legacy alias going through with no injection. Route handler driven directly, no Docker."
+    },
+    {
+      "file": "unit/test_1823_cron_only_put_effective_tz.py",
+      "feature": "#1823",
+      "added": "2026-08-09",
+      "categories": [
+        "backend",
+        "unit",
+        "api",
+        "scheduling"
+      ],
+      "description": "Cron-only `PUT` validates against the row's OWN timezone instead of a hardcoded \"UTC\" (#1823) — the deliberate 200->400 for a row already storing an unregisterable zone. Pins assert on the ARGUMENT handed to the validator, since on a tz-complete runtime every zone validates identically and a verdict-based test would pass against the old literal. The injected failure misses exactly ONE zone for the same reason. Covers incoming-tz precedence, the NULL-stored-tz UTC fallback, the healthy path staying 200, and that a bad cron is still rejected. No Docker."
     }
   ]
 }
