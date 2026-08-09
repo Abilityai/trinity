@@ -183,10 +183,10 @@ alongside the router, MCP, and manifest deploy.
 _resolve_template (crud.py)                       _materialize_agent_files (crud.py)
 ---------------------------                       ---------------------------------
 github: branch                                    if declared and not config.ephemeral:
-  _declared_schedules_for_github(                   try:
+  _read_source_template(                            try:
       repo, creation-resolved PAT, @ref)               reconcile_declared_schedules(
     → template_service                                     name, declared, owner)
-      .fetch_template_metadata_for_create()          except: WARNING   ← non-fatal
+      .fetch_template_metadata_result_for_create()   except: WARNING   ← non-fatal
       (cache-bypassed, loud on failure)                    ↓
     → normalize_declared_schedules()             seen = {s.name for s in
 local: branch                                            db.list_agent_schedules(name)}
@@ -249,7 +249,10 @@ The reader, its tolerance matrix, and the catalog surface are in
 
 **Files:**
 - `src/backend/services/template_schedules.py` — the tolerant reader
-- `src/backend/services/agent_service/crud.py` — `_declared_schedules_for_github`,
+- `src/backend/services/agent_service/crud.py` — `_read_source_template`
+  (ent#14 S2 renamed it from `_declared_schedules_for_github` and widened its
+  return to `(metadata, reason)`: the `fork_to_own` gate decides from this same
+  read, so schedules are no longer its only consumer),
   `reconcile_declared_schedules`, `_materialize_agent_files`
 - `src/backend/services/system_service.py` — `create_schedules` name-match guard
 - `tests/unit/test_ent89_schedule_materialization.py`,
