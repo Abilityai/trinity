@@ -111,13 +111,20 @@
                      every row has the same item set — that, not nowrap alone, is what
                      stops rows breaking at different points. Ink is the tertiary ladder
                      rung (gray-500/gray-400), which was inverted and failed AA in both
-                     themes at rest. -->
+                     themes at rest.
+
+                     The owner span is the one item that can now go multi-line (break-all
+                     is what made that reachable), so its icon is items-start + mt-0.5
+                     rather than items-center — it must sit on the FIRST line, not float
+                     to the vertical centre of two. text-xs is a 16px line box and the
+                     glyph is 12px, so mt-0.5 (2px) is exactly the offset items-center
+                     was already producing: single-line rows are pixel-identical. -->
                 <div class="mt-1 flex items-center flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
                   <span>
                     <code class="bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded font-mono">{{ key.key_prefix }}...</code>
                   </span>
-                  <span v-if="key.user_email" class="flex items-center min-w-0 break-all">
-                    <svg class="h-3 w-3 mr-1 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <span v-if="key.user_email" class="flex items-start min-w-0 break-all">
+                    <svg class="h-3 w-3 mr-1 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
                     </svg>
                     {{ key.user_email }}
