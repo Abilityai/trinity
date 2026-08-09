@@ -73,20 +73,26 @@
           <b v-if="analytics" :class="activityTotal > 0 ? 'info' : 'na'">{{ activityTotal }}</b>
           <b v-else class="na">&mdash;</b>
         </div>
-        <div v-if="!analytics && analyticsPending" class="chartbox skeleton"></div>
-        <!-- Empty days keep a faint baseline stub so sparse data reads as a
-             14-day rhythm instead of a lone bar floating in a void. -->
-        <div v-else-if="activityDays.length" class="stack">
-          <span v-for="(d, i) in activityDays" :key="i" class="col" :title="d.date + ' — ' + d.total + ' runs'">
-            <template v-if="d.total > 0">
-              <i v-if="d.sched" class="bs" :style="{ height: d.schedPx + 'px' }"></i>
-              <i v-if="d.man" class="bm" :style="{ height: d.manPx + 'px' }"></i>
-              <i v-if="d.ext" class="be" :style="{ height: d.extPx + 'px' }"></i>
-            </template>
-            <i v-else class="stub"></i>
-          </span>
-        </div>
-        <div v-else class="stack flat"><span class="flatline"></span></div>
+        <!-- ent#245: scanline loading + wipe reveal, keyed off the store's
+             loading→done flip. Zero-run days still reveal (stub baselines are
+             an answer); only a data-less terminal (error) snaps. -->
+        <ScanlineReveal :loading="chartsLoading" :reveal="!!analytics" class="chartbox">
+          <template v-if="!chartsLoading">
+            <!-- Empty days keep a faint baseline stub so sparse data reads as a
+                 14-day rhythm instead of a lone bar floating in a void. -->
+            <div v-if="activityDays.length" class="stack">
+              <span v-for="(d, i) in activityDays" :key="i" class="col" :title="d.date + ' — ' + d.total + ' runs'">
+                <template v-if="d.total > 0">
+                  <i v-if="d.sched" class="bs" :style="{ height: d.schedPx + 'px' }"></i>
+                  <i v-if="d.man" class="bm" :style="{ height: d.manPx + 'px' }"></i>
+                  <i v-if="d.ext" class="be" :style="{ height: d.extPx + 'px' }"></i>
+                </template>
+                <i v-else class="stub"></i>
+              </span>
+            </div>
+            <div v-else class="stack flat"><span class="flatline"></span></div>
+          </template>
+        </ScanlineReveal>
       </div>
 
       <!-- Context · 7d — miniature trend line, colored by current level -->
@@ -95,15 +101,21 @@
           <span>Context · 7d</span>
           <b :class="contextHeadline == null ? 'na' : contextLevelClass">{{ contextHeadline == null ? '—' : contextHeadline + '%' }}</b>
         </div>
-        <div v-if="!analytics && analyticsPending" class="chartbox skeleton"></div>
-        <div v-else-if="contextPoints" class="chartbox">
-          <svg class="ctxsvg" viewBox="0 0 160 32" preserveAspectRatio="none">
-            <path class="ctxarea" :class="contextLevelClass" :d="contextPoints.area"></path>
-            <polyline class="ctxline" :class="contextLevelClass" :points="contextPoints.line"></polyline>
-            <circle class="ctxdot" :class="contextLevelClass" :cx="contextPoints.lastX" :cy="contextPoints.lastY" r="2.6"></circle>
-          </svg>
-        </div>
-        <div v-else class="chartbox"><div class="ctxflat"></div></div>
+        <ScanlineReveal :loading="chartsLoading" :reveal="!!analytics" class="chartbox">
+          <template v-if="!chartsLoading">
+            <!-- Inner .chartbox: the svg/flatline need a definite 32px box
+                 (percentage heights don't resolve inside the primitive's
+                 auto-height content wrapper — see ScanlineReveal's CSS note). -->
+            <div class="chartbox">
+              <svg v-if="contextPoints" class="ctxsvg" viewBox="0 0 160 32" preserveAspectRatio="none">
+                <path class="ctxarea" :class="contextLevelClass" :d="contextPoints.area"></path>
+                <polyline class="ctxline" :class="contextLevelClass" :points="contextPoints.line"></polyline>
+                <circle class="ctxdot" :class="contextLevelClass" :cx="contextPoints.lastX" :cy="contextPoints.lastY" r="2.6"></circle>
+              </svg>
+              <div v-else class="ctxflat"></div>
+            </div>
+          </template>
+        </ScanlineReveal>
       </div>
     </div>
 
@@ -169,6 +181,7 @@ import RuntimeBadge from './RuntimeBadge.vue'
 import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
 import RunningStateToggle from './RunningStateToggle.vue'
 import AutonomyToggle from './AutonomyToggle.vue'
+import ScanlineReveal from './ScanlineReveal.vue'
 import { useNetworkStore } from '@/stores/network'
 import { useFleetGridStore } from '@/stores/fleetGrid'
 
@@ -357,6 +370,10 @@ const analyticsPending = computed(() => {
   const s = gridStore.analyticsState[name.value]
   return !s || s === 'loading'
 })
+// ent#245: one loading flag drives both chart zones' ScanlineReveal — the
+// store only enters 'loading' when there is no cache, so background
+// refreshes never re-enter the loading state (§6: refresh is invisible).
+const chartsLoading = computed(() => !analytics.value && analyticsPending.value)
 
 const activityDays = computed(() => {
   const timeline = analytics.value?.timeline || []
@@ -716,14 +733,14 @@ watch(
   height: 32px;
   position: relative;
 }
-.chartbox.skeleton {
-  border-radius: 4px;
-  background: var(--gv-bar-track);
-  animation: gtile-skeleton 1.5s ease-in-out infinite;
-}
-@keyframes gtile-skeleton {
-  0%, 100% { opacity: 0.5; }
-  50% { opacity: 0.9; }
+/* ent#245: the chart zones' ScanlineReveal rides the grid's own palette
+   (already theme-aware via FleetGrid's --gv-* definitions) instead of the
+   primitive's Tailwind-token defaults. Three-class specificity so this beats
+   the component's own `.dark .scanline` override regardless of stylesheet
+   injection order. */
+.t-charts .mini .scanline {
+  --scan-core: var(--gv-blue);
+  --scan-track: var(--gv-bar-track);
 }
 
 .stack {
@@ -912,9 +929,6 @@ watch(
 
 @media (prefers-reduced-motion: reduce) {
   .t-dot.active {
-    animation: none;
-  }
-  .chartbox.skeleton {
     animation: none;
   }
 }

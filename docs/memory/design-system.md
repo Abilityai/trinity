@@ -280,6 +280,18 @@ The app has **one** data-loading motion (design session, 2026-07). Bespoke per-c
 
 CSS-only: one beam element per zone + two keyframe animations. No JS animation loop.
 
+**Shipped primitive (trinity-enterprise#245):** `src/frontend/src/components/ScanlineReveal.vue`
+(phase rules in the pure, unit-tested `utils/scanlinePhase.js`). Wrap the zone, pass
+`:loading` ("no data yet") and `:reveal` (false for an error/empty terminal — those snap,
+never celebrate); swap loading/loaded content inside the SLOT of one persistent instance
+(sibling `v-if` branches remount it and the reveal never plays); the consumer sizes the
+zone. During the arrival pass the track is wiped OUT behind the beam (complementary
+`clip-path`), so revealed pixels sit on their final background from the first frame — no
+end-of-pass background snap. Theme via `--scan-core`/`--scan-track` overrides (the Grid
+rides `--gv-*`). Reference adoption: the Grid `AgentTile.vue` chart zones — Dashboard-only
+for now by product decision; adopting any further surface = the ent#253 pass; do not build
+a new spinner.
+
 ### Rules (all mandatory)
 
 - **Keyed off store state** (`loading → loaded`), **never a timer**. Cache hits resolve instantly and **skip the animation entirely** — no forced beam pass on instant data.
