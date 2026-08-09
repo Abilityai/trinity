@@ -111,13 +111,16 @@ class CycleResult:
     # retried on a later cycle while its invariant stays red.
     undelivered_invariant_ids: List[str] = field(default_factory=list)
     # snapshot_time of the most recent prior violation per invariant this
-    # cycle attempted to alert on — used by the alert sink to render
-    # "last red 2h ago" and by the run-cycle endpoint to surface
-    # `previous_violation_at`. Populated for every emitting invariant,
-    # i.e. the union of `transition_invariant_ids` and
-    # `undelivered_invariant_ids`; on a #1897 retry the value is the one
-    # captured when the transition was first detected, which is the
-    # honest pre-episode "last red" rather than the failed episode
+    # cycle alerted on or still owes an alert for — used by the alert sink
+    # to render "last red 2h ago" and by the run-cycle endpoint to surface
+    # `previous_violation_at`. Populated for exactly the union of
+    # `transition_invariant_ids` and `undelivered_invariant_ids`, which is
+    # slightly wider than "emitted": an entry the retry floor held off is
+    # in the union but made no POST this cycle. Harmless — the router
+    # reads this map only for ids in `transition_invariant_ids` — but the
+    # union, not emission, is the contract. On a #1897 retry the value is
+    # the one captured when the transition was first detected, which is
+    # the honest pre-episode "last red" rather than the failed episode
     # itself. `None` = first-ever violation for that invariant.
     previous_violation_at: Dict[str, Optional[str]] = field(default_factory=dict)
     snapshot_time: str = ""
@@ -206,12 +209,29 @@ REDIS_KEY_ALERT_PENDING = "canary:alert_pending"
 # #1644's `MAX_ROWS_PER_SWEEP` is the precedent: a mutable value read at
 # action time that gates a safety behaviour is the #1638 class, and nobody
 # outside this file can reason about the right number anyway.
+#
+# The budget is evaluated AFTER each attempt, not before it, so that the
+# give-up ERROR can quote the elapsed and the `last_error` of the attempt
+# that actually just failed rather than a stale one. The arithmetic
+# consequence is that a run ends on the first attempt whose age EXCEEDS the
+# window, not on the last one inside it: at the 5-minute default that is
+# **8 POSTs spanning 2100s (35 min)**, not 6 over 30. Pinned by
+# `test_retry_is_bounded_and_gives_up_loudly`, which derives its cycle count
+# from this constant rather than hard-coding it.
 MAX_ALERT_PENDING_AGE_SECONDS = 1800
 
 # #1897: a gap longer than this many intervals between attempts ends the
 # contiguous failure run, so the next failure starts a fresh window.
 # Without the decay, brief separated flaps would consume the budget a later
 # long outage needs; with it, they cannot.
+#
+# The dual of that, stated so nobody rediscovers it as a bug: an invariant
+# that flaps red→green→red on a period LONGER than this never accumulates
+# run age, so against a permanently dead webhook it never reaches a give-up.
+# It also never retries — the invariant is green before the retry floor
+# opens — so each red episode costs exactly ONE POST, which is the
+# detection rate and is precisely the pre-#1897 behaviour. The delivery
+# layer deliberately does not bound its own detector.
 _ALERT_RUN_DECAY_INTERVALS = 3
 
 # #1897: `post_webhook` returns Slack's response body VERBATIM, and a
@@ -1202,7 +1222,6 @@ class CanaryService:
         if last_attempt is None:
             return True
         return (now - last_attempt) >= self.interval
-
 
     # ------------------------------------------------------------------
     # Cycle-state side-table (Redis)

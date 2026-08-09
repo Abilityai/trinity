@@ -397,8 +397,22 @@
   Past the window a distinct ERROR names the invariant, the elapsed
   seconds and the last webhook error, and `cumulative_alerts_dropped`
   increments; `cumulative_transitions_detected` keeps counting flips so
-  no single counter has to mean both "detected" and "delivered". The
-  retried payload is always rebuilt from the CURRENT cycle's
+  no single counter has to mean both "detected" and "delivered".
+  **The exact bound, because "up to 1800s" reads tighter than it is:**
+  the budget is evaluated AFTER each attempt (so the ERROR quotes the
+  elapsed and error of the attempt that actually just failed, not a
+  stale one), which means a run ends on the first attempt whose age
+  *exceeds* the window rather than the last one inside it — at the
+  5-minute default, **8 POSTs spanning 2100s (35 min)** per run, then
+  silence. The **dual of the run-decay**, stated so it is not
+  rediscovered as a bug: an invariant flapping red→green→red on a
+  period longer than 3× the interval never accumulates run age and so
+  never reaches a give-up — but it also never *retries* (it is green
+  again before the floor opens), so it costs exactly one POST per red
+  episode, which is the detection rate and is precisely the pre-#1897
+  behaviour. A delivery-layer budget deliberately does not bound its
+  own detector.
+  The retried payload is always rebuilt from the CURRENT cycle's
   violations, and a pending entry only acts on a cycle where its
   invariant is red, so a retry is never stale content and never fires
   for something that went green. Retry state is **per-invariant**, in
