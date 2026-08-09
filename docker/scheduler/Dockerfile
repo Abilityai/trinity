@@ -7,8 +7,19 @@ FROM python:3.13-slim
 WORKDIR /app
 
 # Install system dependencies
+#
+# `tzdata-legacy` carries the IANA *backward-compatibility links* (#1823). Debian
+# 13 "trixie" split them out of `tzdata`, and this image is `FROM python:3.13-slim`
+# with no codename pin — so it silently migrated bookworm→trixie and lost
+# `/usr/share/zoneinfo/Europe/Kiev` (and every other legacy alias). This is the
+# image that actually registers the CronTrigger: without the links a stored
+# legacy-alias schedule can never register, so it never fires and its
+# `next_run_at` freezes. Do NOT drop this when slimming the image —
+# `tests/unit/test_1823_tz_capability_parity.py` fails if an image that resolves
+# timezones declares no tz-data source.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    tzdata-legacy \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for caching

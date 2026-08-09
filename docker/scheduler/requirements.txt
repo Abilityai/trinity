@@ -15,6 +15,16 @@ redis>=5.0.0
 # Timezone handling
 pytz>=2024.1
 
+# #1823 portability floor for the tz database. APScheduler's `astimezone()`
+# re-resolves a pytz zone through the stdlib `zoneinfo`, which reads the SYSTEM
+# database first and falls back to this wheel only for keys the system lacks —
+# so with `tzdata-legacy` installed in docker/scheduler/Dockerfile this is inert
+# in production. It exists so the capability survives another silent base-tag
+# migration (`python:3.13-slim` carries no codename pin) and holds on a
+# non-Debian base. A FLOOR, matching this file's convention and the rationale in
+# tests/requirements-test.txt (#1771): an exact pin freezes a stale IANA database.
+tzdata>=2024.1
+
 # PostgreSQL driver (#300) — used only when DATABASE_URL is a postgresql:// URL;
 # the scheduler defaults to the shared SQLite file when unset.
 psycopg2-binary>=2.9.0
