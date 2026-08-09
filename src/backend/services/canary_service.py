@@ -8,7 +8,9 @@ Runs in the backend process. Every 5 minutes:
 3. Persist any violations to `canary_violations`.
 4. Detect green→red transitions per invariant against the previously-stored
    latest violation; fire one Slack alert per transition via incoming
-   webhook (`CANARY_SLACK_WEBHOOK_URL` env var; unset = silent sink).
+   webhook (`CANARY_SLACK_WEBHOOK_URL` env var; unset = silent sink), and
+   re-attempt any alert the webhook rejected while its invariant is still
+   red (#1897 — see `REDIS_KEY_ALERT_PENDING`).
 
 Modeled on `services/cleanup_service.py` — single asyncio task, idempotent
 start/stop, lock-guarded re-entrancy. Disabled by default; enable per

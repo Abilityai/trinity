@@ -3,8 +3,13 @@ Canary alert sink — Slack Block Kit composition + webhook post (CANARY-001 / #
 
 Extracted from `services/canary_service.py` to keep the cycle orchestrator
 focused on lifecycle + invariant runs. The watcher imports `CanaryAlerts`
-and calls `emit_transition` once per green→red transition; everything
-Slack-shaped lives here.
+and calls `emit_transition` once per green→red transition — plus, since
+#1897, once more per later cycle for a transition whose POST was rejected
+and whose invariant is still red. Everything Slack-shaped lives here.
+
+This module stays **stateless**: it composes and posts, and reports the
+outcome back. Which alerts are still owed, and for how long, is cycle state
+and lives on `CanaryService` with the rest of it.
 
 The split is purely organisational — there's no behaviour change vs. when
 these methods lived on `CanaryService` as classmethods. Tests pivoted from
