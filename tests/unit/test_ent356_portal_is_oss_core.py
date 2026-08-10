@@ -339,7 +339,7 @@ def test_monkeypatch_string_targets_are_not_used_for_services_modules():
     )
 
 
-def test_the_two_resolvers_really_do_disagree():
+def test_the_two_resolvers_really_do_disagree(monkeypatch):
     """Executable proof of the claim the two guards above rest on.
 
     Guards built on a belief about an import mechanism are worth exactly as much
@@ -364,21 +364,19 @@ def test_the_two_resolvers_really_do_disagree():
     live = types.ModuleType(mod_name)
     stale = types.ModuleType(mod_name)
 
-    saved = {k: sys.modules.get(k) for k in (pkg_name, mod_name)}
-    try:
-        sys.modules[pkg_name] = pkg
-        sys.modules[mod_name] = live
-        pkg.leaf = stale                      # the divergence
+    # `monkeypatch.setitem`, not a bare write + try/finally: it records the prior
+    # value — including *absence*, which it undoes by deleting the key — so this
+    # probe cannot leak two synthetic modules into a 9,000-test session if an
+    # assertion above the restore ever raises. (Enforced by tests/lint_sys_modules.py;
+    # writing sys.modules by hand inside a test is the pollution class this whole
+    # test file is about, one level up.)
+    monkeypatch.setitem(sys.modules, pkg_name, pkg)
+    monkeypatch.setitem(sys.modules, mod_name, live)
+    pkg.leaf = stale                      # the divergence
 
-        assert mp.resolve(mod_name) is stale, (
-            "pytest's resolver now agrees with sys.modules — the "
-            "monkeypatch-string-target guard above is obsolete, delete it"
-        )
-        getter, _ = _get_target(f"{mod_name}.anything")
-        assert getter() is live, "mock's resolver no longer reads sys.modules"
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                sys.modules.pop(k, None)
-            else:
-                sys.modules[k] = v
+    assert mp.resolve(mod_name) is stale, (
+        "pytest's resolver now agrees with sys.modules — the "
+        "monkeypatch-string-target guard above is obsolete, delete it"
+    )
+    getter, _ = _get_target(f"{mod_name}.anything")
+    assert getter() is live, "mock's resolver no longer reads sys.modules"
