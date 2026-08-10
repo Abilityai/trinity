@@ -290,7 +290,15 @@ This means existing agents pick up new exclusion patterns automatically on
 their next Push, with no re-init or container rebuild required. The same
 shared `_detect_git_dir` helper used by `initialize_git_in_container`
 guarantees the migration targets the same path as init (`/home/developer`,
-or `/home/developer/workspace` for legacy pre-2026-02 agents).
+or `/home/developer/workspace` for legacy pre-2026-02 agents). Since #2075
+that path comes from git itself (`rev-parse --show-toplevel`), not from a
+`workspace/`-content heuristic — the heuristic made this migration's
+`[ -d <dir>/.git ]` guard test the wrong directory on agents with a populated
+non-git `workspace/`, so the whole #462 migration silently no-op'd for them.
+**Operator note**: on such an agent the next Push finally appends the
+fleet-wide patterns and `git rm --cached`s files that now match a rule —
+working-tree files are untouched and history is **not** rewritten, so anything
+already pushed stays in history (credential rotation is separate work).
 
 ---
 

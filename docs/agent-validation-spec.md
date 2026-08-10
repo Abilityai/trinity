@@ -27,7 +27,7 @@
 | S-002 | HARD | STATIC | Security | `.mcp.json` is excluded in `.gitignore` |
 | S-003 | HARD | STATIC | Security | No hardcoded secrets in any committed file |
 | S-004 | HARD | STATIC | Security | `.claude/projects/` is excluded in `.gitignore` |
-| S-005 | HARD | STATIC | Security | `.trinity/` is excluded in `.gitignore` |
+| S-005 | HARD | STATIC | Security | `.trinity/` runtime state is excluded in `.gitignore` (canonical shape is `.trinity/*` plus `!` re-includes for the authored hooks — see #2070; the dir-forms are still accepted) |
 | S-006 | SOFT | STATIC | Security | `.claude/statsig/`, `.claude/todos/`, `.claude/debug/`, `.claude/sessions/`, `.claude/shell-snapshots/` excluded in `.gitignore` |
 | S-007 | SOFT | STATIC | Security | `content/` is excluded in `.gitignore` |
 | S-008 | SOFT | STATIC | Security | `*.pem`, `*.key`, `credentials.json` patterns in `.gitignore` |
