@@ -1246,6 +1246,29 @@ All four require `X-Internal-Secret` **AND** `MCP_INLINE_AUTH_ENABLED`; with the
 | POST | `/api/agents/{name}/sessions/{id}/reset` | Clear cached UUID (next turn cold); best-effort JSONL reap |
 | DELETE | `/api/agents/{name}/sessions/{id}` | Delete session + messages; best-effort JSONL reap |
 
+### Workspace / Client Portal (epic ent#78; OSS core since ent#356)
+
+The client-facing surface, mounted in **every** build (`src/backend/client_portal/`,
+prefix `/api/enterprise/client-portal`, Vue at `/workspace`). A caller is either an
+**external client** — a verified email with no `users` row, signing in with a 6-digit
+code — or a **signed-in platform user**, who reaches the same surface in one click
+because their platform session *is* the workspace session (ent#357). Both resolve
+through `client_portal/portal_auth.py::get_portal_principal`, which returns
+`(email, is_platform)`; the roster is every agent shared with that email, plus — for a
+platform session only — the agents they own.
+
+It was an entitled module and returned 404 in community builds; ent#356 moved it into
+OSS core (adoption: this is the main surface a non-operator uses to work with agents).
+The `/api/enterprise/client-portal` prefix and the `enterprise_portal_sessions` /
+`enterprise_portal_messages` / `enterprise_client_blocks` table names are **retained
+history, not licensing** — ent#83 shipped that prefix as the documented integration
+surface for API-only clients, and renaming the tables would force a data migration on
+every existing install. Tables are versioned on the OSS two-track runner
+(`client_portal_tables_to_oss` + Alembic `0036_client_portal_oss`), both
+`CREATE TABLE IF NOT EXISTS` so adopting them is a no-op where they already exist, and
+both `agent_name` columns are registered in `AGENT_REFS` (CASCADE) — which the enterprise
+track never was, so an agent rename used to strand a client's portal history.
+
 ### Enterprise Modules (#847)
 
 Open-core seam (generic mechanism only). The public backend exposes an extension point: `main.py` conditionally `register_enterprise(app)` (no-op `ImportError` in OSS-only builds); each registered module calls `entitlement_service.register_module("<id>")`, and the registry drives `feature-flags → enterprise_features`, which the OSS Vue bundle reads to show/hide gated surfaces. `requires_entitlement("<id>")` in `dependencies.py` gates an entitled endpoint (403 unentitled; 404 when the submodule is absent). `TRINITY_OSS_ONLY=1` hard-empties the registry. Private enterprise tables migrate via the separate two-track runner (Invariant #3).

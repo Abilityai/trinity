@@ -120,6 +120,11 @@ from routers.loops import (
 from services.loop_service import set_websocket_manager as set_loop_ws_manager
 from routers.webhooks import router as webhooks_router  # Webhook triggers (WEBHOOK-001, #291)
 from routers.ws_tickets import router as ws_tickets_router  # /ws ticket auth (#550)
+# Workspace / client portal — OSS core since ent#356 (was an entitled
+# enterprise module). Its own package rather than routers/: it moved
+# wholesale from the submodule, and keeping the vertical slice intact
+# keeps the move reviewable as a move.
+from client_portal.router import router as client_portal_router
 
 # Import activity service
 from services.activity_service import activity_service
@@ -1040,6 +1045,7 @@ app.include_router(loops_agent_router)  # Sequential agent loops (#740)
 app.include_router(loops_loop_router)  # Sequential agent loops (#740)
 app.include_router(webhooks_router)  # Webhook Triggers (WEBHOOK-001, #291)
 app.include_router(ws_tickets_router)  # WebSocket auth tickets (#550)
+app.include_router(client_portal_router)  # Workspace / client portal (ent#356, epic #78)
 
 
 # #847 Phase 0 — Enterprise modules (closed-source companion submodule

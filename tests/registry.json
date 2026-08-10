@@ -1902,6 +1902,18 @@
         "guard"
       ],
       "description": "Guards the full-suite harness against silently rotting back (#2080). Every defect that issue fixed removed COVERAGE without failing anything: collection aborted before any test ran, tiers skipped themselves, and a sys.modules shadow swallowed each new src/backend/utils module. Asserts: tests/utils cannot come back (it shadowed the backend package on the pythonpath \u2014 adding safe_yaml.py broke ~1,000 tests with a ModuleNotFoundError that read like a product regression) and no test imports the helpers under the old name; no package directory has a non-identifier name (tests/git-sync's __init__.py put its conftest under the bare `conftest` key and collided with the root one, breaking collection of tests/integration and aborting the run before the unit tier); every test directory is named by a tier in run-full.sh; every tier passes -rs (without it the skip audit is blind) and a thread-method timeout; pytest exit code 5 (no tests collected) is a FAILURE; pyproject pins timeout_method=thread for hand-run pytest. Plus the audit's own honesty: each allowlist entry carries a written justification, an empty log dir refuses to certify, an unallowlisted skip fails and an allowlisted one passes."
+    },
+    {
+      "file": "unit/test_ent356_portal_is_oss_core.py",
+      "feature": "trinity-enterprise#356",
+      "added": "2026-08-10",
+      "categories": [
+        "backend",
+        "workspace",
+        "unit",
+        "guard"
+      ],
+      "description": "Pins that the workspace / client portal stays OSS core (ent#356). It shipped entitled \u2014 register_module('client_portal') + requires_entitlement on the router \u2014 so community builds mounted nothing and every endpoint 404'd, capping adoption at exactly the non-operator population the surface exists for. Guards the four ways that could silently revert: no entitlement machinery anywhere in the module (prose about the old gate is allowed, code is not); the router is mounted in main.py and never referenced from a register_enterprise-shaped function; no frontend isEntitled('client_portal') / requiresEntitlement route meta; and `client_portal.router` still resolves to the MODULE rather than the APIRouter object (the first __init__ did `from .router import router`, shadowing the submodule and breaking handler lookups in 13 tests). Plus the table contract: DDL declared in db/schema.py, BOTH migration tracks carry the adoption (Invariant #9), every CREATE TABLE/INDEX on both tracks is IF NOT EXISTS so an entitled install where the enterprise runner already made them is a no-op ('no data migration' is an acceptance criterion), the Alembic downgrade does not drop client conversation history it never created, and the historical `enterprise_` prefix is retained because renaming would be that forbidden data migration."
     }
   ]
 }

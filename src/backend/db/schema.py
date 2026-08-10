@@ -505,6 +505,56 @@ TABLES = {
     """,
 
     # -------------------------------------------------------------------------
+    # Workspace / client portal (epic #78; moved from the entitled enterprise
+    # seam to OSS core by ent#356).
+    #
+    # The `enterprise_` prefix is HISTORICAL and deliberately kept: these tables
+    # already exist on every entitled install, created by the enterprise runner,
+    # and renaming them would force a data migration the move explicitly
+    # forbids. Every statement is IF NOT EXISTS, so adopting them onto the OSS
+    # track is a no-op there and a plain create on a fresh/community build.
+    #
+    # A portal client is a VERIFIED EMAIL, not a `users` row, and does not go
+    # through the public-link surface — so neither `chat_messages` (user_id
+    # scoped) nor `public_chat_messages` (link_id scoped) fits; hence a small
+    # dedicated pair keyed by (agent, client email).
+    # -------------------------------------------------------------------------
+    "enterprise_portal_sessions": """
+        CREATE TABLE IF NOT EXISTS enterprise_portal_sessions (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            client_email TEXT NOT NULL,
+            title TEXT,
+            created_at TEXT NOT NULL,
+            last_message_at TEXT,
+            message_count INTEGER NOT NULL DEFAULT 0
+        )
+    """,
+
+    "enterprise_portal_messages": """
+        CREATE TABLE IF NOT EXISTS enterprise_portal_messages (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            client_email TEXT NOT NULL,
+            session_id TEXT,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            cost REAL,
+            created_at TEXT NOT NULL
+        )
+    """,
+
+    "enterprise_client_blocks": """
+        CREATE TABLE IF NOT EXISTS enterprise_client_blocks (
+            email TEXT PRIMARY KEY,
+            blocked_at TEXT NOT NULL,
+            blocked_by_id TEXT,
+            blocked_by_email TEXT,
+            reason TEXT
+        )
+    """,
+
+    # -------------------------------------------------------------------------
     # Local product-event capture — activation funnel, Tier-1 (ent#184)
     # Local-only, default-on, zero egress. Wizard step transitions are emitted;
     # first-value events are derived on read from audit_log/agent_activities.
@@ -1652,6 +1702,17 @@ INDEXES = [
     # (the reconcile reads pending ∪ firing).
     "CREATE INDEX IF NOT EXISTS idx_agent_reminders_active "
     "ON agent_reminders(fire_at) WHERE status IN ('pending', 'firing')",
+    # Workspace / client portal (ent#356). Names unchanged from the enterprise
+    # runner that created them, so an existing install re-runs these as no-ops.
+    "CREATE INDEX IF NOT EXISTS idx_portal_messages_convo "
+    "ON enterprise_portal_messages(agent_name, client_email, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_portal_sessions_convo "
+    "ON enterprise_portal_sessions(agent_name, client_email, last_message_at)",
+    # Per-session read (the chat view loads one thread at a time). Safe here —
+    # unlike on the enterprise track, where `session_id` was added by a later
+    # migration to a pre-existing table and this index had to wait for it.
+    "CREATE INDEX IF NOT EXISTS idx_portal_messages_session "
+    "ON enterprise_portal_messages(session_id, created_at)",
 ]
 
 

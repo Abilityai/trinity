@@ -1,0 +1,634 @@
+"""FastAPI router for the Workspace / client portal (epic #78, exposure #79).
+
+OSS core since ent#356 — mounted in every build, entitlement-free. Individual
+routes keep their own gates: the admin-only exposure config is `require_admin`,
+and every client-facing route resolves identity through `get_portal_identity`
+(a verified-email portal session, or a signed-in platform user).
+
+Exposes the portal base-URL / exposure-mode seam so an operator can switch the
+portal between public (tunnel) and private (VPN/LAN) reachability with no code
+change. Reads report the resolved base URL actually in use.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
+
+from dependencies import (
+    PORTAL_SESSION_EXPIRE_HOURS,
+    CurrentUser,
+    OwnedAgentByName,
+    assert_admin,
+    get_current_user,
+    reject_agent_principal,
+    require_admin,
+)
+from models import User
+
+from services.platform_audit_service import AuditEventType, platform_audit_service
+
+from . import service
+from .models import (
+    PortalAuthRequest,
+    PortalAuthVerify,
+    PortalBlockRequest,
+    PortalBlockResult,
+    PortalClientRoster,
+    PortalClientState,
+    PortalLogoutResult,
+    PortalUnblockResult,
+    PortalChatRequest,
+    PortalExchangeRequest,
+    PortalExchangeResponse,
+    PortalChatResponse,
+    PortalDocuments,
+    PortalHistory,
+    PortalExposureConfig,
+    PortalExposureUpdate,
+    PortalRoster,
+    PortalSearchResults,
+    PortalSession,
+    PortalSessions,
+    PortalSessionSummary,
+    PortalTtsRequest,
+    PortalUpload,
+    PortalUploads,
+)
+from .portal_auth import PortalPrincipal, get_portal_identity, get_portal_principal
+from .service import ClientPortalError
+
+logger = logging.getLogger(__name__)
+_signin_email_tasks: set = set()
+
+# --- Per-client abuse controls on the two surfaces that spend money and disk ---
+#
+# ent#287. `/tts` and `/stt` already carry a per-(client, agent) limiter;
+# `/chat` and `/documents` carried none. Chat was bounded only *indirectly*, by
+# the agent's own capacity/backlog inside `execute_task` — which protects the
+# agent from overload but does nothing to stop one client email spending that
+# agent's entire model budget. Upload was bounded per file (25 MiB) and per
+# inbox (100 MiB / client / agent), but the inbox write is an OVERWRITE: the
+# same filename re-uploaded never grows `used`, so the quota never trips and the
+# per-request work (two docker execs + a 25 MiB tar) was unbounded.
+#
+# Two tiers per surface, because one is not enough:
+#   * burst (60s)  — well clear of what a human drives from the shipped portal
+#                    (chat is one turn per send; upload is one file per pick),
+#                    with headroom for a headless client batching. Set AT the
+#                    20/min the voice surfaces use: chat must never be TIGHTER
+#                    than /tts, or voice mode — one chat + one tts per turn —
+#                    429s on the chat leg first.
+#   * sustained (1h) — the tier that actually meets this issue's goal. A 20/min
+#                    limit alone still permits 1200 turns/hour, which is not a
+#                    budget bound at all.
+#
+# Env-tunable: the right ceiling depends on the licensee's clients, and an
+# operator must be able to loosen this without a release.
+PORTAL_CHAT_BURST_LIMIT = int(os.getenv("PORTAL_CHAT_BURST_LIMIT", "20"))
+PORTAL_CHAT_HOURLY_LIMIT = int(os.getenv("PORTAL_CHAT_HOURLY_LIMIT", "300"))
+PORTAL_UPLOAD_BURST_LIMIT = int(os.getenv("PORTAL_UPLOAD_BURST_LIMIT", "20"))
+PORTAL_UPLOAD_HOURLY_LIMIT = int(os.getenv("PORTAL_UPLOAD_HOURLY_LIMIT", "100"))
+
+_CHAT_LIMIT_DETAIL = "Too many messages to this agent."
+_UPLOAD_LIMIT_DETAIL = "Too many uploads."
+
+
+def _require_roster(agent_name: str, email: str) -> None:
+    """Uniform 404 for an agent outside the caller's roster.
+
+    The services re-check this — it is duplicated here deliberately, as an
+    access-first gate (OSS invariant #8), so the rate limiters below never key
+    on an unvalidated path param. Without it a caller could mint an unbounded
+    number of distinct limiter keys (`portal_chat:{email}:{anything}`), each
+    holding Redis memory for its window, without ever tripping a limit —
+    turning the control into an amplifier. On the upload path it also means the
+    body is never `read()` into memory, and no docker work is done, for an agent
+    the caller cannot reach.
+    """
+    if not service.agent_on_roster(agent_name, email):
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+
+# ent#356: OSS core — no `requires_entitlement`. The workspace is the main
+# surface a non-operator uses to work with agents, so gating it behind the paid
+# tier capped adoption at exactly the population we most want using it.
+#
+# The `/api/enterprise/client-portal` PREFIX stays, deliberately. It is now a
+# misnomer, but ent#83 shipped this as the documented integration surface for
+# fully custom, API-only clients; renaming it would break those integrations for
+# no functional gain, and "existing installs are unaffected" is an acceptance
+# criterion of the move. A cosmetic alias can be added later if wanted.
+router = APIRouter(
+    prefix="/api/enterprise/client-portal",
+    tags=["client-portal"],
+)
+
+
+# --- Client sign-in (verified email → portal session; no platform account) ---
+
+@router.post("/auth/request")
+async def portal_auth_request(body: PortalAuthRequest, request: Request):
+    """Step 1 — request a 6-digit code. ALWAYS returns the same generic body so
+    a caller can't tell which emails have portal access (#186).
+
+    ent#309 / ent#311: this reimplements OSS email sign-in and used to inherit
+    NONE of its brute-force/enumeration protections. Two things are wired here:
+
+    * A per-(email, IP) request-rate limit (`services/rate_limiter`, the shared
+      sliding-window primitive) BEFORE any access-dependent work — it bounds the
+      code-minting flood (30 requests used to mint 30 simultaneously-valid codes,
+      shrinking the OTP guess space) and caps how fast an attacker can sample the
+      timing side-channel (ent#309). The limit applies to every email regardless
+      of access, so it is not itself an oracle; 429 reveals nothing about the
+      address.
+
+    * The access-check + code-mint move INTO the fire-and-forget task (ent#309).
+      The synchronous path is now identical whether or not the email has a share
+      — the measurable DB-write difference that distinguished a client from a
+      stranger no longer happens before the response. Not constant-time in a
+      strict sense (framework jitter dominates), but the dominant term is gone.
+    """
+    from services import rate_limiter
+
+    client_ip = request.client.host if request.client else "unknown"
+    email = (body.email or "").strip().lower()
+    # Per-IP stops one host sweeping many addresses (to time or to mint codes);
+    # per-email stops a targeted flood at one address. Both fail open (Redis
+    # down → allowed), matching the platform posture.
+    rate_limiter.enforce(f"portal_signin_req_ip:{client_ip}", 30, 60,
+                         detail="Too many sign-in requests.")
+    rate_limiter.enforce(f"portal_signin_req_email:{email}", 5, 300,
+                         detail="Too many sign-in requests for this address.")
+
+    async def _issue_and_send(addr: str):
+        # Access check + code mint happen HERE, off the measured path (ent#309).
+        try:
+            code = service.portal_signin_request(addr)
+            if not code:
+                return
+            from services.email_service import EmailService
+            await EmailService().send_verification_code(addr, code, context_label="Client Portal")
+        except Exception:
+            logger.exception("Failed to issue/send portal login code")
+
+    task = asyncio.create_task(_issue_and_send(email))
+    _signin_email_tasks.add(task)
+    task.add_done_callback(_signin_email_tasks.discard)
+    return {"success": True, "message": "If your email has access, you'll receive a code shortly"}
+
+
+@router.post("/auth/verify", response_model=PortalSession)
+def portal_auth_verify(body: PortalAuthVerify, request: Request):
+    """Step 2 — verify the code, mint a portal session token (a verified email,
+    not a platform account).
+
+    ent#311: gate the 6-digit code against brute force. Reuses the OSS OTP
+    failure-counter LOGIC (`check_otp_rate_limit` / `record_otp_attempt`, the
+    pentest-3.1.5 cap that invalidates a code after OTP_MAX_ATTEMPTS=5 wrong
+    tries) — one source of truth for "how many wrong OTPs before lockout" — but
+    under a **portal-scoped key** (`otp_attempts:portal:{email}`).
+
+    The key namespace is load-bearing, not cosmetic. Those functions build their
+    key from the identifier passed in, and the platform email path passes the
+    bare email → `otp_attempts:{email}`. Reusing the bare email here would share
+    the bucket with platform login: an unauthenticated attacker POSTing 5 wrong
+    codes at a victim's address would trip the platform's counter and lock that
+    user out of platform sign-in (a cross-surface lockout DoS this endpoint must
+    not create). Prefixing with `portal:` keeps the shared logic and isolates the
+    state.
+
+    Deliberately NOT reusing `check_login_rate_limit`: its per-account bucket is
+    the platform-login bucket (same collision), and it is redundant here — the
+    OTP cap already bounds guesses per email. The per-IP dimension is covered
+    instead by the enterprise `rate_limiter` under a portal-only key, so nothing
+    the portal writes can throttle a platform surface.
+    """
+    from routers.auth import check_otp_rate_limit, record_otp_attempt
+    from services import rate_limiter
+
+    client_ip = request.client.host if request.client else "unknown"
+    email = (body.email or "").strip().lower()
+    otp_scope = f"portal:{email}"  # isolate from the platform `otp_attempts:{email}` bucket
+
+    # Per-IP coarse abuse cap (isolated portal key, sliding window) + per-email
+    # OTP failure cap (isolated portal key, failure-counter). Both fail open.
+    rate_limiter.enforce(f"portal_signin_verify_ip:{client_ip}", 60, 60,
+                         detail="Too many sign-in attempts.")
+    check_otp_rate_limit(otp_scope)  # raises 429 past the cap, before any comparison
+
+    token = service.portal_signin_verify(email, body.code)
+    if not token:
+        record_otp_attempt(otp_scope, success=False)
+        raise HTTPException(status_code=401, detail="Invalid or expired code")
+
+    record_otp_attempt(otp_scope, success=True)
+    return PortalSession(token=token, email=email)
+
+
+@router.post("/auth/exchange", response_model=PortalExchangeResponse)
+async def portal_auth_exchange(
+    body: PortalExchangeRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """ent#163 — trusted-issuer token exchange: assert an end user, get a portal
+    session for them.
+
+    This is how a licensee runs their OWN customer portal against Trinity while
+    keeping their own IdP. Their backend holds one admin-issued
+    `portal_delegate` key, says "this request is for bob@example.com", and gets
+    a normal portal session token back. Everything downstream — `/my-agents`,
+    chat, history, documents — is the surface that already shipped with #78, and
+    is roster-scoped to that email, so nothing here widens it.
+
+    Authorization is two independent checks:
+      * the key must be `portal_delegate`-scoped. OSS fences that scope to THIS
+        route alone at the single auth entry point, so a leaked issuer key
+        cannot read the platform — it can only mint portal sessions. We re-check
+        the flag here rather than trusting the fence: defence in depth, and it
+        makes the requirement legible at the endpoint that depends on it.
+      * the asserted email must actually have portal access. That stays
+        Trinity's call, never the issuer's — `email_has_access` requires a real
+        share, so an issuer cannot conjure a session for an arbitrary address.
+
+    **Enumeration posture — deliberately different from `/auth/request`.** That
+    endpoint is anonymous, so it always returns the same generic body and never
+    reveals which emails are clients (#186). This caller is authenticated,
+    trusted, and admin-issued: they already know their own user list, so a 403
+    tells them nothing they did not supply, and a generic 200 would instead hand
+    them an unusable token and a support ticket. The divergence is intentional —
+    please do not "fix" it back into a generic response.
+    """
+    if not getattr(current_user, "portal_delegate", False):
+        raise HTTPException(
+            status_code=403,
+            detail="This endpoint requires a portal-delegate API key",
+        )
+
+    email = (body.email or "").strip().lower()
+    token = service.portal_exchange(email)
+
+    # Audited either way: a denied exchange is the more interesting event.
+    await platform_audit_service.log(
+        event_type=AuditEventType.AUTHENTICATION,
+        event_action="portal_delegate_exchange",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="portal_client",
+        target_id=email or None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={"granted": bool(token)},
+    )
+
+    if not token:
+        raise HTTPException(
+            status_code=403,
+            detail="This email has no access to any agent on this instance",
+        )
+
+    return PortalExchangeResponse(
+        token=token,
+        email=email,
+        expires_in=PORTAL_SESSION_EXPIRE_HOURS * 3600,
+    )
+
+
+@router.get("/exposure", response_model=PortalExposureConfig)
+def get_exposure(_: User = Depends(require_admin)):
+    return service.get_status()
+
+
+@router.put("/exposure", response_model=PortalExposureConfig)
+def set_exposure(body: PortalExposureUpdate, current_user: User = Depends(require_admin)):
+    try:
+        return service.configure(body, actor_email=getattr(current_user, "email", None))
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+# ---------------------------------------------------------------------------
+# Operator controls over a signed-in client (ent#281)
+# ---------------------------------------------------------------------------
+#
+# Permissions differ on purpose, and the difference is the design:
+#
+#   log out  — any owner of an agent shared with this client. Ends live sessions
+#              and nothing else; the client can sign straight back in, so the
+#              worst an owner can do to a peer's client is interrupt them once.
+#   block    — ADMIN ONLY. It bars the email platform-wide, so letting any agent
+#              owner do it would let them lock a client out of a different
+#              owner's agents. Owners already have a per-agent kill switch that
+#              needs no new endpoint: unshare.
+#
+# Both are agent-scoped in the URL (that is where the operator is standing) but
+# global in effect, and the response models say so.
+
+async def _audit_client_control(request: Request, current_user: User, action: str,
+                                email: str, outcome: dict) -> None:
+    """One audit row per operator control action (ent#281 AC)."""
+    await platform_audit_service.log(
+        event_type=AuditEventType.AUTHENTICATION,
+        event_action=action,
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="portal_client",
+        target_id=email,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details=outcome,
+    )
+
+
+@router.get("/agents/{agent_name}/clients", response_model=PortalClientRoster)
+def list_agent_clients(agent_name: OwnedAgentByName, current_user: CurrentUser):
+    """Clients of this agent with their control state (ent#281).
+
+    Owner/admin. The emails an agent is shared with ARE its portal accounts
+    (#78), so `agent_sharing` is the roster; each row carries last-seen, the
+    durable block state, and the session-revocation cutoff.
+    """
+    return PortalClientRoster(
+        agent_name=agent_name,
+        clients=[PortalClientState(**c) for c in service.get_agent_client_roster(agent_name)],
+    )
+
+
+@router.post("/agents/{agent_name}/clients/{email}/logout", response_model=PortalLogoutResult)
+async def logout_agent_client(agent_name: OwnedAgentByName, email: str,
+                              request: Request, current_user: CurrentUser):
+    """End every live portal session for this client (ent#281).
+
+    Owner of the agent (or admin). Global in effect — one portal token covers a
+    client's whole roster, so there is no per-agent session to end. Non-
+    destructive: the client may sign in again immediately unless also blocked.
+
+    Human-only: ending a person's access is an operator decision, and an
+    agent-scoped key resolves to its owner, so without this a prompt-injected
+    agent could sign clients out of the agent it runs as.
+    """
+    reject_agent_principal(current_user)
+    try:
+        result = service.logout_client(email)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    await _audit_client_control(request, current_user, "portal_client_logout",
+                                result["email"], result)
+    return PortalLogoutResult(**result)
+
+
+@router.post("/agents/{agent_name}/clients/{email}/block", response_model=PortalBlockResult)
+async def block_agent_client(agent_name: OwnedAgentByName, email: str, body: PortalBlockRequest,
+                             request: Request, current_user: CurrentUser):
+    """Bar this client from signing in again, anywhere, and end their sessions.
+
+    **Admin only** — `OwnedAgentByName` establishes that the operator is standing
+    at an agent they own, but the effect is platform-wide, so ownership alone is
+    not enough authority.
+
+    `assert_admin` is NOT sufficient on its own: it rejects *connector*
+    principals, but an agent-scoped key resolves to its owner **carrying the
+    owner's role**, so on a default admin-owned install it would pass. That is
+    the trinity-ops-agent#232 shape the retention-acknowledge endpoint hit.
+    `reject_agent_principal` is what makes this human-only.
+    """
+    reject_agent_principal(current_user)
+    assert_admin(current_user, detail="Blocking a client requires admin access")
+    try:
+        result = service.block_client(
+            email,
+            actor_id=str(getattr(current_user, "id", "") or "") or None,
+            actor_email=getattr(current_user, "email", None),
+            reason=body.reason,
+        )
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    await _audit_client_control(request, current_user, "portal_client_block",
+                                result["email"], result)
+    return PortalBlockResult(**result)
+
+
+@router.delete("/agents/{agent_name}/clients/{email}/block", response_model=PortalUnblockResult)
+async def unblock_agent_client(agent_name: OwnedAgentByName, email: str,
+                               request: Request, current_user: CurrentUser):
+    """Lift the block. Admin + human-only, mirroring block exactly.
+
+    The symmetry is load-bearing: a weaker guard here would let the principals
+    the block constrains undo it, making the stricter guard on block decorative.
+
+    Restores nothing but access: revoked tokens stay revoked (the client signs in
+    again and gets a fresh one), and no data was ever removed — block is not
+    delete.
+    """
+    reject_agent_principal(current_user)
+    assert_admin(current_user, detail="Unblocking a client requires admin access")
+    try:
+        result = service.unblock_client(email)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    await _audit_client_control(request, current_user, "portal_client_unblock",
+                                result["email"], result)
+    return PortalUnblockResult(**result)
+
+
+@router.get("/my-agents", response_model=PortalRoster)
+async def my_agents(principal: PortalPrincipal = Depends(get_portal_principal)):
+    """The signed-in client's "My Agents" roster (agents shared with their email).
+
+    Not admin-only — this is the client-facing surface. Identity comes from
+    `get_portal_identity`: a portal session token (a verified email, no platform
+    account) OR a platform user's email (operator preview). Agents are resolved
+    from `agent_sharing` for that email. Async (#138): the roster now enriches
+    each card with its briefing (description + client-visible playbooks).
+    """
+    # ent#357: a platform session also sees the agents it OWNS. Trinity refuses
+    # a self-share, so without this an owner's roster is always empty — one
+    # click to a dead page. An external client's roster is unchanged.
+    return await service.get_roster(principal.email, include_owned=principal.is_platform)
+
+
+@router.get("/search", response_model=PortalSearchResults)
+def portal_search(q: str = "", limit: int = 30, email: str = Depends(get_portal_identity)):
+    """Cross-chat search over the signed-in client's conversations (all rostered
+    agents), by thread title or message content — the portal's main-page search.
+    Roster-scoped; a short/empty query returns no results (never an error)."""
+    return service.search_chats(email, q, limit=min(max(limit, 1), 50))
+
+
+@router.post("/agents/{agent_name}/chat", response_model=PortalChatResponse)
+async def portal_chat(
+    agent_name: str,
+    body: PortalChatRequest,
+    email: str = Depends(get_portal_identity),
+):
+    """One client chat turn to a rostered agent. Identity from
+    `get_portal_identity` (portal session token or operator preview); scoped to
+    the caller's roster (a scope miss is a uniform 404). Runs the standard
+    platform execution — observable under Executions, cost-tracked — instead of
+    exposing the fenced OSS `/api/agents/{name}/chat` to the portal token.
+
+    Rate-limited per (client, agent) in two tiers (ent#287) — a paid surface, so
+    the agent's capacity limiter (which bounds concurrency, not spend) is not a
+    sufficient control on its own.
+    """
+    from services import rate_limiter
+
+    _require_roster(agent_name, email)
+    # Burst first: a rejected burst returns before the hourly window records a
+    # hit, so a client held at the per-minute limit does not also burn their
+    # hourly budget. (The converse costs one burst slot on an hourly rejection —
+    # it decays in 60s and is not worth a two-phase commit.)
+    rate_limiter.enforce(
+        f"portal_chat:{email}:{agent_name}", PORTAL_CHAT_BURST_LIMIT, 60, detail=_CHAT_LIMIT_DETAIL
+    )
+    rate_limiter.enforce(
+        f"portal_chat_hourly:{email}:{agent_name}", PORTAL_CHAT_HOURLY_LIMIT, 3600,
+        detail=_CHAT_LIMIT_DETAIL,
+    )
+    try:
+        result = await service.portal_chat(agent_name, body.message, email, session_id=body.session_id)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    return PortalChatResponse(**result)
+
+
+@router.post("/agents/{agent_name}/tts")
+async def portal_tts(agent_name: str, body: PortalTtsRequest,
+                     email: str = Depends(get_portal_identity)):
+    """Speak a reply in portal voice mode (#78) — returns `audio/mpeg` (MP3) for
+    the given text via the shared ElevenLabs voice layer, using the agent's
+    configured voice. Roster-scoped (miss → 404); 404 when voice isn't available,
+    422 when synthesis fails / exceeds the cost cap (client keeps the text).
+    Rate-limited per (client, agent) — it's a paid, client-facing surface."""
+    from services import rate_limiter
+    # 20 syntheses / minute per client+agent, on top of tts_service's char cap.
+    rate_limiter.enforce(f"portal_tts:{email}:{agent_name}", 20, 60)
+    try:
+        audio = await service.synthesize_portal_tts(agent_name, email, body.text)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    return Response(content=audio, media_type="audio/mpeg")
+
+
+@router.post("/agents/{agent_name}/stt")
+async def portal_stt(agent_name: str, file: UploadFile = File(...),
+                     email: str = Depends(get_portal_identity)):
+    """Speech-to-text for portal voice input (#78) — the Firefox/Safari fallback
+    when the browser has no Web Speech API. Accepts a recorded audio clip, returns
+    `{text}` via ElevenLabs Scribe. Roster-scoped (miss → 404); rate-limited per
+    (client, agent); fail-soft (client just types on any error)."""
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_stt:{email}:{agent_name}", 20, 60)
+    audio = await file.read()
+    try:
+        text = await service.transcribe_portal_audio(
+            agent_name, email, file.filename or "audio.webm",
+            file.content_type or "application/octet-stream", audio,
+        )
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    return {"text": text}
+
+
+@router.get("/agents/{agent_name}/sessions", response_model=PortalSessions)
+def portal_sessions(agent_name: str, email: str = Depends(get_portal_identity)):
+    """The client's conversation threads with a rostered agent (most-recent first)
+    — the chat-history list. Roster-scoped (miss → 404)."""
+    try:
+        return service.list_sessions(agent_name, email)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@router.post("/agents/{agent_name}/sessions", response_model=PortalSessionSummary)
+def portal_create_session(agent_name: str, email: str = Depends(get_portal_identity)):
+    """Open a fresh conversation thread ("New chat"). Roster-scoped (miss → 404).
+    Returns the empty session; its title fills in on the first message."""
+    try:
+        return service.create_session(agent_name, email)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@router.get("/agents/{agent_name}/history", response_model=PortalHistory)
+def portal_history(agent_name: str, session_id: str | None = None,
+                   email: str = Depends(get_portal_identity)):
+    """The client's persisted conversation with a rostered agent (oldest-first),
+    so it survives a refresh / re-sign-in. With ``?session_id=`` returns that
+    thread; without, the most-recent one. Roster-scoped (miss → 404).
+    """
+    try:
+        return service.get_history(agent_name, email, session_id=session_id)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@router.get("/agents/{agent_name}/documents", response_model=PortalDocuments)
+def portal_documents(agent_name: str, email: str = Depends(get_portal_identity)):
+    """Files a rostered agent has shared (FILES-001), with download URLs. Scoped
+    to the caller's roster (miss → uniform 404). The `?sig=` token gates the
+    public OSS download route, so no portal auth rides on the link.
+    """
+    try:
+        return service.portal_documents(agent_name, email)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@router.post("/agents/{agent_name}/documents", response_model=PortalUpload)
+async def portal_upload(
+    agent_name: str,
+    file: UploadFile = File(...),
+    email: str = Depends(get_portal_identity),
+):
+    """Upload a file to a rostered agent (lands in `~/inbox/<client-email>/`).
+    Scoped to the caller's roster (miss → 404); size-capped, filename sanitized.
+
+    Rate-limited per client **across agents** in two tiers (ent#287) — the inbox
+    quota bounds resident bytes, but a same-filename re-upload overwrites rather
+    than accumulates, so without this the per-request work is unbounded. Keyed on
+    email alone: the cost being bounded here is the operator's, not one agent's.
+    """
+    from services import rate_limiter
+
+    # Both gates run before `read()`, which is what materialises the body in RAM,
+    # and before the service call, which is the expensive part (two docker execs
+    # + a tar + a container write).
+    #
+    # What this ordering does NOT save is the transfer: Starlette parses the
+    # multipart form in `get_request_handler` BEFORE the endpoint function is
+    # called, spooling anything over 1 MiB to a temp file. By the time we get
+    # here the 25 MiB is already on disk. Rejecting earlier than this would need
+    # middleware (or a Content-Length pre-check), not an in-handler gate — do not
+    # let a comment here claim otherwise.
+    _require_roster(agent_name, email)
+    rate_limiter.enforce(
+        f"portal_upload:{email}", PORTAL_UPLOAD_BURST_LIMIT, 60, detail=_UPLOAD_LIMIT_DETAIL
+    )
+    rate_limiter.enforce(
+        f"portal_upload_hourly:{email}", PORTAL_UPLOAD_HOURLY_LIMIT, 3600,
+        detail=_UPLOAD_LIMIT_DETAIL,
+    )
+    data = await file.read()
+    try:
+        result = await service.portal_upload_document(agent_name, email, file.filename or "upload", data)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    return PortalUpload(**result)
+
+
+@router.get("/agents/{agent_name}/uploads", response_model=PortalUploads)
+async def portal_uploads(agent_name: str, email: str = Depends(get_portal_identity)):
+    """Files the client has sent to this rostered agent (their inbox) — so they
+    can review what they've uploaded. Roster-scoped (miss → 404); empty when the
+    agent is offline.
+    """
+    try:
+        return await service.list_client_uploads(agent_name, email)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
