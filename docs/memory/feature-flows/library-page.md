@@ -121,7 +121,7 @@ Single desktop link: label **Library**, `to="/library"`, active check `$route.pa
 ### Templates Router (`src/backend/routers/templates.py` — 2 endpoints)
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/templates` | List templates — admin-configured GitHub list (TMPL-001, `system_settings` key `github_templates`) or `config.py` defaults, plus curated local templates; hidden fixtures excluded (#1513); GitHub metadata cached 10 min/repo (#843); sorted by `priority` then `display_name` |
+| `GET /api/templates` | List templates — the GitHub half resolves **admin-configured list (TMPL-001, `system_settings` key `github_templates`) → remote template registry (TMPL-002, trinity-enterprise#14) → `config.py` defaults (empty since #1931)**, and every registry failure degrades back to that floor (see [template-registry.md](template-registry.md)); plus curated local templates; hidden fixtures excluded (#1513); GitHub metadata cached 10 min/repo (#843); sorted by `priority` then `display_name` |
 | `GET /api/templates/{template_id:path}` | Single template details |
 
 (`POST /api/templates/refresh` and `GET /api/templates/env-template` no longer exist — the refresh icon on the page is a client refetch.)
@@ -168,6 +168,7 @@ CI runs admin-authenticated (`e2e/.auth/admin.json`), so the non-admin empty-sta
 
 | Date | Changes |
 |------|---------|
+| 2026-08-04 | **ent#14 — remote template registry**: the `GET /api/templates` row now names the three-tier ladder (admin list → registry → bundled defaults) instead of claiming the GitHub half is admin-list-or-`config.py`. **Zero page change** — registry entries are `source: "github"` and land in the existing grid, which is what keeps this page (and MCP `list_templates`) untouched. |
 | 2026-08-01 | **#1931 — catalog honesty**: the 11 `dd-*` VC-demo templates go `hidden: true` (visible catalog 14 → 3: `sage`/`scout`/`scribe`), `DEFAULT_GITHUB_TEMPLATE_REPOS` emptied (6 → 0, so `GET /api/templates` makes no outbound GitHub calls on a cold cache), new marketplace-first GitHub-zero placeholder card + corrected page-level hint copy, and the demo fleet stays deployable as a set via the promoted `config/manifests/vc-due-diligence.yaml`. |
 | 2026-07-31 | **ent#263 — Templates page → Library**: file renamed from `templates-page.md`; full rewrite. `/library` route + query/hash-preserving `/templates` redirect, NavBar rename, Agent Templates section (content preserved, fetch migrated to shared api client), new Skills fleet-browse section (`LibrarySkillsSection.vue` + `stores/skillsLibrary.js` + shared `components/skills/` chips seam), per-kind empty states, security notes. Previous revision documented the standalone Templates page (incl. the long-gone `AgentSubNav` and dead `env-template`/`refresh` endpoints). |
 | 2026-03-04 | TMPL-001 configurable GitHub templates (historical — see git history of `templates-page.md`). |

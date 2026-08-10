@@ -210,6 +210,11 @@
               <NeverminedPanel :agent-name="agent.name" :can-edit="agent.can_share" />
             </div>
 
+            <!-- A2A Tab Content (trinity-enterprise#158) -->
+            <div v-if="activeTab === 'a2a' && agent.can_share" class="p-6">
+              <A2aPanel :agent-name="agent.name" :notify="showNotification" />
+            </div>
+
             <!-- Sharing Tab Content -->
             <!-- Access Tab Content (#17 — Trinity operators) -->
             <div v-if="activeTab === 'access' && agent.can_share">
@@ -387,6 +392,7 @@ import PlaybooksPanel from '../components/PlaybooksPanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
 import SessionPanel from '../components/SessionPanel.vue'  // SESSION_TAB_2026-04 Phase 3
 import NeverminedPanel from '../components/NeverminedPanel.vue'
+import A2aPanel from '../components/A2aPanel.vue'  // trinity-enterprise#158: A2A config tab
 import OverflowTabs from '../components/OverflowTabs.vue'  // #1114: tab overflow dropdown
 
 // Import composables
@@ -861,6 +867,12 @@ const visibleTabs = computed(() => {
     tabs.push({ id: 'access', label: 'Access' })  // #17 operators (Trinity users)
     tabs.push({ id: 'sharing', label: 'Sharing' })
     tabs.push({ id: 'permissions', label: 'Permissions' })
+  }
+
+  // A2A tab (trinity-enterprise#158) — owner-only, non-system, and only when the
+  // enterprise A2A module is entitled (never a blank tab in OSS/unentitled).
+  if (sessionsStore.a2aAvailable && agent.value?.can_share && !isSystem) {
+    tabs.push({ id: 'a2a', label: 'A2A' })
   }
 
   // Git and Files tabs together

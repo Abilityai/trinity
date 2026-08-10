@@ -2958,15 +2958,36 @@ class TestCanarySlackEmit:
             "continuing-red must POST once, not every cycle"
         )
 
-    def test_webhook_failure_swallowed_cycle_continues(
-        self, canary_db, canary_service, slack_capture, monkeypatch
+    def test_webhook_failure_is_not_counted_and_is_retried(
+        self, canary_db, canary_service, slack_capture, fake_redis, monkeypatch
     ):
-        """A failing webhook must not break cycle accounting.
+        """A rejected webhook is an UNDELIVERED alert, not a delivered one.
 
-        The row is already persisted before `CanaryAlerts.emit_transition` runs;
-        a hung Slack endpoint can't roll that back. We assert the
-        transition is still counted and the violation is still in the
-        DB even when the recorder returns a failure tuple.
+        This test used to assert the bug (#1897): with the recorder returning
+        a failure tuple it asserted `transition_invariant_ids == ["L-03"]` and
+        `cumulative_transitions == 1` — i.e. it pinned "swallowed" as the
+        correct outcome, which is exactly the learnings-2026-08-02 smell
+        (catching the raise is half the fix; propagating it into the state
+        machine is the other half, and its old name said "swallowed" out
+        loud).
+
+        What is unchanged: the row is persisted before the emit runs, so a
+        hung Slack endpoint cannot roll it back, and the cycle still
+        completes. What changed: the transition is not counted as notified,
+        it is reported under `undelivered_invariant_ids`, and it is armed in
+        `canary:alert_pending` so a later cycle re-attempts it while the
+        invariant stays red.
+
+        The retry itself is not driven here: the real `collect_snapshot` runs
+        in this fixture, so two back-to-back cycles share a snapshot_time to
+        the second and the per-interval retry floor (correctly) holds the
+        second attempt off. The armed entry is the observable that does not
+        depend on the clock.
+
+        NOTE: no CI workflow executes this file (#2037), and on this base its
+        whole class errors at collection because `tests/utils` shadows
+        `src/backend/utils`. The runnable guard for all of this is
+        `tests/unit/test_1897_canary_alert_delivery.py`.
         """
         monkeypatch.setenv(
             "CANARY_SLACK_WEBHOOK_URL",
@@ -2979,12 +3000,17 @@ class TestCanarySlackEmit:
         svc = canary_service["service"]
         result = _run(svc.run_cycle())
 
-        assert result.transition_invariant_ids == ["L-03"]
-        assert svc.cumulative_transitions == 1
+        assert result.transition_invariant_ids == []
+        assert result.undelivered_invariant_ids == ["L-03"]
+        assert svc.cumulative_transitions == 0
+        # Detection is a separate fact and is still counted.
+        assert svc.cumulative_transitions_detected == 1
         ops = canary_service["canary_ops"]
         assert ops.count_violations(invariant_id="L-03") == 1
         # Recorder still saw the call — failure happened on Slack's side.
         assert len(slack_capture["calls"]) == 1
+        # Armed before the POST, still armed after it was rejected.
+        assert "L-03" in fake_redis.hgetall("canary:alert_pending")
 
     def test_previous_violation_at_threaded_into_payload(
         self, canary_db, canary_service, slack_capture, monkeypatch

@@ -32,6 +32,7 @@ from .agent_settings import (
     FileSharingMixin,
     DisplayLabelMixin,
     McpExposureMixin,
+    A2AExposureMixin,
     TtsMixin,
     EphemeralMixin,
 )
@@ -68,6 +69,7 @@ class AgentOperations(
     FileSharingMixin,
     DisplayLabelMixin,
     McpExposureMixin,
+    A2AExposureMixin,
     TtsMixin,
     EphemeralMixin,
 ):

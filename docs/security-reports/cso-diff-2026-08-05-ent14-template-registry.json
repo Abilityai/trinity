@@ -1,0 +1,145 @@
+{
+  "version": "1.1",
+  "date": "2026-08-05",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/ent14-remote-template-registry",
+  "merge_base": "e6df5bf8a0184e33810a721b287c6d000e7a4b6a",
+  "head": "3900d23a",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    9,
+    12,
+    13,
+    14
+  ],
+  "verification_note": "Phase-12 independent verification performed in-context, not via fresh-context subagents (session policy forbids unrequested subagent dispatch). Each finding carries an empirical proof (script against the shipped function) or a direct source trace instead.",
+  "attack_surface": {
+    "new_endpoints_admin_only": 3,
+    "new_endpoints_public": 0,
+    "new_outbound_hosts": 1,
+    "new_yaml_parse_sinks": 1,
+    "new_settings_keys": 4,
+    "dependency_changes": 0,
+    "ci_workflow_changes": 0,
+    "dockerfile_changes": 0
+  },
+  "findings": [
+    {
+      "id": "S2",
+      "severity": "HIGH",
+      "confidence": 8,
+      "status": "FIXED",
+      "phase": 9,
+      "category": "A01 Broken Access Control / authorization gate correctness",
+      "title": "fork_to_own fail-closed gate decides from the platform-PAT catalog cache, not the creation-path read",
+      "files": [
+        "src/backend/services/agent_service/crud.py:590",
+        "src/backend/services/template_service.py:233",
+        "src/backend/services/agent_service/crud.py:1136"
+      ],
+      "description": "The new gate reads gh_template['metadata_unavailable'], derived from _get_cached_metadata_result -> _get_github_pat() (global platform PAT, default branch, 600s cache). crud.py:1136 already calls fetch_template_metadata_for_create with the caller's resolved PAT, pinned ref and no cache, one line earlier, and the gate ignores it. ent#89's own docstring warns against exactly this substitution.",
+      "exploit_scenario": "A private template repo declares fork_to_own: required and is shared with creators via per-user PATs (ent#162), not the platform PAT. GitHub answers 404 (not 403) for a repo the platform PAT cannot see; metadata_reason_is_unreadable('HTTP 404') is False by design, so the gate passes, fork_to_own is never observed, and the agent is created bound to the shared upstream template repo instead of a user-owned copy - silently.",
+      "secondary_impact": "Opposite direction: a creator whose own PAT reads the template fine is refused 503 because the shared global-PAT cache entry is poisoned by a 403, for the full 600s TTL - degrading the github:owner/repo escape hatch the acceptance criteria call untouched.",
+      "recommendation": "Gate on a reason-preserving sibling of fetch_template_metadata_for_create (the underlying _fetch_template_yaml_result already returns (metadata, reason); only the wrapper drops it). Zero extra GitHub calls, caller's own credentials, pinned ref, no poisoned cache.",
+      "resolution": {
+        "fixed_at": "2026-08-05",
+        "fix": "The gate now reads `_read_source_template` — the creation-path read (resolved per-agent/per-user/global PAT, pinned ref, cache-bypassed) that `_resolve_template` already makes for ent#89's schedules, so zero extra GitHub calls. BOTH inputs moved: the availability verdict (`metadata_reason_is_unreadable(source_metadata_reason)`) and the `fork_to_own` value — fixing only the verdict would leave the false pass open, since a private template's catalog VALUE is None for the same reason its verdict is wrong. `required` from EITHER read enforces (a union), so the change can only remove a false pass, never add one. New sibling `template_service.fetch_template_metadata_result_for_create` preserves the reason the old wrapper dropped.",
+        "verification": "tests/unit/test_ent14_fork_to_own_failclosed.py — the private-404 false pass, the poisoned-cache false refuse, and a creation-read outage still refusing, all driven through the real `_resolve_template` with a GitHub whose answer depends on which token asks. Verified RED against the catalog-reading gate (3 failures), green after."
+      }
+    },
+    {
+      "id": "S1",
+      "severity": "MEDIUM",
+      "confidence": 10,
+      "status": "FIXED",
+      "phase": 6,
+      "category": "Control bypass / resource exhaustion",
+      "title": "Registry byte ceiling bypassed ~1000:1 by transparent Content-Encoding decompression",
+      "files": [
+        "src/backend/services/template_registry_service.py:465-494"
+      ],
+      "description": "The custom headers dict does not override httpx's default Accept-Encoding: gzip, deflate, and resp.iter_bytes() yields DECOMPRESSED chunks. The running-total ceiling is therefore applied after decompression, one chunk at a time, so a single chunk can inflate ~1000x before the check runs. The Content-Length early abort inspects the compressed size and so does not help.",
+      "evidence": "Driving the shipped _fetch_registry_text over httpx.MockTransport with a 203861-byte gzipped body (under REGISTRY_MAX_BYTES=262144): result error_code=too_large, PEAK ALLOCATION 148.6 MB. With iter_raw() on the identical body: peak 0.2 MB.",
+      "exploit_scenario": "Attacker controls the registry response (compromised vendor host/repo at the default URL, or an admin persuaded to repoint). Any authenticated user calling GET /api/templates drives the fetch; the negative cache permits one fetch per 60s per worker. Each fetch transiently allocates up to ~264 MB (gzip's 1032:1 ceiling against the 256 KiB wire cap) on the backend's event-loop thread - GC thrash, multi-second stalls, or OOM kill of the whole backend on a memory-limited container.",
+      "recommendation": "1) Send Accept-Encoding: identity. 2) Apply the ceiling to resp.iter_raw() (network bytes, which is what the docstring's 'bytes actually received' means) and refuse a non-identity Content-Encoding as a fetch failure, the way a redirect is refused - a hostile server can gzip regardless of what was requested, so (1) alone is insufficient.",
+      "resolution": {
+        "fixed_at": "2026-08-05",
+        "fix": "The ceiling counts WIRE bytes (`resp.iter_raw()`); any non-identity `Content-Encoding` is refused before the body is read (new error code `encoding_refused`, fixed-vocabulary, fail-open to the bundled floor); `Accept-Encoding: identity` is sent as the polite half.",
+        "verification": "tests/unit/test_ent14_registry_fetch.py — a gzip bomb whose wire size passes the Content-Length abort is refused with ZERO body bytes read (counting stream), peak allocation asserted under 8 MB against 64 MB decoded, every non-identity encoding refused by name, explicit `identity` still normal. `compressed_body` added to the catalog-failopen matrix. Verified RED pre-fix (peak 148.3 MB).",
+        "measurement_correction": "The 148.6 MB figure in the report was measured through a BUFFERED mock (`httpx.Response(content=...)`), which decodes in the constructor — so it partly measured the harness. On a true streaming response (the production shape) the pre-fix peak is 458 MB from a 199 KiB body and the post-fix peak is 0.01 MB. Both transport fixtures now build real streams; the buffered shape could not exercise `iter_raw()` at all."
+      }
+    },
+    {
+      "id": "S3",
+      "severity": "LOW",
+      "confidence": 9,
+      "status": "FIXED",
+      "phase": 9,
+      "category": "A10 SSRF",
+      "title": "RFC 6598 shared address space (100.64.0.0/10) not in the SSRF deny set",
+      "files": [
+        "src/backend/utils/url_validation.py:180-193"
+      ],
+      "description": "100.64.0.0/10 is neither is_private nor is_reserved in Python's ipaddress module, so a registry URL resolving there is admitted. Verified: ipaddress.ip_address('100.64.0.1') -> all predicates False.",
+      "exploit_scenario": "Not exploitable in Trinity's own topology (both Docker networks are 172.28/16 and 172.29/16, which are is_private). The range is used for internal addressing by some cloud providers, so a hosted deployment could expose an internal endpoint.",
+      "recommendation": "Add `ip in ipaddress.ip_network('100.64.0.0/10')` to the deny predicate.",
+      "resolution": {
+        "fixed_at": "2026-08-05",
+        "fix": "`utils/url_validation.py` adds RFC 6598 shared address space (`_SHARED_ADDRESS_SPACE = 100.64.0.0/10`, parsed once at import) to the registry validator's deny predicate. The skills-library validator is deliberately unchanged — its host is allowlisted to github.com, so the operator cannot choose the destination.",
+        "verification": "tests/unit/test_ent14_registry_url_ssrf.py (new) — CGNAT refused with both /10 boundaries held public, one CGNAT record among public ones enough to refuse, neighbouring internal ranges pinned. Verified RED pre-fix (5 failures)."
+      }
+    }
+  ],
+  "verified_safe": [
+    "YAML: AliasPolicy.REJECT pinned at the utils layer via load_template_registry_yaml; alias bombs, single aliases, duplicate keys and a 256 KiB parse cap all refuse the whole document -> bundled floor.",
+    "Invariant #5: src/backend/utils/safe_yaml.py and docker/base-image/agent_server/safe_yaml.py are byte-identical (diff clean) and guarded by test_1965_agent_server_safe_yaml.py::test_loader_copies_are_byte_identical (passing).",
+    "SSRF: https-only; userinfo refused outright; DNS pre-resolution rejects private/loopback/reserved/link-local/multicast/unspecified across all returned records. Empirically confirmed blocked: ::ffff:127.0.0.1, ::ffff:10.0.0.1, ::ffff:169.254.169.254, 169.254.169.254, ::1, fc00::1, 0.0.0.0, ::, 64:ff9b::7f00:1.",
+    "follow_redirects=False, with a 3xx classified as failure before any body is read; the URL is re-validated on every refetch so an env-set TEMPLATE_REGISTRY_URL cannot bypass the endpoint validation.",
+    "Blast radius: frozen four-field allowlist, never splatted; id and github_repo both derived from the same repo (card cannot advertise one path and clone another); dot segments refused - stricter than the three sibling owner/repo regexes.",
+    "Status vocabulary is a fixed code set, never a raw exception string; foreign text bounded to 80 chars, newline-stripped, repr-escaped, admin-only, Vue-interpolated (no v-html).",
+    "AuthZ: GET assert_admin; PUT/DELETE assert_admin + reject_agent_principal; all four keys 422-blocked on both generic catch-alls; both writes audit-logged; route order pinned by test.",
+    "No secrets in the diff; no dependency, lockfile, workflow, Dockerfile or compose changes."
+  ],
+  "residuals_documented_by_the_feature": [
+    "DNS rebinding TOCTOU between validate and connect (requirements 4.2.2).",
+    "No signature/provenance verification of the registry document in v1.",
+    "repo is a capability pointer: choosing it chooses which template.yaml Trinity fetches and trusts, and that document declares mcp_servers, credentials, schedules, data_paths, persistent_state, resources, skills and fork_to_own - all materialized at creation."
+  ],
+  "filter_stats": {
+    "candidates_considered": 11,
+    "dropped_hard_exclusion": 4,
+    "dropped_below_confidence_gate": 3,
+    "reported": 3
+  },
+  "totals": {
+    "critical": 0,
+    "high": 1,
+    "medium": 1,
+    "low": 1
+  },
+  "trend": {
+    "prior_report": "cso-diff-2026-08-02-ent89-template-schedules",
+    "resolved": 0,
+    "persistent": 0,
+    "new": 3,
+    "direction": "new-surface"
+  },
+  "resolution_summary": {
+    "resolved_at": "2026-08-05",
+    "findings_fixed": [
+      "S1",
+      "S2",
+      "S3"
+    ],
+    "findings_open": [],
+    "test_evidence": "Every fix was proven RED against the pre-fix code before being accepted as a regression test."
+  }
+}

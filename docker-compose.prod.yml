@@ -254,6 +254,15 @@ services:
       - TELEMETRY_SHARING_URL=${TELEMETRY_SHARING_URL:-https://intake.abilityai.dev/v1/telemetry-share}
       - TELEMETRY_SHARING_INTERVAL_HOURS=${TELEMETRY_SHARING_INTERVAL_HOURS:-24}
       - TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS=${TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS:-30}
+      # Remote template registry (ent#14). Mirrors docker-compose.yml; prod
+      # compose launches standalone (no base merge / env_file), so wire it here
+      # too — without these lines the .env values are inert (the #1039 /
+      # #1056 packaging-gap class). TEMPLATE_REGISTRY_ENABLED=false is the HARD
+      # kill switch and is the only air-gap answer, so an inert one is the
+      # failure that matters. URL keeps its FULL non-empty default — a bare :-
+      # would arrive set-but-empty and shadow the code default (#1076 class).
+      - TEMPLATE_REGISTRY_ENABLED=${TEMPLATE_REGISTRY_ENABLED:-true}
+      - TEMPLATE_REGISTRY_URL=${TEMPLATE_REGISTRY_URL:-https://raw.githubusercontent.com/Abilityai/trinity-templates/main/registry.yaml}
       # Internal API shared secret (C-003) - for scheduler/agent communication
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
       # Configurable database backend (#300, experimental) — mirrors

@@ -424,6 +424,24 @@ def _load_crud(docker_available=True):
 
     template_service = MagicMock()
     template_service.generate_credential_files = MagicMock(return_value={})
+    # ent#14 S2: the creation path reads `template.yaml` through the
+    # reason-preserving form and UNPACKS the pair — the `fork_to_own` gate
+    # decides on the reason, so it can no longer be dropped. An unstubbed
+    # MagicMock iterates empty and fails the unpack, which is the loud failure
+    # we want rather than a Mock silently standing in for a security decision.
+    template_service.fetch_template_metadata_result_for_create = MagicMock(
+        return_value=({}, None)
+    )
+    # ent#14 S2: the `fork_to_own` gate calls this classifier, which crud
+    # imports FROM this module — an unstubbed MagicMock returns a truthy Mock,
+    # so every github create would 503 TEMPLATE_METADATA_UNAVAILABLE. Mirrored
+    # faithfully (real: services/template_service.py::metadata_reason_is_unreadable
+    # — a clean 404 is absence, everything else is unreadable) rather than
+    # pinned to False, so a case that DOES script an unreadable reason still
+    # exercises the refusal.
+    template_service.metadata_reason_is_unreadable = MagicMock(
+        side_effect=lambda reason: bool(reason) and not reason.startswith("HTTP 404")
+    )
 
     git_service = MagicMock()
     git_service.DEFAULT_PERSISTENT_STATE = ["memory/"]

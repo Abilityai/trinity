@@ -21,7 +21,7 @@ list.
 | [core-agent.md](requirements/core-agent.md) | Core agent management, template system, chat & terminal, activity monitoring, agent collaboration |
 | [auth.md](requirements/auth.md) | Authentication & authorization (email/admin login, roles, JWT) |
 | [credentials.md](requirements/credentials.md) | Credential management (file injection, encrypted exports) |
-| [mcp.md](requirements/mcp.md) | MCP server, A2A discoverability, per-agent MCP exposure |
+| [mcp.md](requirements/mcp.md) | MCP server, A2A discoverability + inbound server, per-agent MCP exposure |
 | [scheduling.md](requirements/scheduling.md) | Scheduling & autonomy, agent-defined pipelines, schedule timeout validation, MCP chat timeout recovery, sequential agent loops |
 | [github.md](requirements/github.md) | GitHub integration (sync, PAT, recovery) |
 | [infrastructure.md](requirements/infrastructure.md) | Infrastructure, platform operations, CLI tool, canary invariant harness, enterprise edition architecture, build info surface |
