@@ -84,10 +84,10 @@ const features = [
   },
   {
     id: 'client_portal',
-    title: 'Client Portal',
+    title: 'Workspace',
     icon: '🪟',
     description: 'Client-facing surface: the agents shared with your email, in one place. Configurable public or private (VPN/LAN) exposure.',
-    route: '/portal',
+    route: '/workspace',
     entitlement: 'client_portal',
     soon: false,
   },

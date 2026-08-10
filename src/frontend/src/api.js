@@ -36,11 +36,16 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      // #138: the client portal manages its own (verified-email) session and
-      // must never be bounced to the operator /login by a stale operator JWT —
-      // let portal code handle its own 401 (drop the portal token, show sign-in).
+      // #138: an external client on the workspace manages its own
+      // (verified-email) session and must never be bounced to the operator
+      // /login by a stale operator JWT — let that code handle its own 401.
+      // ent#357: an internal user's workspace session IS the platform session,
+      // so they DO get bounced. Same path, two session kinds — discriminate on
+      // the portal token, not the URL.
       const path = window.location.pathname
-      if (!path.startsWith('/portal')) {
+      const onWorkspace = path.startsWith('/workspace') || path.startsWith('/portal')
+      const externalClient = !!localStorage.getItem('trinity.portalToken')
+      if (!(onWorkspace && externalClient)) {
         // Token expired or invalid - redirect to login
         localStorage.removeItem('token')
         window.location.href = '/login'

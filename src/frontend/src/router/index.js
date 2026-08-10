@@ -17,7 +17,12 @@ function agentTabTitle(slug) {
   }
 }
 
-const routes = [
+// Exported so the route table can be exercised without constructing a
+// web-history router (ent#357): the redirect behaviour for the legacy /portal
+// links is a property of these definitions, and asserting it through a
+// memory-history router is the only way to test the real thing rather than a
+// restatement of it.
+export const routes = [
   {
     path: '/setup',
     name: 'Setup',
@@ -213,25 +218,42 @@ const routes = [
     meta: { requiresAuth: true, requiresEntitlement: 'shared_sessions', title: 'Sessions' }
   },
   {
-    // Public client-facing portal — a client signs in with a verified email
-    // (no platform account) and sees the agents shared with them. Standalone
-    // (no NavBar / platform chrome), no requiresAuth. Backend 404s in
-    // OSS/unentitled builds; the page shows its sign-in / empty state.
-    path: '/portal',
-    name: 'ClientPortalPublic',
+    // Workspace (ent#357, formerly "Client Portal") — a view of the agents
+    // shared with WHOEVER is looking: an external client who signed in with a
+    // verified email, or a platform user who is already logged in and arrives
+    // in one click. Standalone (no NavBar / platform chrome), no requiresAuth:
+    // the external path must stay reachable without an account. Backend 404s in
+    // OSS/unentitled builds; the page shows its sign-in / unavailable state.
+    path: '/workspace',
+    name: 'Workspace',
     component: () => import('../views/Portal.vue'),
-    // hideHelpWidget: the operator-only help widget would overlap the portal
-    // chat's Send button (and is meaningless to a client) — off here.
-    meta: { title: 'Client Portal', hideHelpWidget: true }
+    // hideHelpWidget: the operator-only help widget would overlap the
+    // conversation's Send button (and is meaningless to a client) — off here.
+    meta: { title: 'Workspace', hideHelpWidget: true }
   },
   {
     // #138: deep-linkable, refresh-safe conversation thread. The same shell as
-    // /portal (new-chat state); the :sessionId opens that thread. Back/forward
+    // /workspace (new-chat state); the :sessionId opens that thread. Back/forward
     // navigate between new-chat and threads.
-    path: '/portal/c/:sessionId',
-    name: 'ClientPortalThread',
+    path: '/workspace/c/:sessionId',
+    name: 'WorkspaceThread',
     component: () => import('../views/Portal.vue'),
-    meta: { title: 'Client Portal', hideHelpWidget: true }
+    meta: { title: 'Workspace', hideHelpWidget: true }
+  },
+  // ent#357 legacy paths. Function form so query AND hash survive the hop —
+  // these URLs were handed to real clients by email, and a client landing on a
+  // dead link has no way to report it. `/portal/c/:sessionId` keeps the thread.
+  {
+    path: '/portal',
+    redirect: to => ({ path: '/workspace', query: to.query, hash: to.hash })
+  },
+  {
+    path: '/portal/c/:sessionId',
+    redirect: to => ({
+      path: `/workspace/c/${to.params.sessionId}`,
+      query: to.query,
+      hash: to.hash,
+    })
   },
   // Mobile Admin PWA (MOB-001) — standalone, no NavBar
   {

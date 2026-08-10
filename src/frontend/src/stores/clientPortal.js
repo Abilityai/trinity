@@ -19,20 +19,43 @@ export const useClientPortalStore = defineStore('clientPortal', {
     agents: [],
     loading: false,
     error: null,
+    // ent#357: set when the backend says the workspace module is absent /
+    // unentitled (404), so the view can say so instead of showing an empty
+    // roster that looks like "nobody shared anything with you".
+    unavailable: false,
     // A portal session token (verified email, no platform account). When set,
-    // it authenticates the portal endpoints; else we fall back to the platform
-    // login (operator preview). Persisted so a client stays signed in.
+    // it authenticates the workspace endpoints; else we fall back to the
+    // platform session. Persisted so an external client stays signed in.
     portalToken: localStorage.getItem(PORTAL_TOKEN_KEY) || null,
   }),
 
   getters: {
-    // Portal-session token wins; otherwise the operator's platform auth header.
+    // Portal-session token wins; otherwise the platform session.
     authHeader() {
       if (this.portalToken) return { Authorization: `Bearer ${this.portalToken}` }
       const authStore = useAuthStore()
       return authStore.authHeader
     },
-    isClientSignedIn: (state) => !!state.portalToken,
+
+    // ent#357: TWO ways to be signed in to the workspace.
+    //
+    // This getter used to be `!!state.portalToken`, which is why an
+    // already-signed-in platform user was shown the email-OTP form on a surface
+    // they were entitled to see: the transport layer below already fell back to
+    // the platform header, and the backend's `get_portal_identity` already
+    // accepts a platform JWT and resolves it to that user's email — only this
+    // one predicate disagreed, so the round-trip it forced was pure ceremony.
+    //
+    // Deriving the internal case from the platform session is also what makes
+    // "signing out of the platform ends it" true by construction: there is no
+    // second credential to revoke, so `authStore.logout()` ends the workspace
+    // session in the same act.
+    isPlatformSession() {
+      return !this.portalToken && !!useAuthStore().isAuthenticated
+    },
+    isClientSignedIn() {
+      return !!this.portalToken || this.isPlatformSession
+    },
   },
 
   actions: {
@@ -215,7 +238,15 @@ export const useClientPortalStore = defineStore('clientPortal', {
       } catch (err) {
         // An expired/invalid portal token → drop it so the sign-in form returns.
         if (err.response?.status === 401 && this.portalToken) this.signOut()
-        this.error = err.response?.data?.detail || 'Failed to load your agents.'
+        // ent#357: a 404 here is not "you have no agents" — it is the module
+        // being absent (OSS build) or unentitled, and the two must not render
+        // the same. The empty roster used to swallow both, so an operator whose
+        // entitlement had lapsed saw "No agents shared with you yet" and had no
+        // way to tell that from an actually-empty share list.
+        this.unavailable = err.response?.status === 404
+        this.error = this.unavailable
+          ? 'The workspace is not available on this instance.'
+          : (err.response?.data?.detail || 'Failed to load your agents.')
         this.agents = []
       } finally {
         this.loading = false

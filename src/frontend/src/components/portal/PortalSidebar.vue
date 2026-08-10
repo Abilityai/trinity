@@ -3,7 +3,7 @@
     <!-- Brand -->
     <div class="shrink-0 flex items-center gap-2 px-4 h-14 border-b border-gray-200 dark:border-gray-800">
       <svg class="w-6 h-6 text-action-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
-      <span class="font-semibold">Client Portal</span>
+      <span class="font-semibold">Workspace</span>
     </div>
 
     <div class="p-3 space-y-2">
