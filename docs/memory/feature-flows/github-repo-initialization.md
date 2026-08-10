@@ -140,8 +140,8 @@ sequenceDiagram
 
     Note over Backend,Container: Phase 4b: Git Initialization (via git_service)
     Backend->>GitService: initialize_git_in_container(working_branch=reserved, create_working_branch=False)
-    GitService->>Container: Check for existing git directory
-    alt Has existing /home/developer/workspace with content (LEGACY)
+    GitService->>Container: git rev-parse --show-toplevel (walks up, #2075)
+    alt Repo genuinely rooted at /home/developer/workspace (LEGACY)
         Note over GitService: LEGACY: Agents created before 2026-02
         GitService->>GitService: Use /home/developer/workspace
     else Standard (new agents)
@@ -451,22 +451,17 @@ async def initialize_git_in_container(
     """
     container_name = f"agent-{agent_name}"
 
-    # Step 1: Directory detection with LEGACY workspace support
-    # LEGACY: Agents created before 2026-02 may have /home/developer/workspace
-    # New agents use /home/developer directly (no workspace subdirectory)
-    check_workspace = execute_command_in_container(
-        container_name=container_name,
-        command='bash -c "[ -d /home/developer/workspace ] && find /home/developer/workspace -mindepth 1 -maxdepth 1 | head -1 | wc -l"',
-        timeout=5
-    )
-
-    workspace_has_content = (
-        check_workspace.get("exit_code") == 0 and
-        "1" in check_workspace.get("output", "")
-    )
-    # LEGACY support: use workspace if it exists with content (pre-2026-02 agents)
-    # Otherwise use home directory directly (new standard)
-    git_dir = "/home/developer/workspace" if workspace_has_content else "/home/developer"
+    # Step 1: Directory detection — git's answer wins (#2075)
+    # _git_toplevel runs `git rev-parse --show-toplevel` from workspace/ when
+    # that directory exists and from /home/developer otherwise. --show-toplevel
+    # walks UP, so a genuinely workspace-rooted legacy repo (pre-2026-02) still
+    # resolves to workspace/ while a standard agent that merely keeps data
+    # under workspace/ resolves to /home/developer. Answers outside
+    # /home/developer are rejected.
+    # Only when there is NO repository at all does the pre-#2075 content
+    # heuristic decide (_detect_git_dir_fallback) — this init path needs a
+    # placement for a repo that does not exist yet, so it stays byte-compatible.
+    git_dir = await _detect_git_dir(container_name)
 
     # Step 2: Append any missing _GITIGNORE_PATTERNS entries to .gitignore
     # (issues #458 and #462). Runs for BOTH /home/developer and the legacy
@@ -1210,10 +1205,14 @@ sqlite3 ~/trinity-data/trinity.db "SELECT * FROM agent_git_config WHERE agent_na
 - The same merge runs on every subsequent Push via `_migrate_workspace_gitignore` (#462), so existing agents pick up new patterns automatically
 
 **LEGACY Case** (agents created before 2026-02):
-- If `/home/developer/workspace/` exists with content, that directory is used
+- If the agent's repository is genuinely rooted at `/home/developer/workspace/`
+  (git's own `rev-parse --show-toplevel` says so), that directory is used
 - Backend logs: `Using workspace directory: /home/developer/workspace`
 - `.gitignore` merge also runs here (#458 — previously skipped)
 - Detection logic shared with `_detect_git_dir`, used by both init and the post-init Push migration (#462)
+- A populated non-git `workspace/` **data** directory no longer forces this
+  branch (#2075) — that content heuristic misrouted standard agents, and now
+  runs only when no repository exists yet (fresh-agent placement)
 
 **Verify**:
 - Check GitHub repo contains agent files but not system files
@@ -1518,15 +1517,27 @@ your-repo/
 
 The system uses smart detection to find the correct directory (in `git_service.initialize_git_in_container()`):
 
-1. **Standard path (new agents, 2026-02+)**: Use `/home/developer` directly
-   - Agent home directory is `/home/developer`
-   - All files live there directly (no workspace subdirectory)
+1. **Ask git (#2075)**: `git rev-parse --show-toplevel`, probing from
+   `/home/developer/workspace` when that directory exists and `/home/developer`
+   otherwise. `--show-toplevel` walks **up**, so the nearest enclosing repo
+   wins: a genuinely workspace-rooted LEGACY repo (pre-2026-02) still resolves
+   to `workspace/`, a standard agent resolves to `/home/developer` even when it
+   keeps a populated non-git `workspace/` data directory. An answer outside
+   `/home/developer` is rejected.
 
-2. **LEGACY support (agents created before 2026-02)**: Check for workspace
-   - If `/home/developer/workspace` exists AND has content -> Use workspace
-   - Otherwise -> Use `/home/developer`
+2. **No repository yet → legacy content heuristic** (`_detect_git_dir_fallback`,
+   verbatim pre-#2075): `/home/developer/workspace` exists AND has content ->
+   use workspace, otherwise `/home/developer`. Only `initialize_git_in_container`
+   reaches this branch — it needs a placement for a repo that does not exist yet,
+   so fresh-agent placement is unchanged.
 
 3. **If using home directory**: Create `.gitignore` to exclude system files
+
+**Known limitation**: an agent that was already re-initialised *while
+misdetected* now has a real `workspace/.git` — a genuine nested repo,
+indistinguishable from a legitimate legacy agent by any probe. Git's answer for
+it is `workspace/`, and this logic keeps it there; repairing those takes an
+operator decision per agent.
 
 4. **Verify**: Run `git rev-parse --git-dir` before creating DB record
 
