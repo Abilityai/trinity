@@ -92,6 +92,17 @@ PARITY_FIXTURES = [
     "KEY=  spaced  ",
     "lower_key=v",
     "K-E-Y=v",
+    # Backslash shapes (#2023 review): the corpus for the copy most at risk of
+    # drift had NO backslash fixture at all — the exact class the reversible
+    # encoding changes. An escaped quote, an escaped backslash, a run of two,
+    # a trailing one, and the combination that makes order matter.
+    r'KEY="a\"b"',
+    r'KEY="a\\b"',
+    r'KEY="a\\\\b"',
+    r'KEY="a\\"',
+    r'KEY="\\\"quoted\\\""',
+    r"KEY='a\\b'",
+    r'KEY=a\\b',
 ]
 
 

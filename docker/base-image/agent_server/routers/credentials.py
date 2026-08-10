@@ -105,7 +105,13 @@ async def update_credentials(request: CredentialUpdateRequest):
             # #2023: one helper, sitting next to its inverse
             # (`unquote_env_value`). Inlining the encoding here is how it came
             # to disagree with the reader in the first place.
-            env_lines.append(format_env_line(var_name, str(value)))
+            try:
+                env_lines.append(format_env_line(var_name, str(value)))
+            except ValueError as exc:
+                # A newline-bearing value would define an extra key in the
+                # spawned env (#2023 review); name the offending key rather
+                # than writing a file that means something else.
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         env_content = "\n".join(env_lines) + "\n"
         env_file.write_text(env_content)

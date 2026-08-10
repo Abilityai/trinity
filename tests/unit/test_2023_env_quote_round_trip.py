@@ -197,3 +197,132 @@ def test_the_probe_script_still_compiles_with_the_inlined_mirror():
     from services import credential_requirements_service as crs
 
     compile(crs._build_collector_script("/tmp/probe-root"), "<probe>", "exec")
+
+
+# ---------------------------------------------------------------------------
+# The copies the first version of this PR did not migrate (#2023 review)
+# ---------------------------------------------------------------------------
+
+class TestTheRedactionSetUsesTheSameDecoder:
+    """`credential_sanitizer` builds the set of values that get redacted from
+    logs, and it held a FOURTH copy of the old decoder.
+
+    Before the reversible encoding the two agreed — both corrupted identically
+    — so redaction worked. Making the execution path correct without moving
+    this one would mean the redaction set holds the ESCAPED form while the
+    execution receives the UNESCAPED one, and `sanitize_text()` stops redacting
+    a live credential from logs. A security regression introduced by a
+    correctness fix, in the direction CLAUDE.md's rules forbid.
+
+    Reachability, verified on `dev`: `startup.sh` never sources `.env` (no
+    `set -a`, no `source`), so on any agent-server start the `os.environ` branch
+    of `_load_credential_values()` contributes nothing and the file branch is
+    the ONLY source.
+    """
+
+    @staticmethod
+    def _values_for(tmp_path, monkeypatch, line):
+        import sys
+        sys.path.insert(0, str(_REPO / "docker" / "base-image"))
+        from agent_server.utils import credential_sanitizer as cs
+
+        env = tmp_path / ".env"
+        env.write_text(line + "\n")
+        monkeypatch.setattr(cs.os.path, "expanduser", lambda p: str(env))
+        monkeypatch.setattr(cs, "_credential_values", None, raising=False)
+        return cs._load_credential_values()
+
+    def test_a_quote_bearing_secret_is_redacted(self, tmp_path, monkeypatch):
+        raw = 'sk-live-a"bcdefghij'
+        import sys
+        sys.path.insert(0, str(_REPO / "docker" / "base-image"))
+        from agent_server.services.execution_env import format_env_line
+
+        values = self._values_for(tmp_path, monkeypatch, format_env_line("MY_API_KEY", raw))
+        assert raw in values, (
+            f"the redaction set holds {values!r}, not the value the execution "
+            "receives — sanitize_text() will not redact this credential"
+        )
+
+    def test_a_backslash_bearing_secret_is_redacted(self, tmp_path, monkeypatch):
+        raw = r"sk-live-a\\bcdefghij"
+        import sys
+        sys.path.insert(0, str(_REPO / "docker" / "base-image"))
+        from agent_server.services.execution_env import format_env_line
+
+        values = self._values_for(tmp_path, monkeypatch, format_env_line("MY_API_KEY", raw))
+        assert raw in values
+
+
+class TestTheSecondEnvWriterMatchesTheFirst:
+    """`github_pat_propagation_service._format_pat_line` is a second writer of
+    the same file, read back by the same reader. Its docstring asserted parity
+    with the agent's writer, which escaping only `"` did not have.
+
+    Backend code cannot import the agent-side module (different image), so the
+    contract is a parity test over a shared corpus — the same shape as the
+    vendored-mirror parity tests elsewhere in the tree.
+    """
+
+    CORPUS = [
+        "ghp_plain",
+        'ghp_a"b',
+        r"ghp_a\b",
+        r"ghp_a\\b",
+        r"ghp_a\\\\b",
+        r"ghp_trailing\\",
+        r'ghp_\"already_escaped',
+        "ghp_$(id)`whoami`",
+    ]
+
+    @pytest.mark.parametrize("value", CORPUS)
+    def test_both_writers_emit_the_same_line(self, value):
+        import sys
+        sys.path.insert(0, str(_REPO / "docker" / "base-image"))
+        sys.path.insert(0, str(_REPO / "src" / "backend"))
+        from agent_server.services.execution_env import format_env_line
+        from services.github_pat_propagation_service import _format_pat_line
+
+        assert _format_pat_line(value, "GITHUB_PAT") == format_env_line("GITHUB_PAT", value)
+
+    @pytest.mark.parametrize("value", CORPUS)
+    def test_the_pat_line_round_trips_through_the_real_reader(self, value, tmp_path):
+        import sys
+        sys.path.insert(0, str(_REPO / "docker" / "base-image"))
+        sys.path.insert(0, str(_REPO / "src" / "backend"))
+        from agent_server.services.execution_env import parse_env_file
+        from services.github_pat_propagation_service import _format_pat_line
+
+        env = tmp_path / ".env"
+        env.write_text(_format_pat_line(value) + "\n")
+        assert parse_env_file(env)["GITHUB_PAT"] == value
+
+
+class TestNewlinesAreRefusedNotEscaped:
+    """The writer is now a single named function, and `.env` is line-oriented.
+
+    A value containing `\\n` decodes such that a NEW KEY appears in
+    `build_execution_env` — and `PROTECTED_KEYS` refuses `LD_PRELOAD` but not
+    `ANTHROPIC_API_KEY` / `GITHUB_PAT` / `CLAUDE_CODE_OAUTH_TOKEN`. Not a
+    regression (the old writer was equally broken) and the input is
+    operator-supplied, but the PR title claims reversibility, so the limit is
+    refused at the writer rather than left implicit.
+    """
+
+    @pytest.mark.parametrize("bad", ["a\nB=x", "a\r\nB=x", "trailing\n", "\rcr"])
+    def test_the_agent_writer_refuses(self, bad):
+        import sys
+        sys.path.insert(0, str(_REPO / "docker" / "base-image"))
+        from agent_server.services.execution_env import format_env_line
+
+        with pytest.raises(ValueError, match="newline"):
+            format_env_line("ANTHROPIC_API_KEY", bad)
+
+    @pytest.mark.parametrize("bad", ["a\nB=x", "a\r\nB=x"])
+    def test_the_backend_writer_refuses_too(self, bad):
+        import sys
+        sys.path.insert(0, str(_REPO / "src" / "backend"))
+        from services.github_pat_propagation_service import _format_pat_line
+
+        with pytest.raises(ValueError, match="newline"):
+            _format_pat_line(bad)

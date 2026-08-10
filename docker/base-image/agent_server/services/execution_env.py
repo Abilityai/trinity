@@ -115,6 +115,21 @@ def format_env_line(key: str, value: str) -> str:
     it is undecodable: a value ending in `\\` would produce `KEY="a\\"`, whose
     closing quote reads as escaped.
     """
+    # `\n` / `\r` are rejected, not escaped (#2023 review). The reader is
+    # line-oriented, so a value containing a newline decodes such that a NEW KEY
+    # appears in `build_execution_env` — and `PROTECTED_KEYS` refuses
+    # `LD_PRELOAD` but not `ANTHROPIC_API_KEY`, `GITHUB_PAT` or
+    # `CLAUDE_CODE_OAUTH_TOKEN`. Escaping them would make the encoding
+    # reversible on paper while leaving every other `.env` consumer (a shell
+    # sourcing the file, the ent#127 probe) reading two lines. Operator-supplied
+    # input, and no credential format contains a newline, so refusing at the
+    # writer is both safe and honest — the caller gets a named error instead of
+    # a file that silently means something else.
+    if "\n" in value or "\r" in value:
+        raise ValueError(
+            f"value for {key!r} contains a newline or carriage return; "
+            ".env is line-oriented and such a value would define an extra key"
+        )
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'{key}="{escaped}"'
 
