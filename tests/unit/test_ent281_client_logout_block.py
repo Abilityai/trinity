@@ -427,15 +427,29 @@ class _Req:
 def quiet_audit(monkeypatch):
     """The audit sink writes to the OSS audit_log table, which this fixture's DB
     does not create. Record calls instead — the assertions are about *whether* an
-    action is audited, not about the platform sink's own storage."""
-    from services import platform_audit_service as pas
+    action is audited, not about the platform sink's own storage.
+
+    Patch the ROUTER's binding, not `services.platform_audit_service`'s singleton.
+    `router.py` does a module-level `from services.platform_audit_service import
+    platform_audit_service`, so it holds whichever singleton was live when IT was
+    imported. That key is on conftest's #762 invariant-restore list, so the module
+    object in `sys.modules` is swapped back to the baseline between tests — and
+    once the two diverge, patching the singleton patches an object the router
+    never calls. The real sink then runs against this fixture's DB, which has no
+    `audit_log` table, and the assertion fails on an empty list — which reads like
+    "the code forgot to audit" rather than "the patch missed".
+
+    The router module object the test holds is the one the test calls into, so
+    patching its attribute is correct by construction, whatever sys.modules says.
+    """
+    from client_portal import router as portal_router
 
     calls = []
 
     async def _log(**kw):
         calls.append(kw)
 
-    monkeypatch.setattr(pas.platform_audit_service, "log", _log)
+    monkeypatch.setattr(portal_router.platform_audit_service, "log", _log)
     return calls
 
 

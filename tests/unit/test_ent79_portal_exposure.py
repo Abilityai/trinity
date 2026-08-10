@@ -6,6 +6,18 @@ read/normalize, and the setter's validation (mode whitelist, absolute-URL check,
 clear-to-fallback). Runs against a throwaway sqlite seeded with the OSS
 ``system_settings`` table. The entitlement gate lives at the router, so this
 needs no entitlement wiring.
+
+PATCHING RULE (ent#356): every ``services.*`` patch here uses the STRING target
+form, never ``import services.x as alias`` + ``patch.object(alias, ...)``.
+``client_portal.service`` reaches its dependencies through function-local
+``from services.x import y``, which resolves ``sys.modules["services.x"]`` at
+call time — while ``import services.x as alias`` resolves the ``services``
+package ATTRIBUTE. Those are normally the same object, but conftest's #762
+invariant-restore swaps ``sys.modules`` entries back to a captured baseline
+between tests, so once an earlier test in the run replaces one they diverge and
+the alias-form patch silently targets an object the code never calls. The test
+then fails on the real dependency's behaviour, which reads like a product bug.
+Only the full suite reproduces it; a small selection passes.
 """
 from __future__ import annotations
 
@@ -184,8 +196,7 @@ def test_roster_carries_briefing(roster_db, monkeypatch):
     (best-effort enrichment), so the new-chat briefing needs no extra fetch."""
     from client_portal import service
     from client_portal.models import PortalPlaybook
-    import services.tts_service as tts
-    monkeypatch.setattr(tts, "is_available", lambda: False)   # skip the global key check
+    monkeypatch.setattr("services.tts_service.is_available", lambda: False)   # skip the global key check
 
     async def fake_briefing(name):
         if name == "atlas":
@@ -210,8 +221,7 @@ def test_roster_briefing_is_fail_soft(roster_db, monkeypatch):
     """A slow/erroring agent must not break the roster — gather swallows it and
     that card keeps the (None, []) defaults."""
     from client_portal import service
-    import services.tts_service as tts
-    monkeypatch.setattr(tts, "is_available", lambda: False)
+    monkeypatch.setattr("services.tts_service.is_available", lambda: False)
 
     async def boom(name):
         raise RuntimeError("agent unreachable")
@@ -320,8 +330,9 @@ def _mock_execute(status="success", response="hi there", cost=0.02, error=None):
     from unittest.mock import AsyncMock, patch
     result = types.SimpleNamespace(status=status, response=response, cost=cost, error=error)
     svc = types.SimpleNamespace(execute_task=AsyncMock(return_value=result))
-    import services.task_execution_service as tes
-    return patch.object(tes, "get_task_execution_service", return_value=svc), svc
+    return patch(
+        "services.task_execution_service.get_task_execution_service", return_value=svc
+    ), svc
 
 
 def test_portal_chat_scope_miss_is_404(roster_db):
@@ -434,11 +445,9 @@ def test_portal_upload_too_large_is_413(roster_db):
 def test_portal_upload_happy_path_writes_inbox(roster_db):
     from unittest.mock import AsyncMock, patch
     from client_portal import service
-    import services.docker_service as ds
-    import services.docker_utils as du
-    with patch.object(ds, "get_agent_container", return_value=object()), \
-         patch.object(du, "container_exec_run", new=AsyncMock(return_value=None)), \
-         patch.object(du, "container_put_archive", new=AsyncMock(return_value=True)) as put:
+    with patch("services.docker_service.get_agent_container", return_value=object()), \
+         patch("services.docker_utils.container_exec_run", new=AsyncMock(return_value=None)), \
+         patch("services.docker_utils.container_put_archive", new=AsyncMock(return_value=True)) as put:
         out = _run(service.portal_upload_document("atlas", "Bob@Example.com", "../notes.txt", b"hello"))
     assert out["filename"] == "notes.txt"
     assert out["size_bytes"] == 5
@@ -467,10 +476,9 @@ def test_portal_upload_over_inbox_quota_is_413(roster_db):
     import types
     from unittest.mock import AsyncMock, patch
     from client_portal import service
-    import services.docker_service as ds
     running = types.SimpleNamespace(status="running")
     full = [{"filename": "big.bin", "size_bytes": service.MAX_INBOX_TOTAL_BYTES, "uploaded_at": None}]
-    with patch.object(ds, "get_agent_container", return_value=running), \
+    with patch("services.docker_service.get_agent_container", return_value=running), \
          patch.object(service, "_read_inbox", new=AsyncMock(return_value=full)):
         with pytest.raises(service.ClientPortalError) as ei:
             _run(service.portal_upload_document("atlas", "bob@example.com", "one-more.txt", b"x"))
@@ -481,9 +489,8 @@ def test_portal_upload_stopped_agent_is_409_not_500(roster_db):
     import types
     from unittest.mock import patch
     from client_portal import service
-    import services.docker_service as ds
     stopped = types.SimpleNamespace(status="exited")   # container exists but not running
-    with patch.object(ds, "get_agent_container", return_value=stopped):
+    with patch("services.docker_service.get_agent_container", return_value=stopped):
         with pytest.raises(service.ClientPortalError) as ei:
             _run(service.portal_upload_document("atlas", "bob@example.com", "x.txt", b"hi"))
     assert ei.value.status_code == 409  # friendly, not an unhandled 500
@@ -504,9 +511,8 @@ def test_list_uploads_offline_agent_is_empty(roster_db):
     import types
     from unittest.mock import patch
     from client_portal import service
-    import services.docker_service as ds
     stopped = types.SimpleNamespace(status="exited")
-    with patch.object(ds, "get_agent_container", return_value=stopped):
+    with patch("services.docker_service.get_agent_container", return_value=stopped):
         out = _run(service.list_client_uploads("atlas", "bob@example.com"))
     assert out == {"agent_name": "atlas", "uploads": []}  # can't read while offline; no error
 
@@ -515,15 +521,13 @@ def test_list_uploads_parses_inbox(roster_db):
     import types
     from unittest.mock import AsyncMock, patch
     from client_portal import service
-    import services.docker_service as ds
-    import services.docker_utils as du
     running = types.SimpleNamespace(status="running")
     exec_out = types.SimpleNamespace(
         exit_code=0,
         output=b'[{"filename":"contract (v2).pdf","size_bytes":2048,"mtime":1751880000.0}]',
     )
-    with patch.object(ds, "get_agent_container", return_value=running), \
-         patch.object(du, "container_exec_run", new=AsyncMock(return_value=exec_out)):
+    with patch("services.docker_service.get_agent_container", return_value=running), \
+         patch("services.docker_utils.container_exec_run", new=AsyncMock(return_value=exec_out)):
         out = _run(service.list_client_uploads("atlas", "bob@example.com"))
     assert out["uploads"][0]["filename"] == "contract (v2).pdf"
     assert out["uploads"][0]["size_bytes"] == 2048
@@ -849,18 +853,17 @@ def test_resolve_title_auth_prefers_api_key_then_subscription(monkeypatch):
     call borrows the agent's OWN subscription OAuth token (Bearer + oauth beta);
     with neither credential the resolver returns None so the derived title stands."""
     from client_portal import service
-    import services.settings_service as ss
     import database
     db = database.db if hasattr(database, "db") else database.get_db()
 
     # 1. API key present → x-api-key scheme, no subscription lookup needed.
-    monkeypatch.setattr(ss, "get_anthropic_api_key", lambda: "sk-ant-test")
+    monkeypatch.setattr("services.settings_service.get_anthropic_api_key", lambda: "sk-ant-test")
     h = service._resolve_title_auth("atlas")
     assert h["x-api-key"] == "sk-ant-test"
     assert "authorization" not in h and "anthropic-beta" not in h
 
     # 2. No API key, agent has a subscription → Bearer OAuth + the beta header.
-    monkeypatch.setattr(ss, "get_anthropic_api_key", lambda: "")
+    monkeypatch.setattr("services.settings_service.get_anthropic_api_key", lambda: "")
     monkeypatch.setattr(db, "get_agent_subscription_id", lambda a: "sub-1")
     monkeypatch.setattr(db, "get_subscription_token", lambda s: "oauth-tok-108")
     h = service._resolve_title_auth("atlas")

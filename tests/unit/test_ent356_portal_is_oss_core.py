@@ -22,6 +22,7 @@ tests with it.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -228,3 +229,59 @@ def test_malformed_addresses_are_still_rejected(address):
     service = _service()
     with pytest.raises(service.ClientPortalError):
         service.normalize_client_email(address)
+
+
+# ---------------------------------------------------------------------------
+# How the portal's own tests patch `services.*`
+# ---------------------------------------------------------------------------
+
+_PORTAL_TEST_FILES = (
+    "test_ent79_portal_exposure.py",
+    "test_ent163_portal_delegated_identity.py",
+    "test_ent281_client_logout_block.py",
+    "test_ent287_portal_rate_limits.py",
+    "test_ent308_inbox_dir_collision.py",
+    "test_ent311_portal_signin_hardening.py",
+    "test_ent357_workspace_owned_roster.py",
+)
+
+
+def test_portal_tests_patch_services_by_string_target_not_module_alias():
+    """`import services.x as a` + `patch.object(a, ...)` is identity-sensitive.
+
+    `client_portal.service` reaches its dependencies through function-local
+    `from services.x import y`, which resolves `sys.modules["services.x"]` at
+    call time. `import services.x as a` resolves the `services` package
+    ATTRIBUTE instead. Normally the same object — but conftest's #762
+    invariant-restore swaps `sys.modules` entries back to a captured baseline
+    between tests, so once an earlier test replaces one, the two diverge and the
+    alias-form patch targets an object the code never calls.
+
+    That is the worst possible failure shape: it needs the FULL suite to
+    reproduce (five of these tests passed in every small selection and failed in
+    CI), and when it fires the test fails on the real dependency's behaviour, so
+    it reads as a product bug rather than a patch that missed.
+
+    The string form resolves through `sys.modules`, exactly as the code does.
+    """
+    here = Path(__file__).parent
+    offenders = []
+    for name in _PORTAL_TEST_FILES:
+        path = here / name
+        if not path.is_file():
+            continue
+        aliases = {}
+        for num, line in enumerate(path.read_text().splitlines(), 1):
+            m = re.match(r"\s*import\s+(services\.[A-Za-z_.]+)\s+as\s+([A-Za-z_]\w*)\s*$", line)
+            if m:
+                aliases[m.group(2)] = (m.group(1), num)
+            for alias, (mod, decl) in aliases.items():
+                if re.search(rf"\b(?:patch\.object|monkeypatch\.setattr)\(\s*{alias}\s*,", line):
+                    offenders.append(
+                        f"{name}:{num} patches via alias `{alias}` (= {mod}, bound "
+                        f"line {decl}) — use the string target \"{mod}.<attr>\""
+                    )
+    assert not offenders, (
+        "portal tests patch a `services.*` module through an import alias:\n  "
+        + "\n  ".join(offenders)
+    )
