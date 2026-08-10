@@ -1988,6 +1988,18 @@
         "edge-cases"
       ],
       "description": "Round-trip property analysis of GITHUB_PAT propagation as merged by #1979. The contract is stated once as a Hypothesis property - after a rotation the agent reads back exactly the new token under all three key names (GITHUB_PAT/GH_TOKEN/GITHUB_TOKEN) - with the oracle being a byte-faithful copy of the agent-server's own last-wins .env parser, because what the agent sees is the only definition of success for a credential rotation. Plus idempotence, unrelated keys surviving, and the old token not surviving anywhere as text. Deterministic boundaries that hold: empty file, no trailing newline, leading whitespace/tab, commented-out line, present-but-empty, lookalike and prefixed keys, CRLF, append-not-glued. Three xfail(strict) findings: a duplicated GITHUB_PAT line survives count=1 and wins under last-wins parsing so the agent keeps the revoked token while the rotation reports updated (#2016); a backslash in the token raises re.error because the new line is used as an re.sub REPLACEMENT (#2017); and the writer escapes an embedded quote while the reader never unescapes it (#2017, a .env parse-contract issue deliberately left byte-faithful by #1999)."
+    },
+    {
+      "file": "unit/test_1999_execution_env.py",
+      "feature": "#1999",
+      "added": "2026-08-05",
+      "categories": [
+        "agent-server",
+        "unit",
+        "security",
+        "credentials"
+      ],
+      "description": "Credential injects mirrored every .env key into the long-lived agent-server process env, and all five runtime spawn sites (claude_code, headless_executor, codex_runtime, gemini_runtime x2) passed env={**os.environ, ...} - a one-way sync with NO delete phase. A key removed from .env by any non-mirroring write path (SSH, docker exec, or an agent editing its own .env) kept reaching every subsequently-spawned execution until container restart, and was invisible to /proc/<pid>/environ (an exec-time snapshot - runtime os.environ mutations never appear there) AND to docker exec (which shows the container baseline, not this process's mutated env), so credential revocation silently failed with no inspection route that could reveal it. Fix: services/execution_env.py rebuilds the execution env per spawn as INITIAL_ENV (boot baseline = what docker exec shows) + .env (parsed fresh, authoritative for credentials) + RUNTIME_OVERRIDES (#1089 token rotation - applied AFTER the file so a stale token in .env cannot beat an explicit rotation; None = force-unset, which a dict merge cannot express) + extra (EXECUTION_TAG_NAME last, #407). The process mirror gains a delete phase that restores the container baseline rather than popping blind, and only ever undoes keys it itself wrote. Covers: the issue's exact reproduction (inject, delete out-of-band, assert the next execution is clean), re-injecting a cleaned .env, baseline restore vs delete, the #1089 no-regression cases, EXECUTION_TAG_NAME non-displacement, tolerant .env parsing incl. the writer's own backslash escaping (.strip('\"') eats a legitimate trailing quote), unreadable/oversized files degrading to the baseline rather than raising on the spawn path, protected keys (.env is agent-writable and now read at every spawn, so PATH/LD_PRELOAD/BASH_ENV redirection is refused), the name-only drift report added to /api/credentials/status, and a static guard that fails if a sixth spawn site reintroduces the {**os.environ} form."
     }
   ]
 }

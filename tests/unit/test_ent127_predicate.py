@@ -22,6 +22,15 @@ AGENT_SERVER_CREDENTIALS = (
     Path(__file__).resolve().parents[2]
     / "docker" / "base-image" / "agent_server" / "routers" / "credentials.py"
 )
+# #1999 moved the exporter: the set-only loop that used to live inside
+# `routers/credentials.py` is now `parse_env_file`, which both the process
+# mirror and every spawned execution's environment are built from. The parsing
+# is byte-faithful to the old loop precisely so THIS predicate did not have to
+# move with it — only the anchor below did.
+AGENT_SERVER_EXECUTION_ENV = (
+    Path(__file__).resolve().parents[2]
+    / "docker" / "base-image" / "agent_server" / "services" / "execution_env.py"
+)
 
 
 def _exporter_replica(content: str):
@@ -87,45 +96,36 @@ class TestExporterParity:
         Anchored on the OWNING FUNCTION via `ast`, not on a `str.find` offset:
         a find-based slice returns -1 on a rename, the slice silently becomes
         `''`, and the guard then asserts against nothing.
+
+        #1999 relocated that loop out of `routers/credentials.py` and into
+        `services/execution_env.parse_env_file` — same parsing, new home and a
+        delete phase. The anchor follows it.
         """
-        tree = ast.parse(AGENT_SERVER_CREDENTIALS.read_text())
+        src = AGENT_SERVER_EXECUTION_ENV.read_text()
+        tree = ast.parse(src)
         owners = []
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                segment = ast.get_source_segment(
-                    AGENT_SERVER_CREDENTIALS.read_text(), node
-                ) or ""
-                if "os.environ[key] = value" in segment:
+                segment = ast.get_source_segment(src, node) or ""
+                if """parsed[key] = value.strip().strip('"').strip("'")""" in segment:
                     owners.append((node.name, segment))
 
         assert owners, (
-            "no function in agent_server/routers/credentials.py still contains "
-            "`os.environ[key] = value` — the parity anchor moved. Re-derive "
-            "`_env_pairs` against the new exporter before touching this test."
+            "no function in agent_server/services/execution_env.py still "
+            "contains the byte-faithful `.env` value parse — the parity anchor "
+            "moved. Re-derive `_env_pairs` against the new exporter before "
+            "touching this test."
         )
-        _name, segment = owners[0]
-        for fragment in (
-            'line.startswith("#")',
-            'key, _, value = line.partition("=")',
-            "key = key.strip()",
-            "value = value.strip().strip('\"').strip(\"'\")",
-        ):
-            assert fragment in segment, (
-                "the exporter's normalisation changed ({0!r} is gone); "
-                "`_env_pairs` and this replica must be re-derived".format(fragment)
-            )
 
-    def test_decode_divergence_is_deliberate(self):
-        """The ONE documented divergence: byte decoding, not parsing.
-
-        The exporter's `read_text()` is strict UTF-8 and raises on a bad byte,
-        so the agent exports NOTHING. The probe decodes with `errors="replace"`
-        so surviving variables are still reported. Degrading one line beats
-        reporting a whole configured agent as unconfigured.
-        """
-        raw = b"GOOD=1\nBAD=\xff\xfe\nALSO=2\n"
-        keys = crs._env_keys_with_values(raw.decode("utf-8", "replace").splitlines())
-        assert "GOOD" in keys and "ALSO" in keys
+    def test_the_set_only_mirror_did_not_come_back(self):
+        """#1999: the loop this predicate mirrors used to have no delete phase,
+        so a key removed from `.env` kept reaching every spawned execution. Its
+        return would reintroduce that silently."""
+        src = AGENT_SERVER_CREDENTIALS.read_text()
+        assert "os.environ[key] = value" not in src, (
+            "the set-only .env mirror is back in agent_server/routers/"
+            "credentials.py (#1999)"
+        )
 
 
 class TestPredicate:

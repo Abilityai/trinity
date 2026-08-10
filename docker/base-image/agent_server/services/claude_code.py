@@ -33,6 +33,7 @@ from ._runtime_config import (
     _DEFAULT_MAX_TURNS_CHAT,
     _load_guardrails,
 )
+from .execution_env import build_execution_env
 from .error_classifier import (
     _classify_signal_exit,
     _diagnose_exit_failure,
@@ -307,7 +308,7 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
             text=True,
             bufsize=1,  # Line buffered
             start_new_session=True,
-            env={**os.environ, EXECUTION_TAG_NAME: execution_id},
+            env=build_execution_env({EXECUTION_TAG_NAME: execution_id}),
         )
         # Issue #407: capture pgid now — after wait() reaps the parent,
         # the pid is gone and we lose the ability to signal the group.

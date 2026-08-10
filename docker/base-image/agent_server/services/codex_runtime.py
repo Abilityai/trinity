@@ -58,6 +58,7 @@ from ..utils.credential_sanitizer import (
 from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 from ._runtime_config import _DEFAULT_EXECUTION_TIMEOUT_SEC, _load_guardrails
 from .activity_tracking import complete_tool_execution, start_tool_execution
+from .execution_env import build_execution_env
 from .process_registry import get_process_registry
 from .runtime_adapter import AgentRuntime, RuntimeCapabilities
 from .subprocess_lifecycle import (
@@ -806,11 +807,10 @@ class CodexRuntime(AgentRuntime):
         )
         cmd.append(composed_prompt)
 
-        env = {
-            **os.environ,
+        env = build_execution_env({
             EXECUTION_TAG_NAME: execution_id,
             "CODEX_HOME": codex_home,
-        }
+        })
         # #1971: `CODEX_API_KEY` is NO LONGER synthesized. Setting it under both
         # names was meant as harmless defence ("some Codex builds also read
         # CODEX_API_KEY"), but its mere PRESENCE flips the CLI into API-key auth
