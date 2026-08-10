@@ -16,7 +16,11 @@ if [ -f "$DOTENV" ]; then
     ADMIN_PW="$(grep ^ADMIN_PASSWORD "$DOTENV" | cut -d= -f2-)"
     [ -n "$ADMIN_PW" ] && export TRINITY_TEST_PASSWORD="${TRINITY_TEST_PASSWORD:-$ADMIN_PW}"
 
-    for v in REDIS_BACKEND_PASSWORD INTERNAL_API_SECRET SECRET_KEY; do
+    # REDIS_PASSWORD (the `default` ACL user) as well as REDIS_BACKEND_PASSWORD:
+    # tests/security/test_redis_network_isolation.py reads the former and was
+    # skipping with "REDIS_PASSWORD not set" on every local run — invisible
+    # until #2080's skip audit refused to call that a pass.
+    for v in REDIS_PASSWORD REDIS_BACKEND_PASSWORD INTERNAL_API_SECRET SECRET_KEY; do
         val="$(grep "^$v=" "$DOTENV" | cut -d= -f2-)"
         # Indirect expansion via eval (portable across bash + zsh; ${!v} is bash-only).
         eval "current=\${$v-}"

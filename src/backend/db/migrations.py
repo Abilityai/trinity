@@ -3318,6 +3318,77 @@ def _migrate_channel_report_back_columns(cursor, conn):
     )
 
 
+def _migrate_client_portal_tables_to_oss(cursor, conn):
+    """Adopt the Workspace / client-portal tables onto the OSS track (ent#356).
+
+    The module moved from the entitled enterprise seam into OSS core, so its
+    three tables move from `enterprise_schema_migrations` to `schema_migrations`.
+
+    ADOPTION, NOT CREATION. On every existing entitled install these tables
+    already exist — created by the enterprise runner — and carry live client
+    conversations. The acceptance criteria for the move are explicit that there
+    is no data migration and no re-auth for signed-in clients, so every
+    statement here is IF NOT EXISTS and this migration is a NO-OP on those
+    installs. It does real work only on a fresh or community build.
+
+    The `enterprise_` table-name prefix is therefore load-bearing history, not a
+    licensing claim: renaming would be exactly the data migration this forbids.
+
+    Mirrored by Alembic `0036_client_portal_oss` and the DDL in `db/schema.py`.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS enterprise_portal_sessions (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            client_email TEXT NOT NULL,
+            title TEXT,
+            created_at TEXT NOT NULL,
+            last_message_at TEXT,
+            message_count INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS enterprise_portal_messages (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            client_email TEXT NOT NULL,
+            session_id TEXT,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            cost REAL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS enterprise_client_blocks (
+            email TEXT PRIMARY KEY,
+            blocked_at TEXT NOT NULL,
+            blocked_by_id TEXT,
+            blocked_by_email TEXT,
+            reason TEXT
+        )
+    """)
+    # `session_id` predates this move on the enterprise track (its 0001
+    # migration added it to an already-shipped messages table). A fresh OSS
+    # build gets it from the CREATE above; an adopted install already has it.
+    # Add defensively so a half-migrated enterprise install cannot land here
+    # without the column the index below needs.
+    cursor.execute("PRAGMA table_info(enterprise_portal_messages)")
+    if "session_id" not in {row[1] for row in cursor.fetchall()}:
+        cursor.execute("ALTER TABLE enterprise_portal_messages ADD COLUMN session_id TEXT")
+
+    for index_sql in (
+        "CREATE INDEX IF NOT EXISTS idx_portal_messages_convo "
+        "ON enterprise_portal_messages(agent_name, client_email, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_portal_sessions_convo "
+        "ON enterprise_portal_sessions(agent_name, client_email, last_message_at)",
+        "CREATE INDEX IF NOT EXISTS idx_portal_messages_session "
+        "ON enterprise_portal_messages(session_id, created_at)",
+    ):
+        cursor.execute(index_sql)
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -3425,4 +3496,5 @@ MIGRATIONS = [
     ("agent_evaluations_table", _migrate_agent_evaluations_table),
     ("skill_sources_table", _migrate_skill_sources_table),
     ("agent_ownership_a2a_exposed", _migrate_agent_ownership_a2a_exposed),
+    ("client_portal_tables_to_oss", _migrate_client_portal_tables_to_oss),
 ]

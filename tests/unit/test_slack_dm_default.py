@@ -21,8 +21,14 @@ import pytest
 _THIS = Path(__file__).resolve()
 _BACKEND = _THIS.parent.parent.parent / "src" / "backend"
 _BACKEND_STR = str(_BACKEND)
-for _shadow in ("utils", "utils.api_client", "utils.assertions", "utils.cleanup"):
-    sys.modules.pop(_shadow, None)
+# #2080: the shadow-eviction loop that used to sit here is GONE. It popped
+# `utils` (and the test-helper submodules) from sys.modules to defeat
+# `tests/utils` shadowing `src/backend/utils`. That package is now
+# `tests/testkit`, so `utils` IS the backend package — and popping it
+# evicted the canonical module mid-session, leaving anything that had
+# already imported it holding a stale reference (observed as
+# `ImportError: module services.subscription_auto_switch not in sys.modules`
+# from an importlib.reload several hundred tests later).
 while _BACKEND_STR in sys.path:
     sys.path.remove(_BACKEND_STR)
 sys.path.insert(0, _BACKEND_STR)

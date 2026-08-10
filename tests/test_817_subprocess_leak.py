@@ -32,9 +32,9 @@ import uuid
 
 import pytest
 
-from utils.api_client import TrinityApiClient
-from utils.assertions import assert_status, assert_json_response
-from utils.cleanup import cleanup_test_agent
+from testkit.api_client import TrinityApiClient
+from testkit.assertions import assert_status, assert_json_response
+from testkit.cleanup import cleanup_test_agent
 
 
 # Schedule firing window: timeout_seconds=30 + backend buffer (10s) +

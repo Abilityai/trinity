@@ -89,7 +89,10 @@ class AuditRetentionService:
             logger.exception("audit_log prune failed: %s", exc)
             return {"removed": 0, "retention_days": retention_days, "error": str(exc)}
 
-        if getattr(platform_audit_service, "_hash_chain_enabled", False) and removed:
+        # `hash_chain_enabled`, not the old private attribute (#2015): the flag
+        # moved to `system_settings`, and a `getattr(..., False)` default would
+        # have degraded silently to "never warn" the moment it did.
+        if platform_audit_service.hash_chain_enabled and removed:
             logger.warning(
                 "audit_log prune removed %d rows while hash chain is enabled — "
                 "verification ranges spanning the cutoff will fail by design",

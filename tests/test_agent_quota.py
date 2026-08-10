@@ -16,13 +16,13 @@ import tarfile
 import io
 import time
 
-from utils.api_client import TrinityApiClient
-from utils.assertions import (
+from testkit.api_client import TrinityApiClient
+from testkit.assertions import (
     assert_status,
     assert_status_in,
     assert_json_response,
 )
-from utils.cleanup import cleanup_test_agent
+from testkit.cleanup import cleanup_test_agent
 
 
 def create_test_archive(name: str) -> str:
