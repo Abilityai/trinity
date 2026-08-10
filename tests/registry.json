@@ -56,6 +56,18 @@
       "description": "Static guard on backend-unit-nightly.yml's merge check (#1941). The job shallow-fetched both dev and the PR head, so the merge had no common ancestor and git's `refusing to merge unrelated histories` was recorded as `merge_conflict=true` for EVERY open PR (9/9, 8 of them MERGEABLE) — the detector's output was independent of its input, so the suite never ran and the regression signal defaulted to clean. Asserts: base checkout is fetch-depth 0; the pull/N/head fetch carries no --depth; the merge_conflict=true branch is gated on actual unmerged paths (--diff-filter=U) so an infrastructure failure can't be reported as a PR conflict; --allow-unrelated-histories is never used (it would fabricate a merge of unrelated trees and run the suite against a worktree that isn't the real merge result); and the `git merge dev` advice stays inside the conflict/regression branches. Comment lines are stripped before matching — the fix's own comment says 'no --depth' and a naive substring search matches it and passes while the command is shallow again."
     },
     {
+      "file": "unit/test_2015_hash_chain_persistence.py",
+      "feature": "#2015",
+      "added": "2026-08-05",
+      "categories": [
+        "backend",
+        "unit",
+        "security",
+        "audit"
+      ],
+      "description": "Enabling the audit hash chain set an instance attribute and wrote nothing, and nothing restored it at boot - so every backend restart silently switched the integrity control back off, with restarts being routine (CLAUDE.md documents re-login after one). An install could sit unhashed indefinitely while the feature still showed as available, and #1985's verified_partial reports valid:true for a range that is mostly unverifiable. The chain HEAD had the same defect one level down: self._last_hash made the chain a property of one PROCESS, so with >1 worker each kept its own head and wrote previous_hash values pointing into another worker's sequence - verify_chain's link check then reported an untampered log as TAMPERED, the loud false positive its own docstring warns against. Fix: the flag persists in system_settings and resolves live per write (uncached, per the _resolve_bool_flag rationale, but fail-CLOSED rather than fail-open since it decides whether an integrity record is written), and db.create_audit_entry_chained reads the head inside the INSERT's own transaction. Covers restart survival both directions, default-off, two instances over one store agreeing (the --workers 2 relationship), live-not-cached, nine stored-value parsings, fail-closed on a settings error, a pin that neither _hash_chain_enabled nor _last_hash exists on the instance, the chained-vs-plain writer choice, an end-to-end two-instance interleaved append verifying as ONE valid chain, and the retention consumer that gated on the old private attribute via getattr(...,False) - a default that would have degraded silently to 'never warn'. The atomicity guard walks the AST and requires the SELECT and the INSERT to be in the same with-block with no head read outside it: an earlier substring-on-ast.dump version passed when the read was hoisted out. Mutation-verified: flag back in the instance (6 fail), fail-open (1), always-plain-writer (2), head read in a separate transaction (1)."
+    },
+    {
       "file": "unit/test_ent15_import_intents.py",
       "feature": "trinity-enterprise#15",
       "added": "2026-08-06",

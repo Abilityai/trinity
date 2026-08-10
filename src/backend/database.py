@@ -2964,6 +2964,17 @@ class DatabaseManager:
         """Insert an audit log entry (append-only)."""
         return self._audit_ops.create_audit_entry(entry)
 
+    def create_audit_entry_chained(self, entry: dict, compute_hash):
+        """Insert a HASH-CHAINED audit entry (#2015).
+
+        The pass-through the facade was missing: `platform_audit_service` calls
+        `db.create_audit_entry_chained(...)`, and without this the hash-chained
+        write path raises `AttributeError` the first time the chain is enabled —
+        i.e. the integrity control fails exactly when it is switched on. Caught
+        by `test_database_facade_delegation`, which is why that guard exists.
+        """
+        return self._audit_ops.create_audit_entry_chained(entry, compute_hash)
+
     def get_audit_entries(self, **filters):
         """Query audit entries with optional filters. See PlatformAuditOperations for kwargs."""
         return self._audit_ops.get_audit_entries(**filters)
