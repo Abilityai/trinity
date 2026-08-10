@@ -224,7 +224,17 @@ class TestComputeHash:
 class TestHashChainLifecycle:
 
     def test_enabling_is_reflected_in_the_verdict(self, svc, mod, hasher, monkeypatch):
+        # Forced through BOTH seams so this reads the same answer before and
+        # after #2026: today the verdict is computed from the private
+        # `_hash_chain_enabled`; once the flag moves to `system_settings` it is
+        # computed from the `hash_chain_enabled` property, and a test that
+        # forces only the private attribute fails on the merged tree while
+        # testing nothing about the flag. Both are `raising=False`, so whichever
+        # seam does not exist in the tree under test is simply unused.
         monkeypatch.setattr(svc, "_hash_chain_enabled", True, raising=False)
+        monkeypatch.setattr(
+            type(svc), "hash_chain_enabled", property(lambda self: True), raising=False
+        )
         _rows(mod, monkeypatch, _chain(hasher, 2))
         assert _verify(svc)["hash_chain_enabled"] is True
 
@@ -249,20 +259,62 @@ class TestHashChainLifecycle:
 
         svc_b = mod.PlatformAuditService()   # the process after a restart
 
-        assert svc_b._hash_chain_enabled is True, (
+        # The PUBLIC seam, not `_hash_chain_enabled`. The private attribute is
+        # what the fix (#2026) deletes when the flag moves to `system_settings`,
+        # and a `strict=True` xfail treats the resulting AttributeError as an
+        # expected failure exactly like the assertion failure it replaces — so
+        # the marker would go on reporting "BUG: ... in-memory only" against a
+        # codebase where the bug is dead, which is the opposite of what strict
+        # is for. Asserting the public seam makes it XPASS(strict) — loud — the
+        # moment the flag genuinely persists.
+        assert svc_b.hash_chain_enabled is True, (
             "hash chain silently reverted to disabled in a new process"
         )
 
     def test_the_enable_route_persists_nothing(self):
         """Pins the mechanism behind the xfail above, so the finding survives a
-        refactor of the service: the router hands the flag straight to the
-        in-memory setter with no settings write."""
+        refactor: the flag is set in memory and nothing writes it durably.
+
+        Checks BOTH ends of the delegation. The first draft read only
+        `routers/audit_log.py`, and #2026 puts the write in the *service*
+        (`db.set_setting(...)`) while leaving the router a thin passthrough — so
+        the router-only version passes with the fix in place, and this backstop
+        died silently alongside the xfail it exists to protect.
+
+        The service half is asserted over the AST, not the text: the fix's own
+        docstring explains the persistence it adds, so a substring scan matches
+        the prose and reports "still in-memory" while the write sits next to it.
+        """
+        import ast
+        import inspect
+        import textwrap
+
         src = (_REPO / "src" / "backend" / "routers" / "audit_log.py").read_text()
         block = src[src.index("async def enable_hash_chain"):]
         block = block[:block.index("\n@router") if "\n@router" in block else len(block)]
         assert "platform_audit_service.enable_hash_chain" in block
         assert "set_setting" not in block and "system_settings" not in block, (
             "the enable route now persists — update or remove the xfail above"
+        )
+
+        # ...and the setter the route delegates to, resolved through the import
+        # rather than a fixed filename, so moving the service doesn't silence it.
+        if _BACKEND_STR not in sys.path:
+            sys.path.insert(0, _BACKEND_STR)
+        from services.platform_audit_service import PlatformAuditService
+
+        setter = ast.parse(
+            textwrap.dedent(inspect.getsource(PlatformAuditService.enable_hash_chain))
+        )
+        persisted = [
+            node for node in ast.walk(setter)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"set_setting", "set_system_setting"}
+        ]
+        assert not persisted, (
+            "`enable_hash_chain` now persists the flag — the #2015 finding is "
+            "fixed; update or remove the xfail above"
         )
 
 
