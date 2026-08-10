@@ -75,14 +75,14 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
    * nearest free cell. Falls back to the deterministic default layout when
    * nothing usable is saved.
    */
-  function syncLayout(agentNames, systemNames = new Set()) {
+  function syncLayout(agentNames, systemNames = new Set(), originFor = null) {
     const saved = { ..._loadSavedRaw(), ...layout.value }
     if (Object.keys(saved).length === 0) {
       layout.value = defaultLayout(agentNames, systemNames)
       _persist()
       return
     }
-    const { layout: healed, changed } = normalizeLayout(saved, agentNames)
+    const { layout: healed, changed } = normalizeLayout(saved, agentNames, originFor)
     layout.value = healed
     if (changed) _persist()
   }
@@ -118,6 +118,24 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
   function ensurePlaced(name) {
     if (layout.value[name]) return
     layout.value = { ...layout.value, [name]: nearestFreeCell(layout.value, 0, 0) }
+    _persist()
+  }
+
+  /** Replace the whole layout (org-overlay "Group by department" arrange). */
+  function applyLayout(map) {
+    layout.value = { ...map }
+    _persist()
+  }
+
+  /** Translate a set of tiles by a cell delta (org-overlay block move). The
+   *  caller validates the target cells are free; this just commits. */
+  function moveTiles(names, dc, dr) {
+    const next = { ...layout.value }
+    for (const n of names) {
+      const p = next[n]
+      if (p) next[n] = { c: p.c + dc, r: p.r + dr }
+    }
+    layout.value = next
     _persist()
   }
 
@@ -285,6 +303,8 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     tidy,
     resetLayout,
     ensurePlaced,
+    applyLayout,
+    moveTiles,
     analyticsState,
     analyticsFor,
     hydrate,

@@ -37,7 +37,7 @@ Load this before writing any code under `src/frontend/`. It is the condensed, bi
 
 ## Data loading & motion
 
-- One loading motion app-wide: scanline beam (gradient halo + ~1.5px glowing core) sweeping a dimmed track at 1.5s ease-in-out alternate; on arrival, one 550ms linear pass wipes the content in behind it via `clip-path`; values flip from `—`. CSS-only.
+- One loading motion app-wide: scanline beam (gradient halo + ~1.5px glowing core) sweeping a dimmed track at 1.5s ease-in-out alternate; on arrival, one 550ms linear pass wipes the content in behind it via `clip-path`; values flip from `—`. CSS-only. **Use `ScanlineReveal.vue`** (ent#245) — one persistent instance, content swapped in its slot, `:reveal="false"` for error/empty terminals.
 - Key the animation off store state (`loading → loaded`), never a timer. Cache hits skip it entirely.
 - Loading means "no data yet", never "fetch in flight".
 - First load animates; **scheduled background refresh is invisible**: stale-while-revalidate, in-place value swap, no skeleton re-flash, no spinner, no layout shift, no scroll reset.

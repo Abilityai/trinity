@@ -351,7 +351,7 @@ Admins can configure which GitHub repositories appear as agent templates via the
 - Emptying the list removes a **browse** surface, never a **create** capability: `template: github:owner/repo` still resolves through `template_service.get_github_template`'s dynamic branch whether or not the repo is configured. Guarded by `tests/unit/test_1931_empty_github_defaults.py`.
 - Side-effect: with no default repos, `GET /api/templates` makes **zero** outbound GitHub calls on a cold metadata cache (`_fetch_all_metadata([])` skips the `if to_fetch:` block entirely, so no ThreadPoolExecutor, no HTTP, no PAT read), where it previously blocked on up to six 10s-timeout requests.
 
-`trinity-enterprise#14` (remote template registry) will repoint this seam; the constant is kept, not deleted, for that reason and for the `None`-vs-`[]` fallback above.
+`trinity-enterprise#14` (remote template registry) **has now repointed this seam** — see [template-registry.md](template-registry.md). The constant is kept, not deleted: it is the fail-open FLOOR under the registry, and it still backs the `None`-vs-`[]` fallback above.
 
 ### Data Flow
 
@@ -424,8 +424,50 @@ Templates stored as JSON in `system_settings` table under key `github_templates`
 
 ---
 
+## Template Registry (TMPL-002, trinity-enterprise#14)
+
+**Status**: Implemented (2026-08-04)
+
+The runtime SOURCE for the GitHub half of the catalog — a `registry.yaml` fetched
+over HTTPS, so curating an install's starter templates is a vendor file edit
+rather than a Trinity release. Precedence: **admin DB override (TMPL-001 above)
+→ remote registry → bundled `DEFAULT_GITHUB_TEMPLATE_REPOS`**, so a curated
+install is unaffected and never even issues the fetch.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/settings/template-registry` | `assert_admin`. Config + a live `status` block |
+| `PUT` | `/api/settings/template-registry` | `assert_admin` **+ `reject_agent_principal`**. Partial `{url?, enabled?}`; SSRF-validated; audit-logged |
+| `DELETE` | `/api/settings/template-registry` | `assert_admin` **+ `reject_agent_principal`**. Reverts to the config default; audit-logged |
+
+Registered **before** the `/{key}` catch-all (Invariant #4); all four registry
+keys 422 on the generic `PUT` **and** `DELETE /{key}`. UI:
+`components/settings/TemplateRegistryPanel.vue` in the **Agents** tab.
+
+Three things a reader of this file needs, with the full argument in the flow doc:
+
+- **The human gate is load-bearing.** `assert_admin` answers *what role*, never
+  *is this a human* — an agent-scoped MCP key resolves to its owner carrying the
+  owner's role (trinity-ops-agent#232), and here that would let an agent repoint
+  the platform's template registry at a URL it controls.
+- **The status block is part of the contract.** Fail-open makes a broken registry
+  look exactly like a working empty one from the catalog, so this panel is the
+  only place an operator can see it.
+- **Two off-switches, asymmetric.** `TEMPLATE_REGISTRY_ENABLED` (env) is a hard
+  kill switch no DB row can override; `template_registry_enabled` is the admin
+  toggle, default-on. Deliberately not `_resolve_bool_flag` — its env leg is
+  opt-in only, so `default=True` would have swallowed the `false` and shipped an
+  inert switch (#1039 class).
+
+**Full flow**: [template-registry.md](template-registry.md) — the document schema,
+the tolerant reader, the fail-open matrix, the cache semantics, the SSRF gate, and
+the `fork_to_own` fail-closed fix.
+
+---
+
 ## Related Flows
 
+- **Downstream**: [template-registry.md](template-registry.md) - Remote registry for the GitHub half of the catalog (TMPL-002)
 - **Upstream**: [first-time-setup.md](first-time-setup.md) - Initial admin password and API key configuration
 - **Downstream**: [template-processing.md](template-processing.md) - Uses GitHub PAT for private repo cloning
 - **Downstream**: [library-page.md](library-page.md) - Library page (formerly Templates, ent#263) uses configured list
@@ -518,6 +560,7 @@ Templates stored as JSON in `system_settings` table under key `github_templates`
 
 | Date | Change |
 |------|--------|
+| 2026-08-04 | **TMPL-002 Remote Template Registry (trinity-enterprise#14)**: new section + endpoint table for `GET/PUT/DELETE /api/settings/template-registry`; the TMPL-001 section's *"ent#14 will repoint this seam"* sentence is now past tense and names the constant as the fail-open floor. Full vertical in the new [template-registry.md](template-registry.md). |
 | 2026-03-08 | **AVATAR-003 Default Avatars**: Added Default Avatars card documentation. New UI section (lines 1054-1092), state refs, generateDefaultAvatars() method, test case. Backend endpoint documented in agent-avatars.md. |
 | 2026-03-04 | **TMPL-001 GitHub Templates Configuration**: Added admin UI and API endpoints for configuring which GitHub repos appear as agent templates. New section with data flow, endpoints, service layer, and storage details. Updated overview, entry points, related flows. |
 | 2026-01-13 | Initial documentation for Platform Settings feature flow |
