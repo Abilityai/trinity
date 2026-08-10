@@ -40,10 +40,17 @@ axios.interceptors.response.use(
       // workspace session IS the platform session, so an expired JWT must
       // bounce them like anywhere else. The discriminator is the portal token,
       // not the path: same URL, two session kinds.
+      // Who gets bounced is decided by the PLATFORM token, not the portal one
+      // (/review I1). Reading the portal token here made the answer depend on
+      // timing: `fetchRoster`'s 401 handler calls `signOut()`, which removes it,
+      // so a second concurrent 401 saw no portal token and threw an external
+      // client onto the operator /login instead of the workspace sign-in form.
+      // "Does this browser hold a platform session that just expired?" is the
+      // actual question, and it has a stable answer.
       const onWorkspace = currentPath.startsWith('/workspace') || currentPath.startsWith('/portal')
-      const externalClient = !!localStorage.getItem('trinity.portalToken')
+      const internalSession = !!localStorage.getItem('token')
       if (currentPath !== '/login' && currentPath !== '/setup' && currentPath !== '/m'
-          && !(onWorkspace && externalClient)) {
+          && (!onWorkspace || internalSession)) {
         console.log('🔐 Session expired - redirecting to login')
 
         // Clear auth state

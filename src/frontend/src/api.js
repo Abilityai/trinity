@@ -43,9 +43,16 @@ api.interceptors.response.use(
       // so they DO get bounced. Same path, two session kinds — discriminate on
       // the portal token, not the URL.
       const path = window.location.pathname
+      // Who gets bounced is decided by the PLATFORM token, not the portal one
+      // (/review I1). Reading the portal token here made the answer depend on
+      // timing: `fetchRoster`'s 401 handler calls `signOut()`, which removes it,
+      // so a second concurrent 401 saw no portal token and threw an external
+      // client onto the operator /login instead of the workspace sign-in form.
+      // "Does this browser hold a platform session that just expired?" is the
+      // actual question, and it has a stable answer.
       const onWorkspace = path.startsWith('/workspace') || path.startsWith('/portal')
-      const externalClient = !!localStorage.getItem('trinity.portalToken')
-      if (!(onWorkspace && externalClient)) {
+      const internalSession = !!localStorage.getItem('token')
+      if (!onWorkspace || internalSession) {
         // Token expired or invalid - redirect to login
         localStorage.removeItem('token')
         window.location.href = '/login'

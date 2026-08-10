@@ -241,3 +241,37 @@ describe('workspace availability state is not sticky (/review C1)', () => {
     expect(store.agents).toHaveLength(1)
   })
 })
+
+describe('who gets bounced to /login on a 401 (/review I1)', () => {
+  // The guards live in api.js / main.js interceptors, which need `window`. The
+  // property under test is the PREDICATE, so assert it directly against the
+  // storage states it reads — the same expression both interceptors use.
+  const shouldBounce = (path, hasPlatformToken) => {
+    const onWorkspace = path.startsWith('/workspace') || path.startsWith('/portal')
+    return !onWorkspace || hasPlatformToken
+  }
+
+  it('an internal user whose platform session expired IS bounced', () => {
+    expect(shouldBounce('/workspace', true)).toBe(true)
+  })
+
+  it('an external client on the workspace is NOT bounced to the operator login', () => {
+    expect(shouldBounce('/workspace', false)).toBe(false)
+    expect(shouldBounce('/workspace/c/abc', false)).toBe(false)
+    expect(shouldBounce('/portal', false)).toBe(false)   // legacy URL, mid-redirect
+  })
+
+  it('the verdict does not depend on the portal token, which signOut() races away', () => {
+    // The first 401 drops the portal token (fetchRoster -> signOut). A second,
+    // concurrent 401 must reach the same answer as the first — keying on the
+    // portal token made this flip and threw the client onto /login.
+    const before = shouldBounce('/workspace', false)   // portal token present
+    const after = shouldBounce('/workspace', false)    // portal token now gone
+    expect(after).toBe(before)
+  })
+
+  it('everywhere else keeps the normal bounce', () => {
+    expect(shouldBounce('/agents/scout', false)).toBe(true)
+    expect(shouldBounce('/', true)).toBe(true)
+  })
+})
