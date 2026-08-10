@@ -10,8 +10,8 @@ Integration tests with real Telegram require a configured bot binding.
 """
 
 import pytest
-from utils.api_client import TrinityApiClient
-from utils.assertions import assert_status, assert_json_response, assert_status_in
+from testkit.api_client import TrinityApiClient
+from testkit.assertions import assert_status, assert_json_response, assert_status_in
 
 # Module-scoped agent fixture + telegram config setup can exceed 30s.
 pytestmark = pytest.mark.timeout(120)

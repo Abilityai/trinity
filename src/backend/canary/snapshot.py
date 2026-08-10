@@ -67,6 +67,7 @@ internal skip contract, not a live backend claim.
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
@@ -292,6 +293,32 @@ class AgentSnapshot:
     # (#226 bug class). Empty dict means the per-slot read was skipped
     # this cycle (Redis unavailable); the check skips silently.
     slot_ttls: Dict[str, int] = field(default_factory=dict)
+    # ent#372: unix wall-clock at which THIS slot's `slot_ttls` entry was read,
+    # stamped in `_collect_redis_slot_state` immediately before the TTL
+    # pipeline. S-03 reconstructs a slot's initial TTL as `ttl + age`, and both
+    # terms must describe the SAME instant. Deriving `age` from
+    # `Snapshot.snapshot_time` did not: that is stamped at the top of
+    # `collect_snapshot()`, the docker and roster collectors run in between
+    # (measured 1.0–1.9s on eu2, tail to 9s), and every one of those seconds is
+    # ticked off `ttl` without being counted in `age` — so the reconstruction
+    # landed short by exactly the collector's elapsed time and S-03 fired
+    # `below_floor` on every live slot, every cycle (208 violations / 24h).
+    #
+    # Stamped PER SLOT rather than once per collector for the same reason the
+    # issue rejected widening S-03's tolerance: the loop below is O(slots) and
+    # its own elapsed time grows with the fleet, so a single collector-level
+    # timestamp would re-open the identical gap at a larger fleet size.
+    #
+    # Taken BEFORE `pipe.execute()`, so the server evaluates the TTL at or
+    # after this instant and `age` can only be UNDER-counted, by one RTT. That
+    # is the conservative direction (it can never manufacture a green) and sits
+    # far inside the 1s rounding tolerance S-03 already carries.
+    #
+    # An eid present in `slot_ttls` but ABSENT here cannot happen at runtime
+    # (both are written in the same try-block), so S-03 treats it as a
+    # test-constructed snapshot and SKIPS the floor arm rather than falling
+    # back to `snapshot_time` — the fallback is precisely the bug.
+    slot_ttl_read_at: Dict[str, float] = field(default_factory=dict)
     # ent#336: the `timeout_seconds` field written into the same
     # `agent:slot:{name}:{eid}` HASH by `SlotService.acquire_slot` — THIS
     # execution's effective timeout, which since #929 may legitimately be lower
@@ -1092,6 +1119,11 @@ def _collect_redis_slot_state(known_agents: Set[str]) -> Dict[str, Dict[str, Any
       "slot_ttls": {agent_name: {execution_id: ttl_seconds}} — per-slot
                    metadata HASH TTLs read for S-03 (bounded by ZCARD which is
                    ≤ max_parallel_tasks).
+      "slot_ttl_read_at": {agent_name: {execution_id: unix_seconds}} — the
+                   wall-clock at which each of those TTLs was read (ent#372).
+                   S-03 pairs it with the ZSET score; see the field comment on
+                   `AgentSnapshot.slot_ttl_read_at` for why it is per slot and
+                   why it is stamped before the pipeline rather than after.
       "slot_timeouts": {agent_name: {execution_id: timeout_seconds}} — the
                    effective per-execution timeout stored in the same HASH at
                    acquire time (ent#336). Read in the SAME pipeline round-trip
@@ -1109,6 +1141,7 @@ def _collect_redis_slot_state(known_agents: Set[str]) -> Dict[str, Dict[str, Any
     by_agent: Dict[str, Set[str]] = {}
     scores: Dict[str, Dict[str, float]] = {}
     slot_ttls: Dict[str, Dict[str, int]] = {}
+    slot_ttl_read_at: Dict[str, Dict[str, float]] = {}
     slot_timeouts: Dict[str, Dict[str, int]] = {}
     orphan_slots: Dict[str, int] = {}
 
@@ -1122,6 +1155,7 @@ def _collect_redis_slot_state(known_agents: Set[str]) -> Dict[str, Dict[str, Any
         by_agent[name] = {m for m, _ in with_scores}
         scores[name] = {m: float(s) for m, s in with_scores}
         ttl_map: Dict[str, int] = {}
+        ttl_read_at_map: Dict[str, float] = {}
         timeout_map: Dict[str, int] = {}
         for eid, _ in with_scores:
             # Drain sentinels are intentionally short-lived; skip the TTL
@@ -1143,8 +1177,16 @@ def _collect_redis_slot_state(known_agents: Set[str]) -> Dict[str, Dict[str, Any
                 pipe = redis_client.pipeline()
                 pipe.ttl(metadata_key)
                 pipe.hget(metadata_key, "timeout_seconds")
+                # ent#372: stamp the instant the TTL is read, per slot, so S-03
+                # can pair `ttl` with an `age` measured at the same moment
+                # instead of against `snapshot_time` (stamped a collector or
+                # two earlier). Written INSIDE the try beside `ttl_map[eid]`,
+                # so the pair is all-or-nothing: a slot that lands in
+                # `slot_ttls` always has its read time.
+                read_at = time.time()
                 raw_ttl, raw_timeout = pipe.execute()
                 ttl_map[eid] = int(raw_ttl)
+                ttl_read_at_map[eid] = read_at
                 if raw_timeout is not None:
                     # `decode_responses=True` on the slot_service client, so
                     # this is a str. `acquire_slot` writes `str(timeout_seconds)`;
@@ -1155,6 +1197,7 @@ def _collect_redis_slot_state(known_agents: Set[str]) -> Dict[str, Dict[str, Any
                 # The missing entry simply means S-03 skips that slot.
                 continue
         slot_ttls[name] = ttl_map
+        slot_ttl_read_at[name] = ttl_read_at_map
         slot_timeouts[name] = timeout_map
 
     # SCAN for orphan keys (agent name in the key but not in known set).
@@ -1175,6 +1218,7 @@ def _collect_redis_slot_state(known_agents: Set[str]) -> Dict[str, Dict[str, Any
         "by_agent": by_agent,
         "scores": scores,
         "slot_ttls": slot_ttls,
+        "slot_ttl_read_at": slot_ttl_read_at,
         "slot_timeouts": slot_timeouts,
         "orphan_slots": orphan_slots,
     }
@@ -1257,6 +1301,7 @@ def collect_snapshot() -> Snapshot:
         "by_agent": {},
         "scores": {},
         "slot_ttls": {},
+        "slot_ttl_read_at": {},
         "slot_timeouts": {},
         "orphan_slots": {},
     }
@@ -1342,6 +1387,7 @@ def collect_snapshot() -> Snapshot:
                 slot_ids=redis_state["by_agent"].get(name, set()),
                 slot_scores=redis_state["scores"].get(name, {}),
                 slot_ttls=redis_state["slot_ttls"].get(name, {}),
+                slot_ttl_read_at=redis_state.get("slot_ttl_read_at", {}).get(name, {}),
                 slot_timeouts=redis_state.get("slot_timeouts", {}).get(name, {}),
                 running_exec_ids=execs["running"],
                 running_started_at=execs.get("started_at", {}),

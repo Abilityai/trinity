@@ -293,7 +293,7 @@ class TestValidationIntegration:
     @pytest.fixture
     def test_schedule_with_validation(self, api_client, created_agent):
         """Create a test schedule with validation enabled."""
-        from utils.api_client import TrinityApiClient
+        from testkit.api_client import TrinityApiClient
 
         agent_name = created_agent["name"]
 

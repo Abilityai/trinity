@@ -6,7 +6,7 @@ Covers REQ-AS-FILES-001 through REQ-AS-FILES-002.
 """
 
 import pytest
-from utils.assertions import (
+from testkit.assertions import (
     assert_status,
     assert_status_in,
     assert_json_response,

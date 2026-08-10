@@ -54,7 +54,7 @@ class ConflictClass(str, Enum):
 
 
 # Regexes matched against the stderr. Patterns are drawn from real stderr
-# samples captured in /tmp/trinity-repro/ (see tests/git-sync/fixtures/).
+# samples captured in /tmp/trinity-repro/ (see tests/git_sync/fixtures/).
 _AUTH_PATTERNS = (
     re.compile(r"authentication failed", re.IGNORECASE),
     re.compile(r"could not read username", re.IGNORECASE),
@@ -1266,6 +1266,36 @@ def delete_agent_git_config(agent_name: str) -> bool:
 # grouped by category. The list covers the runtime/instance noise the #462
 # bug report named (1,599 files leaked on a single Push) plus the credential
 # files `inject_credentials` writes (the #458 trio).
+# Authored content under `.trinity/` — files a TEMPLATE commits and the
+# platform reads back (#2070). Everything else in that directory is runtime
+# state the platform writes.
+#
+# The rule used to be "ignore `.trinity/` wholesale", with a hardcoded pathspec
+# exemption list in the `git rm --cached` sweep. That is backwards: the default
+# was "untrack it", so every authored file needed remembering, and three
+# separate incidents were three forgotten strings — brain-orb hooks
+# (trinity-enterprise#76), `setup.sh` (swept live before the second exemption),
+# and `pre-check` (#2070, the SCHED-COND-001 hook the platform's own docs tell
+# template authors to commit).
+#
+# Inverted: `.trinity/*` ignores the directory's contents, and each authored
+# path is re-included. A NEW runtime file is ignored by default (no action
+# needed), and authored content is tracked by construction rather than by an
+# exemption someone has to remember. The star form is required — git does not
+# descend into a directory excluded by the `.trinity/` dir-form, so negations
+# under it never apply (which is also why compat check S-005 accepts it).
+_TRINITY_AUTHORED_PATHS: Tuple[str, ...] = (
+    ".trinity/pre-check",       # SCHED-COND-001 conditional-schedule hook (#454)
+    ".trinity/post-check",      # output-contract validator (compat I-005)
+    ".trinity/pre-snapshot",    # data-snapshot quiesce hook (#1169)
+    ".trinity/setup.sh",        # startup setup convention (trinity-enterprise#76)
+    ".trinity/persistent-processes.allow",  # orphan-sweep allowlist patterns (#1501)
+    ".trinity/brain-orb/",      # brain-orb convention hooks (#58/#60)
+    ".trinity/pipelines/",      # agent-defined pipeline DEFINITIONS (#919);
+                                # instance STATE lives in pipeline-state/
+)
+
+
 _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     # Shell init / history (instance-specific)
     ".bash_logout",
@@ -1285,7 +1315,9 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     ".local/",
     ".npm/",
     ".ssh/",
-    ".trinity/",
+    # #2070: contents-only, so the authored paths below can be re-included.
+    ".trinity/*",
+    *(f"!{path}" for path in _TRINITY_AUTHORED_PATHS),
     ".tmp/",  # #1098 disk-backed scratch (TMPDIR); #1187 relocated CODEX_HOME
     ".trinity-clone-tmp/",  # #1439 transient full-history clone staging dir (removed post-merge; ignored so a crash-orphaned copy — incl. its PAT-bearing .git/config — is never committed)
     # Large generated content
@@ -1374,13 +1406,54 @@ def _build_gitignore_append_command(git_dir: str, patterns) -> str:
     return f"bash -c {shlex.quote(script)}"
 
 
+# Exact lines the fleet-wide merge REMOVES before appending (#2070).
+#
+# Append-only is not enough here. Git does not descend into a directory
+# excluded by the dir-form ``.trinity/``, so the ``!.trinity/pre-check``
+# negations that follow it are inert. Every agent synced before #2070 carries
+# that line — precisely the fleet this fixes — so leaving it in place would
+# keep sweeping authored hooks forever.
+#
+# Removal is by EXACT LINE and confined to the two spellings this platform
+# itself wrote (the same discipline as the G-001 auto-fix, which removes a
+# blanket ``.claude/`` line by exact-line match). A user rule that merely
+# mentions the directory — ``.trinity/scratch/``, ``!.trinity/mine`` — does not
+# match and is left alone.
+_GITIGNORE_SUPERSEDED_LINES: Tuple[str, ...] = (
+    ".trinity/",
+    ".trinity",
+)
+
+
 def _build_gitignore_merge_command(git_dir: str) -> str:
-    """Build a bash command that appends any missing ``_GITIGNORE_PATTERNS``
-    entries to ``{git_dir}/.gitignore`` without clobbering user-supplied
-    rules. Idempotent — each pattern is gated by an exact-line ``grep -qxF``
-    check, so a second run is a no-op.
+    """Build a bash command that reconciles ``{git_dir}/.gitignore`` with
+    ``_GITIGNORE_PATTERNS``: drop superseded exact lines, then append whatever
+    is missing — without clobbering user-supplied rules. Idempotent: the
+    removal is a no-op once the line is gone, and each append is gated by an
+    exact-line ``grep -qxF`` check.
     """
-    return _build_gitignore_append_command(git_dir, _GITIGNORE_PATTERNS)
+    parts = [f"cd {shlex.quote(git_dir)}", "touch .gitignore"]
+    for stale in _GITIGNORE_SUPERSEDED_LINES:
+        # `grep -vxF` into a temp file, not `sed -i`: `-x -F` is a whole-line
+        # literal match, so no pattern metacharacter in a user's rule can be
+        # caught by accident. Guarded on the line existing, so the common path
+        # leaves the file (and its mtime) untouched.
+        q = shlex.quote(stale)
+        # `|| true` on the filter: `grep -v` exits 1 when it selects NO lines,
+        # which is the legitimate case of a `.gitignore` that contained only
+        # the superseded line. Without it the whole `&&` chain aborts and the
+        # merge never runs — and the guard above has already proved the file is
+        # readable, so the only status being swallowed is "empty result".
+        parts.append(
+            f"(! grep -qxF -- {q} .gitignore || "
+            f"{{ grep -vxF -- {q} .gitignore > .gitignore.tmp || true; "
+            f"mv .gitignore.tmp .gitignore; }})"
+        )
+    for pattern in _GITIGNORE_PATTERNS:
+        q = shlex.quote(pattern)
+        parts.append(f"(grep -qxF -- {q} .gitignore || echo {q} >> .gitignore)")
+    script = " && ".join(parts)
+    return f"bash -c {shlex.quote(script)}"
 
 
 def _build_rm_cached_ignored_command(git_dir: str) -> str:
@@ -1393,15 +1466,24 @@ def _build_rm_cached_ignored_command(git_dir: str) -> str:
     with spaces or unicode survive the round-trip. Working-tree files are
     left alone; only the index is touched.
 
-    ``.trinity/brain-orb/`` and ``.trinity/setup.sh`` are exempt: Brain-Orb /
-    setup-convention templates COMMIT those files (trinity-enterprise#76), while
-    the fleet-wide ``.trinity/`` ignore appended above makes them look
-    ignored-but-tracked — without the pathspec exclusions the first push would
-    untrack them and push the deletion, so a later re-clone/recreate boots
-    hookless and never runs its startup setup (verified live: the e2e Push
-    swept setup.sh before the second exemption was added).
+    Authored ``.trinity/`` content is exempt, and the exemption list is DERIVED
+    from ``_TRINITY_AUTHORED_PATHS`` rather than written out here (#2070). It
+    used to be two hardcoded strings, and each of the three incidents in this
+    area was one more forgotten string: brain-orb hooks
+    (trinity-enterprise#76), ``setup.sh`` (swept live before the second
+    exemption was added), ``pre-check`` (#2070 — the SCHED-COND-001 hook the
+    platform's own docs tell template authors to commit). Deriving it makes
+    adding an authored path one edit instead of two, and the two cannot drift.
+
+    Belt-and-braces: since #2070 the ignore rules themselves no longer match
+    these paths, so ``git ls-files -ci`` should not list them at all. The
+    pathspec stays for the agent whose ``.gitignore`` still carries the
+    superseded wholesale ``.trinity/`` line — otherwise its hooks would be
+    swept by the very push that repairs the file.
     """
-    exempt = '":!.trinity/brain-orb" ":!.trinity/setup.sh"'
+    exempt = " ".join(
+        shlex.quote(f":!{path.rstrip('/')}") for path in _TRINITY_AUTHORED_PATHS
+    )
     script = (
         f"cd {shlex.quote(git_dir)} && "
         f"ignored=$(git ls-files -ci --exclude-standard -- . {exempt}) && "
@@ -1413,13 +1495,54 @@ def _build_rm_cached_ignored_command(git_dir: str) -> str:
     return f"bash -c {shlex.quote(script)}"
 
 
-async def _detect_git_dir(container_name: str) -> str:
-    """Pick the directory git operations should run in for an agent container.
+AGENT_HOME_DIR = "/home/developer"
+LEGACY_WORKSPACE_DIR = "/home/developer/workspace"
 
-    Standard path is ``/home/developer``. Returns ``/home/developer/workspace``
-    only for legacy agents (created before 2026-02) that have content under
-    that subdirectory. Mirrors the detection ``initialize_git_in_container``
-    has always used so init and the post-init migration agree.
+
+async def _git_toplevel(container_name: str) -> Optional[str]:
+    """Ask git where this agent's repository is rooted (#2075).
+
+    The probe starts at ``workspace/`` when that directory exists and at the
+    home directory otherwise. ``rev-parse --show-toplevel`` walks **up**, so
+    the nearest enclosing repository wins: a genuinely workspace-rooted legacy
+    repo still answers ``/home/developer/workspace``, while a standard agent
+    that merely keeps a populated non-git ``workspace/`` data directory answers
+    ``/home/developer`` — the case the old content heuristic got wrong.
+
+    ``safe.directory`` is relaxed for this read-only query only: the exec runs
+    as ``developer``, but a volume restored with foreign ownership would
+    otherwise make git refuse to answer and silently drop the caller onto the
+    fallback heuristic that this function exists to replace.
+
+    Returns None when there is no repository at or above the probe point, or
+    when git answers with a path outside the agent home (never trusted).
+    """
+    script = (
+        f"start={shlex.quote(LEGACY_WORKSPACE_DIR)}; "
+        f'[ -d "$start" ] || start={shlex.quote(AGENT_HOME_DIR)}; '
+        "git -c safe.directory='*' -C \"$start\" rev-parse --show-toplevel "
+        "2>/dev/null"
+    )
+    result = await execute_command_in_container(
+        container_name=container_name,
+        command=f"bash -c {shlex.quote(script)}",
+        timeout=5,
+    )
+    if result.get("exit_code") != 0:
+        return None
+    top = (result.get("output") or "").strip().splitlines()
+    top = top[-1].strip() if top else ""
+    if top == AGENT_HOME_DIR or top.startswith(f"{AGENT_HOME_DIR}/"):
+        return top
+    return None
+
+
+async def _detect_git_dir_fallback(container_name: str) -> str:
+    """Where to *create* a repo when the container has none yet.
+
+    Verbatim the pre-#2075 content heuristic: any non-empty ``workspace/``
+    means the repo goes there. ``initialize_git_in_container`` uses this to
+    place a brand-new repo, so fresh-agent placement stays byte-compatible.
     """
     check_workspace = await execute_command_in_container(
         container_name=container_name,
@@ -1435,6 +1558,20 @@ async def _detect_git_dir(container_name: str) -> str:
         and "1" in check_workspace.get("output", "")
     )
     return "/home/developer/workspace" if workspace_has_content else "/home/developer"
+
+
+async def _detect_git_dir(container_name: str) -> str:
+    """Pick the directory git operations should run in for an agent container.
+
+    Git's own answer wins (``_git_toplevel``). Only when the container has no
+    repository at all does the legacy content heuristic decide — that path is
+    reached by ``initialize_git_in_container``, which needs a placement for a
+    repo that does not exist yet.
+    """
+    top = await _git_toplevel(container_name)
+    if top:
+        return top
+    return await _detect_git_dir_fallback(container_name)
 
 
 async def _migrate_workspace_gitignore(agent_name: str) -> None:

@@ -1,11 +1,11 @@
 /**
- * Client Portal store (enterprise `client_portal`, epic #78 / #79).
+ * Workspace / client portal store (epic #78 / #79; OSS core since ent#356).
  *
  * Domain store for the client-facing portal surface. First slice: the
  * "My Agents" roster (agents shared with the signed-in email) + the operator
  * exposure config. Backed by the gated `/api/enterprise/client-portal/*`
  * endpoints — 404 in OSS/unentitled builds, but the route guard
- * (`requiresEntitlement: 'client_portal'`) keeps this store off those builds.
+ * ent#356 moved the module into OSS core, so it ships in every build.
  */
 import { defineStore } from 'pinia'
 import axios from 'axios'

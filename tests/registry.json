@@ -34,17 +34,51 @@
       "description": "A2A exposed-skills filter (ent#180): the open-core seam that narrows a card's skills[] to what an agent may advertise. OSS-unchanged by construction (no provider → identity, same list object); None = no opinion = advertise all (the unconfigured default, so an exposed agent's card is byte-identical across upgrade) vs [] = explicit advertise-nothing; stale/unknown stored ids are inert (the selection only subtracts, the template stays the source of truth); fail-open on provider error AND on a malformed return (a str would otherwise iterate to chars and silently empty the card — fail-closed, invisible); both card surfaces filter via one router helper (structural guard against a route rebuilding an unfiltered card). Disclosure control only — message/send dispatches free-form text, so this never narrows what a caller may ask for."
     },
     {
-      "file": "unit/test_2008_dead_credentials_update.py",
-      "feature": "#2008",
+      "file": "unit/test_1896_integration_nightly_workflow.py",
+      "feature": "#1896",
+      "added": "2026-08-03",
+      "categories": [
+        "ci",
+        "unit",
+        "guard"
+      ],
+      "description": "Static guards on integration-nightly.yml (#1896), the CI home for the live-instance root suite (~93 files needing a running Trinity; nothing ran them, so they gated nothing). Pins the properties whose absence is invisible until the night it matters: membership is DIRECTORY-based (--ignore=unit, matching tests/run-core.sh) so #1895's relocations shrink it with no workflow edit and no file list to drift; base and head both run for attribution; a missing JUnit fails the job LOUDLY instead of being reported to the author as a regression (the diff script is fail-closed on missing XML, so a failed stack boot would otherwise wear a PR's name — #1941's class); each side gets a pristine stack via `down -v` since the suite mutates its instance; the merge is full-depth with the conflict verdict gated on unmerged paths (#1941 again); the job running untrusted PR code holds only contents:read while the write-scoped comment job never checks out PR code; it is not on the pull_request path; the runtime budget and its escalation are written down; --continue-on-collection-errors is present (measured: 3 root modules currently fail to import, and without the flag pytest writes no XML at all); and src/cli is installed, since test_cli_*.py imports trinity_cli which is deliberately absent from requirements-test.txt."
+    },
+    {
+      "file": "unit/test_1941_nightly_merge_depth.py",
+      "feature": "#1941",
+      "added": "2026-08-03",
+      "categories": [
+        "ci",
+        "unit",
+        "guard"
+      ],
+      "description": "Static guard on backend-unit-nightly.yml's merge check (#1941). The job shallow-fetched both dev and the PR head, so the merge had no common ancestor and git's `refusing to merge unrelated histories` was recorded as `merge_conflict=true` for EVERY open PR (9/9, 8 of them MERGEABLE) — the detector's output was independent of its input, so the suite never ran and the regression signal defaulted to clean. Asserts: base checkout is fetch-depth 0; the pull/N/head fetch carries no --depth; the merge_conflict=true branch is gated on actual unmerged paths (--diff-filter=U) so an infrastructure failure can't be reported as a PR conflict; --allow-unrelated-histories is never used (it would fabricate a merge of unrelated trees and run the suite against a worktree that isn't the real merge result); and the `git merge dev` advice stays inside the conflict/regression branches. Comment lines are stripped before matching — the fix's own comment says 'no --depth' and a naive substring search matches it and passes while the command is shallow again."
+    },
+    {
+      "file": "unit/test_2015_hash_chain_persistence.py",
+      "feature": "#2015",
+      "added": "2026-08-05",
+      "categories": [
+        "backend",
+        "unit",
+        "security",
+        "audit"
+      ],
+      "description": "Enabling the audit hash chain set an instance attribute and wrote nothing, and nothing restored it at boot - so every backend restart silently switched the integrity control back off, with restarts being routine (CLAUDE.md documents re-login after one). An install could sit unhashed indefinitely while the feature still showed as available, and #1985's verified_partial reports valid:true for a range that is mostly unverifiable. The chain HEAD had the same defect one level down: self._last_hash made the chain a property of one PROCESS, so with >1 worker each kept its own head and wrote previous_hash values pointing into another worker's sequence - verify_chain's link check then reported an untampered log as TAMPERED, the loud false positive its own docstring warns against. Fix: the flag persists in system_settings and resolves live per write (uncached, per the _resolve_bool_flag rationale, but fail-CLOSED rather than fail-open since it decides whether an integrity record is written), and db.create_audit_entry_chained reads the head inside the INSERT's own transaction. Covers restart survival both directions, default-off, two instances over one store agreeing (the --workers 2 relationship), live-not-cached, nine stored-value parsings, fail-closed on a settings error, a pin that neither _hash_chain_enabled nor _last_hash exists on the instance, the chained-vs-plain writer choice, an end-to-end two-instance interleaved append verifying as ONE valid chain, and the retention consumer that gated on the old private attribute via getattr(...,False) - a default that would have degraded silently to 'never warn'. The atomicity guard walks the AST and requires the SELECT and the INSERT to be in the same with-block with no head read outside it: an earlier substring-on-ast.dump version passed when the read was hoisted out. Mutation-verified: flag back in the instance (6 fail), fail-open (1), always-plain-writer (2), head read in a separate transaction (1)."
+    },
+    {
+      "file": "unit/test_2007_mcp_template_render.py",
+      "feature": "#2007",
       "added": "2026-08-05",
       "categories": [
         "agent-server",
         "unit",
         "security",
         "credentials",
-        "docs"
+        "parity"
       ],
-      "description": "POST /api/credentials/update had no callers anywhere - not the backend, MCP server, startup.sh, frontend, or enterprise submodule - while its own docstring said 'called by the Trinity backend', agent_server/routers/files.py named it as the SANCTIONED alternative to raw .mcp.json editing (both direct-edit blocks rested on that sentence), and architecture.md listed it as live. So the documented escape hatch for configuring MCP servers did not exist. It also mattered if re-wired: its renderer was a whole-text str.replace over .mcp.json.template, so unlike every other path it DID substitute into `command`, with no validate_mcp_config anywhere on the path - the RCE-by-config class #590 closed, inert only because nothing called it. Resolved by deletion (the decision the issue asks for), because #2007 put the .mcp.json.template renderer where the files actually are: in-container at startup, env-only, validated per server. Covers: the route is gone (AST, not a substring scan - the corrected files.py comment and this test both still mention the string), the request model is gone (a dangling model is how a deleted route comes back), the whole-text replace renderer is gone, and no LIVE doc sends anyone back to it (files.py, architecture.md, API_TEST_REQUIREMENTS, the container diagram). Historical records - docs/archive/**, docs/security-reports/**, the 2026-06 meta-analysis - are deliberately out of scope: they were true when written."
+      "description": "TRINITY_COMPATIBLE_AGENT_GUIDE.md promised Trinity replaces ${VAR} in .mcp.json.template with credential-store values; for a github: template nothing did. The backend renderer (template_service.generate_credential_files) reads .mcp.json - not the .template - and is local:-only, while a github: agent's files only exist AFTER startup.sh clones the repo inside the container, so the only writer of ~/.mcp.json was inject_trinity_mcp_if_configured() and every declared server was silently absent (a freshly-seeded Cornelius shipped three and ran with none). Fix: agent_server/mcp_template.py, invoked by startup.sh after both .env sources (the /generated-creds copy and the decrypt-and-inject fallback). Substitution is confined to env blocks - the only form mcp_validator accepts, since ${VAR} in args reads as a shell metachar and command must be a literal allowlist entry, making substitution there the #590 RCE-by-config class. Unresolvable placeholders WITHHOLD the server with a named reason on stdout instead of blanking to \"\" (the #1929 contract); merge-only-missing keeps the trinity entry and any owner edit across restarts; each candidate is validated individually through the vendored validator so one bad server never costs the good ones. Covers: byte-parity of the vendored mcp_validator (Invariant #5), the Cornelius trio installing two and withholding ebook-mcp with the validator's own 'uv not in allowlist' reason, ${VAR:-default}, empty-value-counts-as-unset, placeholder-in-command asserted against the renderer's OWN named reason (a withheld-only assertion passes with the guard deleted, because the validator refuses the literal too - and would tell the operator the wrong thing to fix) plus an independent 'the credential value never appears in the output' property, idempotence, unparseable-existing-config left alone, every malformed-template shape degrading quietly, main() always returning 0, and two static wiring checks (startup.sh invokes it, and does so after the credential import)."
     },
     {
       "file": "unit/test_ent15_import_intents.py",
@@ -1892,6 +1926,93 @@
         "templates"
       ],
       "description": "Compose/env packaging for the two registry knobs (ent#14), caught by /validate-pr before merge. config.py read TEMPLATE_REGISTRY_ENABLED / TEMPLATE_REGISTRY_URL and NEITHER compose file injected them; prod compose launches standalone (no base merge, no env_file) and is what every deploy path uses, so both were inert on any real instance. The var is the feature's HARD kill switch - the documented air-gap answer no system_settings row can override - so an inert one means default-ON outbound egress with no way to stop it. The irony is pinned in the docstring because it is the lesson: the config.py comment block directly above the os.getenv call argues at length against routing the flag through _resolve_bool_flag precisely because that helper's opt-in-only env leg would 'ship an inert kill switch (#1039 class)' - and it then shipped inert by the other route. Covers: injection present in BOTH composes; the ENABLED default is the ${VAR:-true} form and not a hardcoded true (which passes a presence check while re-breaking the switch); the URL default is the full non-empty https literal, since a bare :- arrives set-but-empty and shadows the code default (#1076 class) - worse than absent because it looks wired; compose and config.py defaults do not drift; dev/prod agree; both documented in .env.example. Sixth recurrence of the #1039/#1056 packaging-gap class (after #1056 VOIP_*, ent#31 LOG_*, #1039, #1871 AGENT_LOG_*, #411 CANARY_*), so it is pinned rather than trusted. Shape mirrors test_canary_env_prod_parity.py, the guard for the fifth. The meta-test proves the matcher fails on pre-fix content AND on a hardcoded value; the guard was additionally verified by deleting the real prod line and watching it go red - the first attempt at that proof used an unescaped grep -v whose $ read as an end-of-line anchor, matched nothing, and reported a false green."
+    },
+    {
+      "file": "unit/test_2070_trinity_authored_paths.py",
+      "feature": "#2070",
+      "added": "2026-08-10",
+      "categories": [
+        "backend",
+        "git",
+        "unit",
+        "guard"
+      ],
+      "description": "The .trinity/ authored-vs-runtime split survives a backend Push (#2070). Every Push runs `git rm --cached` over tracked-but-now-ignored files; the fleet list ignored `.trinity/` WHOLESALE, so template-committed content there was untracked and its deletion pushed, guarded only by a hardcoded two-entry pathspec that was wrong three times (brain-orb ent#76, setup.sh — swept live — and pre-check #2070, the SCHED-COND-001 hook the platform's own docs tell authors to commit). Silent by construction: only the index is touched, so the working tree keeps running and the failure lands one re-clone/recreate later as an agent with no hook, whose every cron tick then runs a full LLM turn. Runs the REAL `_build_gitignore_merge_command` + `_build_rm_cached_ignored_command` against REAL git repos in tmp (the defect is in git's own descend/negation semantics, which a mocked container cannot express). Asserts the SPLIT, never the current exemption strings: 8 authored paths survive, 9 runtime files stay untracked, a fresh clone still RUNS the hook, the superseded wholesale line is replaced (append-only would be inert — git never descends into a dir-form exclusion), user rules merely mentioning .trinity are preserved, the merge is idempotent, exemptions are derived from `_TRINITY_AUTHORED_PATHS`, and a newly-invented runtime file needs no action. Mutation-verified 4 ways (wholesale ignore restored 5F, hardcoded exemptions 1F, no stale-line migration 2F, pre-check dropped from the set 4F)."
+    },
+    {
+      "file": "unit/test_2080_harness_contract.py",
+      "feature": "#2080",
+      "added": "2026-08-10",
+      "categories": [
+        "harness",
+        "unit",
+        "guard"
+      ],
+      "description": "Guards the full-suite harness against silently rotting back (#2080). Every defect that issue fixed removed COVERAGE without failing anything: collection aborted before any test ran, tiers skipped themselves, and a sys.modules shadow swallowed each new src/backend/utils module. Asserts: tests/utils cannot come back (it shadowed the backend package on the pythonpath — adding safe_yaml.py broke ~1,000 tests with a ModuleNotFoundError that read like a product regression) and no test imports the helpers under the old name; no package directory has a non-identifier name (tests/git-sync's __init__.py put its conftest under the bare `conftest` key and collided with the root one, breaking collection of tests/integration and aborting the run before the unit tier); every test directory is named by a tier in run-full.sh; every tier passes -rs (without it the skip audit is blind) and a thread-method timeout; pytest exit code 5 (no tests collected) is a FAILURE; pyproject pins timeout_method=thread for hand-run pytest. Plus the audit's own honesty: each allowlist entry carries a written justification, an empty log dir refuses to certify, an unallowlisted skip fails and an allowlisted one passes."
+    },
+    {
+      "file": "unit/test_ent356_portal_is_oss_core.py",
+      "feature": "trinity-enterprise#356",
+      "added": "2026-08-10",
+      "categories": [
+        "backend",
+        "workspace",
+        "unit",
+        "guard"
+      ],
+      "description": "Pins that the workspace / client portal stays OSS core (ent#356). It shipped entitled — register_module('client_portal') + requires_entitlement on the router — so community builds mounted nothing and every endpoint 404'd, capping adoption at exactly the non-operator population the surface exists for. Guards the four ways that could silently revert: no entitlement machinery anywhere in the module (prose about the old gate is allowed, code is not); the router is mounted in main.py and never referenced from a register_enterprise-shaped function; no frontend isEntitled('client_portal') / requiresEntitlement route meta; and `client_portal.router` still resolves to the MODULE rather than the APIRouter object (the first __init__ did `from .router import router`, shadowing the submodule and breaking handler lookups in 13 tests). Plus the table contract: DDL declared in db/schema.py, BOTH migration tracks carry the adoption (Invariant #9), every CREATE TABLE/INDEX on both tracks is IF NOT EXISTS so an entitled install where the enterprise runner already made them is a no-op ('no data migration' is an acceptance criterion), the Alembic downgrade does not drop client conversation history it never created, and the historical `enterprise_` prefix is retained because renaming would be that forbidden data migration."
+    },
+    {
+      "file": "unit/test_audit_chain_edges.py",
+      "feature": "#2015",
+      "added": "2026-08-05",
+      "categories": [
+        "backend",
+        "unit",
+        "security",
+        "audit",
+        "edge-cases"
+      ],
+      "description": "Edge-case analysis of the audit hash chain as merged by #1985. Covers what the chain can and cannot DETECT (a mutated hashed field, a deleted middle row and a reordered pair are all caught; fields outside _compute_hash's subset - source/actor_email/actor_ip/endpoint/mcp_key_id - are silently mutable with the chain still reporting verified, and tail truncation is undetectable because verification is over a caller-supplied range), _compute_hash's real input domain (details as str vs dict must hash identically or every entry fails verification, key order in a details string, unparseable details hitting the except branch, non-ASCII, missing optional fields, and the four fields read with [] raising KeyError rather than hashing a hole), and range boundaries (inverted/absurd ranges degrade to empty_range, a single-row range never checks a link because of the i>0 guard, counts add up to total_in_range). Carries the xfail(strict) for #2015: enabling the hash chain is in-memory only, so a restart silently disables it, plus a static pin that the enable route persists nothing. Uses asyncio.run, not get_event_loop - the sibling #1984 suite closes the loop, so the latter passes standalone and fails on collection order."
+    },
+    {
+      "file": "unit/test_pat_propagation_properties.py",
+      "feature": "#2016",
+      "added": "2026-08-05",
+      "categories": [
+        "backend",
+        "unit",
+        "security",
+        "credentials",
+        "property-based",
+        "edge-cases"
+      ],
+      "description": "Round-trip property analysis of GITHUB_PAT propagation as merged by #1979. The contract is stated once as a Hypothesis property - after a rotation the agent reads back exactly the new token under all three key names (GITHUB_PAT/GH_TOKEN/GITHUB_TOKEN) - with the oracle being a byte-faithful copy of the agent-server's own last-wins .env parser, because what the agent sees is the only definition of success for a credential rotation. Plus idempotence, unrelated keys surviving, and the old token not surviving anywhere as text. Deterministic boundaries that hold: empty file, no trailing newline, leading whitespace/tab, commented-out line, present-but-empty, lookalike and prefixed keys, CRLF, append-not-glued. Three xfail(strict) findings: a duplicated GITHUB_PAT line survives count=1 and wins under last-wins parsing so the agent keeps the revoked token while the rotation reports updated (#2016); a backslash in the token raises re.error because the new line is used as an re.sub REPLACEMENT (#2017); and the writer escapes an embedded quote while the reader never unescapes it (#2017, a .env parse-contract issue deliberately left byte-faithful by #1999)."
+    },
+    {
+      "file": "unit/test_1999_execution_env.py",
+      "feature": "#1999",
+      "added": "2026-08-05",
+      "categories": [
+        "agent-server",
+        "unit",
+        "security",
+        "credentials"
+      ],
+      "description": "Credential injects mirrored every .env key into the long-lived agent-server process env, and all five runtime spawn sites (claude_code, headless_executor, codex_runtime, gemini_runtime x2) passed env={**os.environ, ...} - a one-way sync with NO delete phase. A key removed from .env by any non-mirroring write path (SSH, docker exec, or an agent editing its own .env) kept reaching every subsequently-spawned execution until container restart, and was invisible to /proc/<pid>/environ (an exec-time snapshot - runtime os.environ mutations never appear there) AND to docker exec (which shows the container baseline, not this process's mutated env), so credential revocation silently failed with no inspection route that could reveal it. Fix: services/execution_env.py rebuilds the execution env per spawn as INITIAL_ENV (boot baseline = what docker exec shows) + .env (parsed fresh, authoritative for credentials) + RUNTIME_OVERRIDES (#1089 token rotation - applied AFTER the file so a stale token in .env cannot beat an explicit rotation; None = force-unset, which a dict merge cannot express) + extra (EXECUTION_TAG_NAME last, #407). The process mirror gains a delete phase that restores the container baseline rather than popping blind, and only ever undoes keys it itself wrote. Covers: the issue's exact reproduction (inject, delete out-of-band, assert the next execution is clean), re-injecting a cleaned .env, baseline restore vs delete, the #1089 no-regression cases, EXECUTION_TAG_NAME non-displacement, tolerant .env parsing incl. the writer's own backslash escaping (.strip('\"') eats a legitimate trailing quote), unreadable/oversized files degrading to the baseline rather than raising on the spawn path, protected keys (.env is agent-writable and now read at every spawn, so PATH/LD_PRELOAD/BASH_ENV redirection is refused), the name-only drift report added to /api/credentials/status, and a static guard that fails if a sixth spawn site reintroduces the {**os.environ} form."
+    },
+    {
+      "file": "unit/test_2008_dead_credentials_update.py",
+      "feature": "#2008",
+      "added": "2026-08-05",
+      "categories": [
+        "agent-server",
+        "unit",
+        "security",
+        "credentials",
+        "docs"
+      ],
+      "description": "POST /api/credentials/update had no callers anywhere - not the backend, MCP server, startup.sh, frontend, or enterprise submodule - while its own docstring said 'called by the Trinity backend', agent_server/routers/files.py named it as the SANCTIONED alternative to raw .mcp.json editing (both direct-edit blocks rested on that sentence), and architecture.md listed it as live. So the documented escape hatch for configuring MCP servers did not exist. It also mattered if re-wired: its renderer was a whole-text str.replace over .mcp.json.template, so unlike every other path it DID substitute into `command`, with no validate_mcp_config anywhere on the path - the RCE-by-config class #590 closed, inert only because nothing called it. Resolved by deletion (the decision the issue asks for), because #2007 put the .mcp.json.template renderer where the files actually are: in-container at startup, env-only, validated per server. Covers: the route is gone (AST, not a substring scan - the corrected files.py comment and this test both still mention the string), the request model is gone (a dangling model is how a deleted route comes back), the whole-text replace renderer is gone, and no LIVE doc sends anyone back to it (files.py, architecture.md, API_TEST_REQUIREMENTS, the container diagram). Historical records - docs/archive/**, docs/security-reports/**, the 2026-06 meta-analysis - are deliberately out of scope: they were true when written."
     }
   ]
 }
