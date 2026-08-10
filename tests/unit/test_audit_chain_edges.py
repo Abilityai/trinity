@@ -238,18 +238,14 @@ class TestHashChainLifecycle:
         _rows(mod, monkeypatch, _chain(hasher, 2))
         assert _verify(svc)["hash_chain_enabled"] is True
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG: enabling the audit hash chain is in-memory only — no "
-               "persistence, no boot restore, so a backend restart silently "
-               "turns the integrity control back off. See /edge-cases report "
-               "2026-08-05, finding 1.",
-    )
     def test_enabling_the_hash_chain_survives_a_restart(self, mod, hasher):
-        """`enable_hash_chain(True)` sets `self._hash_chain_enabled` and writes
-        nothing. A fresh process — every deploy, every config change, the
-        documented post-restart re-login — starts `False`, and nothing tells the
-        operator that hashing stopped.
+        """Regression test for #2015 (fixed by #2026).
+
+        Before the fix, `enable_hash_chain(True)` set `self._hash_chain_enabled`
+        and wrote nothing. A fresh process — every deploy, every config change,
+        the documented post-restart re-login — started `False`, and nothing told
+        the operator that hashing had stopped. #2026 moves the flag to
+        `system_settings`, so a second instance now reads it back.
 
         Modelled as "construct a second service instance", which is exactly what
         the next process does.
@@ -271,19 +267,18 @@ class TestHashChainLifecycle:
             "hash chain silently reverted to disabled in a new process"
         )
 
-    def test_the_enable_route_persists_nothing(self):
-        """Pins the mechanism behind the xfail above, so the finding survives a
-        refactor: the flag is set in memory and nothing writes it durably.
+    def test_the_enable_route_persists_durably(self):
+        """Pins the mechanism behind the test above, so the #2015 fix survives a
+        refactor: the flag must be written durably, not just set in memory.
 
-        Checks BOTH ends of the delegation. The first draft read only
-        `routers/audit_log.py`, and #2026 puts the write in the *service*
-        (`db.set_setting(...)`) while leaving the router a thin passthrough — so
-        the router-only version passes with the fix in place, and this backstop
-        died silently alongside the xfail it exists to protect.
+        Checks BOTH ends of the delegation. #2026 puts the write in the
+        *service* (`db.set_setting(...)`) while leaving the router a thin
+        passthrough, so a router-only check would pass even if the service
+        write were later deleted.
 
-        The service half is asserted over the AST, not the text: the fix's own
-        docstring explains the persistence it adds, so a substring scan matches
-        the prose and reports "still in-memory" while the write sits next to it.
+        The service half is asserted over the AST, not the text, so a docstring
+        that merely *describes* persistence can't satisfy it — only a real call
+        can.
         """
         import ast
         import inspect
@@ -293,9 +288,6 @@ class TestHashChainLifecycle:
         block = src[src.index("async def enable_hash_chain"):]
         block = block[:block.index("\n@router") if "\n@router" in block else len(block)]
         assert "platform_audit_service.enable_hash_chain" in block
-        assert "set_setting" not in block and "system_settings" not in block, (
-            "the enable route now persists — update or remove the xfail above"
-        )
 
         # ...and the setter the route delegates to, resolved through the import
         # rather than a fixed filename, so moving the service doesn't silence it.
@@ -312,9 +304,9 @@ class TestHashChainLifecycle:
             and isinstance(node.func, ast.Attribute)
             and node.func.attr in {"set_setting", "set_system_setting"}
         ]
-        assert not persisted, (
-            "`enable_hash_chain` now persists the flag — the #2015 finding is "
-            "fixed; update or remove the xfail above"
+        assert persisted, (
+            "`enable_hash_chain` no longer persists the flag — #2015 has "
+            "regressed: a restart will silently disable the hash chain"
         )
 
 
