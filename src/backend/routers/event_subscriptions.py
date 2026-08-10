@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from models import EmitEventRequest
 
 from database import db
-from dependencies import get_current_user, AuthorizedAgent, OwnedAgent, assert_agent_owner
+from dependencies import get_current_user, AuthorizedAgent, OwnedAgent, assert_agent_owner, assert_agent_access
 from db_models import (
     User,
     EventSubscriptionCreate,
@@ -234,6 +234,10 @@ async def get_event_subscription(
     sub = db.get_event_subscription(subscription_id)
     if not sub:
         raise HTTPException(status_code=404, detail="Event subscription not found")
+    # CSO L1: gate the cross-tenant read at accessor tier (mirrors the list route
+    # /api/agents/{name}/event-subscriptions and the owner-gated PUT/DELETE below),
+    # so an authenticated caller can't read another tenant's subscription config.
+    assert_agent_access(current_user, sub.subscriber_agent)
     return sub
 
 

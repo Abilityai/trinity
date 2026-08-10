@@ -6,11 +6,12 @@ FROM node:24-alpine AS builder
 
 WORKDIR /app
 
-# Copy package files
-COPY package.json package-lock.json* ./
+# Copy package files (lockfile is tracked — require it)
+COPY package.json package-lock.json ./
 
-# Install dependencies (use npm install since package-lock.json might not exist)
-RUN npm install
+# Install from the tracked lockfile (CSO M4: npm ci is lockfile-exact and fails
+# on drift; the prior npm install floated semver ranges in the shipped bundle).
+RUN npm ci
 
 # Copy source code
 COPY . .

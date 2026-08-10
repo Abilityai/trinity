@@ -120,8 +120,13 @@ class TerminalSessionManager:
                 user_email = user.get("email") or user.get("sub") or "unknown"
                 user_role = user.get("role", "user")
 
-                # Check access to this agent
-                if not db.can_user_access_agent(user_email, agent_name) and user_role != "admin":
+                # Check access to this agent.
+                # SECURITY (CSO H1): a container shell exposes .env / .credentials.enc
+                # and the baked CLAUDE_CODE_OAUTH_TOKEN / TRINITY_MCP_API_KEY, so it
+                # must be gated at OWNER/admin tier (can_user_share_agent), not the
+                # accessor tier (can_user_access_agent, which admits chat-shared
+                # collaborators). Mirrors the deliberately admin-only SSH endpoint.
+                if not db.can_user_share_agent(user_email, agent_name) and user_role != "admin":
                     await websocket.send_text(json.dumps({
                         "type": "error",
                         "message": "You don't have access to this agent",

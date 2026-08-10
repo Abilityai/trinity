@@ -101,8 +101,8 @@ RUN pip install --no-cache-dir \
     reportlab==4.2.5 \
     google-genai==1.63.0 \
     "slack_sdk[socket-mode]==3.41.0" \
-    aiohttp \
-    slackify-markdown \
+    aiohttp==3.14.3 \
+    slackify-markdown==0.2.4 \
     tenacity==9.0.0 \
     opentelemetry-api==1.29.0 \
     opentelemetry-sdk==1.29.0 \
