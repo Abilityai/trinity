@@ -79,11 +79,41 @@ class TestNoLiveDocSendsYouThere:
     """AC #2 and #3: the two places that named a path which did not exist."""
 
     def test_files_py_names_a_path_that_exists(self):
+        """The rationale must point at a route that runs today.
+
+        The first draft was `"/api/credentials/inject" in block or
+        ".mcp.json.template" in block`. `PROTECTED_PATHS` contains the literal
+        `.mcp.json.template` and sits well inside the 1500-character window, so
+        the `or` was satisfied by the path list no matter what the comment
+        said — deleting the whole rationale, or rewording it to point back at
+        the deleted endpoint, both left this green. It now asserts what the AC
+        actually claims: the sanctioned path is named, and the deleted route is
+        not offered as a destination.
+        """
         src = _FILES.read_text()
-        block = src[src.index("EDIT_PROTECTED_PATHS") - 1500:src.index("EDIT_PROTECTED_PATHS")]
-        assert "/api/credentials/inject" in block or ".mcp.json.template" in block, (
+        # Anchored on the rationale block itself, not a fixed byte window: a
+        # 1500-character lookbehind both reaches into `PROTECTED_PATHS` (which
+        # is what made the old `or` branch always true) and silently drops the
+        # top of the comment as soon as it grows.
+        start = src.index("# Paths that cannot be edited via the file-write endpoint.")
+        block = src[start:src.index("EDIT_PROTECTED_PATHS = [")]
+        # The backend route is `/api/agents/{name}/credentials/inject`; the
+        # first draft asserted `/api/credentials/inject`, which is not a path
+        # that exists anywhere — and it went unnoticed because the `or` branch
+        # carried the test.
+        assert "credentials/inject" in block, (
             "the EDIT_PROTECTED_PATHS rationale must name a real path — both "
             "direct-edit blocks rest on it"
+        )
+        # The one permitted mention is the historical note saying it was
+        # removed; anything else is the comment sending an owner to a route
+        # that does not exist.
+        without_history = block.replace(
+            "`/api/credentials/update`, which had no callers anywhere and was removed", ""
+        )
+        assert "/api/credentials/update" not in without_history, (
+            "the rationale points at /api/credentials/update as a live path "
+            "again — it was deleted in #2008"
         )
         assert "platform-internal\n# /api/credentials/update flow" not in src
 

@@ -181,14 +181,20 @@ PROTECTED_PATHS = [
 # "users need to modify them" — but raw editing of either is RCE-by-config:
 # tool `command:` fields run as the agent process. See #590 (AISEC-C2).
 #
-# The sanctioned paths (#2008 — this comment previously named
+# The sanctioned path (#2008 — this comment previously named
 # `/api/credentials/update`, which had no callers anywhere and was removed;
 # both blocks below were justified by a route that did not run):
-#   * declare servers in the template's `.mcp.json.template` — rendered into
-#     `.mcp.json` at container startup, `${VAR}` substituted inside `env` only,
-#     each server validated (#2007);
-#   * post-deploy, `POST /api/agents/{name}/credentials/inject` — the same
-#     `validate_mcp_config` gate, which is Layer 2 of the #590 closure (#598).
+#   * `POST /api/agents/{name}/credentials/inject`, gated by
+#     `validate_mcp_config` — Layer 2 of the #590 closure (#598). Real today.
+#
+# PLANNED, not yet available: rendering `.mcp.json.template` into `.mcp.json`
+# at container startup (`${VAR}` substituted inside `env` only, each server
+# validated) — #2007 / PR #2013. Deleting `update_credentials` removed the only
+# code that ever rendered the template, `startup.sh` performs no substitution,
+# and `credential_paths.py` denies the template on the inject path — so until
+# #2013 lands, declaring a server in the template alone never reaches
+# `.mcp.json`. Written as planned rather than present so this comment does not
+# replace one forward reference with another.
 #
 # CLAUDE.md is intentionally NOT here — owners do edit their agent's
 # instructions directly.
