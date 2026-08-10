@@ -70,6 +70,44 @@ Consequence to design around: **FastMCP sessions are per-connection**, so an inl
 lasts only as long as the MCP client's connection — a client restart requires logging in
 again. Accepted as the cost of the no-credential-on-disk model.
 
+### The session id is the credential (#2035) — deploy over TLS only
+
+"Session, not a minted key" has a consequence the original design did not state: what
+identifies the session is the `Mcp-Session-Id` header, and the client resends it on every
+request. MCP streamable HTTP is discrete POSTs, so the mcp-server re-authenticates each one
+and — for the keyless tier, which has no credential to re-present — resolves the verified
+identity from a store keyed by that header (`createAnonymousSessionStore`, `server.ts`).
+**For this tier the header therefore IS a bearer credential.** Shipping #848 without that
+memo is what made keyless sign-in non-functional (#2035): `verify_login` succeeded and the
+next call answered `login_required`.
+
+Operator consequences, in the order they bite:
+
+- **Expose the MCP port over TLS only when `MCP_INLINE_AUTH_ENABLED` is on.** A plain
+  header over plain HTTP is sniffable, and whoever reads it holds the signed-in session
+  until it expires. Keyed connector clients are no worse off — their key is on the wire
+  either way — but the keyless tier turns a routing detail into a secret.
+- **It is not written to logs in full.** Trinity's own code logs an independent correlation
+  id instead, and the bundled `mcp-proxy` prints the raw id on three paths, so the
+  mcp-server truncates it at the console boundary (`log-redaction.ts`). Without that, Vector
+  would ship every live keyless session id to `/data/logs` in plaintext.
+- **Expiry is the only exit: 30 min idle, 4 h absolute.** There is no `logout` tool, and no
+  usable disconnect signal to evict on — the MCP SDK's `close()` only aborts the SSE stream,
+  and the DELETE that would end the server-side session is sent solely by the opt-in
+  `terminateSession()`, so a client that simply quits leaves the entry to age out.
+  Restarting the mcp-server drops every keyless session at once.
+- **Clearing the conversation in an MCP client does not log out.** `/clear` in Claude Code
+  resets the model's context, not the transport session; the connection — and the signed-in
+  identity on it — survives.
+
+What bounds the damage: the backend re-gates **authorization** on every call
+(`email_has_agent_access` + connector-enabled), so a stolen session confers the asserted
+identity with live permissions, not frozen ones — unshare the agent and the next call 403s.
+Only authentication is remembered. Memoization is scoped to the anonymous tier and is
+unreachable from the keyed path, which is pinned by a source guard
+(`src/inline-auth-scope.test.ts`) rather than by comment: memoizing a keyed session would
+let `Mcp-Session-Id` alone stand in for a key that was never presented.
+
 ### Anonymous session tier
 
 - `MCP_INLINE_AUTH_ENABLED` (env, **default OFF**) gates the whole feature. With it off,

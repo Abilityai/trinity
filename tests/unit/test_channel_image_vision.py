@@ -39,8 +39,14 @@ for _p in (str(_BACKEND), str(_BASE_IMAGE)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-for _shadow in ("utils", "utils.api_client", "utils.assertions"):
-    sys.modules.pop(_shadow, None)
+# #2080: the shadow-eviction loop that used to sit here is GONE. It popped
+# `utils` (and the test-helper submodules) from sys.modules to defeat
+# `tests/utils` shadowing `src/backend/utils`. That package is now
+# `tests/testkit`, so `utils` IS the backend package — and popping it
+# evicted the canonical module mid-session, leaving anything that had
+# already imported it holding a stale reference (observed as
+# `ImportError: module services.subscription_auto_switch not in sys.modules`
+# from an importlib.reload several hundred tests later).
 
 
 # ---------------------------------------------------------------------------

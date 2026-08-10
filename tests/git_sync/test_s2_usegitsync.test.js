@@ -9,7 +9,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { ref, nextTick } from 'vue'
 
-// Import path is relative to this file: tests/git-sync/...
+// Import path is relative to this file: tests/git_sync/...
 import { useGitSync } from '../../src/frontend/src/composables/useGitSync.js'
 
 function makeHarness(statusPayload) {

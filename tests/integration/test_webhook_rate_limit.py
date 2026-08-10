@@ -27,7 +27,7 @@ import uuid
 import httpx
 import pytest
 
-from utils.api_client import TrinityApiClient
+from testkit.api_client import TrinityApiClient
 
 
 WEBHOOK_RATE_LIMIT = 10  # matches WEBHOOK_RATE_LIMIT default in webhooks.py

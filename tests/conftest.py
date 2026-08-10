@@ -109,10 +109,16 @@ if _dot_env_754.exists():
 # test file runs its top-level code. setdefault in that unit test then
 # becomes a benign no-op.
 #
-# Constraint: this conftest also does `from utils.api_client import ...`
-# which needs tests/utils/api_client.py (NOT src/backend/utils/). We must
-# NOT replace the `utils` package entry — only install `utils.helpers` as
-# a submodule while leaving `utils` itself pointing to tests/utils/.
+# NOTE (#2080): this constraint is HISTORY. The test helpers used to live in
+# `tests/utils`, which sits first on the pythonpath and therefore shadowed
+# `src/backend/utils` — so `utils` meant the test package, `utils.helpers` had
+# to be force-installed as a submodule of it, and every module added to the
+# backend package (most recently `safe_yaml.py`) became unimportable, taking
+# ~1,000 tests with it. The helpers are now `tests/testkit`, so `utils`
+# unambiguously means `src/backend/utils` and no shadow-repair is needed.
+# The preload below is kept for a DIFFERENT reason: several root-level tests
+# stub `utils.helpers` into sys.modules at import time, and this pins the real
+# module as the baseline the per-test restore returns to.
 #
 # Also pre-register `routers` as a proper namespace package pointing to
 # src/backend/routers/. test_inter_agent_timeout_unit.py has:
@@ -135,12 +141,13 @@ _BACKEND_STR = str(_BACKEND)
 
 
 def _preload_backend_helpers_submodule():
-    """Pre-register src/backend/utils/helpers.py as `utils.helpers`.
+    """Pin src/backend/utils/helpers.py as the canonical `utils.helpers`.
 
-    Does NOT change `sys.modules["utils"]` — conftest.py needs that to
-    point to tests/utils/ (for api_client, cleanup, etc.). We only
-    install the helpers submodule so that `from utils.helpers import X`
-    inside models.py resolves to the backend version.
+    Since #2080 this is a POLLUTION defence, not a shadow repair: the test
+    helpers moved to `tests/testkit`, so `utils` already resolves to the
+    backend package. What this still buys is a known-good baseline for the
+    #762 per-test restore, because several root-level tests replace
+    `utils.helpers` with a stub at module-import time.
     """
     existing = sys.modules.get("utils.helpers")
     if existing is not None:
@@ -337,8 +344,8 @@ def _restore_sys_modules_baseline_762():
     yield
     _restore_invariant_sys_modules()
 
-from utils.api_client import TrinityApiClient, ApiConfig
-from utils.cleanup import (
+from testkit.api_client import TrinityApiClient, ApiConfig
+from testkit.cleanup import (
     ResourceTracker,
     cleanup_test_agent,
     register_created_agent,

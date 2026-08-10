@@ -9,8 +9,8 @@ Feature Flow: agent-notifications.md
 
 import pytest
 
-from utils.api_client import TrinityApiClient
-from utils.assertions import (
+from testkit.api_client import TrinityApiClient
+from testkit.assertions import (
     assert_status,
     assert_json_response,
     assert_has_fields,

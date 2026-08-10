@@ -20,8 +20,8 @@ Pairs with: tests/unit/test_mcp_validator.py (88 unit tests)
 import json
 import pytest
 
-from utils.api_client import TrinityApiClient
-from utils.assertions import assert_status, assert_status_in, assert_json_response
+from testkit.api_client import TrinityApiClient
+from testkit.assertions import assert_status, assert_status_in, assert_json_response
 
 
 def _inject(api_client, agent_name: str, mcp_config: dict):

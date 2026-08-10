@@ -36,10 +36,9 @@ _BACKEND_STR = str(_BACKEND)
 # tests/unit/test_telegram_webhook_backfill.py — required by the
 # sys-modules lint baseline).
 _STUBBED_MODULE_NAMES = (
-    "utils",
-    "utils.api_client",
-    "utils.assertions",
-    "utils.cleanup",
+    # #2080: the four `utils*` entries that used to head this list are gone —
+    # they named the `tests/utils` shadow, which is now `tests/testkit`, so
+    # popping `utils` would evict the real backend package.
 )
 for _shadow in _STUBBED_MODULE_NAMES:
     sys.modules.pop(_shadow, None)  # noqa: lint-allowed via _restore_sys_modules

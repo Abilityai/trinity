@@ -13,8 +13,8 @@ import subprocess
 import uuid
 
 import pytest
-from utils.api_client import TrinityApiClient
-from utils.assertions import assert_status
+from testkit.api_client import TrinityApiClient
+from testkit.assertions import assert_status
 
 
 _BACKEND_CONTAINER = os.getenv("TRINITY_BACKEND_CONTAINER", "trinity-backend")
