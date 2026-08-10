@@ -38,20 +38,32 @@ View, monitor, and manage task executions across all agents. Executions are crea
 The fleet execution list lives on the **Executions** tab of the [Operations page](operating-room.md) (`/operations?tab=executions`). The legacy `/executions` route redirects there.
 
 1. Lists all executions across the fleet. Admins see every agent; other users see only agents they own or that are shared with them.
-2. Stat cards show Total, Success rate, and Cost for the selected time window. Running and queued counts are always live, regardless of the window.
+2. Stat cards show Total, **Completion**, and Cost for the selected time window. Running and queued counts are always live, regardless of the window.
 3. Filter by agent, status, trigger type, time range (1h to 30d, or all time), and free-text search over task messages.
 4. The list loads 50 rows at a time; **Load more** appends the next page.
 5. A "N running now" strip appears whenever executions are in flight.
 6. A status dot shows **Live** when WebSocket updates are connected, or **Polling** (every 30s) as fallback.
 7. Click any execution row to open its detail page (`/agents/{name}/executions/{id}` — this route is unchanged).
 
+### Completion is not quality
+
+"Completion" means the run finished cleanly — the process exited without error. It says nothing about whether the work was any good. That is a separate axis, recorded as an **evaluation**.
+
+Evaluations are written by the platform or by a human admin — never by the agent being graded, which is the entire point of keeping them apart from [reports](agent-reports.md) (an agent publishes its own reports). An ungraded run has no quality score at all; that is different from scoring zero.
+
+An agent can read its own evaluations — seeing its own bad score is the feedback loop. Only humans with admin rights can write one.
+
 ### Execution Detail Page
 
 1. Displays agent name, status, timestamps, duration, cost, model used, and trigger source.
-2. Shows the full transcript/log of the Claude Code execution.
-3. For running executions, a green pulsing "Live" indicator streams output in real time.
-4. **Stop** button terminates a running execution.
-5. **Continue as Chat** button resumes the execution as an interactive chat session.
+2. Shows who or what initiated the run, including scheduler-triggered executions.
+3. Shows the full transcript/log of the execution.
+4. **Tool calls** are recorded as a summary — which tools ran and how often — not as a second copy of the transcript.
+5. For running executions, a green pulsing "Live" indicator streams output in real time.
+6. **Stop** button terminates a running execution.
+7. **Continue as Chat** button resumes the execution as an interactive chat session.
+
+Durations are always non-negative, and a run that ends through a recovery path (a timeout, a restart, an expired lease) closes its activity record with a real duration rather than being left open until a sweep guesses one.
 
 ### Tasks Tab (per-agent)
 
@@ -81,8 +93,12 @@ The fleet execution list lives on the **Executions** tab of the [Operations page
 | `/api/agents/{name}/executions` | GET | List executions for an agent |
 | `/api/agents/{name}/executions/{id}` | GET | Get execution details |
 | `/api/agents/{name}/task` | POST | Submit a new task |
+| `/api/agents/{name}/evaluations` | GET | Read an agent's quality evaluations (access-scoped) |
+| `/api/agents/{name}/evaluations` | POST | Write an evaluation (admin **and** human-only — an agent can never grade itself) |
 
 Access control on the fleet endpoints mirrors the UI: admins see everything; other users see only owned or shared agents.
+
+The `success_rate` field name is unchanged in the API — only the UI label moved to "Completion".
 
 Full API reference: http://localhost:8000/docs
 
@@ -97,6 +113,7 @@ Full API reference: http://localhost:8000/docs
 ## See Also
 
 - [Operations Page](operating-room.md) -- The tabbed view that hosts the Executions tab
+- [Agent Reports](agent-reports.md) -- Structured results an agent publishes about its work
 - [Scheduling](../automation/scheduling.md) -- Automate recurring executions with cron
 - [Agent Chat](../agents/agent-chat.md) -- Interactive chat sessions with agents
 - [Monitoring](monitoring.md) -- Fleet-wide health and activity monitoring

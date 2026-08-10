@@ -56,7 +56,7 @@ Three ways to give someone access, for three audiences. A **public link** is a s
 
 ## How do I keep a growing fleet of agents organized?
 
-Use tags and saved views. Tag agents from the agent detail page (or via API/MCP); tags show as colored badges on agent tiles, group agents into tag clouds on the Dashboard, and drive filters on the Agents page that persist as you navigate. For filter combinations you use often, create a **System View** — a saved filter of tags plus other criteria that persists across sessions. See [Tags and Organization](../sharing-and-access/tags-and-organization.md).
+Use tags and saved views. Tag agents from the agent detail page (or via API/MCP); tags show as colored badges on agent tiles, group agents into tag clouds on the Dashboard, and drive the shared Dashboard filters that apply across the Timeline, Grid, and List views. For filter combinations you use often, create a **System View** — a saved filter of tags plus other criteria that persists across sessions. See [Tags and Organization](../sharing-and-access/tags-and-organization.md).
 
 ## Can I manage Trinity from my phone?
 

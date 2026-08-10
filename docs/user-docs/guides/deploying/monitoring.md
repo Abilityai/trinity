@@ -81,6 +81,21 @@ df -h /
 docker system df
 ```
 
+#### Container log rotation
+
+Docker's default JSON log driver has **no size limit**, and an unbounded container log will eventually fill the Docker data root and wedge the whole fleet at once. Trinity therefore caps every container it controls — platform services and agent containers alike — at 10 MB per file, 3 files, by default.
+
+| Variable | Applies to | Default |
+|---|---|---|
+| `CONTAINER_LOG_MAX_SIZE` / `CONTAINER_LOG_MAX_FILE` | Platform services (compose) | `10m` / `3` |
+| `AGENT_LOG_MAX_SIZE` / `AGENT_LOG_MAX_FILE` | Agent containers | `10m` / `3` |
+
+Both are validated in both directions: a malformed value **and** an absurd-but-well-formed one (over 1 GB, or more than 10 files) fall back to the bounded default and log a warning. There is no way to configure an unbounded log.
+
+These apply at container creation, so platform services adopt a change on the next `docker compose up`, and existing agents on **recreate** — not on a plain restart.
+
+This only shortens the history available to `docker logs`. Vector's aggregate at `/data/logs` is the primary queryable record and keeps its own `LOG_RETENTION_DAYS`; live log streaming in the UI is unaffected by rotation.
+
 Check `trinity.db` size:
 
 ```bash

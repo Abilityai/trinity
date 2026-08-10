@@ -60,7 +60,7 @@
 ## Automation
 
 - [Scheduling](automation/scheduling.md) — Cron schedules, execution queue, misfire handling
-- [Skills and Playbooks](automation/skills-and-playbooks.md) — Skills library, assignment, chat autocomplete
+- [Skills and Playbooks](automation/skills-and-playbooks.md) — Multi-source skills library, assignment, injection, auto-sync
 - [Approvals](automation/approvals.md) — Human-in-the-loop approval gates
 - [Fan-Out](automation/fan-out.md) — Parallel task dispatch and result collection
 - [Agent Loops](automation/agent-loops.md) — Bounded sequential task repetition, templates, stop signals, failure policy
@@ -68,10 +68,11 @@
 
 ## Operations
 
-- [Dashboard](operations/dashboard.md) — Grid and timeline views, tag clouds, activity feed
+- [Dashboard](operations/dashboard.md) — Timeline, Grid, and List views, org overlay, tag clouds, activity feed
 - [Operations Page](operations/operating-room.md) — Unified tabbed view: operator queue, notifications, health, executions
 - [Monitoring](operations/monitoring.md) — Fleet health checks, agent heartbeats, cleanup service, retention sweeps
 - [Executions](operations/executions.md) — Fleet execution list, stats, detail, live streaming, termination
+- [Agent Reports](operations/agent-reports.md) — Structured results agents publish, with rendering, filters, and export
 - [Audit Trail](operations/audit-trail.md) — Append-only administrative action log
 - [Telemetry](operations/telemetry.md) — Local product events and opt-in fleet sharing
 - [Agent Quotas](operations/agent-quotas.md) — Per-role agent creation limits

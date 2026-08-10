@@ -38,6 +38,23 @@ curl -H "Authorization: Bearer <token>" http://localhost:8000/api/agents
 
 MCP API keys (`trinity_mcp_*`) can be used in the same way as JWT tokens.
 
+### What a Key Is Not
+
+An MCP key resolves to the user who owns it, **carrying that user's role**. On a default installation where the admin owns the agents, an agent's injected key would therefore satisfy a plain "admin only" check.
+
+Endpoints whose blast radius is operator-scale therefore require a **human** caller in addition to an admin role — API keys of any scope are rejected, regardless of the owner's role. This applies to:
+
+- Approving an oversized data-retention deletion
+- Restarting or reinitializing the system agent
+- Registering, editing, or syncing a skill source
+- Reading an agent's credential checklist
+- Reading, verifying, or rotating an agent's own MCP key (these additionally require an interactive browser session)
+- Binding an agent to a GitHub repository
+- Writing an agent evaluation
+- Adding or removing organizational (`dept-*` / `reports-to-*`) tags
+
+If you hit a 403 on one of these from an automation, that is the gate working as intended — perform the action from the UI or with a user session.
+
 ### API Endpoints
 
 | Endpoint | Method | Auth | Description |

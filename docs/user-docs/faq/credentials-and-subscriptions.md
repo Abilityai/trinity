@@ -81,3 +81,15 @@ The subscription feature requires `CREDENTIAL_ENCRYPTION_KEY` to be set in the p
 ## How do I move an agent's credentials to another Trinity instance?
 
 Export the credentials to a `.credentials.enc` file (from the Credentials tab or the `export_credentials` MCP tool), bring that file to the agent on the target instance, and import it there (the "From encrypted backup" option or the `import_credentials` MCP tool). The catch is the encryption key: the file only decrypts if the target instance uses the same `CREDENTIAL_ENCRYPTION_KEY` as the source. An admin can retrieve the key from the source instance (via the encryption-key API endpoint or the `get_credential_encryption_key` MCP tool) and configure it on the target before importing. See [Credential Management](../credentials/credential-management.md).
+
+## How do I know which credentials an agent actually needs?
+
+The **Credentials** tab shows a per-variable checklist built from the agent's own live `template.yaml` — so a forked or hand-edited agent reports its real requirements, not its original template's. Each row shows what the credential is for, whether it is currently set (probed from the agent's `.env`; **names only**, values are never read or transmitted), and a link to where you obtain it. You can fill values in directly on the checklist. It renders for a stopped agent too, with the live-status column honestly marked unavailable. Reading it is owner-only and human-only. See [Credential Management](../credentials/credential-management.md).
+
+## How does a template declare the credentials it needs?
+
+Two sibling keys in `template.yaml`. `credentials:` lists the variable **names** only and is frozen that way, so older Trinity versions can still read a newer template. The optional `credential_setup:` decorates each one with `title`, `description`, `required`, `secret`, `format`, `setup_url`, and a non-secret `default`. Every `credential_setup:` entry must name a variable that `credentials:` declares — an entry naming anything else is dropped with a named error while its valid siblings survive. `secret` defaults to true and `setup_url` must be HTTPS with no embedded userinfo, so a credential is masked until an author says otherwise and a setup link can't impersonate a vendor domain. See [Credential Management](../credentials/credential-management.md).
+
+## I rotated the platform GitHub token — do I need to restart my agents?
+
+No. Saving a new platform PAT propagates it to every running agent that uses it within seconds: the container environment, the workspace `.env`, and the git credential configuration are all updated, so the rotation takes effect for the agent's next push. Agents carrying their **own** per-agent token are deliberately untouched by a global rotation — update those on the agent's Git tab. See [GitHub PAT Setup](../integrations/github-pat-setup.md).

@@ -103,3 +103,15 @@ The verified email is the identity across every channel: a user verified on Tele
 Yes. An admin can tune the anti-spam caps on **agent-initiated** ("proactive") sends under **Settings → General → Proactive message limits**: Slack per-channel and per-agent, Telegram per-group and per-agent, and proactive direct messages per recipient — each a per-hour limit. The shipped defaults are 10/hour per channel/group/recipient and 100/hour per agent, so nothing changes until you raise them. Set a value to **0** to make that cap unlimited (the guardrail is disabled and the save warns you). Changes take effect immediately, with no restart. This is the setting to raise for a legitimate high-volume agent — for example, one that posts a Slack message for each inbound support request.
 
 Note: these caps apply only to messages the agent *starts*. **Replies to inbound messages** (a DM, an @mention, or a thread reply through a channel) are never limited by them.
+
+## Does Telegram show anything while a long task is running?
+
+Yes, three layers, all fail-soft and on by default per bot binding. A 👀 reaction lands on your message the moment the agent picks it up (and is cleared when the turn ends), the standard typing indicator fires, and past 30 seconds the bot posts a quiet "⏳ Working on it — N min elapsed" note (sent without a notification) that it edits about once a minute and deletes when the turn finishes. Turn it off in the Telegram dialog on the agent's Sharing tab. In groups it only fires on @mentions and replies — a bot in `observe` mode stays silent, since a visible reaction would reveal that it is listening. See [Telegram Integration](../integrations/telegram-integration.md).
+
+## An agent delegated my Telegram request to another agent — will I hear back?
+
+Yes. When work that started from Telegram finishes later — because it was delegated or run in the background — the result is posted back into the originating chat, threaded to your original message and sent by the same bot you were talking to. Failures report honestly rather than vanishing. An ordinary chat turn already answers inline, so it is never double-posted. Group chats have a per-group consent flag (on by default) that suppresses these when turned off; direct messages are consented by construction. Slack behaves the same way. See [Telegram Integration](../integrations/telegram-integration.md) and [Slack Integration](../integrations/slack-integration.md).
+
+## A file someone sent my agent in Slack never arrived. Why?
+
+Inbound Slack files are downloaded through a host allow-list: the authenticated first request may only reach Slack's own API host, and redirects are followed only to Slack's file and edge-CDN hosts, over HTTPS, with each hop re-checked and a bounded hop count. A download to any other host is refused — and logged as an error, so a refusal is visible in the platform log rather than silently dropped. Check `platform.json` for the refusal before assuming the message never arrived. See [Slack Integration](../integrations/slack-integration.md).

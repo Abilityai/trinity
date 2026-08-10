@@ -1,89 +1,178 @@
 # Skills and Playbooks
 
-Platform-managed skills that can be assigned to agents and invoked from the UI via the Playbooks tab or chat autocomplete.
+Reusable capability packages that Trinity syncs from git repositories, assigns to agents, and copies into their containers — invocable from the Playbooks tab, from chat autocomplete, or by the agent itself.
 
 > 📺 **Watch:** [Building Agents — Playbooks, Plugins, Deployment](https://youtu.be/MDxRZBikf70) *(Apr 2026)* · [Build an AI Recruiter Agent](https://youtu.be/K7hFWyFIf-Y) *(Jun 2026)* · [all videos](../videos.md)
 
 ## Concepts
 
-- **Skill** -- A reusable capability shipped as a full directory package `.claude/skills/<name>/` — a `SKILL.md` plus any optional `scripts/`, templates, and resources — stored in the platform's skills library. Skills contain instructions, tools, and procedures that agents can execute.
-- **Skills Library** -- A GitHub repository synced to Trinity containing all available skills. Admins can trigger a sync from Settings.
-- **Skill Assignment** -- An owner assigns skills to agents. Assigned skill packages are injected into the agent on startup.
-- **Playbook** -- A skill invoked from the UI. The Playbooks tab shows assigned skills with a "Run" button.
-- **Playbook Autocomplete** -- Type `/` in the Chat tab input to see a dropdown of available playbooks with ghost text showing command syntax and argument hints.
+- **Skill** — A reusable capability shipped as a whole directory: a `SKILL.md` plus optional `scripts/`, templates, and resources.
+- **Skill source** — A GitHub repository Trinity syncs skills from. An installation can have several.
+- **Skills library** — The merged view of every enabled source. This is what you browse and assign from.
+- **Skill assignment** — An owner assigns skills to an agent. Assigned packages are copied into the agent on start (or on demand).
+- **Playbook** — A skill invoked from the UI. The Playbooks tab shows assigned, user-invocable skills with a **Run** button.
+- **Playbook autocomplete** — Type `/` in the Chat tab to see available playbooks with argument hints.
 
 ## How It Works
 
-### Admin -- Managing Skills
+### The skills library is multi-source
 
-1. Go to **Settings** or the **Skills** admin page.
-2. Sync the skills library from GitHub.
-3. Create, edit, or delete skills (full CRUD).
-4. View skill details and usage.
+Trinity syncs from **one or more** GitHub repositories: a bundled public community catalog that ships pre-configured on fresh installs, plus any custom repositories your admin adds.
 
-### Owner -- Assigning Skills
+Manage sources in **Settings → Agents → Skills Library sources**. Each source has a name, a repository URL (github.com only), a ref (branch or tag), an enabled flag, and a priority.
 
-1. Open the agent detail page.
-2. Go to the skills/playbooks section.
-3. Assign skills from the library to this agent.
-4. Skills are injected on the next agent start.
+**When two sources ship the same skill name**, resolution is by priority (lower wins), then by age. Custom sources default to priority 100 and the bundled community source to 1000 — so **your own repository always wins** a name clash, and a source you add later needs no reordering.
 
-### User -- Running Playbooks
+Nothing is overwritten silently. The winning skill carries a `shadowed_by` marker naming the sources whose copy is unreachable, shown in the library listing, on the source status, and as a warning at injection time. Skill names stay bare (`pdf-export`, never `community/pdf-export`), so an agent's `/skill-name` invocation never changes because a source was added.
 
-1. Open agent detail, click the **Playbooks** tab.
-2. See the list of assigned skills with descriptions.
-3. Click **Run** on a playbook -- this sends the skill as a task to the agent.
-4. Or: in the **Chat** tab, type `/` to autocomplete a playbook command.
+Deleting a source does **not** unassign its skills — they keep resolving through whatever source still provides them.
 
-### Skill Injection on Agent Start
+#### Repository layout
 
-When an agent starts, each assigned skill's whole package is written to the agent's `~/.claude/skills/<name>/` directory (SKILL.md plus its scripts and resources), and a **Platform Skills** section is written into the agent's `CLAUDE.md` listing the injected skills. The agent can then use them as slash commands during execution.
+A source repository can lay its skills out in one of three ways. Trinity tries them in order and falls through on anything invalid:
+
+1. **Declared** — a `catalog.yaml` at the repo root with a `skills_root:` key naming the directory that holds skill folders. One flat level deep.
+2. **Conventional** — a `skills/` directory containing at least one `<name>/SKILL.md`.
+3. **Legacy** — `.claude/skills/`, the original convention.
+
+Existing repositories keep working with no configuration. The resolved root is reported per source in the library status, along with a `layout_conflict` flag if a repository carries more than one recognizable layout.
+
+#### Supply-chain posture: pinned tags
+
+Skills carry executable `scripts/`, and library automation can push them to your whole fleet unattended. So:
+
+- The bundled **community source is pinned to a tag**, not a branch head. New upstream commits do not reach your fleet until the tag is bumped and you sync.
+- **Custom sources track a branch**, because you control who can write to them.
+- **A pinned tag that moves is refused**, not adopted. If a tag now resolves to a different commit than the last sync, the sync reports `moved_tag` and leaves your fleet alone. Moving to new content means pointing the source at a new tag name — an explicit admin action.
+
+To revoke a skill from the community catalog, a new tag is cut without it.
+
+### Browsing and assigning
+
+Two surfaces, deliberately different jobs:
+
+| Surface | Purpose |
+|---------|---------|
+| **Library** page → Skills section | Fleet-level browse. See every skill, its contract, its source, and the library's honest sync state — without opening an agent. Read-only. |
+| Agent detail → **Skills** tab | Assignment. Pick skills from the library for this agent, save, and sync. |
+
+On the Skills tab you see two lists: **Assigned to this agent** (with each skill's version short-SHA, description, and the outcome of the last sync) and **Library** (everything available). Select, save, and — if the agent is running — click **Sync now** to copy the packages in immediately. If the agent is stopped, assignment still saves; the files arrive on next start.
+
+Per-skill outcomes are shown honestly. A skill that landed but is missing a declared binary or environment variable is flagged with a warning, not reported as a clean success.
+
+### Skill injection
+
+When an agent starts, each assigned skill's whole package is written to `~/.claude/skills/<name>/`, and a **Platform Skills** section is written into the agent's `CLAUDE.md` listing what was injected and what is still missing.
 
 Injection is:
 
-- **Tree-SHA versioned and idempotent** — a skill whose package is unchanged since the last inject is skipped on start; only changed skills transfer.
-- **Pruned by manifest diff** — files removed from a skill in the library are removed from the agent on the next injection (only paths the platform wrote are ever touched; agent-authored files are left alone).
-- **Gitignored** — injected skill directories are added to the agent's `.gitignore` and left untracked, so the agent's git auto-sync never commits platform packages.
+- **Versioned and idempotent** — each skill's version is its git tree SHA. A skill unchanged since the last inject is skipped on start; only changed skills transfer. A manual **Sync now** is an unconditional repair.
+- **Pruned by manifest diff** — files removed from a skill upstream are removed from the agent on the next injection. Only paths the platform wrote are ever touched; agent-authored files and runtime artifacts are structurally untouched.
+- **Gitignored** — injected skill directories are added to the agent's `.gitignore` and untracked, so the agent's git auto-sync never commits platform packages into your repository.
+- **Bounded** — 10 MiB per skill, 50 MiB per injection. An over-cap skill fails by name; the rest still inject.
 
-This is a backward-compatible change with no feature flag. On an older agent image that predates package support, a multi-file skill degrades gracefully to **SKILL.md only** (the extra files are dropped with an honest warning) — the skill still works.
+On an older agent image that predates package support, a multi-file skill degrades to **SKILL.md only** with an honest warning — the skill still works.
 
-### Skill Frontmatter and Dependency Checks
+### Unassigning removes the package
+
+Unassigning a skill — whether you remove one skill or drop names from a bulk save — deletes the injected package from the agent, using the same manifest the injection recorded. Only paths a previous injection wrote are removed; directories left empty are cleaned up; anything else in the directory survives. The skill's `.gitignore` line is stripped too.
+
+The unassignment itself always succeeds. If the agent is stopped, busy, or unreachable, removal is reported as deferred rather than failing the unassign — and the agent reconciles on next start, removing any platform-managed skill that is no longer assigned.
+
+A reconcile that would remove an unusually large number of skills from one agent **refuses wholesale** and raises an operator alert instead, so a database problem cannot silently strip a fleet.
+
+### Keeping the library current (automation)
+
+Both settings default **OFF** — a zero-config installation behaves exactly as it always did. Configure them in **Settings → Agents → Skills Library → Automation**:
+
+| Setting | Effect |
+|---------|--------|
+| **Auto-sync** | Trinity pulls every enabled source on an interval (default 1 hour; 5 minutes to 24 hours). Changing the interval applies without a restart. |
+| **Fleet re-inject** | When a sync finds the library actually moved, running agents receive the updated packages automatically. |
+
+Key properties:
+
+- A no-op pull never sweeps the fleet — re-inject fires only when a commit actually changed.
+- Stopped agents are skipped; they pick the change up on next start.
+- The sweep runs at bounded concurrency and skips (rather than waits on) an agent that is mid-injection, reporting what it skipped.
+- The panel shows the last sync status, the last error, and the last fleet report. If ≥1 agent failed, an operator-queue alert is raised.
+
+Sync failures are never silent, and a sync contended by another worker reports `busy` rather than claiming failure.
+
+### Skill frontmatter and dependency checks
 
 A skill's `SKILL.md` frontmatter can declare:
 
-- `requires:` with `packages`, `binaries`, and `env` lists — the dependencies the skill expects.
-- `user_invocable:` — whether the skill appears as a runnable playbook.
-- `allowed-tools:` — the tools the skill is permitted to use.
+- `description:` — shown in the library and in autocomplete.
+- `automation:` — the skill's intended automation level.
+- `user_invocable:` — whether the skill appears as a runnable playbook (default true).
+- `allowed-tools:` — the tools the skill may use.
+- `requires:` with `packages`, `binaries`, and `env` lists.
 
-At injection, Trinity runs a **declaration-only dependency check** and produces honest per-skill warnings (for example, a missing binary or a missing environment variable) instead of failing the injection. Declared package installs are surfaced but not performed. Warnings are reflected in the agent's Platform Skills section so the owner can see what a skill still needs. Environment checks report variable **names** only — values are never read.
+At injection, Trinity runs a **declaration-only** dependency check and produces per-skill warnings (a missing binary, a missing environment variable) instead of failing. Declared package installs are surfaced but not performed. Environment checks report variable **names** only — values are never read.
 
-### Running Skills Without Assignment (Skill Runner)
+A skill whose frontmatter fails to parse gets a named warning and a description falling back to its first paragraph. It is never silently dropped.
+
+### Running playbooks
+
+1. Open agent detail → **Playbooks** tab.
+2. See assigned, user-invocable skills with descriptions.
+3. Click **Run** to send the skill as a task to the agent.
+4. Or, in **Chat**, type `/` to autocomplete a playbook command.
+
+### Running skills without assignment (Skill Runner)
 
 Two MCP tools let an agent run a **permitted** self-contained skill without assigning it:
 
 | Tool | Description |
 |------|-------------|
-| `list_runnable_skills()` | List the skills this agent is permitted to run (its own permitted set, decided by an operator — not the whole library) |
+| `list_runnable_skills()` | List the skills this agent is permitted to run (its permitted set, decided by an operator — not the whole library) |
 | `run_skill(skill_name, input?)` | Run a permitted skill and return its result |
 
-The runner is a **separate workspace** — it cannot see the calling agent's files. Use it for self-contained skills (call an API, generate an artifact from the `input` you pass). A skill that must operate on the caller's own files still goes through assignment and injection instead.
+The runner uses a **separate workspace** — it cannot see the calling agent's files. Use it for self-contained skills (call an API, generate an artifact from the `input` you pass). A skill that must operate on the caller's own files goes through assignment and injection instead.
 
-The Skill Runner is an **enterprise-gated** surface. In a community build, `run_skill` and `list_runnable_skills` return a "disabled" result.
+The Skill Runner is an **entitled** surface. In a community build, `run_skill` and `list_runnable_skills` return a "disabled" result.
 
 ## For Agents
 
-MCP tools available for skill and playbook management:
+MCP tools for skills and playbooks:
 
 | Tool | Description |
 |------|-------------|
-| `list_skills()` | List all platform skills |
-| `get_skill(id)` | Get skill details |
-| `get_skills_library_status()` | Library sync status |
-| `assign_skill_to_agent(skill_id, agent_name)` | Assign a skill to an agent |
-| `set_agent_skills(agent_name, skill_ids)` | Set all skills for an agent |
-| `sync_agent_skills(agent_name)` | Re-inject skills into a running agent |
-| `get_agent_skills(agent_name)` | List skills assigned to an agent |
+| `list_skills()` | List library skills. Each entry carries its `source` name and any `shadowed_by` sources. |
+| `get_skill(name)` | Skill details and contract |
+| `get_skills_library_status()` | Library sync status, including the per-source array |
+| `assign_skill_to_agent(skill_name, agent_name)` | Assign one skill |
+| `set_agent_skills(agent_name, skill_names)` | Set the full skill list (dropping a name unassigns and removes it) |
+| `sync_agent_skills(agent_name)` | Force re-inject into a running agent |
+| `get_agent_skills(agent_name)` | List an agent's assigned skills |
+
+**REST endpoints** — see [Backend API Docs](http://localhost:8000/docs) for full schemas.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/skills/library` | GET | Merged skill listing across sources |
+| `/api/skills/library/status` | GET | Sync state + per-source array |
+| `/api/skills/library/sync` | POST | Sync every enabled source (admin, human-only) |
+| `/api/skills/sources` | GET/POST | List / register a source (admin, human-only) |
+| `/api/skills/sources/{id}` | PUT/DELETE | Edit / remove a source (admin, human-only) |
+| `/api/skills/sources/{id}/sync` | POST | Sync one source (admin, human-only) |
+| `/api/settings/skills-library` | GET/PUT | Auto-sync and fleet re-inject configuration (admin) |
+| `/api/agents/{name}/skills` | GET/PUT | Read / set an agent's assignments (owner) |
+| `/api/agents/{name}/skills/{skill}` | POST/DELETE | Assign / unassign one skill (owner) |
+| `/api/agents/{name}/skills/inject` | POST | Force re-inject into this agent (owner) |
+
+Source management is **REST-only and human-only** — there is no MCP tool for it, and agent-scoped keys are rejected. Registering or syncing a source decides which repository your fleet executes code from, so it is an operator action regardless of the caller's role.
+
+## Limitations
+
+- Auto-sync is one library-wide timer over every enabled source, not a per-source cadence.
+- Skill names share one flat namespace. Shadowed copies are not offered as separate entries because they are unreachable.
+- Assignment happens per agent. There is no fleet-wide "assign to everything" action.
+- The declared-`skills_root` layout supports a single flat directory, one level deep. Nested layouts require a future schema version, which current installations refuse (falling back to the probe) rather than misread.
 
 ## See Also
 
-- [Scheduling](scheduling.md) -- Automate skill execution on a schedule
+- [Scheduling](scheduling.md) — automate skill execution on a schedule
+- [Abilities Marketplace](abilities-marketplace.md) — the plugin marketplace for building agents
+- [Agent Configuration](../agents/agent-configuration.md) — per-agent settings

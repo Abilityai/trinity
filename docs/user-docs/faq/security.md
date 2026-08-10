@@ -81,3 +81,19 @@ Complete first-run setup while still behind a VPN or firewall, and set a strong 
 ## Who controls which users can access an agent?
 
 Access is governed by Trinity's role and sharing model: owners share agents with specific users, admins see everything, and roles gate who can create agents at all. That model is covered in its own documentation rather than here. See [Roles and Permissions](../getting-started/roles-and-permissions.md) and [Access Control](../sharing-and-access/access-control.md).
+
+## An admin API key can do anything an admin can — is that a problem?
+
+It was, and it is now fenced. An MCP key resolves to the user who created it and carries that user's role, so on a default admin-owned installation an agent's own injected key would satisfy any plain "is this caller an admin?" check. Endpoints whose blast radius is operator-scale now require a **human** caller in addition to the role, and reject API keys of any scope regardless of the owner: approving an oversized retention deletion, restarting or reinitializing the system agent, registering/editing/syncing a skill source, reading an agent's credential checklist, reading or rotating an agent's MCP key, binding an agent to a GitHub repository, writing an evaluation, and editing organizational tags. See [Authentication](../api-reference/authentication.md).
+
+## How do I know my agent is authenticating to Trinity as itself?
+
+Check the MCP key panel on the agent's **Settings** tab. It reports a health state and offers a **Verify** action that probes the container's actual configuration and tells you whether it is carrying its own key, a foreign user key, another agent's key, an unknown key, or a duplicate entry. This matters because the agent-to-agent permission matrix only applies to agent-scoped keys — a container holding a *user*-scoped key operates with the owner's identity and bypasses the matrix. If something is wrong, **Regenerate** rotates and delivers a fresh key; Trinity also self-heals a missing or mismatched key on the agent's next start. See [MCP Server](../integrations/mcp-server.md).
+
+## Can a skills repository push executable code to my whole fleet without me noticing?
+
+Only if you enable fleet re-inject, and even then the supply chain is pinned. Skills carry executable scripts, so the bundled community source — which accepts public contributions — is pinned to a **tag**, not a branch head, and a tag that later resolves to a different commit is **refused** rather than adopted. Custom sources, whose write access you control, track a branch. Both automation settings (auto-sync, fleet re-inject) default to off, source URLs are locked to github.com, and registering or syncing a source is admin-and-human-only because it decides which repository your fleet executes code from. See [Skills and Playbooks](../automation/skills-and-playbooks.md).
+
+## Is anything stopping a retention setting from wiping my history?
+
+Yes, two independent controls. Retention windows have exactly one write path, which type- and range-validates every value all-or-nothing and audit-logs the change; the generic settings endpoint refuses those keys. And any sweep that would delete more than a fixed safety threshold (1,000 rows) of a single table **refuses** to run, logs an error, and raises an operator alarm — an admin must then approve it explicitly, bound to the exact window in force and single-use. Note the counter-intuitive part: garbage input always failed safe (retain forever); a *small valid number* is the dangerous input, which is why the approval gate, not the validation, is what actually protects you. "Reset to defaults" deliberately skips retention windows. See [Monitoring](../operations/monitoring.md).
