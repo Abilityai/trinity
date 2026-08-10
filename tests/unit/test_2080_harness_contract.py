@@ -12,7 +12,9 @@ quiet, and each fails loudly rather than reducing what runs.
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -212,3 +214,55 @@ def test_the_audit_passes_an_allowlisted_skip(tmp_path):
     from harness.audit_skips import main
 
     assert main(["audit_skips.py", str(tmp_path)]) == 0
+
+
+# ---------------------------------------------------------------------------
+# The venv the runner bootstraps must not be a tracked path (#2082 follow-up)
+# ---------------------------------------------------------------------------
+
+def test_no_tracked_symlink_escapes_the_repo():
+    """A tracked symlink pointing outside the worktree is broken for everyone else.
+
+    #2082 committed `tests/.venv` as a symlink to
+    `/home/<dev>/Desktop/abilityai/trinity/.venv`. Two failures, neither loud:
+
+    1. It published a developer's local path and username to a public repo.
+    2. It broke the very runner that PR exists to fix. `run-full.sh` guards
+       creation with `[ ! -d .venv ]`, which is *false* for a dangling symlink,
+       so it fell through to `python3 -m venv .venv` against an absolute path
+       that does not exist on any other machine and exited 2.
+
+    `.gitignore` did not stop it because `.venv/` and `.venv*/` carry trailing
+    slashes and therefore match directories only — a symlink is not a directory.
+    """
+    tracked = subprocess.run(
+        ["git", "ls-files", "-s"], cwd=_REPO, capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+
+    offenders = []
+    for line in tracked:
+        meta, _, path = line.partition("\t")
+        if not meta.startswith("120000"):  # symlink blobs only
+            continue
+        target = (_REPO / path).parent / os.readlink(_REPO / path)
+        try:
+            target.resolve().relative_to(_REPO.resolve())
+        except ValueError:
+            offenders.append(f"{path} -> {os.readlink(_REPO / path)}")
+
+    assert not offenders, (
+        "tracked symlink(s) resolve outside the repository — these are dangling "
+        "on every other machine and may leak a local path:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_runner_venv_is_not_tracked():
+    """`tests/.venv` is created by the runner; it must never be a tracked path."""
+    tracked = subprocess.run(
+        ["git", "ls-files", "tests/.venv"], cwd=_REPO, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert tracked == "", (
+        "tests/.venv is tracked; run-full.sh creates it per-machine and a tracked "
+        "copy (dir, file or symlink) makes the bootstrap machine-specific"
+    )

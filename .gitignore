@@ -17,7 +17,12 @@ __pycache__/
 .Python
 env/
 venv/
+# No trailing slash: the slash forms match DIRECTORIES only, so a *symlink*
+# named .venv slipped past them and was committed (#2082 shipped one pointing
+# at a developer's home directory). These also match a symlink or a file.
+.venv
 .venv/
+.venv*
 .venv*/
 ENV/
 build/
