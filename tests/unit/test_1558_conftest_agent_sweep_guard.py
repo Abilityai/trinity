@@ -36,7 +36,7 @@ if _u is not None and _TESTS_DIR not in (getattr(_u, "__file__", "") or ""):
     # under tests/utils. (Backend `utils.helpers` stays cached — it's unrelated.)
     sys.modules.pop("utils", None)
 
-from utils.cleanup import (
+from testkit.cleanup import (
     EPHEMERAL_AGENT_PREFIX,
     is_local_target,
     is_suite_owned_agent,

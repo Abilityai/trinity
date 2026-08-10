@@ -1,0 +1,435 @@
+# Canonical Trinity screenshot store — the single source of truth.
+#
+# Every UI screenshot referenced by docs/ or README.md lives in this directory and
+# has exactly one entry below. Nothing else in the repo stores UI screenshots.
+#
+#   Refresh:  /capture-screenshots  (writes here, then updates captured_at + captured_commit)
+#   Verify:   python3 scripts/ci/check_screenshots.py
+#
+# Fields
+#   file            filename in this directory (flat, no subdirectories)
+#   title           human label for the surface
+#   route           URL path on a running instance, so a refresh lands on the same screen
+#   shows           what the image must depict — the recapture brief
+#   sources         frontend files whose change makes this screenshot stale.
+#                   The freshness check compares the newest commit date over these
+#                   paths against captured_at. Empty list = never goes stale from our
+#                   releases (see external: true).
+#   captured_at     ISO date the image was captured
+#   captured_commit commit the capture was taken at ("unknown" for pre-manifest images)
+#   external        true = not Trinity's own UI (a third-party screen); freshness skipped
+#
+# The one deliberate exception to this store: release-note screenshots under
+# docs/assets/screenshots/whats-new/<version>/ are frozen point-in-time snapshots and
+# must NEVER be refreshed — see that directory's README.md.
+
+version: 1
+
+viewport:
+  width: 1440
+  height: 900
+  device_scale_factor: 2
+  theme: dark
+
+screenshots:
+  # ---------------------------------------------------------------- auth
+  - file: login.png
+    title: Login
+    route: /login
+    shows: The email/admin login form on a fresh instance.
+    sources:
+      - src/frontend/src/views/Login.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  # ---------------------------------------------------------------- dashboard
+  - file: dashboard-grid.png
+    title: Dashboard — Grid view
+    route: /?view=grid
+    shows: The fleet as a canvas of agent tiles — live status, activity sparkline, success
+      rate, cost, and inline Run/Auto toggles per agent.
+    sources:
+      - src/frontend/src/views/Dashboard.vue
+      - src/frontend/src/components/FleetGrid.vue
+      - src/frontend/src/components/AgentTile.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: dashboard-timeline.png
+    title: Dashboard — Timeline view
+    route: /?view=timeline
+    shows: The replay timeline with live executions across the fleet.
+    sources:
+      - src/frontend/src/views/Dashboard.vue
+      - src/frontend/src/components/ReplayTimeline.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: agents-list.png
+    title: Dashboard — List view
+    route: /?view=list
+    shows: The fleet as rows with status, tags, run/autonomy toggles, and name/status filters.
+    sources:
+      - src/frontend/src/views/Dashboard.vue
+      - src/frontend/src/components/AgentListPanel.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  # ---------------------------------------------------------------- agent detail
+  - file: agent-overview.png
+    title: Agent Detail — Overview tab
+    route: /agents/{name}?tab=overview
+    shows: The About lead, needs-attention banner, and activity trend charts (executions
+      by type, success rate, duration) with the full tab strip visible.
+    sources:
+      - src/frontend/src/views/AgentDetail.vue
+      - src/frontend/src/components/OverviewPanel.vue
+      - src/frontend/src/components/AgentHeader.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: agent-chat.png
+    title: Agent Detail — Chat tab
+    route: /agents/{name}?tab=chat
+    shows: The unified Chat tab with the session-mode toggle on.
+    sources:
+      - src/frontend/src/components/SessionPanel.vue
+      - src/frontend/src/components/chat
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: agent-tasks.png
+    title: Agent Detail — Tasks tab
+    route: /agents/{name}?tab=tasks
+    shows: Per-agent execution history with success rate, total cost, and average duration.
+    sources:
+      - src/frontend/src/components/ExecutionsPanel.vue
+    captured_at: 2026-06-01
+    captured_commit: unknown
+
+  - file: agent-schedules.png
+    title: Agent Detail — Schedules tab
+    route: /agents/{name}?tab=schedules
+    shows: Active schedules with cron expressions, inline per-schedule stats, and execution
+      history.
+    sources:
+      - src/frontend/src/components/SchedulesPanel.vue
+      - src/frontend/src/components/ScheduleAnalyticsCard.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: agent-loops.png
+    title: Agent Detail — Loops tab
+    route: /agents/{name}?tab=loops
+    shows: Sequential loop runs with per-iteration status and stop reason.
+    sources:
+      - src/frontend/src/components/LoopsPanel.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: loop-failure-policy.png
+    title: Agent Detail — loop failure policy
+    route: /agents/{name}?tab=loops
+    shows: The on-failure abort/continue selector with the consecutive-failure cutoff.
+    sources:
+      - src/frontend/src/components/LoopsPanel.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: agent-skills.png
+    title: Agent Detail — Skills tab
+    route: /agents/{name}?tab=skills
+    shows: Assigned skills with the library browse/assign surface.
+    sources:
+      - src/frontend/src/components/SkillsPanel.vue
+      - src/frontend/src/components/skills
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: agent-permissions.png
+    title: Agent Detail — Permissions tab
+    route: /agents/{name}?tab=permissions
+    shows: The agent-to-agent collaboration matrix with Allow All / Allow None controls.
+    sources:
+      - src/frontend/src/components/AgentPermissionsMatrix.vue
+    captured_at: 2026-06-01
+    captured_commit: unknown
+
+  - file: agent-folders.png
+    title: Agent Detail — Folders tab
+    route: /agents/{name}?tab=folders
+    shows: Expose Shared Folder and Mount Shared Folders toggles with the mount workflow.
+    sources:
+      - src/frontend/src/components/FoldersPanel.vue
+    captured_at: 2026-06-01
+    captured_commit: unknown
+
+  - file: agent-sharing-access.png
+    title: Agent Detail — Sharing / access control
+    route: /agents/{name}?tab=sharing
+    shows: Identity Proof (require verified email, open access) and the Team Sharing
+      allow-list.
+    sources:
+      - src/frontend/src/components/SharingPanel.vue
+      - src/frontend/src/components/AccessPanel.vue
+    captured_at: 2026-06-01
+    captured_commit: unknown
+
+  - file: agent-sharing-slack-bot.png
+    title: Agent Detail — Slack bot binding
+    route: /agents/{name}?tab=sharing
+    shows: The per-agent Slack channel binding panel.
+    sources:
+      - src/frontend/src/components/SlackAgentBotPanel.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: agent-voice-replies.png
+    title: Agent Detail — voice replies
+    route: /agents/{name}?tab=sharing
+    shows: Agent-level voice-reply enable, voice picker, and per-channel toggles.
+    sources:
+      - src/frontend/src/components/VoiceRepliesControl.vue
+      - src/frontend/src/components/VoiceChannelToggle.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: agent-settings-mcp-expose.png
+    title: Agent Detail — Expose via MCP
+    route: /agents/{name}?tab=settings
+    shows: The MCP-exposure toggle with the derived tool name and Copy connection config.
+    sources:
+      - src/frontend/src/components/McpExposedPanel.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: agent-git.png
+    title: Agent Detail — Git tab
+    route: /agents/{name}?tab=git
+    shows: Sync state, ahead/behind counts, auto-sync toggle, and the bind-to-own-repo action.
+    sources:
+      - src/frontend/src/components/GitPanel.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: agent-custom-dashboard.png
+    title: Agent Detail — agent-defined Dashboard tab
+    route: /agents/{name}?tab=dashboard
+    shows: An agent rendering its own dashboard.yaml metrics.
+    sources:
+      - src/frontend/src/components/DashboardPanel.vue
+    captured_at: 2026-06-01
+    captured_commit: unknown
+
+  - file: a2a-config-panel.png
+    title: Agent Detail — A2A configuration
+    route: /agents/{name}?tab=a2a
+    shows: Exposure toggle, Agent Card URL, advertised skills, inbound allow-list, and
+      the outbound endpoint registry.
+    sources:
+      - src/frontend/src/components/A2aPanel.vue
+    captured_at: 2026-08-08
+    captured_commit: unknown
+
+  - file: a2a-card-url.png
+    title: Agent Detail — A2A Agent Card URL
+    route: /agents/{name}?tab=a2a
+    shows: The public discovery URL with its one-click Copy button.
+    sources:
+      - src/frontend/src/components/A2aPanel.vue
+    captured_at: 2026-08-08
+    captured_commit: unknown
+
+  - file: brain-orb.png
+    title: Brain Orb — an agent's self-rendering mind
+    route: /agents/{name}/brain
+    shows: The 3D knowledge graph woven from the agent's own notes, edges, and activity,
+      with the note detail panel.
+    sources:
+      - src/frontend/src/views/AgentBrainOrb.vue
+      - src/frontend/public/brain-orb
+    captured_at: 2026-07-08
+    captured_commit: unknown
+
+  - file: ghost-agent-detail.png
+    title: Agent Detail — ephemeral (ghost) agent
+    route: /agents/{name}
+    shows: A budgeted ephemeral agent with its GHOST badge and remaining budget.
+    sources:
+      - src/frontend/src/views/AgentDetail.vue
+      - src/frontend/src/components/AgentHeader.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: model-picker.png
+    title: Model selector
+    route: /agents/{name}?tab=chat
+    shows: The per-turn model picker with the selectable model list.
+    sources:
+      - src/frontend/src/components/ModelSelector.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  # ---------------------------------------------------------------- operations
+  - file: operations-executions.png
+    title: Operations — Executions tab
+    route: /operations?tab=executions
+    shows: Fleet-wide run list with Total / Success rate / Failed / Cost stat cards and
+      per-agent, status, and trigger filters.
+    sources:
+      - src/frontend/src/views/Operations.vue
+      - src/frontend/src/components/ExecutionsPanel.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: operations-needs-response.png
+    title: Operations — Needs Response tab
+    route: /operations?tab=needs-response
+    shows: The Operating Room queue with pending approvals and questions awaiting an operator.
+    sources:
+      - src/frontend/src/views/Operations.vue
+      - src/frontend/src/components/operator
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: operations-health.png
+    title: Operations — Health tab
+    route: /operations?tab=health
+    shows: Fleet health monitoring with per-agent status and latency.
+    sources:
+      - src/frontend/src/views/Operations.vue
+      - src/frontend/src/components/MonitoringPanel.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: executions-event-reminder.png
+    title: Execution detail — reminder-triggered run
+    route: /executions/{id}
+    shows: A single execution's detail with a reminder trigger, cost, and tool calls.
+    sources:
+      - src/frontend/src/views/ExecutionDetail.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  # ---------------------------------------------------------------- library / create
+  - file: templates.png
+    title: Library — Agent Templates
+    route: /library#templates
+    shows: The starter, GitHub, and custom template card grids.
+    sources:
+      - src/frontend/src/views/Library.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: create-agent.png
+    title: Create Agent
+    route: /library#templates
+    shows: The create-agent modal with template selection and resource settings.
+    sources:
+      - src/frontend/src/components/CreateAgentModal.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  # ---------------------------------------------------------------- sessions / portal
+  - file: sessions-room.png
+    title: Sessions — multi-agent room
+    route: /sessions
+    shows: A room with several agents participating in one thread.
+    sources:
+      - src/frontend/src/components/rooms
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: portal-chat.png
+    title: Client portal — chat
+    route: /portal
+    shows: The external client portal chat surface.
+    sources:
+      - src/frontend/src/views/Portal.vue
+      - src/frontend/src/components/portal
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  # ---------------------------------------------------------------- settings
+  - file: settings-general.png
+    title: Settings — General
+    route: /settings?tab=general
+    shows: Platform settings including agent defaults and feature toggles.
+    sources:
+      - src/frontend/src/views/Settings.vue
+      - src/frontend/src/components/settings/SettingsPanel.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: settings-retention.png
+    title: Settings — Data retention
+    route: /settings?tab=retention
+    shows: Effective retention windows per key with their source (db-row vs code-default).
+    sources:
+      - src/frontend/src/views/Settings.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: settings-github-pat.png
+    title: Settings — GitHub PAT
+    route: /settings?tab=github
+    shows: The per-user GitHub personal access token panel.
+    sources:
+      - src/frontend/src/components/settings/UserGitHubPatPanel.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: settings-proactive-limits.png
+    title: Settings — proactive messaging limits
+    route: /settings?tab=general
+    shows: Per-recipient and per-agent proactive-message rate limits.
+    sources:
+      - src/frontend/src/views/Settings.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: settings-skills-library.png
+    title: Settings — skills library sources
+    route: /settings?tab=skills
+    shows: Registered skill sources with sync status, ref pin, and priority.
+    sources:
+      - src/frontend/src/components/SkillSourcesPanel.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: settings-activation.png
+    title: Settings — activation funnel
+    route: /settings?tab=activation
+    shows: The activation funnel panel.
+    sources:
+      - src/frontend/src/components/settings/ActivationFunnelPanel.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  - file: mcp-api-keys.png
+    title: Settings — MCP API keys
+    route: /settings?tab=mcp-keys
+    shows: Auto-generated agent keys with usage stats and the client connection snippet.
+    sources:
+      - src/frontend/src/components/settings/McpKeysTab.vue
+    captured_at: 2026-06-01
+    captured_commit: unknown
+
+  - file: usage-sharing-inspect.png
+    title: Settings — usage sharing inspector
+    route: /settings?tab=telemetry
+    shows: The opt-in telemetry sharing panel with the exact payload inspector.
+    sources:
+      - src/frontend/src/components/settings/TelemetrySharingPanel.vue
+    captured_at: 2026-08-09
+    captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
+
+  # ---------------------------------------------------------------- external (never stale)
+  - file: external-github-pat-scopes.png
+    title: GitHub — classic token scopes
+    route: https://github.com/settings/tokens/new
+    shows: GitHub's own new-classic-token page with the `repo` scope checked.
+    sources: []
+    external: true
+    captured_at: 2026-04-23
+    captured_commit: unknown

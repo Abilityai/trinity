@@ -21,8 +21,8 @@ These tests hit the running backend and need NO agent and NO Brain Orb flags:
 
 import pytest
 
-from utils.api_client import TrinityApiClient
-from utils.assertions import assert_status, assert_status_in
+from testkit.api_client import TrinityApiClient
+from testkit.assertions import assert_status, assert_status_in
 
 # Deliberately nonexistent: these tests assert wiring, not agent behavior.
 _AGENT = "smoke-brain-orb-no-such-agent"

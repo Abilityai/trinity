@@ -46,10 +46,14 @@ jobs:
           set -uo pipefail
           # Genuinely-private identifiers. Two families:
           #
-          #  1. Private module names with no OSS meaning (SIEM, SCIM, client_portal,
-          #     permissions_matrix, two_factor). NOTE: a guard must name what it
+          #  1. Private module names with no OSS meaning (SIEM, SCIM,
+          #     permissions_matrix, two_factor). `client_portal` was here until
+          #     ent#356 moved that module into OSS core — it is now a public
+          #     package (`src/backend/client_portal/`) mounted unconditionally in
+          #     main.py, so forbidding the token would fail the build on the OSS
+          #     code itself. NOTE: a guard must name what it
           #     forbids, and this file is public — so every token here is one that is
-          #     ALREADY public elsewhere (client_portal + permissions_matrix + SIEM +
+          #     ALREADY public elsewhere (permissions_matrix + SIEM +
           #     SCIM ship in the OSS Vue bundle; two_factor was in this guard's
           #     previous pattern). Adding a token that is *not* already public would
           #     make the guard itself the disclosure — don't. Deliberately ABSENT:
@@ -74,7 +78,11 @@ jobs:
           #   enterprise_registered       — the OSS `app.state` seam flag in main.py.
           #
           # PCRE (-P) is required for the negative lookahead.
-          PATTERN='\bSIEM\b|\bSCIM\b|\bclient_portal\b|\bpermissions_matrix\b|\btwo_factor\b|2fa_recovery_codes|\benterprise_(?!features\b|schema_migrations\b|connectors|docs\b|registered\b)[a-z_]+'
+          # `enterprise_portal_*` / `enterprise_client_blocks` are exempted with the
+          # same reasoning: ent#356 moved those TABLES onto the OSS track, and their
+          # `enterprise_` prefix is retained history (renaming them would be a data
+          # migration on every existing install), not a private-schema disclosure.
+          PATTERN='\bSIEM\b|\bSCIM\b|\bpermissions_matrix\b|\btwo_factor\b|2fa_recovery_codes|\benterprise_(?!features\b|schema_migrations\b|connectors|docs\b|registered\b|portal_|client_blocks\b)[a-z_]+'
           # The open-core seam files: public code whose comments must stay generic
           # (the entitlement mechanism), never naming the paid catalog (#1461).
           SEAM_FILES='src/backend/main.py src/backend/services/entitlement_service.py src/backend/services/a2a_gate.py'

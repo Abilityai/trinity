@@ -24,8 +24,8 @@ Issue: https://github.com/abilityai/trinity/issues/590
 import uuid
 import pytest
 
-from utils.api_client import TrinityApiClient
-from utils.assertions import assert_status, assert_status_in, assert_json_response
+from testkit.api_client import TrinityApiClient
+from testkit.assertions import assert_status, assert_status_in, assert_json_response
 
 
 # ---------------------------------------------------------------------------

@@ -10,8 +10,28 @@ These tests focus on HTTP endpoint validation and access control.
 
 import pytest
 
-from utils.api_client import TrinityApiClient
-from utils.assertions import (
+
+# #2080: this module was observed hanging indefinitely at 0% CPU (a blocking
+# read no client-side timeout covers), and interrupting it surfaced a
+# pytest-timeout + signal-reentrancy INTERNALERROR — so one test stalled an
+# entire full-suite run for hours.
+#
+# Two layers bound it now. `--timeout-method=thread` is pinned globally
+# (pyproject.toml) so the timeout can no longer re-enter the interpreter from a
+# signal handler, and this module-level mark caps each test here at 60s so the
+# file cannot consume a whole tier's budget even when pytest is invoked by hand
+# without the runner's per-tier `--timeout`. Verified that the class-level
+# `pytestmark = pytest.mark.smoke` below does NOT displace it — pytest unions
+# module and class marks.
+#
+# Stated honestly: the ROOT cause is not fixed. Reproducing it needs a live
+# stack and none was available; what is fixed is that it can no longer cost
+# more than 60 seconds, and the failing test id now reaches the log instead of
+# a run that never ends.
+pytestmark = pytest.mark.timeout(60)
+
+from testkit.api_client import TrinityApiClient
+from testkit.assertions import (
     assert_status,
     assert_status_in,
     assert_json_response,

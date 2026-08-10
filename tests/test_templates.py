@@ -16,8 +16,8 @@ import pytest
 
 # Mark all tests in this module as smoke tests (fast, no agent needed)
 pytestmark = pytest.mark.smoke
-from utils.api_client import TrinityApiClient
-from utils.assertions import (
+from testkit.api_client import TrinityApiClient
+from testkit.assertions import (
     assert_status,
     assert_json_response,
     assert_has_fields,

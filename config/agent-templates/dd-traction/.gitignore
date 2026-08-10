@@ -32,7 +32,14 @@ credentials.json
 .local/
 .npm/
 .ssh/
-.trinity/
+.trinity/*
+!.trinity/pre-check
+!.trinity/post-check
+!.trinity/pre-snapshot
+!.trinity/setup.sh
+!.trinity/persistent-processes.allow
+!.trinity/brain-orb/
+!.trinity/pipelines/
 .tmp/
 .trinity-clone-tmp/
 

@@ -22,6 +22,7 @@ from ..state import agent_state
 from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 from ..utils.orphan_sweep import kill_cgroup_orphans
 from .activity_tracking import start_tool_execution, complete_tool_execution
+from .execution_env import build_execution_env
 from .runtime_adapter import AgentRuntime, RuntimeCapabilities
 
 logger = logging.getLogger(__name__)
@@ -236,7 +237,7 @@ class GeminiRuntime(AgentRuntime):
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,  # Line buffered
-                env={**os.environ, EXECUTION_TAG_NAME: execution_id},
+                env=build_execution_env({EXECUTION_TAG_NAME: execution_id}),
             )
 
             # Write prompt to stdin and close it
@@ -657,7 +658,7 @@ class GeminiRuntime(AgentRuntime):
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
-                env={**os.environ, EXECUTION_TAG_NAME: session_id},
+                env=build_execution_env({EXECUTION_TAG_NAME: session_id}),
             )
 
             # Write prompt to stdin and close it
