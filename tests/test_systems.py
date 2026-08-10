@@ -20,11 +20,11 @@ import time
 import uuid
 import yaml
 
-from utils.api_client import TrinityApiClient
+from testkit.api_client import TrinityApiClient
 
 # Multi-agent system deploys can take >30s; raise to 120s for this suite.
 pytestmark = pytest.mark.timeout(120)
-from utils.assertions import (
+from testkit.assertions import (
     assert_status,
     assert_status_in,
     assert_json_response,
@@ -33,7 +33,7 @@ from utils.assertions import (
     assert_list_response,
     assert_contains_agent,
 )
-from utils.cleanup import cleanup_test_agent
+from testkit.cleanup import cleanup_test_agent
 
 
 # =============================================================================

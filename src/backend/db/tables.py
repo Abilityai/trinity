@@ -446,6 +446,51 @@ agent_activities = Table(
     Column("created_at", Text),
 )
 
+# --- Workspace / client portal (ent#356) ------------------------------------
+# Moved out of the entitled enterprise module. They are in this MetaData — where
+# the enterprise copies deliberately were not — because `db/agent_cleanup.py`
+# resolves every AGENT_REFS entry through it, and both tables carry an
+# `agent_name` that must follow a rename and be cleaned on a purge. Registering
+# the refs without the Table handles is a KeyError at rename time, which is how
+# this was caught.
+#
+# The `enterprise_` prefix is retained history — see `client_portal/__init__.py`.
+enterprise_portal_sessions = Table(
+    "enterprise_portal_sessions",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("client_email", Text),
+    Column("title", Text),
+    Column("created_at", Text),
+    Column("last_message_at", Text),
+    Column("message_count", Integer),
+)
+
+enterprise_portal_messages = Table(
+    "enterprise_portal_messages",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("client_email", Text),
+    Column("session_id", Text),
+    Column("role", Text),
+    Column("content", Text),
+    Column("cost", Float),
+    Column("created_at", Text),
+)
+
+enterprise_client_blocks = Table(
+    "enterprise_client_blocks",
+    metadata,
+    Column("email", Text, primary_key=True),
+    Column("blocked_at", Text),
+    Column("blocked_by_id", Text),
+    Column("blocked_by_email", Text),
+    Column("reason", Text),
+)
+
+
 agent_reports = Table(
     "agent_reports",
     metadata,

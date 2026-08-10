@@ -13,8 +13,8 @@ Key features tested:
 """
 
 import pytest
-from utils.api_client import TrinityApiClient
-from utils.assertions import (
+from testkit.api_client import TrinityApiClient
+from testkit.assertions import (
     assert_status,
     assert_status_in,
     assert_json_response,

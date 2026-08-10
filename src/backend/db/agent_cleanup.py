@@ -130,6 +130,17 @@ AGENT_REFS: List[AgentRef] = [
     AgentRef("agent_session_messages",       "agent_name",        Policy.CASCADE),
     AgentRef("agent_sessions",               "agent_name",        Policy.CASCADE),
 
+    # --- Workspace / client portal (ent#356) --------------------------------
+    # These tables came from the entitled enterprise module, which was OUTSIDE
+    # this registry — so an agent rename left its portal history keyed to the
+    # old name (invisible to the client, whose thread simply emptied) and a
+    # purge orphaned the rows. Moving the module into OSS core brings them under
+    # the same delete/rename contract as every other agent-scoped table, and the
+    # parity test is what noticed: it failed the moment the DDL landed in
+    # db/schema.py. Children before parents, matching the chat pair above.
+    AgentRef("enterprise_portal_messages",   "agent_name",        Policy.CASCADE),
+    AgentRef("enterprise_portal_sessions",   "agent_name",        Policy.CASCADE),
+
     # --- Activity / notifications ------------------------------------------
     AgentRef("agent_activities",             "agent_name",        Policy.CASCADE),
     AgentRef("agent_notifications",          "agent_name",        Policy.CASCADE),

@@ -65,9 +65,19 @@ class PlatformAuditService:
       caller's primary operation
     """
 
+    # `system_settings` key backing the hash-chain toggle (#2015). Persisted
+    # rather than held in the instance: the flag used to be in-memory only, so
+    # every backend restart silently switched the integrity control back off
+    # and nothing told the operator. Restarts are routine — CLAUDE.md documents
+    # that users re-login after one — so an audit log could sit unhashed
+    # indefinitely while the UI still showed the feature as available.
+    HASH_CHAIN_SETTING = "audit_hash_chain_enabled"
+
     def __init__(self) -> None:
-        self._last_hash: Optional[str] = None
-        self._hash_chain_enabled = False  # Phase 4 toggle
+        # No `_last_hash`: the chain head is read from the DB at write time
+        # (`db.create_audit_entry_chained`). Holding it here made the chain a
+        # property of one process — see that method for what that cost.
+        pass
 
     async def log(
         self,
@@ -141,12 +151,12 @@ class PlatformAuditService:
                 "entry_hash": None,
             }
 
-            if self._hash_chain_enabled:
-                entry["previous_hash"] = self._last_hash
-                entry["entry_hash"] = self._compute_hash(entry)
-                self._last_hash = entry["entry_hash"]
-
-            db.create_audit_entry(entry)
+            if self.hash_chain_enabled:
+                # The chain head comes from the DB, inside the insert's own
+                # transaction — not from a process attribute (#2015).
+                db.create_audit_entry_chained(entry, self._compute_hash)
+            else:
+                db.create_audit_entry(entry)
             return event_id
 
         except Exception as e:
@@ -190,24 +200,49 @@ class PlatformAuditService:
             return (AuditActorType.MCP_CLIENT.value, mcp_key_id, None)
         return (AuditActorType.SYSTEM.value, "trinity-system", None)
 
+    @property
+    def hash_chain_enabled(self) -> bool:
+        """Is hash chaining on for THIS INSTALL (not this process)? (#2015)
+
+        Read live from `system_settings` on every call, deliberately uncached —
+        the same reasoning `settings_service._resolve_bool_flag` records for the
+        other platform flags: a cache lets a worker keep hashing (or keep not
+        hashing) after an admin has flipped the toggle, and here the two halves
+        of a divergent fleet write rows that cannot be verified against each
+        other.
+
+        Fail-CLOSED, unlike those flags. They fail open because an exception
+        would zero every feature flag in the UI; this one decides whether an
+        integrity record is written, and a settings-read failure is not a reason
+        to claim one exists. Off is the honest answer, and `verify_chain`'s
+        `unverifiable` state describes the result accurately.
+        """
+        try:
+            stored = db.get_setting_value(self.HASH_CHAIN_SETTING)
+        except Exception:  # noqa: BLE001 — fail closed, see above
+            logger.warning(
+                "[PlatformAuditService] could not read %s; treating hash chain "
+                "as disabled", self.HASH_CHAIN_SETTING, exc_info=True,
+            )
+            return False
+        return str(stored).lower() in ("true", "1", "yes")
+
     def enable_hash_chain(self, enabled: bool = True) -> None:
-        """Toggle hash chain computation for new entries (Phase 4)."""
-        self._hash_chain_enabled = enabled
-        if enabled:
-            # Seed from the last entry in DB so chain continues
-            try:
-                entries = db.get_audit_entries(limit=1, offset=0)
-                if entries and isinstance(entries, list) and len(entries) > 0:
-                    last = entries[0]
-                    if isinstance(last, dict) and last.get("entry_hash"):
-                        self._last_hash = last["entry_hash"]
-            except Exception as e:
-                # Non-fatal: chain will start from None and verify_chain skips
-                # entries written before seeding succeeded.
-                logger.warning(
-                    "[PlatformAuditService] failed to seed hash chain from last entry: %s",
-                    e,
-                )
+        """Toggle hash chain computation for new entries — durably (#2015).
+
+        This used to set an instance attribute and write nothing, so the
+        control turned itself off at the next restart. It now persists, and
+        `hash_chain_enabled` reads it back, so the answer survives a restart
+        and is the same in every worker.
+
+        No seeding step any more: the chain head is read from the DB inside the
+        insert transaction, so there is nothing in this process to seed.
+        """
+        db.set_setting(self.HASH_CHAIN_SETTING, "true" if enabled else "false")
+        logger.info(
+            "[PlatformAuditService] hash chain %s (persisted)",
+            "enabled" if enabled else "disabled",
+        )
 
     async def verify_chain(self, start_id: int, end_id: int) -> Dict[str, Any]:
         """Verify hash chain integrity between two row IDs (inclusive).
@@ -241,7 +276,7 @@ class PlatformAuditService:
             "checked": 0,
             "skipped_unhashed": 0,
             "total_in_range": len(entries),
-            "hash_chain_enabled": self._hash_chain_enabled,
+            "hash_chain_enabled": self.hash_chain_enabled,
             "first_invalid_id": None,
         }
 

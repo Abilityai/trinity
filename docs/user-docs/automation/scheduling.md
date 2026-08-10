@@ -16,7 +16,7 @@ For a single, agent-initiated, one-shot deferred follow-up rather than a recurri
 
 ## How It Works
 
-![Agent Schedules tab showing three active weekly schedules with cron expressions and execution history](../images/agent-schedules-tab.png)
+![Agent Schedules tab showing three active weekly schedules with cron expressions and execution history](../../screenshots/agent-schedules.png)
 
 1. Open the agent detail page and go to the scheduling section.
 2. Click **Create Schedule**.

@@ -551,6 +551,25 @@ if [ -f ".credentials.enc" ] && [ ! -f ".env" ]; then
     fi
 fi
 
+# === Render .mcp.json.template (#2007) ===
+# The agent guide promises Trinity substitutes ${VAR} in `.mcp.json.template`.
+# For a `github:` template nothing did it: the backend renderer is `local:`-only
+# and reads `.mcp.json`, not the `.template`, and a github: agent's files only
+# exist after the clone above — in here. So declared MCP servers were silently
+# absent (a freshly-seeded Cornelius shipped three and ran with none).
+#
+# Runs AFTER both `.env` sources (the /generated-creds copy and the
+# decrypt-and-inject fallback above) so credentials are present either way, and
+# merges rather than overwrites — the agent server's own `trinity` entry may be
+# written before or after this point. Substitution is confined to `env` blocks,
+# each rendered server is validated individually, and an unresolvable
+# placeholder withholds that one server with a reason on stdout instead of
+# blanking it. Never fails startup.
+if [ -f "/home/developer/.mcp.json.template" ]; then
+    (cd /app && python3 -m agent_server.mcp_template) || \
+        echo "Warning: .mcp.json.template rendering failed (continuing startup)"
+fi
+
 # === Content Folder Convention ===
 # Create content/ directory for large generated assets (videos, audio, images, exports)
 # These files persist across restarts but are NOT synced to GitHub

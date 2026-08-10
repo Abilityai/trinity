@@ -8,8 +8,8 @@ Related flow: docs/memory/feature-flows/role-model.md
 """
 
 import pytest
-from utils.api_client import TrinityApiClient
-from utils.assertions import assert_status, assert_json_response
+from testkit.api_client import TrinityApiClient
+from testkit.assertions import assert_status, assert_json_response
 
 
 class TestListUsers:
