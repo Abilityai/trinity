@@ -38,6 +38,7 @@ import { createAuthTools } from "./tools/auth.js";
 import { createGitTools } from "./tools/git.js";
 import { createA2ATools } from "./tools/a2a.js";
 import { withAudit } from "./audit.js";
+import { installLogRedaction } from "./log-redaction.js";
 import type { McpAuthContext } from "./types.js";
 
 export interface ServerConfig {
@@ -95,14 +96,14 @@ export interface McpApiKeyValidationResult {
 //
 // These MUST be allow-lists, not "not connector" deny-checks. Two fastmcp
 // behaviours make a deny-check fail OPEN. Both re-verified against the version
-// this repo actually installs — `fastmcp@4.12.1` (package-lock), NOT the 4.4.0
+// this repo actually installs — `fastmcp@4.12.2` (package-lock), NOT the 4.4.0
 // an earlier revision of this comment cited. Cited by SYMBOL first and line
 // second: the minified chunk filename changes between releases (4.4.0
-// chunk-MDIESGNI.js → 4.12.1 chunk-5BQXF2VT.js), so a bare line number rots
+// chunk-MDIESGNI.js → 4.12.x chunk-5BQXF2VT.js), so a bare line number rots
 // silently and invites reasoning about a version nobody runs.
 //   1. `FastMCP#createSession` skips filtering entirely when auth is falsy —
 //      `const allowedTools = auth ? this.#tools.filter(...) : this.#tools`
-//      (4.12.1 dist/chunk-5BQXF2VT.js:1998-2000) — so a session with no auth
+//      (4.12.2 dist/chunk-5BQXF2VT.js:1998-2000) — so a session with no auth
 //      context gets EVERY registered tool and `canAccess` never runs. The guard
 //      immediately above it (`:1994`, present since 4.4.0) does not help: it
 //      rejects only an auth OBJECT carrying `authenticated: false`, so falsy
@@ -161,7 +162,7 @@ export const anonymousOnly = (auth: any): boolean => auth?.scope === "anonymous"
  * comment claimed FastMCP had "no per-session refresh API", and that is wrong.
  * `FastMCPSession.toolsListChanged` re-filters a LIVE session against its
  * current `#auth` and rebuilds the call map via `setupToolHandlers`
- * (fastmcp@4.12.1 dist/chunk-5BQXF2VT.js:661-666), fanned to every session by
+ * (fastmcp@4.12.2 dist/chunk-5BQXF2VT.js:661-666), fanned to every session by
  * addTool/addTools/removeTool/removeTools (`:1550`, `:1561`, `:1754`, `:1765` →
  * `#toolsListChanged` `:2479-2481`) — and Trinity triggers exactly that every
  * ~20s via the #846 exposed-agents reconciler.
@@ -188,13 +189,13 @@ export const connectorOrAnonymous = (auth: any): boolean =>
 //
 // MCP streamable HTTP is discrete POSTs, one per tool call, all carrying the
 // same `Mcp-Session-Id`. `mcp-proxy`'s `handleStreamRequest` (bundled in
-// fastmcp@4.12.1) re-authenticates EVERY one of them and then reinstalls the
+// fastmcp@4.12.2) re-authenticates EVERY one of them and then reinstalls the
 // result on the existing session:
 //
 //     authResult = await authenticate(req);   // every post, not just initialize
 //     if (sessionId) { ...; server.updateAuth(authResult); }
 //
-// and `FastMCPSession#updateAuth` is `this.#auth = auth` (4.12.1
+// and `FastMCPSession#updateAuth` is `this.#auth = auth` (4.12.2
 // dist/chunk-5BQXF2VT.js:685-687) — REPLACE, not merge. So a callback that
 // returns a fresh object per request throws away the upgrade every time.
 //
@@ -214,11 +215,21 @@ export const connectorOrAnonymous = (auth: any): boolean =>
 //     status quo, where the credential is on the wire every time. The call
 //     site enforces this structurally: this store is consulted only inside the
 //     no-Authorization-header branch.
-//  2. TTL, not just eviction. fastmcp hands this closure no session-close
-//     hook (`tools/auth.ts` records the same limitation for its counters), so
-//     an entry cannot be freed when the client disconnects. Idle expiry bounds
-//     how long a leaked id stays usable; the absolute cap bounds a session
-//     that is kept warm deliberately.
+//  2. TTL, not just eviction, and it is the ONLY bound — verified, not
+//     assumed. fastmcp does emit `disconnect` carrying the session, and
+//     `FastMCPSession` does expose a `sessionId` getter, so evicting on
+//     disconnect reads as available; it is not. Probed against this tree: the
+//     `connect` event fires with `sessionId` still unset (the id is copied off
+//     the transport, which has not minted one at initialize), and `disconnect`
+//     does not fire at all for a client that simply goes away — the SDK's
+//     `StreamableHTTPClientTransport.close()` only aborts the SSE stream, and
+//     the DELETE that would close the server transport is sent solely by the
+//     opt-in `terminateSession()`. A quitting client leaves no signal.
+//     There is also no `logout` tool by decision (#2035), so nothing ends a
+//     session early. Idle expiry therefore bounds how long an abandoned or
+//     leaked id stays usable, and the absolute cap bounds one kept warm
+//     deliberately — and both must be sized as if they were the only defence,
+//     because they are.
 //  3. BOUNDED. One entry per anonymous connection, unfreeable on disconnect,
 //     would otherwise be retained for the process lifetime and an
 //     unauthenticated caller could exhaust memory just by reconnecting in a
@@ -232,7 +243,12 @@ export const connectorOrAnonymous = (auth: any): boolean =>
 // it in an error body. Note this store deliberately keys on the transport id
 // while `McpAuthContext.sessionId` stays an independent random id — the
 // correlation id that appears in logs and rate-limit keys is therefore NOT the
-// credential.
+// credential. Trinity's own code holds that line, but the bundled `mcp-proxy`
+// prints the raw id on three paths; `log-redaction.ts` truncates it at the
+// console boundary and guards the assumption that keeps that narrow.
+// Operator-facing consequence: the id also rides the wire as a plain header,
+// so the keyless tier must be exposed over TLS only (docs/memory/requirements/
+// mcp.md §7.6).
 //
 // What bounds the damage: #848 re-gates AUTHORIZATION on the backend for every
 // call (`email_has_agent_access` + connector-enabled). Only authentication is
@@ -247,8 +263,17 @@ export const connectorOrAnonymous = (auth: any): boolean =>
 
 /** Idle expiry. A session in active use refreshes; a leaked id dies. */
 export const ANON_SESSION_IDLE_MS = 30 * 60 * 1000;
-/** Hard ceiling regardless of activity, so a warmed session still expires. */
-export const ANON_SESSION_MAX_MS = 8 * 60 * 60 * 1000;
+/**
+ * Hard ceiling regardless of activity, so a warmed session still expires.
+ *
+ * 4h, not the 8h this shipped with: #2035 condition 2 asks for "hours, not
+ * days" and to err aggressive, and constraint 2 above is why — nothing else
+ * ends a session, so this number IS the exposure window for a leaked id on a
+ * client that stays connected all day. Re-authenticating costs one email code.
+ * Lowering it is always safe; raising it weakens every keyless session at once,
+ * so `inline-auth-session.test.ts` pins the DIRECTION rather than the value.
+ */
+export const ANON_SESSION_MAX_MS = 4 * 60 * 60 * 1000;
 /** Retained-entry cap. Insertion-ordered Map ⇒ the first key is the oldest. */
 export const MAX_ANON_SESSIONS = 10_000;
 
@@ -363,6 +388,13 @@ async function validateMcpApiKey(
  * Create and configure the Trinity MCP Server
  */
 export async function createServer(config: ServerConfig = {}) {
+  // #2035 condition 1. Installed FIRST, before anything in this function can
+  // write, and unconditionally — not gated on `inlineAuthEnabled`, because a
+  // log format that changes with a feature flag is one an operator learns
+  // wrong. Truncating an id nobody treats as a secret costs nothing; the
+  // reverse mistake writes live credentials to disk. See log-redaction.ts.
+  installLogRedaction();
+
   const {
     name = "trinity-orchestrator",
     version = "1.0.0" as const,
@@ -444,7 +476,7 @@ export async function createServer(config: ServerConfig = {}) {
             // INVALID one (below) stays an error. Gated OFF by default, in
             // which case this is the pre-#848 rejection, unchanged.
             if (inlineAuthEnabled) {
-              // MUST be a truthy object: fastmcp@4.12.1 skips canAccess
+              // MUST be a truthy object: fastmcp@4.12.2 skips canAccess
               // filtering entirely for falsy auth, which would hand this
               // session every registered tool. Must also NOT carry
               // `authenticated: false`, which fastmcp treats as a rejection.

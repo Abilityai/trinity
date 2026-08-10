@@ -18,7 +18,12 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import { createAnonymousSessionStore, readHeader } from "./server.js";
+import {
+  ANON_SESSION_IDLE_MS,
+  ANON_SESSION_MAX_MS,
+  createAnonymousSessionStore,
+  readHeader,
+} from "./server.js";
 
 // ---------------------------------------------------------------------------
 // Store semantics
@@ -100,6 +105,44 @@ describe("#2035 createAnonymousSessionStore", () => {
     const store = createAnonymousSessionStore({ maxEntries: 3 });
     for (let i = 0; i < 10; i++) store.resolve(`session-${i}`);
     assert.ok(store.size() <= 3, `expected <= 3 retained, got ${store.size()}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TTL ratchet (#2035 condition 2)
+// ---------------------------------------------------------------------------
+//
+// Pins the DIRECTION, not the value — the #1644 `MAX_ROWS_PER_SWEEP` shape.
+// Tightening either window is always safe and needs no test edit; loosening one
+// weakens every keyless session at once and has to be a deliberate change to
+// this file with a reason attached. The numbers below are the ceilings in force
+// when condition 2 was signed off; nothing else ends a keyless session (see
+// constraint 2 in server.ts — no logout tool, no usable disconnect signal), so
+// these ARE the exposure window for a leaked `Mcp-Session-Id`.
+
+describe("#2035 anonymous session TTL", () => {
+  const CEILING_IDLE_MS = 30 * 60 * 1000;
+  const CEILING_MAX_MS = 4 * 60 * 60 * 1000;
+
+  it("keeps the idle window at or below its agreed ceiling", () => {
+    assert.ok(
+      ANON_SESSION_IDLE_MS <= CEILING_IDLE_MS,
+      `idle TTL loosened to ${ANON_SESSION_IDLE_MS}ms (ceiling ${CEILING_IDLE_MS}ms)`
+    );
+  });
+
+  it("keeps the absolute cap at or below its agreed ceiling", () => {
+    assert.ok(
+      ANON_SESSION_MAX_MS <= CEILING_MAX_MS,
+      `absolute TTL loosened to ${ANON_SESSION_MAX_MS}ms (ceiling ${CEILING_MAX_MS}ms)`
+    );
+  });
+
+  it("keeps the absolute cap above the idle window", () => {
+    // An absolute cap at or under the idle window would make idle expiry dead
+    // code — the session would always die on the absolute clock first, and the
+    // sliding refresh the tests above pin would never be observable.
+    assert.ok(ANON_SESSION_MAX_MS > ANON_SESSION_IDLE_MS);
   });
 });
 
