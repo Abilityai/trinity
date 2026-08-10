@@ -64,7 +64,11 @@ Use the `restart_system(name)` MCP tool or the matching REST endpoint. Trinity f
 
 ## Can external orchestrators discover and call my Trinity agents?
 
-Yes. Every agent publishes an A2A v1.0 Agent Card at `GET /api/agents/{name}/a2a/agent-card` — a standard JSON document (built from the agent's `template.yaml` and container labels) advertising its name, description, capabilities, skills, and URL, so external orchestrators can discover it without knowing Trinity's internal API. The endpoint requires authentication (owner, admin, or shared user, via JWT or MCP key), and it still returns a partial card when the agent is stopped. There is no public unauthenticated `/.well-known` route yet, and you should set `PUBLIC_CHAT_URL` or `FRONTEND_URL` so the card advertises an externally reachable URL. See [A2A Agent Card](../integrations/a2a-protocol.md).
+Yes — discover *and* call. Every agent publishes an A2A Agent Card (protocol `0.3.0`) at `GET /api/agents/{name}/a2a/agent-card` — a standard JSON document (built from the agent's `template.yaml` and container labels) advertising its name, description, capabilities, skills, and URL, so external orchestrators can discover it without knowing Trinity's internal API. That endpoint requires authentication (owner, admin, or shared user, via JWT or MCP key), and it still returns a partial card when the agent is stopped.
+
+To let an outside orchestrator actually reach an agent, turn on **A2A exposure** for it (Sharing tab → A2A). Exposure is off by default, and until you enable it nothing is publicly reachable. Once enabled, the agent gets a public discovery card at `GET /a2a/{name}/.well-known/agent-card.json` and a JSON-RPC task endpoint at `POST /a2a/{name}` (`message/send`, `message/stream` over SSE, `tasks/get`, `tasks/cancel`). Discovery is unauthenticated and rate limited per IP; **tasking always requires a Trinity MCP API key**, and the caller still has to be an owner or shared user of that agent. A non-exposed agent is indistinguishable from one that doesn't exist — both return `404`.
+
+Set `PUBLIC_CHAT_URL` or `FRONTEND_URL` so the card advertises an externally reachable URL. See [A2A Protocol](../integrations/a2a-protocol.md).
 
 ## Can my agent message me proactively instead of waiting for me to ask?
 

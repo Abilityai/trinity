@@ -35,8 +35,9 @@ from services.agent_runtime_state import clear_agent_breakers, clear_agent_runti
 from services.template_service import (
     CredentialDeclarationError,
     credential_mcp_server_names,
-    fetch_template_metadata_for_create,
+    fetch_template_metadata_result_for_create,
     get_github_template,
+    metadata_reason_is_unreadable,
     generate_credential_files,
 )
 from services.template_schedules import normalize_declared_schedules
@@ -529,25 +530,33 @@ def _parse_github_ref(config: AgentConfig) -> tuple[str, str, Optional[str]]:
     return template_lookup, template_str, url_branch
 
 
-def _declared_schedules_for_github(
+def _read_source_template(
     repo: str, pat: Optional[str], ref: Optional[str]
-) -> list:
-    """Normalized `schedules:` for a `github:` template, read at CREATION time.
+) -> tuple:
+    """The ONE creation-time read of a `github:` template's `template.yaml`.
+    Returns `(metadata, reason)`.
 
-    Deliberately NOT the catalog's `gh_template["schedules"]`
-    (trinity-enterprise#89 R2): that dict comes from `_get_cached_metadata`,
-    which reads with the **global platform** PAT off the **default branch**
-    through a 10-minute per-process cache. Creation resolves its PAT
-    completely differently (per-agent -> per-user -> global, ent#162), so a
-    user creating from their own private repo with their own token would clone
-    successfully and then get zero schedules with no signal at all — the exact
-    silent-ignore class this feature exists to close, reintroduced one layer up.
+    Deliberately NOT the catalog's `gh_template` (trinity-enterprise#89 R2):
+    that dict comes from `_get_cached_metadata`, which reads with the **global
+    platform** PAT off the **default branch** through a 10-minute per-process
+    cache. Creation resolves its PAT completely differently (per-agent ->
+    per-user -> global, ent#162), so a user creating from their own private repo
+    with their own token would clone successfully and then read zero
+    declarations with no signal at all — the exact silent-ignore class this
+    feature exists to close, reintroduced one layer up.
 
-    Non-fatal by construction: `fetch_template_metadata_for_create` returns
-    `{}` and logs a WARNING on any failure, and the normalizer is total.
+    ent#89 wrote that warning about `schedules:` and then the ent#14 fork gate
+    was built on the catalog dict anyway, one line below the call site that had
+    already read the file correctly (trinity-enterprise#14 S2). So this returns
+    the whole `(metadata, reason)` pair and BOTH consumers — the schedules
+    normalizer and the `fork_to_own` gate — read it. One GitHub call, one set of
+    credentials, one ref, and no second source that can disagree.
+
+    Non-fatal by construction for schedules (the normalizer is total, and any
+    failure yields `{}` plus a WARNING naming the repo, the ref and the reason).
+    The `reason` is what makes the gate's fail-closed decision possible.
     """
-    metadata = fetch_template_metadata_for_create(repo, pat=pat, ref=ref)
-    return normalize_declared_schedules(metadata.get("schedules"))
+    return fetch_template_metadata_result_for_create(repo, pat=pat, ref=ref)
 
 
 def _declared_schedules_for_snapshot(snapshot) -> list:
@@ -665,14 +674,103 @@ async def _apply_fork_to_own(
     github_pat_for_agent: Optional[str],
     github_pat_tier: str,
     url_branch: Optional[str],
+    *,
+    source_metadata: dict,
+    source_metadata_reason: Optional[str],
 ) -> tuple[str, Optional[str], str, Optional[str]]:
     """trinity-enterprise#93: enforce a `fork_to_own: required` template and, when
     the caller forks, copy the template into a user-owned repo and return the
     updated `(repo, pat, tier, fork_upstream_repo)`. Runs BEFORE the docker
     try-block so the structured FORK_* errors reach the UI. When the caller is
     NOT forking the inputs pass through unchanged (tier untouched)."""
-    fork_meta = (gh_template or {}).get("fork_to_own")
-    if fork_meta == "required" and not config.fork_to_own:
+    # trinity-enterprise#14 F2 — an unreadable template.yaml is UNKNOWN, not absent.
+    #
+    # The chain this closes, every link verified in source:
+    #   _fetch_template_yaml_result()  -> ({}, "HTTP 403") on a rate limit
+    #   _build_template()              -> "fork_to_own": None
+    #   the test below                 -> `None == "required"` is False
+    #   => the gate never fires and the agent is created bound to the SHARED
+    #      UPSTREAM TEMPLATE REPO instead of a user-owned copy.
+    #
+    # `fork_to_own: required` exists precisely to stop that, and the failure is
+    # silent: the user's knowledge base ends up in the wrong place with no error.
+    # It is the ent#162 class ("a private KB could reach the shared public
+    # upstream") reached without any attacker.
+    #
+    # Pre-existing, but the remote template registry converts it from
+    # unreachable to EXPECTED: it re-introduces per-repo GitHub metadata fetches
+    # on a DEFAULT install (#1931 had driven them to zero), ships default-on, and
+    # its own arithmetic — workers x windows/hr x entries — exceeds GitHub's
+    # 60/hr ANONYMOUS limit above ~5 listed repos, while the curated fleet is
+    # very likely to include the fork_to_own template (Cornelius).
+    #
+    # WHICH READ DECIDES (trinity-enterprise#14 S2). Both inputs below come from
+    # `_read_source_template` — the creation-path read — and NOT from
+    # `gh_template`, whose `metadata_unavailable`/`fork_to_own` are computed from
+    # `_get_cached_metadata_result`: the global platform PAT, off the default
+    # branch, through a 600s cache. Reading the catalog here failed in both
+    # directions at once:
+    #
+    #   FALSE PASS. GitHub answers 404 — not 403 — for a repo a token cannot
+    #   see. So a PRIVATE `fork_to_own: required` template that only the
+    #   creator's per-user PAT can read (ent#162, a supported flow) came back
+    #   `("HTTP 404" -> absent, fork_to_own=None)`, the gate passed, and the
+    #   agent bound to the shared upstream. The precise outcome this gate
+    #   exists to prevent, with no attacker involved. Note that fixing only
+    #   the availability half would NOT have closed it: the `fork_to_own`
+    #   VALUE has to come from the correctly-credentialed read too, which is
+    #   why `source_metadata` is threaded in beside the reason.
+    #
+    #   FALSE REFUSE. A creator whose own PAT reads the template fine was 503'd
+    #   because the SHARED cache entry said 403 — for the full 600s TTL, on
+    #   every non-forking `github:` create, including the plain
+    #   `github:owner/repo` escape hatch.
+    #
+    # Costs zero extra GitHub calls: `_resolve_template` already made this read
+    # one call earlier, for ent#89's schedules, with the PAT that will clone.
+    # That last part is the structural argument — the read that DECIDES is now
+    # made with the same credentials as the clone that follows, so "we could not
+    # see it" and "the agent could not have cloned it" can no longer disagree.
+    #
+    # Scoped to the branch that is actually unsafe. A caller who IS forking ends
+    # up with a user-owned repo whatever the template declares, so an outage must
+    # not block them; only the non-forking path has to treat unknown as refuse.
+    # A clean HTTP 404 stays "absent" (`metadata_reason_is_unreadable`), so a repo
+    # that genuinely ships no template.yaml creates exactly as it always has —
+    # and on this path a 404 the creator's own token cannot get past is caught
+    # loudly downstream by `_validate_github_access` anyway.
+    #
+    # The trade is deliberate: creation now depends on GitHub API reachability
+    # where it previously depended only on `git clone`. A loud, retryable refusal
+    # beats a silent wrong-repo binding — the learnings.md 2026-07-15
+    # direction-of-failure rule, applied to a gate instead of a retention window.
+    if metadata_reason_is_unreadable(source_metadata_reason) and not config.fork_to_own:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": (
+                    f"Could not read '{config.template}' template metadata from "
+                    f"GitHub, so Trinity cannot tell whether this template must "
+                    f"be copied into a repo you own. Refusing rather than "
+                    f"guessing. This is usually a transient GitHub rate limit — "
+                    f"retry shortly, or configure a platform GitHub token in "
+                    f"Settings to raise the limit from 60 to 5000 requests/hour."
+                ),
+                "code": "TEMPLATE_METADATA_UNAVAILABLE",
+            },
+        )
+
+    # The union, not a precedence: `required` from EITHER read wins. The
+    # creation read is the better one (right credentials, pinned ref, no cache),
+    # but taking it alone would mean a repo whose default branch declares
+    # `required` could be created from an `@branch` that drops the line. Both
+    # sources feed one boolean, so this change can only ever REMOVE a false pass
+    # relative to the catalog-only gate, never add one.
+    declared_fork_modes = {
+        (source_metadata or {}).get("fork_to_own"),
+        (gh_template or {}).get("fork_to_own"),
+    }
+    if "required" in declared_fork_modes and not config.fork_to_own:
         raise HTTPException(
             status_code=400,
             detail={
@@ -1229,9 +1327,14 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             # Read the SOURCE template's declarations here, before
             # `_apply_fork_to_own` swaps in the user's fork + PAT: this pairing
             # (source repo, PAT resolved to read it) is the one that can
-            # actually see a private template.
-            tr.declared_schedules = _declared_schedules_for_github(
+            # actually see a private template. ONE read feeds both consumers —
+            # ent#89's schedules and ent#14's fork gate (which used to decide
+            # from the catalog cache instead; see `_apply_fork_to_own`).
+            source_metadata, source_metadata_reason = _read_source_template(
                 tr.github_repo_for_agent, tr.github_pat_for_agent, url_branch
+            )
+            tr.declared_schedules = normalize_declared_schedules(
+                source_metadata.get("schedules")
             )
             (
                 tr.github_repo_for_agent,
@@ -1246,6 +1349,8 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
                 tr.github_pat_for_agent,
                 tr.github_pat_tier,
                 url_branch,
+                source_metadata=source_metadata,
+                source_metadata_reason=source_metadata_reason,
             )
             # Validate PAT has access to the repository before creating container
             # This prevents silent clone failures in startup.sh (#218)

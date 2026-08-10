@@ -114,14 +114,29 @@ async def list_subscriptions(
     current_user: User = Depends(get_current_user)
 ):
     """
-    List all subscriptions with their assigned agents.
+    List subscriptions with their assigned agents. Admin sees the fleet; every
+    other caller sees only their own. Never returns the encrypted credentials.
 
-    Admin-only. Returns subscription metadata and agent assignments.
-    Never returns the encrypted credentials.
+    ent#293 review: this was `assert_admin`, which broke the subscription
+    workflow asymmetrically once admin gates stopped accepting agent-scoped
+    keys — `assign_subscription` / `clear_agent_subscription` / `get_agent_auth`
+    all kept working (owner gates), so an agent could ASSIGN a subscription it
+    could no longer ENUMERATE. A half-working workflow is worse than a closed
+    door.
+
+    Scoped rather than un-gated, deliberately. Dropping the gate entirely was
+    the first attempt and it was wrong: the payload carries `owner_email` and
+    the full agent-name list of EVERY subscription, so an ungated read hands any
+    `role=user` account a fleet-wide owner-email and agent-name enumeration
+    oracle — the disclosure class Invariant #8 exists to prevent, reintroduced
+    by a fix for a different disclosure. The `owner_id` filter is already part
+    of the accessor's contract, so scoping costs nothing and restores exactly
+    the read the workflow needs: an agent key resolves to its owner and sees
+    that owner's subscriptions, which are the only ones it can assign anyway.
     """
-    assert_admin(current_user)
-
-    return db.list_subscriptions_with_agents()
+    if current_user.role == "admin" and not getattr(current_user, "agent_name", None):
+        return db.list_subscriptions_with_agents()
+    return db.list_subscriptions_with_agents(owner_id=current_user.id)
 
 
 @router.get("/{subscription_id}/usage", response_model=SubscriptionUsage)
@@ -132,7 +147,9 @@ async def get_subscription_usage(
     """
     Get rolling usage statistics for a subscription (SUB-004).
 
-    Admin-only. Returns token and cost aggregates across two rolling windows:
+    Returns token and cost aggregates across two rolling windows (the docstring
+    said "Admin-only" while the gate has always been `get_current_user` — noted
+    while auditing this module for ent#293):
     - window_5h: last 5 hours
     - window_7d: last 7 days
 

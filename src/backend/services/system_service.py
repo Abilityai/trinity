@@ -272,6 +272,24 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
     # ORG-001 Phase 4: Validate tags
     tag_pattern = re.compile(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$')
 
+    # trinity-enterprise#305: org-overlay namespaces are human-only, and this
+    # writer bypasses the tags router's `_guard_org_namespace` (it calls
+    # `db.set_agent_tags` directly). `deploy_system` is `require_role("creator")`,
+    # which an agent-scoped key satisfies via its owner's role — so without
+    # this check a prompt-injected agent could deploy a manifest that hangs a
+    # fabricated node under a real manager. Rejected at validation, mirroring
+    # the router guard.
+    from db.tags import ORG_TAG_PREFIXES
+
+    def _reject_org_tag(tag: str, where: str) -> None:
+        normalized = tag.lower().strip()
+        if normalized.startswith(ORG_TAG_PREFIXES):
+            raise ValueError(
+                f"{where} uses reserved org-overlay tag '{tag}': 'dept-*' and "
+                "'reports-to-*' carry the org chart and can only be set by a "
+                "human operator through the tags API"
+            )
+
     # Validate default_tags
     if manifest.default_tags:
         for tag in manifest.default_tags:
@@ -279,6 +297,7 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
                 raise ValueError(
                     f"Invalid tag '{tag}': must be lowercase alphanumeric and hyphens"
                 )
+            _reject_org_tag(tag, "default_tags")
 
     # Validate per-agent tags
     for agent_name, config in manifest.agents.items():
@@ -289,6 +308,7 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
                         f"Agent '{agent_name}' has invalid tag '{tag}': "
                         "must be lowercase alphanumeric and hyphens"
                     )
+                _reject_org_tag(tag, f"Agent '{agent_name}'")
 
     # Validate system_view name
     if manifest.system_view:

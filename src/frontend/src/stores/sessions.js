@@ -44,6 +44,7 @@ export const useSessionsStore = defineStore('sessions', {
     workspaceAvailable: false,
     voipAvailable: false,
     brainOrbAvailable: false,      // trinity-enterprise#58 — Brain Orb platform flag
+    a2aAvailable: false,           // trinity-enterprise#158 — A2A config tab (enterprise_features)
     brainOrbVoiceAvailable: false, // trinity-enterprise#60 — Brain Orb voice tile (Phase 3)
     brainOrbWriteAvailable: false, // trinity-enterprise#61 — Brain Orb KB-write surface (Phase 4a)
     claudeAuthConfigured: false,   // trinity-enterprise#52 — onboarding hard gate
@@ -81,6 +82,10 @@ export const useSessionsStore = defineStore('sessions', {
         this.brainOrbVoiceAvailable = !!r.data?.brain_orb_voice_available
         this.brainOrbWriteAvailable = !!r.data?.brain_orb_write_available
         this.claudeAuthConfigured = !!r.data?.claude_auth_configured
+        // ent#158: the A2A config tab shows only when the enterprise A2A module
+        // is entitled (registered in enterprise_features).
+        this.a2aAvailable = Array.isArray(r.data?.enterprise_features)
+          && r.data.enterprise_features.includes('a2a')
       } catch {
         this.sessionTabEnabled = false
         this.voiceAvailable = false
@@ -90,6 +95,7 @@ export const useSessionsStore = defineStore('sessions', {
         this.brainOrbVoiceAvailable = false
         this.brainOrbWriteAvailable = false
         this.claudeAuthConfigured = false
+        this.a2aAvailable = false
       } finally {
         this.featureFlagsLoaded = true
       }

@@ -192,6 +192,7 @@ def test_ops_reset_cannot_strand_a_retention_window():
     admin = MagicMock()
     admin.role = "admin"
     admin.connector_agent = None  # #1310: not a connector principal
+    admin.agent_name = None  # ent#293: not an agent-scoped key
 
     fake_db = MagicMock()
     fake_db.delete_setting.return_value = True

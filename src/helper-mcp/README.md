@@ -1,4 +1,4 @@
-# Trinity Docs MCP (`@abilityai/trinity-docs-mcp`)
+# Trinity Docs MCP (`trinity-docs-mcp`)
 
 Ask Trinity anything, from any MCP client. A standalone [Model Context
 Protocol](https://modelcontextprotocol.io) server that exposes the
@@ -15,7 +15,7 @@ be inaccurate; treat them as guidance.
 ### Claude Code
 
 ```bash
-claude mcp add trinity-docs -- npx -y @abilityai/trinity-docs-mcp
+claude mcp add trinity-docs -- npx -y trinity-docs-mcp
 ```
 
 ### Claude Desktop / Cursor / any MCP client
@@ -25,7 +25,7 @@ claude mcp add trinity-docs -- npx -y @abilityai/trinity-docs-mcp
   "mcpServers": {
     "trinity-docs": {
       "command": "npx",
-      "args": ["-y", "@abilityai/trinity-docs-mcp"]
+      "args": ["-y", "trinity-docs-mcp"]
     }
   }
 }
@@ -51,7 +51,7 @@ Requires Node.js ≥ 18 (`npx` ships with it).
 - **"server disconnected" immediately** — check Node version: `node --version`
   must be ≥ 18. The launcher prints a clear message to the client's MCP logs.
 - **Stale version after an update** — `npx` caches packages; clear with
-  `npx clear-npx-cache` or pin a version: `npx -y @abilityai/trinity-docs-mcp@latest`.
+  `npx clear-npx-cache` or pin a version: `npx -y trinity-docs-mcp@latest`.
 - **Slow first call** — the answer API generates responses with an LLM; expect
   seconds. The server waits up to 50s before reporting a timeout.
 

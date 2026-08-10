@@ -2003,6 +2003,10 @@ Example:
             </div>
           </div>
 
+          <!-- Template Registry (TMPL-002, trinity-enterprise#14). Its own file
+               so this view's raw-color count cannot move; the tag adds none. -->
+          <TemplateRegistryPanel v-if="activeTab === 'agents'" />
+
           <!-- SSH Access Section -->
           <div v-if="activeTab === 'access'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -2359,6 +2363,7 @@ import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
 import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
+import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
 const router = useRouter()

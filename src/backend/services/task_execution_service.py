@@ -260,7 +260,12 @@ def _is_reader_race_signature(detail) -> bool:
 # interactive-ish trigger (a user's /task, mcp, or public turn) still classifies
 # as FAILED but the caller already sees the "Unknown command" reply, so no alert.
 _AUTONOMOUS_TRIGGERS = frozenset(
-    {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder"}
+    # ent#157: `a2a` belongs here for the same reason `agent` does — an inbound
+    # A2A task is dispatched by a remote machine caller, so nobody on THIS
+    # install is reading the reply. The interactive-ish triggers deliberately
+    # left out (`manual`, `mcp`, `public`, `chat`, `session`) all have a human
+    # looking at the "Unknown command" text as it comes back.
+    {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder", "a2a"}
 )
 
 # The agent runtime (Claude Code) answers a slash-command that doesn't resolve

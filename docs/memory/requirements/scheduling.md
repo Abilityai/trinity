@@ -565,7 +565,7 @@ schedules:
     cron: "0 9 * * *"             # required, non-empty string, strict 5-field Unix cron
     message: /daily-briefing       # required, non-empty string, ≤ 10 000 chars (truncated beyond)
     enabled: true                  # optional bool; anything else → False + a named error
-    timezone: Europe/London        # optional string, pytz zone; default "UTC"
+    timezone: Europe/London        # optional string, IANA zone (see below); default "UTC"
     description: ...               # optional string, ≤ 1000 chars (`purpose:` is an accepted alias)
     id: sched-1                    # IGNORED — Trinity mints its own schedule id
 ```
@@ -592,6 +592,7 @@ schedules:
   | missing / non-string / empty `name`, `cron`, `message` | entry dropped + named error |
   | non-string `timezone` | entry dropped + named error |
   | invalid cron (`@daily`, 6-field, `99 99 * * *`) or unknown timezone | entry dropped + named error |
+  | timezone pytz knows but the runtime's IANA database cannot resolve (#1823) | entry dropped + named error naming the missing tz data — **never** a 500 |
   | `name` > 200 / `description` > 1000 | entry dropped + named error |
   | `message` > 10 000 | truncated + named error |
   | duplicate `name` within the block | second and later dropped + named error |
@@ -609,6 +610,19 @@ schedules:
   a report verdict: `_calculate_next_run_at` *swallows* a bad cron and returns `None`
   (`db/schedules/crud.py`), and `set_schedule_enabled` never re-validates — so an unvalidated entry
   would create a **zombie schedule**: a row that exists, shows no next run, and never fires.
+- **A valid `timezone` is one BOTH resolvers accept (#1823)** — not "a pytz zone", which is what this
+  doc said and what #1472 implemented. The scheduler's chain is
+  `pytz.timezone(name)` → `CronTrigger(timezone=…)` → APScheduler `astimezone()` →
+  `zoneinfo.ZoneInfo(name)`. pytz bundles its own complete database and accepts every IANA
+  *backward-compatibility alias* (`Europe/Kiev`) everywhere; `zoneinfo` reads the system database
+  plus the optional `tzdata` wheel, so it is the strictly narrower — and actually binding —
+  constraint. `validate_timezone` probes both, and `validate_cron_expression` **delegates** to it, so
+  the create route (which calls only the latter) and the update route (which calls the former)
+  cannot enforce different contracts. Aliases are **supported, not normalized**: the shipped images
+  install `tzdata-legacy` + the `tzdata` wheel, guarded by
+  `tests/unit/test_1823_tz_capability_parity.py`. An unresolvable zone is a named 400 at the API and
+  a **permanent** (bounded, non-retrying) `_add_job` failure in the scheduler — never a 500, and
+  never the 60s retry storm that froze `next_run_at`.
 - `MAX_DECLARED_SCHEDULES = 20` lives in the reader, so the catalog surface and the materializer
   inherit the same cap. (Verified: the platform has no other per-agent schedule cap.)
 

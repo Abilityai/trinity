@@ -291,7 +291,8 @@ _TEMPLATE_YAML = {
 
 
 def _stub_github_resolution(monkeypatch, fetches: list):
-    async def _passthrough_fork(config, user, gh, repo, pat, tier, branch):
+    async def _passthrough_fork(config, user, gh, repo, pat, tier, branch,
+                               *, source_metadata=None, source_metadata_reason=None):
         return repo, pat, tier, None
 
     async def _ok(*args, **kwargs):
@@ -308,9 +309,11 @@ def _stub_github_resolution(monkeypatch, fetches: list):
 
     def _fetch(repo, pat=None, ref=None):
         fetches.append({"repo": repo, "pat": pat, "ref": ref})
-        return _TEMPLATE_YAML
+        # ent#14 S2: creation now takes the reason-preserving form, because the
+        # `fork_to_own` gate decides on it. `None` = read cleanly.
+        return _TEMPLATE_YAML, None
 
-    monkeypatch.setattr(crud, "fetch_template_metadata_for_create", _fetch)
+    monkeypatch.setattr(crud, "fetch_template_metadata_result_for_create", _fetch)
 
 
 def test_github_branch_populates_declared_schedules(db_backend, monkeypatch):
