@@ -370,7 +370,8 @@ def _drive_retry(*, role="admin", log_entry="settle_failed"):
         entry = SimpleNamespace(action=log_entry, agent_name="agent-a")
     mock_db = MagicMock()
     mock_db.get_nevermined_payment_log_entry.return_value = entry
-    user = SimpleNamespace(role=role, username="u", connector_agent=None)
+    user = SimpleNamespace(role=role, username="u", connector_agent=None,
+                           agent_name=None)  # ent#293: not an agent-scoped key
 
     with (
         patch.object(nvm, "NEVERMINED_AVAILABLE", True),

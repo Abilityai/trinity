@@ -47,6 +47,7 @@ Workshops, demos, and deep-dives on building and running autonomous agents with 
 
 ## Use Cases & Case Studies
 
+- [Measurably Self-Improving Multi-Agent System Without Retraining](https://youtu.be/_BFKrp9GnNQ) — *Jul 2026* · Brier HQ: a forecasting fleet with five feedback loops — paper at [research/closed-loop-forecasting](https://github.com/Abilityai/trinity/tree/main/research/closed-loop-forecasting)
 - [How I Built an Agent That Makes Movies While I Sleep](https://youtu.be/CblJsMI9ekU) — *Feb 2026* · long-running creative production + heartbeat
 - [Investigative Analysis of Epstein Files Using an AI Agent](https://youtu.be/8a9p60kOWgU) — *Jan 2026* · knowledge graph over a messy corpus
 - [Control My DGX Spark From Anywhere](https://youtu.be/epDBrEtg4nE) — *Jan 2026* · Trinity on local/edge hardware over Tailscale

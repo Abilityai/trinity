@@ -176,6 +176,69 @@ jobs:
             echo "Scheduler: $SCHED"
             [ "$SCHED" = "healthy" ] || echo "WARNING: scheduler not healthy yet"
 
+            echo "=== Enterprise registration (#2068) ==="
+            # The enterprise version-line is upgraded during module
+            # registration, which runs at IMPORT time — before uvicorn serves.
+            # So if /health answered above, the outcome line is already in the
+            # log: no polling, no race.
+            #
+            # Why a log grep and not `GET /api/version` → edition: that endpoint
+            # requires authentication (SEC-180), so asserting on it would drag an
+            # admin token into the deploy path. main.py's own comment beside the
+            # success string says "docker logs captures it and CI greps for this
+            # exact string" — this uses an interface that already declares itself
+            # a CI-grep target, and build-without-submodule.yml already
+            # establishes boot-log grepping as the accepted assertion here.
+            #
+            # This is the layer that catches #2068: a multi-head version-line
+            # makes registration raise, the seam's broad `except` degrades the
+            # instance to OSS-only, and every other signal stays green —
+            # containers up, /health healthy, gated routes answering 403. The
+            # existing error check below would have PRINTED this and moved on,
+            # because it ends in `|| echo "No errors"`.
+            #
+            # Guarded on the populated marker file, so a deploy where the
+            # submodule genuinely failed to init falls through to the
+            # ::warning:: path above. An OSS-only deploy is NEVER failed here.
+            if [ -f src/backend/enterprise/backend/__init__.py ]; then
+              # Scope the read to the CURRENT container run, so a FAILED line
+              # left over from a previous boot cannot fail today's deploy.
+              #
+              # The --tail fallback below does NOT carry that property, and is
+              # sound only here: `up -d` just recreated this container, so its
+              # whole log is a few hundred lines and every boot line is inside
+              # the window. On a long-running container it would be wrong in
+              # both directions — deep enough to catch a previous boot's FAILED
+              # line, and too shallow to reach the current boot's success line
+              # (a live instance measured 14k lines since start). Don't lift
+              # this block somewhere the container isn't newly started.
+              ENT_SINCE=$(sudo docker inspect -f '{{.State.StartedAt}}' trinity-backend 2>/dev/null || echo "")
+              if [ -n "$ENT_SINCE" ]; then
+                ENT_LOG=$(sudo docker logs trinity-backend --since "$ENT_SINCE" 2>&1 || true)
+              else
+                ENT_LOG=$(sudo docker logs trinity-backend --tail 2000 2>&1 || true)
+              fi
+              if printf '%s\n' "$ENT_LOG" | grep -q 'Trinity Enterprise registration FAILED'; then
+                echo "::error::Enterprise registration FAILED — the submodule is mounted but this instance is running OSS-only (every entitled route will 403). See trinity#2068."
+                printf '%s\n' "$ENT_LOG" | grep -A 20 'Trinity Enterprise registration FAILED' | head -40
+                exit 1
+              elif printf '%s\n' "$ENT_LOG" | grep -q 'Trinity Enterprise modules registered'; then
+                echo "ENTERPRISE: modules registered"
+              else
+                echo "::error::Enterprise submodule is mounted but the backend never printed 'Trinity Enterprise modules registered' — registration did not complete. See trinity#2068."
+                printf '%s\n' "$ENT_LOG" | grep -i 'enterprise' | tail -20
+                exit 1
+              fi
+              # Partial degradation: registration finished, but some modules
+              # failed — the success line still prints. Out of scope for #2068
+              # and not a deploy blocker on its own, so warn rather than fail;
+              # failing on it deserves its own decision.
+              if printf '%s\n' "$ENT_LOG" | grep -q 'FAILED module(s)'; then
+                echo "::warning::Enterprise registration completed with FAILED module(s) — some entitled features are unavailable on this instance"
+                printf '%s\n' "$ENT_LOG" | grep 'FAILED module(s)' | head -5
+              fi
+            fi
+
             echo "=== Error check ==="
             sudo docker logs trinity-backend --tail 50 2>&1 | grep -iE 'error|exception|failed' | head -10 || echo "No errors"
 

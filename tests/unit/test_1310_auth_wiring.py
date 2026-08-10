@@ -43,11 +43,17 @@ _ROUTERS = Path(__file__).resolve().parents[2] / "src" / "backend" / "routers"
 #     intentional 404 (session-id enumeration safety, Invariant #8 session
 #     pattern). No shared helper fits: `assert_owns_or_admin` takes an owner_id
 #     and raises 403, which would leak session existence. Stays inline (#1083).
+#   * a2a._authorize_inbound        — the public A2A inbound gate (ent#157): a
+#     uniform-404 helper (non-exposed OR inaccessible → the SAME 404, so the
+#     public /a2a/{name} surface is not an enumeration oracle, Invariant #8).
+#     A shared `AuthorizedAgentByName` dependency can't express the exposure
+#     pre-check + the allow-list 403 that only fires AFTER access is proven.
 _ALLOWLIST: set[tuple[str, str]] = {
     ("reports.py", "_report_or_404"),
     ("nevermined.py", "_require_read_access"),
     ("nevermined.py", "_require_write_access"),
     ("chat.py", "execute_parallel_task"),
+    ("a2a.py", "_authorize_inbound"),
 }
 
 _CAN_USER = {"can_user_access_agent", "can_user_share_agent"}

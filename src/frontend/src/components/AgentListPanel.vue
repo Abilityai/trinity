@@ -691,6 +691,7 @@ import { useNotification } from '../composables/useNotification'
 import { useAgentsStore } from '../stores/agents'
 import { useNetworkStore } from '../stores/network'
 import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
+import { isOrgTag } from '../utils/gridOrg'
 import { sortAgents } from '../utils/agentSort'
 import AgentAvatar from './AgentAvatar.vue'
 import RuntimeBadge from './RuntimeBadge.vue'
@@ -964,7 +965,10 @@ const hasSchedules = (agentName) => {
 
 // Tags ride the fleet payload — the per-agent N+1 fetch is gone (ent#260).
 function getAgentTags(agent) {
-  return agent.tags || []
+  // Org-overlay namespaces (dept-*/reports-to-*) render as zones/lines on the
+  // Grid, not as browse chips here; the AgentDetail tag editor shows all
+  // (trinity-enterprise#305).
+  return (agent.tags || []).filter((t) => !isOrgTag(t))
 }
 
 // Autonomy toggle — networkStore.toggleAutonomy RETURNS {success, error}

@@ -55,6 +55,54 @@ test.describe('dashboard grid view (trinity-enterprise#47)', () => {
     await expect(page.locator('.gv-zoomlvl')).toContainText('%')
   })
 
+  test('scanline loading settles: chart content visible, no lingering clip-path (ent#245)', async ({ page }) => {
+    await gotoGrid(page)
+    const sysTile = page.locator('.gv-tile[data-agent="trinity-system"]')
+    await expect(sysTile).toBeVisible({ timeout: 15000 })
+
+    // The primitive actually renders (guards against the trivially-green
+    // case where the wrapper is absent and every count below is vacuous).
+    await expect(sysTile.locator('.scan-content')).toHaveCount(2)
+
+    // Once analytics land, both chart zones must be fully revealed: the
+    // loading track gone and NO wrapper stuck mid-wipe. A retained non-none
+    // clip-path is the signature of the entire stuck-`revealing` bug class
+    // (lost animationend, scoped-keyframe rename) — assert it never survives.
+    await expect(sysTile.locator('.scan-track')).toHaveCount(0, { timeout: 20000 })
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() =>
+            [...document.querySelectorAll('.scan-content')].filter(
+              (el) => getComputedStyle(el).clipPath !== 'none'
+            ).length
+          ),
+        { timeout: 10000 }
+      )
+      .toBe(0)
+    // Headline flipped off the em-dash placeholder state (value or 0, not a
+    // stuck loading dash on the Activity zone whose data always exists).
+    await expect(sysTile.locator('.t-charts')).toBeVisible()
+  })
+
+  test('reduced motion: charts render instantly with no beam (ent#245)', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await gotoGrid(page)
+    const sysTile = page.locator('.gv-tile[data-agent="trinity-system"]')
+    await expect(sysTile).toBeVisible({ timeout: 15000 })
+    await expect(sysTile.locator('.scan-content')).toHaveCount(2)
+    await expect(sysTile.locator('.scan-track')).toHaveCount(0, { timeout: 20000 })
+    // The reveal phase is skipped entirely under reduced motion — nothing
+    // may ever hold a clip-path.
+    expect(
+      await page.evaluate(() =>
+        [...document.querySelectorAll('.scan-content')].filter(
+          (el) => getComputedStyle(el).clipPath !== 'none'
+        ).length
+      )
+    ).toBe(0)
+  })
+
   test('mode choice persists across reload', async ({ page }) => {
     await gotoGrid(page)
     expect(await page.evaluate((k) => localStorage.getItem(k), MODE_KEY)).toBe('grid')
