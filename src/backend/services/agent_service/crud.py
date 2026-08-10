@@ -3,6 +3,7 @@ Agent Service CRUD - Agent creation and deletion operations.
 
 Contains the core logic for creating and deleting agents.
 """
+import asyncio
 import os
 import re
 import json
@@ -34,8 +35,9 @@ from services.agent_runtime_state import clear_agent_breakers, clear_agent_runti
 from services.template_service import (
     CredentialDeclarationError,
     credential_mcp_server_names,
-    fetch_template_metadata_for_create,
+    fetch_template_metadata_result_for_create,
     get_github_template,
+    metadata_reason_is_unreadable,
     generate_credential_files,
 )
 from services.template_schedules import normalize_declared_schedules
@@ -49,6 +51,7 @@ from services.agent_auth import derive_agent_token
 from utils.helpers import parse_iso_timestamp, sanitize_agent_name, to_utc_iso, utc_now_iso
 from utils.safe_yaml import HardenedYamlError, load_template_yaml
 from .fork_to_own import fork_template_to_own_repo
+from . import snapshot_import
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
 from .capabilities import (
@@ -334,6 +337,10 @@ class _TemplateResolution:
     # key at all, so merging the two would change credential generation for
     # every GitHub agent. One normalized carrier, two producers.
     declared_schedules: list = field(default_factory=list)
+    # trinity-enterprise#15: staged backend-materialized snapshot for the
+    # "copy" import intent. When set, `github_repo_for_agent` stays None by
+    # design — the container gets NO GitHub env, no git-config row, no PAT.
+    copy_snapshot: Optional["snapshot_import.SnapshotStaging"] = None
 
 
 @dataclass
@@ -352,6 +359,13 @@ class _RollbackHandles:
     # before this attempt, so this attempt did not create it and must not
     # remove it. See `_reclaim_failed_creation_container`.
     container_floor_ts: Optional[str] = None
+    # trinity-enterprise#15: copy-intent snapshot cleanup — the staged clone
+    # dir (always removable) and the volume THIS attempt pre-populated (set
+    # only after `_prepopulate_workspace_from_template` succeeds, so the
+    # rollback never removes a volume another owner claims; removing it keeps
+    # the #1667 leftover-volume guard from 409ing the user's retry).
+    copy_staging_dir: Optional[str] = None
+    copy_volume_name: Optional[str] = None
 
 
 def _apply_ephemeral_pregates(config: AgentConfig, current_user: User) -> Optional[str]:
@@ -516,25 +530,54 @@ def _parse_github_ref(config: AgentConfig) -> tuple[str, str, Optional[str]]:
     return template_lookup, template_str, url_branch
 
 
-def _declared_schedules_for_github(
+def _read_source_template(
     repo: str, pat: Optional[str], ref: Optional[str]
-) -> list:
-    """Normalized `schedules:` for a `github:` template, read at CREATION time.
+) -> tuple:
+    """The ONE creation-time read of a `github:` template's `template.yaml`.
+    Returns `(metadata, reason)`.
 
-    Deliberately NOT the catalog's `gh_template["schedules"]`
-    (trinity-enterprise#89 R2): that dict comes from `_get_cached_metadata`,
-    which reads with the **global platform** PAT off the **default branch**
-    through a 10-minute per-process cache. Creation resolves its PAT
-    completely differently (per-agent -> per-user -> global, ent#162), so a
-    user creating from their own private repo with their own token would clone
-    successfully and then get zero schedules with no signal at all — the exact
-    silent-ignore class this feature exists to close, reintroduced one layer up.
+    Deliberately NOT the catalog's `gh_template` (trinity-enterprise#89 R2):
+    that dict comes from `_get_cached_metadata`, which reads with the **global
+    platform** PAT off the **default branch** through a 10-minute per-process
+    cache. Creation resolves its PAT completely differently (per-agent ->
+    per-user -> global, ent#162), so a user creating from their own private repo
+    with their own token would clone successfully and then read zero
+    declarations with no signal at all — the exact silent-ignore class this
+    feature exists to close, reintroduced one layer up.
 
-    Non-fatal by construction: `fetch_template_metadata_for_create` returns
-    `{}` and logs a WARNING on any failure, and the normalizer is total.
+    ent#89 wrote that warning about `schedules:` and then the ent#14 fork gate
+    was built on the catalog dict anyway, one line below the call site that had
+    already read the file correctly (trinity-enterprise#14 S2). So this returns
+    the whole `(metadata, reason)` pair and BOTH consumers — the schedules
+    normalizer and the `fork_to_own` gate — read it. One GitHub call, one set of
+    credentials, one ref, and no second source that can disagree.
+
+    Non-fatal by construction for schedules (the normalizer is total, and any
+    failure yields `{}` plus a WARNING naming the repo, the ref and the reason).
+    The `reason` is what makes the gate's fail-closed decision possible.
     """
-    metadata = fetch_template_metadata_for_create(repo, pat=pat, ref=ref)
-    return normalize_declared_schedules(metadata.get("schedules"))
+    return fetch_template_metadata_result_for_create(repo, pat=pat, ref=ref)
+
+
+def _declared_schedules_for_snapshot(snapshot) -> list:
+    """Normalized `schedules:` for a copy-intent agent, read from the STAGED
+    tree (trinity-enterprise#15) — the snapshot's exact content is the truth,
+    so no API re-fetch (which could see a different ref). Non-fatal by
+    construction, mirroring `_declared_schedules_for_github`."""
+    template_yaml = Path(snapshot.staging_dir) / "template.yaml"
+    if not template_yaml.is_file():
+        return []
+    try:
+        metadata = load_template_yaml(template_yaml.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            return []
+        return normalize_declared_schedules(metadata.get("schedules"))
+    except Exception as e:  # noqa: BLE001 — schedules are advisory, never fatal
+        logger.warning(
+            "snapshot-import: could not read template.yaml schedules for %s: %s",
+            snapshot.source_repo, e,
+        )
+        return []
 
 
 def _gate_tokenless_request(
@@ -631,14 +674,103 @@ async def _apply_fork_to_own(
     github_pat_for_agent: Optional[str],
     github_pat_tier: str,
     url_branch: Optional[str],
+    *,
+    source_metadata: dict,
+    source_metadata_reason: Optional[str],
 ) -> tuple[str, Optional[str], str, Optional[str]]:
     """trinity-enterprise#93: enforce a `fork_to_own: required` template and, when
     the caller forks, copy the template into a user-owned repo and return the
     updated `(repo, pat, tier, fork_upstream_repo)`. Runs BEFORE the docker
     try-block so the structured FORK_* errors reach the UI. When the caller is
     NOT forking the inputs pass through unchanged (tier untouched)."""
-    fork_meta = (gh_template or {}).get("fork_to_own")
-    if fork_meta == "required" and not config.fork_to_own:
+    # trinity-enterprise#14 F2 — an unreadable template.yaml is UNKNOWN, not absent.
+    #
+    # The chain this closes, every link verified in source:
+    #   _fetch_template_yaml_result()  -> ({}, "HTTP 403") on a rate limit
+    #   _build_template()              -> "fork_to_own": None
+    #   the test below                 -> `None == "required"` is False
+    #   => the gate never fires and the agent is created bound to the SHARED
+    #      UPSTREAM TEMPLATE REPO instead of a user-owned copy.
+    #
+    # `fork_to_own: required` exists precisely to stop that, and the failure is
+    # silent: the user's knowledge base ends up in the wrong place with no error.
+    # It is the ent#162 class ("a private KB could reach the shared public
+    # upstream") reached without any attacker.
+    #
+    # Pre-existing, but the remote template registry converts it from
+    # unreachable to EXPECTED: it re-introduces per-repo GitHub metadata fetches
+    # on a DEFAULT install (#1931 had driven them to zero), ships default-on, and
+    # its own arithmetic — workers x windows/hr x entries — exceeds GitHub's
+    # 60/hr ANONYMOUS limit above ~5 listed repos, while the curated fleet is
+    # very likely to include the fork_to_own template (Cornelius).
+    #
+    # WHICH READ DECIDES (trinity-enterprise#14 S2). Both inputs below come from
+    # `_read_source_template` — the creation-path read — and NOT from
+    # `gh_template`, whose `metadata_unavailable`/`fork_to_own` are computed from
+    # `_get_cached_metadata_result`: the global platform PAT, off the default
+    # branch, through a 600s cache. Reading the catalog here failed in both
+    # directions at once:
+    #
+    #   FALSE PASS. GitHub answers 404 — not 403 — for a repo a token cannot
+    #   see. So a PRIVATE `fork_to_own: required` template that only the
+    #   creator's per-user PAT can read (ent#162, a supported flow) came back
+    #   `("HTTP 404" -> absent, fork_to_own=None)`, the gate passed, and the
+    #   agent bound to the shared upstream. The precise outcome this gate
+    #   exists to prevent, with no attacker involved. Note that fixing only
+    #   the availability half would NOT have closed it: the `fork_to_own`
+    #   VALUE has to come from the correctly-credentialed read too, which is
+    #   why `source_metadata` is threaded in beside the reason.
+    #
+    #   FALSE REFUSE. A creator whose own PAT reads the template fine was 503'd
+    #   because the SHARED cache entry said 403 — for the full 600s TTL, on
+    #   every non-forking `github:` create, including the plain
+    #   `github:owner/repo` escape hatch.
+    #
+    # Costs zero extra GitHub calls: `_resolve_template` already made this read
+    # one call earlier, for ent#89's schedules, with the PAT that will clone.
+    # That last part is the structural argument — the read that DECIDES is now
+    # made with the same credentials as the clone that follows, so "we could not
+    # see it" and "the agent could not have cloned it" can no longer disagree.
+    #
+    # Scoped to the branch that is actually unsafe. A caller who IS forking ends
+    # up with a user-owned repo whatever the template declares, so an outage must
+    # not block them; only the non-forking path has to treat unknown as refuse.
+    # A clean HTTP 404 stays "absent" (`metadata_reason_is_unreadable`), so a repo
+    # that genuinely ships no template.yaml creates exactly as it always has —
+    # and on this path a 404 the creator's own token cannot get past is caught
+    # loudly downstream by `_validate_github_access` anyway.
+    #
+    # The trade is deliberate: creation now depends on GitHub API reachability
+    # where it previously depended only on `git clone`. A loud, retryable refusal
+    # beats a silent wrong-repo binding — the learnings.md 2026-07-15
+    # direction-of-failure rule, applied to a gate instead of a retention window.
+    if metadata_reason_is_unreadable(source_metadata_reason) and not config.fork_to_own:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": (
+                    f"Could not read '{config.template}' template metadata from "
+                    f"GitHub, so Trinity cannot tell whether this template must "
+                    f"be copied into a repo you own. Refusing rather than "
+                    f"guessing. This is usually a transient GitHub rate limit — "
+                    f"retry shortly, or configure a platform GitHub token in "
+                    f"Settings to raise the limit from 60 to 5000 requests/hour."
+                ),
+                "code": "TEMPLATE_METADATA_UNAVAILABLE",
+            },
+        )
+
+    # The union, not a precedence: `required` from EITHER read wins. The
+    # creation read is the better one (right credentials, pinned ref, no cache),
+    # but taking it alone would mean a repo whose default branch declares
+    # `required` could be created from an `@branch` that drops the line. Both
+    # sources feed one boolean, so this change can only ever REMOVE a false pass
+    # relative to the catalog-only gate, never add one.
+    declared_fork_modes = {
+        (source_metadata or {}).get("fork_to_own"),
+        (gh_template or {}).get("fork_to_own"),
+    }
+    if "required" in declared_fork_modes and not config.fork_to_own:
         raise HTTPException(
             status_code=400,
             detail={
@@ -1049,6 +1181,61 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             },
         )
 
+    # trinity-enterprise#15: import-intent intake gates, all pre-side-effect.
+    if config.import_intent:
+        if not (config.template or "").startswith("github:"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        "import_intent requires a 'github:owner/repo' template "
+                        "— fork/copy/clone are meaningless without a source repo."
+                    ),
+                    "code": "INTENT_REQUIRES_GITHUB_TEMPLATE",
+                },
+            )
+        if config.import_intent == "fork" and not config.fork_to_own:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        "import_intent 'fork' needs the fork_to_own block "
+                        "(destination_repo + github_pat) — the fork is created "
+                        "in YOUR account."
+                    ),
+                    "code": "FORK_PARAMS_REQUIRED",
+                },
+            )
+        if config.import_intent == "copy" and config.ephemeral:
+            # Ghosts are volume-less by invariant (ent#69) and the snapshot
+            # lives on the workspace volume — the combination would boot a
+            # green blank ghost and strand the populated volume (review F2).
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        "import_intent 'copy' cannot be combined with "
+                        "ephemeral — a snapshot needs the durable workspace "
+                        "volume that ghost agents deliberately do not mount."
+                    ),
+                    "code": "COPY_EPHEMERAL_UNSUPPORTED",
+                },
+            )
+        if config.import_intent in ("copy", "clone") and config.fork_to_own:
+            # A stray fork block with an explicit non-fork intent would
+            # otherwise silently create a GitHub repo (fork_to_own triggers on
+            # block presence alone) — refuse the contradiction by name.
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": (
+                        f"import_intent '{config.import_intent}' contradicts "
+                        f"the fork_to_own block — remove one of them."
+                    ),
+                    "code": "INTENT_FORK_BLOCK_CONFLICT",
+                },
+            )
+
     # Load template configuration
     if config.template:
         # #843: reject template strings that don't start with a known
@@ -1073,6 +1260,62 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             )
         if config.template.startswith("github:"):
             template_lookup, repo_path, url_branch = _parse_github_ref(config)
+
+            if config.import_intent == "copy":
+                # trinity-enterprise#15: backend-materialized snapshot. The
+                # staged clone IS the reachability check (same transport class
+                # as ent#123's probe); the tokenless source-mode gate is
+                # deliberately NOT run — that 400 protects boot-time push, and
+                # copy never pushes. `github_repo_for_agent` stays None so the
+                # container gets no GitHub env, no git-config row is reserved,
+                # and the PAT-persist site below never fires.
+                gh_template = get_github_template(template_lookup)
+                if (gh_template or {}).get("fork_to_own") == "required":
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "error": (
+                                "This template requires fork-to-own creation "
+                                "— use import_intent 'fork' with a "
+                                "fork_to_own block."
+                            ),
+                            "code": "FORK_TO_OWN_REQUIRED",
+                        },
+                    )
+                if gh_template:
+                    # Catalog parity with `_resolve_github_repo_and_pat`: the
+                    # catalog id maps to its declared repo, and the template's
+                    # resource/MCP defaults still apply to the snapshot agent.
+                    copy_repo = gh_template["github_repo"]
+                    config.resources = gh_template.get("resources", config.resources)
+                    config.mcp_servers = gh_template.get("mcp_servers", config.mcp_servers)
+                else:
+                    if "/" not in repo_path:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Invalid GitHub template format. Use: github:owner/repo or github:owner/repo@branch",
+                        )
+                    copy_repo = repo_path
+                copy_pat, _copy_tier = resolve_github_pat(
+                    owner_id=current_user.id
+                )
+                # GIT-002 parity with startup.sh (`-b` only when ≠ "main"):
+                # the default "main" means "the repo's default branch".
+                copy_branch = (
+                    config.source_branch
+                    if config.source_branch and config.source_branch != "main"
+                    else None
+                )
+                tr.copy_snapshot = await snapshot_import.stage_github_snapshot(
+                    copy_repo,
+                    copy_branch,
+                    copy_pat or None,
+                )
+                tr.declared_schedules = _declared_schedules_for_snapshot(
+                    tr.copy_snapshot
+                )
+                return tr
+
             (
                 gh_template,
                 tr.github_repo_for_agent,
@@ -1084,9 +1327,14 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             # Read the SOURCE template's declarations here, before
             # `_apply_fork_to_own` swaps in the user's fork + PAT: this pairing
             # (source repo, PAT resolved to read it) is the one that can
-            # actually see a private template.
-            tr.declared_schedules = _declared_schedules_for_github(
+            # actually see a private template. ONE read feeds both consumers —
+            # ent#89's schedules and ent#14's fork gate (which used to decide
+            # from the catalog cache instead; see `_apply_fork_to_own`).
+            source_metadata, source_metadata_reason = _read_source_template(
                 tr.github_repo_for_agent, tr.github_pat_for_agent, url_branch
+            )
+            tr.declared_schedules = normalize_declared_schedules(
+                source_metadata.get("schedules")
             )
             (
                 tr.github_repo_for_agent,
@@ -1101,6 +1349,8 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
                 tr.github_pat_for_agent,
                 tr.github_pat_tier,
                 url_branch,
+                source_metadata=source_metadata,
+                source_metadata_reason=source_metadata_reason,
             )
             # Validate PAT has access to the repository before creating container
             # This prevents silent clone failures in startup.sh (#218)
@@ -1687,6 +1937,10 @@ async def _create_agent_container(
         'trinity.full-capabilities': str(full_capabilities).lower(),
         'trinity.base-image-version': get_platform_version()
     }
+    if config.import_intent:
+        # trinity-enterprise#15: ops-visible import provenance (a copy agent
+        # is otherwise indistinguishable from a local agent post-hoc).
+        container_labels['trinity.import-intent'] = config.import_intent
     if config.ephemeral:
         # trinity-enterprise#69: Docker-as-truth ghost markers — the GC
         # orphan pass reclaims labeled containers whose ownership row
@@ -2062,6 +2316,27 @@ def _rollback_failed_creation(handles: _RollbackHandles) -> None:
                 "Failed to roll back MCP key for %s after creation "
                 "failure: %s",
                 handles.agent_name,
+                cleanup_exc,
+            )
+
+
+def _cleanup_copy_artifacts(handles: _RollbackHandles) -> None:
+    """trinity-enterprise#15: copy-intent except-path cleanup — the staged
+    snapshot dir (best-effort, idempotent) and the volume THIS attempt
+    pre-populated. Called AFTER ``_reclaim_failed_creation_container`` so a
+    created-then-reclaimed container no longer holds the volume mount.
+    Removing the volume keeps the #1667 leftover-volume guard from 409ing the
+    user's retry; safe because ``copy_volume_name`` is set only after this
+    attempt created+populated it."""
+    snapshot_import.cleanup_staging(handles.copy_staging_dir)
+    if handles.copy_volume_name and docker_client:
+        try:
+            docker_client.volumes.get(handles.copy_volume_name).remove(force=True)
+        except Exception as cleanup_exc:  # noqa: BLE001 — NotFound/in-use both fine
+            logger.warning(
+                "Failed to remove pre-populated copy volume %s after creation "
+                "failure (the #1581 orphan sweep will reclaim it): %s",
+                handles.copy_volume_name,
                 cleanup_exc,
             )
 
@@ -2528,6 +2803,11 @@ async def create_agent_internal(
         # rollback can tell a container THIS attempt created from one that was
         # already there.
         container_floor_ts=utc_now_iso(),
+        # trinity-enterprise#15: staged snapshot dir travels into the rollback
+        # so a mid-try failure never strands it.
+        copy_staging_dir=(
+            tr.copy_snapshot.staging_dir if tr.copy_snapshot else None
+        ),
     )
 
     if docker_client:
@@ -2549,6 +2829,28 @@ async def create_agent_internal(
                         f"failed to persist per-agent GitHub PAT for {config.name}"
                     )
 
+            # trinity-enterprise#15: copy intent — stream the staged snapshot
+            # (+ .trinity-initialized marker) into the workspace volume BEFORE
+            # the container exists; `_workspace_volume_mount` below then adopts
+            # the volume this attempt just created (the #1667 refusal gate
+            # already passed pre-try, so no other owner can claim it).
+            if tr.copy_snapshot:
+                from .deploy import _prepopulate_workspace_from_template
+                # Armed BEFORE the call (review F4): `_prepopulate` creates the
+                # volume first and can fail mid-stream — an unarmed handle
+                # would strand a half-populated volume that 409s the user's
+                # retry via the #1667 guard until the orphan sweep. Safe
+                # single-flight: the #1667 gate already proved no volume
+                # existed pre-try, so anything under this name is ours.
+                handles.copy_volume_name = f"agent-{config.name}-workspace"
+                await asyncio.to_thread(
+                    _prepopulate_workspace_from_template,
+                    config.name,
+                    Path(tr.copy_snapshot.staging_dir),
+                )
+                snapshot_import.cleanup_staging(tr.copy_snapshot.staging_dir)
+                handles.copy_staging_dir = None
+
             volumes = await _build_volume_mounts(
                 config,
                 config_path,
@@ -2562,6 +2864,15 @@ async def create_agent_internal(
             )
             created_container = container
             agent_status = get_agent_status_from_container(container)
+            if tr.copy_snapshot:
+                # trinity-enterprise#15: surface snapshot provenance on the
+                # create response (the endpoint folds it into the audit entry).
+                agent_status.import_snapshot = {
+                    "source_repo": tr.copy_snapshot.source_repo,
+                    "source_branch": tr.copy_snapshot.source_branch,
+                    "head_sha": tr.copy_snapshot.head_sha,
+                    "file_count": tr.copy_snapshot.file_count,
+                }
             await _broadcast_agent_created(agent_status, ws_manager)
             _register_agent(
                 config,
@@ -2586,6 +2897,10 @@ async def create_agent_internal(
             # DB/quota rollback above deliberately left to a watchdog that only
             # covers ephemeral agents.
             await _reclaim_failed_creation_container(handles, created_container, e)
+            # trinity-enterprise#15: AFTER the container reclaim, so the volume
+            # this attempt pre-populated is no longer mounted and its removal
+            # keeps the #1667 guard from 409ing the retry.
+            _cleanup_copy_artifacts(handles)
             logger.error(f"Failed to create agent {config.name}: {e}")
             raise HTTPException(status_code=500, detail="Failed to create agent. Please try again.")
     else:

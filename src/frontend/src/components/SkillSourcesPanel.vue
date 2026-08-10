@@ -74,7 +74,13 @@
                 >{{ s.ref_type === 'tag' ? 'pinned' : 'branch' }} · {{ s.ref }}</span>
                 <span v-if="!s.enabled" class="px-1.5 py-0.5 rounded text-xs bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300">disabled</span>
               </div>
-              <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400 truncate">{{ s.url }}</p>
+              <!-- ent#334: the backend now strips userinfo at the emitter, so
+                   this is defence-in-depth, not the control. Kept because the
+                   two strips are NOT equivalent — this one also covers
+                   scp-style, protocol-relative and git+ssh:// shapes that
+                   Python's urlparse does not. Both strip; neither is
+                   load-bearing alone. Do not "unify" them. -->
+              <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400 truncate">{{ stripUserinfo(s.url) }}</p>
               <p class="mt-0.5 text-xs" :class="statusClass(s)">
                 {{ statusLabel(s) }}
                 <span v-if="s.skill_count" class="text-gray-500 dark:text-gray-400">
@@ -160,6 +166,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useSkillSourcesStore } from '../stores/skillSources'
+import { stripUserinfo } from './skills/contract'
 
 const store = useSkillSourcesStore()
 const adding = ref(false)

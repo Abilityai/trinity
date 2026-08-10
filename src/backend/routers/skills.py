@@ -27,7 +27,7 @@ from dependencies import (
 )
 from database import db
 from db_models import AgentSkill, SkillInfo, AgentSkillsUpdate
-from models import SkillSourceCreate, SkillSourceUpdate
+from models import SkillsLibraryStatus, SkillSourceCreate, SkillSourceUpdate
 from db.skill_sources import DuplicateSkillSource, DefaultSourceExists
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from utils.url_validation import (
@@ -151,12 +151,23 @@ async def list_skills(current_user: User = Depends(get_current_user)):
     ]
 
 
-@router.get("/skills/library/status")
+@router.get("/skills/library/status", response_model=SkillsLibraryStatus)
 async def get_library_status(current_user: User = Depends(get_current_user)):
     """
     Get the current status of the skills library.
 
     Returns configuration status, sync info, and skill count.
+
+    **`response_model` is a security boundary here, not documentation**
+    (ent#334). This route is open to every authenticated caller — including
+    agent-scoped keys, deliberately, since the per-agent Skills tab and the
+    MCP `get_skills_library_status` tool both read it — while the same
+    service dict is also served by `GET /skills/sources`, which is
+    `require_admin` + `reject_agent_principal` precisely because repo URLs
+    are sensitive. Returning the dict raw handed the admin-gated value to the
+    callers that gate excludes. `SkillsLibraryStatus` names what may leave;
+    everything else is dropped, so the next sensitive field the service grows
+    is fail-closed. Keep it, and see the model's docstring before widening it.
     """
     return skill_service.get_library_status()
 

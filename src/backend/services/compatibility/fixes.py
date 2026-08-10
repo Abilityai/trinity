@@ -22,7 +22,11 @@ import re
 from typing import List, Optional, Tuple
 
 from services.docker_service import execute_command_in_container, get_agent_container
-from services.git_service import _detect_git_dir, _GITIGNORE_PATTERNS
+from services.git_service import (
+    _detect_git_dir,
+    _GITIGNORE_PATTERNS,
+    _TRINITY_AUTHORED_PATHS,
+)
 from . import spec
 
 logger = logging.getLogger(__name__)
@@ -39,7 +43,11 @@ _ADD_PATTERNS = {
     "S-001": [".env", ".env.*"],
     "S-002": [".mcp.json"],
     "S-004": [".claude/projects/"],
-    "S-005": [".trinity/"],
+    # #2070: the contents-only form plus the authored re-includes. Adding the
+    # wholesale `.trinity/` line back would re-break the thing this fix is for:
+    # git does not descend into a dir-form exclusion, so the negations under it
+    # would never apply and the next Push would untrack the template's hooks.
+    "S-005": [".trinity/*", *(f"!{p}" for p in _TRINITY_AUTHORED_PATHS)],
     "S-006": [".claude/statsig/", ".claude/todos/", ".claude/debug/",
               ".claude/sessions/", ".claude/shell-snapshots/"],
     "S-007": ["content/"],

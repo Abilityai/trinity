@@ -122,6 +122,33 @@ def _restore_sys_modules():
 # ---------------------------------------------------------------------------
 
 
+class _FakePipeline:
+    """Records buffered commands and replays them against the parent FakeRedis.
+
+    Deliberately NOT a no-op passthrough: the point of the pipeline in
+    `_collect_redis_slot_state` is that both reads land in one round-trip, and
+    a double that executed eagerly would let a test pass against code that
+    issued them separately.
+    """
+
+    def __init__(self, parent: "FakeRedis"):
+        self._parent = parent
+        self._queued: List[tuple] = []
+
+    def ttl(self, key: str) -> "_FakePipeline":
+        self._queued.append(("ttl", (key,)))
+        return self
+
+    def hget(self, key: str, field: str) -> "_FakePipeline":
+        self._queued.append(("hget", (key, field)))
+        return self
+
+    def execute(self) -> List:
+        results = [getattr(self._parent, op)(*args) for op, args in self._queued]
+        self._queued.clear()
+        return results
+
+
 class FakeRedis:
     """Minimal Redis stand-in for canary tests (ZSET + HASH + SCAN)."""
 
@@ -222,11 +249,28 @@ class FakeRedis:
                 removed += 1
         return removed
 
+    def hgetall(self, key: str) -> Dict[str, str]:
+        return dict(self._hashes.get(key, {}))
+
     def hkeys(self, key: str) -> List[str]:
         return list(self._hashes.get(key, {}).keys())
 
     def hlen(self, key: str) -> int:
         return len(self._hashes.get(key, {}))
+
+    # PIPELINE --------------------------------------------------------------
+    # `_collect_redis_slot_state` reads each slot's TTL and its stored
+    # `timeout_seconds` in one round-trip (ent#336). Buffer the calls and
+    # replay them on execute(), mirroring redis-py's chaining API.
+
+    def pipeline(self):
+        return _FakePipeline(self)
+
+    def expire(self, key: str, seconds: int) -> bool:
+        exists = key in self._hashes or key in self._zsets or key in self._strings
+        if exists:
+            self._ttls[key] = seconds
+        return exists
 
     # TTL -------------------------------------------------------------------
     # Matches redis-py semantics: positive int = seconds remaining,
@@ -244,6 +288,9 @@ class FakeRedis:
         self._ttls[key] = value
 
     def delete(self, key: str) -> int:
+        # Real `DEL` is type-agnostic. The string branch was missing until
+        # #1813 (H-01 clears its `canary:h01:suspect_since` marker with it),
+        # which made the double quietly less capable than redis-py.
         deleted = 0
         if key in self._zsets:
             del self._zsets[key]
@@ -251,6 +298,10 @@ class FakeRedis:
         if key in self._hashes:
             del self._hashes[key]
             deleted += 1
+        if key in self._strings:
+            del self._strings[key]
+            deleted += 1
+        self._ttls.pop(key, None)
         return deleted
 
     # SCAN ------------------------------------------------------------------
@@ -272,8 +323,23 @@ class FakeRedis:
     def get(self, key: str):
         return self._strings.get(key)
 
-    def set(self, key: str, value: str) -> bool:
+    def set(self, key: str, value: str, ex: int = None) -> bool:
         self._strings[key] = str(value)
+        # `ex=` is real redis-py semantics and H-01 relies on it (#1813): a
+        # marker written without an expiry can stay armed forever when the
+        # best-effort clear fails. A fake that silently ignored `ex` would let
+        # that regression pass.
+        if ex is not None:
+            self._ttls[key] = int(ex)
+        else:
+            self._ttls.pop(key, None)
+        return True
+
+    def expire(self, key: str, seconds: int) -> bool:
+        """Refresh a TTL. redis-py returns False when the key is absent."""
+        if key not in self._strings and key not in self._hashes and key not in self._zsets:
+            return False
+        self._ttls[key] = int(seconds)
         return True
 
 
@@ -1397,6 +1463,7 @@ class TestRunner:
             "S-01", "S-02", "S-03",
             "E-01", "E-02", "E-03", "E-04", "E-05", "E-06",
             "G-03", "G-04",
+            "H-01",
             "L-03",
             "B-01", "B-02",
             "R-01",
@@ -1518,6 +1585,7 @@ class TestInvariantE01:
         started_at="2026-05-18T11:00:00Z",
         timeout=900,
         running_ids=("e1",),
+        lease_expires_at=None,
     ):
         from canary.snapshot import Snapshot, AgentSnapshot
         return Snapshot(
@@ -1530,6 +1598,9 @@ class TestInvariantE01:
                     execution_timeout_seconds=timeout,
                     running_exec_ids=set(running_ids),
                     running_started_at={eid: started_at for eid in running_ids},
+                    running_lease_expires_at={
+                        eid: lease_expires_at for eid in running_ids
+                    },
                 )
             ],
         )
@@ -1582,6 +1653,39 @@ class TestInvariantE01:
         snap = self._snap(started_at="not-an-iso-timestamp")
         from canary.invariants import e01_terminal_state_closure as e01
         assert e01.check(snap) == []
+
+    # #1990 lease-awareness. The enforcing guard — including both grace
+    # boundaries, the cleanup-interval coupling, the absent-key fail-open, and
+    # the E-02 no-exclusion verdict — is
+    # `tests/unit/test_1990_e01_lease_awareness.py`; CI runs `pytest unit/`
+    # only, so a lease regression must go red there. These three keep the
+    # triple visible beside the rest of E-01's coverage.
+
+    def test_skips_pull_claimed_row_within_the_reaper_grace(self):
+        # Aged exactly as the firing case below, but pull-CLAIMED with a lease
+        # 1s overdue: owned by the lease-reaper, whose lease window IS
+        # timeout+buffer, so E-01 would otherwise page critical the instant the
+        # reaper became eligible.
+        snap = self._snap(lease_expires_at="2026-05-18T11:59:59Z")
+        from canary.invariants import e01_terminal_state_closure as e01
+        assert e01.check(snap) == []
+
+    def test_lease_overdue_past_the_grace_fires_as_a_reaper_failure(self):
+        # 11:49:00 vs a 12:00:00 snapshot = 660s overdue > the 600s grace: the
+        # reaper has skipped two of its own cycles. The silence is bounded.
+        snap = self._snap(lease_expires_at="2026-05-18T11:49:00Z")
+        from canary.invariants import e01_terminal_state_closure as e01
+        violations = e01.check(snap)
+        assert len(violations) == 1
+        assert violations[0].observed_state["lease_overdue_seconds"] == 660
+
+    def test_null_lease_row_of_same_age_still_fires(self):
+        # The control: the grace is keyed on the lease, not on age.
+        snap = self._snap(lease_expires_at=None)
+        from canary.invariants import e01_terminal_state_closure as e01
+        violations = e01.check(snap)
+        assert len(violations) == 1
+        assert violations[0].observed_state["age_seconds"] == 3600
 
 
 # ---------------------------------------------------------------------------
@@ -1977,19 +2081,32 @@ class TestInvariantS03:
         import time
         return time.time()
 
+    @staticmethod
+    def _store_timeout(redis, agent: str, eid: str, timeout: int) -> None:
+        """Write the `timeout_seconds` field `SlotService.acquire_slot` records.
+
+        ent#336: S-03's floor comes from THIS field, not the agent cap. Every
+        real slot has it; a test that omits it is exercising the
+        unobservable-timeout skip path, not the floor.
+        """
+        redis.hset(f"agent:slot:{agent}:{eid}", "timeout_seconds", str(timeout))
+
     def test_holds_when_ttl_above_floor(self, canary_db, reload_canary):
-        _add_agent(canary_db, "a1", timeout=60)  # floor = 60 + 300 = 360s
+        _add_agent(canary_db, "a1", timeout=60)
         reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
+        self._store_timeout(reload_canary["redis"], "a1", "e1", 60)  # floor 360
         reload_canary["redis"].set_ttl("agent:slot:a1:e1", 500)
         snap = reload_canary["canary"].collect_snapshot()
         from canary.invariants import s03_slot_ttl_floor as s03
         assert s03.check(snap) == []
 
     def test_fires_below_floor(self, canary_db, reload_canary):
-        _add_agent(canary_db, "a1", timeout=60)  # floor = 360s
-        # Slot acquired ~now with EXPIRE=100. Initial TTL = 100 + ~0 age
-        # = 100 < 360 floor — fires.
+        _add_agent(canary_db, "a1", timeout=60)
+        # Slot acquired ~now, stored timeout 60 → floor 360, but EXPIRE=100.
+        # Initial TTL = 100 + ~0 age = 100 < 360 — the EXPIRE and the HSET
+        # disagree, which is what `below_floor` now means (ent#336).
         reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
+        self._store_timeout(reload_canary["redis"], "a1", "e1", 60)
         reload_canary["redis"].set_ttl("agent:slot:a1:e1", 100)
         snap = reload_canary["canary"].collect_snapshot()
         from canary.invariants import s03_slot_ttl_floor as s03
@@ -2000,6 +2117,8 @@ class TestInvariantS03:
         assert v[0].observed_state["kind"] == "below_floor"
         assert v[0].observed_state["redis_ttl_seconds"] == 100
         assert v[0].observed_state["floor_seconds"] == 360
+        assert v[0].observed_state["floor_source"] == "stored"
+        assert v[0].observed_state["stored_timeout_seconds"] == 60
 
     def test_natural_decay_not_below_floor(self, canary_db, reload_canary):
         """#913 regression — a slot created with EXPIRE=floor and observed
@@ -2010,13 +2129,18 @@ class TestInvariantS03:
         # TTL now reads `360 - 5 = 355` — below the raw floor — but the
         # reconstructed initial TTL is 360, exactly at the floor.
         reload_canary["redis"].zadd("agent:slots:a1", {"e1": time.time() - 5})
+        self._store_timeout(reload_canary["redis"], "a1", "e1", 60)
         reload_canary["redis"].set_ttl("agent:slot:a1:e1", 355)
         snap = reload_canary["canary"].collect_snapshot()
         from canary.invariants import s03_slot_ttl_floor as s03
         assert s03.check(snap) == []
 
     def test_fires_when_metadata_missing(self, canary_db, reload_canary):
-        """ZSET points at a slot whose metadata HASH already expired (#226)."""
+        """ZSET points at a slot whose metadata HASH already expired (#226).
+
+        The HASH is gone, so `timeout_seconds` is unreadable — this arm must
+        still fire, because it is independent of the floor (ent#336).
+        """
         _add_agent(canary_db, "a1", timeout=60)
         reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
         # FakeRedis.ttl returns -2 when neither the hash nor the ttl is set.
@@ -2026,6 +2150,10 @@ class TestInvariantS03:
         assert len(v) == 1
         assert v[0].observed_state["kind"] == "missing"
         assert v[0].observed_state["redis_ttl_seconds"] == -2
+        # The floor could not be derived from the slot; the row says so rather
+        # than implying the agent cap was this slot's real bound.
+        assert v[0].observed_state["floor_source"] == "unknown"
+        assert v[0].observed_state["stored_timeout_seconds"] is None
 
     def test_fires_when_ttl_unset(self, canary_db, reload_canary):
         """Metadata HASH exists but no expire was set on it."""
@@ -2033,12 +2161,48 @@ class TestInvariantS03:
         reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
         # Populate the HASH so FakeRedis.ttl returns -1 (exists, no TTL).
         reload_canary["redis"].hset("agent:slot:a1:e1", "started_at", "x")
+        self._store_timeout(reload_canary["redis"], "a1", "e1", 60)
         snap = reload_canary["canary"].collect_snapshot()
         from canary.invariants import s03_slot_ttl_floor as s03
         v = s03.check(snap)
         assert len(v) == 1
         assert v[0].observed_state["kind"] == "no_expiry"
         assert v[0].observed_state["redis_ttl_seconds"] == -1
+
+    def test_explicit_short_timeout_below_agent_cap_does_not_fire(
+        self, canary_db, reload_canary
+    ):
+        """ent#336 — THE regression this issue is about.
+
+        Agent cap 3600 (floor 3900 under the old agent-cap rule), schedule
+        timeout 2700 → slot TTL 3000. Correct by construction, and it paged
+        critical on every normally-configured scheduled run before the fix.
+        """
+        _add_agent(canary_db, "a1", timeout=3600)
+        reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
+        self._store_timeout(reload_canary["redis"], "a1", "e1", 2700)
+        reload_canary["redis"].set_ttl("agent:slot:a1:e1", 3000)
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s03_slot_ttl_floor as s03
+        assert s03.check(snap) == []
+
+    def test_unobservable_timeout_skips_rather_than_using_agent_cap(
+        self, canary_db, reload_canary
+    ):
+        """A live TTL with no stored timeout must SKIP, not fall back.
+
+        The fallback would re-arm the exact false positive above whenever the
+        HASH expires between the two reads: TTL 3000 against an agent-cap floor
+        of 3900 fires, while against the slot's real 2700 bound it does not.
+        """
+        _add_agent(canary_db, "a1", timeout=3600)
+        reload_canary["redis"].zadd("agent:slots:a1", {"e1": self._now_score()})
+        # TTL readable, `timeout_seconds` absent.
+        reload_canary["redis"].set_ttl("agent:slot:a1:e1", 3000)
+        snap = reload_canary["canary"].collect_snapshot()
+        assert snap.agents[0].slot_timeouts == {}
+        from canary.invariants import s03_slot_ttl_floor as s03
+        assert s03.check(snap) == []
 
     def test_drain_sentinels_skipped(self, canary_db, reload_canary):
         _add_agent(canary_db, "a1", timeout=60)
@@ -2267,32 +2431,51 @@ class TestInvariantB02:
 
 
 class TestInvariantR01:
+    # ent#337: the exec now emits one PID per line (empty output = no zombies),
+    # not a count. See `_collect_zombie_counts` for why the dwell needs PIDs.
     def test_holds_when_no_zombies(self, canary_db, reload_canary, fake_docker):
         _add_agent(canary_db, "a1")
-        fake_docker.add_container("agent-a1", exec_output="0")
+        fake_docker.add_container("agent-a1", exec_output="")
         snap = reload_canary["canary"].collect_snapshot()
         from canary.invariants import r01_no_zombie_claude as r01
         assert r01.check(snap) == []
         assert snap.zombie_counts == {"a1": 0}
+        assert snap.zombie_pids == {"a1": set()}
 
-    def test_fires_on_zombie_count(self, canary_db, reload_canary, fake_docker):
+    def test_collects_zombie_pids(self, canary_db, reload_canary, fake_docker):
+        """A single observation is collected but does NOT fire (ent#337).
+
+        Firing needs the dwell window; see the boundary suite in
+        `tests/unit/test_ent337_r01_zombie_dwell.py`.
+        """
         _add_agent(canary_db, "a1")
-        fake_docker.add_container("agent-a1", exec_output="3")
+        fake_docker.add_container("agent-a1", exec_output="811\n902\n1043\n")
         snap = reload_canary["canary"].collect_snapshot()
+        assert snap.zombie_counts == {"a1": 3}
+        assert snap.zombie_pids == {"a1": {811, 902, 1043}}
         from canary.invariants import r01_no_zombie_claude as r01
-        v = r01.check(snap)
-        assert len(v) == 1
-        assert v[0].invariant_id == "R-01"
-        assert v[0].severity == "critical"
-        assert v[0].observed_state["agent_name"] == "a1"
-        assert v[0].observed_state["zombie_count"] == 3
+        assert r01.check(snap) == []
+
+    def test_unparseable_ps_output_is_unavailable_not_green(
+        self, canary_db, reload_canary, fake_docker
+    ):
+        """A diagnostic on stdout must not read as 'no zombies'.
+
+        `ps` absent on a minimal image would otherwise report a silent
+        false-green on the one invariant that watches the process table.
+        """
+        _add_agent(canary_db, "a1")
+        fake_docker.add_container("agent-a1", exec_output="sh: ps: not found")
+        snap = reload_canary["canary"].collect_snapshot()
+        assert "a1" not in snap.zombie_counts
+        assert any("docker.exec[a1]" in s for s in snap.sources_unavailable)
 
     def test_per_container_exec_failure_does_not_kill_cycle(
         self, canary_db, reload_canary, fake_docker
     ):
         _add_agent(canary_db, "ok")
         _add_agent(canary_db, "broken")
-        fake_docker.add_container("agent-ok", exec_output="0")
+        fake_docker.add_container("agent-ok", exec_output="")
         fake_docker.add_container("agent-broken", exec_raises=RuntimeError("boom"))
         snap = reload_canary["canary"].collect_snapshot()
         # The healthy container is still measured; the broken one is in
@@ -2508,6 +2691,34 @@ class TestCanarySlackPayload:
     top, which triggers production DB init unless `database` is stubbed.
     The fixture already does that stubbing; we ignore its return value.
     """
+
+    def test_h01_alert_is_legible(self, canary_service):
+        """H-01's whole value is a loud, interpretable alarm — the generic
+        "H-01 fired 1 violation(s)" fallback would defeat the feature."""
+        from services.canary_alerts import CanaryAlerts
+        from canary.snapshot import ViolationReport
+        from canary.invariants import h01_collector_blindness as h01
+
+        v = ViolationReport(
+            invariant_id="H-01",
+            tier="A",
+            severity="critical",
+            observed_state={
+                "reason": h01.REASON_CONTRADICTED,
+                "known_agent_count": 0,
+                "evidence_agent_count": 7,
+                "blind_since": "2026-07-29T12:00:00Z",
+            },
+            signal_query="…",
+        )
+
+        assert CanaryAlerts._INVARIANT_NAMES["H-01"]
+        assert CanaryAlerts._INVARIANT_RUNBOOKS["H-01"]
+
+        msg = CanaryAlerts._render_message("H-01", [v], "2026-07-29T12:05:00Z")
+        assert "fired 1 violation" not in msg, "must not hit the generic fallback"
+        assert h01.REASON_CONTRADICTED in msg
+        assert "7" in msg and "2026-07-29T12:00:00Z" in msg
 
     def test_format_last_red_first_red_when_none(self, canary_service):
         from services.canary_alerts import CanaryAlerts
@@ -2747,15 +2958,36 @@ class TestCanarySlackEmit:
             "continuing-red must POST once, not every cycle"
         )
 
-    def test_webhook_failure_swallowed_cycle_continues(
-        self, canary_db, canary_service, slack_capture, monkeypatch
+    def test_webhook_failure_is_not_counted_and_is_retried(
+        self, canary_db, canary_service, slack_capture, fake_redis, monkeypatch
     ):
-        """A failing webhook must not break cycle accounting.
+        """A rejected webhook is an UNDELIVERED alert, not a delivered one.
 
-        The row is already persisted before `CanaryAlerts.emit_transition` runs;
-        a hung Slack endpoint can't roll that back. We assert the
-        transition is still counted and the violation is still in the
-        DB even when the recorder returns a failure tuple.
+        This test used to assert the bug (#1897): with the recorder returning
+        a failure tuple it asserted `transition_invariant_ids == ["L-03"]` and
+        `cumulative_transitions == 1` — i.e. it pinned "swallowed" as the
+        correct outcome, which is exactly the learnings-2026-08-02 smell
+        (catching the raise is half the fix; propagating it into the state
+        machine is the other half, and its old name said "swallowed" out
+        loud).
+
+        What is unchanged: the row is persisted before the emit runs, so a
+        hung Slack endpoint cannot roll it back, and the cycle still
+        completes. What changed: the transition is not counted as notified,
+        it is reported under `undelivered_invariant_ids`, and it is armed in
+        `canary:alert_pending` so a later cycle re-attempts it while the
+        invariant stays red.
+
+        The retry itself is not driven here: the real `collect_snapshot` runs
+        in this fixture, so two back-to-back cycles share a snapshot_time to
+        the second and the per-interval retry floor (correctly) holds the
+        second attempt off. The armed entry is the observable that does not
+        depend on the clock.
+
+        NOTE: no CI workflow executes this file (#2037), and on this base its
+        whole class errors at collection because `tests/utils` shadows
+        `src/backend/utils`. The runnable guard for all of this is
+        `tests/unit/test_1897_canary_alert_delivery.py`.
         """
         monkeypatch.setenv(
             "CANARY_SLACK_WEBHOOK_URL",
@@ -2768,12 +3000,17 @@ class TestCanarySlackEmit:
         svc = canary_service["service"]
         result = _run(svc.run_cycle())
 
-        assert result.transition_invariant_ids == ["L-03"]
-        assert svc.cumulative_transitions == 1
+        assert result.transition_invariant_ids == []
+        assert result.undelivered_invariant_ids == ["L-03"]
+        assert svc.cumulative_transitions == 0
+        # Detection is a separate fact and is still counted.
+        assert svc.cumulative_transitions_detected == 1
         ops = canary_service["canary_ops"]
         assert ops.count_violations(invariant_id="L-03") == 1
         # Recorder still saw the call — failure happened on Slack's side.
         assert len(slack_capture["calls"]) == 1
+        # Armed before the POST, still armed after it was rejected.
+        assert "L-03" in fake_redis.hgetall("canary:alert_pending")
 
     def test_previous_violation_at_threaded_into_payload(
         self, canary_db, canary_service, slack_capture, monkeypatch
@@ -3746,7 +3983,609 @@ class TestIssue1540EngineSeam:
                 r.referenced_agent_name == "ghost" for r in snap.orphan_refs
             )
             assert len(l03.check(snap)) >= 1
+
+            # #1813 AC #4 (dual-track): H-01 issues no SQL of its own — it is a
+            # pure function over the Snapshot — so backend-independence holds by
+            # construction. What must be proven on a REAL PG is the input: a
+            # working roster read on psycopg2 leaves H-01 green. If the roster
+            # ever silently returned zero here (the #1540 shape), H-01 arms on
+            # this cycle and fires on the next.
+            from canary.invariants import h01_collector_blindness as h01
+
+            assert h01.check(snap) == []
+
         finally:
             for tbl in reversed(canary_tables):
                 tbl.drop(engine, checkfirst=True)
             engine_mod.dispose_engines()
+
+    @pytest.mark.skipif(
+        not os.getenv("TRINITY_TEST_PG_URL"),
+        reason="requires a real PostgreSQL (set TRINITY_TEST_PG_URL)",
+    )
+    def test_pg_h01_fires_on_a_blind_roster(
+        self, fake_redis, fake_docker, monkeypatch
+    ):
+        """#1813 AC #4/#5 on a REAL PostgreSQL: the FIRING path, not just green.
+
+        The sibling test proves a healthy PG roster leaves H-01 quiet. A guard
+        verified only in its non-firing state is decorative (learnings.md
+        2026-07-26), so this drives the actual #1540 shape on psycopg2: the
+        canary tables exist and are readable but hold ZERO agents, while Docker
+        still reports live agent containers. That is indistinguishable from a
+        clean fleet to every other invariant — H-01 must arm, then fire once the
+        condition is sustained.
+        """
+        from datetime import timedelta as _timedelta
+
+        pg_url = os.environ["TRINITY_TEST_PG_URL"]
+        monkeypatch.setenv("DATABASE_URL", pg_url)
+        import db.engine as engine_mod
+        engine_mod.dispose_engines()
+
+        from db.tables import (
+            access_requests,
+            agent_ownership,
+            agent_public_links,
+            agent_reports,
+            agent_schedules,
+            agent_shared_files,
+            agent_sharing,
+            agent_skills,
+            agent_tags,
+            chat_sessions,
+            mcp_api_keys,
+            operator_queue,
+            schedule_executions,
+        )
+
+        canary_tables = [
+            agent_ownership,
+            schedule_executions,
+            agent_schedules,
+            agent_sharing,
+            chat_sessions,
+            agent_skills,
+            agent_tags,
+            agent_shared_files,
+            agent_public_links,
+            operator_queue,
+            access_requests,
+            agent_reports,
+            mcp_api_keys,
+        ]
+        engine = engine_mod.get_engine()
+        for tbl in reversed(canary_tables):
+            tbl.drop(engine, checkfirst=True)
+        for tbl in canary_tables:
+            tbl.create(engine, checkfirst=True)
+        try:
+            # Deliberately NO agent_ownership rows — the roster read succeeds
+            # and returns zero, which is the whole point.
+            fake_docker.add_container("agent-a1")
+            fake_docker.add_container("agent-a2")
+
+            bundle = _reload_canary_with_temp_db(fake_redis, monkeypatch)
+            from canary.invariants import h01_collector_blindness as h01
+
+            snap = bundle["canary"].collect_snapshot()
+            assert snap.sources_unavailable == [], (
+                f"a collector errored on PostgreSQL: {snap.sources_unavailable}"
+            )
+            assert snap.known_agents == set(), "roster is empty (the blind state)"
+            assert snap.docker_agent_names == {"a1", "a2"}
+
+            # Every OTHER invariant is vacuously green here — the exact #1540
+            # silent all-clear this issue exists to end.
+            others = {
+                k: v
+                for k, v in bundle["canary"].run_invariants(snap).items()
+                if v and k != "H-01"
+            }
+            assert others == {}, f"expected a vacuous green elsewhere, got {others}"
+
+            # First sighting arms; sustained condition fires.
+            assert h01.check(snap) == []
+            aged = h01._to_utc(snap.snapshot_time) - _timedelta(
+                seconds=h01.CONFIRMATION_MIN_SECONDS + 1
+            )
+            fake_redis.set(
+                h01.REDIS_KEY_SUSPECT_SINCE,
+                aged.isoformat().replace("+00:00", "Z"),
+            )
+
+            violations = h01.check(bundle["canary"].collect_snapshot())
+            assert len(violations) == 1, "H-01 must fire on a blind PG roster"
+            assert violations[0].severity == "critical"
+            assert violations[0].observed_state["reason"] == h01.REASON_CONTRADICTED
+            assert violations[0].observed_state["evidence_agent_count"] == 2
+        finally:
+            for tbl in reversed(canary_tables):
+                tbl.drop(engine, checkfirst=True)
+            engine_mod.dispose_engines()
+
+
+# ---------------------------------------------------------------------------
+# Invariant: H-01 collector blindness (#1813)
+# ---------------------------------------------------------------------------
+#
+# H-01 is the harness's self-check: it is the ONLY invariant whose violation
+# means "the observer is blind", not "the observed system is broken". Its whole
+# value depends on firing, so per learnings.md 2026-07-26 ("a guard that has
+# never been shown to fail on a real leak is decorative") the positive-fire
+# cases below are the load-bearing ones — a green-only test suite here would
+# reproduce the exact #1540 failure mode one level up.
+
+
+def _h01_snap(
+    known_agents=None,
+    docker_agent_names=None,
+    orphan_redis_slots=None,
+    sources_unavailable=None,
+    snapshot_time="2026-07-29T12:00:00Z",
+    collectors_ran=None,
+):
+    """A synthetic snapshot for H-01.
+
+    `collectors_ran` defaults to BOTH collectors having run, which is the
+    normal cycle. Pass an explicit set to model the skipped-collector state —
+    `collect_snapshot` returns early on a roster-read failure, so Redis
+    genuinely does not run on that arm, and H-01 must report that rather than
+    inferring "available" from a silent `sources_unavailable`.
+    """
+    from canary.snapshot import COLLECTOR_DOCKER, COLLECTOR_REDIS, Snapshot
+
+    return Snapshot(
+        snapshot_time=snapshot_time,
+        known_agents=set(known_agents or ()),
+        docker_agent_names=set(docker_agent_names or ()),
+        orphan_redis_slots=dict(orphan_redis_slots or {}),
+        sources_unavailable=list(sources_unavailable or ()),
+        collectors_ran=(
+            {COLLECTOR_DOCKER, COLLECTOR_REDIS}
+            if collectors_ran is None
+            else set(collectors_ran)
+        ),
+    )
+
+
+class TestInvariantH01:
+    """Synthetic-snapshot coverage of the three H-01 outcomes + the gate."""
+
+    def test_healthy_roster_passes_and_clears_marker(self, fake_redis):
+        from canary.invariants import h01_collector_blindness as h01
+
+        fake_redis.set(h01.REDIS_KEY_SUSPECT_SINCE, "2026-07-29T11:55:00Z")
+        snap = _h01_snap(known_agents={"a1"}, docker_agent_names={"a1"})
+
+        assert h01.check(snap) == []
+        assert fake_redis.get(h01.REDIS_KEY_SUSPECT_SINCE) is None, (
+            "a healthy cycle must clear the suspicion marker so the next "
+            "genuine episode needs two fresh cycles again"
+        )
+
+    def test_genuinely_empty_fleet_does_not_fire(self, fake_redis):
+        """AC #3 — evidence sources available and agreeing on empty."""
+        from canary.invariants import h01_collector_blindness as h01
+
+        snap = _h01_snap()  # roster empty, docker up + zero, redis up + zero
+        assert h01.check(snap) == []
+        assert h01.check(_h01_snap()) == [], "still green on a second cycle"
+
+    def test_first_blind_cycle_arms_but_does_not_fire(self, fake_redis):
+        """Fix 1 — the last-agent delete race must not alarm on one sighting."""
+        from canary.invariants import h01_collector_blindness as h01
+
+        snap = _h01_snap(docker_agent_names={"a1", "a2"})
+        assert h01.check(snap) == [], "must not fire on first sighting"
+        assert fake_redis.get(h01.REDIS_KEY_SUSPECT_SINCE) == snap.snapshot_time
+
+    def test_second_blind_cycle_fires_critical(self, fake_redis):
+        from canary.invariants import h01_collector_blindness as h01
+
+        assert h01.check(_h01_snap(docker_agent_names={"a1", "a2"})) == []
+        violations = h01.check(
+            _h01_snap(
+                docker_agent_names={"a1", "a2"},
+                snapshot_time="2026-07-29T12:05:00Z",
+            )
+        )
+
+        assert len(violations) == 1
+        v = violations[0]
+        assert v.invariant_id == "H-01"
+        assert v.tier == "A"
+        assert v.severity == "critical"
+        assert v.observed_state["reason"] == h01.REASON_CONTRADICTED
+        assert v.observed_state["evidence_agent_count"] == 2
+        assert v.observed_state["blind_since"] == "2026-07-29T12:00:00Z"
+        assert v.observed_state["confirmation"] == h01.CONFIRMED_SUSTAINED
+
+    def test_second_worker_cannot_confirm_the_first_workers_sighting(
+        self, fake_redis
+    ):
+        """Prod runs `uvicorn --workers 2` and the canary has NO cross-worker
+        leader lease, so two loops share the marker. A cycle-count gate would
+        let worker B confirm worker A seconds later — collapsing the gate to
+        nothing inside the very teardown window it guards. Confirmation is on
+        elapsed time, so a near-simultaneous second observation must not fire."""
+        from canary.invariants import h01_collector_blindness as h01
+
+        worker_a = _h01_snap(
+            docker_agent_names={"a1"}, snapshot_time="2026-07-29T12:00:00Z"
+        )
+        worker_b = _h01_snap(
+            docker_agent_names={"a1"}, snapshot_time="2026-07-29T12:00:05Z"
+        )
+
+        assert h01.check(worker_a) == []
+        assert h01.check(worker_b) == [], (
+            "5s after the first sighting is inside the container-teardown "
+            "window — must not confirm"
+        )
+
+        # Once the condition has genuinely persisted, it fires.
+        later = _h01_snap(
+            docker_agent_names={"a1"}, snapshot_time="2026-07-29T12:05:00Z"
+        )
+        assert len(h01.check(later)) == 1
+
+    def test_clock_skew_between_workers_does_not_confirm(self, fake_redis):
+        """A negative elapsed (worker B's clock behind A's) must not fire."""
+        from canary.invariants import h01_collector_blindness as h01
+
+        assert (
+            h01.check(
+                _h01_snap(
+                    docker_agent_names={"a1"},
+                    snapshot_time="2026-07-29T12:00:00Z",
+                )
+            )
+            == []
+        )
+        assert (
+            h01.check(
+                _h01_snap(
+                    docker_agent_names={"a1"},
+                    snapshot_time="2026-07-29T11:59:50Z",
+                )
+            )
+            == []
+        )
+
+    def test_unparseable_marker_rearms_instead_of_firing(self, fake_redis):
+        from canary.invariants import h01_collector_blindness as h01
+
+        fake_redis.set(h01.REDIS_KEY_SUSPECT_SINCE, "not-a-timestamp")
+        snap = _h01_snap(docker_agent_names={"a1"})
+
+        assert h01.check(snap) == [], "a garbage marker is not evidence"
+        assert fake_redis.get(h01.REDIS_KEY_SUSPECT_SINCE) == snap.snapshot_time
+
+    def test_same_snapshot_time_rerun_is_not_a_confirmation(self, fake_redis):
+        """A manual /run-cycle replay must not count as the second cycle."""
+        from canary.invariants import h01_collector_blindness as h01
+
+        snap = _h01_snap(docker_agent_names={"a1"})
+        assert h01.check(snap) == []
+        assert h01.check(snap) == [], "identical snapshot_time is the same cycle"
+
+    def test_redis_slot_evidence_alone_is_major_not_critical(self, fake_redis):
+        """Review finding: Redis alone must not page critical.
+
+        `orphan_redis_slots` is BY DEFINITION slot keys whose agent is absent
+        from `agent_ownership` — the leaked-slot state L-03 exists to report.
+        A genuinely empty fleet holding one leaked key would otherwise produce
+        `roster_empty_contradicted` / critical: a correct roster, an unrelated
+        Redis leak, and a critical page claiming the harness is blind. The
+        names still ride in the evidence sample; only the severity ladder
+        treats the two sources differently.
+        """
+        from canary.invariants import h01_collector_blindness as h01
+
+        first = _h01_snap(orphan_redis_slots={"a1": 2})
+        second = _h01_snap(
+            orphan_redis_slots={"a1": 2}, snapshot_time="2026-07-29T12:05:00Z"
+        )
+        assert h01.check(first) == []
+        violations = h01.check(second)
+        assert len(violations) == 1
+        assert violations[0].observed_state["reason"] == h01.REASON_UNVERIFIABLE
+        assert violations[0].severity == "major"
+        # Still surfaced to the operator — demoted, not discarded.
+        assert violations[0].observed_state["evidence_sample"] == ["a1"]
+
+    def test_docker_evidence_still_confirms_critical(self, fake_redis):
+        """The counterpart to the test above: Docker IS sufficient alone."""
+        from canary.invariants import h01_collector_blindness as h01
+
+        assert h01.check(_h01_snap(docker_agent_names={"a1"})) == []
+        v = h01.check(
+            _h01_snap(
+                docker_agent_names={"a1"}, snapshot_time="2026-07-29T12:05:00Z"
+            )
+        )[0]
+        assert v.observed_state["reason"] == h01.REASON_CONTRADICTED
+        assert v.severity == "critical"
+
+    def test_roster_read_failure_fires_without_evidence(self, fake_redis):
+        """A raised roster read fires critical — after the same 60s gate.
+
+        The gate is NOT skipped on this arm. There is no delete race to ride
+        out here, but a raised read is very often a momentary DB blip (a
+        connection reset, a PG restart, brief pool exhaustion), and paging
+        critical on one of those is exactly how a safety net gets muted.
+        """
+        from canary.invariants import h01_collector_blindness as h01
+
+        unavail = ["sqlite.agent_ownership: connection refused"]
+        assert h01.check(_h01_snap(sources_unavailable=unavail)) == [], (
+            "first sighting arms the marker; it must not fire immediately"
+        )
+        violations = h01.check(
+            _h01_snap(
+                sources_unavailable=unavail, snapshot_time="2026-07-29T12:05:00Z"
+            )
+        )
+        assert len(violations) == 1
+        assert violations[0].severity == "critical"
+        assert violations[0].observed_state["reason"] == h01.REASON_ROSTER_READ_FAILED
+
+    def test_roster_read_failure_reports_docker_evidence_not_a_phantom_all_clear(
+        self, fake_redis
+    ):
+        """Review finding 1a — the arm that used to misreport its own evidence.
+
+        `collect_snapshot` returns early when the roster read raises, so before
+        the fix the Docker and Redis collectors never ran on this arm — yet the
+        payload reported `docker_available: True`, `redis_available: True` and
+        `evidence_agent_count: 0`, rendering as "docker=up · redis=up … 0 vs 0
+        agent(s)". For the one alarm whose stated job is legibility, that reads
+        as "everything else is fine and the fleet is empty" when in fact neither
+        source had been consulted.
+
+        Docker now runs FIRST, so it carries real evidence here; Redis still
+        cannot (it needs `known_agents`) and must report `None` = never read.
+        """
+        from canary.snapshot import COLLECTOR_DOCKER
+        from canary.invariants import h01_collector_blindness as h01
+
+        def _snap(at):
+            return _h01_snap(
+                docker_agent_names={"a1", "a2"},
+                sources_unavailable=["sqlite.agent_ownership: connection refused"],
+                collectors_ran={COLLECTOR_DOCKER},
+                snapshot_time=at,
+            )
+
+        assert h01.check(_snap("2026-07-29T12:00:00Z")) == []
+        obs = h01.check(_snap("2026-07-29T12:05:00Z"))[0].observed_state
+
+        assert obs["reason"] == h01.REASON_ROSTER_READ_FAILED
+        assert obs["docker_available"] is True
+        assert obs["redis_available"] is None, (
+            "never-consulted must not render as available"
+        )
+        assert obs["evidence_agent_count"] == 2
+        assert sorted(obs["evidence_sample"]) == ["a1", "a2"]
+
+    def test_unavailable_evidence_fires_major(self, fake_redis):
+        """Fix 2 — a guard that cannot check must say so, not stay quiet."""
+        from canary.invariants import h01_collector_blindness as h01
+
+        unavail = ["docker: client unavailable"]
+        assert h01.check(_h01_snap(sources_unavailable=unavail)) == []
+        violations = h01.check(
+            _h01_snap(
+                sources_unavailable=unavail, snapshot_time="2026-07-29T12:05:00Z"
+            )
+        )
+        assert len(violations) == 1
+        assert violations[0].severity == "major"
+        assert violations[0].observed_state["reason"] == h01.REASON_UNVERIFIABLE
+
+    def test_a_collector_that_never_ran_is_not_an_all_clear(self, fake_redis):
+        """The state `sources_unavailable` structurally cannot express.
+
+        An empty roster with Redis never consulted is NOT "every source agrees
+        the fleet is empty" — but a two-state availability test reads the
+        silent `sources_unavailable` as success and falls straight through to
+        the AC #3 all-clear.
+        """
+        from canary.snapshot import COLLECTOR_DOCKER
+        from canary.invariants import h01_collector_blindness as h01
+
+        def _snap(at):
+            return _h01_snap(collectors_ran={COLLECTOR_DOCKER}, snapshot_time=at)
+
+        assert h01.check(_snap("2026-07-29T12:00:00Z")) == []
+        v = h01.check(_snap("2026-07-29T12:05:00Z"))[0]
+        assert v.observed_state["reason"] == h01.REASON_UNVERIFIABLE
+        assert v.observed_state["redis_available"] is None
+        assert v.severity == "major"
+
+    def test_marker_carries_a_ttl_so_an_orphan_cannot_arm_forever(self, fake_redis):
+        """Review finding 4.
+
+        `_clear_marker` swallows failures, and `POST /api/canary/run-cycle`
+        with an `invariant_ids` filter excluding H-01 never reaches the clear
+        path at all — so without an expiry a marker orphaned either way stays
+        armed forever and the next genuine episode confirms on its first cycle
+        instead of riding out the delete race.
+        """
+        from canary.invariants import h01_collector_blindness as h01
+
+        assert h01.check(_h01_snap(docker_agent_names={"a1"})) == []
+        ttl = fake_redis.ttl(h01.REDIS_KEY_SUSPECT_SINCE)
+        assert 0 < ttl <= h01.MARKER_TTL_SECONDS
+
+    def test_live_episode_refreshes_the_marker_ttl(self, fake_redis):
+        """The TTL is an idle timeout, not an absolute lifetime.
+
+        An episode outliving `MARKER_TTL_SECONDS` would otherwise silently
+        re-arm — going green for a cycle and re-alerting on a condition that
+        never changed.
+        """
+        from canary.invariants import h01_collector_blindness as h01
+
+        assert h01.check(_h01_snap(docker_agent_names={"a1"})) == []
+        # Simulate the key aging most of the way to expiry.
+        fake_redis.expire(h01.REDIS_KEY_SUSPECT_SINCE, 5)
+        h01.check(
+            _h01_snap(
+                docker_agent_names={"a1"}, snapshot_time="2026-07-29T12:05:00Z"
+            )
+        )
+        assert fake_redis.ttl(h01.REDIS_KEY_SUSPECT_SINCE) > 5
+
+    def test_marker_unreadable_fires_unconfirmed_rather_than_skipping(
+        self, fake_redis, monkeypatch
+    ):
+        """If H-01 cannot self-check it must fail loud, never silently skip."""
+        from canary.invariants import h01_collector_blindness as h01
+
+        def _boom(*a, **kw):
+            raise RuntimeError("redis down")
+
+        monkeypatch.setattr(fake_redis, "get", _boom)
+
+        violations = h01.check(_h01_snap(docker_agent_names={"a1"}))
+        assert len(violations) == 1
+        assert violations[0].observed_state["confirmation"] == h01.UNCONFIRMED_NO_MARKER
+
+    def test_marker_unwritable_fires_rather_than_rearming_forever(
+        self, fake_redis, monkeypatch
+    ):
+        """A write that fails while reads return None would re-arm every cycle
+        and never fire — a silent hole in the guard that exists to close silent
+        holes. It must fire unconfirmed instead."""
+        from canary.invariants import h01_collector_blindness as h01
+
+        def _boom(*a, **kw):
+            raise RuntimeError("read-only replica")
+
+        monkeypatch.setattr(fake_redis, "set", _boom)
+
+        violations = h01.check(_h01_snap(docker_agent_names={"a1"}))
+        assert len(violations) == 1
+        assert violations[0].observed_state["confirmation"] == h01.UNCONFIRMED_NO_MARKER
+
+    def test_per_agent_exec_failure_is_not_read_as_docker_unavailable(
+        self, fake_redis
+    ):
+        """`docker.exec[name]` shares the `docker` prefix but must never be
+        mistaken for a wholesale Docker outage — presence is recorded before
+        the exec, so the contradiction branch wins."""
+        from canary.invariants import h01_collector_blindness as h01
+
+        unavail = ["docker.exec[a1]: exec failed"]
+        assert (
+            h01.check(
+                _h01_snap(docker_agent_names={"a1"}, sources_unavailable=unavail)
+            )
+            == []
+        )
+        v = h01.check(
+            _h01_snap(
+                docker_agent_names={"a1"},
+                sources_unavailable=unavail,
+                snapshot_time="2026-07-29T12:05:00Z",
+            )
+        )[0]
+        assert v.observed_state["reason"] == h01.REASON_CONTRADICTED
+        assert v.severity == "critical"
+
+    def test_observed_state_carries_no_unbounded_payload(self, fake_redis):
+        """#1644 lesson — identifiers and counts only, bounded sample."""
+        from canary.invariants import h01_collector_blindness as h01
+
+        many = {f"a{i}" for i in range(50)}
+        assert h01.check(_h01_snap(docker_agent_names=many)) == []
+        v = h01.check(
+            _h01_snap(docker_agent_names=many, snapshot_time="2026-07-29T12:05:00Z")
+        )[0]
+        assert v.observed_state["evidence_agent_count"] == 50
+        assert len(v.observed_state["evidence_sample"]) <= 10
+
+    def test_registered_in_registry(self):
+        from canary.invariants import INVARIANTS
+
+        assert "H-01" in INVARIANTS
+
+
+class TestInvariantH01EndToEnd:
+    """Drive the REAL collect_snapshot() over a re-blinded (split) backend.
+
+    Per learnings.md 2026-07-04, an invariant with only synthetic-snapshot
+    tests is untested where it actually runs — these exercise the collector
+    wiring (`docker_agent_names` population) the check depends on.
+    """
+
+    def test_reblinded_backend_fires_on_second_cycle(
+        self, canary_db_split, fake_docker, reload_canary_split
+    ):
+        raw_path, engine_path = canary_db_split
+        # A real fleet, visible only to the RAW file — the engine sees nothing.
+        _add_agent(raw_path, "a1")
+        _add_agent(raw_path, "a2")
+        fake_docker.add_container("agent-a1")
+        fake_docker.add_container("agent-a2")
+
+        canary = reload_canary_split["canary"]
+
+        snap1 = canary.collect_snapshot()
+        assert snap1.known_agents == set(), "engine backend is empty (blind)"
+        assert snap1.docker_agent_names == {"a1", "a2"}, (
+            "Docker evidence must survive SQL blindness"
+        )
+        assert canary.run_invariants(snap1)["H-01"] == []
+
+        # An immediate re-check (a second uvicorn worker's loop) must NOT
+        # confirm — real elapsed time here is milliseconds.
+        snap2 = canary.collect_snapshot()
+        assert canary.run_invariants(snap2)["H-01"] == []
+
+        # Rewind the marker to simulate the condition persisting across the
+        # real 5-minute cycle gap, then it fires.
+        from canary.invariants import h01_collector_blindness as h01
+        from datetime import timedelta as _timedelta
+
+        aged = h01._to_utc(snap1.snapshot_time) - _timedelta(
+            seconds=h01.CONFIRMATION_MIN_SECONDS + 1
+        )
+        reload_canary_split["redis"].set(
+            h01.REDIS_KEY_SUSPECT_SINCE,
+            aged.isoformat().replace("+00:00", "Z"),
+        )
+
+        snap3 = canary.collect_snapshot()
+        violations = canary.run_invariants(snap3)["H-01"]
+        assert len(violations) == 1
+        assert violations[0].severity == "critical"
+        assert violations[0].observed_state["reason"] == h01.REASON_CONTRADICTED
+
+    def test_docker_presence_survives_exec_failure(
+        self, canary_db_split, fake_docker, reload_canary_split
+    ):
+        """`zombie_counts` is keyed by exec success; presence must not be."""
+        raw_path, engine_path = canary_db_split
+        fake_docker.add_container("agent-a1", exec_raises=RuntimeError("no exec"))
+
+        canary = reload_canary_split["canary"]
+        snap = canary.collect_snapshot()
+
+        assert snap.zombie_counts == {}, "exec failed, so no count is recorded"
+        assert snap.docker_agent_names == {"a1"}, (
+            "presence is proven by the container list, not by exec_run"
+        )
+
+    def test_healthy_backend_stays_green(self, canary_db, fake_docker, reload_canary):
+        """A working collector on a live fleet must never fire H-01."""
+        _add_agent(canary_db, "a1")
+        fake_docker.add_container("agent-a1")
+
+        canary = reload_canary["canary"]
+        for _ in range(2):
+            snap = canary.collect_snapshot()
+            assert snap.known_agents == {"a1"}
+            assert canary.run_invariants(snap)["H-01"] == []

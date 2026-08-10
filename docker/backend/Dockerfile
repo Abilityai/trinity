@@ -8,7 +8,17 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
 # Install curl for healthcheck, git for GitHub cloning, libmagic for file type detection
-RUN apt-get update && apt-get install -y --no-install-recommends curl git libmagic1 ffmpeg && rm -rf /var/lib/apt/lists/*
+#
+# `tzdata-legacy` carries the IANA *backward-compatibility links* (#1823). Debian
+# 13 "trixie" split them out of `tzdata`, and this image is `FROM python:3.13-slim`
+# with no codename pin — so it silently migrated bookworm→trixie and lost
+# `/usr/share/zoneinfo/Europe/Kiev` (and every other legacy alias) without anyone
+# changing a line. `zoneinfo.ZoneInfo("Europe/Kiev")` then raises
+# ZoneInfoNotFoundError inside APScheduler's `astimezone()`, which is how a
+# perfectly ordinary schedule create started 500ing. Do NOT drop this when
+# slimming the image — `tests/unit/test_1823_tz_capability_parity.py` fails if
+# an image that resolves timezones declares no tz-data source.
+RUN apt-get update && apt-get install -y --no-install-recommends curl git libmagic1 ffmpeg tzdata-legacy && rm -rf /var/lib/apt/lists/*
 
 # Build-time provenance (#926). Each arg is forwarded by docker-compose
 # `backend.build.args` from shell vars set by `scripts/deploy/start.sh`.
@@ -66,6 +76,18 @@ RUN pip install --no-cache-dir \
     apscheduler==3.11.0 \
     croniter==5.0.1 \
     pytz==2024.2 \
+    # #1823 portability floor for the tz database. `zoneinfo` reads the SYSTEM
+    # database first and falls back to this wheel only for keys the system
+    # lacks (measured: a key present on TZPATH always wins), so with
+    # `tzdata-legacy` installed above this is inert in production — it exists so
+    # the capability survives another silent base-tag migration and holds on a
+    # non-Debian base. Pinned exactly per this file's convention;
+    # tests/requirements-test.txt deliberately keeps a floor instead (#1771 —
+    # an exact pin there would freeze a stale IANA database). The staleness
+    # hazard that motivates the floor there does not bite here precisely
+    # because the wheel is inert while `tzdata-legacy` supplies the system db;
+    # bump this pin with the rest of the file.
+    tzdata==2026.3 \
     psutil==6.1.1 \
     payments-py==1.2.1 \
     Pillow==11.1.0 \

@@ -971,6 +971,16 @@ class DatabaseManager:
     def get_mcp_exposed_agents(self):
         return self._agent_ops.get_mcp_exposed_agents()
 
+    # ent#157 — A2A inbound-server exposure toggle (OSS primitive; enterprise setter)
+    def get_a2a_exposed(self, agent_name: str) -> bool:
+        return self._agent_ops.get_a2a_exposed(agent_name)
+
+    def set_a2a_exposed(self, agent_name: str, enabled: bool) -> bool:
+        return self._agent_ops.set_a2a_exposed(agent_name, enabled)
+
+    def get_a2a_exposed_agents(self):
+        return self._agent_ops.get_a2a_exposed_agents()
+
     # =========================================================================
     # Per-agent MCP connector (ent#46; OSS-core since #118)
     # =========================================================================
@@ -3094,6 +3104,10 @@ class DatabaseManager:
     def idempotency_release(self, scope: str, key: str) -> None:
         """Delete an in-flight idempotency claim so a failed attempt can retry."""
         return self._idempotency_ops.release(scope, key)
+
+    def idempotency_discard_completed(self, scope: str, key: str) -> None:
+        """Delete a completed replay row whose recorded resource is gone (#2040 F3)."""
+        return self._idempotency_ops.discard_completed(scope, key)
 
     def idempotency_purge_expired(self, ttl_hours: int = 24) -> int:
         """Purge idempotency rows older than ttl_hours. Returns rows removed."""

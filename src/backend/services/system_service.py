@@ -4,6 +4,8 @@ System manifest parsing and deployment service.
 Handles YAML parsing, validation, agent naming, and deployment orchestration.
 """
 import json
+import os
+import stat
 import yaml
 
 from utils.safe_yaml import (
@@ -13,6 +15,7 @@ from utils.safe_yaml import (
 )
 import re
 import logging
+from pathlib import Path
 from typing import Callable, Dict, List, Tuple, Optional
 
 from fastapi import HTTPException, Request
@@ -23,8 +26,12 @@ from models import (
     SystemAgentConfig,
     SystemPermissions,
     SystemViewConfig,
+    BundledManifestDetail,
+    BundledManifestSummary,
+    MANIFEST_MAX_BYTES,
     SystemDeployFailure,
     SystemDeployResponse,
+    SystemSchedulePreview,
     User,
 )
 from database import db
@@ -36,6 +43,13 @@ logger = logging.getLogger(__name__)
 # trinity-enterprise#125: cap on a single agent-create failure reason in the
 # deploy report (the full text is still in the backend log).
 _REASON_MAX_LEN = 500
+
+# ent#126: every top-level manifest key `parse_manifest` reads. Kept next to the
+# parser so adding a key to one without the other is visible in review.
+_KNOWN_MANIFEST_KEYS = frozenset({
+    "name", "description", "prompt", "agents", "permissions",
+    "default_tags", "system_view",
+})
 
 
 # --- Manifest YAML hardening (#1884, shared since ent#314) ----------------
@@ -50,7 +64,12 @@ _REASON_MAX_LEN = 500
 # Bounds the INPUT. Deliberately not sufficient on its own: alias expansion is
 # bounded by the budget below, because a few hundred bytes can expand to
 # hundreds of MB while sitting comfortably under any size cap.
-MANIFEST_MAX_BYTES = 256 * 1024
+#
+# Defined ONCE, in `models.py`, and imported above (ent#126 + #1884 + ent#314
+# merge): the same number bounds this parse cap and the bundled-catalog file
+# read below. A second local definition here would shadow the import silently
+# and let the two drift apart — precisely the failure the shared constant
+# exists to prevent.
 
 # Bounds the EXPANSION COST, not the alias count — see utils/safe_yaml.py for
 # why a `maxAliasCount` is the wrong shape for a bomb, and for the measurements.
@@ -159,7 +178,19 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
         agents=agents,
         permissions=permissions,
         default_tags=default_tags,
-        system_view=system_view
+        system_view=system_view,
+        # ent#126: everything above is every key this parser reads. Anything else
+        # is silently dropped, which is how `trinity_prompt:` (a typo for
+        # `prompt:`) and `auto_start:` sat in a shipped manifest doing nothing.
+        # Recorded, not rejected — `validate_manifest` turns these into warnings,
+        # because rejecting would 400 manifests that deploy successfully today.
+        # `str(k)` because YAML keys are not necessarily strings: YAML 1.1
+        # renders bare `on`/`off`/`yes`/`no` as BOOLEANS and `2:` as an int, so
+        # a mixed-type set makes `sorted` raise TypeError -> a raw 500 from a
+        # manifest that deployed fine before this key check existed, and a
+        # single non-string key fails the List[str] field with a raw Pydantic
+        # dump. Both are exactly the unnamed-500 this warning exists to prevent.
+        unknown_keys=sorted(str(k) for k in set(data.keys()) - _KNOWN_MANIFEST_KEYS),
     )
 
 
@@ -241,6 +272,24 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
     # ORG-001 Phase 4: Validate tags
     tag_pattern = re.compile(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$')
 
+    # trinity-enterprise#305: org-overlay namespaces are human-only, and this
+    # writer bypasses the tags router's `_guard_org_namespace` (it calls
+    # `db.set_agent_tags` directly). `deploy_system` is `require_role("creator")`,
+    # which an agent-scoped key satisfies via its owner's role — so without
+    # this check a prompt-injected agent could deploy a manifest that hangs a
+    # fabricated node under a real manager. Rejected at validation, mirroring
+    # the router guard.
+    from db.tags import ORG_TAG_PREFIXES
+
+    def _reject_org_tag(tag: str, where: str) -> None:
+        normalized = tag.lower().strip()
+        if normalized.startswith(ORG_TAG_PREFIXES):
+            raise ValueError(
+                f"{where} uses reserved org-overlay tag '{tag}': 'dept-*' and "
+                "'reports-to-*' carry the org chart and can only be set by a "
+                "human operator through the tags API"
+            )
+
     # Validate default_tags
     if manifest.default_tags:
         for tag in manifest.default_tags:
@@ -248,6 +297,7 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
                 raise ValueError(
                     f"Invalid tag '{tag}': must be lowercase alphanumeric and hyphens"
                 )
+            _reject_org_tag(tag, "default_tags")
 
     # Validate per-agent tags
     for agent_name, config in manifest.agents.items():
@@ -258,11 +308,24 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
                         f"Agent '{agent_name}' has invalid tag '{tag}': "
                         "must be lowercase alphanumeric and hyphens"
                     )
+                _reject_org_tag(tag, f"Agent '{agent_name}'")
 
     # Validate system_view name
     if manifest.system_view:
         if not manifest.system_view.name or not manifest.system_view.name.strip():
             raise ValueError("system_view.name is required")
+
+    # ent#126: surface silently-dropped top-level keys. A warning, not an error:
+    # rejecting would break manifests that deploy today. The common case is a
+    # near-miss key name (`trinity_prompt` for `prompt`) whose intent is lost
+    # with no signal anywhere.
+    if manifest.unknown_keys:
+        warnings.append(
+            "Ignored unknown top-level key(s): "
+            f"{', '.join(manifest.unknown_keys)}. "
+            "Recognized keys are: "
+            f"{', '.join(sorted(_KNOWN_MANIFEST_KEYS))}."
+        )
 
     return warnings
 
@@ -328,26 +391,53 @@ def resolve_agent_names(
 # Phase 2: Configuration Functions
 # ============================================================================
 
-async def configure_permissions(
+def resolve_permission_edges(
     agent_names: Dict[str, str],  # {short_name: final_name}
     permissions: Optional[SystemPermissions],
-    created_by: str
-) -> int:
-    """
-    Apply permission configuration based on preset or explicit rules.
+) -> Tuple[List[Tuple[str, List[str]]], int]:
+    """Compute the permission write-set WITHOUT touching the database (ent#126).
 
-    Args:
-        agent_names: Mapping of short names to final agent names
-        permissions: Permission configuration from manifest
-        created_by: Username for audit trail
+    Returns ``(write_set, permissions_count)`` where ``write_set`` is the exact
+    ordered sequence of ``db.set_agent_permissions(source, targets)`` calls the
+    deploy would make, and ``permissions_count`` is the integer it would report.
 
-    Returns:
-        Number of permissions configured
+    This exists so the dry-run preview and the real deploy compute topology from
+    ONE piece of code: only the backend knows the resolved ``_N``-suffixed names,
+    and a preview that re-derived the preset rules separately would drift from
+    the writer the first time either changed. ``configure_permissions`` below is
+    now a thin loop over this.
+
+    An ordered list of pairs, not a dict, so the write SEQUENCE is faithful by
+    construction — clearing an agent and then granting to it is observable
+    ordering that a dict would silently normalise away.
+
+    Every truthiness guard here is load-bearing and is pinned by
+    ``tests/unit/test_ent126_permission_characterization.py``:
+
+    * ``full-mesh``: ``if targets`` — a source with no targets is skipped
+      entirely, never written as an empty list.
+    * ``orchestrator-workers``: ``if workers`` guards the WHOLE body, so a lone
+      orchestrator with zero workers writes nothing and counts 0; the count is
+      ``len(workers)`` by assignment, and the worker-clearing writes are not
+      counted.
+    * ``none``: clears every agent but counts 0 — clearing is not "configuring".
+    * ``explicit``: ``{}`` is falsy, so the branch is skipped and NOTHING is
+      cleared (that is the ``none`` preset's job). Phase 1 clears every agent
+      absent from ``explicit`` as a SOURCE — so a target-only agent is cleared
+      first and granted-to second. Unknown targets are silently filtered;
+      an unknown source is skipped.
+
+    The unknown-source/target branches are unreachable from a manifest
+    (``validate_manifest`` rejects them) but ARE reachable on the partial-deploy
+    path, where the caller passes ``created_map`` — a subset of the resolved
+    names. The preview is called with the FULL map, so it shows the optimistic
+    topology; the UI says so.
     """
     if not permissions:
-        return 0
+        return [], 0
 
     final_names = list(agent_names.values())
+    write_set: List[Tuple[str, List[str]]] = []
     permissions_count = 0
 
     if permissions.preset == "full-mesh":
@@ -355,9 +445,8 @@ async def configure_permissions(
         for source in final_names:
             targets = [t for t in final_names if t != source]
             if targets:
-                db.set_agent_permissions(source, targets, created_by)
+                write_set.append((source, targets))
                 permissions_count += len(targets)
-                logger.info(f"Granted {source} permissions to call: {targets}")
 
     elif permissions.preset == "orchestrator-workers":
         # Only orchestrator can call workers
@@ -368,28 +457,24 @@ async def configure_permissions(
             workers = [n for n in final_names if n != orchestrator]
             if workers:
                 # Set orchestrator permissions to call all workers
-                db.set_agent_permissions(orchestrator, workers, created_by)
+                write_set.append((orchestrator, workers))
                 permissions_count = len(workers)
-                logger.info(f"Granted {orchestrator} permissions to call workers: {workers}")
 
                 # Clear worker permissions (set to empty list = clear all)
                 for worker in workers:
-                    db.set_agent_permissions(worker, [], created_by)
-                    logger.info(f"Cleared permissions for worker {worker}")
+                    write_set.append((worker, []))
 
     elif permissions.preset == "none":
         # No permissions - clear all default permissions for all system agents
         for agent in final_names:
-            db.set_agent_permissions(agent, [], created_by)
-        logger.info(f"Cleared all permissions for {len(final_names)} agents (preset: none)")
+            write_set.append((agent, []))
 
     elif permissions.explicit:
         # Apply explicit permission matrix
         # First, clear permissions for all system agents not in explicit config
         for short_name, final_name in agent_names.items():
             if short_name not in permissions.explicit:
-                db.set_agent_permissions(final_name, [], created_by)
-                logger.info(f"Cleared default permissions for {final_name} (not in explicit config)")
+                write_set.append((final_name, []))
 
         # Then set explicit permissions
         for source_short, target_shorts in permissions.explicit.items():
@@ -399,12 +484,134 @@ async def configure_permissions(
                 continue
             targets = [agent_names[t] for t in target_shorts if t in agent_names]
             # set_agent_permissions does a full replacement
-            db.set_agent_permissions(source, targets, created_by)
+            write_set.append((source, targets))
             permissions_count += len(targets)
-            if targets:
-                logger.info(f"Granted {source} permissions to call: {targets}")
-            else:
-                logger.info(f"Cleared permissions for {source} (empty target list)")
+
+    return write_set, permissions_count
+
+
+def resolve_schedule_previews(
+    agent_names: Dict[str, str],  # {short_name: final_name}
+    agents_config: Dict[str, SystemAgentConfig],
+) -> List[SystemSchedulePreview]:
+    """Compute the schedules a deploy would create, WITHOUT writing them (ent#126).
+
+    The schedule sibling of `resolve_permission_edges`, and `create_schedules`
+    is now a thin loop over it. Mirrors that writer's iteration and its `.get()`
+    defaults exactly — `enabled` defaulting to **True** is why a manifest that
+    merely lists a schedule begins autonomous executions the moment it deploys,
+    which is the thing the preview has to surface.
+
+    Each preview is built through the same `ScheduleCreate` the writer constructs,
+    so whatever that model rejects is rejected HERE, in the preview, instead of
+    degrading to a post-deploy warning once the fleet already exists.
+
+    **What that does NOT include: the cron expression.** `ScheduleCreate` declares
+    `cron_expression: str` with no validator, and `validate_manifest` only checks
+    that the key is PRESENT — so neither layer parses it. A syntactically invalid
+    cron still previews clean, deploys clean, and surfaces only when the scheduler
+    tries to arm it. Validating it here would change a shipped path (manifests with
+    a bad cron deploy today), so it is left as a documented gap rather than
+    silently half-fixed. What this DOES catch is a schedule entry whose field types
+    the model rejects (e.g. a non-string `name`), which `validate_manifest`'s
+    presence-only checks let through.
+
+    **Nor does it model ent#89's duplicate-name skip.** `create_agent_internal`
+    now materializes the TEMPLATE's own declared `schedules:`, and the writer
+    skips any manifest schedule whose name already exists on the agent. This
+    resolver is pure over the manifest and never reads a template, so a manifest
+    schedule colliding with a template-declared one is previewed as "will be
+    created" and is then skipped at deploy. The **armed** end state is still what
+    the preview showed — the template created a schedule of that name — so what
+    diverges is provenance and the report's `schedules_created` count, not
+    whether the fleet ends up running that schedule. Closing it properly means
+    resolving templates inside the preview, which is deferred rather than
+    half-fixed here.
+
+    Pinned by `tests/unit/test_ent126_schedule_characterization.py`; both the
+    caught and the uncaught case are pinned in `test_ent126_dry_run_preview.py`.
+    """
+    previews: List[SystemSchedulePreview] = []
+
+    for short_name, config in agents_config.items():
+        final_name = agent_names.get(short_name)
+        if not final_name or not config.schedules:
+            continue
+
+        for schedule_data in config.schedules:
+            # The writer's own model, so a field type it rejects is a PREVIEW
+            # blocker rather than a warning discovered after the fleet exists.
+            # NOT a cron-syntax check — see the docstring.
+            schedule_create = _build_schedule_create(schedule_data)
+            previews.append(SystemSchedulePreview(
+                agent=final_name,
+                short_name=short_name,
+                name=schedule_create.name,
+                cron=schedule_create.cron_expression,
+                message=schedule_create.message,
+                enabled=schedule_create.enabled,
+                timezone=schedule_create.timezone,
+                description=schedule_create.description,
+            ))
+
+    return previews
+
+
+def _build_schedule_create(schedule_data: dict) -> ScheduleCreate:
+    """Map one manifest schedule entry onto `ScheduleCreate` (ent#126).
+
+    The single mapping shared by the preview resolver and the writer, so the
+    manifest key names (`cron` -> `cron_expression`) and the three `.get()`
+    defaults cannot diverge between what a preview shows and what deploy writes.
+    Fields the manifest never populates (timeout_seconds, model, allowed_tools,
+    retries) keep their model defaults.
+    """
+    return ScheduleCreate(
+        name=schedule_data["name"],
+        cron_expression=schedule_data["cron"],
+        message=schedule_data["message"],
+        enabled=schedule_data.get("enabled", True),
+        timezone=schedule_data.get("timezone", "UTC"),
+        description=schedule_data.get("description")
+    )
+
+
+async def configure_permissions(
+    agent_names: Dict[str, str],  # {short_name: final_name}
+    permissions: Optional[SystemPermissions],
+    created_by: str
+) -> int:
+    """
+    Apply permission configuration based on preset or explicit rules.
+
+    Thin writer over `resolve_permission_edges` (ent#126): the topology decision
+    lives in the pure resolver the dry-run preview also uses, and this function
+    only performs the writes and the logging. Behaviour is unchanged and pinned
+    by `tests/unit/test_ent126_permission_characterization.py`.
+
+    Args:
+        agent_names: Mapping of short names to final agent names
+        permissions: Permission configuration from manifest
+        created_by: Username for audit trail
+
+    Returns:
+        Number of permissions configured
+    """
+    write_set, permissions_count = resolve_permission_edges(agent_names, permissions)
+
+    for source, targets in write_set:
+        db.set_agent_permissions(source, targets, created_by)
+        if targets:
+            logger.info(f"Granted {source} permissions to call: {targets}")
+        else:
+            logger.info(f"Cleared permissions for {source}")
+
+    if permissions:
+        mode = permissions.preset or ("explicit" if permissions.explicit else "none-specified")
+        logger.info(
+            f"Permission mode '{mode}': {len(write_set)} write(s), "
+            f"{permissions_count} permission(s) granted"
+        )
 
     return permissions_count
 
@@ -497,14 +704,12 @@ def create_schedules(
                 )
                 continue
 
-            schedule_create = ScheduleCreate(
-                name=schedule_data["name"],
-                cron_expression=schedule_data["cron"],
-                message=schedule_data["message"],
-                enabled=schedule_data.get("enabled", True),
-                timezone=schedule_data.get("timezone", "UTC"),
-                description=schedule_data.get("description")
-            )
+            # ent#126: the manifest -> ScheduleCreate mapping is shared with
+            # `resolve_schedule_previews`, so the dry-run preview shows exactly
+            # the schedules (and `enabled` states) this writer will create.
+            # NOTE (ent#89 merge): the skip above is a DEPLOY-side check the
+            # preview cannot make — see `resolve_schedule_previews`.
+            schedule_create = _build_schedule_create(schedule_data)
 
             # Create schedule in database
             schedule = db.create_schedule(
@@ -852,6 +1057,286 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
 # without importing a router; #1578 precedent)
 # ============================================================================
 
+# ============================================================================
+# ent#126: bundled-manifest catalog (read-only)
+#
+# `config/manifests/` is bind-mounted read-only into the backend at
+# /app/config/manifests by BOTH compose files, and WORKDIR is /app. Until now
+# the only code reading that directory was the first-run seeder, against one
+# hard-coded filename. These two functions turn it into a catalog the UI can
+# offer as "pick a system to install".
+# ============================================================================
+
+# Env-overridable because the bare relative default is correct at runtime
+# (WORKDIR /app + the :ro mount) but CWD-dependent under pytest — and a catalog
+# that silently returns [] because the CWD differs is a silent failure. Read at
+# CALL time, not import, so a test (or an operator) can point it elsewhere
+# without reloading the module.
+MANIFESTS_DIR_ENV = "TRINITY_MANIFESTS_DIR"
+_DEFAULT_MANIFESTS_DIR = "config/manifests"
+
+_MANIFEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_MANIFEST_SUFFIXES = (".yaml", ".yml")
+# Generous for a real manifest name, and short enough that `{id}.yaml` can never
+# reach the filesystem's own NAME_MAX. Without this an over-long id escapes as
+# OSError(ENAMETOOLONG) from `os.open` and surfaces as a bare 500 instead of the
+# 400 that a malformed id deserves.
+_MANIFEST_ID_MAX_LEN = 128
+
+
+def _manifests_dir() -> Path:
+    return Path(os.getenv(MANIFESTS_DIR_ENV) or _DEFAULT_MANIFESTS_DIR)
+
+
+def _resolve_manifest_path(manifest_id: str) -> Path:
+    """Map a manifest id onto a confined path under the manifests dir.
+
+    Raises ValueError on anything that is not a plain, in-directory id — the
+    router maps that to 400.
+
+    Layered on purpose, because no single check here is sufficient:
+
+    1. Character allowlist. Rejects `/`, backslashes, NUL and (being ASCII-only)
+       Unicode homoglyph tricks. FastAPI has already percent-decoded the path
+       parameter, so `%2e%2e%2f` arrives as `../` and is caught here.
+    2. EXPLICIT rejection of "", ".", ".." and any id containing "..". The regex
+       above does NOT do this — `.` is inside the character class, so `..` and
+       `...` match it happily. Relying on the regex for traversal is the mistake
+       #1759 taught (a guard tested against 9 leak shapes missed 8).
+    3. The suffix is ours by construction: the id is a STEM and we append
+       `.yaml`/`.yml` ourselves, so a caller cannot steer the extension at all.
+       A trailing `.yaml`/`.yml` in the id is tolerated and stripped, so both
+       `default-system` and `default-system.yaml` address the same file.
+    4. `.resolve()` both sides, then `is_relative_to`. This is what actually
+       defeats a symlink inside the directory pointing outside it.
+    """
+    raw = (manifest_id or "").strip()
+    if not raw or not _MANIFEST_ID_RE.match(raw):
+        raise ValueError(
+            "Invalid manifest id: must be letters, digits, dot, underscore or hyphen"
+        )
+    if len(raw) > _MANIFEST_ID_MAX_LEN:
+        raise ValueError(
+            f"Invalid manifest id: longer than {_MANIFEST_ID_MAX_LEN} characters"
+        )
+    # Tolerate (and normalise away) an explicit extension before the dot checks.
+    lowered = raw.lower()
+    for suffix in _MANIFEST_SUFFIXES:
+        if lowered.endswith(suffix):
+            raw = raw[: -len(suffix)]
+            break
+    if raw in ("", ".", "..") or ".." in raw:
+        raise ValueError("Invalid manifest id: path traversal is not allowed")
+
+    base = _manifests_dir().resolve()
+    for suffix in _MANIFEST_SUFFIXES:
+        entry = base / f"{raw}{suffix}"
+        candidate = entry.resolve()
+        if not candidate.is_relative_to(base):
+            # A symlink inside the directory pointing outside it.
+            raise ValueError("Invalid manifest id: resolves outside the manifests directory")
+        # Parity with `list_bundled_manifests`, which skips symlinks outright.
+        # Checked on the UNRESOLVED entry, because `.resolve()` has already erased
+        # the link. Without this, a symlink whose target happens to be inside the
+        # directory is invisible in the catalog yet readable by id — the two routes
+        # would disagree about what the catalog contains, and "not listed" would
+        # stop meaning "not served".
+        if entry.is_symlink():
+            raise ValueError("Invalid manifest id: symlinked manifests are not served")
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"No bundled manifest '{manifest_id}'")
+
+
+def _read_manifest_text(path: Path) -> str:
+    """Read a confined manifest path safely.
+
+    Opened ONCE and fstat'd through that same descriptor, rather than
+    stat-then-read: `config/manifests` is a host bind mount in both compose
+    files, so a swap or a growth between a separate stat and a later read is a
+    real window, and the file that was checked must be the file that is read.
+
+    `O_NOFOLLOW` refuses a symlinked final component (the confinement check in
+    `_resolve_manifest_path` covers where a symlink POINTS; this covers the
+    TOCTOU race on the link itself), and at most `cap + 1` bytes are read so an
+    oversized file is detected without being slurped into memory first.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("Not a regular file")
+        if st.st_size > MANIFEST_MAX_BYTES:
+            raise ValueError(
+                f"Manifest is larger than {MANIFEST_MAX_BYTES} bytes"
+            )
+        with os.fdopen(fd, "rb") as fh:
+            fd = -1  # ownership transferred to the file object
+            raw = fh.read(MANIFEST_MAX_BYTES + 1)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+    if len(raw) > MANIFEST_MAX_BYTES:
+        raise ValueError(f"Manifest is larger than {MANIFEST_MAX_BYTES} bytes")
+    return raw.decode("utf-8")
+
+
+def _assess_manifest(yaml_text: str) -> Tuple[Optional[SystemManifest], bool, Optional[str]]:
+    """Run the FULL three-stage check a deploy would run. -> (manifest, valid, reason)
+
+    `parse_manifest` alone is not a validity check: it accepts invalid system and
+    agent names, unsupported template prefixes and bogus permission presets, and
+    on a non-mapping `agents:` value it raises AttributeError rather than
+    ValueError. So a card marked "valid" on parsing alone would still fail to
+    deploy. All three stages run — parse, validate, and the same side-effect-free
+    template/resource preflight the dry-run uses — and the field is called `valid`
+    only because all three ran. If this is ever reduced to parsing, rename it
+    `parseable`.
+
+    Every `reason` leaves here through `_failure_reason`, the same exit point the
+    deploy report's `failed[].reason` uses — credential-sanitized, URL-userinfo
+    redacted and length-capped. A raw `str(e)` would be neither: PyYAML's parse
+    errors ECHO the offending source line (verified), and `validate_manifest`
+    interpolates manifest-supplied values, so an uncapped reason grows with the
+    file. Nothing a `creator` cannot already read via `GET /manifests/{id}`, which
+    returns the raw YAML — but the catalog is the surface most likely to be widened
+    to a looser role later, and this is the field a reader would trust.
+    """
+    try:
+        manifest = parse_manifest(yaml_text)
+    except Exception as e:  # noqa: BLE001 — incl. the AttributeError shape above
+        return None, False, _failure_reason(e)[0]
+
+    try:
+        validate_manifest(manifest)
+    except Exception as e:  # noqa: BLE001
+        return manifest, False, _failure_reason(e)[0]
+
+    # Base names, not `_N`-resolved ones: suffixing is a deploy-time concern and
+    # resolving it here would mean a DB round trip per agent per card.
+    blockers = [
+        f"{short}: {failure.reason}"
+        for short, failure in (
+            (
+                short,
+                _preflight_template(
+                    f"{manifest.name}-{short}", short, cfg.template, cfg.resources
+                ),
+            )
+            for short, cfg in manifest.agents.items()
+        )
+        if failure is not None
+    ]
+    if blockers:
+        # Each `failure.reason` is already capped; the JOIN of N of them is not.
+        return manifest, False, "; ".join(blockers)[:_REASON_MAX_LEN]
+
+    return manifest, True, None
+
+
+def _summarize_manifest(path: Path, yaml_text: str) -> BundledManifestSummary:
+    """Build one catalog entry. Never raises."""
+    manifest, valid, reason = _assess_manifest(yaml_text)
+    summary = BundledManifestSummary(
+        id=path.stem,
+        filename=path.name,
+        valid=valid,
+        reason=reason,
+    )
+    if manifest is None:
+        return summary
+
+    summary.name = manifest.name
+    summary.description = manifest.description
+    summary.agent_count = len(manifest.agents)
+    summary.templates = sorted({c.template for c in manifest.agents.values() if c.template})
+    summary.schedule_count = sum(
+        len(c.schedules or []) for c in manifest.agents.values()
+    )
+    # A top-level `prompt:` OVERWRITES the platform-wide trinity_prompt for every
+    # agent, so the UI needs it up front to gate deploy behind an acknowledgement.
+    summary.sets_prompt = bool(manifest.prompt)
+    summary.permissions_preset = (
+        manifest.permissions.preset if manifest.permissions else None
+    )
+    try:
+        summary.already_deployed = any(
+            agent_exists(f"{manifest.name}-{short}") for short in manifest.agents
+        )
+    except Exception:  # noqa: BLE001 — a DB hiccup must not blank the catalog
+        logger.warning(
+            f"Could not determine deployed state for manifest '{path.name}'",
+            exc_info=True,
+        )
+    return summary
+
+
+def list_bundled_manifests() -> List[BundledManifestSummary]:
+    """List the manifests shipped in `config/manifests/` (ent#126).
+
+    Fail-soft per file: an unparseable, invalid or oversized manifest is listed
+    with `valid: false` and a short reason rather than 500-ing the request. One
+    bad file must not hide the others — that is precisely how a broken bundled
+    manifest stays invisible.
+    """
+    directory = _manifests_dir()
+    try:
+        entries = sorted(
+            child for child in directory.iterdir()
+            if child.suffix.lower() in _MANIFEST_SUFFIXES
+        )
+    except (OSError, FileNotFoundError) as e:
+        # A missing directory is an empty catalog, not an error — but say so,
+        # because the alternative reading is a silently misconfigured CWD.
+        logger.warning(f"Manifest directory '{directory}' is unreadable: {e}")
+        return []
+
+    summaries: List[BundledManifestSummary] = []
+    seen_ids: set = set()
+    for path in entries:
+        if path.stem in seen_ids:
+            # Both `x.yaml` and `x.yml` present: the id is the stem, so only the
+            # first (.yaml, by sort order) is addressable. Say so rather than
+            # listing an entry that resolves to a different file.
+            logger.warning(
+                f"Skipping '{path.name}': manifest id '{path.stem}' is already taken"
+            )
+            continue
+        seen_ids.add(path.stem)
+        # Checked BEFORE the read: `_read_manifest_text` opens with O_NOFOLLOW and
+        # would fail on a symlink anyway, but as an unexplained ELOOP listed as a
+        # broken manifest. A symlink is not a broken file, it is a file we decline
+        # to serve, and the reason should say that.
+        if path.is_symlink():
+            logger.warning(f"Skipping '{path.name}': symlinked manifests are not served")
+            continue
+        try:
+            text = _read_manifest_text(path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not read bundled manifest '{path.name}': {e}")
+            summaries.append(BundledManifestSummary(
+                id=path.stem, filename=path.name, valid=False,
+                reason=_failure_reason(e)[0],
+            ))
+            continue
+        summaries.append(_summarize_manifest(path, text))
+    return summaries
+
+
+def read_bundled_manifest(manifest_id: str) -> BundledManifestDetail:
+    """Read one bundled manifest plus its summary (ent#126).
+
+    Raises ValueError (-> 400) on a malformed id and FileNotFoundError (-> 404)
+    on an unknown one.
+    """
+    path = _resolve_manifest_path(manifest_id)
+    text = _read_manifest_text(path)
+    summary = _summarize_manifest(path, text)
+    return BundledManifestDetail(**summary.model_dump(), manifest=text)
+
+
 def _default_create_agent_fn():
     """Resolve the agent-create function at call time.
 
@@ -867,16 +1352,19 @@ def _default_create_agent_fn():
 
 
 def _preflight_template(
-    final_name: str, short_name: str, template: Optional[str]
+    final_name: str,
+    short_name: str,
+    template: Optional[str],
+    resources: Optional[dict] = None,
 ) -> Optional[SystemDeployFailure]:
-    """Can this agent's template resolve? Returns a failure, or None if it can.
+    """Can this agent's template resolve, with usable resources? (failure or None)
 
-    Reuses the CREATE path's own resolver rather than re-deriving "does this
-    template exist", so the preview cannot drift from the deploy: the reason
-    string and status code a caller sees here are produced by the same code that
-    will produce them for real (#1841).
+    Reuses the CREATE path's own resolver and its own validators rather than
+    re-deriving "does this template exist" / "is this cpu usable", so the preview
+    cannot drift from the deploy: the reason string and status code a caller sees
+    here are produced by the same code that will produce them for real (#1841).
 
-    Scope, deliberately:
+    Template scope, deliberately:
       * ``local:`` — resolved (a filesystem read, no side effects). This is
         where the cheap typo lives, and where #1793/#1759 made an unresolvable
         id a hard 404 instead of a silent blank agent.
@@ -885,26 +1373,59 @@ def _preflight_template(
         new outbound call on a path that had none. A dry run therefore still
         cannot promise a github-template manifest deploys.
       * no template — valid by construction (creates a bare agent by design).
-    """
-    if not template or not template.startswith("local:"):
-        return None
 
-    # Lazy import: crud imports service-layer modules, so a module-level import
+    Resource validation (ent#126) closes a hole this function used to have. It
+    checked template SHAPE only, so a manifest carrying an unusable resource
+    value previewed as `valid` and then failed 100% of its agents at create —
+    the exact class of defect #1841 exists to prevent, through a different door.
+    A shipped bundled manifest had `cpu: 1.0` (an unquoted YAML float, which
+    `normalize_cpu` rejects because it compares against the string set
+    ``("1","2","4","8","16")``) and every deploy of it returned
+    ``status: "failed"`` / HTTP 500 with a clean preview beforehand.
+
+    The values checked are the MERGED ones, mirroring the create path's own
+    precedence: `_resolve_local_template` overwrites `config.resources` with the
+    template's block when the template declares one (`crud.py`
+    ``config.resources = template_data.get("resources", config.resources)``), so
+    a manifest value only survives when the template is silent — which is exactly
+    the case the bundled manifest hit.
+
+    For a ``github:`` template the merge cannot be computed without the network
+    call this function refuses to make, so the manifest's DECLARED values are
+    validated instead. That can over-report: if the remote template declares its
+    own resources, an invalid manifest value would have been discarded and the
+    deploy would have succeeded. Accepted deliberately — the alternative is
+    staying silent about a value that is either fatal or dead config, and the fix
+    (quote it, or use a supported value) is harmless in both cases.
+    """
+    # Lazy imports: crud imports service-layer modules, so a module-level import
     # here would close a cycle (same reason `_default_create_agent_fn` is lazy).
     from models import AgentConfig
-    from services.agent_service.crud import _resolve_local_template
+    from services.agent_service.capabilities import normalize_cpu, normalize_memory
+    from services.agent_service.crud import _get_default_resource, _resolve_local_template
+
+    # A throwaway config: `_resolve_local_template` mutates the object it is
+    # given (type/resources/tools/runtime from template.yaml). The manifest's
+    # resources are COPIED in rather than handed over, so neither the resolver
+    # nor the normalizers below (which write canonical values back) can mutate
+    # the parsed manifest during what must stay a read-only preview.
+    config = AgentConfig(
+        name=final_name, template=template, resources=dict(resources or {})
+    )
 
     try:
-        # A throwaway config: `_resolve_local_template` mutates the object it is
-        # given (type/resources/tools/runtime from template.yaml), which is why
-        # the manifest's own config is never handed to it.
-        _resolve_local_template(AgentConfig(name=final_name, template=template))
+        if template and template.startswith("local:"):
+            _resolve_local_template(config)
+
+        # Same validators, same defaults, same actionable messages as create.
+        normalize_cpu(config.resources.get("cpu"), _get_default_resource("cpu"))
+        normalize_memory(config.resources.get("memory"), _get_default_resource("memory"))
     except Exception as e:  # noqa: BLE001 — mirrors the create loop's catch
         reason, status_code = _failure_reason(e)
         return SystemDeployFailure(
             name=final_name,
             short_name=short_name,
-            template=template,
+            template=template or "",
             reason=reason,
             status_code=status_code,
         )
@@ -1008,11 +1529,49 @@ async def deploy_manifest(
             preview_failed = [
                 failure for failure in (
                     _preflight_template(
-                        final_name, short_name, manifest.agents[short_name].template
+                        final_name,
+                        short_name,
+                        manifest.agents[short_name].template,
+                        manifest.agents[short_name].resources,
                     )
                     for short_name, final_name in agent_names.items()
                 ) if failure is not None
             ]
+
+            # ent#126 (AC #2): the preview must show permission topology and
+            # schedules, not just agent names. Both come from the pure resolvers
+            # the real writers consume, so what is previewed is what deploys.
+            #
+            # `permission_edges` collapses the resolver's ordered write-set to
+            # {source: targets} for display. Lossless for the set of writes —
+            # each branch writes any given agent at most once (explicit's clear
+            # and set phases are disjoint) — and write order carries no meaning
+            # for a reader.
+            #
+            # Topology is OPTIMISTIC: it is resolved against the full agent map,
+            # whereas a partial deploy configures permissions against
+            # `created_map` (a subset). The UI states this.
+            edges, _preview_permission_count = resolve_permission_edges(
+                agent_names, manifest.permissions
+            )
+            try:
+                schedules_preview = resolve_schedule_previews(
+                    agent_names, manifest.agents
+                )
+            except Exception as e:  # noqa: BLE001
+                # A schedule the writer could not construct (e.g. a field
+                # ScheduleCreate rejects). Surfacing it as a preview BLOCKER is
+                # the point: post-deploy it degrades to a warning once the fleet
+                # already exists (deploy step 9).
+                reason, status_code = _failure_reason(e)
+                schedules_preview = []
+                preview_failed.append(SystemDeployFailure(
+                    name=manifest.name,
+                    short_name="(schedules)",
+                    template="",
+                    reason=f"Invalid schedule definition: {reason}",
+                    status_code=status_code,
+                ))
 
             return SystemDeployResponse(
                 # "valid" keeps its meaning — a manifest that will deploy. A
@@ -1026,6 +1585,13 @@ async def deploy_manifest(
                 prompt_updated=bool(manifest.prompt),
                 warnings=all_warnings,
                 failed=preview_failed,
+                permission_edges=dict(edges),
+                schedules_preview=schedules_preview,
+                system_view_requested=bool(manifest.system_view),
+                # `permissions_configured` / `schedules_created` deliberately stay
+                # at their 0 defaults on this branch: they mean "written", and
+                # changing a shipped field's meaning would mislead any existing
+                # consumer. Callers count the new arrays instead.
             )
 
         # 5. Create all agents — best-effort by default (trinity-enterprise#125):
@@ -1205,6 +1771,16 @@ async def deploy_manifest(
             )
             if system_view_id:
                 logger.info(f"Created System View '{manifest.system_view.name}' (ID: {system_view_id}) for system '{manifest.name}'")
+            else:
+                # ent#126: create_system_view swallows its exception and returns
+                # None, so without this the only trace of a lost view was a log
+                # line — the response looked identical to "no view requested"
+                # and a caller would navigate to an unfiltered dashboard.
+                all_warnings.append(
+                    f"System View '{manifest.system_view.name}' was requested but "
+                    "could not be created; the agents are still tagged with the "
+                    "system name."
+                )
 
         # 12. Start all agents (triggers Trinity injection with updated prompt)
         start_results = await start_all_agents(created_agents)
@@ -1226,6 +1802,7 @@ async def deploy_manifest(
             schedules_created=schedules_count,
             tags_configured=tags_count,
             system_view_created=system_view_id,
+            system_view_requested=bool(manifest.system_view),
             warnings=all_warnings,
             failed=failed
         )

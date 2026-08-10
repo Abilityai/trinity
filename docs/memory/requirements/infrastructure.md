@@ -300,7 +300,68 @@
 - **Storage**: `canary_violations` table; observed_state JSON column.
 - **Activation**: gated by `CANARY_ENABLED=1` env var; disabled by
   default. Production deployment is staging/dev — the harness watches
-  there, not in user-facing prod.
+  there, not in user-facing prod. `CANARY_ENABLED` and
+  `CANARY_SLACK_WEBHOOK_URL` must be forwarded under `backend.environment:`
+  in **both** `docker-compose.yml` and `docker-compose.prod.yml` (#1881
+  part 1, shipped as #1876): prod compose launches standalone — no base-compose merge and no
+  `env_file:` — so the explicit `environment:` list is the only path into
+  the container, and the vars were wired into the dev file only. Staging/dev
+  runs prod compose, so the harness was un-enableable on exactly the
+  deployment it exists for: a documented `.env` lever that silently did
+  nothing (#1039/#1056 packaging-gap class), and a silent-green one level
+  above H-01 that no invariant can catch, since invariants only run inside
+  the thing that isn't running. Pinned by
+  `tests/unit/test_canary_env_prod_parity.py`.
+- **Single-cycling-worker lease** (#1881 part 2): the FastAPI lifespan
+  starts `canary_service` in **every** uvicorn worker (prod runs
+  `--workers 2`) and the service held only a per-process `asyncio.Lock`,
+  which guards re-entrancy inside one process and says nothing about
+  cross-worker exclusion. Enabling the harness therefore meant two full
+  cycles per interval — R-01 `docker exec`ing into every running agent
+  container twice per 5 min, violations double-persisted (11,942
+  `canary_violations` rows in 24h, measured on eu2), and two independent
+  writers on every shared marker (`canary:last_cycle_at`,
+  `canary:last_cycle_red`, `canary:e02:terminal_seen`,
+  `canary:h01:suspect_since`). The two defects had to ship together: the
+  compose fix alone converts a dormant bug into a live one. The scheduled
+  loop now runs only when it holds the Redis `canary:leader` lease — SET
+  NX, TTL `max(3×interval, 900s)`, own-lease-only refresh, best-effort
+  release on `stop()` — mirroring `monitoring:leader` (#1464) and
+  `opqueue:leader` (#1632). Every worker still runs its loop and re-checks
+  each cycle, so leadership fails over when the holder dies with no
+  restart; non-leaders log on the **transition** only, never per cycle.
+  - **TTL floor**, the one deviation from `interval × 3`: a canary cycle's
+    cost is dominated by R-01's `container.exec_run` sweep, which is bounded
+    by no timeout and scales with *fleet size*, not with how often we look.
+    A shortened interval must not shorten the lease below one sweep, or it
+    lapses mid-cycle and leadership flaps — restoring the concurrent
+    probing the lease exists to remove. The floor is a no-op at the default
+    300s interval.
+  - **Fail-open to leader** when Redis is unreachable. The precedents' own
+    justification does not transfer — a duplicate canary cycle is *not*
+    inert (it re-runs the sweep and double-persists rows) — so it is taken
+    on different grounds: this is the one subsystem whose purpose is
+    noticing that something went quiet, and a canary that stops is the
+    silent-green failure H-01 exists to catch, one level up where nothing
+    can see it. Duplicated probes are noisy and visible; silence is not.
+    A Redis outage is also already a degraded state the harness announces
+    (`sources_unavailable`; H-01 fires unconfirmed on an unreadable
+    marker), and failing closed would suppress precisely those paths.
+  - Consequently the lease is **best-effort, not mutual exclusion**:
+    H-01's `CONFIRMATION_MIN_SECONDS` and R-01's `DWELL_SECONDS`
+    elapsed-wall-clock gates stay load-bearing and must not be relaxed to
+    "seen in a second cycle" on the strength of it. Both also ride out a
+    real-time transient, which is a single-worker property.
+  - Knock-on: a leader failover leaves up to ~1200s (TTL + interval) with
+    nobody cycling, which exceeds R-01's `_MAX_OBSERVATION_GAP_SECONDS`
+    (600) and restarts its dwell. Correct — a crashed leader is a genuine
+    observation outage, and restarting is the fail-safe direction.
+  - `run_cycle()` is deliberately **not** gated: `POST /api/canary/run-cycle`
+    lands on an arbitrary worker, so gating it would make an explicit admin
+    request return an empty payload roughly half the time under
+    `--workers 2` — structurally identical to a green cycle, the exact
+    ambiguity the 409 `"cycle in progress"` contract exists to remove.
+  - Guard: `tests/unit/test_1881_canary_leader_lease.py`.
 - **Fleet**: `config/canary-fleet.yaml` deploys two synthetic agents
   (`canary-fleet-burst` minute-cron, `canary-fleet-long` 5-min cron) via
   the existing `/api/systems/deploy` endpoint. Without the fleet, the
@@ -313,9 +374,88 @@
   line with snapshot_time + violation count + "last red Xm ago"
   badge). Unset = silent sink: cycles still run, violations still
   persist to `canary_violations`, only the outbound POST is skipped.
-  Continuing-red invariants don't re-post. The dashboard-notifications
+  Continuing-red invariants don't re-post — **except to complete an
+  alert that was never delivered** (#1897). The dashboard-notifications
   path (writing `agent_notifications` rows via `db.create_notification`)
   was rejected on the product call.
+  **Delivery is an outcome, not an assumption (#1897).**
+  `emit_transition` reports `DELIVERED` / `SKIPPED` (no webhook
+  configured — deliberately *not* a failure, or every default install
+  would arm a retry per transition) / `FAILED`, and only a non-FAILED
+  outcome counts the transition in `cumulative_transitions` or lists it
+  under `transitions` in the run-cycle response; the undelivered set is
+  surfaced beside it as `undelivered_invariant_ids`, so a webhook outage
+  cannot make an admin `POST /api/canary/run-cycle` look like a green
+  cycle. An undelivered transition is **re-attempted on a later cycle
+  while the invariant is still red**, at most once per cycle interval
+  (a floor, because `run_cycle()` is deliberately not leader-gated and
+  manual polling would otherwise spend the whole window in seconds), for
+  up to `MAX_ALERT_PENDING_AGE_SECONDS` (1800s, a module constant per
+  the #1644 `MAX_ROWS_PER_SWEEP` precedent) per *contiguous failure run*
+  — failures separated by more than 3× the interval start a fresh run,
+  so brief flaps cannot consume the window a later long outage needs.
+  Past the window a distinct ERROR names the invariant, the elapsed
+  seconds and the last webhook error, and `cumulative_alerts_dropped`
+  increments; `cumulative_transitions_detected` keeps counting flips so
+  no single counter has to mean both "detected" and "delivered".
+  **The exact bound, because "up to 1800s" reads tighter than it is:**
+  the budget is evaluated AFTER each attempt (so the ERROR quotes the
+  elapsed and error of the attempt that actually just failed, not a
+  stale one), which means a run ends on the first attempt whose age
+  *exceeds* the window rather than the last one inside it — at the
+  5-minute default, **8 POSTs spanning 2100s (35 min)** per run, then
+  silence. The **dual of the run-decay**, stated so it is not
+  rediscovered as a bug: an invariant flapping red→green→red on a
+  period longer than 3× the interval never accumulates run age and so
+  never reaches a give-up — but it also never *retries* (it is green
+  again before the floor opens), so it costs exactly one POST per red
+  episode, which is the detection rate and is precisely the pre-#1897
+  behaviour. A delivery-layer budget deliberately does not bound its
+  own detector.
+  The retried payload is always rebuilt from the CURRENT cycle's
+  violations, and a pending entry only acts on a cycle where its
+  invariant is red, so a retry is never stale content and never fires
+  for something that went green. Retry state is **per-invariant**, in
+  the Redis hash `canary:alert_pending` (field = invariant id),
+  deliberately independent of the cycle-global `canary:last_cycle_at`
+  cursor: withholding that cursor retries nothing (the invariant's own
+  freshly-inserted row already post-dates it) and silently swallows an
+  unrelated red→green→red flip instead. The entry is armed BEFORE the
+  POST and `HDEL`'d on success, not armed on failure, because
+  `asyncio.CancelledError` is not an `Exception` and `stop()` cancels a
+  live cycle — a SIGTERM landing inside the webhook await would
+  otherwise lose the alert on every deploy that coincides with a red
+  cycle. Everything fails open: an unreadable or unwritable pending
+  store degrades to exactly the pre-#1897 behaviour, never worse, and
+  the *evidence* is never at risk because it lives in
+  `canary_violations` (SQL) rather than in Redis. The alternative of an
+  `alert_state` column on `canary_violations` — delivery state in the
+  same failure domain as the evidence, queryable via
+  `GET /api/canary/violations` — was rejected on scope (a dual-track
+  SQLite + Alembic migration for a delivery bug), not on merit. Two
+  workers can both retry one pending entry, which costs at most one
+  duplicate message; #1881's posture on this same subsystem ("choose the
+  duplicate over the silence") decides it. Guard:
+  `tests/unit/test_1897_canary_alert_delivery.py` — under `tests/unit/`
+  because no CI workflow runs the canary suite itself (#2037).
+- **Instance attribution (#1987)**: the payload names the instance that
+  fired it — a `[eu2]` prefix on both the Block Kit header and the `text`
+  fallback — so instances sharing one webhook (as `dev` and `eu2` do since
+  the #1766 soak) stay tellable apart. A webhook carries no sender
+  identity, and continuing-red gating makes each alert a one-shot, so
+  anything the message omits is not recoverable from a later one.
+  `services/instance_identity.py::get_instance_label()` resolves it:
+  optional `TRINITY_INSTANCE_NAME` override → first DNS label of
+  `FRONTEND_URL`'s host (`https://eu2.abilityai.dev` → `eu2`; an IP
+  literal keeps its whole host) → `installation_id[:8]` → unlabelled.
+  Deliberately no new *required* var: managed instances already carry
+  `FRONTEND_URL`, so attribution improves fleet-wide without an `.env`
+  rollout. Every tier degrades instead of raising — an unlabelled alert
+  is the prior behaviour, a lost alert is the failure the sink exists to
+  prevent. The label is sanitized (ASCII-alnum + hostname punctuation,
+  32-char cap) at resolution *and* at the render boundary, so it can
+  neither forge Slack markup (`<!channel>`) nor overflow the 150-char
+  header cap Slack rejects the whole message on.
 - **Determinism**: invariant checks are pure functions
   `check(snapshot) → list[ViolationReport]`. Same snapshot input always
   yields the same output. No LLM reasoning anywhere in the canary path.
@@ -335,6 +475,61 @@
   after it. **Credential safety:** E-04/G-04 violations persist to
   `canary_violations`, so neither ever echoes the raw `backlog_metadata` — E-04
   reports the failed-predicate reason code, G-04 the matched pattern name only.
+- **Phase 5 (shipped, #1813)**: **H-01 collector blindness** — the harness's
+  first *self*-check, and the reason the `H-` (harness health) id family exists:
+  every other invariant means "the system is broken", H-01 means "the observer
+  is blind", and an H-01 violation invalidates every other green in that cycle.
+  #1540 repointed the SQL-tier collectors onto the configured engine but left
+  the failure *shape* untouched — a collector reading an empty or unreachable
+  source returns zero rows, which is indistinguishable from a genuinely clean
+  fleet, so both report green. H-01 fires when the roster read
+  (`_collect_known_agents`) returns zero rows or raises **while an independent,
+  non-SQL source proves the fleet is alive**: Docker container presence
+  (`docker_agent_names`, read from the container list *before* any `exec_run`,
+  since `zombie_counts` is keyed by exec success and thins on a degraded
+  container) ∪ Redis slot keys (`orphan_redis_slots`, corroborating only — slot
+  keys exist solely while an execution holds a slot). Docker is collected
+  **before** the roster read, so it still supplies evidence on the arm where
+  that read raises and the collector returns early; Redis needs `known_agents`
+  and cannot. Reason codes
+  (stable — trinity-enterprise#202 scores on them): `roster_read_failed` /
+  `roster_empty_contradicted` (critical) / `roster_empty_unverifiable` (major —
+  the evidence source was unreachable, was never read, or **only Redis** had
+  anything to say: `orphan_redis_slots` is by definition slot keys whose agent
+  is absent from `agent_ownership`, i.e. L-03's leaked-slot state, so treating
+  it as a contradiction would page critical over a correct roster plus an
+  unrelated leak). `docker_available`/`redis_available` are **tri-state**
+  (`None` = the collector never ran) because `sources_unavailable` cannot
+  express a skipped collector. **Confirmation on elapsed
+  wall-clock** (`CONFIRMATION_MIN_SECONDS`, marker `canary:h01:suspect_since`,
+  E-02's cross-cycle-state precedent) so the last-agent delete race — DB row
+  gone, container still tearing down — cannot false-fire. Deliberately NOT "a
+  second cycle": prod runs `--workers 2` and, when the gate was written,
+  `canary_service` held no leader lease, so both loops shared the marker and
+  worker B would confirm worker A's sighting seconds later, collapsing the
+  gate. The #1881 `canary:leader` lease does not retire the rule — it fails
+  open to leader on a Redis outage, restoring concurrent loops over the shared
+  marker, and the transient being ridden out is real-time regardless of worker
+  count. An unreadable *or unwritable*
+  marker fires *unconfirmed* rather than skipping,
+  because a guard that cannot self-check must say so; the marker carries a 24h
+  TTL refreshed every suspicious cycle, so a `_clear_marker` that silently
+  failed cannot leave the gate armed forever. The gate applies to **every**
+  arm including `roster_read_failed` — a raised roster read is often a
+  momentary DB blip, and paging critical on one is how a safety net gets muted.
+  A whole-database outage now reaches the check at all: `_run_cycle_inner`'s
+  pre-cycle latest-violation read is fail-open (it previously raised before
+  `collect_snapshot` ran, so H-01 never executed), with transition detection
+  falling back to `canary:last_cycle_red` so a persistent outage chirps once
+  rather than every cycle. Scoped to the roster read
+  ONLY: on a live-but-quiet fleet `terminal_rows`/`enabled_schedules`/
+  `orphan_refs`/`terminal_exec_statuses` are all legitimately empty, so a
+  general "any SQL collector reads zero" rule would false-alarm on every idle
+  install. Dual-track by construction (a pure function over the `Snapshot`; it
+  issues no SQL). **Residual:** an entirely *stopped* fleet has no containers
+  and no slots, so no evidence exists and H-01 can only reach
+  `roster_empty_unverifiable`; partial blindness (roster returns 1 of 20) is out
+  of scope, since a count comparison would false-fire on create/stop races.
 - **Registration**: each new invariant is a new file under
   `src/backend/canary/invariants/` + a registry entry (per the catalog at
   `docs/testing/orchestration-invariant-catalog.md`); the service and API

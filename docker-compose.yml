@@ -113,6 +113,13 @@ services:
       # operator manifest, or `disabled` to skip seeding. Empty = bundled
       # config/manifests/default-system.yaml.
       - TRINITY_DEFAULT_SYSTEM_MANIFEST=${TRINITY_DEFAULT_SYSTEM_MANIFEST:-}
+      # ent#126: directory the bundled-manifest catalog
+      # (GET /api/systems/manifests) reads. Empty = the image's own
+      # config/manifests (already bind-mounted :ro below). Point it at another
+      # bind-mounted directory to offer your own curated fleet manifests; an
+      # unreadable path is an EMPTY catalog, not an error, so mount the
+      # directory too — setting this alone silently lists nothing.
+      - TRINITY_MANIFESTS_DIR=${TRINITY_MANIFESTS_DIR:-}
       # Agent /tmp tmpfs size (#1231) — read by capabilities.py to build the
       # agent container mount spec. noexec,nosuid stay fixed; only size tunes.
       # Existing agents pick up a change on recreate, not restart.
@@ -199,6 +206,15 @@ services:
       - TELEMETRY_SHARING_URL=${TELEMETRY_SHARING_URL:-https://intake.abilityai.dev/v1/telemetry-share}
       - TELEMETRY_SHARING_INTERVAL_HOURS=${TELEMETRY_SHARING_INTERVAL_HOURS:-24}
       - TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS=${TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS:-30}
+      # Remote template registry (ent#14): the GitHub half of the template
+      # catalog, fetched at runtime. TEMPLATE_REGISTRY_ENABLED=false is the HARD
+      # kill switch (no system_settings row can turn it back on) — without this
+      # line it is inert, which is the #1039 class the config.py comment argues
+      # against one paragraph above where it reads the var. URL keeps its FULL
+      # non-empty default — a bare :- would arrive set-but-empty and shadow the
+      # code default (#1076 class), pointing the registry at "".
+      - TEMPLATE_REGISTRY_ENABLED=${TEMPLATE_REGISTRY_ENABLED:-true}
+      - TEMPLATE_REGISTRY_URL=${TEMPLATE_REGISTRY_URL:-https://raw.githubusercontent.com/Abilityai/trinity-templates/main/registry.yaml}
       # CORS (comma-separated extra origins)
       - EXTRA_CORS_ORIGINS=${EXTRA_CORS_ORIGINS:-}
       # Slack channel adapter
@@ -220,6 +236,11 @@ services:
       # credential — leaking it lets anyone post to that one channel.
       # Unset = canary cycles run silently (still persists violations).
       - CANARY_SLACK_WEBHOOK_URL=${CANARY_SLACK_WEBHOOK_URL:-}
+      # Optional label naming THIS instance in outbound alerts (#1987). Unset
+      # is the norm — services/instance_identity.py then derives one from
+      # FRONTEND_URL's host, so multiple instances sharing one webhook are
+      # already distinguishable. Set it only to override that derivation.
+      - TRINITY_INSTANCE_NAME=${TRINITY_INSTANCE_NAME:-}
       # Backend agent-call budget (#904 RC-1). Caps how many concurrent
       # outbound agent HTTP calls the backend will hold at once, plus
       # the per-acquire queue wait before returning 503. Default

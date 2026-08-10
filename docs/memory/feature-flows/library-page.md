@@ -46,13 +46,16 @@ Renamed from `Templates.vue` via a **pure `git mv` commit** followed by a conten
 
 | Element | Purpose |
 |---------|---------|
-| h1 "Library" + subtitle | "Installable assets for your fleet — agent templates and skills" |
-| Header jump anchors | `#agent-templates` · `#skills` |
+| h1 "Library" + subtitle | "Installable assets for your fleet — agent templates, systems, and skills" (ent#126 added the third kind) |
+| Header jump anchors | `#agent-templates` · `#systems` (creator+ only) · `#skills` |
 | `<section id="agent-templates">` | The whole former Templates page content (heading "Agent Templates"; inner Starter/GitHub/Custom headings demoted h2→h3) |
+| `<section id="systems">` | `<SystemInstallPanel />` — install a multi-agent system from a manifest (ent#126). Placed **between** templates and skills: it and Agent Templates both *install agents*, while Skills configures agents that already exist. **Role-gated** (`hasMinRole('creator')`, mirroring `POST /api/systems/deploy`) and hidden outright below that role — with its jump anchor gated alongside, so the nav never points at an unrendered section |
 | `<section id="skills">` | `<LibrarySkillsSection />` |
 | `CreateAgentModal` | Opened by "Use Template" / "Create Blank Agent" with `initial-template`; `onAgentCreated` navigates to `/agents/{name}` |
 
-**Per-section failure isolation** is a page invariant: the templates fetch and the skills fetches are independent — each section owns its own loading/error/empty states, so a failure in one never blanks the other.
+**Per-section failure isolation** is a page invariant: the templates fetch, the systems catalog fetch and the skills fetches are independent — each section owns its own loading/error/empty states, so a failure in one never blanks the others.
+
+**Tabs were considered and rejected** (ent#263), and ent#126 conforms rather than reopening it: these are disjoint section shapes that stack, and a tab strip would hide two-thirds of the page behind a click on a surface whose whole job is browsing what is installable. A new asset kind is a new `<section>` + one jump anchor.
 
 **Agent Templates section** (unchanged behavior from the Templates page): single `GET /api/templates` fetch (now via the shared `api` client — Invariant #7; previously raw axios with a hand-built auth header), split client-side into Starter (`source === 'local' || !source`) and GitHub (`source === 'github'`) grids, plus the Custom/Blank Agent card and a "No templates configured" empty state. The backend already excludes hidden fixtures (#1513). `CreateAgentModal.vue`'s single `/api/templates` call was migrated to the shared client in the same change, so no half-migrated consumer of the endpoint remains.
 
@@ -118,7 +121,7 @@ Single desktop link: label **Library**, `to="/library"`, active check `$route.pa
 ### Templates Router (`src/backend/routers/templates.py` — 2 endpoints)
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/templates` | List templates — admin-configured GitHub list (TMPL-001, `system_settings` key `github_templates`) or `config.py` defaults, plus curated local templates; hidden fixtures excluded (#1513); GitHub metadata cached 10 min/repo (#843); sorted by `priority` then `display_name` |
+| `GET /api/templates` | List templates — the GitHub half resolves **admin-configured list (TMPL-001, `system_settings` key `github_templates`) → remote template registry (TMPL-002, trinity-enterprise#14) → `config.py` defaults (empty since #1931)**, and every registry failure degrades back to that floor (see [template-registry.md](template-registry.md)); plus curated local templates; hidden fixtures excluded (#1513); GitHub metadata cached 10 min/repo (#843); sorted by `priority` then `display_name` |
 | `GET /api/templates/{template_id:path}` | Single template details |
 
 (`POST /api/templates/refresh` and `GET /api/templates/env-template` no longer exist — the refresh icon on the page is a client refetch.)
@@ -126,7 +129,7 @@ Single desktop link: label **Library**, `to="/library"`, active check `$route.pa
 ### Skills read surfaces (`src/backend/routers/skills.py`)
 | Endpoint | Auth | Used for |
 |----------|------|----------|
-| `GET /api/skills/library/status` | any auth user | sync-state header + empty-state discriminator (`{configured, url, branch, cloned, last_sync, commit_sha, skill_count}` — PR #1901 keeps these flat fields verbatim and adds `sources[]`) |
+| `GET /api/skills/library/status` | any auth user | sync-state header + empty-state discriminator (`{configured, cloned, branch, commit_sha, last_sync, skill_count}` + `sources[]`). **No `url`** — ent#334 put a `response_model` allow-list on this route: it is open to every authenticated caller including agent-scoped keys, while source repo URLs are admin-sensitive and served only by the admin-gated `GET /api/skills/sources`. The per-source `url` and `last_error` are withheld for the same reason (`last_error` is git failure text, which echoes the PAT-spliced clone URL). `configured`/`cloned` are the load-bearing pair — the empty-state discriminator derives from them |
 | `GET /api/skills/library` | any auth user | skill cards (`SkillInfo` contract, ent#183) |
 | `POST /api/skills/library/sync` | admin | Sync now button |
 
@@ -165,6 +168,7 @@ CI runs admin-authenticated (`e2e/.auth/admin.json`), so the non-admin empty-sta
 
 | Date | Changes |
 |------|---------|
+| 2026-08-04 | **ent#14 — remote template registry**: the `GET /api/templates` row now names the three-tier ladder (admin list → registry → bundled defaults) instead of claiming the GitHub half is admin-list-or-`config.py`. **Zero page change** — registry entries are `source: "github"` and land in the existing grid, which is what keeps this page (and MCP `list_templates`) untouched. |
 | 2026-08-01 | **#1931 — catalog honesty**: the 11 `dd-*` VC-demo templates go `hidden: true` (visible catalog 14 → 3: `sage`/`scout`/`scribe`), `DEFAULT_GITHUB_TEMPLATE_REPOS` emptied (6 → 0, so `GET /api/templates` makes no outbound GitHub calls on a cold cache), new marketplace-first GitHub-zero placeholder card + corrected page-level hint copy, and the demo fleet stays deployable as a set via the promoted `config/manifests/vc-due-diligence.yaml`. |
 | 2026-07-31 | **ent#263 — Templates page → Library**: file renamed from `templates-page.md`; full rewrite. `/library` route + query/hash-preserving `/templates` redirect, NavBar rename, Agent Templates section (content preserved, fetch migrated to shared api client), new Skills fleet-browse section (`LibrarySkillsSection.vue` + `stores/skillsLibrary.js` + shared `components/skills/` chips seam), per-kind empty states, security notes. Previous revision documented the standalone Templates page (incl. the long-gone `AgentSubNav` and dead `env-template`/`refresh` endpoints). |
 | 2026-03-04 | TMPL-001 configurable GitHub templates (historical — see git history of `templates-page.md`). |

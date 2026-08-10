@@ -14,7 +14,9 @@ import json
 import logging
 import random
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Request, Query, WebSocket
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Query, WebSocket
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 
 from models import (
     AgentConfig,
@@ -31,7 +33,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope
+from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -40,6 +42,7 @@ from services.docker_utils import (
     container_stop, container_remove,
 )
 from services import heartbeat_service
+from services import idempotency_service
 from services.platform_audit_service import (
     platform_audit_service,
     AuditEventType,
@@ -433,9 +436,80 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
 
 
 @router.post("")
-async def create_agent_endpoint(config: AgentConfig, request: Request, current_user: User = Depends(require_role("creator"))):
-    """Create a new agent. Requires creator role or above."""
-    result = await create_agent_internal(config, current_user, request, skip_name_sanitization=False)
+async def create_agent_endpoint(
+    config: AgentConfig,
+    request: Request,
+    current_user: User = Depends(require_role("creator")),
+    idempotency_key: Optional[str] = Header(None),
+):
+    """Create a new agent. Requires creator role or above.
+
+    Invariant #18 (trinity-enterprise#15): accepts an optional
+    ``Idempotency-Key`` so a retried import (long fork/copy creates can outlive
+    client timeouts) replays the original response instead of 409ing on the
+    name. Header-only — no auto-derived key: name uniqueness already prevents a
+    double-create, the header adds transparent REPLAY. The scope folds the
+    caller (2026-07-20 learning: another user's identical key must never replay
+    a foreign create response).
+    """
+    idem = None
+    if idempotency_key:
+        scope = f"agent_create:{current_user.id}"
+        idem = idempotency_service.begin(scope, idempotency_key)
+        if idem.replay:
+            if idem.in_flight:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": (
+                            "An agent create with this Idempotency-Key is "
+                            "still being processed."
+                        ),
+                        # Named distinctly from the name-taken 409 so clients
+                        # can tell "wait" from "pick another name".
+                        "code": "CREATE_IN_FLIGHT",
+                    },
+                )
+            # A completed replay is only truthful while the agent it reports
+            # still exists (#2040 review F3): MCP derives a deterministic key
+            # over name+config, so delete-then-identical-recreate within 24h
+            # would otherwise replay a 200 naming an agent that is gone —
+            # and no agent gets created. Discard the stale row and fall
+            # through to a genuinely fresh create (which then answers
+            # honestly: name-reserved 409 for a soft-deleted agent, a real
+            # create for a hard-purged one).
+            recorded_name = (idem.snapshot or {}).get("name") or config.name
+            if db.is_agent_live(recorded_name):
+                return JSONResponse(
+                    content=idem.snapshot, headers={"X-Idempotent-Replay": "true"}
+                )
+            idempotency_service.discard_stale_replay(idem.scope, idem.key)
+            idem = idempotency_service.begin(scope, idempotency_key)
+            if idem.replay:
+                # Lost the re-claim race to a concurrent identical retry —
+                # let that attempt own the create.
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": (
+                            "An agent create with this Idempotency-Key is "
+                            "being retried concurrently."
+                        ),
+                        "code": "CREATE_IN_FLIGHT",
+                    },
+                )
+
+    try:
+        result = await create_agent_internal(config, current_user, request, skip_name_sanitization=False)
+    except Exception:
+        # Release the fresh claim so a corrected retry can proceed (fail-open;
+        # never converts the underlying error).
+        if idem is not None:
+            idempotency_service.fail(idem)
+        raise
+
+    if idem is not None:
+        idempotency_service.complete(idem, config.name, jsonable_encoder(result))
     # SEC-001: audit after successful creation. Failures here swallowed by the service.
     await platform_audit_service.log(
         event_type=AuditEventType.AGENT_LIFECYCLE,
@@ -450,6 +524,11 @@ async def create_agent_endpoint(config: AgentConfig, request: Request, current_u
             "template": getattr(config, "template", None),
             "base_image": getattr(config, "base_image", None),
             "agent_type": getattr(config, "agent_type", None),
+            # trinity-enterprise#15: import provenance — intent always; for a
+            # copy the snapshot's source repo + exact SHA (the only durable
+            # record of what a volume-lost snapshot agent was cloned from).
+            "import_intent": getattr(config, "import_intent", None),
+            "import_snapshot": getattr(result, "import_snapshot", None),
         },
     )
     return result
@@ -826,7 +905,20 @@ async def force_release_agent(
 @router.post("/{agent_name}/circuit-breaker/reset")
 async def reset_circuit_breaker_endpoint(
     agent_name: AuthorizedAgentByName,
-    current_user: User = Depends(require_role("admin")),
+    # ent#293/ent#297: was `require_role("admin")` — the THIRD spelling of an
+    # admin gate, and the one this PR's first pass missed. `require_role`
+    # rejects connector principals but NOT agent ones, deliberately: agent
+    # -spawned agent creation runs through `require_role("creator")` (ent#69
+    # Part 2). So after `require_admin`/`assert_admin` were closed, an
+    # admin-owned agent's own key still passed HERE — and ent#297 names
+    # circuit-breaker resets in its blast radius. An agent that can re-close its
+    # own dispatch breaker on demand defeats the control built to contain it.
+    #
+    # `require_admin` is equivalent for this case (`admin` is last in
+    # ROLE_HIERARCHY, so ">= admin" is "== admin") and additionally rejects
+    # agent principals. Swapping this ONE call site is the fix; adding the
+    # rejection to `require_role` itself would break ghost spawning.
+    current_user: User = Depends(require_admin),
 ):
     """Force the agent's circuit breakers to closed (#921, #526).
 

@@ -75,15 +75,19 @@ def test_card_full_template_shape(card_service):
         base_url="https://trinity.example.com",
     )
 
-    # Top-level fields
-    assert card["protocolVersion"] == "1.0"
+    # Top-level fields (ent#157: protocolVersion pinned to the targeted spec)
+    assert card["protocolVersion"] == "0.3.0"
     assert card["name"] == "DD Compliance Agent"
     assert card["description"] == template["description"]
     assert card["version"] == "1.2.0"
 
-    # URL points where A2A clients would call (placeholder until
-    # the dedicated JSON-RPC endpoint ships in a follow-up)
-    assert card["url"] == "https://trinity.example.com/api/agents/dd-compliance/chat"
+    # ent#157: url points at the real A2A JSON-RPC endpoint (not the old
+    # /chat placeholder), with the discovery doc as documentationUrl.
+    assert card["url"] == "https://trinity.example.com/a2a/dd-compliance"
+    assert card["documentationUrl"] == (
+        "https://trinity.example.com/a2a/dd-compliance/.well-known/agent-card.json"
+    )
+    assert card["preferredTransport"] == "JSONRPC"
 
     # Streaming flag — Trinity always supports SSE
     assert card["capabilities"]["streaming"] is True
@@ -141,7 +145,7 @@ def test_card_label_fallback_shape(card_service):
         base_url="http://localhost:8000",
     )
 
-    assert card["protocolVersion"] == "1.0"
+    assert card["protocolVersion"] == "0.3.0"
     assert card["name"] == "Some Template Name"
     # Description must never be empty in a valid A2A card — falls back to
     # synthetic "Trinity agent: …"

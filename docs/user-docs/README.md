@@ -93,7 +93,7 @@
 - [Telegram Integration](integrations/telegram-integration.md) — Bot setup, group chats, privacy mode, trigger modes
 - [WhatsApp Integration](integrations/whatsapp-integration.md) — Twilio binding, sandbox setup, email verification
 - [MCP Server](integrations/mcp-server.md) — 100+ MCP tools, API keys, dedicated per-agent tools
-- [A2A Agent Card](integrations/a2a-protocol.md) — A2A v1.0 discovery for external orchestrators
+- [A2A Protocol](integrations/a2a-protocol.md) — A2A `0.3.0` discovery and inbound tasking for external orchestrators
 - [Nevermined Payments](integrations/nevermined-payments.md) — x402 payment monetization
 
 ## CLI

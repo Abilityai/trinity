@@ -48,6 +48,9 @@ from services.dispatch_breaker import DispatchBreaker
 from services import event_dispatch_service
 from services import channel_completion_report
 from services.platform_audit_service import AuditEventType, platform_audit_service
+# #2048: stdlib-only leaf by construction, so this cannot cycle back through the
+# capacity stack at import time (its own reference to this module is lazy).
+from services.pull_pilot import note_unreachable_pull_trigger
 from services.settings_service import settings_service
 from utils.credential_sanitizer import sanitize_dict, sanitize_execution_log, sanitize_response, sanitize_text
 from services.tool_call_summary import extract_tool_calls
@@ -257,7 +260,12 @@ def _is_reader_race_signature(detail) -> bool:
 # interactive-ish trigger (a user's /task, mcp, or public turn) still classifies
 # as FAILED but the caller already sees the "Unknown command" reply, so no alert.
 _AUTONOMOUS_TRIGGERS = frozenset(
-    {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder"}
+    # ent#157: `a2a` belongs here for the same reason `agent` does — an inbound
+    # A2A task is dispatched by a remote machine caller, so nobody on THIS
+    # install is reading the reply. The interactive-ish triggers deliberately
+    # left out (`manual`, `mcp`, `public`, `chat`, `session`) all have a human
+    # looking at the "Unknown command" text as it comes back.
+    {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder", "a2a"}
 )
 
 # The agent runtime (Claude Code) answers a slash-command that doesn't resolve
@@ -1059,6 +1067,14 @@ class TaskExecutionService:
             # capacity, not a backlog spill.
             if not slot_already_held:
                 max_parallel_tasks = db.get_max_parallel_tasks(agent_name)
+                # #2048: this producer passes overflow_policy="reject", so the
+                # pull gate inside `capacity.acquire` — which short-circuits on
+                # `queue_persistent` — is never even consulted here. On a PILOT
+                # agent that makes an autonomous row (schedule/webhook/loop/
+                # fan_out/reminder) take the push path silently, indistinguishable
+                # from the flag being unset. Say so once per (agent, trigger).
+                # Diagnostic only; never raises, never affects dispatch.
+                note_unreachable_pull_trigger(agent_name, triggered_by)
                 try:
                     cap_result = await capacity.acquire(
                         agent_name=agent_name,
@@ -1246,7 +1262,11 @@ class TaskExecutionService:
                 logger.warning(
                     f"[TaskExecService] execution context build failed, falling back: {e}"
                 )
-                platform_prompt = get_platform_system_prompt(runtime=agent_runtime)
+                # ent#243: pass the model here too — a context-build failure must
+                # not silently swap the prompt tier as well as the context block.
+                platform_prompt = get_platform_system_prompt(
+                    runtime=agent_runtime, model=model
+                )
                 effective_system_prompt = (
                     platform_prompt + "\n\n" + system_prompt if system_prompt else platform_prompt
                 )

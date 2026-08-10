@@ -1,5 +1,5 @@
 {
-  "name": "@abilityai/trinity-docs-mcp",
+  "name": "trinity-docs-mcp",
   "version": "0.1.0",
   "description": "Ask Trinity anything — standalone MCP server exposing the Trinity docs Q&A assistant (Vertex AI Search + Gemini, grounded on the Trinity documentation). No Trinity instance or API key required.",
   "type": "module",

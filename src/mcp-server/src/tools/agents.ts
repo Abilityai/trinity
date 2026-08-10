@@ -7,6 +7,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { deriveMcpIdempotencyKey } from "./chat.js";
 
 /**
  * Create agent management tools with the given client
@@ -229,8 +230,9 @@ export function createAgentTools(
             "Template to use for agent configuration. Supports: " +
             "(1) Any id returned by list_templates (e.g., 'local:scout'), " +
             "(2) Any GitHub repo with 'github:owner/repo' format - requires system GITHUB_PAT to have access; " +
-            "this works whether or not the repo appears in list_templates, which on a default install " +
-            "returns local templates only until an admin curates GitHub repos in Settings, " +
+            "this works whether or not the repo appears in list_templates, whose GitHub half comes from " +
+            "the remote template registry by default and from an admin-curated list once one is configured " +
+            "in Settings (an admin list takes full precedence), " +
             "(3) Local templates with 'local:template-name'. " +
             "Templates include pre-configured .claude directories, MCP servers, and instructions."
           ),
@@ -262,6 +264,17 @@ export function createAgentTools(
           .describe(
             "Branch to track for this agent. Default: 'main'. " +
             "Can also be specified in template URL as 'github:owner/repo@branch'."
+          ),
+        import_intent: z
+          .enum(["copy", "clone"])
+          .optional()
+          .describe(
+            "How to import a 'github:owner/repo' template (trinity-enterprise#15). " +
+            "'clone' (default when omitted): normal git-synced clone that keeps tracking " +
+            "the source repo. 'copy': point-in-time snapshot of the repo contents — no " +
+            "git sync and no upstream tie; the response includes an import_snapshot " +
+            "with the source repo and head SHA. 'fork' (copy into a new repo you own) " +
+            "is available only in the web UI."
           ),
         ephemeral: z
           .object({
@@ -303,6 +316,7 @@ export function createAgentTools(
           mcp_servers?: string[];
           custom_instructions?: string;
           source_branch?: string;
+          import_intent?: "copy" | "clone";
           ephemeral?: { max_executions?: number; ttl_seconds?: number };
         },
         context: any
@@ -321,6 +335,7 @@ export function createAgentTools(
           mcp_servers: args.mcp_servers,
           custom_instructions: args.custom_instructions,
           source_branch: args.source_branch,
+          import_intent: args.import_intent,
           ephemeral: args.ephemeral,
         };
 
@@ -340,9 +355,32 @@ export function createAgentTools(
         const apiClient = getClient(authContext);
         console.log("[CREATE_AGENT] Created API client, calling backend...");
 
-        const agent = await apiClient.createAgent(config);
+        // RELIABILITY-006 (#525): deterministic key so a transport retry of
+        // this exact create replays the original response instead of
+        // dispatching a second create. Includes the agent NAME so two
+        // different agents imported from the same repo never share a key.
+        const idempotencyKey = deriveMcpIdempotencyKey([
+          authContext?.userId,
+          "create_agent",
+          args.name,
+          JSON.stringify(config),
+        ]);
+
+        const agent = await apiClient.createAgent(config, idempotencyKey);
         console.log("[CREATE_AGENT] Agent created successfully:", agent.name);
-        return JSON.stringify(agent, null, 2);
+
+        let text = JSON.stringify(agent, null, 2);
+        // trinity-enterprise#15: surface copy-snapshot provenance when present.
+        if (agent.import_snapshot?.source_repo) {
+          const sha = agent.import_snapshot.head_sha
+            ? ` @ ${agent.import_snapshot.head_sha.slice(0, 7)}`
+            : "";
+          text += `\nImported a point-in-time copy of ${agent.import_snapshot.source_repo}${sha} (no git sync / upstream tie).`;
+        }
+        text +=
+          "\nNext: run get_agent_compatibility_report to validate the imported workspace " +
+          "(it runs against the RUNNING agent).";
+        return text;
       },
     },
 

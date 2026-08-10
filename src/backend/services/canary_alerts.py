@@ -3,8 +3,13 @@ Canary alert sink — Slack Block Kit composition + webhook post (CANARY-001 / #
 
 Extracted from `services/canary_service.py` to keep the cycle orchestrator
 focused on lifecycle + invariant runs. The watcher imports `CanaryAlerts`
-and calls `emit_transition` once per green→red transition; everything
-Slack-shaped lives here.
+and calls `emit_transition` once per green→red transition — plus, since
+#1897, once more per later cycle for a transition whose POST was rejected
+and whose invariant is still red. Everything Slack-shaped lives here.
+
+This module stays **stateless**: it composes and posts, and reports the
+outcome back. Which alerts are still owed, and for how long, is cycle state
+and lives on `CanaryService` with the rest of it.
 
 The split is purely organisational — there's no behaviour change vs. when
 these methods lived on `CanaryService` as classmethods. Tests pivoted from
@@ -14,12 +19,60 @@ these methods lived on `CanaryService` as classmethods. Tests pivoted from
 import logging
 import os
 from datetime import datetime
-from typing import Any, List, Optional, Tuple
+from enum import Enum
+from typing import Any, List, NamedTuple, Optional, Tuple
 
 from canary.snapshot import ViolationReport
+from services.instance_identity import get_instance_label, sanitize_instance_label
 
 
 logger = logging.getLogger(__name__)
+
+
+class AlertDelivery(str, Enum):
+    """Outcome of one `emit_transition` call (#1897).
+
+    THREE states, not a bool, because "no webhook configured" is not a
+    failed delivery. `CANARY_SLACK_WEBHOOK_URL` is unset on every install
+    that never wired the sink — the default — so a bool folding SKIPPED
+    into False would arm a retry for every transition on a correctly
+    configured silent sink, burn its budget, and end with a give-up ERROR.
+    That is a new alarm-fatigue bug shipped inside the fix for an
+    alarm-loss bug. (Same shape as #1813's "ran and was fine" vs "never
+    ran": the third state is the one a boolean destroys.)
+
+    An `Enum` rather than a `@dataclass`: architecture.md records the
+    fieldless-dataclass `__eq__` footgun from #1085, where two distinct
+    instances compared equal and a status check silently matched the wrong
+    branch. Enum members have identity semantics by construction. The
+    `str` mixin is only so it logs and formats readably.
+
+    Deliberately module-level rather than a `CanaryAlerts` attribute:
+    #1880's parity guard reads this module with `ast` and visits the
+    class body, so keeping the enum outside it leaves that guard's
+    surfaces untouched.
+    """
+
+    DELIVERED = "delivered"  # the webhook accepted the POST
+    SKIPPED = "skipped"      # sink deliberately silent (no webhook configured)
+    FAILED = "failed"        # webhook rejected / errored / timed out
+
+
+class AlertResult(NamedTuple):
+    """`(outcome, error)` — what happened, and why if it went wrong.
+
+    The error string exists so the give-up ERROR can name a cause: the
+    give-up frequently runs on a different worker (and several cycles
+    later) than the attempt that saw the rejection, so the enum alone
+    would strand "why" in a WARNING somebody has to go find. It is
+    Slack's response body verbatim, or `type(e).__name__` for a transport
+    error — `slack_service.post_webhook` never echoes the webhook URL,
+    which IS the credential. Callers must truncate before persisting it:
+    a misrouted URL answers with a whole HTML page.
+    """
+
+    outcome: AlertDelivery
+    error: Optional[str] = None
 
 
 class CanaryAlerts:
@@ -67,6 +120,7 @@ class CanaryAlerts:
         "B-01": "Queue accessor drift",
         "B-02": "Stalled backlog drain",
         "R-01": "Zombie Claude process",
+        "H-01": "Canary is blind (collector sees no fleet)",
     }
 
     # One-line runbook hint per invariant. Kept short on purpose —
@@ -85,15 +139,28 @@ class CanaryAlerts:
             "`agent:slots:*`."
         ),
         "S-03": (
-            "Slot metadata HASH TTL is below `execution_timeout_seconds + 300s` "
-            "(or missing entirely). Catches #226 class — slot metadata "
-            "expires while execution is still running, leaking the slot "
-            "permanently. Check the `expire()` call in `SlotService.acquire_slot`."
+            "Slot metadata HASH is missing (`missing`), has no expiry "
+            "(`no_expiry`), or was created with a TTL below its OWN stored "
+            "`timeout_seconds + 300s` (`below_floor`). The first two are the "
+            "#226 class — metadata expires while the execution is still "
+            "running, leaking the slot permanently; check the `expire()` call "
+            "in `SlotService.acquire_slot`. `below_floor` is narrower than it "
+            "looks (ent#336): the floor comes from the slot's own stored "
+            "timeout, which `acquire_slot` writes from the same local it "
+            "derives the TTL from, so it flags those two lines drifting apart "
+            "— NOT a caller passing a wrong timeout."
         ),
         "E-01": (
             "An execution stayed `running` past `execution_timeout_seconds + 300s` "
-            "buffer. Cleanup watchdog should have fired — inspect "
-            "`cleanup_service` logs and the agent container for a wedged Claude."
+            "buffer. Read `lease_expires_at` in the violation FIRST — it selects "
+            "the diagnosis (#1990). NULL ⇒ a push row the cleanup watchdog should "
+            "have closed: inspect `cleanup_service` logs and the agent container "
+            "for a wedged Claude. NON-NULL ⇒ a #1081 pull-claimed row whose lease "
+            "is overdue by more than the reaper's grace — the LEASE-REAPER has "
+            "not acted for several of its own cycles: check `_sweep_expired_leases` "
+            "in the cleanup loop, and whether the #1085 re-delivery governor is "
+            "holding it (`governor:pause` in Redis). Same invariant, different "
+            "component."
         ),
         "E-02": (
             "An execution went terminal then non-terminal. Look for retry "
@@ -160,9 +227,24 @@ class CanaryAlerts:
             "for `[Capacity] maintenance tick failed`."
         ),
         "R-01": (
-            "Agent container has unreaped zombie `claude` processes (#407 class). "
-            "Restart the affected agent to clear; check agent-server's subprocess "
-            "wait() path for the reaped child."
+            "Agent container has a zombie `claude` process that has PERSISTED "
+            "past the dwell window (#407 class) — a transient zombie awaiting "
+            "its parent's wait() is normal and is deliberately not flagged "
+            "(ent#337). Compare `first_seen_count` with `zombie_count` to tell "
+            "a single stuck zombie from an accumulating leak. Restart the "
+            "affected agent to clear; check agent-server's subprocess wait() "
+            "path for the unreaped child."
+        ),
+        "H-01": (
+            "The harness itself cannot see the fleet, so EVERY other green this "
+            "cycle is meaningless — triage this before any other canary result. "
+            "Check `DATABASE_URL` and that the backend points at the live "
+            "database (#1540 class); `roster_read_failed` means the read raised, "
+            "`roster_empty_contradicted` means it returned zero while DOCKER "
+            "still saw running agent containers, `roster_empty_unverifiable` "
+            "means the independent sources were unreachable, never read, or "
+            "only Redis had anything to say (a slot key alone cannot tell a "
+            "blind collector from an L-03 leak)."
         ),
     }
 
@@ -174,12 +256,12 @@ class CanaryAlerts:
         snapshot_time: str,
         previous_violation_at: Optional[str],
         persisted_ids: List[Optional[int]],
-    ) -> None:
+    ) -> AlertResult:
         """Fire a Slack alert for a green→red transition.
 
         Reads the webhook URL from the `CANARY_SLACK_WEBHOOK_URL` env var.
-        If unset, logs at debug and returns — green→red detection still
-        runs and rows are still persisted to `canary_violations`, the
+        If unset, logs at debug and returns `SKIPPED` — green→red detection
+        still runs and rows are still persisted to `canary_violations`, the
         sink is just silent. Mirrors the `CANARY_ENABLED` env-gating
         pattern for the watcher itself.
 
@@ -187,6 +269,19 @@ class CanaryAlerts:
         line. Failures are logged and swallowed so a hung webhook can't
         break the cycle — `slack_service.post_webhook` already enforces
         a 5s timeout.
+
+        **Returns the outcome, never raises it (#1897).** This used to be
+        `-> None`, so `post_webhook`'s `success` flag died here and the
+        caller read "did not raise" as "delivered": it counted the
+        transition, advanced the cycle cursor, and continuing-red
+        suppression then silenced the invariant forever. Raising instead
+        would buy nothing — the caller's own `except Exception` swallows
+        it, and it would collapse "Slack said 400" into "the payload
+        builder crashed". So the outcome is returned and the caller decides.
+
+        The parameter list is unchanged and must stay that way:
+        `tests/unit/test_1987_instance_label.py` calls this with keyword
+        arguments. A return value is transparent to an `await`.
         """
         webhook_url = os.getenv("CANARY_SLACK_WEBHOOK_URL", "").strip()
         if not webhook_url:
@@ -201,9 +296,12 @@ class CanaryAlerts:
                 len(violations),
                 snapshot_time,
             )
-            return
+            return AlertResult(AlertDelivery.SKIPPED)
 
         worst = max(violations, key=lambda v: severity_rank(v.severity))
+        # #1987: name the instance in the payload. Resolved here rather than
+        # inside the composer so `_build_slack_payload` stays a pure function
+        # of its arguments — the render path never touches env or the DB.
         text, blocks = cls._build_slack_payload(
             invariant_id,
             violations,
@@ -211,6 +309,7 @@ class CanaryAlerts:
             previous_violation_at,
             worst.severity,
             persisted_ids,
+            instance_label=get_instance_label(),
         )
 
         # Lazy import — avoids dragging the SlackService init (and its
@@ -225,13 +324,14 @@ class CanaryAlerts:
                 invariant_id,
                 error,
             )
-        else:
-            logger.info(
-                "canary slack alert sent: %s severity=%s violations_in_cycle=%d",
-                invariant_id,
-                worst.severity,
-                len(violations),
-            )
+            return AlertResult(AlertDelivery.FAILED, error)
+        logger.info(
+            "canary slack alert sent: %s severity=%s violations_in_cycle=%d",
+            invariant_id,
+            worst.severity,
+            len(violations),
+        )
+        return AlertResult(AlertDelivery.DELIVERED)
 
     @classmethod
     def _build_slack_payload(
@@ -242,6 +342,8 @@ class CanaryAlerts:
         previous_violation_at: Optional[str],
         severity: str,
         persisted_ids: List[Optional[int]],
+        *,
+        instance_label: Optional[str] = None,
     ) -> Tuple[str, list]:
         """Compose the Slack message text + Block Kit blocks.
 
@@ -250,25 +352,40 @@ class CanaryAlerts:
         identify blocks by `type` rather than index so adding/removing
         sections doesn't break them.
 
+        `instance_label` (#1987) names the instance that fired the alert and
+        is rendered into BOTH the header and the `text` fallback — the header
+        so it is visible without expanding the message, the fallback because
+        that is what a mobile push notification actually shows, and triaging
+        "eu2, the #1766 pilot" vs "dev, unrelated" from the lock screen is
+        the case that motivated it. `None` (nothing identifies this install)
+        renders exactly today's unlabelled payload.
+
         Returns `(text, blocks)` — `text` is the fallback used by
         clients that don't render blocks (notifications, screen
         readers).
         """
         emoji = cls._SEVERITY_EMOJI.get(severity, "•")
         name = cls._INVARIANT_NAMES.get(invariant_id, invariant_id)
+        # Re-sanitized at the render boundary rather than trusted from the
+        # resolver — same argument `_mrkdwn_safe` makes below. It also bounds
+        # the length, and an over-long `header` is a 400 from Slack that drops
+        # the WHOLE message while the transition is still recorded as sent
+        # (the #1880 failure mode).
+        label = sanitize_instance_label(instance_label)
+        prefix = f"[{label}] " if label else ""
         body = cls._render_message(invariant_id, violations, snapshot_time)
         forensic = cls._render_forensic(invariant_id, violations)
         runbook = cls._INVARIANT_RUNBOOKS.get(invariant_id)
         last_red = cls._format_last_red(previous_violation_at, snapshot_time)
         row_ref = cls._format_row_refs(persisted_ids)
 
-        text = f"{emoji} canary {invariant_id} {name} ({severity}): {body}"
+        text = f"{prefix}{emoji} canary {invariant_id} {name} ({severity}): {body}"
         blocks = [
             {
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": f"{emoji} {invariant_id} {name} — {severity}",
+                    "text": f"{emoji} {prefix}{invariant_id} {name} — {severity}",
                     "emoji": True,
                 },
             },
@@ -409,8 +526,13 @@ class CanaryAlerts:
                 ttl = obs.get("redis_ttl_seconds", "?")
                 floor = obs.get("floor_seconds", "?")
                 kind = _mrkdwn_safe(obs.get("kind"))
+                # ent#336: name where the floor came from — on a missing/
+                # no_expiry slot the HASH may be gone, so the printed floor is
+                # the agent-cap placeholder rather than this slot's own bound.
+                src = _mrkdwn_safe(obs.get("floor_source"))
                 lines.append(
-                    f"  • *{agent}* `{eid}`: TTL={ttl}s ({kind}); floor={floor}s"
+                    f"  • *{agent}* `{eid}`: TTL={ttl}s ({kind}); "
+                    f"floor={floor}s (from {src})"
                 )
             if len(violations) > 5:
                 lines.append(f"  • _… +{len(violations) - 5} more_")
@@ -425,9 +547,21 @@ class CanaryAlerts:
                 age = obs.get("age_seconds", "?")
                 timeout = obs.get("execution_timeout_seconds", "?")
                 buffer = obs.get("slot_ttl_buffer_seconds", "?")
+                # #1990: a leased row is a lease-reaper failure, not a wedged
+                # execution — say which, inline, so on-call is not sent after
+                # `cleanup_service` for the reaper's problem (or vice versa).
+                if obs.get("lease_expires_at"):
+                    overdue = obs.get("lease_overdue_seconds", "?")
+                    grace = obs.get("lease_reaper_grace_seconds", "?")
+                    tail = (
+                        f" — *lease-reaper*: lease overdue {overdue}s "
+                        f"> grace {grace}s"
+                    )
+                else:
+                    tail = ""
                 lines.append(
                     f"  • *{agent}* `{eid}`: age={age}s "
-                    f"(timeout={timeout}s + buffer={buffer}s)"
+                    f"(timeout={timeout}s + buffer={buffer}s){tail}"
                 )
             if len(violations) > 5:
                 lines.append(f"  • _… +{len(violations) - 5} more_")
@@ -485,7 +619,16 @@ class CanaryAlerts:
                 obs = v.observed_state or {}
                 agent = _mrkdwn_safe(obs.get("agent_name"))
                 count = obs.get("zombie_count", "?")
-                lines.append(f"  • *{agent}*: {count} zombie(s)")
+                # ent#337: the count alone reads as noise now that transients
+                # are filtered — how LONG it has held, and whether it grew
+                # since first-seen, are what distinguish a stuck zombie from
+                # an accumulating leak.
+                held = _format_duration(obs.get("held_for_seconds"))
+                first = obs.get("first_seen_count", "?")
+                trend = f"{first} → {count}" if first != count else f"{count}"
+                lines.append(
+                    f"  • *{agent}*: {trend} zombie(s), held {held}"
+                )
             if len(violations) > 5:
                 lines.append(f"  • _… +{len(violations) - 5} more_")
             return "\n".join(lines) if lines else None
@@ -578,6 +721,45 @@ class CanaryAlerts:
                 lines.append(f"  • _… +{len(violations) - 5} more_")
             return "\n".join(lines) if lines else None
 
+        if invariant_id == "H-01":
+            # H-01 is fleet-wide: at most one violation, no `agent_name`. The
+            # forensic block carries the two things triage needs and the
+            # summary line cannot hold — WHICH corroborating source still
+            # answered (a roster read failing while docker is also down is a
+            # host problem, not a collector bug), and the evidence sample that
+            # makes "the fleet is provably alive" checkable rather than
+            # asserted. Already capped at 10 by the check.
+            obs = violations[0].observed_state or {}
+
+            def _source(state) -> str:
+                # Tri-state, NOT a boolean (#1813). `None` means the collector
+                # never ran — `collect_snapshot` returns early on a roster-read
+                # failure, so on that arm Redis genuinely was not consulted.
+                # Rendering that as "unavailable" would blame a healthy Redis;
+                # rendering it as "up" (what a two-state ternary did) told the
+                # reader everything else was fine on the one alarm whose job is
+                # to say the opposite.
+                if state is None:
+                    return "not read"
+                return "up" if state else "unavailable"
+
+            lines: List[str] = [
+                f"*Reason:* `{_mrkdwn_safe(obs.get('reason'))}` "
+                f"({_mrkdwn_safe(obs.get('confirmation'), fallback='unconfirmed')})",
+                f"*Blind since:* {_mrkdwn_safe(obs.get('blind_since'), fallback='this cycle')}",
+                f"*Sources:* docker={_source(obs.get('docker_available'))} · "
+                f"redis={_source(obs.get('redis_available'))}",
+                f"*Roster vs evidence:* {_mrkdwn_safe(obs.get('known_agent_count'))} "
+                f"vs {_mrkdwn_safe(obs.get('evidence_agent_count'))} agent(s)",
+            ]
+            sample = obs.get("evidence_sample") or []
+            if sample:
+                lines.append(
+                    "*Agents seen by independent sources:* "
+                    f"`{', '.join(_mrkdwn_safe(a) for a in sample)}`"
+                )
+            return "\n".join(lines)
+
         # Fallback is deliberately STATE-FREE — an un-rendered invariant emits
         # no forensic block at all rather than a generic dump. Never replace
         # this with something that iterates `observed_state`: E-04 and G-04
@@ -665,15 +847,21 @@ class CanaryAlerts:
             agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
             kinds = sorted({_mrkdwn_safe(v.observed_state.get("kind")) for v in violations})
             return (
-                f"{len(violations)} slot(s) with TTL below floor "
+                f"{len(violations)} slot(s) with an unusable metadata TTL "
                 f"({'/'.join(kinds)}) on {len(agents)} agent(s): "
                 f"{', '.join(agents)[:160]}."
             )
         if invariant_id == "E-01":
             agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
+            # #1990: the leased split is the headline triage fact — a leased row
+            # means the lease-reaper is not running, not that an execution wedged.
+            leased = sum(
+                1 for v in violations if (v.observed_state or {}).get("lease_expires_at")
+            )
+            leased_note = f" ({leased} lease-reaper overdue)" if leased else ""
             return (
                 f"{len(violations)} execution(s) stuck in `running` past "
-                f"timeout+buffer across {len(agents)} agent(s)."
+                f"timeout+buffer across {len(agents)} agent(s){leased_note}."
             )
         if invariant_id == "E-02":
             return (
@@ -709,9 +897,18 @@ class CanaryAlerts:
         if invariant_id == "R-01":
             agents = sorted({_mrkdwn_safe(v.observed_state.get("agent_name")) for v in violations})
             total = sum(v.observed_state.get("zombie_count", 0) for v in violations)
+            # ent#337: worst dwell tells the reader whether this is a fresh
+            # stick or a long-running leak. `or 0` guards a None the same way
+            # the E-06/G-03 branches below do.
+            worst = max(
+                violations,
+                key=lambda v: v.observed_state.get("held_for_seconds") or 0,
+            )
+            worst_str = _format_duration(worst.observed_state.get("held_for_seconds"))
             return (
-                f"{total} zombie claude process(es) across {len(agents)} "
-                f"agent(s): {', '.join(agents)[:160]}."
+                f"{total} PERSISTING zombie claude process(es) across "
+                f"{len(agents)} agent(s), worst held {worst_str}: "
+                f"{', '.join(agents)[:160]}."
             )
         # The five branches below coerce `agent_name` with `or "?"` before
         # `sorted()`. This is NOT decoration: these are the first per-ROW
@@ -773,6 +970,24 @@ class CanaryAlerts:
                 f"{len(violations)} queued row(s) matched a credential pattern "
                 f"({', '.join(patterns)[:80]}) across {len(agents)} agent(s): "
                 f"{', '.join(agents)[:160]}."
+            )
+        if invariant_id == "H-01":
+            # H-01 is fleet-wide, so it emits at most one violation and carries
+            # no `agent_name` — the generic "fired N violation(s)" line would be
+            # useless for the one alarm whose entire job is to be legible.
+            obs = violations[0].observed_state or {}
+            # `_mrkdwn_safe`, not `.get(k, default)`: the latter does not fire
+            # on a key present with value None (#1880). It tests `is None`, so
+            # `known_agent_count=0` still renders "0" — which is the whole
+            # point of this alert, not a value to swallow as "?".
+            return (
+                f"Canary cannot see the fleet "
+                f"({_mrkdwn_safe(obs.get('reason'), fallback='unknown')}): "
+                f"roster reported {_mrkdwn_safe(obs.get('known_agent_count'))} agents "
+                f"while independent sources saw "
+                f"{_mrkdwn_safe(obs.get('evidence_agent_count'))}. "
+                f"Blind since {_mrkdwn_safe(obs.get('blind_since'), fallback='this cycle')}. "
+                "Every other green this cycle is unreliable."
             )
         # Fallback is deliberately COUNT-ONLY and state-free — same contract as
         # `_render_forensic`'s terminal `return None`. Never widen it to render

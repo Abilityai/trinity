@@ -5,7 +5,7 @@ import os
 import re
 import unicodedata
 
-from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator, model_validator
 from typing import Any, Dict, List, Literal, Optional, Union
 from datetime import datetime
 from enum import Enum
@@ -215,6 +215,11 @@ class AgentConfig(BaseModel):
     # Fork-to-own creation (trinity-enterprise#93): copy the github: template
     # into a user-owned repo first; the agent is created from that copy.
     fork_to_own: Optional[ForkToOwnRequest] = None
+    # trinity-enterprise#15: explicit GitHub import intent. None → legacy
+    # behavior (clone semantics; fork when a fork_to_own block is present).
+    # "copy" is a backend-materialized snapshot: no git sync, no git-config
+    # row, no GitHub env in the container.
+    import_intent: Optional[Literal["fork", "copy", "clone"]] = None
     # Ephemeral "ghost" agent (trinity-enterprise#69): budgeted, volume-less,
     # hard-discarded at budget. Entitlement-gated at the creation path.
     ephemeral: Optional[EphemeralConfig] = None
@@ -262,8 +267,18 @@ class AgentLabelUpdate(BaseModel):
     `label=None` (or blank) clears it, and the agent renders under its slug
     again. Presentation only: the slug never moves, which is the entire point —
     a slug rename re-keys ~20 tables and strands the agent's volumes (#1664).
+
+    #1821: `label` is REQUIRED-but-nullable, and unknown fields are rejected.
+    Clearing is a legitimate operation expressed as an explicit null, but with
+    an ignored-extras model and a `None` default it was also what you got from
+    any body the server did not recognise — so `{"display_label": "..."}` (an
+    easy mistake: `display_label` is the DB column and `display_name` the
+    response field) returned 200 and silently wiped the label. Both an unknown
+    field and an empty `{}` now 422 instead of destroying data.
     """
-    label: Optional[str] = None
+    model_config = ConfigDict(extra="forbid")
+
+    label: Optional[str]
 
     @field_validator("label")
     @classmethod
@@ -285,6 +300,9 @@ class AgentStatus(BaseModel):
     base_image_version: Optional[str] = None  # Version of trinity-agent-base image
     ephemeral: Optional[bool] = False  # trinity-enterprise#69: ghost agent (budgeted, hard-discarded)
     display_label: Optional[str] = None  # ent#181: human-facing name; None = render `name` (the slug)
+    # trinity-enterprise#15: copy-intent provenance — {source_repo, source_branch,
+    # head_sha, file_count}; set only on the create response of a snapshot import.
+    import_snapshot: Optional[Dict[str, Any]] = None
 
     class Config:
         json_encoders = {
@@ -730,6 +748,12 @@ class QueueStatus(BaseModel):
 # System Manifest Models (Recipe-based Multi-Agent Deployment)
 # ============================================================================
 
+# ent#126: cap on a manifest accepted over the wire OR read from the bundled
+# catalog. Generous — the largest bundled manifest is ~2 KB — so it bounds abuse
+# without constraining a real fleet definition.
+MANIFEST_MAX_BYTES = 256 * 1024
+
+
 class SystemAgentConfig(BaseModel):
     """Configuration for a single agent in a system manifest."""
     template: str  # e.g., "github:Org/repo" or "local:scout" (#1759: must resolve, or create 400s)
@@ -763,6 +787,12 @@ class SystemManifest(BaseModel):
     # ORG-001 Phase 4: Tags and System View support
     default_tags: Optional[List[str]] = None  # Applied to all agents in manifest
     system_view: Optional[SystemViewConfig] = None  # Auto-create System View on deploy
+    # ent#126: top-level keys the parser does not recognise, recorded so
+    # `validate_manifest` can WARN about them. Silently dropping them is how
+    # `trinity_prompt:` (a typo for `prompt:`) sat in a shipped manifest doing
+    # nothing. Warned, never rejected — rejecting would 400 manifests that
+    # deploy today.
+    unknown_keys: List[str] = []
 
 
 class SystemDeployRequest(BaseModel):
@@ -787,6 +817,53 @@ class SystemDeployFailure(BaseModel):
     status_code: Optional[int] = None  # Original HTTP status when the failure was an HTTPException
 
 
+class SystemSchedulePreview(BaseModel):
+    """One schedule a manifest would create, as shown in the dry-run preview (ent#126).
+
+    Mirrors what `create_schedules` would build, including its `.get()` defaults
+    — `enabled` in particular defaults to True, which is why a manifest that
+    merely lists a schedule starts autonomous executions on deploy.
+    """
+    agent: str  # Final (resolved) agent name
+    short_name: str
+    name: str
+    cron: str
+    message: str
+    enabled: bool
+    timezone: str
+    description: Optional[str] = None
+
+
+class BundledManifestSummary(BaseModel):
+    """One manifest shipped in `config/manifests/`, as listed in the catalog (ent#126)."""
+    id: str  # Filename stem — the {manifest_id} path parameter
+    filename: str
+    # None when the file could not be parsed; the card still renders, with `reason`.
+    name: Optional[str] = None
+    description: Optional[str] = None
+    agent_count: int = 0
+    templates: List[str] = []
+    schedule_count: int = 0
+    # True when the manifest carries a top-level `prompt:`, which OVERWRITES the
+    # platform-wide trinity_prompt for every agent. The UI gates deploy on an
+    # explicit acknowledgement for this.
+    sets_prompt: bool = False
+    permissions_preset: Optional[str] = None
+    # parse + validate + the same side-effect-free template/resource preflight the
+    # dry-run uses. Named `valid` only because all three ran; a parse-only check
+    # would be `parseable`.
+    valid: bool = False
+    reason: Optional[str] = None  # Why it is not valid (short, human-readable)
+    # At least one agent this manifest would create already exists, so deploying
+    # produces `_N`-suffixed duplicates.
+    already_deployed: bool = False
+
+
+class BundledManifestDetail(BundledManifestSummary):
+    """A bundled manifest plus its raw YAML, for loading into the editor (ent#126)."""
+    manifest: str  # Raw YAML text
+
+
 class SystemDeployResponse(BaseModel):
     """Response from system deployment."""
     # "deployed" (all created) | "partial" (some failed) | "failed" (none created)
@@ -803,6 +880,23 @@ class SystemDeployResponse(BaseModel):
     system_view_created: Optional[str] = None  # ORG-001 Phase 4: View ID if created
     warnings: List[str] = []
     failed: List[SystemDeployFailure] = []  # trinity-enterprise#125: per-agent create failures
+    # ent#126 dry-run preview fields (None on a real deploy). Computed by the
+    # SAME pure resolvers the writers consume, so the preview cannot drift from
+    # what deploy actually does.
+    #
+    # `permission_edges` is {source: targets} rather than the resolver's ordered
+    # pair list: write ORDER does not matter for display, and the sources are
+    # unique by construction (each branch writes any given agent at most once —
+    # explicit's clear phase and set phase are disjoint), so collapsing to a dict
+    # is lossless for the set of writes.
+    permission_edges: Optional[Dict[str, List[str]]] = None
+    schedules_preview: Optional[List[SystemSchedulePreview]] = None
+    # `system_view_created` is None both when a view was never requested AND when
+    # creating it failed (create_system_view swallows the exception), so a caller
+    # cannot tell "no view wanted" from "view lost". This disambiguates it: the
+    # frontend needs it to choose its post-deploy navigation, and a requested view
+    # that failed also appends a warning.
+    system_view_requested: bool = False
 
 
 # ============================================================================
@@ -2120,11 +2214,18 @@ class CycleViolation(BaseModel):
 
 
 class CycleTransition(BaseModel):
-    """A green→red transition detected this cycle.
+    """A green→red transition this cycle **delivered an alert for**.
 
-    `CanaryService` posts exactly one Slack webhook message per entry,
+    `CanaryService` delivered exactly one Slack webhook message per entry,
     mapping severity to the message styling. Surfaced here so the run-cycle
-    response mirrors what the service actually emitted.
+    response mirrors what the service actually sent.
+
+    Since #1897 an entry means *notified*, not merely *detected*: a
+    transition whose webhook POST was rejected appears in
+    `RunCycleResponse.undelivered_invariant_ids` instead and is retried on
+    a later cycle while the invariant stays red. Conversely an entry here
+    may be a retry that finally landed, whose flip was detected on an
+    earlier cycle.
     """
 
     invariant_id: str
@@ -2153,6 +2254,18 @@ class RunCycleResponse(BaseModel):
     sources_unavailable: List[str]
     violations: List[CycleViolation]
     transitions: List[CycleTransition]
+    undelivered_invariant_ids: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Invariants this cycle tried to alert on and could not deliver — "
+            "a rejected webhook, a raised emit, or a retry held off by the "
+            "per-interval floor (#1897). Disjoint from `transitions`, which "
+            "since #1897 lists only what was actually sent; without this "
+            "field a webhook outage would render as zero transitions, which "
+            "is indistinguishable from a green cycle. Each entry is retried "
+            "on a later cycle while its invariant stays red."
+        ),
+    )
 
 
 # =============================================================================
@@ -3038,6 +3151,19 @@ class GitHubTemplatesUpdate(BaseModel):
     templates: List[GitHubTemplateEntry]
 
 
+class TemplateRegistryUpdate(BaseModel):
+    """PUT body for the remote template registry (TMPL-002, ent#14).
+
+    Partial update: an omitted field is left untouched (the
+    `/api/settings/skills-library` shape), so an admin can flip the toggle
+    without re-typing the URL. `url` is validated by
+    `utils.url_validation.validate_template_registry_url` at the route — SSRF
+    gating needs DNS resolution, which does not belong in a Pydantic model.
+    """
+    url: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
 class McpUrlUpdate(BaseModel):
     """Request body for updating the MCP server URL."""
     url: str
@@ -3365,3 +3491,92 @@ class SkillSourceUpdate(BaseModel):
     ref_type: Optional[Literal["branch", "tag"]] = None
     enabled: Optional[bool] = None
     priority: Optional[int] = Field(None, ge=1, le=10000)
+
+
+class SkillsLibrarySourceStatus(BaseModel):
+    """One source's entry in the PUBLIC library-status projection (ent#334).
+
+    Every field the service emits per source EXCEPT `url`. Repo URLs are
+    admin-sensitive by ent#237's own classification — that is why
+    `GET /skills/sources` is `require_admin` + `reject_agent_principal` — but
+    `GET /skills/library/status` is open to any authenticated user (and to
+    agent-scoped keys, deliberately: the per-agent Skills tab and the MCP tool
+    both read it). Emitting the URL there handed the admin-gated value to
+    exactly the callers the gate excludes.
+    """
+    id: str
+    name: str
+    ref: Optional[str] = None
+    ref_type: Optional[str] = None
+    is_default: bool = False
+    enabled: bool = True
+    priority: Optional[int] = None
+    cloned: bool = False
+    # ent#332: resolved layout root; null until the source has been cloned.
+    skills_root: Optional[str] = None
+    layout_conflict: bool = False
+    last_sync: Optional[str] = None
+    last_sync_status: Optional[str] = None
+    commit_sha: Optional[str] = None
+    skill_count: int = 0
+    # `last_error` is deliberately NOT here (ent#334, found by /cso).
+    #
+    # It carries git's own failure text, which routinely echoes the remote
+    # URL — and the URL the clone path uses is `_authenticated_url`'s, with a
+    # PAT spliced in. `skill_source_clone.redact()` scrubs it on the way in,
+    # but that scrubber under-matches a double-`@` authority (ent#347), which
+    # is exactly the shape `_authenticated_url` produces when the stored URL
+    # ALREADY carries userinfo — and that combination reliably fails auth, so
+    # the failing branch is the guaranteed one.
+    #
+    # Dropping the field here costs nothing: its only consumer is
+    # `SkillSourcesPanel.vue`, which reads the admin-gated
+    # `GET /api/skills/sources` (raw dict, field intact). So the operator who
+    # needs the error still sees it, and a caller who should not see repo
+    # URLs cannot reach one through an error string. Do not add it back to
+    # this projection to "help" a non-admin surface debug a sync.
+
+
+class SkillsLibraryStatus(BaseModel):
+    """PUBLIC projection of `skill_service.get_library_status()` (ent#334).
+
+    **This model exists to be an allow-list, and that is the whole point** —
+    do not replace it with the raw dict, and do not add fields to it
+    reflexively. FastAPI serialises through an explicitly-constructed model, so
+    anything the service starts returning that is not named here is invisible
+    over REST until someone deliberately adds it. Fail-closed: the next
+    sensitive field the service grows leaks nothing by default. Same idiom, and
+    same reason, as `response_model=List[SkillInfo]` on `GET /skills/library`.
+
+    Omitted on purpose: the flat `url` and the per-source `url`. Those are the
+    admin-sensitive value — ent#237 classes source repo URLs that way, which is
+    why `GET /skills/sources` is `require_admin` + `reject_agent_principal` —
+    and this route is open to every authenticated caller including agent-scoped
+    keys.
+
+    `branch` and `commit_sha` are deliberately KEPT. They are a ref name and a
+    commit hash, not credentials and not a repo identity, and the Library
+    header renders both. Dropping them was considered and cut: it would have
+    been a second, unrelated behaviour change riding a security fix. If a
+    reason to drop them appears later it belongs in its own issue.
+
+    `configured` and `cloned` are load-bearing, not decoration: the frontend
+    stores derive their empty-state discriminator from them
+    (`stores/skillsLibrary.js` → `emptyReason === 'not_cloned'`,
+    `stores/skills.js` gates on `configured`). Dropping either turns a
+    configured-but-unsynced library into a wrong "no library" empty state.
+    """
+    configured: bool = False
+    cloned: bool = False
+    sources: List[SkillsLibrarySourceStatus] = Field(default_factory=list)
+    source_count: int = 0
+    enabled_source_count: int = 0
+    skill_count: int = 0
+    multi_file_count: int = 0
+    shadowed_count: int = 0
+    last_sync: Optional[str] = None
+    last_sync_status: Optional[str] = None
+    last_sync_error: Optional[str] = None
+    # Legacy flat fields (first source in resolution order). Not URLs.
+    branch: Optional[str] = None
+    commit_sha: Optional[str] = None
