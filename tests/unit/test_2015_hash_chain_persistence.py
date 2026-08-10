@@ -284,3 +284,135 @@ def test_the_retention_warning_still_fires(mod, store, monkeypatch):
 
     out = asyncio.run(ret.AuditRetentionService().prune())
     assert out["removed"] == 7
+
+
+# ---------------------------------------------------------------------------
+# The append must be serialised, not merely wrapped in one transaction
+# ---------------------------------------------------------------------------
+
+class TestConcurrentAppendsDoNotForkTheChain:
+    """One transaction around SELECT-then-INSERT is NOT enough on either backend.
+
+    pysqlite defers the real ``BEGIN`` until it sees DML, so the head SELECT ran
+    in autocommit and the transaction opened at the INSERT; PostgreSQL is READ
+    COMMITTED and a bare ``SELECT … ORDER BY id DESC LIMIT 1`` takes no lock and
+    cannot lock rows that do not exist yet. Both let two appenders read the same
+    head and both insert — silently, with zero errors, which is how the first
+    version of this fix passed review.
+
+    These run against a real SQLite file, since the defect is in the driver's
+    transaction timing and a mocked connection cannot express it.
+    """
+
+    @staticmethod
+    def _hash(entry):
+        import hashlib
+        import json
+        payload = json.dumps(
+            {k: entry.get(k) for k in ("event_id", "previous_hash")}, sort_keys=True
+        )
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    @staticmethod
+    def _row(i):
+        return {
+            "event_id": f"e{i}", "event_type": "t", "event_action": "a",
+            "actor_type": "user", "timestamp": "2026-08-10T00:00:00Z", "source": "api",
+        }
+
+    def _run(self, tmp_path, monkeypatch, threads=4, per=15):
+        import threading
+
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'chain.db'}")
+        import db.engine as engine_mod
+        from db.audit import PlatformAuditOperations
+        from db.tables import audit_log, metadata
+
+        if hasattr(engine_mod, "reset_engine"):
+            engine_mod.reset_engine()
+        engine = engine_mod.get_engine()
+        metadata.create_all(engine, tables=[audit_log])
+        ops = PlatformAuditOperations()
+
+        # Pre-seed so this is not a cold-start artifact.
+        for i in range(3):
+            ops.create_audit_entry_chained(self._row(f"seed{i}"), self._hash)
+
+        errors = []
+
+        def worker(t):
+            for i in range(per):
+                try:
+                    ops.create_audit_entry_chained(self._row(f"{t}-{i}"), self._hash)
+                except Exception as exc:  # noqa: BLE001 — reported, not swallowed
+                    errors.append(repr(exc))
+
+        ts = [threading.Thread(target=worker, args=(t,)) for t in range(threads)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+
+        from sqlalchemy import select as sa_select
+        with engine.connect() as conn:
+            rows = conn.execute(
+                sa_select(audit_log.c.previous_hash, audit_log.c.entry_hash)
+                .order_by(audit_log.c.id)
+            ).all()
+        return rows, errors
+
+    def test_every_link_points_at_its_predecessor(self, tmp_path, monkeypatch):
+        rows, errors = self._run(tmp_path, monkeypatch)
+        assert not errors, f"appends failed: {errors[:2]}"
+
+        broken = [
+            i for i, (prev, _) in enumerate(rows)
+            if i and prev != rows[i - 1][1]
+        ]
+        assert not broken, (
+            f"{len(broken)}/{len(rows)} rows link to something other than their "
+            "predecessor — concurrent appends forked the chain, and verify_chain "
+            "reports that untampered log as tampered (#2015)"
+        )
+
+    def test_no_two_rows_share_a_previous_hash(self, tmp_path, monkeypatch):
+        """The fork itself, stated directly: a head may be consumed once."""
+        rows, _ = self._run(tmp_path, monkeypatch)
+        heads = [prev for prev, _ in rows]
+        dupes = {h for h in heads if heads.count(h) > 1}
+        assert not dupes, (
+            f"{len(dupes)} chain head(s) consumed by more than one row — two "
+            "appenders read the same head and both inserted (#2015)"
+        )
+
+
+def test_the_append_lock_is_taken_before_the_head_is_read():
+    """Structural: the lock call is the FIRST statement in the transaction.
+
+    Ordering is the whole property — a lock taken after the SELECT serialises
+    nothing. Asserted over the AST because the docstring above it explains the
+    locking at length, so a text scan matches the prose either way.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    from db.audit import PlatformAuditOperations
+
+    tree = ast.parse(
+        textwrap.dedent(
+            inspect.getsource(PlatformAuditOperations.create_audit_entry_chained)
+        )
+    )
+    with_blocks = [n for n in ast.walk(tree) if isinstance(n, ast.With)]
+    assert with_blocks, "the transaction block is gone"
+    first = with_blocks[0].body[0]
+    calls = [
+        n for n in ast.walk(first)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "_lock_chain_for_append"
+    ]
+    assert calls, (
+        "the append lock is not the first statement inside the transaction — "
+        "a lock taken after the head SELECT serialises nothing (#2015)"
+    )
