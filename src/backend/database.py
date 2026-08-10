@@ -1454,6 +1454,13 @@ class DatabaseManager:
             agent_names, group_by, hours
         )
 
+    def shape_execution_timeline(self, rows, *, group_by: str, hours: int):
+        """Fold/gap-fill the timeline rows (ent#326) — the domain transforms
+        live beside the query, not in the router (Invariant #1)."""
+        return self._schedule_ops.shape_execution_timeline(
+            rows, group_by=group_by, hours=hours
+        )
+
     # =========================================================================
     # Git Configuration Management (delegated to db/schedules.py)
     # =========================================================================

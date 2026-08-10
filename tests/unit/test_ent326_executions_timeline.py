@@ -516,3 +516,99 @@ class _User:
     role: str = "user"
     agent_name: _Opt[str] = None
     connector_agent: _Opt[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups (#1983 review)
+# ---------------------------------------------------------------------------
+
+class TestBucketOrderMatchesTheRestOfThePlatform:
+    """`Other` must sort LAST, not alphabetically.
+
+    `_BUCKET_ORDER` exists in `db/schedules/analytics.py` precisely so the
+    legend/stack order is stable and `Other` is the tail. Sorting by name puts
+    it sixth — between `MCP` and `Public` — so the #1107 Overview chart and this
+    endpoint's tile would render the same buckets in different orders on the
+    same page.
+    """
+
+    @staticmethod
+    def _row(bucket, total=1):
+        return {"bucket": bucket, "total": total, "success": total, "failed": 0,
+                "cost": 0.0, "context_used": 0}
+
+    def test_other_sorts_last(self):
+        import sys
+        from pathlib import Path
+        backend = str(Path(__file__).resolve().parents[2] / "src" / "backend")
+        if backend not in sys.path:
+            sys.path.insert(0, backend)
+        from db.schedules import ScheduleOperations
+
+        rows = [self._row("manual"), self._row("weird-new-trigger"), self._row("schedule")]
+        out = ScheduleOperations.shape_execution_timeline(
+            None, rows, group_by="trigger", hours=24
+        )
+        labels = [b["bucket"] for b in out]
+        assert labels[-1] == "Other", f"Other is not last: {labels}"
+        assert labels == ["Chat/Tasks", "Scheduled", "Other"], labels
+
+    def test_the_order_is_the_shared_constant(self):
+        """Pins that this reads `_BUCKET_ORDER` rather than a second copy."""
+        import sys
+        from pathlib import Path
+        backend = str(Path(__file__).resolve().parents[2] / "src" / "backend")
+        if backend not in sys.path:
+            sys.path.insert(0, backend)
+        from db.schedules import _BUCKET_ORDER, ScheduleOperations
+
+        rows = [self._row(t) for t in ("manual", "schedule", "mcp")]
+        out = ScheduleOperations.shape_execution_timeline(
+            None, rows, group_by="trigger", hours=24
+        )
+        labels = [b["bucket"] for b in out]
+        assert labels == sorted(labels, key=_BUCKET_ORDER.index), (
+            f"bucket order diverges from _BUCKET_ORDER: {labels}"
+        )
+
+
+def test_the_router_does_not_reimplement_the_domain_transforms():
+    """Invariant #1: the fold and the gap-fill belong beside the query.
+
+    The first draft inlined `_TRIGGER_BUCKETS.get(..., "Other")` — with a
+    literal fallback rather than `_OTHER_BUCKET` — and re-implemented the
+    continuous UTC axis, both of which `db/schedules/analytics.py` already owns
+    for #1107. Two copies of a mapping the codebase deliberately centralised is
+    how the Overview chart and this tile come to disagree.
+    """
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[2]
+           / "src" / "backend" / "routers" / "executions.py").read_text()
+    assert "_TRIGGER_BUCKETS" not in src, (
+        "the trigger map is being read in the router again — fold it in the db "
+        "layer, where the `Other` catch-all and the bucket order live"
+    )
+    assert "def _gap_fill" not in src and "def _fold_trigger_buckets" not in src, (
+        "the timeline transforms are re-implemented in the router"
+    )
+
+
+def test_legacy_naive_timestamps_land_in_the_same_bucket_as_iso_z_rows():
+    """Pre-#1474 scheduler rows are `YYYY-MM-DD HH:MM:SS` (space, no Z).
+
+    They pass the lexicographic cutoff and ARE counted by `/stats` and by
+    `group_by=trigger|agent`, but `substr(started_at, 1, 13)` yields
+    `2026-08-06 10`, which never matches the gap-filled axis key
+    `2026-08-06T10` — so the hour/day chart renders a real zero for executions
+    the stat card above it counts. Bucketing normalises the separator.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2] / "src" / "backend" / "db"
+           / "schedules" / "stats.py").read_text()
+    block = src[src.index("def get_fleet_execution_timeline"):]
+    block = block[:block.index("def shape_execution_timeline")]
+    assert "replace(started_at, ' ', 'T')" in block, (
+        "the hour/day bucketer slices started_at raw, so legacy naive rows "
+        "fall outside the gap-filled axis and render as zeros"
+    )

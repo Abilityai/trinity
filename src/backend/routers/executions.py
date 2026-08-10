@@ -9,13 +9,11 @@ Access control mirrors fleet.py:
 - admin → sees every execution (agent_names=None, no SQL filter)
 - non-admin → sees only accessible agents (owned + shared)
 """
-from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
 
 from database import db
-from db.schedules import _TRIGGER_BUCKETS
 from dependencies import get_current_user
 from models import (
     ExecutionTimeline,
@@ -113,10 +111,11 @@ async def get_fleet_execution_timeline(
     agent_names = narrow_to_agent(accessible_agent_names(current_user), agent)
     rows = db.get_fleet_execution_timeline(agent_names, group_by=group_by, hours=hours)
 
-    if group_by == "trigger":
-        rows = _fold_trigger_buckets(rows)
-    elif gap_filled:
-        rows = _gap_fill(rows, group_by=group_by, hours=hours)
+    # Folding and gap-filling live in the db layer beside the query
+    # (Invariant #1, and the #1107 precedent): `_bucket_for_trigger` and
+    # the continuous UTC axis already exist there, and a second copy in a
+    # router is how the two drift.
+    rows = db.shape_execution_timeline(rows, group_by=group_by, hours=hours)
 
     return ExecutionTimeline(
         group_by=group_by,
@@ -124,61 +123,6 @@ async def get_fleet_execution_timeline(
         gap_filled=gap_filled,
         buckets=[ExecutionTimelineBucket(**r) for r in rows],
     )
-
-
-def _empty_bucket(key: str) -> dict:
-    return {"bucket": key, "total": 0, "success": 0, "failed": 0,
-            "cost": 0.0, "context_used": 0}
-
-
-def _accumulate(into: dict, row: dict) -> None:
-    into["total"] += row["total"]
-    into["success"] += row["success"]
-    into["failed"] += row["failed"]
-    into["cost"] = round(into["cost"] + row["cost"], 6)
-    into["context_used"] += row["context_used"]
-
-
-def _fold_trigger_buckets(rows: List[dict]) -> List[dict]:
-    """Collapse raw `triggered_by` values into the user-facing buckets.
-
-    Folded HERE rather than in SQL because `_TRIGGER_BUCKETS` is a Python map
-    with an explicit `Other` catch-all — the property that makes a newly-added
-    trigger type show up as `Other` instead of silently vanishing from a chart.
-    Encoding the mapping as a CASE would drop that guarantee the first time
-    someone adds a trigger and forgets the SQL.
-    """
-    folded: dict = {}
-    for row in rows:
-        label = _TRIGGER_BUCKETS.get(row["bucket"] or "", "Other")
-        _accumulate(folded.setdefault(label, _empty_bucket(label)), row)
-    return sorted(folded.values(), key=lambda b: b["bucket"])
-
-
-def _gap_fill(rows: List[dict], *, group_by: str, hours: int) -> List[dict]:
-    """Emit a continuous UTC axis so a chart shows a real zero, not a skip.
-
-    A missing bucket and a zero bucket mean different things to a reader — "no
-    executions that hour" versus "no data" — and a sparse series renders them
-    identically (#1107).
-    """
-    by_key = {r["bucket"]: r for r in rows}
-    now = datetime.now(timezone.utc)
-    out: List[dict] = []
-    if group_by == "hour":
-        start = (now - timedelta(hours=hours)).replace(minute=0, second=0, microsecond=0)
-        step, fmt = timedelta(hours=1), "%Y-%m-%dT%H"
-    else:
-        start = (now - timedelta(hours=hours)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        step, fmt = timedelta(days=1), "%Y-%m-%d"
-    cursor = start
-    while cursor <= now:
-        key = cursor.strftime(fmt)
-        out.append(by_key.get(key) or _empty_bucket(key))
-        cursor += step
-    return out
 
 
 @router.get("", response_model=List[FleetExecutionSummary])
