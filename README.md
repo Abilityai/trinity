@@ -539,7 +539,7 @@ Trinity includes an MCP server for external orchestration of agents:
 ### Ask Trinity from any MCP client — no instance required
 
 Evaluating Trinity, or want its docs assistant inside your editor? The standalone
-[`@abilityai/trinity-docs-mcp`](src/helper-mcp/) server answers questions about
+[`trinity-docs-mcp`](src/helper-mcp/) server answers questions about
 Trinity, grounded in this documentation — no Trinity instance, no API key:
 
 ```json
@@ -547,7 +547,7 @@ Trinity, grounded in this documentation — no Trinity instance, no API key:
   "mcpServers": {
     "trinity-docs": {
       "command": "npx",
-      "args": ["-y", "@abilityai/trinity-docs-mcp"]
+      "args": ["-y", "trinity-docs-mcp"]
     }
   }
 }

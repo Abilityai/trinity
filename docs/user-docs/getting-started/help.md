@@ -13,7 +13,7 @@ MCP client — no Trinity instance or API key required:
 
 ```bash
 # Claude Code
-claude mcp add trinity-docs -- npx -y @abilityai/trinity-docs-mcp
+claude mcp add trinity-docs -- npx -y trinity-docs-mcp
 ```
 
 ```json
@@ -21,7 +21,7 @@ claude mcp add trinity-docs -- npx -y @abilityai/trinity-docs-mcp
   "mcpServers": {
     "trinity-docs": {
       "command": "npx",
-      "args": ["-y", "@abilityai/trinity-docs-mcp"]
+      "args": ["-y", "trinity-docs-mcp"]
     }
   }
 }

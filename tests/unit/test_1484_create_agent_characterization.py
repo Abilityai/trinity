@@ -110,6 +110,24 @@ def _load_crud(monkeypatch, docker_available=True):
     # Dynamic-vs-predefined dispatch keys on this: a truthy return picks the
     # predefined branch. Default None ⇒ dynamic github:owner/repo path.
     template_service.get_github_template = MagicMock(return_value=None)
+    # ent#14 S2: the creation path reads `template.yaml` through the
+    # reason-preserving form and UNPACKS the pair — the `fork_to_own` gate
+    # decides on the reason, so it can no longer be dropped. An unstubbed
+    # MagicMock iterates empty and fails the unpack, which is the loud failure
+    # we want rather than a Mock silently standing in for a security decision.
+    template_service.fetch_template_metadata_result_for_create = MagicMock(
+        return_value=({}, None)
+    )
+    # ent#14 S2: the `fork_to_own` gate calls this classifier, which crud
+    # imports FROM this module — an unstubbed MagicMock returns a truthy Mock,
+    # so every github create would 503 TEMPLATE_METADATA_UNAVAILABLE. Mirrored
+    # faithfully (real: services/template_service.py::metadata_reason_is_unreadable
+    # — a clean 404 is absence, everything else is unreadable) rather than
+    # pinned to False, so a case that DOES script an unreadable reason still
+    # exercises the refusal.
+    template_service.metadata_reason_is_unreadable = MagicMock(
+        side_effect=lambda reason: bool(reason) and not reason.startswith("HTTP 404")
+    )
     # ent#128: `_resolve_local_template` reads the template's declared MCP servers
     # through this tolerant accessor instead of reaching through `credentials:`
     # raw (a null/list/string block raised AttributeError, and that read sits

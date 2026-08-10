@@ -206,6 +206,15 @@ services:
       - TELEMETRY_SHARING_URL=${TELEMETRY_SHARING_URL:-https://intake.abilityai.dev/v1/telemetry-share}
       - TELEMETRY_SHARING_INTERVAL_HOURS=${TELEMETRY_SHARING_INTERVAL_HOURS:-24}
       - TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS=${TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS:-30}
+      # Remote template registry (ent#14): the GitHub half of the template
+      # catalog, fetched at runtime. TEMPLATE_REGISTRY_ENABLED=false is the HARD
+      # kill switch (no system_settings row can turn it back on) — without this
+      # line it is inert, which is the #1039 class the config.py comment argues
+      # against one paragraph above where it reads the var. URL keeps its FULL
+      # non-empty default — a bare :- would arrive set-but-empty and shadow the
+      # code default (#1076 class), pointing the registry at "".
+      - TEMPLATE_REGISTRY_ENABLED=${TEMPLATE_REGISTRY_ENABLED:-true}
+      - TEMPLATE_REGISTRY_URL=${TEMPLATE_REGISTRY_URL:-https://raw.githubusercontent.com/Abilityai/trinity-templates/main/registry.yaml}
       # CORS (comma-separated extra origins)
       - EXTRA_CORS_ORIGINS=${EXTRA_CORS_ORIGINS:-}
       # Slack channel adapter

@@ -87,7 +87,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents
 - Public chat links for external users
 - Channel adapters: Slack, Telegram, WhatsApp (via Twilio)
 - Outbound file sharing — agents publish files to signed download URLs
-- A2A v1.0 Agent Card discovery for external orchestrators
+- A2A `0.3.0` Agent Card discovery + opt-in inbound tasking for external orchestrators
 - Voice chat via Gemini Live API
 - x402 payment protocol for agent monetization
 
