@@ -1,6 +1,39 @@
 {
   "test_files": [
     {
+      "file": "unit/test_157_a2a_inbound_server.py",
+      "feature": "ent#157",
+      "added": "2026-07-15",
+      "categories": [
+        "backend",
+        "a2a",
+        "integration"
+      ],
+      "description": "A2A inbound server (ent#157): card honesty (protocolVersion 0.3.0, JSON-RPC url); public well-known gating (uniform 404 non-exposed/nonexistent, stopped-agent label fallback); JSON-RPC dispatch + error codes (-32700/-32600/-32601/-32602/-32001); message/send bridge to execute_task(triggered_by=a2a); message/stream SSE (working→final completed); tasks/get state mapping (success/failed/cancelled/running/queued/unknown) + tasks/cancel; multipart concat + empty-text invalid; messageId idempotency (completed replay + in-flight retryable); a2a_gate allow-list allow/deny/fail-open; unauthenticated POST → 401. TestClient, no Docker."
+    },
+    {
+      "file": "unit/test_a2a_exposure_mixin.py",
+      "feature": "ent#157",
+      "added": "2026-07-15",
+      "categories": [
+        "backend",
+        "a2a",
+        "database"
+      ],
+      "description": "A2AExposureMixin (ent#157) OSS a2a_exposed primitive: default-false (no row / unset column), set/get round-trip, per-agent isolation, missing-agent set→False, deleted_at guard (soft-deleted agent never flipped/read exposed), get_a2a_exposed_agents live-only listing. sqlite3 + SQLAlchemy engine at one temp file."
+    },
+    {
+      "file": "unit/test_180_a2a_exposed_skills.py",
+      "feature": "ent#180",
+      "added": "2026-07-17",
+      "categories": [
+        "backend",
+        "a2a",
+        "unit"
+      ],
+      "description": "A2A exposed-skills filter (ent#180): the open-core seam that narrows a card's skills[] to what an agent may advertise. OSS-unchanged by construction (no provider → identity, same list object); None = no opinion = advertise all (the unconfigured default, so an exposed agent's card is byte-identical across upgrade) vs [] = explicit advertise-nothing; stale/unknown stored ids are inert (the selection only subtracts, the template stays the source of truth); fail-open on provider error AND on a malformed return (a str would otherwise iterate to chars and silently empty the card — fail-closed, invisible); both card surfaces filter via one router helper (structural guard against a route rebuilding an unfiltered card). Disclosure control only — message/send dispatches free-form text, so this never narrows what a caller may ask for."
+    },
+    {
       "file": "unit/test_1999_execution_env.py",
       "feature": "#1999",
       "added": "2026-08-05",
@@ -1709,6 +1742,155 @@
         "performance"
       ],
       "description": "The free-text PAT scrubbers only fired on a literal `https://` (#2052) - the follow-up ent#347 predicted. `skill_source_clone._CREDENTIAL_URL_RE` was `https://[^\\s/?#]+@`, anchored on the scheme, while the parse-based `utils.url_validation.strip_url_credentials` (ent#334) resolves an authority with no scheme at all. Three shapes therefore slipped past the regex and were echoed VERBATIM: protocol-relative `//tok@github.com/o/r`, the scheme-less shorthand `tok@github.com/o/r`, and an alternate scheme `git+ssh://tok@...` (plus the empty-userinfo `https://@host`, which the old `+` quantifier could not match). Reachable rather than theoretical: `_adopt_legacy_clone` writes source rows with no validation and `validate_skills_library_url` accepts the scheme-less form, so a stored URL may legitimately take them, and `_scrub_pat` then runs over `str(e)` of an ARBITRARY exception whose text is not constrained to what `_authenticated_url` built. Sink is `system_settings['skills_library_last_error']` - durable and admin-rendered. Fixed by moving the rule next to the parser as `scrub_url_credentials_in_text` rather than adding a fourth hand-written regex; `redact` delegates and `_CREDENTIAL_URL_RE` is deleted. The free-text side stays text-oriented on purpose - git stderr is prose plus several URLs, so there is no single URL to hand `urlparse`. Tests are mostly PARITY assertions over one shared corpus (the ent#334 cross-check shapes plus the three that regressed): the two must agree on the resolved authority, on WHETHER a credential is present at all (the actual defect), and no userinfo may survive. A structural test asserts `_CREDENTIAL_URL_RE` is gone so a local pattern cannot be reintroduced. Regression guards keep `?ref=a@b` untouched - the removed scheme anchor was also what kept the pattern off a query `@`, which is why the bare form carries a run-start boundary - plus multi-URL free text, idempotency and never-raises. 21 of these fail against the pre-fix scrubber, one with the token verbatim. Also pins the scan LINEAR: dropping the `https://` anchor also drops the literal `str.find` could jump to, and the first fix expressed the new rule as a class-first pattern, which rescanned a long no-`@` run from every offset - 24s on 200KB, 151s on 500KB, on RAW git stderr that is unbounded and partly remote-controlled, i.e. a DoS reachable from a hostile repo. Rewritten to walk maximal authority-legal runs; same 500KB now scrubs in 1.2ms."
+    },
+    {
+      "file": "unit/test_1823_tz_capability_parity.py",
+      "feature": "#1823",
+      "added": "2026-08-09",
+      "categories": [
+        "backend",
+        "unit",
+        "packaging",
+        "reliability",
+        "scheduling"
+      ],
+      "description": "TZ-capability packaging parity (#1823), #1891-shaped static guard. Both tz-resolving images (backend, scheduler) install `tzdata-legacy` AND declare the `tzdata` wheel; tests/requirements-test.txt declares it too (CI must not be MORE capable than production — that inversion kept this bug green on CI and red in the image for months); the base image's exemption is asserted against the reason that holds (its tree registers no CronTrigger) rather than inherited; and both images pin the SAME APScheduler exactly, since the #1472 contract ('reject exactly what the scheduler would') is only true while validator and executor build the same CronTrigger — a floor on either side does not merely risk drift, it produces it, as `>=3.10.0,<4.0.0` resolves to whatever is newest at build time. Stale-path guard. Comments are stripped before matching, so the fix's own explanatory comments cannot make the guard vacuous. Plus one runtime assertion resolving `Europe/Kiev` — the one that goes red INSIDE a mis-packaged image. Pure stdlib, no Docker."
+    },
+    {
+      "file": "unit/test_1823_scheduler_permanent_classification.py",
+      "feature": "#1823",
+      "added": "2026-08-09",
+      "categories": [
+        "backend",
+        "unit",
+        "scheduler",
+        "reliability",
+        "scheduling"
+      ],
+      "description": "`src/scheduler/service.py::_add_job` permanent-vs-transient classification (#1823 D5, a gap in #1472's own bounded-retry machinery). `zoneinfo.ZoneInfoNotFoundError` is a KeyError subclass, so it fell through to the transient arm and retried every 60s forever with a frozen next_run_at (canary E-06 fires on it). Both directions pinned: RuntimeError and a plain KeyError must STAY transient, because the permanent arm suppresses retries. Plus log-once bounding, the recovery path (a parked row registers and clears its flag once the runtime can resolve the zone), and one un-injected case registering a real legacy alias. Injected fake DB/scheduler, no Docker."
+    },
+    {
+      "file": "unit/test_1823_update_route_timezone.py",
+      "feature": "#1823",
+      "added": "2026-08-09",
+      "categories": [
+        "backend",
+        "unit",
+        "api",
+        "scheduling"
+      ],
+      "description": "`PUT /api/agents/{name}/schedules/{id}` timezone gate (#1823 D4 — the silent persist that was quieter and worse than the create path's 500: the alias was written to the row and the failure deferred to a fire time that never came). Every case asserts the WRITE did not happen, not just the status code. Non-admin caller. Real-input (`Not/AZone`), fault-injected unresolvable-but-pytz-known, and a resolvable legacy alias going through with no injection. Route handler driven directly, no Docker."
+    },
+    {
+      "file": "unit/test_1823_cron_only_put_effective_tz.py",
+      "feature": "#1823",
+      "added": "2026-08-09",
+      "categories": [
+        "backend",
+        "unit",
+        "api",
+        "scheduling"
+      ],
+      "description": "Cron-only `PUT` validates against the row's OWN timezone instead of a hardcoded \"UTC\" (#1823) — the deliberate 200->400 for a row already storing an unregisterable zone. Pins assert on the ARGUMENT handed to the validator, since on a tz-complete runtime every zone validates identically and a verdict-based test would pass against the old literal. The injected failure misses exactly ONE zone for the same reason. Covers incoming-tz precedence, the NULL-stored-tz UTC fallback, the healthy path staying 200, and that a bad cron is still rejected. No Docker."
+    },
+    {
+      "file": "unit/test_ent14_registry_document.py",
+      "feature": "ent#14",
+      "added": "2026-08-04",
+      "categories": [
+        "unit",
+        "security",
+        "parser",
+        "templates"
+      ],
+      "description": "The pure registry.yaml parser (ent#14 / TMPL-002). Covers the happy path; `templates: []` treated as a SUCCESS rather than a failure, because an empty registry is the deliberate day-one state and classifying it as an error would serve stale entries forever; every document-level refusal; ent#314 YAML hardening reaching this document specifically (any single alias, a level-6 anchor bomb, duplicate keys, oversize - all refuse the WHOLE document and degrade to the bundled floor, never a partial parse); per-entry drops; dot path segments; case-insensitive duplicate repos; field caps; `priority: true` not sorting as 1 (a bool is an int in Python and used to 500 the router's sort); a bounded error list; and THE ALLOWLIST - 16 forbidden keys asserted absent from the frozen four-field record, so a hostile registry cannot inject fork_to_own, credentials, schedules, data_paths, persistent_state, skills, hidden or id."
+    },
+    {
+      "file": "unit/test_ent14_registry_fetch.py",
+      "feature": "ent#14",
+      "added": "2026-08-04",
+      "categories": [
+        "unit",
+        "security",
+        "transport",
+        "cache",
+        "templates"
+      ],
+      "description": "Transport + cache for the remote registry (ent#14). The byte ceiling counts WIRE bytes via iter_raw (S1): a gzip bomb whose Content-Length passes the early abort is refused as encoding_refused with zero body bytes read, and peak allocation is asserted under 8 MB against 64 MB of decoded payload. Both transport fixtures convert every mock response to a REAL stream - a buffered httpx.Response(content=...) decodes in its constructor and marks the stream consumed, so it can only ever exercise iter_bytes(), which is precisely why the pre-S1 ceiling tests were green against a 1030:1 hole. Also: a LYING Content-Length re-probed through a second client to prove the lie was actually told (otherwise a future refactor that starts trusting the header stays green); early abort on a declared oversize length; connect/timeout/HTTP/redirect failures; HTML and binary bodies; URL-validation refusal never dialling; TTL + jitter; URL change; the cross-worker GENERATION bump (a per-process invalidate half-applies under --workers 2); serve-stale and its 7-day cap; negative caching; and the durable last-known-good (persist-on-change-only, cold-start restore, and rejection of a wrong-URL / older-parser / too-old / tampered row)."
+    },
+    {
+      "file": "unit/test_ent14_catalog_failopen.py",
+      "feature": "ent#14",
+      "added": "2026-08-04",
+      "categories": [
+        "unit",
+        "templates",
+        "reliability",
+        "fail-open"
+      ],
+      "description": "The fail-open MATRIX at the catalog seam (ent#14). The design rule is that a broken registry can only ever degrade to the bundled floor, never break the catalog - so every assertion is on the CATALOG OUTPUT, not on whether an except branch ran (a test asserting the branch ran still passes if the branch returns garbage). 19 failure modes x 2: catalog equality, and again through the ROUTER's own sort, where a non-int priority used to 500 the endpoint. Plus a registry service that simply RAISES; per-entry fencing; the full precedence ladder admin-override -> registry -> DEFAULT_GITHUB_TEMPLATE_REPOS including zero-requests-when-curated; the config hard kill switch beating the DB row; list/detail/create sharing ONE ladder (F1 - the second resolver feeds GET /api/templates/{id} AND agent creation, so a divergence changes what gets cloned); payload key-set equality; and a hostile registry failing to inject fork_to_own / credentials / schedules / hidden / id. Two tests exist to stop the matrix being vacuous: one pins that the real bundled floor is non-empty, one re-probes the lying header."
+    },
+    {
+      "file": "unit/test_ent14_registry_settings_api.py",
+      "feature": "ent#14",
+      "added": "2026-08-04",
+      "categories": [
+        "unit",
+        "security",
+        "api",
+        "authz",
+        "templates"
+      ],
+      "description": "GET/PUT/DELETE /api/settings/template-registry on the real router (ent#14). The security assertion is the PRINCIPAL MATRIX: an admin-owned AGENT-scoped key passes assert_admin because it resolves to its owner carrying the owner's role (the trinity-ops-agent#232 trap), so both writes additionally require reject_agent_principal - otherwise any agent could repoint the platform's template registry. Also: audit rows on write AND on a no-op reset; partial update; the hard-kill-switch 409; and the catch-all 422 on BOTH generic write paths (PUT and DELETE /api/settings/{key}) for all four registry keys, so the SSRF gate has no second unvalidated write path. Route order versus the /{key} catch-all is pinned by test (Invariant #4)."
+    },
+    {
+      "file": "unit/test_ent14_repo_pattern_parity.py",
+      "feature": "ent#14",
+      "added": "2026-08-04",
+      "categories": [
+        "unit",
+        "security",
+        "parity",
+        "templates"
+      ],
+      "description": "All four owner/repo gates agree on a shared fixture corpus (ent#14). Compares BEHAVIOUR, not source strings - two of the copies already differ in character-class ordering, so a source diff would report drift that does not exist and miss drift that does. Pins one DELIBERATE divergence: `.` sits inside the character class in the three older copies, so `../evil` matches them, while the registry gate refuses dot segments outright; registry acceptance is therefore asserted to be a strict SUBSET of every other gate, which is the property that actually matters - the newest gate may be stricter but must never admit something an existing gate rejects."
+    },
+    {
+      "file": "unit/test_ent14_fork_to_own_failclosed.py",
+      "feature": "ent#14",
+      "added": "2026-08-04",
+      "categories": [
+        "unit",
+        "security",
+        "authz",
+        "templates"
+      ],
+      "description": "The fork_to_own fail-closed gate (ent#14 F2 + S2). F2: a rate-limited (403) template.yaml read as fork_to_own=None skipped the gate and bound the agent to the SHARED upstream template repo instead of a user-owned copy. S2 is the sharper case - the gate decided from the CATALOG dict (global platform PAT, default branch, 600s process cache) while the correctly-credentialed creation read ran one line earlier. That failed in both directions at once: GitHub answers 404 (not 403) for a repo a token cannot see, so a PRIVATE fork_to_own: required template readable only by the creator's per-user PAT (ent#162, a supported flow) came back absent and the gate PASSED (false pass, no attacker involved); and a poisoned shared cache entry 503'd creators whose own PAT reads fine for the full TTL (false refuse). Both the availability verdict and the fork_to_own VALUE now come from the creation read, unioned with the catalog so the change can only remove a false pass. Driven through the REAL _resolve_template against a GitHub whose answer depends on which token asks. Verified red (measured 2026-08-05): neutralising the F2 guard fails 11 of 31; restoring the catalog-reading gate fails 3; and the plausible HALF-FIX - moving only the availability verdict while the value still comes from the catalog - still fails 1, so the suite is not vacuous against the fix that tests green."
+    },
+    {
+      "file": "unit/test_ent14_registry_url_ssrf.py",
+      "feature": "ent#14",
+      "added": "2026-08-05",
+      "categories": [
+        "unit",
+        "security",
+        "ssrf",
+        "templates"
+      ],
+      "description": "SSRF gate on the template-registry URL (ent#14 S3): RFC 6598 shared address space (100.64.0.0/10) is reported by Python's ipaddress as neither is_private nor is_reserved, so the predicate stack admitted it — refused now, with both /10 boundaries held public so a legitimate registry is not blackholed, and one CGNAT record among public ones enough to refuse (every resolved record is checked). Also pins the neighbouring internal ranges, IPv4-mapped IPv6, the HTTPS-only and no-userinfo rules, and refusal (not pass-through) of an unresolvable host. DNS is stubbed — the property under test is the predicate, not the resolver. Also pins WHY the sibling validate_skills_library_url has no CGNAT clause and must not grow one as a consistency fix: it is allowlisted by HOST, so the operator never chooses a destination and the resolved address is not an operator-controlled input. Four non-allowlisted hosts (incl. the suffix lookalike github.com.evil.com and the real-but-unlisted raw.githubusercontent.com) are refused while resolving to a PUBLIC address, so the refusal provably does not come from the address predicates, plus the accept case so it is an allowlist and not a blanket refusal. Copying the clause across is harmless; deleting the registry one as redundant is not, and this is where that turns from a judgement call into a failure. Verified red: removing the CGNAT clause fails 5 of 33, widening the skills-library allowlist fails 4."
+    },
+    {
+      "file": "unit/test_ent14_registry_env_packaging.py",
+      "feature": "ent#14",
+      "added": "2026-08-05",
+      "categories": [
+        "unit",
+        "config",
+        "packaging",
+        "regression",
+        "templates"
+      ],
+      "description": "Compose/env packaging for the two registry knobs (ent#14), caught by /validate-pr before merge. config.py read TEMPLATE_REGISTRY_ENABLED / TEMPLATE_REGISTRY_URL and NEITHER compose file injected them; prod compose launches standalone (no base merge, no env_file) and is what every deploy path uses, so both were inert on any real instance. The var is the feature's HARD kill switch - the documented air-gap answer no system_settings row can override - so an inert one means default-ON outbound egress with no way to stop it. The irony is pinned in the docstring because it is the lesson: the config.py comment block directly above the os.getenv call argues at length against routing the flag through _resolve_bool_flag precisely because that helper's opt-in-only env leg would 'ship an inert kill switch (#1039 class)' - and it then shipped inert by the other route. Covers: injection present in BOTH composes; the ENABLED default is the ${VAR:-true} form and not a hardcoded true (which passes a presence check while re-breaking the switch); the URL default is the full non-empty https literal, since a bare :- arrives set-but-empty and shadows the code default (#1076 class) - worse than absent because it looks wired; compose and config.py defaults do not drift; dev/prod agree; both documented in .env.example. Sixth recurrence of the #1039/#1056 packaging-gap class (after #1056 VOIP_*, ent#31 LOG_*, #1039, #1871 AGENT_LOG_*, #411 CANARY_*), so it is pinned rather than trusted. Shape mirrors test_canary_env_prod_parity.py, the guard for the fifth. The meta-test proves the matcher fails on pre-fix content AND on a hardcoded value; the guard was additionally verified by deleting the real prod line and watching it go red - the first attempt at that proof used an unescaped grep -v whose $ read as an end-of-line anchor, matched nothing, and reported a false green."
     }
   ]
 }

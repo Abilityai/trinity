@@ -212,6 +212,19 @@ class MetadataMixin:
 
                 cascade_rename(conn, old_name, new_name)
 
+                # Org-overlay reporting refs (trinity-enterprise#305): tags on
+                # OTHER agents' rows whose VALUE names this agent
+                # (`reports-to-<old_name>`). Structurally different from the
+                # AGENT_REFS cascade above (which re-keys this agent's own
+                # rows): this rewrites a tag VALUE on other agents' rows, so it
+                # cannot fold into AGENT_REFS. Same transaction as the rename —
+                # a crash can never leave half the org chart pointing at a
+                # name that no longer exists. Cross-tenant by design (a report
+                # may belong to another owner) — covered by the rename's own
+                # audit row at the router.
+                from ..tags import rename_reports_to_refs
+                rename_reports_to_refs(conn, old_name, new_name)
+
                 # Entitled-module agent-scoped tables (ent#46) registered via
                 # db.agent_cleanup.register_agent_owned_table. Kept separate
                 # from the registry pass: these are runtime-registered by the
@@ -286,6 +299,7 @@ class MetadataMixin:
                 COALESCE(ao.read_only_mode, 0) as read_only_enabled,
                 COALESCE(ao.use_platform_api_key, 1) as use_platform_api_key,
                 COALESCE(ao.mcp_exposed, 0) as mcp_exposed,
+                COALESCE(ao.a2a_exposed, 0) as a2a_exposed,
                 ao.memory_limit,
                 ao.cpu_limit,
                 ao.avatar_updated_at,
@@ -317,6 +331,7 @@ class MetadataMixin:
                     "read_only_enabled": bool(row["read_only_enabled"]),
                     "use_platform_api_key": bool(row["use_platform_api_key"]),
                     "mcp_exposed": bool(row["mcp_exposed"]),
+                    "a2a_exposed": bool(row["a2a_exposed"]),
                     "memory_limit": row["memory_limit"],
                     "cpu_limit": row["cpu_limit"],
                     "github_repo": row["github_repo"],

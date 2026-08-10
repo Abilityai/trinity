@@ -280,15 +280,25 @@
     />
 
     <!-- Schedules List -->
-    <div v-if="loading" class="text-center py-8">
+    <!-- #1634: the spinner means "no data yet", never "fetch in flight"
+         (design-system p4/p5/p13/p14). Gating on the in-flight flag alone
+         unmounted the whole list on every refetch — the document collapsed to
+         spinner height and the browser clamped window.scrollY to 0, so toggling
+         a row threw the page back to the top. Matches ExecutionsPanel /
+         LoopsPanel / TasksPanel / ReportsPanel / RoomsRail / CompatibilityPanel. -->
+    <div v-if="loading && schedules.length === 0" class="text-center py-8">
       <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500 mx-auto"></div>
       <p class="text-sm text-gray-500 dark:text-gray-400 mt-2">Loading schedules...</p>
     </div>
 
     <!-- Failed list fetch (#1926) — "No schedules configured" on a failed fetch
-         invites the user to create a duplicate schedule. -->
+         invites the user to create a duplicate schedule. Gated on "no data":
+         once rows are on screen, letting this panel replace them would unmount
+         the list mid-refetch — the #1634 scroll clamp by another door. The
+         data-on-screen refetch failure renders as a dense banner above the
+         list instead (below). -->
     <LoadFailed
-      v-else-if="loadError"
+      v-else-if="loadError && schedules.length === 0"
       title="Couldn't load schedules"
       message="The schedule list didn't load, so what you see may be incomplete. Try again."
       :detail="loadError"
@@ -305,9 +315,23 @@
     </div>
 
     <div v-else class="space-y-4">
+      <!-- Refetch failed with data on screen (#1926 × #1634): same failure,
+           non-unmounting form — the stale rows stay put and keep their scroll
+           position; the banner names the staleness and carries the retry. -->
+      <LoadFailed
+        v-if="loadError"
+        dense
+        title="Couldn't refresh schedules"
+        message="Showing the last loaded list — it may be stale."
+        :detail="loadError"
+        :retrying="loading"
+        @retry="loadSchedules"
+      />
       <div
         v-for="schedule in schedules"
         :key="schedule.id"
+        data-testid="schedule-row"
+        :data-schedule-id="schedule.id"
         class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 hover:shadow-sm transition-shadow"
       >
         <div class="flex justify-between items-start">
@@ -315,6 +339,7 @@
             <div class="flex items-center space-x-2">
               <h4 class="font-medium text-gray-900 dark:text-white">{{ schedule.name }}</h4>
               <span
+                data-testid="schedule-status"
                 :class="[
                   'px-2 py-0.5 text-xs font-medium rounded-full',
                   schedule.enabled ? 'bg-status-success-100 dark:bg-status-success-900/30 text-status-success-800 dark:text-status-success-300' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
@@ -451,12 +476,13 @@
             </button>
             <button
               @click="toggleSchedule(schedule)"
-              :disabled="toggleLoading === schedule.id"
+              data-testid="schedule-toggle"
+              :disabled="toggleLoading.has(schedule.id)"
               class="p-1.5 rounded transition-colors"
               :class="schedule.enabled ? 'text-status-success-600 hover:text-gray-400' : 'text-gray-400 hover:text-status-success-600'"
               :title="schedule.enabled ? 'Disable' : 'Enable'"
             >
-              <svg v-if="toggleLoading === schedule.id" class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
+              <svg v-if="toggleLoading.has(schedule.id)" class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                 <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
               </svg>
@@ -464,8 +490,13 @@
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
               </svg>
             </button>
+            <!-- #1634: also gate Edit while THIS row's toggle refetch is in
+                 flight — editSchedule() copies `enabled` into the form and
+                 saveSchedule() PUTs it back (recomputing next_run_at), so an
+                 Edit+Save inside the toggle window rewrites the fire time. -->
             <button
               @click="editSchedule(schedule)"
+              :disabled="deleteLoading === schedule.id || toggleLoading.has(schedule.id)"
               class="p-1.5 text-gray-400 hover:text-action-primary-600 rounded transition-colors"
               title="Edit"
             >
@@ -876,7 +907,9 @@ const editingSchedule = ref(null)
 const formLoading = ref(false)
 const formError = ref('')
 const triggerLoading = ref(null)
-const toggleLoading = ref(null)
+// #1634: a Set, not one id — two rows can be in flight at once, and a single ref
+// let the first completion re-enable the second row's control mid-request (AC #6).
+const toggleLoading = ref(new Set())
 // #1926: a failed list fetch is not an empty list; a failed verb is not a
 // silent no-op. Both get their own state instead of console.error/alert().
 const loadError = ref('')
@@ -1147,21 +1180,31 @@ function toggleAllTools() {
   }
 }
 
+// #1634: a superseded load must not paint over a newer one. Clearing the list in
+// the agent-name watcher cannot stop a LATE response: switching A→B while A's GET
+// is in flight lands A's rows under B's header (and clears the spinner early)
+// whenever A resolves last. Also covers two same-agent refreshes racing (AC #3).
+// Per-instance: `let` inside <script setup>.
+let loadSeq = 0
+
 // Load schedules
 async function loadSchedules() {
+  const seq = ++loadSeq
   loading.value = true
   loadError.value = ''
   try {
     const response = await axios.get(`/api/agents/${props.agentName}/schedules`, {
       headers: authStore.authHeader
     })
+    if (seq !== loadSeq) return
     schedules.value = response.data
     loadError.value = ''
   } catch (error) {
+    if (seq !== loadSeq) return
     console.error('Failed to load schedules:', error)
     loadError.value = apiErrorMessage(error, 'Request failed')
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
   loadPerf()
 }
@@ -1170,8 +1213,10 @@ async function loadSchedules() {
 // by schedule_id for inline row stats. Best-effort — failure leaves rows
 // without stats, never blocks the list.
 async function loadPerf() {
+  const seq = loadSeq          // #1634: the load that owns this refresh
   try {
     const summary = await executionsStore.fetchSchedulesSummary(props.agentName, PERF_WINDOW)
+    if (seq !== loadSeq) return
     const map = {}
     for (const row of summary?.schedules || []) map[row.schedule_id] = row
     perfBySchedule.value = map
@@ -1219,8 +1264,15 @@ async function saveSchedule() {
         { headers: authStore.authHeader }
       )
     }
-    closeForm()
+    // #1634: refresh BEFORE closing. With the list no longer unmounting during a
+    // refetch, closing first leaves the stale row interactive — a click on its
+    // Edit button opens the modal pre-filled from pre-save data, and saving that
+    // silently reverts the edit just made. Keeping the modal up — it already
+    // shows the sanctioned in-button spinner (`formLoading`) — removes the
+    // interactive-stale window entirely and gives the create path the progress
+    // signal it otherwise loses.
     await loadSchedules()
+    closeForm()
   } catch (error) {
     formError.value = error.response?.data?.detail || 'Failed to save schedule'
   } finally {
@@ -1307,7 +1359,7 @@ function reportActionFailure(error, what) {
 
 // Toggle schedule enabled/disabled
 async function toggleSchedule(schedule) {
-  toggleLoading.value = schedule.id
+  toggleLoading.value.add(schedule.id)
   clearActionError()
   const wanted = schedule.enabled ? 'disable' : 'enable'
   try {
@@ -1320,7 +1372,7 @@ async function toggleSchedule(schedule) {
     // sees the toggle snap back with no explanation (#1926).
     reportActionFailure(error, `${wanted} the schedule "${schedule.name}"`)
   } finally {
-    toggleLoading.value = null
+    toggleLoading.value.delete(schedule.id)
   }
 }
 
@@ -1505,6 +1557,17 @@ function summarizeToolInput(tool) {
 
 // Watch for agent name changes
 watch(() => props.agentName, () => {
+  // #1634: this state belongs to the PREVIOUS agent. With the spinner now gated
+  // on "no data yet", leaving it would (a) suppress the panel-wide spinner the
+  // new agent's first load needs and (b) render the old agent's rows under the
+  // new agent's header. ORDERING: loadSchedules() sets loading=true
+  // synchronously (no await precedes it) and this watcher is flush:'pre', so
+  // both writes land in one flush — no empty-state frame. Keep that line first.
+  schedules.value = []
+  perfBySchedule.value = {}
+  // #1926 state is per-agent too: a failed verb on agent A must not show as an
+  // error banner under agent B. (loadError clears inside loadSchedules().)
+  clearActionError()
   loadSchedules()
 })
 

@@ -148,6 +148,34 @@ applies to your clone too — plain `git submodule update` starts *skipping*
 the enterprise submodule (exit 0, working tree left stale). Run the step-1
 `git config` line once to restore normal syncing.
 
+#### Before advancing the recorded submodule pointer (#2068)
+
+Advancing the pointer is the one change public CI cannot check: it never
+mounts the submodule, so nothing in this repo's build sees what the new
+pointer contains. Run the migration-graph guard locally first — you already
+have the submodule checked out, which is why this is a procedure rather than
+a CI job:
+
+```bash
+python3 scripts/ci/check_alembic_heads.py \
+  src/backend/enterprise/backend/migrations/versions
+#   → "… 1 head (…) — PASS."   ship it
+#   → "FAIL — … resolves to 2 heads"   do NOT advance the pointer
+```
+
+Two migration revisions that branch off the same parent leave the version
+line with two heads. The upgrade run is `head`, singular: it resolves its
+target *before* applying anything, so it applies **nothing** and raises —
+and that error is caught and downgraded to a warning, so the platform boots
+happily with every entitled feature switched off. Git shows no conflict for
+this, because each revision file is valid on its own.
+
+After the deploy, confirm the outcome rather than assuming it — the boot log
+in [4. Verify](#4-verify) must show `Trinity Enterprise modules registered`
+and no `registration FAILED` line, and `GET /api/version` must report
+`"edition": "enterprise"`. A green `/health` and green containers prove
+nothing here: a failed registration leaves both untouched.
+
 ## Forcing OSS-only mode
 
 `TRINITY_OSS_ONLY=1` (backend environment) empties the entitlement registry

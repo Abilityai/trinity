@@ -82,7 +82,7 @@ from routers.canary import router as canary_router  # CANARY-001 / Issue #411
 from routers.compatibility import router as compatibility_router  # #668 agent compatibility
 from routers.skills import router as skills_router
 from routers.internal import router as internal_router, pull_router as internal_pull_router
-from routers.tags import router as tags_router
+from routers.tags import router as tags_router, set_websocket_manager as set_tags_ws_manager
 from routers.system_views import router as system_views_router
 from routers.notifications import router as notifications_router, set_websocket_manager as set_notifications_ws_manager, set_filtered_websocket_manager as set_notifications_filtered_ws_manager
 from routers.reports import router as reports_router
@@ -109,6 +109,7 @@ from routers.event_subscriptions import router as event_subscriptions_router, se
 from routers.users import router as users_router
 from routers.debug import router as debug_router  # #306 soak instrumentation
 from routers.a2a import router as a2a_router  # #737 A2A Agent Cards
+from routers.a2a import a2a_server_router  # ent#157 A2A inbound server (well-known + JSON-RPC)
 from routers.admin_recovery import router as admin_recovery_router  # #834 Phase 1c
 from routers.messages import router as messages_router  # Proactive Messaging (#321)
 from routers.public_memory import router as public_memory_router  # MEM-001 write path (#888)
@@ -254,6 +255,7 @@ set_agents_filtered_ws_manager(filtered_manager)
 set_agent_rename_ws_manager(manager)
 set_agent_rename_filtered_ws_manager(filtered_manager)
 set_sharing_ws_manager(manager)
+set_tags_ws_manager(manager)  # agent_tags_changed (org overlay, ent#305)
 set_chat_persistence_ws_manager(manager)  # #1483: chat_response_ready broadcast
 set_chat_execution_ws_manager(manager)    # #1483: agent_collaboration + self_task broadcasts
 set_public_links_ws_manager(manager)
@@ -1032,6 +1034,7 @@ app.include_router(event_subscriptions_router)  # Agent Event Subscriptions (EVT
 app.include_router(users_router)  # User Management (ROLE-001)
 app.include_router(debug_router)  # #306 soak dashboard
 app.include_router(a2a_router)  # A2A Agent Cards (#737)
+app.include_router(a2a_server_router)  # A2A inbound server: /a2a/{name}/.well-known + JSON-RPC (ent#157)
 app.include_router(admin_recovery_router)  # Soft-delete admin recovery (#834 Phase 1c)
 app.include_router(loops_agent_router)  # Sequential agent loops (#740)
 app.include_router(loops_loop_router)  # Sequential agent loops (#740)

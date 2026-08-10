@@ -125,4 +125,4 @@ An owner can publish an agent as its own first-class MCP tool. On the agent's **
 
 - [Nevermined Payments](nevermined-payments.md)
 - [Slack Integration](slack-integration.md)
-- [A2A Agent Card](a2a-protocol.md) — A2A v1.0 discovery for external orchestrators
+- [A2A Protocol](a2a-protocol.md) — A2A `0.3.0` discovery and inbound tasking for external orchestrators

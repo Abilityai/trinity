@@ -12,12 +12,77 @@ unchanged.
 
 from typing import List
 
-from sqlalchemy import select, insert, delete, func
+from sqlalchemy import select, insert, delete, func, update
 
 from .engine import get_engine, make_insert
 from .tables import agent_tags
 from db_models import AgentTagList, TagWithCount
 from utils.helpers import utc_now_iso
+
+
+# ---------------------------------------------------------------------------
+# Org-overlay reserved namespaces (trinity-enterprise#305)
+#
+# The Grid view's org overlay stores departments and reporting lines as tags:
+#   dept-<name>          department membership (on the agent itself)
+#   reports-to-<agent>   "this agent reports to <agent>" (on the REPORT row)
+#
+# These prefixes are reserved against agent-principal writes at the router
+# (mirrors the #1578 reserved event namespace: a prompt-injected agent must
+# not redraw the org chart operators act on). Keep in sync with the frontend
+# mirror in src/frontend/src/utils/gridOrg.js.
+# ---------------------------------------------------------------------------
+
+ORG_DEPT_PREFIX = "dept-"
+ORG_REPORTS_PREFIX = "reports-to-"
+ORG_TAG_PREFIXES = (ORG_DEPT_PREFIX, ORG_REPORTS_PREFIX)
+
+
+def rename_reports_to_refs(conn, old_name: str, new_name: str) -> int:
+    """
+    Rewrite ``reports-to-<old_name>`` tag VALUES fleet-wide to point at
+    ``new_name``. Runs on the caller's connection so it is atomic with the
+    rename transaction (db/agent_settings/metadata.py:rename_agent).
+
+    The `(agent_name, tag)` primary key makes a blind UPDATE abort whenever a
+    row already holds ``reports-to-<new_name>`` (stale tag from a purged
+    predecessor, hand-set duplicate) — and that IntegrityError would fail the
+    WHOLE rename. So: delete the colliding rows first, then update.
+
+    Returns the number of refs rewritten.
+    """
+    old_tag = ORG_REPORTS_PREFIX + old_name
+    new_tag = ORG_REPORTS_PREFIX + new_name
+    holders = select(agent_tags.c.agent_name).where(agent_tags.c.tag == old_tag)
+    conn.execute(
+        delete(agent_tags).where(
+            agent_tags.c.tag == new_tag,
+            agent_tags.c.agent_name.in_(holders),
+        )
+    )
+    result = conn.execute(
+        update(agent_tags).where(agent_tags.c.tag == old_tag).values(tag=new_tag)
+    )
+    return result.rowcount or 0
+
+
+def delete_reports_to_refs(conn, agent_name: str) -> int:
+    """
+    Delete dangling ``reports-to-<agent_name>`` tag VALUES fleet-wide.
+
+    Called from the hard-purge cascade (db/agent_cleanup.py:cascade_delete) —
+    the row-level AGENT_REFS cascade removes the agent's OWN tag rows, but
+    refs to it live on OTHER agents' rows and would otherwise silently
+    re-attach if the name is ever reused after the retention window.
+    Soft-delete keeps refs (render skips missing agents; recovery restores
+    the lines intact).
+
+    Returns the number of refs deleted.
+    """
+    result = conn.execute(
+        delete(agent_tags).where(agent_tags.c.tag == ORG_REPORTS_PREFIX + agent_name)
+    )
+    return result.rowcount or 0
 
 
 class TagOperations:

@@ -9,6 +9,7 @@ import asyncio
 import logging
 import json
 import time
+import zoneinfo
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Callable
 
@@ -456,7 +457,26 @@ class SchedulerService:
             self._permanent_add_failures.discard(schedule.id)
             logger.info(f"Added schedule job: {job_id} ({schedule.name}) for agent {schedule.agent_name}")
             return True
-        except (pytz.exceptions.UnknownTimeZoneError, ValueError) as e:
+        except (
+            pytz.exceptions.UnknownTimeZoneError,
+            ValueError,
+            # #1823: a zone pytz knows but this runtime's IANA database lacks —
+            # a legacy alias such as `Europe/Kiev` when the image ships no
+            # backward-compatibility links. APScheduler's `astimezone()` raises
+            # it from inside CronTrigger, and it is a KeyError subclass, so it
+            # is NOT a ValueError and fell through to the broad `except
+            # Exception` below: the TRANSIENT arm. The row was therefore never
+            # snapshotted into _permanent_add_failures, so #1472's bounded-retry
+            # machinery was defeated — it retried every 60s forever, logged an
+            # ERROR on every sync tick, and froze `next_run_at` into exactly the
+            # "Next: Nd ago" symptom #1472 existed to eliminate (canary E-06
+            # fires on it each cycle).
+            #
+            # Named explicitly, NEVER a bare KeyError: this arm SUPPRESSES
+            # retries, so widening it would permanently park schedules whose
+            # registration failed for a genuinely transient reason.
+            zoneinfo.ZoneInfoNotFoundError,
+        ) as e:
             # #1472: permanent — a bad timezone or cron that clears the backend's
             # looser croniter check but fails _parse_cron/CronTrigger. Log ONCE and
             # record so the sync loop snapshots it (bounded) instead of retrying

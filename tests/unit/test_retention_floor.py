@@ -108,6 +108,7 @@ def _admin():
     u = MagicMock()
     u.role = "admin"
     u.connector_agent = None  # #1310: not a connector principal
+    u.agent_name = None  # ent#293: not an agent-scoped key
     return u
 
 
