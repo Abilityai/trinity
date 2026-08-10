@@ -103,8 +103,9 @@ drops become instant placement. Multi-touch is discriminated by pointer id
 ## Performance contract (#47 acceptance criteria)
 
 1. **Non-blocking first paint** — tiles render immediately from the agents
-   list the Dashboard already holds; per-section skeletons while analytics
-   stream in. Nothing awaits the full set.
+   list the Dashboard already holds; the chart zones show the scanline
+   loading motion while analytics stream in (see "Chart loading motion"
+   below). Nothing awaits the full set.
 2. **Lazy, capped hydration** — a tile asks the fleetGrid store to hydrate
    only when near the viewport (culled tiles render a light placeholder and
    fetch nothing); fetches run through a 4-slot queue into the executions
@@ -113,6 +114,44 @@ drops become instant placement. Multi-touch is discriminated by pointer id
 3. **Batch endpoints over per-agent loops** for chip data; the 60s poll is
    visibility-aware (skips when `document.hidden`) and tears down when the
    Grid unmounts (mode switch is `v-if`).
+
+## Chart loading motion (trinity-enterprise#245)
+
+The tile's two chart zones use **`components/ScanlineReveal.vue`** — the
+app's default data-loading motion (design-system.md §6: beam sweep while
+loading, one 550ms `clip-path` wipe-in when data arrives) — instead of the
+retired flat pulse skeleton. This is the **reference adoption** of the
+primitive; new data-loading surfaces reach for it rather than inventing
+spinners/skeletons (fleet-wide adoption pass: trinity-enterprise#253).
+
+- One `ScanlineReveal` per chart box, both driven by a single
+  `chartsLoading = !analytics && analyticsPending` flag, so the beams
+  phase-sync. `:reveal="!!analytics"` — a data-less terminal (per-tile fetch
+  error) snaps instead of playing the arrival pass; zero-run stub baselines
+  are an answer and do reveal.
+- The phase rules (cache hits mount straight to `loaded`, rising edges
+  re-enter `loading`, background refresh never animates) live in the pure
+  `utils/scanlinePhase.js`, unit-tested in `tests/unit/scanlinePhase.spec.js`.
+  The store contract already guarantees the refresh half: `fleetGrid.hydrate`
+  only sets `'loading'` when there is no cached payload.
+- The grid overrides the primitive's token defaults with its own palette
+  (`.t-charts .mini .scanline` → `--scan-core: var(--gv-blue)`,
+  `--scan-track: var(--gv-bar-track)`), so both themes come from FleetGrid's
+  existing `--gv-*` definitions.
+- `prefers-reduced-motion`: static track, instant reveal (JS matchMedia skip
+  + CSS belt). E2e guards in `e2e/dashboard-grid-view.spec.js` assert no
+  element retains a `clip-path` after settle (the stuck-reveal bug class)
+  and cover the reduced-motion path.
+
+- **No-blink reveal**: during the arrival pass the dimmed track is wiped OUT
+  behind the beam (the complementary `clip-path` of the content wipe), so
+  each pixel shows either the track or the final content on its final
+  background — the track's unmount at `loaded` is visually a no-op.
+
+**Adoption is deliberately Dashboard-only for now** (product decision,
+2026-08-08): Agent Detail keeps its existing loading states. Rolling the
+primitive across further surfaces (Overview trend charts included) is
+trinity-enterprise#253's charter.
 4. **A slow or failed per-agent fetch degrades that one tile only.**
 
 ## Failure modes & edge cases
@@ -136,3 +175,49 @@ layout persistence, tidy/reset, and Timeline coexistence (@smoke; Graph mode dec
 
 Fleet KPI strip; "Needs your attention" + live-activity right rail;
 server-side per-user layout storage.
+
+## Org overlay — department zones + reporting lines (trinity-enterprise#305)
+
+Organizational layer over the same lattice; OSS-core. Full requirement:
+`docs/memory/requirements/core-agent.md` § Grid Org Overlay.
+
+**Data model (namespaced tags, no schema change).** Department =
+`dept-<name>` tag; reporting line = `reports-to-<agent>` tag on the REPORT
+agent (direction = which row carries the tag). Prefix constants live twice by
+contract: `src/backend/db/tags.py` (`ORG_TAG_PREFIXES`) and
+`src/frontend/src/utils/gridOrg.js` — keep in sync.
+
+**Frontend flow.** `utils/gridOrg.js` (pure: parsing, `orgMeta` bootstrap
+gate, `computeZones` hulls + `ZONE_CHROME` budget, `computeEdges` with
+arrowheads, `arrangeByDept`, `tidyByDept`, `newcomerOrigin`, `deptSlot` hash
+palette, `isOrgTag`) → `composables/useOrgOverlay.js` (all org state +
+gestures: connect-port drag with live pill, drop-to-assign re-validated at
+drop, zone-header block move with rAF throttling + drop-time re-validation,
+canvas toast with Undo, New-department assign mode) → `FleetGrid.vue`
+(template layers: zones under wires under tiles; canvas-space panels) +
+`AgentTile.vue` (dept ribbon via `--gv-dept-N` slot vars, light 600 / dark
+400). Tag writes go through the **network store** (atomic `PUT /tags`
+set-list; refetch-on-failure; `{previous, next}` returned for Undo).
+
+**Backend flow.** `routers/tags.py`: org namespaces are human-only
+(`_guard_org_namespace` rejects agent principals — #1578 pattern; the
+set-list guard checks the DELTA) and every mutation broadcasts
+`agent_tags_changed` (network store patches by name — cross-browser
+convergence without a roster poll). Rename: `metadata.py:rename_agent` calls
+`db/tags.py:rename_reports_to_refs` in the SAME transaction
+(delete-colliding-then-update; the `(agent_name, tag)` PK would otherwise
+abort the whole rename). Hard purge: `agent_cleanup.py:cascade_delete` calls
+`delete_reports_to_refs` (dangling refs must not re-attach to a reused name).
+Soft delete keeps refs; `computeEdges` skips unplaced endpoints.
+
+**Guardrails.** Zones derived (hull model) — never constrain the lattice;
+bootstrap fallback (first plain tag = dept while zero `dept-*` exist
+fleet-wide) renders READ-ONLY zones; `zoneAt` resolves overlap by smallest
+hull; roster changes cancel all in-flight org gestures; spacing contract
+(chrome 22/10/34/10 ≤ gaps 40/50) pinned by unit test.
+
+**Testing.** `src/frontend/tests/unit/gridOrg.spec.js` +
+`gridLayout.spec.js` (vitest, `npm run test:unit`, wired into
+frontend-build.yml); `tests/unit/test_305_org_tag_integrity.py` (rename
+collision, purge sweep, namespace guard); e2e smoke in
+`src/frontend/e2e/grid-org-overlay.spec.js`.

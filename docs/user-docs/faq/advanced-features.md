@@ -48,7 +48,9 @@ Some templates declare `fork_to_own: required` in their `template.yaml`, meaning
 
 ## What is the A2A agent card?
 
-It's a standardized discovery endpoint — `GET /api/agents/{name}/a2a/agent-card` — that publishes an agent's capabilities in A2A v1.0 format so external orchestrators (AWS Bedrock, Azure Copilot, Google ADK) can discover and call the agent without knowing Trinity's internal API. The card is generated from the agent's `template.yaml` and container labels, works even when the agent is stopped (it falls back to a partial card), and never returns a server error. It currently requires authentication; the public `/.well-known/agent-card.json` route is not served yet. See [A2A Agent Card](../integrations/a2a-protocol.md).
+It's a standardized discovery endpoint — `GET /api/agents/{name}/a2a/agent-card` — that publishes an agent's capabilities in A2A `0.3.0` format so external orchestrators (AWS Bedrock, Azure Copilot, Google ADK) can discover and call the agent without knowing Trinity's internal API. The card is generated from the agent's `template.yaml` and container labels, works even when the agent is stopped (it falls back to a partial card), and never returns a server error. This endpoint requires authentication.
+
+Agents you explicitly **expose** for A2A also get a public discovery card at `GET /a2a/{name}/.well-known/agent-card.json` and a JSON-RPC task endpoint at `POST /a2a/{name}`, so an outside orchestrator can task them. Exposure is per-agent and off by default; tasking always requires a Trinity MCP API key. See [A2A Protocol](../integrations/a2a-protocol.md).
 
 ## Can my agent run a long multi-stage pipeline, and can I watch its progress?
 

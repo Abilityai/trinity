@@ -92,9 +92,23 @@ def test_agentconfig_blank_label_clears(M):
 def test_label_update_shares_policy(M):
     assert M.AgentLabelUpdate(label="  Hi  ").label == "Hi"
     assert M.AgentLabelUpdate(label="").label is None       # clear
-    assert M.AgentLabelUpdate().label is None
+    assert M.AgentLabelUpdate(label=None).label is None     # clear, said explicitly
     with pytest.raises(Exception):
         M.AgentLabelUpdate(label="bad\ttab")
+
+
+def test_label_update_requires_the_label_field(M):
+    """#1821: an omitted or misnamed `label` no longer means "clear".
+
+    It used to, which made a typo'd field name — `display_label`, the DB column,
+    right next to the `display_name` response field — indistinguishable from a
+    deliberate clear: the unknown key was dropped, `label` defaulted to None, and
+    the PUT wiped the label while answering 200. Clearing is still supported and
+    unchanged in meaning (see the two cases above); it just has to be stated."""
+    with pytest.raises(Exception):
+        M.AgentLabelUpdate()                              # empty body
+    with pytest.raises(Exception):
+        M.AgentLabelUpdate(display_label="Typo Name")     # the actual #1821 trigger
 
 
 def test_not_unique_policy(M):

@@ -5,7 +5,7 @@ import os
 import re
 import unicodedata
 
-from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator, model_validator
 from typing import Any, Dict, List, Literal, Optional, Union
 from datetime import datetime
 from enum import Enum
@@ -267,8 +267,18 @@ class AgentLabelUpdate(BaseModel):
     `label=None` (or blank) clears it, and the agent renders under its slug
     again. Presentation only: the slug never moves, which is the entire point —
     a slug rename re-keys ~20 tables and strands the agent's volumes (#1664).
+
+    #1821: `label` is REQUIRED-but-nullable, and unknown fields are rejected.
+    Clearing is a legitimate operation expressed as an explicit null, but with
+    an ignored-extras model and a `None` default it was also what you got from
+    any body the server did not recognise — so `{"display_label": "..."}` (an
+    easy mistake: `display_label` is the DB column and `display_name` the
+    response field) returned 200 and silently wiped the label. Both an unknown
+    field and an empty `{}` now 422 instead of destroying data.
     """
-    label: Optional[str] = None
+    model_config = ConfigDict(extra="forbid")
+
+    label: Optional[str]
 
     @field_validator("label")
     @classmethod
@@ -2204,11 +2214,18 @@ class CycleViolation(BaseModel):
 
 
 class CycleTransition(BaseModel):
-    """A green→red transition detected this cycle.
+    """A green→red transition this cycle **delivered an alert for**.
 
-    `CanaryService` posts exactly one Slack webhook message per entry,
+    `CanaryService` delivered exactly one Slack webhook message per entry,
     mapping severity to the message styling. Surfaced here so the run-cycle
-    response mirrors what the service actually emitted.
+    response mirrors what the service actually sent.
+
+    Since #1897 an entry means *notified*, not merely *detected*: a
+    transition whose webhook POST was rejected appears in
+    `RunCycleResponse.undelivered_invariant_ids` instead and is retried on
+    a later cycle while the invariant stays red. Conversely an entry here
+    may be a retry that finally landed, whose flip was detected on an
+    earlier cycle.
     """
 
     invariant_id: str
@@ -2237,6 +2254,18 @@ class RunCycleResponse(BaseModel):
     sources_unavailable: List[str]
     violations: List[CycleViolation]
     transitions: List[CycleTransition]
+    undelivered_invariant_ids: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Invariants this cycle tried to alert on and could not deliver — "
+            "a rejected webhook, a raised emit, or a retry held off by the "
+            "per-interval floor (#1897). Disjoint from `transitions`, which "
+            "since #1897 lists only what was actually sent; without this "
+            "field a webhook outage would render as zero transitions, which "
+            "is indistinguishable from a green cycle. Each entry is retried "
+            "on a later cycle while its invariant stays red."
+        ),
+    )
 
 
 # =============================================================================
@@ -3120,6 +3149,19 @@ class GitHubTemplateEntry(BaseModel):
 class GitHubTemplatesUpdate(BaseModel):
     """Request body for updating GitHub templates."""
     templates: List[GitHubTemplateEntry]
+
+
+class TemplateRegistryUpdate(BaseModel):
+    """PUT body for the remote template registry (TMPL-002, ent#14).
+
+    Partial update: an omitted field is left untouched (the
+    `/api/settings/skills-library` shape), so an admin can flip the toggle
+    without re-typing the URL. `url` is validated by
+    `utils.url_validation.validate_template_registry_url` at the route — SSRF
+    gating needs DNS resolution, which does not belong in a Pydantic model.
+    """
+    url: Optional[str] = None
+    enabled: Optional[bool] = None
 
 
 class McpUrlUpdate(BaseModel):

@@ -165,6 +165,26 @@ OPS_SETTINGS_DESCRIPTIONS = {
 }
 
 
+# --- Remote template registry keys (TMPL-002, trinity-enterprise#14) -------
+TEMPLATE_REGISTRY_URL_KEY = "template_registry_url"
+TEMPLATE_REGISTRY_ENABLED_KEY = "template_registry_enabled"
+TEMPLATE_REGISTRY_GENERATION_KEY = "template_registry_generation"
+TEMPLATE_REGISTRY_LKG_KEY = "template_registry_lkg"
+
+#: Every registry key the generic `PUT /api/settings/{key}` must refuse, so the
+#: dedicated validated route is the only write path. The URL alone would be
+#: enough to matter (the SSRF gate lives on that route); `generation` and `lkg`
+#: are here because they are the cache itself, and a writable cache is a
+#: poisonable one. Same 422-with-a-pointer shape as RETENTION_OPS_KEYS (ent#297)
+#: and SKILLS_AUTOMATION_KEYS (ent#236).
+TEMPLATE_REGISTRY_KEYS = frozenset({
+    TEMPLATE_REGISTRY_URL_KEY,
+    TEMPLATE_REGISTRY_ENABLED_KEY,
+    TEMPLATE_REGISTRY_GENERATION_KEY,
+    TEMPLATE_REGISTRY_LKG_KEY,
+})
+
+
 class SettingsService:
     """
     Centralized service for retrieving settings.
@@ -443,6 +463,145 @@ class SettingsService:
     def delete_github_templates(self) -> bool:
         """Delete GitHub templates configuration (revert to defaults)."""
         return db.delete_setting('github_templates')
+
+    # =========================================================================
+    # Remote Template Registry (TMPL-002, trinity-enterprise#14)
+    # =========================================================================
+    #
+    # Four keys, all four blocked on the generic `PUT /api/settings/{key}` via
+    # TEMPLATE_REGISTRY_KEYS: `url` because the SSRF gate would otherwise be one
+    # unvalidated PUT away from bypass, `enabled` because it is a security
+    # control, and `generation`/`lkg` because they ARE the cache — writing them
+    # directly is cache poisoning with extra steps.
+
+    def get_template_registry_url(self) -> str:
+        """Effective registry URL: admin override row, else the config default.
+
+        No cache. `--workers 2` (the #506 rationale) — one SQLite read per
+        catalog assembly is negligible next to the HTTP fetch it gates, and a
+        cached URL is exactly how one worker keeps fetching a repointed
+        registry's old address.
+        """
+        from config import TEMPLATE_REGISTRY_URL
+
+        stored = self.get_setting(TEMPLATE_REGISTRY_URL_KEY)
+        if stored and str(stored).strip():
+            return str(stored).strip()
+        return TEMPLATE_REGISTRY_URL
+
+    def is_template_registry_enabled(self) -> bool:
+        """Composed switch: the config hard kill switch AND the admin toggle.
+
+        Deliberately NOT `_resolve_bool_flag` — see the config.py comment. That
+        helper treats its env var as opt-in only, so `default=True` would make
+        `TEMPLATE_REGISTRY_ENABLED=false` inert (#1039 class). Here the hard
+        switch is evaluated FIRST and no stored row can override it.
+
+        Fail-open on a settings-read failure (the #506 `clamp_to_ceiling`
+        discipline): the toggle defaults to on, so a transient DB error must not
+        silently disable a working registry — and the fetch itself is fenced.
+        """
+        from config import TEMPLATE_REGISTRY_ENABLED
+
+        if not TEMPLATE_REGISTRY_ENABLED:
+            return False
+        try:
+            stored = self.get_setting(TEMPLATE_REGISTRY_ENABLED_KEY)
+        except Exception:
+            stored = None
+        if stored is None:
+            return True
+        return str(stored).strip().lower() in ("1", "true", "yes", "on")
+
+    def is_template_registry_hard_disabled(self) -> bool:
+        """True when config alone has switched the registry off, so the panel
+        can render the toggle as inert instead of pretending it works
+        (the `TelemetrySharingPanel` `hard_disabled` shape)."""
+        from config import TEMPLATE_REGISTRY_ENABLED
+
+        return not TEMPLATE_REGISTRY_ENABLED
+
+    def get_template_registry_generation(self) -> int:
+        """Monotonic counter bumped on every registry settings write.
+
+        This is the cross-worker cache invalidation primitive. A per-process
+        `invalidate_registry_cache()` clears only the calling worker, so under
+        `--workers 2` an admin who repoints the registry sees the change apply
+        on roughly half their page loads — a nondeterministic setting, which is
+        worse than a slow one. A cached entry stamped with a stale generation is
+        discarded on read.
+
+        Mandatory, not nice-to-have, once the registry TTL is an hour: the two
+        decisions are coupled and must not be split. Fail-open to 0 — an
+        unreadable counter must not disable the cache.
+        """
+        try:
+            raw = self.get_setting(TEMPLATE_REGISTRY_GENERATION_KEY)
+            return int(raw) if raw is not None else 0
+        except Exception:  # noqa: BLE001 — unreadable counter must not disable the cache
+            return 0
+
+    def bump_template_registry_generation(self) -> int:
+        """Invalidate every worker's registry cache. Called on every write."""
+        nxt = self.get_template_registry_generation() + 1
+        db.set_setting(TEMPLATE_REGISTRY_GENERATION_KEY, str(nxt))
+        return nxt
+
+    def set_template_registry_config(
+        self, *, url: Optional[str] = None, enabled: Optional[bool] = None
+    ) -> None:
+        """Partial update. An omitted field is left untouched (the
+        `/api/settings/skills-library` shape). Always bumps the generation."""
+        if url is not None:
+            db.set_setting(TEMPLATE_REGISTRY_URL_KEY, url)
+        if enabled is not None:
+            db.set_setting(
+                TEMPLATE_REGISTRY_ENABLED_KEY, "true" if enabled else "false"
+            )
+        self.bump_template_registry_generation()
+
+    def delete_template_registry_config(self) -> bool:
+        """Reset to the config defaults.
+
+        Also drops the durable last-known-good: it was captured under the
+        overridden URL, and serving it after a reset would attribute one
+        registry's catalog to another.
+        """
+        removed_url = db.delete_setting(TEMPLATE_REGISTRY_URL_KEY)
+        removed_enabled = db.delete_setting(TEMPLATE_REGISTRY_ENABLED_KEY)
+        db.delete_setting(TEMPLATE_REGISTRY_LKG_KEY)
+        self.bump_template_registry_generation()
+        return bool(removed_url or removed_enabled)
+
+    def get_template_registry_lkg(self) -> Optional[dict]:
+        """Durable last-known-good parse, or None.
+
+        Never raises: a corrupt row is indistinguishable from no row, which is
+        the correct degradation — the caller falls back to the bundled floor.
+        """
+        raw = None
+        try:
+            raw = self.get_setting(TEMPLATE_REGISTRY_LKG_KEY)
+            if raw is None:
+                return None
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            logger.warning(
+                "[template-registry] stored last-known-good is unreadable; ignoring it"
+            )
+            return None
+
+    def set_template_registry_lkg(self, payload: dict) -> None:
+        """Persist the sanitized PARSED registry (never the raw YAML).
+
+        Storing raw YAML would mean re-parsing an untrusted document out of our
+        own database on a path where the network guards no longer apply.
+        """
+        db.set_setting(TEMPLATE_REGISTRY_LKG_KEY, json.dumps(payload))
+
+    def clear_template_registry_lkg(self) -> None:
+        db.delete_setting(TEMPLATE_REGISTRY_LKG_KEY)
 
     def get_platform_default_model(self) -> str:
         """
@@ -981,6 +1140,17 @@ def get_agent_default_require_email() -> bool:
 def get_github_templates() -> Optional[List[dict]]:
     """Get admin-configured GitHub templates, or None for defaults."""
     return settings_service.get_github_templates()
+
+
+# Remote Template Registry (TMPL-002, trinity-enterprise#14)
+def get_template_registry_url() -> str:
+    """Effective registry URL — admin override row, else the config default."""
+    return settings_service.get_template_registry_url()
+
+
+def is_template_registry_enabled() -> bool:
+    """Config hard switch AND the admin toggle (default on when unset)."""
+    return settings_service.is_template_registry_enabled()
 
 
 def get_platform_default_model() -> str:
