@@ -70,7 +70,7 @@ def test_main_py_does_not_catch_bare_importerror_for_the_benign_message():
     """Static guard: the reassuring message must sit behind the narrowed
     `ModuleNotFoundError` + name check, never a bare `except ImportError`."""
     src = MAIN_PY.read_text()
-    block_start = src.index("from enterprise.backend import register_enterprise")
+    block_start = src.index("from client_portal import register_enterprise")
     block = src[block_start:block_start + 2500]
 
     assert "except ModuleNotFoundError" in block, (

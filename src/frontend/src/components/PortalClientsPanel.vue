@@ -118,7 +118,11 @@ const props = defineProps({
 })
 
 const enterprise = useEnterpriseStore()
-const entitled = computed(() => enterprise.isEntitled('client_portal'))
+// ent#356: the client portal is OSS core, so this section is always
+// available. Kept as a named constant rather than deleting every usage —
+// the panel still has load/empty states that key off it, and a future
+// per-agent gate (a workspace that is off for one agent) would reuse it.
+const entitled = computed(() => true)
 const { isAdmin } = useRole()
 
 const clients = ref([])
