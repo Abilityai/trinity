@@ -246,6 +246,7 @@
 <script setup>
 import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { useSystemViewsStore } from '@/stores/systemViews'
+import { isOrgTag } from '@/utils/gridOrg'
 import axios from 'axios'
 
 const props = defineProps({
@@ -311,7 +312,8 @@ async function fetchAvailableTags() {
   tagsError.value = false
   try {
     const response = await axios.get('/api/tags')
-    availableTags.value = response.data.tags || []
+    // Hide org-overlay namespaces (dept-*/reports-to-*) — see gridOrg.isOrgTag
+    availableTags.value = (response.data.tags || []).filter((t) => !isOrgTag(t.tag))
   } catch (err) {
     console.error('Failed to fetch tags:', err)
     tagsError.value = true

@@ -62,18 +62,30 @@ def _load_template_service(monkeypatch, default_repos):
 def _stub_network(monkeypatch, module, calls, db_entries=None):
     """Replace every hop that leaves the process; record what it would fetch.
 
-    `_get_cached_metadata` and `_fetch_template_yaml` are the two GitHub reads;
+    `_get_cached_metadata`, `_fetch_template_yaml` and — since
+    trinity-enterprise#14 — `_fetch_template_yaml_logged` are the GitHub reads;
     `_get_github_pat` reads settings/DB and is called before the pool is even
     built. `services.settings_service.get_github_templates` is imported lazily
     inside both `get_github_template` and `get_all_templates` — `None` is the
     "no admin override row" case, i.e. fall back to the defaults.
+
+    `_fetch_template_yaml_logged` is the `(metadata, reason)` variant the bulk
+    path now submits to the pool, so that an unreadable `template.yaml` is
+    cached as unreadable rather than as "declares nothing" (the fork-gate
+    bypass). Stubbing only `_fetch_template_yaml` would leave the real one
+    running: `calls` would come back empty and the counter-test below would
+    silently stop counting.
     """
     def _fake(repo, *args, **kwargs):
         calls.append(repo)
         return {}
 
+    def _fake_logged(repo, *args, **kwargs):
+        return _fake(repo, *args, **kwargs), None
+
     monkeypatch.setattr(module, "_get_cached_metadata", _fake)
     monkeypatch.setattr(module, "_fetch_template_yaml", _fake)
+    monkeypatch.setattr(module, "_fetch_template_yaml_logged", _fake_logged)
     monkeypatch.setattr(module, "_get_github_pat", lambda *a, **k: "test-pat")
     # `_metadata_cache` is a module-level dict, so each `exec_module` above
     # already gets a fresh one — this is belt-and-braces against a future load

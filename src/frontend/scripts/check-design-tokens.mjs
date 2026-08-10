@@ -135,6 +135,9 @@ const INK_LADDER_SWEPT = {
   'components/operator/NotificationsPanel.vue': 2, // spinner svg + inbox svg
   'components/operator/QueueCard.vue': 4,      // separator, dismiss glyph, 2 disabled buttons
   'components/operator/QueueItemDetail.vue': 0,
+  // #1848 swept the key-list metadata row, whose inverted ink pair
+  // (text-gray-400 dark:text-gray-500) failed AA in BOTH themes at rest.
+  'components/settings/McpKeysTab.vue': 1,     // empty-state svg glyph
   'views/Dashboard.vue': 5,                    // 3 separators, search svg, clear glyph
   'views/Login.vue': 0,
   'views/enterprise/Audit.vue': 0,

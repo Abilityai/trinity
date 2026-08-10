@@ -62,6 +62,7 @@ class FakeRedis:
 
     def __init__(self) -> None:
         self.store: Dict[str, str] = {}
+        self.hashes: Dict[str, Dict[str, str]] = {}
         self.ttls: Dict[str, int] = {}
 
     def register_script(self, src: str):
@@ -108,6 +109,32 @@ class FakeRedis:
     def delete(self, key):
         self.ttls.pop(key, None)
         return 1 if self.store.pop(key, None) is not None else 0
+
+    # HASH — #1897's `canary:alert_pending` store. This double is also
+    # monkeypatched over `CanaryService._redis` by
+    # `test_non_leader_never_collects_a_snapshot`, which drives the REAL cycle
+    # path; without these the pending read/write would raise `AttributeError`
+    # into the service's fail-open handlers. That test would still pass — but
+    # with a `logger.exception` traceback per cycle and the whole retry
+    # mechanism inert, so a bug in it could not be seen from here.
+
+    def hset(self, key, field, value):
+        bucket = self.hashes.setdefault(key, {})
+        added = 0 if field in bucket else 1
+        bucket[field] = str(value)
+        return added
+
+    def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
+
+    def hdel(self, key, *fields):
+        bucket = self.hashes.get(key)
+        if not bucket:
+            return 0
+        removed = sum(1 for f in fields if bucket.pop(f, None) is not None)
+        if not bucket:
+            self.hashes.pop(key, None)
+        return removed
 
 
 def _module():

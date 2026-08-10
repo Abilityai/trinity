@@ -31,5 +31,8 @@ jobs:
       - name: Verify design tokens
         run: npm run check:tokens
 
+      - name: Unit tests
+        run: npm run test:unit
+
       - name: Build
         run: npm run build

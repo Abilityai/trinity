@@ -10,10 +10,14 @@
 // Interaction constants from the approved design of record (issue #47 mockup).
 // GAP_X exceeds the 26px avatar overhang, so a protruding avatar always
 // floats in clear space between columns.
+// Org-overlay revision: gaps are sized so a department-zone frame's chrome
+// (22px left / 10px right / 34px header top / 10px bottom, see gridOrg.js)
+// fits INSIDE the regular gap — two different zones can occupy adjacent
+// rows/columns with no spacer cells and no frame collision.
 export const CELL_W = 384
 export const CELL_H = 216
-export const GAP_X = 34
-export const GAP_Y = 18
+export const GAP_X = 40
+export const GAP_Y = 50
 export const COORD_LIMIT = 60 // sanity bound, ~unbounded in practice
 export const Z_MIN = 0.25
 export const Z_MAX = 1.6
@@ -98,12 +102,15 @@ export function defaultLayout(agentNames, systemNames = new Set()) {
 /**
  * Self-healing pass (#47 AC): reconcile a saved layout against the live
  * agent list.
- *   - new agents take the first free cell near the origin
+ *   - new agents take the first free cell near the origin — or, when the
+ *     caller provides `originFor(name)`, near that agent-specific origin
+ *     (the org overlay uses this to place a newcomer beside its department's
+ *     zone hull instead of at the board origin)
  *   - deleted agents leave their gap (their entries are dropped)
  *   - an invalid or colliding saved position resolves to the nearest free cell
  * Returns `{ layout, changed }` — `changed` signals the caller to re-persist.
  */
-export function normalizeLayout(saved, agentNames) {
+export function normalizeLayout(saved, agentNames, originFor = null) {
   const layout = {}
   let changed = false
   const names = [...agentNames]
@@ -124,9 +131,11 @@ export function normalizeLayout(saved, agentNames) {
     }
   }
 
-  // Second pass: place newcomers / evicted entries near the origin.
+  // Second pass: place newcomers / evicted entries near their origin.
   for (const name of pending) {
-    layout[name] = nearestFreeCell(layout, 0, 0)
+    const origin = (originFor && originFor(name, layout)) || { c: 0, r: 0 }
+    const o = isValidPos(origin) ? origin : { c: 0, r: 0 }
+    layout[name] = nearestFreeCell(layout, o.c, o.r)
     changed = true
   }
   return { layout, changed }

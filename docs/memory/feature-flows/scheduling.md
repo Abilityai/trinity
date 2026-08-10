@@ -183,10 +183,10 @@ alongside the router, MCP, and manifest deploy.
 _resolve_template (crud.py)                       _materialize_agent_files (crud.py)
 ---------------------------                       ---------------------------------
 github: branch                                    if declared and not config.ephemeral:
-  _declared_schedules_for_github(                   try:
+  _read_source_template(                            try:
       repo, creation-resolved PAT, @ref)               reconcile_declared_schedules(
     → template_service                                     name, declared, owner)
-      .fetch_template_metadata_for_create()          except: WARNING   ← non-fatal
+      .fetch_template_metadata_result_for_create()   except: WARNING   ← non-fatal
       (cache-bypassed, loud on failure)                    ↓
     → normalize_declared_schedules()             seen = {s.name for s in
 local: branch                                            db.list_agent_schedules(name)}
@@ -249,7 +249,10 @@ The reader, its tolerance matrix, and the catalog surface are in
 
 **Files:**
 - `src/backend/services/template_schedules.py` — the tolerant reader
-- `src/backend/services/agent_service/crud.py` — `_declared_schedules_for_github`,
+- `src/backend/services/agent_service/crud.py` — `_read_source_template`
+  (ent#14 S2 renamed it from `_declared_schedules_for_github` and widened its
+  return to `(metadata, reason)`: the `fork_to_own` gate decides from this same
+  read, so schedules are no longer its only consumer),
   `reconcile_declared_schedules`, `_materialize_agent_files`
 - `src/backend/services/system_service.py` — `create_schedules` name-match guard
 - `tests/unit/test_ent89_schedule_materialization.py`,
@@ -695,9 +698,10 @@ Broadcast via dedicated scheduler -> Redis pub/sub -> backend WebSocket relay fo
 ## Dependencies
 
 **Python packages** (docker/backend/Dockerfile):
-- `apscheduler==3.10.4` - Async job scheduler
-- `croniter==2.0.1` - Cron expression parsing
-- `pytz==2024.1` - Timezone support
+- `apscheduler==3.11.0` - Async job scheduler. `docker/scheduler/requirements.txt` pins the SAME version (#1823): the backend validates by constructing the `CronTrigger` the scheduler will register, so a floor on one side lets validator and executor resolve different parsers
+- `croniter==5.0.1` - Cron expression parsing
+- `pytz==2024.2` - Timezone support. **Not the authoritative resolver** — pytz bundles its own complete tz database, while APScheduler's `astimezone()` re-resolves the zone through the stdlib `zoneinfo` (#1823)
+- `tzdata==2026.3` (+ the `tzdata-legacy` apt package) - The IANA database `zoneinfo` reads. `tzdata-legacy` carries the *backward-compatibility links* (`Europe/Kiev` → `Europe/Kyiv`), split out of `tzdata` in Debian trixie; without it every schedule stored under a legacy alias fails to register (#1823). Guarded by `tests/unit/test_1823_tz_capability_parity.py`
 - `httpx` - Async HTTP client (used by AgentClient)
 
 ---
@@ -1148,6 +1152,8 @@ POST /schedules  ------>  db/schedules.py:create_schedule()
 ---
 
 ## Status
+**Updated 2026-08-09** - **Legacy IANA timezone aliases (#1823)**: a valid `timezone` is one BOTH resolvers accept, not "a pytz zone". `validate_timezone` now probes `zoneinfo` (what APScheduler's `astimezone()` binds through) and `validate_cron_expression` delegates to it, so the create route (which calls only the latter) and the update route (only the former) share one contract; a cron-only `PUT` validates against the row's stored timezone rather than a hardcoded `"UTC"`. Aliases are supported, not normalized — the images now ship `tzdata-legacy` + the `tzdata` wheel. See the Dependencies section and `docs/memory/feature-flows/scheduler-service.md` for the `_add_job` permanent/transient half.
+
 **Updated 2026-03-09** - **MCP Tool Parity (#85)**: Added `timeout_seconds`, `allowed_tools`, and `model` parameters to MCP `create_agent_schedule` and `update_agent_schedule` tools. TypeScript interfaces updated in `src/mcp-server/src/types.ts`, Zod schemas updated in `src/mcp-server/src/tools/schedules.ts`.
 **Updated 2026-03-02** - **MODEL-001 Model Selection**: Per-schedule model override. New `model` column on `agent_schedules`, `model_used` column on `schedule_executions`. ModelSelector.vue component in create/edit form. Model forwarded through scheduler service to agent container. model_used recorded on every execution for audit. See [model-selection.md](model-selection.md).
 **Updated 2026-02-22** - **Dashboard Schedule Stats**: Added `get_all_agents_schedule_counts()` method to `db/schedules.py:719-743`. Returns schedule counts (total and enabled) per agent. Used by `GET /api/agents/execution-stats` endpoint to populate `schedules_total` and `schedules_enabled` fields. Dashboard AgentNode now displays "X/Y schedules" with "(paused)" indicator when autonomy disabled.

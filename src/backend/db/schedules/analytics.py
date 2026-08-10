@@ -42,7 +42,7 @@ _TRIGGER_BUCKETS = {
     "loop": "Loops",  # #1150: first-class bucket so loop bursts don't read as cron load
     "reminder": "Reminders",  # #1296: agent self-direction, not operator cron
     "agent": "Agent-to-agent", "fan_out": "Agent-to-agent",
-    "self_task": "Agent-to-agent",
+    "self_task": "Agent-to-agent", "a2a": "Agent-to-agent",  # ent#157 inbound A2A tasks
     "voip": "Voice", "voice": "Voice",
 }
 

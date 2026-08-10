@@ -1,11 +1,11 @@
 name: Publish Helper MCP to npm
 
-# Publishes @abilityai/trinity-docs-mcp (src/helper-mcp/) with npm provenance.
+# Publishes trinity-docs-mcp (src/helper-mcp/) with npm provenance.
 #
 # BOOTSTRAP (one-time, manual): npm cannot pre-register a trusted publisher
 # for a package that does not exist yet (unlike PyPI pending publishers).
 # The FIRST publish must be done by a maintainer:
-#   1. create the @abilityai npm org (if absent)
+#   1. (unscoped package — no npm org needed; the abilityai npm name is held by an inaccessible legacy account)
 #   2. cd src/helper-mcp && npm publish --access public   (with a real login)
 #   3. on npmjs.com → package → Settings → add this workflow as a
 #      Trusted Publisher, then revoke the token used in step 2.
@@ -65,7 +65,7 @@ jobs:
         id: check
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          if npm view "@abilityai/trinity-docs-mcp@${VERSION}" version > /dev/null 2>&1; then
+          if npm view "trinity-docs-mcp@${VERSION}" version > /dev/null 2>&1; then
             echo "Version $VERSION already exists on npm — skipping publish."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
