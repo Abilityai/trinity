@@ -41,7 +41,10 @@ sys.path.insert(0, _BACKEND_STR)
 # `utils.helpers` resolves to the backend. Done in the fixture (not at module
 # import) so all sys.modules mutation goes through monkeypatch (sys.modules
 # pollution lint).
-_SHADOWS = ("utils", "utils.api_client", "utils.assertions", "utils.cleanup")
+# #2080: emptied. These named the `tests/utils` shadow of the backend
+# `utils` package; the helpers are now `tests/testkit`, so deleting
+# `utils` here would evict the REAL backend package mid-session.
+_SHADOWS: tuple[str, ...] = ()
 
 pytestmark = pytest.mark.unit
 
