@@ -140,19 +140,51 @@ class TestOrdinaryTokensAreUnaffected:
 
 
 def test_the_replacement_is_a_callable_not_a_string():
-    """Pins the mechanism, not just the symptom.
+    """Pins the mechanism, via the AST rather than the text.
 
     A future edit could re-introduce `line_re.sub(new_line, ...)` and every
     behavioural test above would still pass for tokens that happen to contain
     no backslash — which is every real GitHub PAT. The property being protected
     is 'the token is never parsed', and only the call shape expresses it.
+
+    It has to read the CALL, not the source text. The first draft asserted
+    `"lambda" in inspect.getsource(...)`, and this function's own comment block
+    opens with ``# `lambda _: new_line`, NOT the string itself (#2017)`` — so
+    the scan was satisfied by the prose and stayed green with the fix reverted,
+    which is the one moment it exists for (the #2025 conflict resolution
+    rewrites these same three lines). Same trap as the sibling guard in
+    `test_2016_duplicate_pat_line.py::test_the_substitution_is_not_capped_at_one`,
+    and the fourth instance of the class in `docs/memory/learnings.md`.
     """
+    import ast
     import inspect
+    import textwrap
 
     import services.github_pat_propagation_service as mod
 
-    src = inspect.getsource(mod._patch_env_github_pat)
-    assert "lambda" in src and ".sub(" in src, (
-        "the .env line is being passed to re.sub as a replacement STRING again "
-        "— a backslash in the token is then read as regex syntax (#2017)"
-    )
+    tree = ast.parse(textwrap.dedent(inspect.getsource(mod._patch_env_github_pat)))
+    subs = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "sub"
+    ]
+    assert subs, "no `.sub(...)` call found — has the patcher been rewritten?"
+    for call in subs:
+        assert call.args, "`.sub()` called with no replacement argument"
+        repl = call.args[0]
+        # A string replacement — literal, f-string, concatenation, or %-format
+        # — is parsed by `re.sub` for escapes. A credential must never be.
+        # `ast.Lambda` only — deliberately not "anything that isn't a literal".
+        # The exact shape of the bug is `line_re.sub(new_line, out)`, whose
+        # replacement is an `ast.Name`, and a Name is statically ambiguous: the
+        # str variable that caused #2017 and a named callable are the same node.
+        # An allow-list containing Name therefore passes the reverted bug —
+        # my first draft did, and the mutation below caught it. If this is ever
+        # rewritten to use a named callable, widen this assertion deliberately
+        # and prove callability, rather than loosening it to Name.
+        assert isinstance(repl, ast.Lambda), (
+            "the .env line is being passed to re.sub as a replacement STRING "
+            "again — a backslash in the token is then read as regex syntax "
+            f"(#2017); expected a lambda, got {type(repl).__name__}"
+        )
