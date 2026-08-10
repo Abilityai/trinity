@@ -45,6 +45,17 @@
       "description": "Static guards on integration-nightly.yml (#1896), the CI home for the live-instance root suite (~93 files needing a running Trinity; nothing ran them, so they gated nothing). Pins the properties whose absence is invisible until the night it matters: membership is DIRECTORY-based (--ignore=unit, matching tests/run-core.sh) so #1895's relocations shrink it with no workflow edit and no file list to drift; base and head both run for attribution; a missing JUnit fails the job LOUDLY instead of being reported to the author as a regression (the diff script is fail-closed on missing XML, so a failed stack boot would otherwise wear a PR's name — #1941's class); each side gets a pristine stack via `down -v` since the suite mutates its instance; the merge is full-depth with the conflict verdict gated on unmerged paths (#1941 again); the job running untrusted PR code holds only contents:read while the write-scoped comment job never checks out PR code; it is not on the pull_request path; the runtime budget and its escalation are written down; --continue-on-collection-errors is present (measured: 3 root modules currently fail to import, and without the flag pytest writes no XML at all); and src/cli is installed, since test_cli_*.py imports trinity_cli which is deliberately absent from requirements-test.txt."
     },
     {
+      "file": "unit/test_1941_nightly_merge_depth.py",
+      "feature": "#1941",
+      "added": "2026-08-03",
+      "categories": [
+        "ci",
+        "unit",
+        "guard"
+      ],
+      "description": "Static guard on backend-unit-nightly.yml's merge check (#1941). The job shallow-fetched both dev and the PR head, so the merge had no common ancestor and git's `refusing to merge unrelated histories` was recorded as `merge_conflict=true` for EVERY open PR (9/9, 8 of them MERGEABLE) — the detector's output was independent of its input, so the suite never ran and the regression signal defaulted to clean. Asserts: base checkout is fetch-depth 0; the pull/N/head fetch carries no --depth; the merge_conflict=true branch is gated on actual unmerged paths (--diff-filter=U) so an infrastructure failure can't be reported as a PR conflict; --allow-unrelated-histories is never used (it would fabricate a merge of unrelated trees and run the suite against a worktree that isn't the real merge result); and the `git merge dev` advice stays inside the conflict/regression branches. Comment lines are stripped before matching — the fix's own comment says 'no --depth' and a naive substring search matches it and passes while the command is shallow again."
+    },
+    {
       "file": "unit/test_ent15_import_intents.py",
       "feature": "trinity-enterprise#15",
       "added": "2026-08-06",
