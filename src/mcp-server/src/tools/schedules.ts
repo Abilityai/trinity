@@ -565,8 +565,6 @@ export function createScheduleTools(
           throw error;
         }
 
-        console.log(`[trigger_agent_schedule] Triggered schedule '${schedule_id}' for agent '${agent_name}', execution_id: ${result.execution_id}`);
-
         // #1968: `execution_id` used to be absent from the response, so this
         // string always read "...with ID 'undefined'". Guard the wording rather
         // than assume — an old scheduler behind a new MCP server still omits it,
@@ -581,6 +579,8 @@ export function createScheduleTools(
               "Find the run via list_recent_executions.",
           }, null, 2);
         }
+
+        console.log(`[trigger_agent_schedule] Triggered schedule '${schedule_id}' for agent '${agent_name}', execution_id: ${result.execution_id}`);
 
         return JSON.stringify({
           status: "triggered",

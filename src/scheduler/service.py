@@ -896,10 +896,23 @@ class SchedulerService:
         if execution is None:
             return
         try:
-            self.db.update_execution_status(
-                execution.id, ExecutionStatus.FAILED, error=reason
+            # CAS on RUNNING: this row was created moments ago by the trigger
+            # and every abandon gate runs BEFORE dispatch, so nothing else can
+            # have written it — but "safe by argument" is what #1082 exists to
+            # retire, and the precondition is one clause.
+            abandoned = self.db.update_execution_status(
+                execution.id,
+                ExecutionStatus.FAILED,
+                error=reason,
+                expected_status=ExecutionStatus.RUNNING,
             )
-            logger.info(f"Abandoned pre-created execution {execution.id}: {reason}")
+            if abandoned:
+                logger.info(f"Abandoned pre-created execution {execution.id}: {reason}")
+            else:
+                logger.info(
+                    f"Pre-created execution {execution.id} already left RUNNING — "
+                    f"not abandoning ({reason})"
+                )
         except Exception as exc:
             logger.error(
                 f"Could not abandon pre-created execution {execution.id}: {exc}"
