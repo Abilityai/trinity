@@ -8,8 +8,14 @@
 
     <div class="p-3 space-y-2">
       <!-- New chat -->
+      <!-- ent#357: disabled with an empty roster. `newChat()` only resets
+           conversation state, so with no agent to chat with every branch of it
+           is a no-op — the button looked live and did nothing, which is the
+           dead-end this surface is supposed to have stopped having. -->
       <button
-        class="w-full flex items-center gap-2 rounded-xl border border-gray-300 dark:border-gray-700 px-3 py-2 text-sm font-medium hover:bg-white dark:hover:bg-gray-900 transition"
+        :disabled="!roster.length"
+        :title="roster.length ? 'Start a new conversation' : 'No agents available yet'"
+        class="w-full flex items-center gap-2 rounded-xl border border-gray-300 dark:border-gray-700 px-3 py-2 text-sm font-medium hover:bg-white dark:hover:bg-gray-900 transition disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent dark:disabled:hover:bg-transparent"
         @click="$emit('new-chat')"
       >
         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>

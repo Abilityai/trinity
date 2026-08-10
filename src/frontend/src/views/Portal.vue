@@ -131,8 +131,23 @@
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">{{ store.error }}</p>
             <button class="mt-3 text-sm text-action-primary-600 hover:underline" @click="store.fetchRoster()">Try again</button>
           </template>
+          <!-- ent#357: an empty roster needs a next step, not just a statement.
+               The two audiences need different ones: a signed-in user can go
+               make an agent, an external client can only ask the person who
+               invited them. -->
+          <template v-else-if="store.isPlatformSession">
+            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">No agents here yet</p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">
+              Agents you own, and agents shared with you, appear here.
+            </p>
+            <a href="/" class="mt-3 text-sm text-action-primary-600 hover:underline">Go to your agents</a>
+          </template>
           <template v-else>
-            <p class="text-sm text-gray-500 dark:text-gray-400 font-medium">No agents shared with you yet</p>
+            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">No agents shared with you yet</p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">
+              Ask whoever invited you to share an agent with
+              <span class="font-medium">{{ store.clientEmail || 'your email' }}</span>.
+            </p>
           </template>
           <button class="sm:hidden mt-4 text-sm text-action-primary-600" @click="mobileNav = true">Open menu</button>
         </div>
