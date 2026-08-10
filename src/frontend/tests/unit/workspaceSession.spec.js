@@ -216,3 +216,28 @@ describe('legacy /portal links keep working (AC: query-preserving redirect)', ()
     expect(paths).toContain('/workspace/c/:sessionId')
   })
 })
+
+describe('workspace availability state is not sticky (/review C1)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    __setAuthed(true)
+    setActivePinia(createPinia())
+  })
+
+  it('a successful retry clears the "unavailable" verdict', async () => {
+    const axios = (await import('axios')).default
+    const store = useClientPortalStore()
+
+    axios.get.mockRejectedValueOnce({ response: { status: 404 } })
+    await store.fetchRoster()
+    expect(store.unavailable).toBe(true)
+
+    // The retry button the unavailable state offers.
+    axios.get.mockResolvedValueOnce({ data: { client_email: 'a@b.c', agents: [{ name: 'scout' }] } })
+    await store.fetchRoster()
+
+    expect(store.unavailable).toBe(false)
+    expect(store.error).toBeNull()
+    expect(store.agents).toHaveLength(1)
+  })
+})

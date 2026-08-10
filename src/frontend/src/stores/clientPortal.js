@@ -226,6 +226,11 @@ export const useClientPortalStore = defineStore('clientPortal', {
     async fetchRoster() {
       this.loading = true
       this.error = null
+      // Reset with `error`, not just alongside it: a 404 followed by a
+      // successful retry would otherwise keep rendering "not available on this
+      // instance" over a roster that loaded fine — and the retry button added
+      // for that state makes the stale case one click away.
+      this.unavailable = false
       try {
         const { data } = await axios.get('/api/enterprise/client-portal/my-agents', {
           headers: this.authHeader,
