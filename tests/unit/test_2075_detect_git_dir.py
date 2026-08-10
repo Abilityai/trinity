@@ -32,25 +32,37 @@ if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 
 
-def _load_git_service():
-    """Import git_service with heavy dependencies mocked out."""
-    mock_modules = {}
-    for mod in [
-        "docker", "docker.errors", "docker.types",
-        "redis", "redis.asyncio",
-        "database",
-        "services.docker_service",
-    ]:
-        mock_modules[mod] = Mock()
-    mock_modules["database"].db = Mock()
-    mock_modules["database"].AgentGitConfig = Mock
-    mock_modules["database"].GitSyncResult = Mock
+def _load_git_service(monkeypatch):
+    """Import git_service with heavy dependencies mocked out.
 
-    with patch.dict("sys.modules", mock_modules):
-        for key in list(sys.modules.keys()):
-            if key.startswith("services.git_service"):
-                del sys.modules[key]
-        import services.git_service as gs
+    Every `sys.modules` mutation goes through ``monkeypatch`` (#762 lint), so
+    the stubs — and the stub-built module this import leaves behind — are
+    unwound when the test ends instead of leaking into later tests.
+    """
+    stubs = {
+        mod: Mock()
+        for mod in (
+            "docker", "docker.errors", "docker.types",
+            "redis", "redis.asyncio",
+            "database",
+            "services.docker_service",
+        )
+    }
+    stubs["database"].db = Mock()
+    stubs["database"].AgentGitConfig = Mock
+    stubs["database"].GitSyncResult = Mock
+
+    for name, stub in stubs.items():
+        monkeypatch.setitem(sys.modules, name, stub)
+
+    for key in [k for k in list(sys.modules) if k.startswith("services.git_service")]:
+        monkeypatch.delitem(sys.modules, key)
+    # Records the (possibly absent) pre-test state of the key the import below
+    # creates, so monkeypatch's undo removes the stub-built module either way.
+    monkeypatch.setitem(sys.modules, "services.git_service", None)
+    monkeypatch.delitem(sys.modules, "services.git_service")
+
+    import services.git_service as gs
     return gs
 
 
@@ -99,9 +111,9 @@ def _detect_against_fs(gs, home: Path) -> str:
 # The reported bug, against a real filesystem
 # ---------------------------------------------------------------------------
 
-def test_home_rooted_repo_with_populated_workspace_resolves_to_home(tmp_path):
+def test_home_rooted_repo_with_populated_workspace_resolves_to_home(tmp_path, monkeypatch):
     """The repro: repo at the home root, `workspace/` holding data files."""
-    gs = _load_git_service()
+    gs = _load_git_service(monkeypatch)
     home = _make_home(tmp_path)
     _git(home, "init", "-q")
     (home / "workspace" / "cache.db").write_text("data")
@@ -110,13 +122,13 @@ def test_home_rooted_repo_with_populated_workspace_resolves_to_home(tmp_path):
     assert _detect_against_fs(gs, home) == str(home)
 
 
-def test_genuinely_workspace_rooted_repo_still_resolves_to_workspace(tmp_path):
+def test_genuinely_workspace_rooted_repo_still_resolves_to_workspace(tmp_path, monkeypatch):
     """A real legacy agent — repo rooted *inside* `workspace/` — is unchanged.
 
     `--show-toplevel` walks up from the probe point, so the nearest enclosing
     repository wins.
     """
-    gs = _load_git_service()
+    gs = _load_git_service(monkeypatch)
     home = _make_home(tmp_path)
     _git(home / "workspace", "init", "-q")
     (home / "workspace" / "template.yaml").write_text("name: legacy\n")
@@ -124,12 +136,12 @@ def test_genuinely_workspace_rooted_repo_still_resolves_to_workspace(tmp_path):
     assert _detect_against_fs(gs, home) == str(home / "workspace")
 
 
-def test_nested_workspace_repo_wins_over_home_repo(tmp_path):
+def test_nested_workspace_repo_wins_over_home_repo(tmp_path, monkeypatch):
     """Known limitation, pinned: an agent re-initialised while misdetected has
     a genuine nested repo and is indistinguishable from a legacy agent — git's
     own answer is `workspace/`, and this fix keeps it there.
     """
-    gs = _load_git_service()
+    gs = _load_git_service(monkeypatch)
     home = _make_home(tmp_path)
     _git(home, "init", "-q")
     _git(home / "workspace", "init", "-q")
@@ -137,12 +149,12 @@ def test_nested_workspace_repo_wins_over_home_repo(tmp_path):
     assert _detect_against_fs(gs, home) == str(home / "workspace")
 
 
-def test_no_repo_defers_to_the_content_heuristic(tmp_path):
+def test_no_repo_defers_to_the_content_heuristic(tmp_path, monkeypatch):
     """No repository anywhere: git answers nothing and placement is decided by
     the (hardcoded-path) legacy heuristic — the branch
     `initialize_git_in_container` needs for a repo that does not exist yet.
     """
-    gs = _load_git_service()
+    gs = _load_git_service(monkeypatch)
     home = _make_home(tmp_path)
     (home / "workspace" / "seed.txt").write_text("x")
 
@@ -156,9 +168,9 @@ def test_no_repo_defers_to_the_content_heuristic(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_fallback_heuristic_is_byte_compatible():
+async def test_fallback_heuristic_is_byte_compatible(monkeypatch):
     """The fresh-agent placement probe is unchanged from the pre-#2075 code."""
-    gs = _load_git_service()
+    gs = _load_git_service(monkeypatch)
     seen = []
 
     async def _exec(container_name: str, command: str, timeout: int = 5):
@@ -177,8 +189,8 @@ async def test_fallback_heuristic_is_byte_compatible():
     )
 
 
-def test_no_workspace_directory_at_all(tmp_path):
-    gs = _load_git_service()
+def test_no_workspace_directory_at_all(tmp_path, monkeypatch):
+    gs = _load_git_service(monkeypatch)
     home = tmp_path / "developer"
     home.mkdir()
     _git(home, "init", "-q")
@@ -191,10 +203,10 @@ def test_no_workspace_directory_at_all(tmp_path):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_toplevel_outside_agent_home_is_rejected():
+async def test_toplevel_outside_agent_home_is_rejected(monkeypatch):
     """A toplevel outside `/home/developer` is never trusted — the caller
     falls back rather than operating on an arbitrary path."""
-    gs = _load_git_service()
+    gs = _load_git_service(monkeypatch)
     calls = []
 
     async def _exec(container_name: str, command: str, timeout: int = 5):
@@ -211,8 +223,8 @@ async def test_toplevel_outside_agent_home_is_rejected():
 
 
 @pytest.mark.asyncio
-async def test_git_failure_falls_back():
-    gs = _load_git_service()
+async def test_git_failure_falls_back(monkeypatch):
+    gs = _load_git_service(monkeypatch)
 
     async def _exec(container_name: str, command: str, timeout: int = 5):
         if "rev-parse" in command:
@@ -224,10 +236,10 @@ async def test_git_failure_falls_back():
 
 
 @pytest.mark.asyncio
-async def test_successful_probe_skips_the_content_heuristic():
+async def test_successful_probe_skips_the_content_heuristic(monkeypatch):
     """A repo-rooted answer costs exactly one exec — the old heuristic must
     not run and must not be able to override git."""
-    gs = _load_git_service()
+    gs = _load_git_service(monkeypatch)
     calls = []
 
     async def _exec(container_name: str, command: str, timeout: int = 5):
