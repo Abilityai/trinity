@@ -62,12 +62,14 @@ DOC_FILES = [REPO / "README.md", REPO / "CONTRIBUTING.md"]
 #   docs/screenshots/**                      the canonical store
 #   docs/assets/screenshots/whats-new/**     frozen release snapshots (never refreshed)
 #   docs/assets/*                            brand assets (hero, explainer gif, logos)
-#   docs/diagrams/**                         generated illustrations, not UI captures
+#
+# Deliberately short. Every extra prefix is a place a fourth store can quietly grow —
+# docs/diagrams/ was allowed until its unreferenced marketing jpegs were dropped, and
+# is not re-added: docs/diagrams/ is Mermaid-in-markdown and holds no image files.
 ALLOWED_IMAGE_PREFIXES = (
     "docs/screenshots/",
     "docs/assets/screenshots/whats-new/",
     "docs/assets/",
-    "docs/diagrams/",
 )
 
 # Historical records are not forward-maintained; a stale path there is not news.
