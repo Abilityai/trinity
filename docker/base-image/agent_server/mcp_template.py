@@ -137,15 +137,84 @@ def _resolve_refs(value: str, values: Dict[str, str]) -> Tuple[Optional[str], Op
     return expanded, None
 
 
-def render_server(config: dict, values: Dict[str, str]) -> Tuple[Optional[dict], Optional[str]]:
+def _probe_copy(config: dict) -> dict:
+    """A validation probe with refs INTACT but written in the plain form.
+
+    `mcp_validator` is vendored byte-identically (Invariant #5) and knows only
+    `${NAME}`; Trinity's `${NAME:-default}` extension trips its variable-name
+    check. Rewriting each ref to `${NAME}` for the probe keeps the value a
+    REFERENCE — which is the shape the validator's literal-secret and
+    shell-metachar rules are written against — without teaching the vendored
+    copy a new syntax or validating a rendered secret.
+    """
+    probe = json.loads(json.dumps(config))
+    env = probe.get("env")
+    if isinstance(env, dict):
+        for key, value in list(env.items()):
+            if isinstance(value, str):
+                env[key] = _REF_RE.sub(lambda m: "${%s}" % m.group(1), value)
+    return probe
+
+
+def render_server(
+    config: dict, values: Dict[str, str], name: str = "server"
+) -> Tuple[Optional[dict], Optional[str]]:
     """Render ONE server entry. Returns `(rendered, None)` or `(None, reason)`.
 
     Substitution is confined to `env`. A `${...}` anywhere else is reported —
     not expanded — because the validator would reject the expansion anyway and
     a silent expansion into `command` is the #590 class.
+
+    Validation runs BEFORE substitution (#2007 review). `mcp_validator` was
+    written for the UNRENDERED config: it strips `${...}` refs and rejects
+    whatever literal remains against `_LITERAL_SECRET_PATTERNS` and
+    `_SHELL_METACHARS_RE`. After substitution the literal IS the secret, so
+    validating the rendered entry rejects every real credential —
+    `AIzaSy…` (Google's actual key shape), `sk-ant-`, `sk-proj-`, `ghp_`,
+    `github_pat_`, `xoxb-`, `AKIA`, and anything containing a shell
+    metacharacter — telling the operator to "store it in .env and reference as
+    ${VAR}", which is precisely what they did. That made the headline outcome
+    unreachable in production while CI passed on a fixture value
+    (`GEMINI_API_KEY="real-key-value"`) that no credential looks like.
+
+    `name` is the DECLARED server name and is used in the failure reason. The
+    probe key used to be the literal `"_probe"`, which the validator embeds
+    verbatim, so the operator-facing message read
+    `withheld MCP server 'aistudio': Server '_probe': ...` — and the named,
+    actionable reason is this feature's core value claim.
     """
     if not isinstance(config, dict):
         return None, "entry is not an object"
+
+    # Trinity's own placeholder rules run FIRST, so the actionable reason wins
+    # over the validator's generic "command not in allowlist" for the same
+    # entry — an operator reading "Trinity substitutes only inside 'env'" knows
+    # what to change; one reading "'${SHELL_PATH}' not in allowlist" does not.
+    for field in ("command", "url"):
+        value = config.get(field)
+        if isinstance(value, str) and _REF_RE.search(value):
+            return None, (
+                f"'{field}' contains a ${{VAR}} placeholder; Trinity substitutes "
+                f"only inside 'env' (a credential value must never become the "
+                f"executed command)"
+            )
+    declared_args = config.get("args")
+    if isinstance(declared_args, list):
+        for arg in declared_args:
+            if isinstance(arg, str) and _REF_RE.search(arg):
+                return None, (
+                    "'args' contains a ${VAR} placeholder; Trinity substitutes "
+                    "only inside 'env', and the validator rejects placeholders "
+                    "in args"
+                )
+
+    # Validate the entry with refs INTACT — the shape the validator was
+    # designed for — then substitute into the copy that gets written.
+    probe_key = name if isinstance(name, str) and name else "server"
+    try:
+        validate_mcp_config(json.dumps({"mcpServers": {probe_key: _probe_copy(config)}}))
+    except McpValidationError as e:
+        return None, str(e)
 
     rendered = json.loads(json.dumps(config))  # deep copy, JSON-only by construction
 
@@ -161,28 +230,6 @@ def render_server(config: dict, values: Dict[str, str]) -> Tuple[Optional[dict],
                 return None, reason
             env[key] = resolved
 
-    for field in ("command", "url"):
-        value = rendered.get(field)
-        if isinstance(value, str) and _REF_RE.search(value):
-            return None, (
-                f"'{field}' contains a ${{VAR}} placeholder; Trinity substitutes "
-                f"only inside 'env' (a credential value must never become the "
-                f"executed command)"
-            )
-    args = rendered.get("args")
-    if isinstance(args, list):
-        for arg in args:
-            if isinstance(arg, str) and _REF_RE.search(arg):
-                return None, (
-                    "'args' contains a ${VAR} placeholder; Trinity substitutes "
-                    "only inside 'env', and the validator rejects placeholders "
-                    "in args"
-                )
-
-    try:
-        validate_mcp_config(json.dumps({"mcpServers": {"_probe": rendered}}))
-    except McpValidationError as e:
-        return None, str(e)
     return rendered, None
 
 
@@ -250,7 +297,17 @@ def render(
     for name, config in declared.items():
         if name in servers:
             continue  # never clobber an entry that is already installed
-        rendered, reason = render_server(config, values)
+        # Guarded (#2007 review): `render()` documents "never raises", but
+        # `_resolves_to_private_ip` catches only `socket.gaierror` and
+        # `getaddrinfo` raises `UnicodeError` for an over-long hostname label —
+        # so one bad entry propagated out of an unguarded call, out of this
+        # unguarded loop, and cost every VALID sibling server its render.
+        # `startup.sh`'s `|| echo` saved the boot, not the file.
+        try:
+            rendered, reason = render_server(config, values, name)
+        except Exception as e:  # noqa: BLE001 — one entry must never cost the rest
+            skipped[name] = f"could not be validated ({type(e).__name__}: {e})"
+            continue
         if reason:
             skipped[name] = reason
             continue

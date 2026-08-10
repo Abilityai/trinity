@@ -369,3 +369,115 @@ def test_the_renderer_runs_after_credentials_are_available():
         "the renderer runs before the credential auto-import — placeholders "
         "would be unresolvable on that path"
     )
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups (#2013 review)
+# ---------------------------------------------------------------------------
+
+class TestRealCredentialValuesRender:
+    """AC #5 must hold for values that look like real credentials.
+
+    `mcp_validator` was written for the UNRENDERED config: it strips `${...}`
+    refs and rejects whatever literal remains against `_LITERAL_SECRET_PATTERNS`
+    and `_SHELL_METACHARS_RE`. Validating AFTER substitution means the literal
+    IS the secret, so every real key was withheld with advice ("store it in
+    .env and reference as ${VAR}") that the operator had already followed. CI
+    passed only because the fixture used `GEMINI_API_KEY="real-key-value"`,
+    which no credential looks like.
+    """
+
+    # Each is the real vendor shape, not a lookalike.
+    SHAPES = [
+        "AIzaSyA1234567890123456789012345678901234",   # Google (AIza[0-9A-Za-z_-]{35})
+        "sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",  # Anthropic
+        "sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",  # OpenAI
+        "ghp_1234567890abcdefghij1234567890abcdefgh",   # GitHub PAT
+        "github_pat_11ABCDEFG0abcdefghijkl_ABCDEFGHI",  # GitHub fine-grained
+        "xoxb-123456789012-1234567890123-abcdefghij",   # Slack bot
+        "AKIAIOSFODNN7EXAMPLE",                          # AWS
+        "pa$$w|rd;with&shell`meta",                      # shell metacharacters
+    ]
+
+    @pytest.mark.parametrize("secret", SHAPES)
+    def test_the_declared_server_is_rendered_not_withheld(self, mod, home, secret):
+        result, written = _render(
+            mod, home,
+            {"mcpServers": {"aistudio": {
+                "command": "npx", "args": ["-y", "@aistudio/mcp"],
+                "env": {"GEMINI_API_KEY": "${GEMINI_API_KEY}"},
+            }}},
+            env=f'GEMINI_API_KEY="{secret}"\n',
+        )
+        assert result["added"] == ["aistudio"], (
+            f"a real-shaped credential was withheld: {result['skipped']}"
+        )
+        assert written["mcpServers"]["aistudio"]["env"]["GEMINI_API_KEY"] == secret
+
+    def test_the_default_form_still_resolves(self, mod, home):
+        """`${VAR:-default}` is a Trinity extension the vendored validator does
+        not know, so the probe normalises it to `${VAR}` rather than teaching
+        the vendored copy a new syntax (Invariant #5) or validating a rendered
+        secret."""
+        result, written = _render(
+            mod, home,
+            {"mcpServers": {"x": {"command": "npx", "args": ["-y", "p"],
+                                  "env": {"P": "${MISSING:-/opt/fallback}"}}}},
+        )
+        assert result["added"] == ["x"], result["skipped"]
+        assert written["mcpServers"]["x"]["env"]["P"] == "/opt/fallback"
+
+
+class TestOneBadServerNeverCostsTheGoodOnes:
+    """`render()` documents 'never raises' and the per-server call was unguarded.
+
+    `_resolves_to_private_ip` catches only `socket.gaierror`, but
+    `getaddrinfo` raises `UnicodeError` for an over-long hostname label — so a
+    single bad entry propagated out of the loop and NOTHING was written,
+    losing every valid sibling. `startup.sh`'s `|| echo` saved the boot, not
+    the render.
+    """
+
+    def test_an_over_long_hostname_label_only_withholds_its_own_entry(self, mod, home):
+        result, written = _render(
+            mod, home,
+            {"mcpServers": {
+                "good": {"command": "npx", "args": ["-y", "ok"], "env": {}},
+                "bad": {"type": "http", "url": f"https://{'a' * 80}.example.com/mcp"},
+            }},
+        )
+        assert result["added"] == ["good"], (
+            "a valid sibling was lost to another entry's failure"
+        )
+        assert "bad" in result["skipped"]
+        assert written is not None and "good" in written["mcpServers"]
+
+    def test_an_unexpected_error_is_reported_not_raised(self, mod, home, monkeypatch):
+        """The guard is on the CALL, so any future validator exception type is
+        covered — not just the one hostname case that was found."""
+        def boom(*a, **k):
+            raise RuntimeError("validator exploded")
+
+        monkeypatch.setattr(mod, "render_server", boom)
+        result, _ = _render(
+            mod, home,
+            {"mcpServers": {"x": {"command": "npx", "args": ["-y", "p"], "env": {}}}},
+        )
+        assert result["status"] == "ok"
+        assert "validator exploded" in result["skipped"]["x"]
+
+
+def test_the_withheld_reason_names_the_server_not_the_probe(mod, home):
+    """The named, actionable reason is this feature's core value claim.
+
+    The probe key used to be the literal `"_probe"`, which the validator embeds
+    verbatim — so the operator read `withheld MCP server 'aistudio': Server
+    '_probe': ...`.
+    """
+    result, _ = _render(
+        mod, home,
+        {"mcpServers": {"aistudio": {"command": "/bin/sh", "args": ["-c", "id"]}}},
+    )
+    reason = result["skipped"]["aistudio"]
+    assert "_probe" not in reason, f"the probe key leaked into the reason: {reason}"
+    assert "aistudio" in reason, f"the reason does not name the server: {reason}"
