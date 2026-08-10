@@ -148,15 +148,19 @@ class TestRoundTrip:
 
 class TestKnownGaps:
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="BUG: `count=1` replaces only the FIRST GITHUB_PAT line, and the "
-               "agent's .env parser is last-wins — so a duplicated line leaves "
-               "the agent authenticating with the REVOKED token while the "
-               "rotation reports `updated`. See /edge-cases report 2026-08-05, "
-               "finding 2.",
-    )
     def test_a_duplicated_pat_line_still_rotates(self, svc):
+        """Finding 2 — FIXED by #2016 (PR #2025), marker retired.
+
+        This carried `xfail(strict=True)` while the bug was live: `count=1`
+        replaced only the FIRST `GITHUB_PAT` line, and the agent's `.env` parser
+        is last-wins, so a duplicated line left the agent authenticating with the
+        REVOKED token while the rotation reported `updated`.
+
+        `31ba8d98` levels every occurrence, so the marker did its job and flipped
+        to XPASS(strict) — which is a FAILURE, and is why CI went red here rather
+        than quietly reporting a bug that no longer exists. Retired to a plain
+        regression test: it now guards the fix instead of the defect.
+        """
         env = ('GITHUB_PAT="ghp_old"\n'
                'SOMETHING=1\n'
                'GITHUB_PAT="ghp_old"\n')
