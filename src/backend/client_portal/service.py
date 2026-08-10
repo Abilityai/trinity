@@ -1351,7 +1351,14 @@ async def list_client_uploads(agent_name: str, email: str) -> dict:
 # named 422 instead of silently writing a block nobody will ever match. It is not
 # an authorization check — the block only ever matters for an email that also has
 # a share, and `agent_sharing` is the authority on that.
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# Domain labels EXCLUDE the dot (`[^@\s.]`), which is what makes this linear.
+# The previous form was `[^@\s]+@[^@\s]+\.[^@\s]+$`: since `[^@\s]` matches a
+# dot, the two domain atoms were ambiguous and an input like `a@b.b.b.b…` forced
+# polynomial backtracking (CodeQL py/polynomial-redos, surfaced the moment
+# ent#356 moved this file into the scanned public repo). The 320-char cap below
+# already bounded the cost, but a length check is a mitigation, not a fix — and
+# it only holds while it keeps being evaluated first.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$")
 
 
 def normalize_client_email(email: str | None) -> str:

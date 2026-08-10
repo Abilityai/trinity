@@ -174,3 +174,57 @@ def test_table_names_keep_their_historical_prefix():
     for table in PORTAL_TABLES:
         assert table.startswith("enterprise_")
         assert table in schema
+
+
+# ---------------------------------------------------------------------------
+# CodeQL py/polynomial-redos on the email validator (surfaced by the move)
+# ---------------------------------------------------------------------------
+
+def _service():
+    import sys
+    sys.path.insert(0, str(_BACKEND))
+    from client_portal import service
+    return service
+
+
+def test_the_email_regex_has_no_ambiguous_repetition():
+    """`[^@\\s]` matches a dot, so `[^@\\s]+\\.[^@\\s]+` let the two domain atoms
+    compete for the same characters — polynomial backtracking by construction.
+
+    Moving this file into the public repo is what made CodeQL see it (the
+    private submodule is not scanned), so the finding is as old as the code.
+    Excluding the dot from the domain classes removes the ambiguity.
+    """
+    pattern = _service()._EMAIL_RE.pattern
+    domain = pattern.split("@", 1)[1]
+    assert "[^@\\s]+" not in domain, (
+        "the domain part accepts dots inside a repeated class again — that is "
+        "the ambiguity CodeQL flags (py/polynomial-redos)"
+    )
+
+
+def test_the_length_cap_is_checked_before_the_regex():
+    """The cap is what actually bounds the cost, and only while it is evaluated
+    FIRST. Reordering the `or` chain would hand the regex unbounded input."""
+    import inspect
+
+    src = inspect.getsource(_service().normalize_client_email)
+    guard = src[src.index("if not candidate"):src.index("raise ClientPortalError")]
+    assert guard.index("len(candidate) > 320") < guard.index("_EMAIL_RE"), (
+        "the regex is evaluated before the length cap — an arbitrarily long "
+        "input would reach it"
+    )
+
+
+@pytest.mark.parametrize("address", [
+    "a@b.co", "first.last@sub.example.com", "x@y.z", "UPPER@Example.COM",
+])
+def test_real_addresses_still_validate(address):
+    assert _service().normalize_client_email(address) == address.strip().lower()
+
+
+@pytest.mark.parametrize("address", ["a@b", "a@.com", "a@b..com", "no-at.com", "a b@c.d", ""])
+def test_malformed_addresses_are_still_rejected(address):
+    service = _service()
+    with pytest.raises(service.ClientPortalError):
+        service.normalize_client_email(address)
