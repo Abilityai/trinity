@@ -119,6 +119,44 @@ session is rejected otherwise, so a keyless config would not connect.
 email server-side and hands the user nothing. The cost is that a FastMCP session is
 per-connection, so a client restart requires signing in again.
 
+**How the session survives the next request (#2035).** "Upgraded IN PLACE" above is
+necessary but not sufficient, and #848 shipped believing it was sufficient. Streamable
+HTTP is discrete POSTs: `mcp-proxy` re-runs `authenticate` on **every** one and then calls
+`FastMCPSession#updateAuth`, which is `this.#auth = auth` — replace, not merge. A callback
+minting a fresh anonymous context per request therefore discarded each login before
+anything could read it, so `verify_login` reported success and the next tool call answered
+`login_required`. The fix returns the **same object** for the same transport session, from
+a store keyed on `Mcp-Session-Id`:
+
+```
+POST #1  initialize          no session id yet  → fresh context, NOT stored
+POST #2  request_login       Mcp-Session-Id: S  → store.resolve(S) → ctx  (pendingEmail written)
+POST #3  verify_login        Mcp-Session-Id: S  → store.resolve(S) → SAME ctx (verifiedEmail written)
+POST #4  list_playbooks      Mcp-Session-Id: S  → store.resolve(S) → SAME ctx → authorized
+```
+
+Three properties hold it in place, each with its own test:
+
+- **Anonymous tier only.** The store is consulted solely inside the no-`Authorization`
+  branch; a keyed session re-validates its key with the backend on every request. Memoizing
+  those too would let `Mcp-Session-Id` stand in for a key never presented. Pinned
+  structurally by `src/inline-auth-scope.test.ts` (one call site, inside that branch) and
+  behaviourally by the keyed cases in `src/inline-auth-transport.test.ts`.
+- **Bounded and expiring.** 30 min idle / 4 h absolute, 10 000-entry cap, oldest-first.
+  Expiry is the only exit — there is no `logout` tool and no usable disconnect signal, since
+  the SDK's `close()` only aborts the SSE stream and the session-ending DELETE comes solely
+  from the opt-in `terminateSession()`. Note for users: `/clear` in an MCP client resets the
+  conversation, **not** the transport session — it does not log you out.
+- **The session id is a credential.** Serve the MCP port over **TLS only** with this flag
+  on, and do not log or display the id: `src/log-redaction.ts` truncates the copies the
+  bundled `mcp-proxy` writes, and `McpAuthContext.sessionId` is a separate random id so the
+  value in logs and rate-limit keys is not the one that grants access.
+
+Tested where it can actually fail: `src/inline-auth-transport.test.ts` drives a real
+`StreamableHTTPClientTransport` across separate POSTs. #848's 30 tests were all
+handler-level — they invoke `execute` with a context the test owns, so the object is never
+swapped and this bug class is invisible by construction. That is why it shipped green.
+
 **Two invariants worth not breaking:**
 
 - **`scope` stays `"anonymous"` after login.** The session still holds no API key
