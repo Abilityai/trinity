@@ -7,7 +7,8 @@ turns keep their already-inherited old token and finish), and persists the token
 to the writable-layer override (``/var/lib/trinity/oauth-token``, 0600) so it
 survives a plain stop+start (F2 durability). It must NOT rewrite ``.env`` /
 ``.mcp.json`` or re-inject Trinity MCP — those are the destructive whole-file
-flows owned by ``/api/credentials/update`` and ``/api/credentials/inject``.
+flows owned by ``/api/credentials/inject`` (``/api/credentials/update`` was
+the other such flow and was deleted in #2008 — it had no callers).
 
 Module: docker/base-image/agent_server/routers/credentials.py
 

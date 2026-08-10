@@ -40,13 +40,6 @@ class ModelRequest(BaseModel):
 # Credential Models
 # ============================================================================
 
-class CredentialUpdateRequest(BaseModel):
-    credentials: dict  # {"VAR_NAME": "value", ...}
-    mcp_config: Optional[str] = None  # Pre-generated .mcp.json content (if provided)
-    files: Optional[Dict[str, str]] = None  # File-type credentials: {"path": "content", ...}
-    files_b64: Optional[Dict[str, str]] = None  # Binary file creds: {"path": base64(content)} (#11)
-
-
 # ============================================================================
 # Agent Info Models
 # ============================================================================
