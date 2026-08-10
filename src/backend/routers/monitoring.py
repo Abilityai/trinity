@@ -379,12 +379,20 @@ async def get_agent_health_history(
 @router.post("/agents/{agent_name}/check", response_model=AgentHealthDetail)
 async def trigger_health_check(
     agent_name: AuthorizedAgentByName,
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Trigger an immediate health check for an agent.
 
-    Admin only. Forces a fresh health check regardless of schedule.
+    Forces a fresh health check regardless of schedule.
+
+    ent#293 review: the `require_admin` here was redundant — `AuthorizedAgentByName`
+    already restricts this to callers who own or are shared the agent — and once
+    admin gates stopped accepting agent-scoped keys it made the surface
+    incoherent: an ops agent could READ health (`GET /status`,
+    `GET /agents/{name}`, both non-admin) but not REFRESH it. Triggering a probe
+    on an agent you can already see is a USE of a capability, not a grant of one,
+    so it takes the same gate as its siblings.
 
     #631 — this endpoint is the documented manual recovery path out of the
     dormant circuit state. Reset the circuit before running the check so the

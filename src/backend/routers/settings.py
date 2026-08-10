@@ -26,6 +26,7 @@ from models import (
     BrainOrbSettingsUpdate,
     ElevenLabsSettingsUpdate,
     GitHubTemplatesUpdate,
+    TemplateRegistryUpdate,
     MaxParallelTasksCeilingUpdate,
     McpUrlUpdate,
     OpsSettingsUpdate,
@@ -1408,6 +1409,190 @@ async def delete_github_templates(
 
 
 # ============================================================================
+# Remote Template Registry (TMPL-002, trinity-enterprise#14)
+# ============================================================================
+#
+# Same shape as GitHub Templates above, deliberately — the registry is a new
+# SOURCE for that seam, not a second settings idiom. Registered here, well
+# before the `/{key}` catch-all (Invariant #4), like `/skills-library` and
+# `/brain-orb`.
+
+
+@router.get("/template-registry")
+async def get_template_registry(current_user: User = Depends(get_current_user)):
+    """Remote template registry configuration + live status. Admin-only.
+
+    The `status` block is part of the contract, not a nicety: fail-open makes
+    every registry failure invisible in the catalog by design, so the ONLY place
+    an operator can see that their registry 404s is here. A panel that cannot
+    show a failing fetch is a panel they cannot debug with (ent#236).
+
+    Resolving the status goes through the same cache the catalog uses, so this
+    fetches only when a fetch was already due — an admin opening the panel costs
+    no more than a user listing templates.
+    """
+    assert_admin(current_user)
+
+    from config import TEMPLATE_REGISTRY_URL
+    from services.settings_service import TEMPLATE_REGISTRY_URL_KEY
+    from services.template_registry_service import get_registry_status
+
+    stored_url = settings_service.get_setting(TEMPLATE_REGISTRY_URL_KEY)
+    return {
+        "source": "settings" if stored_url else "default",
+        "url": stored_url or "",
+        "default_url": TEMPLATE_REGISTRY_URL,
+        "effective_url": settings_service.get_template_registry_url(),
+        "enabled": settings_service.is_template_registry_enabled(),
+        # Rendered as an inert toggle rather than a working one, the
+        # `TelemetrySharingPanel` shape: TEMPLATE_REGISTRY_ENABLED=false is a
+        # config/air-gap decision no DB row may override, and a toggle that
+        # silently does nothing is worse than one that says why.
+        "hard_disabled": settings_service.is_template_registry_hard_disabled(),
+        # An admin-curated GitHub list wins outright (TMPL-001), and the catalog
+        # never even asks the registry in that case. Surfaced so the panel does
+        # not report a healthy registry that is contributing nothing.
+        "suppressed_by_github_templates": (
+            settings_service.get_github_templates() is not None
+        ),
+        "status": get_registry_status(),
+    }
+
+
+@router.put("/template-registry")
+async def update_template_registry(
+    body: TemplateRegistryUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Set the registry URL and/or toggle. Admin **and human**-only. Audit-logged.
+
+    `reject_agent_principal` is not optional here. `assert_admin` answers *what
+    role*, never *is this a human*: `get_current_user` resolves an agent-scoped
+    MCP key to its owner CARRYING THE OWNER'S ROLE, so on a default admin-owned
+    install any agent's injected `TRINITY_MCP_API_KEY` satisfies a bare admin
+    gate (trinity-ops-agent#232, spelled out in Invariant #8). The consequence
+    here is direct and total: an agent could repoint the platform's template
+    registry at a URL it controls, and every operator browsing templates would
+    see its catalog. GET stays admin-only without the human gate — it reads an
+    operator-set URL, same as TMPL-001's GET.
+    """
+    from dependencies import reject_agent_principal
+
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    if body.url is None and body.enabled is None:
+        raise HTTPException(
+            status_code=400, detail="Provide `url` and/or `enabled`."
+        )
+
+    if settings_service.is_template_registry_hard_disabled() and body.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The template registry is disabled by configuration "
+                "(TEMPLATE_REGISTRY_ENABLED=false); no setting can enable it."
+            ),
+        )
+
+    url = body.url
+    if url is not None:
+        from utils.url_validation import validate_template_registry_url
+
+        url = url.strip()
+        if not url:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Registry URL cannot be blank. Use "
+                    "DELETE /api/settings/template-registry to revert to the default."
+                ),
+            )
+        try:
+            url = validate_template_registry_url(url)
+        except ValueError as e:
+            # `str(e)` is safe: every message in that validator is built from
+            # our own literals, never from the resolved address or the URL.
+            raise HTTPException(status_code=400, detail=str(e))
+
+    previous_url = settings_service.get_template_registry_url()
+    previous_enabled = settings_service.is_template_registry_enabled()
+
+    settings_service.set_template_registry_config(url=url, enabled=body.enabled)
+
+    # Per-process convenience; the generation counter bumped above is what
+    # actually reaches the other uvicorn worker.
+    from services.template_registry_service import invalidate_registry_cache
+
+    invalidate_registry_cache()
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="template_registry_config_change",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={
+            "url": {"old": previous_url, "new": settings_service.get_template_registry_url()},
+            "enabled": {
+                "old": previous_enabled,
+                "new": settings_service.is_template_registry_enabled(),
+            },
+        },
+    )
+
+    return await get_template_registry(current_user=current_user)
+
+
+@router.delete("/template-registry")
+async def delete_template_registry(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Reset the registry to its config defaults. Admin **and human**-only.
+
+    Also drops the durable last-known-good — it was captured under the
+    overridden URL, and serving it afterwards would attribute one registry's
+    catalog to another.
+    """
+    from dependencies import reject_agent_principal
+
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    previous_url = settings_service.get_template_registry_url()
+    deleted = settings_service.delete_template_registry_config()
+
+    from services.template_registry_service import invalidate_registry_cache
+
+    invalidate_registry_cache()
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="template_registry_config_reset",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={
+            "previous_url": previous_url,
+            "new_url": settings_service.get_template_registry_url(),
+            "removed_override": deleted,
+        },
+    )
+
+    return {
+        "success": True,
+        "deleted": deleted,
+        "message": "Template registry reset to defaults",
+    }
+
+
+# ============================================================================
 # MCP Server URL Configuration (#76)
 # ============================================================================
 
@@ -2404,6 +2589,23 @@ async def update_setting(
     # PROACTIVE_RATE_LIMIT_DEFAULTS (#1609) and telemetry_sharing_* (ent#12):
     # a settings key whose value has a safe range gets a route that knows the
     # range, and the catch-all refuses to be a way around it.
+    # ent#14: the registry URL is an SSRF sink and the toggle is a security
+    # control, so both must go through the dedicated validated + human-gated
+    # route — without this block the whole SSRF gate is one generic PUT away
+    # from being bypassed. `generation` and `lkg` are blocked for a different
+    # reason: they ARE the cache, and a writable cache is a poisonable one.
+    # Validate at the boundary AND at the sink (#1525).
+    from services.settings_service import TEMPLATE_REGISTRY_KEYS
+
+    if key in TEMPLATE_REGISTRY_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/template-registry "
+                "(HTTPS + SSRF validated, admin + human-only, audit-logged)"
+            ),
+        )
+
     from services.settings_service import RETENTION_OPS_KEYS
 
     if key in RETENTION_OPS_KEYS:
@@ -2517,6 +2719,23 @@ async def delete_setting(
     Admin-only endpoint. Returns success even if setting didn't exist.
     """
     assert_admin(current_user)
+
+    # ent#14: blocked here as well as on PUT, unlike the #1644 retention acks.
+    # Deleting an ack re-arms a guard and therefore fails safe; deleting
+    # `template_registry_enabled` reverts it to its default of ON, which
+    # re-enables egress an operator deliberately switched off — and this route
+    # carries no `reject_agent_principal`, so an admin-owned agent key could do
+    # it. The dedicated DELETE has the human gate and the audit action.
+    from services.settings_service import TEMPLATE_REGISTRY_KEYS
+
+    if key in TEMPLATE_REGISTRY_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be cleared via DELETE /api/settings/template-registry "
+                "(admin + human-only, audit-logged)"
+            ),
+        )
 
     try:
         deleted = db.delete_setting(key)

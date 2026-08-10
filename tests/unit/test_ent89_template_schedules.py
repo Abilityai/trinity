@@ -395,10 +395,16 @@ class TestGitHubCatalogFence:
     def _explode_on(monkeypatch, ts, bad_repo):
         real = ts._build_template
 
-        def explode(repo, metadata, admin_override=None):
+        # `metadata_error` was added by trinity-enterprise#14 (the fetch reason,
+        # so an unreadable template.yaml is distinguishable from an absent one).
+        # A double of the builder has to carry the real signature: a stub that
+        # is one parameter short raises TypeError INSIDE the fence this class
+        # exists to test, so every template would be skipped and the assertion
+        # would fail for a reason that has nothing to do with the fence.
+        def explode(repo, metadata, admin_override=None, metadata_error=None):
             if repo == bad_repo:
                 raise RuntimeError("boom")
-            return real(repo, metadata, admin_override)
+            return real(repo, metadata, admin_override, metadata_error)
 
         monkeypatch.setattr(ts, "_build_template", explode)
         monkeypatch.setattr(ts, "_fetch_all_metadata", lambda repos: {})

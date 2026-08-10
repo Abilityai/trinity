@@ -47,8 +47,17 @@ if _BACKEND_STR not in sys.path:
 
 pytestmark = pytest.mark.unit
 
-# The five triggers that are declared autonomous but cannot reach the queue.
-_STRANDED = ["schedule", "webhook", "loop", "fan_out", "reminder"]
+# The triggers that are declared autonomous but cannot reach the queue.
+#
+# `a2a` (ent#157) is stranded, and the classification is deliberate rather than
+# a default. `PULL_REACHABLE_TRIGGERS` is an explicit allow-list, so an
+# unlisted trigger lands here automatically — this comment is the review the
+# test below demands. A2A's `message/send` consumes `result.response`
+# synchronously to build the JSON-RPC artifact it returns to the remote caller;
+# a pull-claimed row is dispatched by the agent later and produces no
+# synchronous response, so pull dispatch structurally cannot serve this
+# trigger. Same reason `fan_out` and `loop` are here.
+_STRANDED = ["schedule", "webhook", "loop", "fan_out", "reminder", "a2a"]
 # The two that can.
 _REACHABLE = ["agent", "event"]
 
@@ -86,7 +95,7 @@ def test_reachable_set_is_the_autonomous_triggers_post_task_can_actually_emit():
     assert PULL_REACHABLE_TRIGGERS == {"agent", "event"}
 
 
-def test_the_five_stranded_triggers_are_named_and_complete():
+def test_the_stranded_triggers_are_named_and_complete():
     """No autonomous trigger is left unclassified: every one is either reachable
     or stranded, so a trigger added to `_AUTONOMOUS_TRIGGERS` later shows up here
     as an unreviewed addition rather than silently joining the stranded set."""

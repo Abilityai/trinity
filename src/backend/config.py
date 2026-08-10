@@ -345,9 +345,49 @@ VOIP_CALL_RATE_WINDOW = int(os.getenv("VOIP_CALL_RATE_WINDOW", "60"))  # seconds
 # makes zero outbound GitHub calls on a cold metadata cache.
 #
 # Do NOT refill this list. Keep the constant: TMPL-001's None-vs-[] fallback,
-# routers/settings.py, and the Settings "defaults" badge all reference it, and
-# trinity-enterprise#14 (remote template registry) will repoint this seam.
+# routers/settings.py, and the Settings "defaults" badge all reference it. It is
+# now the FLOOR under the remote template registry rather than the only source —
+# trinity-enterprise#14 repointed this seam, so the resolution order is
+# `admin DB override -> remote registry -> this list`. Refilling it would give
+# every install a second, un-curatable catalog that no registry edit can remove.
 DEFAULT_GITHUB_TEMPLATE_REPOS: list[str] = []
+
+
+# --- Remote template registry (TMPL-002, trinity-enterprise#14) -------------
+# The GitHub half of the catalog is sourced at RUNTIME from a `registry.yaml`
+# fetched over HTTPS, so curating which starter agents an install offers is a
+# vendor file edit rather than a Trinity release. Purely additive: it fills the
+# branch the empty list above leaves, is never consulted when an admin has
+# curated their own list, and every failure mode degrades back to that floor.
+#
+# `TEMPLATE_REGISTRY_ENABLED=false` is the HARD kill switch — the air-gap /
+# policy answer. No `system_settings` row can turn it back on; the admin toggle
+# (`template_registry_enabled`, default true when absent) is composed with this
+# at the consumer, exactly as OPERATOR_INTAKE / TELEMETRY_SHARING compose theirs.
+#
+# Deliberately NOT resolved through `settings_service._resolve_bool_flag`: that
+# helper's env leg is OPT-IN ONLY ("true"/"1"/"yes" -> True, anything else falls
+# through to `default`), so with `default=True` it would silently swallow
+# `TEMPLATE_REGISTRY_ENABLED=false` and ship an inert kill switch (#1039 class).
+#
+# Deliberately NOT coupled to DO_NOT_TRACK, unlike the two flags above. Those
+# honour it because they SEND data about the operator. A registry fetch sends
+# nothing — it is a package-index read, and npm and Homebrew do not disable
+# their default registries under DNT. It is still outbound egress on a default
+# install, which is a real behavioural change and carries a release note.
+TEMPLATE_REGISTRY_ENABLED = (
+    os.getenv("TEMPLATE_REGISTRY_ENABLED", "true").strip().lower() == "true"
+)
+# Vendor-operated default. `raw.githubusercontent.com` deliberately: no new
+# infra, a public audit trail, and curation is literally a git commit. The
+# document served here must exist before the release ships — an empty
+# `version: 1` / `templates: []` is a valid registry and gives day-one
+# behaviour of "fetch succeeds, zero entries, catalog unchanged, no warnings"
+# (the ent#137 ship prerequisite).
+TEMPLATE_REGISTRY_URL = os.getenv(
+    "TEMPLATE_REGISTRY_URL",
+    "https://raw.githubusercontent.com/Abilityai/trinity-templates/main/registry.yaml",
+)
 
 
 # ============================================================================

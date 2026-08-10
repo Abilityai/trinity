@@ -77,7 +77,7 @@ jobs:
           PATTERN='\bSIEM\b|\bSCIM\b|\bclient_portal\b|\bpermissions_matrix\b|\btwo_factor\b|2fa_recovery_codes|\benterprise_(?!features\b|schema_migrations\b|connectors|docs\b|registered\b)[a-z_]+'
           # The open-core seam files: public code whose comments must stay generic
           # (the entitlement mechanism), never naming the paid catalog (#1461).
-          SEAM_FILES='src/backend/main.py src/backend/services/entitlement_service.py'
+          SEAM_FILES='src/backend/main.py src/backend/services/entitlement_service.py src/backend/services/a2a_gate.py'
           # Live docs only — exclude historical/point-in-time trees and this guard.
           # docs/ is recursive, so docs/user-docs/** (which auto-publishes to a public
           # search index via sync-docs-to-vertex.yml) is covered here too.

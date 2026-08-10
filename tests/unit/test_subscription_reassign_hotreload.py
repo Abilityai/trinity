@@ -59,6 +59,7 @@ def owner_user():
     u.username = "owner"
     u.role = "user"
     u.connector_agent = None  # #1310: not a connector principal
+    u.agent_name = None  # ent#293: not an agent-scoped key
     return u
 
 
@@ -68,6 +69,7 @@ def admin_user():
     u.username = "admin"
     u.role = "admin"
     u.connector_agent = None  # #1310: not a connector principal
+    u.agent_name = None  # ent#293: not an agent-scoped key
     return u
 
 
