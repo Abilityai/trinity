@@ -61,11 +61,40 @@ moment any wall-clock time has passed — a 1-second false positive on
 fresh slots.
 
 The fix is to compare the *initial* TTL against the floor, reconstructed
-as `ttl + age`, where `age = snapshot_time - slot_score` and
+as `ttl + age`, where `age = <the instant the TTL was read> - slot_score` and
 `slot_score` is the unix epoch at acquire (recorded by SlotService in
 the ZSET). A slot created with `EXPIRE(floor)` then ages `t` seconds
 has current TTL `floor - t`, so `ttl + age = floor` — exactly at the
 floor regardless of when the snapshot is taken.
+
+## Both terms must be read at the SAME instant (ent#372)
+
+`age` used to be measured against `Snapshot.snapshot_time`, and that is a
+different moment from the TTL read: `snapshot_time` is stamped at the top of
+`collect_snapshot()`, while the per-slot TTL pipeline runs after the docker and
+roster collectors (measured 1.0–1.9s on eu2, tail to 9s). Everything elapsing in
+between is ticked off `ttl` without being added to `age`, so `ttl + age` landed
+short by exactly the collector's elapsed time — under the floor, every live
+slot, every cycle. eu2 saw 208 critical violations across 24h / 85 cycles, all
+`below_floor`, and the deficit tracked cycle work rather than the timeout value,
+which is the tell that it was collector elapsed time and nothing about the slot.
+
+`age` therefore comes from `agent.slot_ttl_read_at[eid]` — stamped per slot,
+immediately before that slot's TTL pipeline. The remaining 1-second tolerance
+below then covers what its comment claims (Redis's float→int rounding on the
+wire) and nothing else.
+
+Widening the tolerance instead was rejected: collector elapsed time is unbounded
+and grows with fleet size, so no constant is both large enough to silence it and
+small enough to still catch a genuinely short TTL. Re-stamping `snapshot_time`
+before the Redis reads was rejected too (other invariants measure against it),
+as was reordering the collectors (#1813 puts docker first deliberately, so H-01
+has independent evidence on the roster-failure path).
+
+A slot with a TTL but NO read time cannot occur at runtime — the collector
+writes both in one try-block — so it means a hand-built snapshot, and the
+floor arm SKIPS it rather than falling back to `snapshot_time`. The fallback is
+the bug.
 
 ## TTL sentinel values from `redis.ttl()`
 
@@ -116,8 +145,7 @@ Tier A, severity critical. A slot whose TTL is below the floor is a
 ticking timebomb on capacity correctness.
 """
 
-from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List
 
 from ..snapshot import Snapshot, ViolationReport
 
@@ -131,25 +159,10 @@ SLOT_TTL_BUFFER_SECONDS = 300
 
 DRAIN_PREFIX = "drain-"
 
-
-def _parse_iso_to_unix(ts: str) -> Optional[float]:
-    """Convert an ISO-Z timestamp into unix epoch seconds.
-
-    Mirrors `_parse_iso` in e01_terminal_state_closure.py — strips the
-    trailing 'Z' that `fromisoformat` rejects on Python <3.11, and
-    forces UTC tz on naive results so the subtract is sane.
-    """
-    if not ts:
-        return None
-    if ts.endswith("Z"):
-        ts = ts[:-1]
-    try:
-        dt = datetime.fromisoformat(ts)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
+# ent#372 removed the `snapshot_time` parse that used to live here. `age` is now
+# derived from the per-slot TTL read time carried on the snapshot, so this check
+# reads NO ISO timestamp at all — `snapshot_time` survives only as a string in
+# `observed_state`, for the alert reader.
 
 
 def check(snapshot: Snapshot) -> List[ViolationReport]:
@@ -159,8 +172,6 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
     # Same gate as S-01 / S-02 / E-02: Redis failed → skip cleanly.
     if any(s.startswith("redis") for s in snapshot.sources_unavailable):
         return violations
-
-    snapshot_unix = _parse_iso_to_unix(snapshot.snapshot_time)
 
     for agent in snapshot.agents:
         for eid in sorted(agent.slot_ids):
@@ -206,9 +217,17 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
                 # fabricate a violation. Same defensive stance the rest of
                 # the canary takes when an input is incomplete.
                 score = agent.slot_scores.get(eid)
-                if score is None or snapshot_unix is None:
+                # ent#372: `age` is measured from the instant the TTL itself was
+                # read, NOT from `snapshot_time` — the two are a collector or
+                # two apart (1–9s on eu2), and every one of those seconds came
+                # off `ttl` without going into `age`, which is what made this
+                # arm fire on every live slot. Absent read time means a
+                # hand-built snapshot (the collector writes it with the TTL);
+                # skip rather than fall back, since the fallback IS the bug.
+                read_at = agent.slot_ttl_read_at.get(eid)
+                if score is None or read_at is None:
                     continue
-                age = max(0.0, snapshot_unix - float(score))
+                age = max(0.0, float(read_at) - float(score))
                 initial_ttl = ttl + age
                 # 1-second tolerance absorbs the float→int rounding that
                 # Redis `TTL` does on the wire. Without it, a slot created
