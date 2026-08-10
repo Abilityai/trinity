@@ -73,13 +73,74 @@ async def get_agent_credentials_status(
                 timeout=10.0
             )
             response.raise_for_status()
-            return response.json()
+            payload = response.json()
 
     except httpx.RequestError as e:
         raise HTTPException(
             status_code=503,
             detail=f"Failed to connect to agent: {str(e)}"
         )
+
+    # #1999/#2010: the agent reports per-key `env_drift` — variable NAMES — and
+    # this route is the one credential endpoint deliberately left on the looser
+    # read gate, precisely BECAUSE it returns a count and names nothing (see the
+    # rationale above `/credential-requirements`). A shared user, or any
+    # agent-scoped MCP key (which resolves to the owner carrying the owner's
+    # role), reaches it; `get_credential_status` in the MCP server passes the
+    # body straight through. Names of what is actually in `.env` — including
+    # undeclared variables — are a targeting map, so the drift is served from
+    # the owner-only route below instead of being stripped from the diagnostic.
+    if isinstance(payload, dict):
+        payload.pop("env_drift", None)
+    return payload
+
+
+@router.get("/agents/{agent_name}/credentials/env-drift")
+async def get_agent_env_drift(
+    agent_name: str = Depends(get_owned_agent_by_name),
+    current_user: User = Depends(get_current_user),
+):
+    """Per-key drift between the agent's `.env` and its running process env.
+
+    The #1999 ghost class was expensive to diagnose because `/proc/<pid>/environ`
+    and `docker exec` both agree with the file and disagree with what executions
+    actually receive; this is the one view that shows the divergence.
+
+    Owner/admin AND human-only, matching `/credential-requirements`,
+    `/inject`, `/export`, `/import` — it names variables, so it is a targeting
+    map rather than a status light, and a prompt-injected agent must not be able
+    to curl it with its own key.
+    """
+    reject_agent_principal(current_user)
+
+    container = get_agent_container(agent_name)
+    if not container:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    agent_status = get_agent_status_from_container(container)
+    if agent_status.status != "running":
+        return {
+            "agent_name": agent_name,
+            "status": "agent_not_running",
+            "message": "Agent must be running to report env drift",
+            "env_drift": [],
+        }
+
+    try:
+        async with agent_httpx_client(agent_name) as client:
+            response = await client.get(
+                f"http://agent-{agent_name}:8000/api/credentials/status",
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=503, detail=f"Failed to connect to agent: {str(e)}")
+
+    return {
+        "agent_name": agent_name,
+        "env_drift": (payload or {}).get("env_drift", []),
+    }
 
 
 # ============================================================================

@@ -69,6 +69,14 @@ INITIAL_ENV: Dict[str, str] = dict(os.environ)
 PROTECTED_KEYS = frozenset({
     "PATH", "HOME", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
     "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "BASH_ENV", "ENV", "IFS",
+    # Node equivalents (#2010 review): every runtime here is a Node process, and
+    # `NODE_OPTIONS=--require /tmp/x.js` is LD_PRELOAD for Node. NODE_REPL_*
+    # and the loader flags are the same mechanism under other names.
+    "NODE_OPTIONS", "NODE_PATH", "NODE_REPL_EXTERNAL_MODULE",
+    # git executes these as commands, so a .env key would be arbitrary
+    # execution on the next fetch/push the agent runs.
+    "GIT_SSH", "GIT_SSH_COMMAND", "GIT_EXTERNAL_DIFF", "GIT_PAGER",
+    "GIT_EDITOR", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT",
 })
 
 # NOTE (#1999): the parsing below is deliberately BYTE-FAITHFUL to the export
