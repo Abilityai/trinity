@@ -70,6 +70,16 @@ services:
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
       - ELEVENLABS_MODEL_ID=${ELEVENLABS_MODEL_ID:-eleven_multilingual_v2}  # non-empty default (#1076)
       - TTS_MAX_CHARS=${TTS_MAX_CHARS:-1500}                      # shared synth cost cap (chars)
+      # Workspace / client portal (ent#356), now OSS core. Rate limits are enforced
+      # at these defaults whether or not they are wired, so the gap is an inert
+      # tuning lever rather than a dead feature — but inert is still the
+      # #1056/#1039 packaging class, so wire them where the .env lever can reach.
+      - PORTAL_CHAT_BURST_LIMIT=${PORTAL_CHAT_BURST_LIMIT:-20}     # portal chat sends per email+agent per 60s
+      - PORTAL_CHAT_HOURLY_LIMIT=${PORTAL_CHAT_HOURLY_LIMIT:-300}  # ... per 3600s
+      - PORTAL_UPLOAD_BURST_LIMIT=${PORTAL_UPLOAD_BURST_LIMIT:-20} # portal uploads per email per 60s
+      - PORTAL_UPLOAD_HOURLY_LIMIT=${PORTAL_UPLOAD_HOURLY_LIMIT:-100}  # ... per 3600s
+      - PORTAL_TITLE_MODEL=${PORTAL_TITLE_MODEL:-claude-haiku-4-5-20251001}  # thread-title model
+      - PORTAL_TITLE_TIMEOUT_SECONDS=${PORTAL_TITLE_TIMEOUT_SECONDS:-15}
       # Agent structured reports (#918) — per-agent create-rate cap (60s window fixed in code).
       # Must reach the container or the .env lever is inert in prod (the #1039 packaging class).
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
