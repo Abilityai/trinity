@@ -34,6 +34,17 @@
       "description": "A2A exposed-skills filter (ent#180): the open-core seam that narrows a card's skills[] to what an agent may advertise. OSS-unchanged by construction (no provider \u2192 identity, same list object); None = no opinion = advertise all (the unconfigured default, so an exposed agent's card is byte-identical across upgrade) vs [] = explicit advertise-nothing; stale/unknown stored ids are inert (the selection only subtracts, the template stays the source of truth); fail-open on provider error AND on a malformed return (a str would otherwise iterate to chars and silently empty the card \u2014 fail-closed, invisible); both card surfaces filter via one router helper (structural guard against a route rebuilding an unfiltered card). Disclosure control only \u2014 message/send dispatches free-form text, so this never narrows what a caller may ask for."
     },
     {
+      "file": "unit/test_1896_integration_nightly_workflow.py",
+      "feature": "#1896",
+      "added": "2026-08-03",
+      "categories": [
+        "ci",
+        "unit",
+        "guard"
+      ],
+      "description": "Static guards on integration-nightly.yml (#1896), the CI home for the live-instance root suite (~93 files needing a running Trinity; nothing ran them, so they gated nothing). Pins the properties whose absence is invisible until the night it matters: membership is DIRECTORY-based (--ignore=unit, matching tests/run-core.sh) so #1895's relocations shrink it with no workflow edit and no file list to drift; base and head both run for attribution; a missing JUnit fails the job LOUDLY instead of being reported to the author as a regression (the diff script is fail-closed on missing XML, so a failed stack boot would otherwise wear a PR's name — #1941's class); each side gets a pristine stack via `down -v` since the suite mutates its instance; the merge is full-depth with the conflict verdict gated on unmerged paths (#1941 again); the job running untrusted PR code holds only contents:read while the write-scoped comment job never checks out PR code; it is not on the pull_request path; the runtime budget and its escalation are written down; --continue-on-collection-errors is present (measured: 3 root modules currently fail to import, and without the flag pytest writes no XML at all); and src/cli is installed, since test_cli_*.py imports trinity_cli which is deliberately absent from requirements-test.txt."
+    },
+    {
       "file": "unit/test_ent15_import_intents.py",
       "feature": "trinity-enterprise#15",
       "added": "2026-08-06",
