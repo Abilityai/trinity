@@ -7,21 +7,55 @@ clear-to-fallback). Runs against a throwaway sqlite seeded with the OSS
 ``system_settings`` table. The entitlement gate lives at the router, so this
 needs no entitlement wiring.
 
-PATCHING RULE (ent#356): every ``services.*`` patch here uses the STRING target
-form, never ``import services.x as alias`` + ``patch.object(alias, ...)``.
+PATCHING RULE (ent#356) — see ``_services_module`` below for the measurements.
 ``client_portal.service`` reaches its dependencies through function-local
-``from services.x import y``, which resolves ``sys.modules["services.x"]`` at
-call time — while ``import services.x as alias`` resolves the ``services``
-package ATTRIBUTE. Those are normally the same object, but conftest's #762
-invariant-restore swaps ``sys.modules`` entries back to a captured baseline
-between tests, so once an earlier test in the run replaces one they diverge and
-the alias-form patch silently targets an object the code never calls. The test
-then fails on the real dependency's behaviour, which reads like a product bug.
-Only the full suite reproduces it; a small selection passes.
+``from services.x import y``, which resolves ``sys.modules["services.x"]``.
+Every other route walks the ``services`` package ATTRIBUTE, and conftest's #762
+invariant-restore can leave that pointing at a different module object for the
+same file. So in this file:
+
+* ``unittest.mock.patch("services.x.y")`` — OK, resolves via sys.modules.
+* ``monkeypatch.setattr(_services_module("x"), "y", ...)`` — required form;
+  ``monkeypatch.setattr("services.x.y", ...)`` is NOT safe (pytest's own
+  resolver walks package attributes).
+* ``import services.x as a`` + ``patch.object(a, ...)`` — never.
+
+A patch on the wrong object does not error. It lets the real dependency run, so
+the test fails on product behaviour and reads like a product bug. Only the full
+suite reproduces it; every small selection passes.
 """
 from __future__ import annotations
 
 import pytest
+
+
+def _services_module(name: str):
+    """The module object the product code will ACTUALLY resolve.
+
+    `client_portal.service` reaches its dependencies through function-local
+    `from services.<name> import <attr>`. That compiles to IMPORT_NAME with a
+    non-empty fromlist, which returns ``sys.modules["services.<name>"]``.
+
+    Every other route walks the ``services`` PACKAGE ATTRIBUTE via getattr, and
+    conftest's #762 invariant-restore can leave that pointing at a *different*
+    module object for the same file. Measured against a staged divergence:
+
+        the product's own `from services.x import f`   -> LIVE  (sys.modules)
+        `import services.x as a`                       -> STALE (package attr)
+        pytest's `monkeypatch.setattr` string target    -> STALE (package attr)
+        `unittest.mock.patch` string target             -> LIVE  (sys.modules)
+
+    So `mock.patch("services.x.f")` is safe and is used directly below, while
+    pytest's string form is NOT — those sites go through this helper. Patching
+    the stale object does not error: it lets the real dependency run, so the
+    test then fails on product behaviour rather than on the missed patch.
+    """
+    import importlib
+    import sys
+
+    importlib.import_module(f"services.{name}")
+    return sys.modules[f"services.{name}"]
+
 
 
 @pytest.fixture()
@@ -196,7 +230,7 @@ def test_roster_carries_briefing(roster_db, monkeypatch):
     (best-effort enrichment), so the new-chat briefing needs no extra fetch."""
     from client_portal import service
     from client_portal.models import PortalPlaybook
-    monkeypatch.setattr("services.tts_service.is_available", lambda: False)   # skip the global key check
+    monkeypatch.setattr(_services_module("tts_service"), "is_available", lambda: False)   # skip the global key check
 
     async def fake_briefing(name):
         if name == "atlas":
@@ -221,7 +255,7 @@ def test_roster_briefing_is_fail_soft(roster_db, monkeypatch):
     """A slow/erroring agent must not break the roster — gather swallows it and
     that card keeps the (None, []) defaults."""
     from client_portal import service
-    monkeypatch.setattr("services.tts_service.is_available", lambda: False)
+    monkeypatch.setattr(_services_module("tts_service"), "is_available", lambda: False)
 
     async def boom(name):
         raise RuntimeError("agent unreachable")
@@ -857,13 +891,13 @@ def test_resolve_title_auth_prefers_api_key_then_subscription(monkeypatch):
     db = database.db if hasattr(database, "db") else database.get_db()
 
     # 1. API key present → x-api-key scheme, no subscription lookup needed.
-    monkeypatch.setattr("services.settings_service.get_anthropic_api_key", lambda: "sk-ant-test")
+    monkeypatch.setattr(_services_module("settings_service"), "get_anthropic_api_key", lambda: "sk-ant-test")
     h = service._resolve_title_auth("atlas")
     assert h["x-api-key"] == "sk-ant-test"
     assert "authorization" not in h and "anthropic-beta" not in h
 
     # 2. No API key, agent has a subscription → Bearer OAuth + the beta header.
-    monkeypatch.setattr("services.settings_service.get_anthropic_api_key", lambda: "")
+    monkeypatch.setattr(_services_module("settings_service"), "get_anthropic_api_key", lambda: "")
     monkeypatch.setattr(db, "get_agent_subscription_id", lambda a: "sub-1")
     monkeypatch.setattr(db, "get_subscription_token", lambda s: "oauth-tok-108")
     h = service._resolve_title_auth("atlas")

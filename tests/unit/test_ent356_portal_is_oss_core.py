@@ -235,6 +235,19 @@ def test_malformed_addresses_are_still_rejected(address):
 # How the portal's own tests patch `services.*`
 # ---------------------------------------------------------------------------
 
+def _is_prose(line: str) -> bool:
+    """Docstring/comment text, not a call.
+
+    Both guards below search for a pattern that their own explanations have to
+    *name* in order to forbid it — the read-the-prose trap this repo has hit
+    before (a guard that greps source text will happily flag the sentence
+    describing the bug). RST literals (``like this``) and comment/bullet lines
+    are documentation; a real call site is neither.
+    """
+    stripped = line.strip()
+    return stripped.startswith(("#", "*", '"""', "'''")) or "``" in line
+
+
 _PORTAL_TEST_FILES = (
     "test_ent79_portal_exposure.py",
     "test_ent163_portal_delegated_identity.py",
@@ -272,6 +285,8 @@ def test_portal_tests_patch_services_by_string_target_not_module_alias():
             continue
         aliases = {}
         for num, line in enumerate(path.read_text().splitlines(), 1):
+            if _is_prose(line):
+                continue
             m = re.match(r"\s*import\s+(services\.[A-Za-z_.]+)\s+as\s+([A-Za-z_]\w*)\s*$", line)
             if m:
                 aliases[m.group(2)] = (m.group(1), num)
@@ -285,3 +300,85 @@ def test_portal_tests_patch_services_by_string_target_not_module_alias():
         "portal tests patch a `services.*` module through an import alias:\n  "
         + "\n  ".join(offenders)
     )
+
+
+def test_monkeypatch_string_targets_are_not_used_for_services_modules():
+    """`monkeypatch.setattr("services.x.y", ...)` is ALSO unsafe — pytest's own
+    resolver walks package attributes.
+
+    This one is the trap inside the trap. `mock.patch` and `monkeypatch.setattr`
+    take what looks like the same string target, so converting alias-form patches
+    to "the string form" reads like one uniform fix — and it is not. Measured
+    against a staged divergence:
+
+        the product's `from services.x import f`  -> LIVE  (sys.modules)
+        unittest.mock  _get_target("services.x.f") -> LIVE  (sys.modules)
+        pytest   monkeypatch resolve("services.x") -> STALE (package attribute)
+
+    `_pytest.monkeypatch.resolve()` reduces the dotted path with `getattr`, so it
+    lands on whatever the `services` package attribute points at. Six of these
+    tests were fixed by moving to string targets and one kept failing for exactly
+    this reason. Those sites must go through `_services_module()`, which reads
+    `sys.modules` directly.
+    """
+    here = Path(__file__).parent
+    offenders = []
+    for name in _PORTAL_TEST_FILES:
+        path = here / name
+        if not path.is_file():
+            continue
+        for num, line in enumerate(path.read_text().splitlines(), 1):
+            if _is_prose(line):
+                continue
+            if re.search(r'monkeypatch\.setattr\(\s*["\']services\.', line):
+                offenders.append(f"{name}:{num}: {line.strip()[:90]}")
+    assert not offenders, (
+        "monkeypatch string targets on `services.*` resolve the package "
+        "attribute, not sys.modules — use _services_module(<name>):\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_the_two_resolvers_really_do_disagree():
+    """Executable proof of the claim the two guards above rest on.
+
+    Guards built on a belief about an import mechanism are worth exactly as much
+    as the belief. This stages the divergence — `sys.modules["services.x"]` and
+    the `services` package attribute holding different module objects for the
+    same file, which is the state conftest's #762 invariant-restore produces —
+    and checks each resolver against what the product code actually does.
+
+    If a future pytest changes `resolve()` to read sys.modules, this test fails
+    and the guard above can be deleted rather than left as cargo cult.
+    """
+    import sys
+    import types
+    from unittest.mock import _get_target
+
+    import _pytest.monkeypatch as mp
+
+    pkg_name = "_ent356_probe_pkg"
+    mod_name = f"{pkg_name}.leaf"
+    pkg = types.ModuleType(pkg_name)
+    pkg.__path__ = []
+    live = types.ModuleType(mod_name)
+    stale = types.ModuleType(mod_name)
+
+    saved = {k: sys.modules.get(k) for k in (pkg_name, mod_name)}
+    try:
+        sys.modules[pkg_name] = pkg
+        sys.modules[mod_name] = live
+        pkg.leaf = stale                      # the divergence
+
+        assert mp.resolve(mod_name) is stale, (
+            "pytest's resolver now agrees with sys.modules — the "
+            "monkeypatch-string-target guard above is obsolete, delete it"
+        )
+        getter, _ = _get_target(f"{mod_name}.anything")
+        assert getter() is live, "mock's resolver no longer reads sys.modules"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
