@@ -86,8 +86,18 @@ jobs:
               --base dev \
               --state open \
               --limit 20 \
-              --json number,headRefName,headRefOid)
+              --json number,headRefName,headRefOid,isCrossRepository)
           fi
+          # Defence in depth for the same exposure: fork PRs are excluded from
+          # the matrix, so PR code from outside the org never runs in a
+          # scheduled job that can see repository secrets or the runner's
+          # environment. Logged, not silent — a skipped fork must be visible as
+          # a coverage gap rather than look like a passing run.
+          forks=$(echo "$prs" | jq -r '[.[] | select(.isCrossRepository)] | map(.number|tostring) | join(", ")')
+          if [ -n "$forks" ]; then
+            echo "::warning::skipping fork PR(s) $forks — untrusted code is not run in the scheduled integration job"
+          fi
+          prs=$(echo "$prs" | jq '[.[] | select(.isCrossRepository | not)]')
           count=$(echo "$prs" | jq 'length')
           if [ "$count" = "0" ]; then
             echo "has_prs=false" >> "$GITHUB_OUTPUT"
@@ -193,7 +203,19 @@ jobs:
       - name: Run the live suite on BOTH sides
         if: steps.merge.outputs.merge_conflict == 'false'
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.E2E_ANTHROPIC_API_KEY || 'placeholder' }}
+          # NO `secrets.*` here, deliberately (#1896 review). `schedule` exposes
+          # repository secrets to fork PRs, and this step runs arbitrary shell
+          # from the merged PR tree (`boot_stack` runs the PR's own
+          # scripts/deploy/start.sh), so any secret named here is readable by
+          # anyone who opens a PR. `backend-unit-nightly.yml` — the workflow
+          # whose security architecture this one inherits — keeps its only
+          # secret in `discover`, and its test job is genuinely credential-free;
+          # this one is too, now. Tests needing a real key are skip-marked
+          # rather than paid for with a fleet-wide exposure. If a live-LLM
+          # nightly is ever wanted, it needs a different shape (a
+          # `pull_request_target`-free, same-repo-only workflow with an
+          # environment approval), not a secret added to this line.
+          ANTHROPIC_API_KEY: placeholder
           # `tests/conftest.py` aliases TRINITY_TEST_PASSWORD from
           # ADMIN_PASSWORD, so the credential does not need restating.
           TRINITY_API_URL: http://localhost:8000

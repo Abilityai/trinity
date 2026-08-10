@@ -167,6 +167,40 @@ def test_the_job_running_pr_code_has_no_write_token():
     )
 
 
+def test_the_job_running_pr_code_holds_no_secrets():
+    """Token SCOPE was guarded; secret REFERENCES were not.
+
+    The original version of this test asserted only on `permissions:`, so
+    `ANTHROPIC_API_KEY: ${{ secrets.E2E_ANTHROPIC_API_KEY || 'placeholder' }}`
+    sat in the same job unremarked — and `schedule` (unlike `pull_request`)
+    exposes repository secrets to fork PRs, while this job runs arbitrary shell
+    from the merged PR tree. The guard read as if it covered that and did not.
+    """
+    import re
+
+    job = str(_test_job())
+    referenced = set(re.findall(r"secrets\.([A-Za-z_][A-Za-z0-9_]*)", job))
+    assert not referenced, (
+        f"the job that runs untrusted PR code references secret(s): "
+        f"{sorted(referenced)} — a scheduled run hands those to any fork PR"
+    )
+
+
+def test_fork_prs_are_not_run():
+    """Defence in depth for the same exposure, and visible when it bites."""
+    discover = str(_doc()["jobs"]["discover"])
+    assert "isCrossRepository" in discover, (
+        "discover no longer filters fork PRs — untrusted code would run in a "
+        "scheduled job with access to the repository's environment"
+    )
+    assert "select(.isCrossRepository | not)" in discover, (
+        "the fork field is fetched but not filtered on"
+    )
+    assert "::warning::skipping fork PR" in discover, (
+        "a skipped fork must be logged — a silent skip looks like a pass"
+    )
+
+
 def test_it_is_not_wired_into_the_pull_request_merge_path():
     """AC 2: nightly, not per-PR. A mutating ~93-file suite in the merge path
     is a cost and a flake source; `workflow_dispatch` keeps it runnable on
