@@ -7,7 +7,7 @@ plus numeric ahead/behind counts and returns a `ConflictClass` enum value used
 by the GitConflictModal to render operator-readable copy.
 
 Stderr samples are the real payloads captured in /tmp/trinity-repro/; we store
-trimmed copies in tests/git-sync/fixtures/ so the tests are reproducible even
+trimmed copies in tests/git_sync/fixtures/ so the tests are reproducible even
 if the repro scripts are re-run.
 """
 from __future__ import annotations

@@ -21,7 +21,7 @@ import shutil
 # Add backend to path for service imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "backend"))
 
-from utils.assertions import assert_status, assert_status_in
+from testkit.assertions import assert_status, assert_status_in
 
 
 # Skip condition for tests that require the log archive service filesystem

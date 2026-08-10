@@ -4,6 +4,15 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
+# #2080: nothing may hang a run. `thread` (not the default `signal`) because
+# the signal method re-enters the interpreter from a signal handler, which on
+# a hung socket read produced a pytest INTERNALERROR instead of a timeout —
+# the failure that turned one blocking test into an indefinite stall. The
+# ceiling is generous on purpose: per-tier timeouts in tests/run-full.sh are
+# the real budget, and this is only the backstop for someone running pytest by
+# hand.
+timeout = 900
+timeout_method = "thread"
 pythonpath = ["tests", "src/backend", "src"]
 markers = [
     "asyncio: mark test as async",

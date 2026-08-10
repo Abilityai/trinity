@@ -60,9 +60,12 @@ try:
     import main  # noqa: E402  (must follow the env/path setup above)
 except ImportError as _import_main_exc:  # pragma: no cover — polluted sweep only
     pytest.skip(
-        "requires pristine sys.modules — `import main` failed under the full "
-        f"tests/unit collection ({_import_main_exc}); the repo's tests/utils "
-        "package shadows src/backend/utils. Run standalone: "
+        "requires pristine sys.modules — `import main` failed "
+        f"({_import_main_exc}). NOTE (#2080): this message used to blame the "
+        "`tests/utils` shadowing, which no longer exists (that package is now "
+        "`tests/testkit`); the actual cause was an undeclared OTel exporter "
+        "dependency, so this module skipped ALWAYS — standalone included — "
+        "while reading as an environment quirk. Run standalone: "
         "pytest tests/unit/test_ent126_route_order.py",
         allow_module_level=True,
     )
