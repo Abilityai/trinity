@@ -12,7 +12,7 @@
 # overlay → commit → force-with-lease push) and asserts the remote ends
 # up with main's baseline plus the worker's workspace state.
 #
-# Usage: ./tests/git-sync/s3_reset_preserve.sh
+# Usage: ./tests/git_sync/s3_reset_preserve.sh
 # Expected last line: "S3 pure-git regression: OK"
 
 set -euo pipefail

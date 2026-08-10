@@ -1891,6 +1891,17 @@
         "guard"
       ],
       "description": "The .trinity/ authored-vs-runtime split survives a backend Push (#2070). Every Push runs `git rm --cached` over tracked-but-now-ignored files; the fleet list ignored `.trinity/` WHOLESALE, so template-committed content there was untracked and its deletion pushed, guarded only by a hardcoded two-entry pathspec that was wrong three times (brain-orb ent#76, setup.sh \u2014 swept live \u2014 and pre-check #2070, the SCHED-COND-001 hook the platform's own docs tell authors to commit). Silent by construction: only the index is touched, so the working tree keeps running and the failure lands one re-clone/recreate later as an agent with no hook, whose every cron tick then runs a full LLM turn. Runs the REAL `_build_gitignore_merge_command` + `_build_rm_cached_ignored_command` against REAL git repos in tmp (the defect is in git's own descend/negation semantics, which a mocked container cannot express). Asserts the SPLIT, never the current exemption strings: 8 authored paths survive, 9 runtime files stay untracked, a fresh clone still RUNS the hook, the superseded wholesale line is replaced (append-only would be inert \u2014 git never descends into a dir-form exclusion), user rules merely mentioning .trinity are preserved, the merge is idempotent, exemptions are derived from `_TRINITY_AUTHORED_PATHS`, and a newly-invented runtime file needs no action. Mutation-verified 4 ways (wholesale ignore restored 5F, hardcoded exemptions 1F, no stale-line migration 2F, pre-check dropped from the set 4F)."
+    },
+    {
+      "file": "unit/test_2080_harness_contract.py",
+      "feature": "#2080",
+      "added": "2026-08-10",
+      "categories": [
+        "harness",
+        "unit",
+        "guard"
+      ],
+      "description": "Guards the full-suite harness against silently rotting back (#2080). Every defect that issue fixed removed COVERAGE without failing anything: collection aborted before any test ran, tiers skipped themselves, and a sys.modules shadow swallowed each new src/backend/utils module. Asserts: tests/utils cannot come back (it shadowed the backend package on the pythonpath \u2014 adding safe_yaml.py broke ~1,000 tests with a ModuleNotFoundError that read like a product regression) and no test imports the helpers under the old name; no package directory has a non-identifier name (tests/git-sync's __init__.py put its conftest under the bare `conftest` key and collided with the root one, breaking collection of tests/integration and aborting the run before the unit tier); every test directory is named by a tier in run-full.sh; every tier passes -rs (without it the skip audit is blind) and a thread-method timeout; pytest exit code 5 (no tests collected) is a FAILURE; pyproject pins timeout_method=thread for hand-run pytest. Plus the audit's own honesty: each allowlist entry carries a written justification, an empty log dir refuses to certify, an unallowlisted skip fails and an allowlisted one passes."
     }
   ]
 }

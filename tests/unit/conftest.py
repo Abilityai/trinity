@@ -64,11 +64,11 @@ os.environ.setdefault(
 # Fix: load `src/backend/utils/__init__.py` directly via importlib and
 # install it under the name `utils` in sys.modules BEFORE any test imports
 # backend code. After that, `from utils.helpers import ...` and
-# `from utils.api_client import ...` both hit the right place (backend's
+# `from testkit.api_client import ...` both hit the right place (backend's
 # `utils` has `helpers.py`; tests' `utils` has `api_client.py`). Because
 # we register under the name `utils`, test helpers must be imported
-# via `from utils import api_client` — the existing helpers use absolute
-# `from utils.api_client import TrinityApiClient` which still resolves via
+# via `from testkit import api_client` — the existing helpers use absolute
+# `from testkit.api_client import TrinityApiClient` which still resolves via
 # sys.path lookup on attribute access. To avoid breakage we also install
 # the backend's `utils` submodules explicitly and leave the test helpers
 # alone (unit tests don't use them).

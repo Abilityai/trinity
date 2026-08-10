@@ -34,7 +34,7 @@ import uuid
 
 import pytest
 
-from utils.api_client import TrinityApiClient
+from testkit.api_client import TrinityApiClient
 
 
 TESTFIX_AGENT = os.getenv("SESSION_TEST_AGENT", "testfix")

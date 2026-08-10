@@ -12,7 +12,7 @@
 #   - /tmp/trinity-repro/p5_fix_verified.sh    (demonstrates the fix)
 #   - docker/base-image/agent_server/routers/git.py  (the site being fixed)
 #
-# Usage:  bash tests/git-sync/test_p5_branch_ownership.sh
+# Usage:  bash tests/git_sync/test_p5_branch_ownership.sh
 # Exit:   0 on success, 1 on failure.
 
 set -u

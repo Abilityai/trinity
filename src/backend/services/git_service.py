@@ -54,7 +54,7 @@ class ConflictClass(str, Enum):
 
 
 # Regexes matched against the stderr. Patterns are drawn from real stderr
-# samples captured in /tmp/trinity-repro/ (see tests/git-sync/fixtures/).
+# samples captured in /tmp/trinity-repro/ (see tests/git_sync/fixtures/).
 _AUTH_PATTERNS = (
     re.compile(r"authentication failed", re.IGNORECASE),
     re.compile(r"could not read username", re.IGNORECASE),

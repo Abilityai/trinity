@@ -1,5 +1,5 @@
 """
-Local conftest for tests/git-sync/.
+Local conftest for tests/git_sync/.
 
 The top-level tests/conftest.py wires up HTTP fixtures and auto-logs in
 against a live backend, which these unit tests don't need. We override the
