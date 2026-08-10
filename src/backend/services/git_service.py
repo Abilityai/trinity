@@ -1413,13 +1413,54 @@ def _build_rm_cached_ignored_command(git_dir: str) -> str:
     return f"bash -c {shlex.quote(script)}"
 
 
-async def _detect_git_dir(container_name: str) -> str:
-    """Pick the directory git operations should run in for an agent container.
+AGENT_HOME_DIR = "/home/developer"
+LEGACY_WORKSPACE_DIR = "/home/developer/workspace"
 
-    Standard path is ``/home/developer``. Returns ``/home/developer/workspace``
-    only for legacy agents (created before 2026-02) that have content under
-    that subdirectory. Mirrors the detection ``initialize_git_in_container``
-    has always used so init and the post-init migration agree.
+
+async def _git_toplevel(container_name: str) -> Optional[str]:
+    """Ask git where this agent's repository is rooted (#2075).
+
+    The probe starts at ``workspace/`` when that directory exists and at the
+    home directory otherwise. ``rev-parse --show-toplevel`` walks **up**, so
+    the nearest enclosing repository wins: a genuinely workspace-rooted legacy
+    repo still answers ``/home/developer/workspace``, while a standard agent
+    that merely keeps a populated non-git ``workspace/`` data directory answers
+    ``/home/developer`` — the case the old content heuristic got wrong.
+
+    ``safe.directory`` is relaxed for this read-only query only: the exec runs
+    as ``developer``, but a volume restored with foreign ownership would
+    otherwise make git refuse to answer and silently drop the caller onto the
+    fallback heuristic that this function exists to replace.
+
+    Returns None when there is no repository at or above the probe point, or
+    when git answers with a path outside the agent home (never trusted).
+    """
+    script = (
+        f"start={shlex.quote(LEGACY_WORKSPACE_DIR)}; "
+        f'[ -d "$start" ] || start={shlex.quote(AGENT_HOME_DIR)}; '
+        "git -c safe.directory='*' -C \"$start\" rev-parse --show-toplevel "
+        "2>/dev/null"
+    )
+    result = await execute_command_in_container(
+        container_name=container_name,
+        command=f"bash -c {shlex.quote(script)}",
+        timeout=5,
+    )
+    if result.get("exit_code") != 0:
+        return None
+    top = (result.get("output") or "").strip().splitlines()
+    top = top[-1].strip() if top else ""
+    if top == AGENT_HOME_DIR or top.startswith(f"{AGENT_HOME_DIR}/"):
+        return top
+    return None
+
+
+async def _detect_git_dir_fallback(container_name: str) -> str:
+    """Where to *create* a repo when the container has none yet.
+
+    Verbatim the pre-#2075 content heuristic: any non-empty ``workspace/``
+    means the repo goes there. ``initialize_git_in_container`` uses this to
+    place a brand-new repo, so fresh-agent placement stays byte-compatible.
     """
     check_workspace = await execute_command_in_container(
         container_name=container_name,
@@ -1435,6 +1476,20 @@ async def _detect_git_dir(container_name: str) -> str:
         and "1" in check_workspace.get("output", "")
     )
     return "/home/developer/workspace" if workspace_has_content else "/home/developer"
+
+
+async def _detect_git_dir(container_name: str) -> str:
+    """Pick the directory git operations should run in for an agent container.
+
+    Git's own answer wins (``_git_toplevel``). Only when the container has no
+    repository at all does the legacy content heuristic decide — that path is
+    reached by ``initialize_git_in_container``, which needs a placement for a
+    repo that does not exist yet.
+    """
+    top = await _git_toplevel(container_name)
+    if top:
+        return top
+    return await _detect_git_dir_fallback(container_name)
 
 
 async def _migrate_workspace_gitignore(agent_name: str) -> None:
