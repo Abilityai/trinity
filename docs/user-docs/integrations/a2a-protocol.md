@@ -29,12 +29,12 @@ This guide covers both directions:
 
 Open the agent's detail page and select the **A2A** tab.
 
-![The A2A configuration tab on Agent Detail — exposure toggle, Agent Card URL, advertised skills, inbound allow-list, and outbound endpoint registry.](../images/a2a-config-panel.png)
+![The A2A configuration tab on Agent Detail — exposure toggle, Agent Card URL, advertised skills, inbound allow-list, and outbound endpoint registry.](../../screenshots/a2a-config-panel.png)
 
 1. **Flip "Expose over A2A" on.** It's OFF by default. While off, the public routes return `404` and the agent is invisible to the A2A ecosystem.
 2. **Copy the Agent Card URL.** Once exposed, the panel shows the public discovery URL with a one-click **Copy** button. Hand this to whoever is wiring up the external orchestrator.
 
-   ![The Agent Card URL section — the public discovery URL with a one-click Copy button.](../images/a2a-card-url.png)
+   ![The Agent Card URL section — the public discovery URL with a one-click Copy button.](../../screenshots/a2a-card-url.png)
 3. **Review the advertised skills** — exactly what an external caller sees on the card (derived from the agent's `template.yaml` capabilities).
 4. **Manage the inbound allow-list** (optional) — add the account emails of callers that may task the agent. Leave it empty to allow any authenticated owner/shared caller.
 5. **Register outbound endpoints** (optional) — external A2A endpoints your agent may call, with credentials stored encrypted (never shown again).
