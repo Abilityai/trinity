@@ -85,6 +85,17 @@ SKILLS_AUTOMATION_KEYS = {
     SKILLS_AUTO_REINJECT_ENABLED_KEY,
 }
 
+# ent#346: the pre-ent#237 single-repo settings. `_adopt_legacy_clone` converts
+# these into a `skill_sources` row, so writing them IS registering a skills
+# source — the grant action ent#237 gates behind `reject_agent_principal` on
+# every `/skills/sources` route. Blocked on the generic PUT so the gate cannot
+# be walked around. `skills_library_branch` is included because a source is
+# (url, ref): re-pointing the ref alone changes which commit the fleet executes.
+LEGACY_SKILLS_LIBRARY_KEYS = {
+    "skills_library_url",
+    "skills_library_branch",
+}
+
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
@@ -2683,13 +2694,37 @@ async def update_setting(
             ),
         )
 
-    # Validate URL-based settings to prevent SSRF (SEC-179)
-    if key == "skills_library_url" and body.value:
-        from utils.url_validation import validate_skills_library_url
-        try:
-            validate_skills_library_url(body.value)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+    # ent#346: the legacy skills-library keys are a SOURCE GRANT in disguise.
+    #
+    # ent#237 put `reject_agent_principal` on every `/skills/sources` route and
+    # states why: adding a source is the GRANT action, and a prompt-injected
+    # agent that could register its own repo gets unattended, fleet-wide,
+    # persistent prompt injection — skills are instructions Claude follows and
+    # they ship executable `scripts/`.
+    #
+    # This key reaches the same room by another door. `_adopt_legacy_clone`
+    # turns `skills_library_url` into a `skill_sources` row on the next sync at
+    # CUSTOM priority — which outranks the bundled community catalog — then
+    # deletes the setting, erasing where the row came from. This generic PUT is
+    # `assert_admin`-gated but NOT `reject_agent_principal`-gated, and an
+    # agent-scoped key resolves to its owner carrying the owner's role, so on
+    # the default admin-owned install it passes (trinity-ops-agent#232 class).
+    #
+    # Validating the URL is not sufficient and never was: `github.com/attacker/skills`
+    # passes `validate_skills_library_url` cleanly. The question is WHO may grant
+    # a source, not what the string looks like — so block the keys and point at
+    # the route that carries the gate. ent#237 already removed the UI writer, so
+    # nothing supported breaks.
+    if key in LEGACY_SKILLS_LIBRARY_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is a skills SOURCE grant and must be set via "
+                "POST /api/skills/sources (admin + human-only, validated, audited). "
+                "Writing it here would register a fleet-wide skills source without "
+                "the grant gate (ent#346)."
+            ),
+        )
 
     try:
         setting = db.set_setting(key, body.value)
