@@ -48,6 +48,7 @@ from urllib.parse import urlparse, urlunparse
 
 from utils.url_validation import (
     ALLOWED_SKILLS_LIBRARY_HOSTS,
+    reject_embedded_credentials,
     strip_url_credentials,
     validate_skills_library_url,
 )
@@ -678,10 +679,6 @@ class SkillService:
         # carrying a PAT would be laundered into a durable row and read back by
         # anything that lists sources (the ent#334 disclosure).
         try:
-            from utils.url_validation import (
-                reject_embedded_credentials,
-                validate_skills_library_url,
-            )
             validate_skills_library_url(url)
             reject_embedded_credentials(url)
         except ValueError as e:
