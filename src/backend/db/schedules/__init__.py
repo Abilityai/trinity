@@ -33,7 +33,13 @@ from .webhooks import ScheduleWebhooksMixin
 from .executions import ScheduleExecutionsMixin
 from .queue import ScheduleQueueMixin
 from .cleanup import ScheduleCleanupMixin
-from .analytics import ScheduleAnalyticsMixin, _TRIGGER_BUCKETS
+from .analytics import (
+    ScheduleAnalyticsMixin,
+    _TRIGGER_BUCKETS,
+    _BUCKET_ORDER,
+    _OTHER_BUCKET,
+    _bucket_for_trigger,
+)
 from .stats import ScheduleStatsMixin
 from .git_config import ScheduleGitConfigMixin
 from .retention import ScheduleRetentionMixin
@@ -59,4 +65,11 @@ class ScheduleOperations(
         self._agent_ops = agent_ops
 
 
-__all__ = ["ScheduleOperations", "_norm_ts", "_TRIGGER_BUCKETS"]
+__all__ = [
+    "ScheduleOperations",
+    "_norm_ts",
+    "_TRIGGER_BUCKETS",
+    "_BUCKET_ORDER",
+    "_OTHER_BUCKET",
+    "_bucket_for_trigger",
+]

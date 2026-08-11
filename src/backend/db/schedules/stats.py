@@ -1,5 +1,6 @@
 """Light per-agent/fleet execution stats + token stats (EXEC-022 / #18)."""
 
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict
 
 from sqlalchemy import text
@@ -7,6 +8,7 @@ from sqlalchemy import text
 from ..engine import get_engine
 from utils.helpers import iso_cutoff
 from ._common import _norm_ts
+from .analytics import _BUCKET_ORDER, _bucket_for_trigger
 
 class ScheduleStatsMixin:
     """Execution stat rollups + fleet queries."""
@@ -472,3 +474,198 @@ class ScheduleStatsMixin:
                 "deleted_agent_count": row["deleted_agent_count"] or 0,
                 "deleted_agent_cost": round(row["deleted_agent_cost"] or 0.0, 4),
             }
+
+    # ------------------------------------------------------------------
+    # Bucketed fleet timeline (ent#326)
+    # ------------------------------------------------------------------
+
+    def get_fleet_execution_timeline(
+        self,
+        agent_names: Optional[List[str]],  # None = admin (no agent filter)
+        group_by: str,
+        hours: int,
+    ) -> List[Dict]:
+        """Bucketed fleet execution rollups — the time-series sibling of
+        :meth:`get_fleet_execution_stats` (ent#326).
+
+        One endpoint for the grid's data tiles (ent#94 #96/#98/#101) so three
+        tiles don't each grow their own query. Same table, same access model as
+        `/api/executions`; time-series shape instead of scalars.
+
+        `group_by`:
+          * ``hour`` / ``day`` — UTC time buckets, **gap-filled** by the caller
+            so a chart renders a real zero instead of skipping the interval
+            (the #1107 convention).
+          * ``trigger`` — grouped through ``_TRIGGER_BUCKETS`` with its explicit
+            ``Other`` catch-all, so a newly-added trigger type never silently
+            vanishes from a chart.
+          * ``agent`` — per agent_name.
+
+        Per bucket: execution count, failure count, cost sum, context-token sum.
+
+        NOTE on "tokens": ``schedule_executions`` has NO token columns — it
+        carries ``cost``, ``context_used`` and ``context_max``. ``output_tokens``
+        exists only on ``chat_messages``, which covers chat turns rather than
+        fleet executions. So ``context_used`` is reported as what it is,
+        **context-window occupancy**, and the field is named accordingly. A tile
+        labelling this "tokens consumed" would be the liveness-vs-quality
+        mislabel ent#326 explicitly warns against.
+        """
+        if agent_names is not None and len(agent_names) == 0:
+            return []
+
+        bind: Dict = {}
+        where = ["1=1"]
+        if agent_names is not None:
+            keys = [f"an{i}" for i in range(len(agent_names))]
+            where.append("agent_name IN (%s)" % ",".join(f":{k}" for k in keys))
+            bind.update(dict(zip(keys, agent_names)))
+        if hours:
+            where.append("started_at > :cutoff")
+            bind["cutoff"] = iso_cutoff(hours)
+
+        # `started_at` is an ISO-Z TEXT column (Invariant #16), so substr is the
+        # dialect-agnostic bucketer on both SQLite and PostgreSQL — no date
+        # functions, no timezone conversion, and it slices the SAME UTC string
+        # the row was written with.
+        # Pre-#1474 scheduler rows are `YYYY-MM-DD HH:MM:SS` (space separator,
+        # no Z). They pass the lexicographic cutoff, so they are COUNTED — but
+        # `substr` then yields `2026-08-06 10`, which never matches the
+        # gap-filled axis key `2026-08-06T10`, and the bucket renders as a real
+        # zero while `group_by=trigger|agent` and `/stats` still include them.
+        # That is the "chart contradicts the stat card above it" failure this
+        # endpoint counts `error` as failed to avoid, arriving by another route.
+        # `replace` is ANSI SQL and present on both backends.
+        normalized = "replace(started_at, ' ', 'T')"
+        if group_by == "hour":
+            key_sql = f"substr({normalized}, 1, 13)"   # YYYY-MM-DDTHH
+        elif group_by == "day":
+            key_sql = f"substr({normalized}, 1, 10)"   # YYYY-MM-DD
+        elif group_by == "trigger":
+            key_sql = "triggered_by"
+        elif group_by == "agent":
+            key_sql = "agent_name"
+        else:  # pragma: no cover - the router validates first
+            raise ValueError(f"unsupported group_by: {group_by}")
+
+        sql = f"""
+            SELECT {key_sql} AS bucket,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN status IN ('failed', 'error') THEN 1 ELSE 0 END) AS failed,
+                   SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success,
+                   SUM(COALESCE(cost, 0)) AS cost,
+                   SUM(COALESCE(context_used, 0)) AS context_used
+            FROM schedule_executions
+            WHERE {" AND ".join(where)}
+            GROUP BY {key_sql}
+        """
+
+        with get_engine().connect() as conn:
+            rows = conn.execute(text(sql), bind).mappings().all()
+
+        return [
+            {
+                "bucket": r["bucket"],
+                "total": int(r["total"] or 0),
+                "failed": int(r["failed"] or 0),
+                "success": int(r["success"] or 0),
+                "cost": round(float(r["cost"] or 0.0), 6),
+                "context_used": int(r["context_used"] or 0),
+            }
+            for r in rows
+        ]
+
+    def shape_execution_timeline(
+        self, rows: List[Dict], *, group_by: str, hours: int
+    ) -> List[Dict]:
+        """Post-SQL shaping for :meth:`get_fleet_execution_timeline` (ent#326).
+
+        A method (not a bare function) so it reaches the router through the
+        same `DatabaseManager` facade as the query it shapes, rather than the
+        router importing a private db symbol directly.
+        """
+        return _shape_execution_timeline(rows, group_by=group_by, hours=hours)
+
+
+def _empty_bucket(key: str) -> Dict:
+    return {"bucket": key, "total": 0, "success": 0, "failed": 0,
+            "cost": 0.0, "context_used": 0}
+
+
+def _accumulate(into: Dict, row: Dict) -> None:
+    into["total"] += row["total"]
+    into["success"] += row["success"]
+    into["failed"] += row["failed"]
+    into["cost"] = round(into["cost"] + row["cost"], 6)
+    into["context_used"] += row["context_used"]
+
+
+def _fold_trigger_buckets(rows: List[Dict]) -> List[Dict]:
+    """Collapse raw `triggered_by` values into the user-facing buckets.
+
+    Folded HERE rather than in SQL because `_TRIGGER_BUCKETS` is a Python map
+    with an explicit `Other` catch-all — the property that makes a newly-added
+    trigger type show up as `Other` instead of silently vanishing from a chart.
+    Encoding the mapping as a CASE would drop that guarantee the first time
+    someone adds a trigger and forgets the SQL.
+    """
+    folded: Dict = {}
+    for row in rows:
+        label = _bucket_for_trigger(row["bucket"])
+        _accumulate(folded.setdefault(label, _empty_bucket(label)), row)
+    # `_BUCKET_ORDER`, not alphabetical: it exists so `Other` sorts LAST and
+    # the legend/stack order is stable. Sorting by name puts `Other` sixth,
+    # between `MCP` and `Public`, so the #1107 Overview chart and this
+    # endpoint's tile would render the same buckets in different orders on the
+    # same page. Unknown labels (a bucket added to the map but not the order)
+    # follow, alphabetically, rather than being dropped.
+    rank = {name: n for n, name in enumerate(_BUCKET_ORDER)}
+    return sorted(
+        folded.values(),
+        key=lambda b: (rank.get(b["bucket"], len(rank)), b["bucket"]),
+    )
+
+
+def _gap_fill(rows: List[Dict], *, group_by: str, hours: int) -> List[Dict]:
+    """Emit a continuous UTC axis so a chart shows a real zero, not a skip.
+
+    A missing bucket and a zero bucket mean different things to a reader — "no
+    executions that hour" versus "no data" — and a sparse series renders them
+    identically (#1107).
+    """
+    by_key = {r["bucket"]: r for r in rows}
+    now = datetime.now(timezone.utc)
+    out: List[Dict] = []
+    if group_by == "hour":
+        start = (now - timedelta(hours=hours)).replace(minute=0, second=0, microsecond=0)
+        step, fmt = timedelta(hours=1), "%Y-%m-%dT%H"
+    else:
+        start = (now - timedelta(hours=hours)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        step, fmt = timedelta(days=1), "%Y-%m-%d"
+    cursor = start
+    while cursor <= now:
+        key = cursor.strftime(fmt)
+        out.append(by_key.get(key) or _empty_bucket(key))
+        cursor += step
+    return out
+
+
+def _shape_execution_timeline(
+    rows: List[Dict], *, group_by: str, hours: int
+) -> List[Dict]:
+    """Post-SQL shaping for :meth:`get_fleet_execution_timeline` (ent#326).
+
+    Lives here rather than in the router (Invariant #1): the trigger mapping
+    and the continuous UTC axis are domain transforms this package already
+    owns for #1107, and a second copy in a router is how the two drift — the
+    first draft of this endpoint inlined `_TRIGGER_BUCKETS.get(..., "Other")`
+    with a literal fallback and sorted alphabetically, which put `Other` in
+    the middle of a chart the Overview page renders `Other`-last.
+    """
+    if group_by == "trigger":
+        return _fold_trigger_buckets(rows)
+    if group_by in ("hour", "day"):
+        return _gap_fill(rows, group_by=group_by, hours=hours)
+    return rows
