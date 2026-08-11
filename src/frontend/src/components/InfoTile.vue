@@ -100,8 +100,8 @@ defineProps({
   box-sizing: border-box;
   padding: 14px 16px 10px 30px;
   border-radius: var(--gv-radius, 14px);
-  background: var(--gv-tile-bg, #fff);
-  border: 1px solid var(--gv-tile-border, rgba(0, 0, 0, 0.08));
+  background: var(--gv-tile, rgba(255, 255, 255, 0.9));
+  border: 1px solid var(--gv-border, #e5e7eb);
   box-shadow: var(--gv-tile-shadow, 0 1px 2px rgba(0, 0, 0, 0.06));
   overflow: hidden;
 }
@@ -122,7 +122,7 @@ defineProps({
   border-radius: 8px;
   background: var(--gv-peg-bg, #111827);
   color: var(--gv-peg-fg, #fff);
-  border: 1px solid var(--gv-tile-border, rgba(0, 0, 0, 0.08));
+  border: 1px solid var(--gv-border, #e5e7eb);
 }
 .it-peg :deep(svg) {
   fill: none;
@@ -156,7 +156,7 @@ defineProps({
   margin: 0;
   font-size: 13px;
   font-weight: 650;
-  color: var(--gv-fg, #111827);
+  color: var(--gv-text, #111827);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -208,7 +208,7 @@ defineProps({
 }
 .it-msg b {
   font-size: 13px;
-  color: var(--gv-fg, #111827);
+  color: var(--gv-text, #111827);
 }
 .it-msg button {
   margin-top: 6px;
@@ -216,7 +216,7 @@ defineProps({
   padding: 3px 10px;
   border-radius: 7px;
   cursor: pointer;
-  border: 1px solid var(--gv-tile-border, rgba(0, 0, 0, 0.12));
+  border: 1px solid var(--gv-border, #e5e7eb);
   background: transparent;
   color: inherit;
 }
@@ -231,7 +231,7 @@ defineProps({
   text-decoration: none;
 }
 .it-foot a:hover {
-  color: var(--gv-fg, #111827);
+  color: var(--gv-text, #111827);
   text-decoration: underline;
 }
 </style>

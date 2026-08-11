@@ -82,9 +82,9 @@ const stats = computed(() => {
   font-size: 22px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  color: var(--gv-fg, #111827);
+  color: var(--gv-text, #111827);
 }
-.fs-item dd.ok { color: var(--gv-ok, #059669); }
-.fs-item dd.warn { color: var(--gv-warn, #b45309); }
-.fs-item dd.muted { color: var(--gv-fg, #111827); }
+.fs-item dd.ok { color: var(--gv-green-text, #16a34a); }
+.fs-item dd.warn { color: var(--gv-yellow-text, #a16207); }
+.fs-item dd.muted { color: var(--gv-text, #111827); }
 </style>

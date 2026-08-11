@@ -965,6 +965,15 @@ onBeforeUnmount(() => {
   --gv-bk-man: #14b8a6;
   --gv-bk-ext: #ec4899;
   --gv-dots: rgba(17, 24, 39, 0.12);
+  /* ent#325 info-tile chassis. Defined in BOTH blocks: a token defined in one
+     theme only is the same bug the tiles shipped with — a live fallback that
+     never flips. --gv-radius matches .gv-tile's 12px so the inner surface and
+     the chassis share a corner. */
+  --gv-radius: 12px;
+  --gv-peg-bg: #111827;
+  --gv-peg-fg: #f9fafb;
+  --gv-danger-border: rgba(220, 38, 38, 0.35);
+  --gv-skel: rgba(17, 24, 39, 0.07);
   /* Layered depth: top-edge highlight (glass lip) + tight contact shadow +
      mid key shadow + soft ambient falloff. */
   --gv-tile-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0) 55%);
@@ -1038,6 +1047,14 @@ onBeforeUnmount(() => {
   --gv-bk-man: #2dd4bf;
   --gv-bk-ext: #f472b6;
   --gv-dots: rgba(249, 250, 251, 0.08);
+  /* ent#325 info-tile chassis — dark half. The peg inverts (light chip on the
+     dark card) so it reads as a raised marker in both themes rather than
+     disappearing into the tile. */
+  --gv-radius: 12px;
+  --gv-peg-bg: #f9fafb;
+  --gv-peg-fg: #111827;
+  --gv-danger-border: rgba(248, 113, 113, 0.45);
+  --gv-skel: rgba(249, 250, 251, 0.10);
   --gv-drag-shadow: 0 28px 56px -12px rgba(0, 0, 0, 0.75);
   --gv-tile-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 55%);
   --gv-tile-shadow:
