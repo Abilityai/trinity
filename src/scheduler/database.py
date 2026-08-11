@@ -577,12 +577,22 @@ class SchedulerDatabase:
         cost: float = None,
         tool_calls: str = None,
         execution_log: str = None,
-        claude_session_id: str = None  # Claude Code session ID for --resume (EXEC-023)
+        claude_session_id: str = None,  # Claude Code session ID for --resume (EXEC-023)
+        expected_status: str = None,
     ) -> bool:
         """Update execution status when completed.
 
         Args:
             claude_session_id: Claude Code session ID for --resume support (EXEC-023)
+            expected_status: optional CAS precondition — the UPDATE only lands
+                if the row is still in this status. Returns False (no write)
+                otherwise. This writer is otherwise an unconditional
+                ``UPDATE ... WHERE id = ?``; architecture.md names the
+                standalone scheduler's non-CAS writers as the open #1082
+                follow-up, and #1968's abandon path is a NEW one. Rather than
+                argue it is safe today (it is — the abandon gates all run
+                before dispatch, so no competing writer exists), the caller
+                passes the precondition and it is safe by construction.
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -606,7 +616,7 @@ class SchedulerDatabase:
                     context_used = ?, context_max = ?, cost = ?, tool_calls = ?, execution_log = ?,
                     claude_session_id = ?
                 WHERE id = ?
-            """, (
+            """ + (" AND status = ?" if expected_status else ""), (
                 status,
                 to_utc_iso(completed_at),
                 duration_ms,
@@ -618,8 +628,8 @@ class SchedulerDatabase:
                 tool_calls,
                 execution_log,
                 claude_session_id,
-                execution_id
-            ))
+                execution_id,
+            ) + ((expected_status,) if expected_status else ()))
             conn.commit()
             return cursor.rowcount > 0
 

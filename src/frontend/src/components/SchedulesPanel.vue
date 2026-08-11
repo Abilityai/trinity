@@ -1389,7 +1389,20 @@ async function triggerSchedule(schedule) {
       await loadExecutions(schedule.id)
     }
   } catch (error) {
-    reportActionFailure(error, `run the schedule "${schedule.name}" now`)
+    // #1968: the backend now answers 409 when the schedule is already running,
+    // instead of reporting a success that started nothing. That is not the
+    // "nothing was changed — try again" case reportActionFailure describes: a
+    // run IS in flight, and retrying only hits the same lock. Say what is
+    // actually true, and reload so the user can see the run in question.
+    if (error?.response?.status === 409) {
+      actionError.value = `"${schedule.name}" is already running — no new run was started.`
+      actionErrorDetail.value = ''
+      if (expandedSchedule.value === schedule.id) {
+        await loadExecutions(schedule.id)
+      }
+    } else {
+      reportActionFailure(error, `run the schedule "${schedule.name}" now`)
+    }
   } finally {
     triggerLoading.value = null
   }

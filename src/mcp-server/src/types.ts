@@ -304,7 +304,12 @@ export interface ScheduleToggleResult {
 export interface ScheduleTriggerResult {
   status: "triggered";
   schedule_id: string;
-  execution_id: string;
+  // #1968: optional, and that is the honest declaration. This was typed as a
+  // required `string` while the backend never sent the field at all — which is
+  // precisely why the compiler stayed happy while every trigger interpolated
+  // `undefined` into its success message. A current backend fills it in; an
+  // older one still omits it, so callers must check rather than trust the type.
+  execution_id?: string;
   message?: string;
 }
 

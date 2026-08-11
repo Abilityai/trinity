@@ -508,6 +508,16 @@ async def trigger_schedule(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="Scheduler service unavailable"
                 )
+            elif response.status_code == 409:
+                # #1968: the scheduler declined because this schedule is
+                # already running. Relayed as a 409 rather than flattened into
+                # the 500 below, because it is not a failure — it is the answer
+                # to the caller's question, and the old handler's silent
+                # `"status": "triggered"` for this case is the bug.
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Schedule is already executing"
+                )
             elif response.status_code != 200:
                 logger.error(f"Scheduler trigger failed: {response.status_code} - {response.text}")
                 raise HTTPException(
@@ -530,12 +540,20 @@ async def trigger_schedule(
                     "schedule_id": schedule_id,
                     "schedule_name": result.get("schedule_name"),
                     "triggered_by": "manual",
+                    # #1968: the audit row can now name the execution it
+                    # started, so a trigger and its run are joinable after the
+                    # fact rather than only correlatable by timestamp.
+                    "execution_id": result.get("execution_id"),
                 },
             )
 
             return {
                 "status": "triggered",
                 "schedule_id": schedule_id,
+                # #1968: the field the MCP tool has always read and never
+                # found. It was absent here because the scheduler responded
+                # before the row existed; it now creates the row first.
+                "execution_id": result.get("execution_id"),
                 "schedule_name": result.get("schedule_name"),
                 "agent_name": result.get("agent_name"),
                 "message": result.get("message", "Execution started")

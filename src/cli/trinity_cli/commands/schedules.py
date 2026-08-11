@@ -41,4 +41,13 @@ def trigger_schedule(agent, schedule_id):
     """Trigger a schedule immediately."""
     client = TrinityClient()
     data = client.post(f"/api/agents/{agent}/schedules/{schedule_id}/trigger")
-    click.echo(f"Triggered schedule {schedule_id} on '{agent}'")
+    # #1968: `data` was fetched and thrown away, so the command could not tell
+    # the user which run it had just started. The response now carries a real
+    # execution_id; print it, guarded, since an older backend still omits it.
+    execution_id = (data or {}).get("execution_id")
+    if execution_id:
+        click.echo(
+            f"Triggered schedule {schedule_id} on '{agent}' (execution {execution_id})"
+        )
+    else:
+        click.echo(f"Triggered schedule {schedule_id} on '{agent}'")
