@@ -26,6 +26,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pathlib
+import tempfile
+
 import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -47,24 +50,38 @@ def svc():
 
 
 def agent_reads(env_content: str) -> dict:
-    """The agent-server `.env` reader, copied (it ships in its own image).
+    """What the agent ACTUALLY sees — the real reader, not a copy of it.
 
-    Byte-faithful to `routers/credentials.py`: last-wins, one `.strip()` per
-    quote character. Deliberately NOT "fixed" here — see the module note in
-    `test_pat_propagation_properties.py`; this copy exists to answer "what does
-    the agent actually see", which is the only thing that matters for a
-    rotation.
+    This was a hand-written mirror of the agent-server reader: strip quotes,
+    last wins. Correct when written, wrong after #2023/#2030, which made the
+    writer escape the backslash as well as the quote so the encoding is
+    reversible. The mirror never learned to unescape, so it reported
+    `ghp_a\\g<1>b` for a token written as `ghp_a\g<1>b` and these tests failed
+    on the rebase — for a defect that exists only in the copy.
+
+    `test_2023_env_quote_round_trip.py` had already paid for this exact lesson
+    ("a second copy is unverified": mutation testing showed deleting the real
+    escaping broke none of its tests, because they exercised the copy). So load
+    the shipped reader by path, the way that test does. It lives in the agent
+    image, which the backend cannot import — by path is the only route.
     """
-    out = {}
-    for line in env_content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        if key:
-            out[key] = value.strip().strip('"').strip("'")
-    return out
+    import importlib.util
+
+    reader_path = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "docker" / "base-image" / "agent_server" / "services" / "execution_env.py"
+    )
+    spec = importlib.util.spec_from_file_location("_env_reader_2017", reader_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as fh:
+        fh.write(env_content)
+        tmp = pathlib.Path(fh.name)
+    try:
+        return mod.parse_env_file(tmp)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 # The three shapes from the issue, plus the ones `re` treats specially in a
