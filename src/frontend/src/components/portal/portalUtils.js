@@ -41,3 +41,26 @@ export function shortDate(iso) {
 export function threadTitle(t) {
   return (t.title || '').trim() || 'New chat'
 }
+
+// #2101: bounded briefing hint grid. Order deterministically — a card with a
+// real frontmatter description is a useful hint, a bare humanized slug is
+// noise, so described cards come first (stable within each group; the backend
+// list order is a directory walk, i.e. arbitrary). Collapsed, only the first
+// HINT_COLLAPSE_LIMIT render; a counted toggle expands the rest in place.
+export const HINT_COLLAPSE_LIMIT = 6
+
+export function planHintDisplay(hints, expanded, limit = HINT_COLLAPSE_LIMIT) {
+  const list = Array.isArray(hints) ? hints : []
+  // String(): the backend types description as str|null, but a render error is
+  // the wrong failure mode for a briefing card, so coerce defensively.
+  const hasDesc = (h) => String((h && h.description) || '').trim()
+  const described = list.filter((h) => hasDesc(h))
+  const bare = list.filter((h) => !hasDesc(h))
+  const ordered = described.concat(bare)
+  const collapsible = ordered.length > limit
+  return {
+    visible: expanded || !collapsible ? ordered : ordered.slice(0, limit),
+    total: ordered.length,
+    collapsible,
+  }
+}

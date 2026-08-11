@@ -7,12 +7,15 @@
     </p>
     <p v-else class="mt-1.5 text-sm text-gray-400">Start a conversation below.</p>
 
-    <!-- Client-visible playbooks as clickable cards (pre-fill the composer, no auto-run) -->
+    <!-- Client-visible playbooks as clickable cards (pre-fill the composer, no auto-run).
+         #2101: bounded — described-first order, first 6 collapsed, counted toggle
+         expands IN PLACE (no nested scroll region: the chat pane stays the single
+         scroll axis, and the set itself is belted server-side at ≤24). -->
     <div v-if="playbooks.length" class="mt-7 mx-auto max-w-2xl">
       <div class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2 text-left">Things you can ask</div>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
         <button
-          v-for="(p, i) in playbooks"
+          v-for="(p, i) in hintPlan.visible"
           :key="i"
           class="text-left rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3.5 hover:border-action-primary-400 dark:hover:border-action-primary-600 hover:shadow-sm transition"
           @click="$emit('use-playbook', starterFor(p))"
@@ -26,13 +29,28 @@
           </div>
         </button>
       </div>
+      <!-- #2101: ONE persistent toggle element (never two v-if-alternated buttons —
+           that would drop keyboard focus on collapse). Sits outside the grid so the
+           collapsed footprint never changes with the toggle's label. Instant, no
+           animation. The count is the shipped list's, and the label never claims
+           the agent's full skill set (the server belt may have trimmed it). -->
+      <button
+        v-if="hintPlan.collapsible"
+        type="button"
+        class="mt-2.5 text-xs font-medium text-action-primary-600 dark:text-action-primary-400 hover:underline"
+        :aria-expanded="expanded"
+        @click="expanded = !expanded"
+      >
+        {{ expanded ? 'Show fewer' : `Show all ${hintPlan.total}` }}
+      </button>
     </div>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
+import { planHintDisplay } from './portalUtils'
 
 const props = defineProps({
   agent: { type: Object, required: true },
@@ -40,6 +58,13 @@ const props = defineProps({
 defineEmits(['use-playbook'])
 
 const playbooks = computed(() => props.agent.playbooks || [])
+
+// #2101: local by design. Portal.vue keys PortalConversation (and this slot
+// content with it) by `${agent}#${convGen}`, so an agent/thread switch remounts
+// us and collapses for free; a same-agent roster refresh re-renders the same
+// instance and correctly PRESERVES expansion (design contract, principle 5).
+const expanded = ref(false)
+const hintPlan = computed(() => planHintDisplay(playbooks.value, expanded.value))
 
 // Playbooks usually take an argument — pre-fill the composer with the starter
 // (never auto-run). Fall back to the title so a card always does something.
