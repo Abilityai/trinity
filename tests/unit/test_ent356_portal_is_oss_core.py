@@ -89,16 +89,39 @@ def test_router_attribute_still_resolves_to_the_submodule():
     assert isinstance(router_module.router, APIRouter)
 
 
+def _strip_comments(text: str) -> str:
+    """Drop HTML/JS comments so the scan below sees CODE only.
+
+    Added by ent#357: removing the dead gate from `NavBar.vue` meant writing a
+    comment that *names* the predicate being removed — and this guard, a
+    whole-file substring scan, flagged its own explanation. A guard that forbids
+    a string cannot also forbid describing it, or the fix and the note about the
+    fix are mutually exclusive. (Same trap the `_is_prose` helper below handles
+    for the line-based scans.)
+    """
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)     # Vue template
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)      # JS block
+    text = re.sub(r"(?m)^\s*//.*$", "", text)              # JS line
+    return text
+
+
 def test_the_frontend_no_longer_gates_on_the_entitlement():
     """A leftover `isEntitled('client_portal')` would hide the surface in
-    exactly the builds this change opened it for."""
+    exactly the builds this change opened it for.
+
+    Not hypothetical: ent#357 added the Workspace nav entry carrying
+    `v-if="enterpriseStore.isEntitled('client_portal')"` — correct when it was
+    written, dead the moment ent#356 landed, because nothing registers that
+    entitlement any more. The one-click entry point would have rendered on no
+    OSS build at all. This test is what caught it, on the ent#357 PR.
+    """
     frontend = _REPO / "src" / "frontend" / "src"
     offenders = []
     for path in list(frontend.rglob("*.vue")) + list(frontend.rglob("*.js")):
-        text = path.read_text(errors="replace")
-        if "isEntitled('client_portal')" in text or 'isEntitled("client_portal")' in text:
+        code = _strip_comments(path.read_text(errors="replace"))
+        if "isEntitled('client_portal')" in code or 'isEntitled("client_portal")' in code:
             offenders.append(str(path.relative_to(_REPO)))
-        if "requiresEntitlement: 'client_portal'" in text:
+        if "requiresEntitlement: 'client_portal'" in code:
             offenders.append(str(path.relative_to(_REPO)) + " (route meta)")
     assert not offenders, f"frontend still gates the workspace: {offenders}"
 

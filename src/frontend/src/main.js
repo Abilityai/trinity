@@ -31,11 +31,26 @@ axios.interceptors.response.use(
       // Get the current route
       const currentPath = router.currentRoute.value.path
 
-      // Don't redirect if already on login or setup page, or on the client
-      // portal (#138 — it owns a verified-email session and handles its own 401;
-      // a stale operator JWT must not bounce a signed-in client to /login).
+      // Don't redirect if already on login or setup page, or when an EXTERNAL
+      // client holds a verified-email session on the workspace (#138): that
+      // surface owns its own session and handles its own 401, so a stale
+      // operator JWT must not bounce a signed-in client to /login.
+      //
+      // ent#357: an INTERNAL user on the workspace is the opposite case — their
+      // workspace session IS the platform session, so an expired JWT must
+      // bounce them like anywhere else. The discriminator is the portal token,
+      // not the path: same URL, two session kinds.
+      // Who gets bounced is decided by the PLATFORM token, not the portal one
+      // (/review I1). Reading the portal token here made the answer depend on
+      // timing: `fetchRoster`'s 401 handler calls `signOut()`, which removes it,
+      // so a second concurrent 401 saw no portal token and threw an external
+      // client onto the operator /login instead of the workspace sign-in form.
+      // "Does this browser hold a platform session that just expired?" is the
+      // actual question, and it has a stable answer.
+      const onWorkspace = currentPath.startsWith('/workspace') || currentPath.startsWith('/portal')
+      const internalSession = !!localStorage.getItem('token')
       if (currentPath !== '/login' && currentPath !== '/setup' && currentPath !== '/m'
-          && !currentPath.startsWith('/portal')) {
+          && (!onWorkspace || internalSession)) {
         console.log('🔐 Session expired - redirecting to login')
 
         // Clear auth state

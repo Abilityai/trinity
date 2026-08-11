@@ -5,7 +5,7 @@
       <div class="w-full max-w-sm">
         <div class="flex items-center gap-2 mb-6">
           <svg class="w-7 h-7 text-action-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
-          <span class="font-semibold text-lg">Client Portal</span>
+          <span class="font-semibold text-lg">Workspace</span>
         </div>
 
         <template v-if="step === 'email'">
@@ -113,9 +113,42 @@
           </template>
         </PortalConversation>
 
+        <!-- ent#357 AC: an unavailable workspace must SAY so. These three
+             states used to collapse into one "No agents shared with you yet",
+             which reads as "your operator hasn't shared anything" whether the
+             module is absent, the roster call failed, or the list is genuinely
+             empty — a dead end in two of the three cases. -->
         <div v-else class="flex-1 flex flex-col items-center justify-center text-center px-6">
           <svg class="w-10 h-10 text-gray-300 dark:text-gray-700 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
-          <p class="text-sm text-gray-500 dark:text-gray-400 font-medium">No agents shared with you yet</p>
+          <template v-if="store.unavailable">
+            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">Workspace isn't available on this instance</p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">
+              It isn't enabled here. Ask an administrator if you expected access.
+            </p>
+          </template>
+          <template v-else-if="store.error">
+            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">Couldn't load your agents</p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">{{ store.error }}</p>
+            <button class="mt-3 text-sm text-action-primary-600 hover:underline" @click="store.fetchRoster()">Try again</button>
+          </template>
+          <!-- ent#357: an empty roster needs a next step, not just a statement.
+               The two audiences need different ones: a signed-in user can go
+               make an agent, an external client can only ask the person who
+               invited them. -->
+          <template v-else-if="store.isPlatformSession">
+            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">No agents here yet</p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">
+              Agents you own, and agents shared with you, appear here.
+            </p>
+            <a href="/" class="mt-3 text-sm text-action-primary-600 hover:underline">Go to your agents</a>
+          </template>
+          <template v-else>
+            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">No agents shared with you yet</p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">
+              Ask whoever invited you to share an agent with
+              <span class="font-medium">{{ store.clientEmail || 'your email' }}</span>.
+            </p>
+          </template>
           <button class="sm:hidden mt-4 text-sm text-action-primary-600" @click="mobileNav = true">Open menu</button>
         </div>
       </main>
@@ -204,12 +237,12 @@ const convKey = computed(() => `${activeAgentName.value || (store.agents[0]?.nam
 // ---- Navigation handlers ------------------------------------------------------
 function newChat() {
   pendingSession.value = null; prefill.value = ''; convGen.value++
-  if (route.params.sessionId) router.push('/portal')
+  if (route.params.sessionId) router.push('/workspace')
 }
 function newChatWithAgent(name) {
   activeAgentName.value = name
   pendingSession.value = null; prefill.value = ''; convGen.value++
-  if (route.params.sessionId) router.push('/portal')
+  if (route.params.sessionId) router.push('/workspace')
 }
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
 function openThread(t) {
@@ -217,11 +250,11 @@ function openThread(t) {
   activeAgentName.value = t.agent_name || activeAgentName.value
   pendingSession.value = sid; prefill.value = ''; convGen.value++
   search.value = ''
-  router.push(`/portal/c/${sid}`)
+  router.push(`/workspace/c/${sid}`)
 }
 function onSessionAdopted(id) {
   pendingSession.value = id
-  if (route.params.sessionId !== id) router.replace(`/portal/c/${id}`)
+  if (route.params.sessionId !== id) router.replace(`/workspace/c/${id}`)
   refreshThreads()
 }
 function usePlaybook(text) { prefill.value = ''; nextTick(() => { prefill.value = text }) }
@@ -246,7 +279,7 @@ watch(search, (q) => {
 })
 
 // ---- Deep-link / refresh resolution -------------------------------------------
-// On a /portal/c/:id load (or refresh), resolve which agent that thread belongs
+// On a /workspace/c/:id load (or refresh), resolve which agent that thread belongs
 // to from the merged thread list so the shell opens the right conversation.
 watch([() => route.params.sessionId, () => threads.value.length], () => {
   const sid = route.params.sessionId
@@ -275,6 +308,6 @@ function onSignOut() {
   store.signOut()
   threads.value = []; activeAgentName.value = null; pendingSession.value = null
   step.value = 'email'; email.value = ''; code.value = ''
-  if (route.params.sessionId) router.push('/portal')
+  if (route.params.sessionId) router.push('/workspace')
 }
 </script>
