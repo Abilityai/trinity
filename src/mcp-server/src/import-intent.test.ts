@@ -20,7 +20,7 @@ function makeCreateTool(created: { config: AgentConfig; idempotencyKey?: string 
   const fake: Partial<TrinityClient> = {
     createAgent: async (config: AgentConfig, idempotencyKey?: string) => {
       created.push({ config, idempotencyKey });
-      return { name: config.name, type: "business-assistant", status: "running" } as Agent;
+      return { name: config.name, status: "running" } as Agent;
     },
   };
   const tools = createAgentTools(fake as unknown as TrinityClient, false);

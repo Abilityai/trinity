@@ -778,7 +778,6 @@ def get_github_pat() -> Optional[str]:
   "event": "agent_created",
   "data": {
     "name": "agent-name",
-    "type": "business-assistant",
     "status": "running",
     "port": 2222,
     "created": "2026-01-23T10:00:00Z",
@@ -793,7 +792,6 @@ def get_github_pat() -> Optional[str]:
 labels={
     'trinity.platform': 'agent',
     'trinity.agent-name': config.name,
-    'trinity.agent-type': config.type,
     'trinity.template': config.template or '',
     'trinity.agent-runtime': config.runtime or 'claude-code',
     # ... more labels

@@ -69,9 +69,6 @@
               </span>
             </div>
           </div>
-          <div v-if="templateInfo.type" class="px-3 py-1 bg-action-primary-100 dark:bg-action-primary-900/50 text-action-primary-800 dark:text-action-primary-300 text-xs font-medium rounded-full">
-            {{ templateInfo.type }}
-          </div>
         </div>
 
         <!-- Description -->

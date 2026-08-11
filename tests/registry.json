@@ -2111,6 +2111,18 @@
         "security"
       ],
       "description": "enable/disable/trigger must actually REACH their handler (#2094) - the sibling pairing guard proves the annotation is right, this proves the route is, by driving the real schedules.router through a TestClient. Both are needed: the static guard generalises to all 146 dependency uses but only reads source, while this exercises FastAPI's real dependency resolution, which is where the failure lived (a 422 raised during request validation, before any handler code ran). Asserts no missing-path-param 422; that the handler genuinely ran, via its EXACT 404 detail 'Schedule not found' - Starlette's no-route-matched body is {'detail': 'Not Found'}, which a loose \"not found\" substring also satisfies, and the first draft of this file mounted the router with a prefix it already carries, double-prefixing every request into that generic 404 so both tests passed VACUOUSLY; and that #2081's owner-tier intent survives - get_owned_agent resolves and get_authorized_agent does not, so the obvious wrong fix (drop to accessor tier: 422 disappears, security hole returns) fails here. Dependency identity is compared by qualified NAME, not object, because `dependencies` is on conftest's #762 invariant-restore list and a fresh import can hand back a different module object than routers.schedules bound at its import. Mutation-tested: unpatched dev -> 7 failed; accessor-tier fix -> 1 failed; fixed -> 7 passed."
+    },
+    {
+      "file": "unit/test_2104_agent_type_retired.py",
+      "feature": "#2104",
+      "added": "2026-08-11",
+      "categories": [
+        "backend",
+        "unit",
+        "models",
+        "refactor"
+      ],
+      "description": "Agent `type` taxonomy retired (#2104): AgentConfig ignores a legacy type= kwarg (enterprise provisioner stays inert), AgentStatus carries no type field, stale trinity.agent-type container labels are tolerated but never surfaced, and a residue guard walks src/backend + mcp-server + frontend + base-image so the retired tokens (label, AGENT_TYPE env, default value) cannot silently re-enter."
     }
   ]
 }
