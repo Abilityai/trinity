@@ -25,11 +25,14 @@ class PortalExposureUpdate(BaseModel):
 
 
 class PortalPlaybook(BaseModel):
-    """A client-visible playbook usable in this public chat (#138 briefing).
+    """A capability hint card for the new-chat briefing (#138, ent#380).
 
-    The subset an operator exposed via the connector allow-list (∩ user_invocable).
-    ``starter_prompt`` pre-fills the composer — playbooks usually take an argument,
-    so it never auto-runs; the client completes and sends it.
+    Usually a client-visible playbook — the subset an operator exposed via the
+    connector allow-list (∩ user_invocable). When an agent exposes none, the
+    same shape carries its template-declared ``use_cases`` ("What You Can Ask")
+    instead, so the chat surface renders one hint set either way.
+    ``starter_prompt`` pre-fills the composer — it never auto-runs; the client
+    completes/edits and sends it.
     """
     title: str
     description: Optional[str] = None
@@ -45,7 +48,8 @@ class PortalAgentCard(BaseModel):
     voice_available: bool = False    # #78: portal voice (ElevenLabs key + agent voice set)
     # #138 briefing — ships with the roster at sign-in so the new-chat screen
     # renders with zero extra fetches. Best-effort live data (a stopped/slow
-    # agent yields None/[]).
+    # agent yields None/[]). `playbooks` is the hint-card set (ent#380): the
+    # exposed-playbook tier, else the template `use_cases` fallback.
     description: Optional[str] = None
     playbooks: list[PortalPlaybook] = Field(default_factory=list)
 

@@ -314,9 +314,11 @@ export const useClientPortalStore = defineStore('clientPortal', {
           headers: this.authHeader,
         })
         this.clientEmail = data.client_email || null
-        // Roster carries per-agent briefing (#138): description + client-visible
-        // playbooks[]{title,description,starter_prompt}, shipped at sign-in so the
-        // new-chat screen renders with zero extra fetches.
+        // Roster carries per-agent briefing (#138): description + capability
+        // hints as playbooks[]{title,description,starter_prompt} — exposed
+        // playbooks, else the template's "What You Can Ask" use-cases
+        // (ent#380) — shipped at sign-in so the new-chat screen renders with
+        // zero extra fetches.
         this.agents = data.agents || []
       } catch (err) {
         // Two DIFFERENT failures, kept distinct — neither may swallow the other.

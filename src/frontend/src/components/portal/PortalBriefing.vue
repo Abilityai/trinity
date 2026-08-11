@@ -7,7 +7,9 @@
     </p>
     <p v-else class="mt-1.5 text-sm text-gray-400">Start a conversation below.</p>
 
-    <!-- Client-visible playbooks as clickable cards (pre-fill the composer, no auto-run) -->
+    <!-- Capability hints as clickable cards (pre-fill the composer, no auto-run).
+         Exposed playbooks when the operator curated a set; the template's
+         "What You Can Ask" use-cases otherwise (ent#380 — backend ladder). -->
     <div v-if="playbooks.length" class="mt-7 mx-auto max-w-2xl">
       <div class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2 text-left">Things you can ask</div>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -20,7 +22,9 @@
           <div class="flex items-start gap-2">
             <svg class="w-4 h-4 mt-0.5 text-action-primary-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
             <div class="min-w-0">
-              <div class="text-sm font-medium truncate">{{ p.title }}</div>
+              <!-- ent#380: hints can be full-sentence use-case prompts, not just
+                   short playbook names — wrap to two lines instead of clipping. -->
+              <div class="text-sm font-medium line-clamp-2 break-words">{{ p.title }}</div>
               <div v-if="p.description" class="text-xs text-gray-500 dark:text-gray-400 mt-0.5 line-clamp-2">{{ p.description }}</div>
             </div>
           </div>
