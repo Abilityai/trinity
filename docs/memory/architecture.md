@@ -1273,6 +1273,15 @@ every existing install. Tables are versioned on the OSS two-track runner
 both `agent_name` columns are registered in `AGENT_REFS` (CASCADE) — which the enterprise
 track never was, so an agent rename used to strand a client's portal history.
 
+**Briefing hint grid is bounded (#2101):** with no connector allow-list configured every
+`user_invocable` skill becomes a "Things you can ask" card, so the hint set is belted
+server-side (`_agent_briefing` ships ≤24 — one final slice at the return so it binds
+whichever tier populated the list) and folded client-side (`PortalBriefing.vue` renders 6
+described-cards-first via `portalUtils.planHintDisplay`, the rest behind a counted
+in-place "Show all N" toggle — deliberately **no nested scroll region**: the chat pane
+stays the single scroll axis, and the toggle counts the shipped list, never claiming the
+agent's full skill set). Hint *curation* stays the connector allow-list (ent#178 later).
+
 ### Enterprise Modules (#847)
 
 Open-core seam (generic mechanism only). The public backend exposes an extension point: `main.py` conditionally `register_enterprise(app)` (no-op `ImportError` in OSS-only builds); each registered module calls `entitlement_service.register_module("<id>")`, and the registry drives `feature-flags → enterprise_features`, which the OSS Vue bundle reads to show/hide gated surfaces. `requires_entitlement("<id>")` in `dependencies.py` gates an entitled endpoint (403 unentitled; 404 when the submodule is absent). `TRINITY_OSS_ONLY=1` hard-empties the registry. Private enterprise tables migrate via the separate two-track runner (Invariant #3).
