@@ -66,6 +66,19 @@ DEPENDENCY_PARAM = {
     "AuthorizedAgentByName": "agent_name",
 }
 
+#: The SAME gates attached the other way: `param: str = Depends(get_owned_agent)`.
+#: Both forms are in live use (146 alias annotations, 40 Depends defaults), and a
+#: wrong-variant swap is exactly as invisible in either. Scanning only the aliases
+#: would have left 40 routes — every credential endpoint among them — unguarded
+#: while the guard reported success, which is the failure mode this file exists to
+#: prevent, one level up.
+FUNCTION_PARAM = {
+    "get_owned_agent": "name",
+    "get_authorized_agent": "name",
+    "get_owned_agent_by_name": "agent_name",
+    "get_authorized_agent_by_name": "agent_name",
+}
+
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 
 
@@ -83,14 +96,35 @@ def _route_paths(func: ast.AST) -> list[str]:
     return paths
 
 
-def _agent_dependencies(func: ast.AST) -> list[tuple[str, str]]:
-    """`(param_name, alias)` for each parameter annotated with one of the four."""
+def _agent_dependencies(func: ast.AST) -> list[tuple[str, str, str]]:
+    """`(param_name, label, required_path_param)` for every agent gate on `func`.
+
+    Covers BOTH attachment forms — the Annotated alias (`name: OwnedAgent`) and
+    the Depends default (`name: str = Depends(get_owned_agent)`).
+    """
     args = func.args
+    params = [*args.posonlyargs, *args.args, *args.kwonlyargs]
+    # `args.defaults` aligns to the END of posonly+args; kwonly have their own.
+    positional = [*args.posonlyargs, *args.args]
+    pos_defaults = [None] * (len(positional) - len(args.defaults)) + list(args.defaults)
+    defaults = dict(zip(positional, pos_defaults))
+    defaults.update(zip(args.kwonlyargs, args.kw_defaults))
+
     found = []
-    for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]:
+    for arg in params:
         ann = arg.annotation
         if isinstance(ann, ast.Name) and ann.id in DEPENDENCY_PARAM:
-            found.append((arg.arg, ann.id))
+            found.append((arg.arg, ann.id, DEPENDENCY_PARAM[ann.id]))
+            continue
+        dv = defaults.get(arg)
+        if (
+            isinstance(dv, ast.Call)
+            and getattr(dv.func, "id", None) == "Depends"
+            and dv.args
+            and getattr(dv.args[0], "id", None) in FUNCTION_PARAM
+        ):
+            fn = dv.args[0].id
+            found.append((arg.arg, f"Depends({fn})", FUNCTION_PARAM[fn]))
     return found
 
 
@@ -106,14 +140,15 @@ def _collect() -> list[dict]:
             if not deps:
                 continue
             for route in _route_paths(node):
-                for param_name, alias in deps:
+                for param_name, label, needed in deps:
                     out.append({
                         "file": path.name,
                         "line": node.lineno,
                         "handler": node.name,
                         "route": route,
                         "param": param_name,
-                        "alias": alias,
+                        "alias": label,
+                        "needed": needed,
                     })
     return out
 
@@ -131,10 +166,21 @@ def test_the_scan_actually_found_the_routes():
         f"only {len(PAIRINGS)} route/dependency pairings found under {_ROUTERS} — "
         "the scan is no longer seeing the routers"
     )
-    aliases = {p["alias"] for p in PAIRINGS}
-    assert aliases == set(DEPENDENCY_PARAM), (
-        f"expected all four aliases in use, saw {sorted(aliases)} — if one is "
-        "genuinely retired, drop it from DEPENDENCY_PARAM deliberately"
+    labels = {p["alias"] for p in PAIRINGS}
+
+    # BOTH attachment forms must be represented. If the Depends() family stops
+    # appearing, the collector has quietly gone back to seeing only aliases —
+    # which is the 40-route blind spot this guard was extended to close, and it
+    # would otherwise look like a pass.
+    missing_alias = set(DEPENDENCY_PARAM) - labels
+    assert not missing_alias, (
+        f"alias(es) no longer found in any route: {sorted(missing_alias)} — if one "
+        "is genuinely retired, drop it from DEPENDENCY_PARAM deliberately"
+    )
+    missing_fn = {f"Depends({f})" for f in FUNCTION_PARAM} - labels
+    assert not missing_fn, (
+        f"Depends() form(s) no longer found: {sorted(missing_fn)} — either they were "
+        "retired, or the collector stopped scanning that form (a silent 40-route gap)"
     )
 
 
@@ -146,7 +192,7 @@ def test_every_agent_dependency_matches_its_route_path_param():
     """
     offenders = []
     for p in PAIRINGS:
-        needed = DEPENDENCY_PARAM[p["alias"]]
+        needed = p["needed"]
         if "{%s}" % needed not in p["route"]:
             present = [seg for seg in ("{name}", "{agent_name}") if seg in p["route"]]
             offenders.append(
@@ -171,9 +217,9 @@ def test_the_parameter_name_matches_the_dependency_too():
     """
     offenders = [
         f"{p['file']}:{p['line']} {p['handler']}() — parameter {p['param']!r} "
-        f"annotated {p['alias']} (which reads {DEPENDENCY_PARAM[p['alias']]!r})"
+        f"annotated {p['alias']} (which reads {p['needed']!r})"
         for p in PAIRINGS
-        if p["param"] != DEPENDENCY_PARAM[p["alias"]]
+        if p["param"] != p["needed"]
     ]
     assert not offenders, (
         "parameter name disagrees with the dependency's path param:\n  "
