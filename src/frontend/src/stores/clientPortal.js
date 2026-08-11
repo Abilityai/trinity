@@ -12,6 +12,50 @@ import axios from 'axios'
 import { useAuthStore } from './auth'
 
 const PORTAL_TOKEN_KEY = 'trinity.portalToken'
+// Mirrors `SESSION_ROTATION_HEADER` in client_portal/portal_auth.py (ent#375).
+// Lower-case: axios normalises response header names.
+const SESSION_ROTATION_HEADER = 'x-trinity-session-token'
+
+// ent#375 — adopt a rotated session token wherever it arrives.
+//
+// ONE interceptor rather than touching all 13 request sites: a new portal call
+// added later cannot forget to opt in, and forgetting would be invisible (the
+// session just stops sliding and the user is back to re-authenticating, which
+// is the bug this issue fixes). Scoped to portal URLs and to responses that
+// actually carry the header, so it is inert for every other request in the app.
+//
+// Registered at module scope, guarded so hot-reload cannot stack duplicates.
+let _rotationInterceptorInstalled = false
+
+function installRotationInterceptor() {
+  if (_rotationInterceptorInstalled) return
+  _rotationInterceptorInstalled = true
+  axios.interceptors.response.use((response) => {
+    const fresh = response?.headers?.[SESSION_ROTATION_HEADER]
+    if (fresh) {
+      const url = response?.config?.url || ''
+      if (url.includes('/client-portal/')) {
+        const current = localStorage.getItem(PORTAL_TOKEN_KEY)
+        // Only a CLIENT session rotates. An operator previewing on a platform
+        // JWT holds no portal token and must not acquire one from a header.
+        if (current && current !== fresh) {
+          localStorage.setItem(PORTAL_TOKEN_KEY, fresh)
+          try {
+            useClientPortalStore().portalToken = fresh
+          } catch {
+            // Pinia not active yet — localStorage is the source of truth on the
+            // next store construction, so the rotation is not lost.
+          }
+        }
+      }
+    }
+    return response
+  })
+}
+
+// Live from import, so a session restored from localStorage rotates too — not
+// only one created by a fresh sign-in in this tab.
+installRotationInterceptor()
 
 export const useClientPortalStore = defineStore('clientPortal', {
   state: () => ({
@@ -27,6 +71,14 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // it authenticates the workspace endpoints; else we fall back to the
     // platform session. Persisted so an external client stays signed in.
     portalToken: localStorage.getItem(PORTAL_TOKEN_KEY) || null,
+    // ent#375 — set when a session ENDED rather than never existing. The
+    // sign-in form reads it to say "your session expired" instead of silently
+    // re-appearing, which is indistinguishable from "you were never signed in"
+    // and reads as the app having lost the thread.
+    sessionExpired: false,
+    // Where the user was when it expired, so re-authenticating returns them
+    // there instead of the roster root.
+    resumePath: null,
   }),
 
   getters: {
@@ -74,10 +126,36 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
+    // ent#375 — the backend slides the session and hands back a rotated token
+    // in a response header. Swapping it in is the whole client side of renewal.
+    // A response without the header is the normal case (rotation only happens
+    // once a session is halfway through its idle window), so this is a no-op
+    // almost always.
+    adoptRotatedToken(response) {
+      const fresh = response?.headers?.[SESSION_ROTATION_HEADER]
+      if (!fresh || fresh === this.portalToken) return
+      // Only a CLIENT session rotates. An operator previewing with a platform
+      // JWT has no portal token, and must not acquire one from a header.
+      if (!this.portalToken) return
+      this.portalToken = fresh
+      localStorage.setItem(PORTAL_TOKEN_KEY, fresh)
+    },
+
+    // An ended session, told honestly. `expired` distinguishes "your session
+    // ran out" from "you signed out" — the user sees the same form either way,
+    // so the reason has to be carried explicitly.
+    endSession({ expired = false, resumePath = null } = {}) {
+      this.signOut()
+      this.sessionExpired = expired
+      this.resumePath = expired ? resumePath : null
+    },
+
     signOut() {
       this.portalToken = null
       this.clientEmail = null
       this.agents = []
+      this.sessionExpired = false
+      this.resumePath = null
       localStorage.removeItem(PORTAL_TOKEN_KEY)
     },
 
@@ -241,13 +319,22 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // new-chat screen renders with zero extra fetches.
         this.agents = data.agents || []
       } catch (err) {
-        // An expired/invalid portal token → drop it so the sign-in form returns.
-        if (err.response?.status === 401 && this.portalToken) this.signOut()
-        // ent#357: a 404 here is not "you have no agents" — it is the module
-        // being absent (OSS build) or unentitled, and the two must not render
-        // the same. The empty roster used to swallow both, so an operator whose
-        // entitlement had lapsed saw "No agents shared with you yet" and had no
-        // way to tell that from an actually-empty share list.
+        // Two DIFFERENT failures, kept distinct — neither may swallow the other.
+        //
+        // 401 (ent#375): the session ended. Say so and remember the page, so
+        // re-authenticating returns the user to their thread. A bare signOut()
+        // drops them at an empty sign-in form with no explanation, which is
+        // indistinguishable from "you were never signed in".
+        if (err.response?.status === 401 && this.portalToken) {
+          this.endSession({
+            expired: true,
+            resumePath: typeof window !== 'undefined' ? window.location.pathname : null,
+          })
+        }
+        // 404 (ent#357): NOT "you have no agents" — the module is absent (OSS
+        // build) or unentitled. The empty roster used to swallow both, so an
+        // operator whose entitlement had lapsed saw "No agents shared with you
+        // yet" with no way to tell that from an actually-empty share list.
         this.unavailable = err.response?.status === 404
         this.error = this.unavailable
           ? 'The workspace is not available on this instance.'
