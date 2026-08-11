@@ -111,7 +111,21 @@ def _patch_env_github_pat(env_content: str, new_pat: str) -> str:
         line_re = re.compile(rf'(?m)^[ \t]*{key}=.*$')
         new_line = _format_pat_line(new_pat, key)
         if line_re.search(out):
-            out = line_re.sub(new_line, out)
+            # `lambda _: new_line`, NOT the string itself (#2017). `re.sub`
+            # parses a replacement STRING for escapes, so a token carrying a
+            # backslash was read as a group reference: `ghp_a\g<1>b` raised
+            # `re.error: invalid group reference`, and `\1`/`\s` likewise —
+            # aborting that agent's rotation with a message about regex syntax.
+            # A callable replacement is inserted verbatim, which is what a
+            # credential value always needs.
+            #
+            # No `count=`: every matching line is replaced. #2016 levels
+            # duplicate PAT lines so last-wins reads the new token whichever
+            # copy it lands on, and this function's docstring states it. The
+            # pre-rebase branch carried `count=1`, which would have left every
+            # duplicate after the first holding the OLD token — reinstating the
+            # #2016 bug as a side effect of fixing #2017.
+            out = line_re.sub(lambda _match: new_line, out)
         else:
             suffix = "" if (out == "" or out.endswith("\n")) else "\n"
             out = f"{out}{suffix}{new_line}\n"
