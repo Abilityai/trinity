@@ -96,10 +96,19 @@
                  ONE CLICK from the platform. The surface is the same one an
                  external client reaches by email OTP; for a signed-in user the
                  session is simply the platform session, so no sign-in step
-                 stands between this link and the view. Gated on the
-                 `client_portal` entitlement, like every enterprise surface. -->
+                 stands between this link and the view.
+
+                 UNGATED (ent#356): this used to carry
+                 `v-if="enterpriseStore.isEntitled('client_portal')"`, correct
+                 while the module was entitled. ent#356 moved client_portal into
+                 OSS core — main.py mounts it unconditionally and nothing calls
+                 register_module('client_portal') any more — so that predicate is
+                 now false on every OSS build, and the one-click entry this issue
+                 exists to add would never render. It survived only because the
+                 enterprise submodule has not yet dropped its registration
+                 (trinity-enterprise#374), i.e. it was already relying on a
+                 registration that is about to disappear. -->
             <router-link
-              v-if="enterpriseStore.isEntitled('client_portal')"
               to="/workspace"
               class="border-transparent text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-600 hover:text-gray-700 dark:hover:text-gray-200 inline-flex flex-shrink-0 whitespace-nowrap items-center px-1 pt-1 border-b-2 text-sm font-medium"
               :class="{ 'border-blue-500 dark:border-blue-400 text-gray-900 dark:text-white': $route.path.startsWith('/workspace') }"
