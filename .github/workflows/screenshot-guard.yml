@@ -1,0 +1,107 @@
+# Screenshot store guard
+#
+# Trinity keeps every UI screenshot in ONE place — docs/screenshots/ — with one
+# MANIFEST.yaml entry each. Before this guard there were three stores, and the capture
+# tooling wrote to the one no page embedded: the freshest set was the set nobody rendered,
+# while the rendered ones aged three months. This job keeps that from recurring.
+#
+# Blocking (integrity): manifest/file mismatch, broken image reference, an image embedded
+# from outside the canonical store, or a `sources:` path that no longer exists (which would
+# silently make an entry immortally "fresh").
+#
+# Non-blocking (staleness): a frontend PR legitimately makes a screenshot stale in the same
+# commit that changes the view. Blocking there would force a recapture into every UI PR and
+# get itself routed around, so staleness lands as a warning annotation plus a job summary.
+# The weekly --strict run turns that list into actual recapture work.
+name: screenshot-guard
+
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'src/frontend/src/**'
+      - 'scripts/ci/check_screenshots.py'
+      - '.github/workflows/screenshot-guard.yml'
+  push:
+    branches: [dev, main]
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - 'src/frontend/src/**'
+      - 'scripts/ci/check_screenshots.py'
+  schedule:
+    # Mondays 06:00 UTC — the strict sweep that reports what needs recapturing.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      strict:
+        description: 'Fail on stale screenshots'
+        type: boolean
+        default: false
+
+# Least privilege: read + write the job summary only.
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Staleness compares `captured_at` against the newest commit over each entry's
+          # `sources`, so the job needs real history. A shallow clone makes the check
+          # report "not evaluated" rather than silently passing — but then it buys nothing.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install PyYAML
+        run: pip install --disable-pip-version-check pyyaml
+
+      - name: Check screenshot store
+        id: check
+        shell: bash
+        env:
+          # Strict on the weekly sweep and when manually requested; advisory on PRs.
+          STRICT: >-
+            ${{ (github.event_name == 'schedule'
+                 || github.event.inputs.strict == 'true') && '--strict' || '' }}
+        # --json-out (not a pipe): stdout stays annotations, and the exit code reaches the
+        # runner. `python … | tee` would report tee's status, i.e. always 0.
+        run: python3 scripts/ci/check_screenshots.py $STRICT --json-out /tmp/screenshots.json
+
+      - name: Summarize
+        if: always()
+        shell: bash
+        run: |
+          [ -f /tmp/screenshots.json ] || exit 0
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          data = json.loads(pathlib.Path("/tmp/screenshots.json").read_text())
+          print("## Screenshot store\n")
+          print(f"- **{data['screenshots']}** screenshots in `docs/screenshots/`")
+          print(f"- **{data['references_checked']}** doc image references resolved")
+          print(f"- **{len(data['errors'])}** integrity error(s), "
+                f"**{len(data['stale'])}** stale\n")
+          # In --strict runs the stale entries ARE the errors; don't list them twice.
+          stale_names = {s["file"] for s in data["stale"]}
+          integrity = [e for e in data["errors"]
+                       if not any(n in e["message"] for n in stale_names)]
+          if integrity:
+              print("### Integrity errors (blocking)\n")
+              for e in integrity:
+                  print(f"- `{e['file']}` — {e['message']}")
+              print()
+          if data["stale"]:
+              print("### Needs recapture\n")
+              print("| screenshot | captured | UI changed |")
+              print("|---|---|---|")
+              for s in data["stale"]:
+                  print(f"| `{s['file']}` | {s['captured_at']} | {s['sources_changed']} |")
+              print("\nRefresh with `/capture-screenshots <name>`.")
+          PY

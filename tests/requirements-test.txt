@@ -55,6 +55,23 @@ python-multipart>=0.0.20
 # OpenTelemetry for trace logging tests
 opentelemetry-api>=1.29.0
 opentelemetry-sdk>=1.29.0
+# The OTLP exporter and the three instrumentations `main.py` imports at module
+# scope (#2080). Without them `import main` raises
+# `ModuleNotFoundError: No module named 'opentelemetry.exporter'`, and the two
+# route-ORDER tests — the guard for Invariant #4, where a mis-ordered static
+# route is silently shadowed by `/{name}` — skip with a message blaming the
+# `tests/utils` shadowing. They were therefore skipping ALWAYS, standalone
+# included, while reading as an environment quirk. Versions match
+# docker/backend/Dockerfile so the tests import the same tree production runs.
+opentelemetry-exporter-otlp>=1.29.0
+opentelemetry-instrumentation-fastapi>=0.50b0
+opentelemetry-instrumentation-httpx>=0.50b0
+opentelemetry-instrumentation-redis>=0.50b0
+# Alembic drives the PostgreSQL migration track (Invariant #3). The full run's
+# postgres tier does a real `alembic upgrade head` against a disposable
+# container, so the dual-track contract is exercised locally and not only in
+# the `pg-migrations` CI job.
+alembic>=1.14.0
 # Backend deps reachable via unit-test transitive imports (#660). The
 # contributor command `uv pip install -r tests/requirements-test.txt` must
 # pull these so `tests/unit/` runs green out-of-the-box. Versions match the

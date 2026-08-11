@@ -6,7 +6,7 @@ Tests the ability to rename agents via API:
 - PUT /api/agents/{name}/rename
 """
 import pytest
-from utils.api_client import TrinityApiClient
+from testkit.api_client import TrinityApiClient
 
 
 class TestAgentRename:

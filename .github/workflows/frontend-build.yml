@@ -11,6 +11,10 @@ on:
       - 'src/frontend/**'
       - '.github/workflows/frontend-build.yml'
 
+# CSO M9: least-privilege token — this workflow only reads the checkout.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest

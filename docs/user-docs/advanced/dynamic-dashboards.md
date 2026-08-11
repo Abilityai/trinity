@@ -15,7 +15,7 @@ Agent-defined dashboards via `dashboard.yaml` with 11 widget types, historical t
 
 ## How It Works
 
-![Agent Dashboard tab showing Cornelius autonomous learning agent with Moltbook social presence metrics](../images/agent-custom-dashboard.png)
+![Agent Dashboard tab showing Cornelius autonomous learning agent with Moltbook social presence metrics](../../screenshots/agent-custom-dashboard.png)
 
 1. The agent writes a `dashboard.yaml` file to its workspace.
 2. The file defines widgets with `type`, `title`, `value`, and optional configuration fields.
@@ -29,7 +29,7 @@ Agent-defined dashboards via `dashboard.yaml` with 11 widget types, historical t
 
 The `dashboard.yaml` widgets above are one way an agent renders its own state. Knowledge-base agents — like the bundled **Cornelius** second-brain — can also publish a **Brain Orb**: a self-rendering "mind" page that draws the agent's own notes, edges, and activity as a live 3D knowledge graph on the agent's **Brain** tab.
 
-![The Brain Orb — Cornelius's Self-Rendering Mind, a 3D knowledge graph woven from the agent's own notes, edges, and activity](../images/brain-orb.png)
+![The Brain Orb — Cornelius's Self-Rendering Mind, a 3D knowledge graph woven from the agent's own notes, edges, and activity](../../screenshots/brain-orb.png)
 
 The Brain Orb is a **capability-gated** surface: it appears only for agents that ship the `brain-orb` capability (Cornelius-class agents) and only when the platform Brain Orb flag is enabled — it is **off by default**. The agent owns generation and scope state; Trinity reads and renders it.
 

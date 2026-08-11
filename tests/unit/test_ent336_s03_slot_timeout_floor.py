@@ -38,6 +38,12 @@ def _snap(
 
     Neither side samples a real clock, so the floor boundary is exact rather
     than absorbed by a margin (learnings 2026-08-03 / #1909).
+
+    ent#372: the TTL read time is stamped at T0 too, so `age` here is measured
+    exactly as these cases intend. On a live cycle the read lands 1–9s AFTER
+    `snapshot_time` (the docker + roster collectors run in between), which is
+    the skew ent#372 fixes — covered in
+    `test_ent372_s03_snapshot_read_time.py`, deliberately not folded in here.
     """
     from canary.snapshot import AgentSnapshot, Snapshot
 
@@ -52,6 +58,7 @@ def _snap(
                 slot_ids={slot_id},
                 slot_scores={slot_id: T0_UNIX - age_seconds},
                 slot_ttls={slot_id: ttl},
+                slot_ttl_read_at={slot_id: T0_UNIX},
                 slot_timeouts=({} if stored_timeout is None else {slot_id: stored_timeout}),
             )
         ],

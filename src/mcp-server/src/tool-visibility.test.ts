@@ -1,10 +1,10 @@
 /**
  * #848 — tool-visibility gate must be an ALLOW-list, not a deny-check.
  *
- * Why this file exists: `fastmcp@4.12.1` — the version package-lock actually
+ * Why this file exists: `fastmcp@4.12.2` — the version package-lock actually
  * resolves — makes a "not connector" deny-check fail OPEN in two independent
  * ways. (An earlier revision cited 4.4.0; both behaviours were re-verified on
- * 4.12.1 and the conclusion is unchanged, but the chunk filename moved, so these
+ * 4.12.x and the conclusion is unchanged, but the chunk filename moved, so these
  * citations lead with the SYMBOL and treat the line as an "as of" locator.)
  *
  *   1. `FastMCP#createSession` skips filtering entirely for a falsy auth:
@@ -181,7 +181,7 @@ describe("#848 operator tool-visibility gate", () => {
  * `tools/call`, every predicate above would keep passing while an anonymous
  * session could drive `delete_agent` by name — the gate would be a UI hint.
  *
- * As of fastmcp@4.12.1 the mechanism is not a per-call `canAccess` re-check (it
+ * As of fastmcp@4.12.2 the mechanism is not a per-call `canAccess` re-check (it
  * is never re-invoked): `setupToolHandlers(tools)` closes over a `toolsMap` built
  * from the FILTERED list, and the `CallToolRequestSchema` handler throws
  * `MethodNotFound` on a miss. This test does not encode that mechanism — only the

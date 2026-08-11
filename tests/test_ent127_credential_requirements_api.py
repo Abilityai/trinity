@@ -23,8 +23,8 @@ Found", which is what an unwired route returns.
 
 import pytest
 
-from utils.api_client import TrinityApiClient
-from utils.assertions import assert_status, assert_status_in
+from testkit.api_client import TrinityApiClient
+from testkit.assertions import assert_status, assert_status_in
 
 # Deliberately nonexistent: these tests assert wiring, not agent behaviour.
 _AGENT = "smoke-credreq-no-such-agent"

@@ -14,8 +14,8 @@ import subprocess
 import pytest
 import httpx
 
-from utils.api_client import TrinityApiClient, ApiConfig
-from utils.assertions import assert_status, assert_status_in
+from testkit.api_client import TrinityApiClient, ApiConfig
+from testkit.assertions import assert_status, assert_status_in
 
 
 # =============================================================================

@@ -4,6 +4,10 @@ on:
   push:
     branches: [dev]
 
+# CSO L5: least-privilege token — deploy runs over SSH/Tailscale secrets, not GITHUB_TOKEN.
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest

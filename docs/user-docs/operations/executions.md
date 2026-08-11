@@ -33,7 +33,7 @@ View, monitor, and manage task executions across all agents. Executions are crea
 
 ### Executions Tab (Operations Page)
 
-![Operations page — Executions tab listing task runs across the fleet with Total, Success rate, Failed, and Cost stat cards and per-agent/status/trigger filters](../images/operations-executions.png)
+![Operations page — Executions tab listing task runs across the fleet with Total, Success rate, Failed, and Cost stat cards and per-agent/status/trigger filters](../../screenshots/operations-executions.png)
 
 The fleet execution list lives on the **Executions** tab of the [Operations page](operating-room.md) (`/operations?tab=executions`). The legacy `/executions` route redirects there.
 
@@ -55,7 +55,7 @@ The fleet execution list lives on the **Executions** tab of the [Operations page
 
 ### Tasks Tab (per-agent)
 
-![Agent Tasks tab showing execution history, success rate, total cost, and average duration](../images/agent-tasks-tab.png)
+![Agent Tasks tab showing execution history, success rate, total cost, and average duration](../../screenshots/agent-tasks.png)
 
 1. Open agent detail and click the **Tasks** tab.
 2. Enter a task message. Optionally select a model.

@@ -75,7 +75,7 @@ This document details the internal architecture of a Trinity agent container - t
 |  |   DELETE /api/files           Delete file/directory                        |  |
 |  |                                                                            |  |
 |  |   # Credentials (routers/credentials.py)                                   |  |
-|  |   POST /api/credentials/update   Hot-reload credentials                    |  |
+|  |   POST /api/credentials/inject   Write credential files (validated)        |  |
 |  |   GET  /api/credentials/status   Get credential file status                |  |
 |  |                                                                            |  |
 |  |   # Trinity Injection (routers/trinity.py)                                 |  |

@@ -61,7 +61,7 @@ above it passes.
 - Vitest unit-test infra (separate PR if desired)
 - Backend endpoint changes (`/api/settings/api-keys/anthropic/*` etc. — those API endpoints don't change, only the frontend route does)
 - New role-based features (the existing per-section access stays the same; we're only re-organising layout)
-- User-docs screenshot updates (`docs/user-docs/images/mcp-api-keys.png` — slight visual drift acceptable, can update post-merge)
+- User-docs screenshot updates (`docs/screenshots/mcp-api-keys.png` — slight visual drift acceptable, can update post-merge)
 
 ## What we will NOT compromise on
 

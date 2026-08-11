@@ -51,7 +51,7 @@ Agents communicate with each other via Trinity's MCP server, enabling orchestrat
 
 ### Shared Folder Configuration
 
-![Agent Folders tab showing Expose Shared Folder and Mount Shared Folders toggles with step-by-step workflow](../images/agent-folders-tab.png)
+![Agent Folders tab showing Expose Shared Folder and Mount Shared Folders toggles with step-by-step workflow](../../screenshots/agent-folders.png)
 
 Agents can share files via Docker volumes:
 

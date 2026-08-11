@@ -101,8 +101,8 @@ RUN pip install --no-cache-dir \
     reportlab==4.2.5 \
     google-genai==1.63.0 \
     "slack_sdk[socket-mode]==3.41.0" \
-    aiohttp \
-    slackify-markdown \
+    aiohttp==3.14.3 \
+    slackify-markdown==0.2.4 \
     tenacity==9.0.0 \
     opentelemetry-api==1.29.0 \
     opentelemetry-sdk==1.29.0 \
@@ -129,6 +129,12 @@ COPY ../../src/backend/adapters /app/adapters/
 COPY ../../src/backend/utils /app/utils/
 COPY ../../src/backend/db /app/db/
 COPY ../../src/backend/canary /app/canary/
+# Workspace / client portal (ent#356). A new top-level backend package must be
+# listed here or the image builds fine and the app dies at import — `main.py`
+# does `from client_portal.router import ...` and the container has no such
+# module (#1033's class). `prod-image-smoke` is what catches it; source-only CI
+# cannot, because the source tree always has the directory.
+COPY ../../src/backend/client_portal /app/client_portal/
 
 # Alembic migration scripts (#1183). db/alembic_runner.py points Alembic's
 # script_location at /app/migrations at runtime, so the directory MUST ship in

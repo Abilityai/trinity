@@ -90,7 +90,7 @@ See [CLAUDE.md Requirements](#claudemd-requirements) for guidelines.
 
 ### 3. `.mcp.json.template` (Required if using MCP servers)
 
-MCP server configuration with credential placeholders. Trinity replaces `${VAR}` with actual values from the credential store.
+MCP server configuration with credential placeholders. At container startup Trinity renders this file into `.mcp.json`, replacing `${VAR}` with values from the credential store (#2007).
 
 ```json
 {
@@ -108,9 +108,37 @@ MCP server configuration with credential placeholders. Trinity replaces `${VAR}`
 ```
 
 **Important:**
-- Use `${VAR_NAME}` syntax for credential placeholders
+- Use `${VAR_NAME}` syntax for credential placeholders — **inside `env` blocks only**
+- `${VAR:-default}` is also supported (the default is used when the credential is unset)
 - Never commit actual secrets
 - Server names must match `credentials.mcp_servers` keys in `template.yaml`
+
+**Where substitution happens, and what happens when it can't**
+
+Trinity substitutes **only inside `env`**. A `${VAR}` in `args` or `command` is
+**not** expanded, because the MCP config validator rejects both: a bare `$` in
+`args` reads as a shell metacharacter, and `command` must be a literal entry
+from the runtime allowlist (`npx`, `uvx`, `python`, `python3`, `node`, `bun`,
+`deno`, `docker`). Letting a credential value become the executed command is the
+config-injection class Trinity closed deliberately — so if you need a path,
+pass it through `env` and read it in your server, or use `uvx <package>` rather
+than an absolute interpreter path.
+
+Rendering is **merge-only and refuse-on-doubt**:
+
+- A server already present in `.mcp.json` is left untouched — including the
+  `trinity` entry Trinity injects, and anything you edited by hand. Re-running
+  is a no-op, so a restart never reverts your changes.
+- A server whose placeholders cannot be resolved (no such credential, or the
+  value is empty) is **withheld**, not configured with a blank value. The
+  reason is logged to the agent's container output, one line per withheld
+  server.
+- A server the validator rejects is withheld the same way, with the validator's
+  own reason — so `"command": "uv"` tells you `uv` is not in the allowlist
+  rather than failing later at exec time.
+
+The rest of the servers install normally: one bad entry never costs you the
+good ones.
 
 ### 4. `.env.example` (Recommended)
 

@@ -14,8 +14,8 @@ import pytest
 import uuid
 from datetime import datetime, timezone
 
-from utils.api_client import TrinityApiClient, ApiConfig
-from utils.assertions import (
+from testkit.api_client import TrinityApiClient, ApiConfig
+from testkit.assertions import (
     assert_status,
     assert_json_response,
     assert_has_fields,
