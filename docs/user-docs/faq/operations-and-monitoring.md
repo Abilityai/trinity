@@ -4,11 +4,27 @@
 
 ## How do I see what all my agents are doing at once?
 
-The main Dashboard at `/` monitors all agents and their activities in real time, with a live activity feed of collaborations, task starts and completions, schedule executions, and errors. Use the toggle in the top-right to switch between two view modes — Grid and Timeline. Timeline is the default, and your choice persists per browser. See [Dashboard](../operations/dashboard.md).
+The main Dashboard at `/` monitors all agents and their activities in real time, with a live activity feed of collaborations, task starts and completions, schedule executions, and errors. Use the toggle in the top-right to switch between three view modes — Timeline, Grid, and List. Timeline is the default, and your choice persists per browser. See [Dashboard](../operations/dashboard.md).
 
-## What's the difference between the Grid and Timeline dashboard views?
+## What's the difference between the Timeline, Grid, and List dashboard views?
 
-Grid is a tile canvas: each agent is a card with its avatar, runtime badge, inline Running and Autonomy toggles, and live status chips (git sync health, pending operator-queue items) — drag tiles to rearrange, or use Tidy and Reset. Timeline (the default) arranges execution boxes per agent chronologically, color-coded by trigger type, with per-row success rate, cost, and slot count, a time-range filter, and live progress for running executions. Agent-to-agent collaboration is surfaced in the Timeline replay (via the Agent-Triggered trigger type) rather than as a live node graph — the former Graph view has been removed. See [Dashboard](../operations/dashboard.md).
+Timeline (the default) arranges execution boxes per agent chronologically, color-coded by trigger type, with per-row completion rate, cost, and slot count, a time-range filter, and live progress for running executions. Grid is a tile canvas: each agent is a card with its avatar, runtime badge, inline Running and Autonomy toggles, and live status chips (git sync health, pending operator-queue items) — drag tiles to rearrange, or use Tidy and Reset. List is the former standalone Agents page: a sortable, filterable row list with inline toggles and bulk tag actions. Agent-to-agent collaboration is surfaced in the Timeline replay (via the Agent-Triggered trigger type) rather than as a live node graph — the former Graph view has been removed. See [Dashboard](../operations/dashboard.md).
+
+## Where did the Agents page go?
+
+It is now the Dashboard's **List** view mode, and `/agents` redirects there. The row list, filters, sorting, inline Run/Autonomy toggles, and bulk tag operations all came across; tag and owner filtering now use the shared Dashboard header controls, so they apply to the Timeline and Grid views too. See [Dashboard](../operations/dashboard.md).
+
+## Can I show my fleet as an org chart?
+
+Yes — the Grid view has an org overlay. Departments render as labelled zones around their member tiles, and reporting lines render as arrows between tiles. Drop a tile into a zone to assign it, drag from a tile's connect port to another tile to draw a reporting line, and drag a zone header to move a whole department; every change offers Undo. Both are stored as ordinary agent tags (`dept-<name>` and `reports-to-<agent>`), so nothing new is persisted and you can bulk-edit them from the tag surfaces. Adding or removing org tags is human-only — agent API keys are rejected. See [Dashboard](../operations/dashboard.md).
+
+## How do I see structured results an agent produced, without reading its chat?
+
+Agents can publish **reports** — a titled, typed payload rendered as a table, KPI tiles, markdown, a timeline, or raw JSON. Read them on an agent's **Reports** tab or fleet-wide under **Operations → Reports**, filter by type, time window, or free-text search, and export any report to Excel or PDF. Large tables page as you scroll, so opening a multi-megabyte report stays fast. See [Agent Reports](../operations/agent-reports.md).
+
+## Does a green "completion" number mean the work was good?
+
+No. Completion means the run finished cleanly — the process exited without error. Quality is a separate axis recorded as an **evaluation**, written by the platform or a human admin and never by the agent being graded. An ungraded run has no quality score at all, which is different from scoring zero. That is also why the fleet stat card now reads "Completion" rather than "Success rate". See [Executions](../operations/executions.md).
 
 ## What is the Operations page and what do its tabs show?
 

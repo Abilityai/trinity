@@ -32,6 +32,32 @@ Agents created without a Git repository can be connected after the fact:
 - Use the Git repo initialization flow in the UI.
 - Via MCP: `initialize_github_sync(agent_name, repo_url)`
 
+### Binding an agent to a repository you own
+
+An agent created from a **public** template clones with no token — it works, it learns, it accumulates a workspace, but it cannot push anywhere. **Bind to your own repo** on the agent's **Git** tab is how you take ownership of it in place, without recreating the agent.
+
+What it does, in order:
+
+1. Creates the destination repository under your account if it doesn't exist (**private by default**), using a GitHub token you supply in the form.
+2. Pushes the agent's **current workspace history** into it — not the template's, the agent's.
+3. Repoints the agent's `origin` at the new repository.
+4. Saves your token as the agent's per-agent token, so restarts never fall back to a shared platform token.
+5. Rebuilds the container so the change survives a restart.
+
+The agent keeps its name, its identity, its 180-day name reservation, its data volumes, and its history. Nothing is re-provisioned.
+
+This is a **rebind, not a fork** — an agent that already has a writable repository can be rebound too, which is what you want after a typo'd destination, the wrong token account, or an org migration.
+
+Requirements and refusals:
+
+- The agent must be **running** (the operation reads its live workspace).
+- Owner-only and **human-only** — there is deliberately no MCP tool, because binding requires putting your personal token in the request.
+- Working-Branch-mode agents are refused (they need a branch re-reservation), as are agents with no Git configuration at all, including local-template agents and the system agent.
+- A destination that already contains unrelated commits, or that another agent is already bound to, is refused rather than overwritten.
+- A retry after a partial failure is safe. Re-submitting the same destination resumes; **Bind status** on the Git tab reports what the database and the live container each believe, so you can tell whether a lost response actually completed.
+
+After binding, the agent pushes normally and appears on all git-sync surfaces.
+
 ## Conflict Resolution
 
 When sync can't complete cleanly, Trinity opens the **Git Conflict Modal** with a plain-English explanation and operator-readable resolution options. The modal classifies the conflict into one of six cases:
@@ -79,12 +105,25 @@ Trailing slashes are stripped automatically. Defaults target `github.com` and `h
 | `/api/agents/{name}/git/sync` | POST | Trigger sync |
 | `/api/agents/{name}/git/log` | GET | Recent commits |
 | `/api/agents/{name}/git/pull` | POST | Pull from remote |
+| `/api/agents/{name}/git/bind-to-own-repo` | POST | Bind to a repository you own (owner-only, human-only) |
+| `/api/agents/{name}/git/bind-to-own-repo/status` | GET | Reconcile a binding whose response was lost |
+| `/api/agents/sync-health` | GET | Per-agent sync health for the fleet |
+| `/api/fleet/sync-audit` | GET | Fleet sync audit, including duplicate repository bindings |
 
-MCP tool: `initialize_github_sync(agent_name, repo_url)`
+MCP tools: `initialize_github_sync`, `get_git_status`, `git_sync`, `get_git_log`, `git_pull`, `get_git_sync_state`, `reset_to_main_preserve_state`. Mutating tools are owner-only; a shared key gets read and pull.
+
+There is no MCP tool for binding to your own repository — it requires your personal token.
 
 See [Backend API Docs](http://localhost:8000/docs) for full request/response schemas.
+
+## Limitations
+
+- Binding to your own repository requires the agent to be running and is not available in Working Branch mode.
+- A **copy**-imported agent has no Git configuration at all. Use **Initialize GitHub Sync** rather than bind-to-own-repo.
+- Repository maintenance (repack/gc) runs on the agent's own home repository. Sub-repositories cloned into the workspace get no automatic maintenance.
 
 ## See Also
 
 - [GitHub PAT Setup](github-pat-setup.md) — Configure a Personal Access Token before using sync
 - [Creating Agents](../agents/creating-agents.md) — Creating agents from Git templates
+- [Monitoring](../operations/monitoring.md) — Sync-health alerts and repository-bloat warnings

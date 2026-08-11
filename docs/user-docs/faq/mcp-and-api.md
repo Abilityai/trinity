@@ -36,7 +36,7 @@ Once connected, Trinity's tools appear in your client's tool list. See [MCP Serv
 
 ## How many MCP tools are there, and what can they do?
 
-The MCP server exposes 93 tools grouped into families: agent lifecycle and credentials (22 tools), chat and fan-out, schedules, execution queries, skills, tags, system manifests, subscriptions, fleet health monitoring, git operations, sequential loops, operator-queue reading and responses, plus single-purpose tools like `share_file`, `send_message`, and `report`. The largest family covers agent management — create, start/stop, rename, delete, credential injection, GitHub sync, and data export/import. See [MCP Server](../integrations/mcp-server.md).
+The MCP server exposes roughly 107 tools grouped into families: agent lifecycle and credentials (22 tools), chat and fan-out, schedules, execution queries, skills, tags, system manifests, subscriptions, fleet health monitoring, git operations, sequential loops, operator-queue reading and responses, plus single-purpose tools like `share_file`, `send_message`, and `report`. The largest family covers agent management — create, start/stop, rename, delete, credential injection, GitHub sync, and data export/import. See [MCP Server](../integrations/mcp-server.md).
 
 ## Can I expose one of my agents as its own MCP tool?
 
@@ -94,3 +94,19 @@ The backend serves interactive Swagger documentation at `http://localhost:8000/d
 ## Why doesn't my MCP client see Trinity's tools after a backend restart?
 
 MCP clients must be reconnected manually after the backend restarts — the session doesn't recover on its own. In Claude Code, run `/mcp` and reconnect the Trinity server, or restart the client. Your API key is still valid; only the connection needs re-establishing. See [MCP Server](../integrations/mcp-server.md).
+
+## Can I connect an MCP client to Trinity without creating an API key first?
+
+If your admin has enabled inline authentication, yes: connect with a keyless connector config, call `request_login(email)` to get a 6-digit code by email, then `verify_login(code)`. You can then use the exposed playbooks of every agent shared with that email. The login binds a **session**, not a key — nothing is written to disk, and because MCP sessions are per-connection, restarting your client means logging in again. Inline auth is off by default (`MCP_INLINE_AUTH_ENABLED`). See [MCP Server](../integrations/mcp-server.md).
+
+## What is the MCP key panel on an agent's Settings tab for?
+
+Every agent carries its own agent-scoped key so it can call Trinity's MCP server — and that key is what makes the agent-to-agent permission matrix apply. A container carrying a *user*-scoped key would operate with the owner's identity and bypass the matrix entirely. The panel shows the key's health (`active`, `never_used`, `stale`, `missing`, `env_absent`, `env_mismatch`), a **Verify** action that probes what the container's config actually contains, and a **Regenerate** action that rotates and delivers a new key. The secret is never displayed. Trinity also self-heals a missing or mismatched key on the agent's next start. See [MCP Server](../integrations/mcp-server.md).
+
+## Why does my automation get a 403 on an endpoint my account is admin on?
+
+Because an MCP key resolves to its owner *carrying that owner's role* — so on a default admin-owned install, an agent's own key would otherwise satisfy any "admin only" check. Endpoints whose blast radius is operator-scale therefore also require a **human** caller and reject API keys of any scope: approving an oversized retention deletion, restarting the system agent, managing skill sources, reading a credential checklist, rotating an agent's MCP key, binding an agent to a repository, writing an evaluation, and editing org tags. Perform those from the UI or with a user session. See [Authentication](../api-reference/authentication.md).
+
+## Can I ask Trinity questions about Trinity from my MCP client?
+
+Yes — the `ask_trinity` tool answers from the documentation, and returns a `session_id` you can pass back for follow-ups (it tells you when a session reset dropped your context). It is also published standalone as the `trinity-docs-mcp` npx package, which needs no Trinity instance and no API key. See [MCP Server](../integrations/mcp-server.md).

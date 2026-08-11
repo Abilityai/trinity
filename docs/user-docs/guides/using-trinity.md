@@ -9,39 +9,76 @@ A quick tour of the web UI — dashboard, agent management, chat, and day-to-day
 - **Admin login** — Enter username `admin` and the password set via `ADMIN_PASSWORD` in `.env` before first boot (self-hosted) or the one chosen at signup (cloud). There is no first-visit password wizard.
 - **Email login** — Enter your email to receive a 6-digit code (requires email service configuration).
 
+## Top Navigation
+
+| Entry | What it is |
+|-------|-----------|
+| **Dashboard** | The fleet — three view modes, plus Create Agent |
+| **Library** | Everything installable: agent templates, systems, and skills |
+| **Operations** | Operator queue, notifications, health, executions |
+| **Settings** | Platform configuration (all users see MCP Keys; admins see every tab) |
+
+Two more entries appear only on entitled installations: **Sessions** (shared multi-agent rooms) and **Enterprise** (the entitled-feature catalogue).
+
+There is no separate Agents page — it is now the Dashboard's List mode, and `/agents` redirects there.
+
 ## Dashboard
 
-The dashboard gives you a bird's-eye view of your agent fleet:
+The Dashboard gives you a bird's-eye view of your agent fleet in three interchangeable views:
 
-- **Network graph** — Visualizes agent-to-agent relationships and delegation flows.
-- **Timeline** — Shows recent executions and agent activity.
-- **Tag cloud** — Quick filtering by agent tags.
-- **Quick actions** — Create agent, open the Operations page.
+- **Timeline** (default) — Recent and live executions per agent, chronologically.
+- **Grid** — A draggable tile canvas, optionally overlaid with department zones and reporting lines.
+- **List** — A sortable, filterable row list with inline toggles and bulk tag actions.
+
+Shared controls across all three: press `/` to type-filter the fleet by name, plus tag filter, owner filter, time range, and **Create Agent**.
+
+See [Dashboard](../operations/dashboard.md) for the full reference.
+
+## Library
+
+**Library** in the top nav (formerly Templates; `/templates` still redirects there) is one surface for everything you can install onto your fleet, in three stacked sections with jump anchors:
+
+- **Agent Templates** — Starter templates and GitHub templates; **Use Template** opens the create-agent flow.
+- **Systems** — Install a whole multi-agent system from a manifest (creator role and above).
+- **Skills** — Browse the shared skills library and see its sync state honestly, without opening an individual agent.
+
+Each section loads independently, so a failure in one never blanks the others. Skills are *assigned* from an agent's own Skills tab — the Library is for browsing.
 
 ## Agent Management
 
-Click any agent to open its detail page with tabs for:
+Click any agent to open its detail page. Tabs appear based on what the agent has enabled — tabs that do not fit collapse into a **More ▾** menu:
 
 | Tab | Purpose |
 |-----|---------|
-| **Chat** | Talk to your agent, view conversation history |
+| **Overview** | Landing tab — trends, health, needs-attention count, footprint |
+| **Tasks** / **Chat** | Send work to the agent; conversation history |
+| **Reports** | Structured reports the agent has published |
 | **Schedules** | Cron jobs, trigger history, next run times |
+| **Loops** | Bounded sequential task runs |
+| **Playbooks** | Reusable prompts the agent exposes |
+| **Credentials** | Per-agent credential setup and status |
+| **Access** / **Sharing** / **Permissions** | Who can reach the agent, and which agents it may call |
+| **Git** | Repository binding, sync status, and history |
 | **Files** | Browse agent workspace, download files |
-| **Config** | Credentials, permissions, autonomy settings |
+| **Skills** | Assign and sync skills from the library |
+| **Settings** | Autonomy, resources, timeouts, runtime options |
+| **Info** | Template metadata and "what you can ask" |
 
 Key actions:
 
 - **Start/Stop** — Toggle agent container state.
-- **Autonomy mode** — Enable/disable scheduled operations.
+- **Autonomy** — Enable/disable proactive (scheduled) operation. Turning it off holds schedules and reminders without erasing their individual on/off state, so turning it back on restores exactly what you had.
 - **Terminal** — SSH-style access to the agent container.
 
 ## Creating Agents from the UI
 
-Click **Create Agent** on the Dashboard or Agents page:
+Click **Create Agent** in the Dashboard header, or **Use Template** on the Library page:
 
-1. **Choose a source** — GitHub template, GitHub URL, or from scratch.
-2. **Enter a name** — Lowercase with hyphens (e.g., `my-research-agent`).
+1. **Choose a source** — a starter template, a GitHub template, an existing GitHub repository, or a blank agent.
+2. **Enter a name** — Lowercase with hyphens (e.g., `my-research-agent`). You can also set a friendly display label.
 3. **Create** — Trinity clones, builds, and starts the container.
+
+Importing an existing GitHub repository runs a compatibility check inline and lets you choose how to take it on — fork, copy, or clone. See [Creating Agents](../agents/creating-agents.md).
 
 ## Operations
 
@@ -55,14 +92,22 @@ Click **Create Agent** on the Dashboard or Agents page:
 
 The nav entry carries a single badge counting pending queue items and notifications; it pulses when something critical is waiting. Each operator tab has a **Clear All** button for bulk cleanup.
 
-## Settings (Admin Only)
+## Settings
 
-The Settings page lets the admin configure:
+Settings is visible to every authenticated user, but most tabs are admin-only. Non-admins see **MCP Keys**.
 
-- **Email whitelist** — Who can log in
-- **GitHub templates** — Agent repos
-- **API keys** — Platform access
-- **Slack integration** — Workspace connection
+| Tab | Who | Purpose |
+|-----|-----|---------|
+| **General** | Admin | Platform-wide options and feature flags |
+| **Access** | Admin | Email whitelist, roles, who can log in |
+| **Integrations** | Admin | Slack, Telegram, WhatsApp, and other channel connections |
+| **MCP Keys** | Everyone | Create and revoke your own MCP API keys |
+| **Agents** | Admin | GitHub template sources, skill sources, fleet defaults |
+| **Retention** | Admin | How long executions, logs, health checks, and soft-deleted records are kept |
+
+Additional tabs (**Agent Permissions**, **Security**, **SSO**, **Activation**) appear only when the corresponding capability is enabled on your installation.
+
+Retention windows have exactly one validated write path — values are type- and range-checked, the change is audit-logged, and an unusually large deletion is held for explicit approval rather than run silently. See [Monitoring](../operations/monitoring.md).
 
 ## Next Steps
 

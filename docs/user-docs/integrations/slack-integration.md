@@ -54,6 +54,8 @@ Transport -> Adapter -> Router -> Agent -> Response
 | @mention in channel | Bound agent for that channel |
 | Thread reply (no @mention) | Same agent that was originally mentioned |
 
+**Inbound files.** Files attached to a Slack message are downloaded through a host allow-list: the authenticated first request may only go to Slack's own API host, and a redirect is followed only to Slack's file and edge-CDN hosts, over HTTPS, with each hop re-checked and a bounded number of hops. A download to any other host is refused and logged as an error — so a file that fails to reach your agent is visible in the logs rather than silently dropped.
+
 ### Agent Identity in Channels
 
 - **The agent sees who's talking and where.** Channel (non-DM) messages reach the agent with an identity prefix such as `[Channel: #engineering]` / `[From: John Smith (@johndoe)]`, so it can address people by name and adapt to the room. DMs stay clean — no prefix.

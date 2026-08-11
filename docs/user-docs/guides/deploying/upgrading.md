@@ -132,7 +132,11 @@ curl -s http://localhost:8000/api/version
 # Expected: {"version":"0.6.0","git_commit_short":"<sha>","git_branch":"...","build_date":"..."}
 ```
 
-The `git_commit_short`, `git_branch`, `git_commit_subject`, and `build_date` fields come from build-time provenance baked into the image. If they read `"unknown"`, the image was built without the deploy script's build args — rebuild with `scripts/deploy/start.sh` to populate them. The same metadata is visible in the UI via the version chip in the navigation bar (click it for the **Build Info** dialog) and in **Settings**.
+The `git_commit_short`, `git_branch`, `git_commit_subject`, and `build_date` fields report **the code that is actually running**, not merely what was baked in at build time — so a container running mounted source, or one that drifted from its image, is reported honestly rather than claiming the image's commit. If they read `"unknown"`, the image was built without the deploy script's build args — rebuild with `scripts/deploy/start.sh` to populate them.
+
+The response also carries `edition` (`oss` or `enterprise`) and `enterprise_features`, so you can confirm after an upgrade that the entitlements you expect are actually registered.
+
+The same metadata is visible in the UI via the version chip in the navigation bar (click it for the **Build Info** dialog) and in **Settings**.
 
 **Note:** JWT tokens are invalidated when the backend restarts. Users with active web UI sessions will need to log in again. MCP clients (Claude Code) will need to reconnect — run `/mcp` in your Claude Code session or restart the client.
 
@@ -146,7 +150,14 @@ Rebuild the base image only when `docker/base-image/Dockerfile` changes:
 ./scripts/deploy/build-base-image.sh
 ```
 
-After the base image is rebuilt, existing agent containers continue using the old image until they are individually stopped and recreated. There is no automatic roll-forward — agents pick up the new base image the next time they are (re)created.
+**How agents pick it up.** A rebuilt base image is adopted at an agent's next **cold start** — that is, the next time it goes from stopped to running. Trinity compares the running container's image against the current base image and recreates the container when they differ.
+
+What this means in practice:
+
+- A **running** agent is never replaced out from under you. Drift is detected but not acted on until the agent is next started cold.
+- **Restart the fleet** (Operations) to roll the new image out: each agent goes through the normal lifecycle, so a drifted agent is recreated and an up-to-date one keeps its container.
+- The **system agent** (`trinity-system`) follows the same rule and is deliberately never replaced while running. If its image goes stale you get an operator alert rather than a mid-operation container swap; it adopts the rebuild the next time it is started cold.
+- Rebuilding the base image is what makes newly shipped agent-side features available. Skipping it means agents keep running the old runtime, which is usually harmless but occasionally leaves a feature silently inert.
 
 ---
 

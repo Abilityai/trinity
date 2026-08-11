@@ -14,6 +14,14 @@ For a single, agent-initiated, one-shot deferred follow-up rather than a recurri
 - **Scheduler Service** -- Standalone service with Redis distributed locks. Uses async fire-and-forget dispatch with DB polling for status.
 - **Misfire Handling** -- If the scheduler restarts, missed jobs within a 1-hour grace window are caught up and fired immediately (`misfire_grace_time=3600`, `coalesce=True`, `max_instances=1`).
 
+### Timezones
+
+Schedules take any IANA zone name — including legacy aliases like `US/Eastern`, `Asia/Calcutta`, and `Europe/Kiev`. A timezone the platform cannot actually resolve is rejected when you create the schedule, with a message naming the problem, rather than being accepted and then silently never firing.
+
+### Schedules from a template
+
+A template can ship the recurring work its agent is designed to do in a `schedules:` block, and Trinity creates those schedules when the agent is created — through the UI, the API, and MCP alike. They appear here like any other schedule and are yours to edit, disable, or delete. See [Creating Agents](../agents/creating-agents.md).
+
 ## How It Works
 
 ![Agent Schedules tab showing three active weekly schedules with cron expressions and execution history](../../screenshots/agent-schedules.png)
@@ -191,6 +199,8 @@ Raise the agent cap first, then raise the schedule timeout.
 - Missed jobs are only caught up within the 1-hour grace window.
 - Retries count against the agent's parallel capacity slots.
 - Pre-check hooks run with the same permissions as the agent's normal tool calls (`developer` user inside the container).
+- A template may declare at most 20 schedules. Beyond that the list is truncated, with the reason reported.
+- If the agent has **freeze schedules if sync failing** enabled and its git sync has failed three times in a row, the scheduler skips firing until sync recovers.
 
 ## See Also
 
