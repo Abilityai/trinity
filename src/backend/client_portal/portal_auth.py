@@ -22,9 +22,15 @@ import logging
 
 from typing import NamedTuple
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Request, Response
 
-from dependencies import oauth2_scheme, decode_portal_session, get_current_user
+from dependencies import (
+    oauth2_scheme,
+    decode_portal_session,
+    get_current_user,
+    portal_session_needs_rotation,
+    renew_portal_session,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +72,48 @@ class PortalPrincipal(NamedTuple):
     is_platform: bool
 
 
+#: Response header carrying a rotated Workspace session token (ent#375). The
+#: client swaps it into storage; a client that ignores it keeps using its current
+#: token until the idle window runs out, so rotation degrades to the previous
+#: behaviour rather than breaking anything.
+SESSION_ROTATION_HEADER = "X-Trinity-Session-Token"
+
+
+def _maybe_rotate(token: str, response: Response) -> None:
+    """Opportunistically slide the session forward (ent#375).
+
+    Best-effort by construction: the request is already authorised, so a failed
+    rotation must not affect it. `renew_portal_session` returns None for every
+    "do not renew" case — revoked, capped out, revocation store unreadable — and
+    the request simply proceeds on the existing token, still valid until its own
+    `exp`.
+
+    Placed here rather than in middleware because this is the one point that has
+    already established the token IS a portal session and that its owner is not
+    blocked. Middleware would have to re-derive both, and would also run on the
+    platform-JWT path, which ent#375 deliberately leaves alone.
+    """
+    try:
+        if not portal_session_needs_rotation(token):
+            return
+        fresh = renew_portal_session(token)
+        if fresh:
+            response.headers[SESSION_ROTATION_HEADER] = fresh
+    except Exception as exc:  # noqa: BLE001 — never fail an authorised request
+        logger.warning("[ent#375] session rotation skipped: %s", exc)
+
+
 async def get_portal_principal(
-    request: Request, token: str = Depends(oauth2_scheme)
+    request: Request, response: Response, token: str = Depends(oauth2_scheme)
 ) -> PortalPrincipal:
     """Resolve the caller to (email, is_platform). See `PortalPrincipal`."""
     # Portal session token → the verified email it carries.
     email = decode_portal_session(token)
     if email:
         _reject_if_blocked(email)
+        # Slide the session AFTER the block check, so a blocked client is never
+        # handed a fresh token on its way out.
+        _maybe_rotate(token, response)
         return PortalPrincipal(email, False)
 
     # Otherwise a platform principal (operator preview / signed-in user) →

@@ -434,6 +434,64 @@ class SettingsService:
         return self._resolve_bool_flag("brain_orb_write_enabled", "BRAIN_ORB_WRITE_ENABLED")
 
     # =========================================================================
+    # Workspace / portal session policy (ent#375)
+    # =========================================================================
+
+    def get_portal_session_policy(self) -> tuple:
+        """`(idle_seconds, absolute_seconds)` for the sliding Workspace session.
+
+        OSS owns the mechanism and these safe defaults; the entitled Settings
+        panel owns the *setter* that writes the overrides — the core-primitive +
+        enterprise-knob split `users.suspended_at` uses (#995). A community
+        install slides on the defaults, it just cannot retune them.
+
+        NO env leg, deliberately. `_resolve_bool_flag` has one because those
+        flags predate their Settings surface; these keys are new, and an env leg
+        would let a stale variable override a row an operator actually set — the
+        #1638 "two sources for one policy" trap.
+
+        Clamped on READ, not only on write. The entitled setter validates, but a
+        direct DB write or a future default regression must not be able to mint a
+        session that outlives its own cap. Read-side clamping is what makes
+        `idle <= absolute` hold regardless of who wrote the row (#506
+        clamp-on-use).
+
+        Fail-safe: any read failure returns the code defaults rather than
+        raising. This runs on the auth path — an exception here would 500 every
+        Workspace request instead of degrading to the shipped policy.
+        """
+        from config import (
+            PORTAL_SESSION_ABSOLUTE_DAYS_DEFAULT,
+            PORTAL_SESSION_IDLE_DAYS_DEFAULT,
+            PORTAL_SESSION_MAX_ABSOLUTE_DAYS,
+            PORTAL_SESSION_MIN_IDLE_MINUTES,
+        )
+
+        def _read(key: str, default_days: float) -> float:
+            try:
+                raw = self.get_setting(key)
+            except Exception:
+                return float(default_days)
+            if raw is None:
+                return float(default_days)
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                return float(default_days)
+            return val if val > 0 else float(default_days)
+
+        idle_s = int(_read("portal_session_idle_days", PORTAL_SESSION_IDLE_DAYS_DEFAULT) * 86400)
+        abs_s = int(_read("portal_session_absolute_days", PORTAL_SESSION_ABSOLUTE_DAYS_DEFAULT) * 86400)
+
+        # Floors/ceilings first, then the ordering invariant. A cap shorter than
+        # the idle window would kill every session at the cap while the idle
+        # window claimed otherwise.
+        idle_s = max(idle_s, PORTAL_SESSION_MIN_IDLE_MINUTES * 60)
+        abs_s = min(abs_s, PORTAL_SESSION_MAX_ABSOLUTE_DAYS * 86400)
+        abs_s = max(abs_s, idle_s)
+        return idle_s, abs_s
+
+    # =========================================================================
     # GitHub Templates (TMPL-001)
     # =========================================================================
 

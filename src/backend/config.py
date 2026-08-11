@@ -78,6 +78,35 @@ SECRET_KEY = _secret_key
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 10080  # 7 days (was 30 minutes)
 
+# --- Workspace / portal session policy (ent#375) ---------------------------
+#
+# The Workspace session SLIDES: it renews while in use, dies on inactivity, and
+# is still bounded by an absolute cap no amount of use can extend. Replaces the
+# flat 12-hour absolute lifetime, which made anyone using the surface on two
+# consecutive days redo the email OTP.
+#
+# Defaults are the shipped policy for every install; the entitled Settings panel
+# writes overrides into `system_settings`, read (and clamped) by
+# `settings_service.get_portal_session_policy`.
+#
+# NOT env-configurable, deliberately: an env leg would give one policy two
+# sources, and the stale one wins silently (#1638).
+PORTAL_SESSION_IDLE_DAYS_DEFAULT = 7      # no requests for this long -> sign in again
+PORTAL_SESSION_ABSOLUTE_DAYS_DEFAULT = 30  # hard ceiling from first sign-in
+
+# Bounds enforced on READ, so a bad row cannot widen the window (#506).
+PORTAL_SESSION_MIN_IDLE_MINUTES = 15
+PORTAL_SESSION_MAX_ABSOLUTE_DAYS = 90
+
+# Re-mint only once a session is this far into its idle window. Rotation revokes
+# the previous `jti`, so rotating on EVERY request would make a browser with two
+# in-flight requests race: the second arrives bearing a token the first just
+# revoked. A staleness threshold keeps rotations rare and the race window small;
+# `PORTAL_SESSION_ROTATION_GRACE_SECONDS` then keeps the superseded token alive
+# just long enough for requests already in flight.
+PORTAL_SESSION_ROTATE_AFTER_FRACTION = 0.5
+PORTAL_SESSION_ROTATION_GRACE_SECONDS = 60
+
 # Redis URL — must include credentials (Issue #589).
 # docker-compose builds the URL with the `backend` ACL user + REDIS_BACKEND_PASSWORD;
 # we only validate it here. Splicing fallback removed: a single source of truth

@@ -18,7 +18,6 @@ import os
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 
 from dependencies import (
-    PORTAL_SESSION_EXPIRE_HOURS,
     CurrentUser,
     OwnedAgentByName,
     assert_admin,
@@ -291,10 +290,14 @@ async def portal_auth_exchange(
             detail="This email has no access to any agent on this instance",
         )
 
+    # ent#375: report the token's ACTUAL lifetime (the idle window), not a
+    # constant. The session now slides, so this is when it expires *if the
+    # client goes quiet* — a client that keeps using it keeps it alive.
+    idle_s, _ = settings_service.get_portal_session_policy()
     return PortalExchangeResponse(
         token=token,
         email=email,
-        expires_in=PORTAL_SESSION_EXPIRE_HOURS * 3600,
+        expires_in=idle_s,
     )
 
 

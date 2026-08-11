@@ -51,6 +51,28 @@ def _portal_revoked_key(email: str) -> str:
     return f"{_PORTAL_REVOKED_PREFIX}{email.strip().lower()}"
 
 
+def _portal_session_policy() -> tuple:
+    """`(idle_seconds, absolute_seconds)` — the sliding-session policy (ent#375).
+
+    Imported lazily: `settings_service` imports `db`, and `dependencies` is
+    imported by nearly everything, so a module-level import here would make an
+    import cycle out of what is one settings read.
+    """
+    try:
+        from services.settings_service import settings_service
+        return settings_service.get_portal_session_policy()
+    except Exception:  # pragma: no cover — settings unavailable
+        # Auth path: degrade to the shipped policy rather than 500 the request.
+        from config import (
+            PORTAL_SESSION_ABSOLUTE_DAYS_DEFAULT,
+            PORTAL_SESSION_IDLE_DAYS_DEFAULT,
+        )
+        return (
+            int(PORTAL_SESSION_IDLE_DAYS_DEFAULT * 86400),
+            int(PORTAL_SESSION_ABSOLUTE_DAYS_DEFAULT * 86400),
+        )
+
+
 def revoke_portal_sessions_for_email(email: str) -> bool:
     """Invalidate every portal session token already issued to ``email``.
 
@@ -69,7 +91,15 @@ def revoke_portal_sessions_for_email(email: str) -> bool:
     # minted in the same second as the revoke is killed too. For a kill switch,
     # rounding toward revoking is the only safe direction.
     now = int(datetime.now(timezone.utc).timestamp())
-    ttl = PORTAL_SESSION_EXPIRE_HOURS * 3600 + 60  # + slack for clock skew
+    # TTL must outlive the LONGEST-LIVED token this cutoff has to kill, which is
+    # the absolute cap — not the idle window and (ent#375) no longer the old flat
+    # 12 hours. Getting this wrong resurrects revoked sessions: with sliding
+    # sessions capped at 30 days, a 12-hour cutoff evaporates while tokens minted
+    # before the revoke are still valid, and the next request sails through
+    # because there is no cutoff left to compare against. Read the policy so the
+    # TTL tracks the cap automatically instead of restating it.
+    _, absolute_s = _portal_session_policy()
+    ttl = absolute_s + 60  # + slack for clock skew
     try:
         r.setex(_portal_revoked_key(email), ttl, str(now))
         return True
@@ -253,7 +283,17 @@ def decode_mfa_challenge(token: str) -> Optional[dict]:
 # verification of a client whose email has a share). No new secret — same
 # SECRET_KEY/ALGORITHM, so a backend restart invalidates portal sessions too.
 PORTAL_SESSION_SCOPE = "portal_session"
-PORTAL_SESSION_EXPIRE_HOURS = 12
+
+# RETIRED as a lifetime (ent#375). The session now slides: `_portal_session_policy()`
+# supplies an idle window and an absolute cap, and every consumer reads those.
+#
+# Deleted rather than left at 12: a stale constant beside a live policy is the
+# hazard this feature already tripped over once. `revoke_portal_sessions_for_email`
+# derived its Redis TTL from it, so extending sessions to 30 days while it still
+# said 12 hours would have expired the revoke cutoff 29.5 days before the tokens
+# it exists to kill — silently resurrecting revoked sessions. Anything still
+# reading a fixed portal lifetime should read the policy instead, and a NameError
+# is the right way to find that out.
 
 # --- Delegated portal identity (ent#163) ---------------------------------
 #
@@ -288,21 +328,44 @@ PORTAL_DELEGATE_ALLOWED_ROUTES = {
 }
 
 
-def create_portal_session_token(email: str, mode: str = "prod") -> str:
-    """Mint a Client Portal session token for a verified email. Carries no
-    ``sub`` (no platform identity) — only the email + the portal scope.
+def create_portal_session_token(
+    email: str, mode: str = "prod", session_start: Optional[int] = None
+) -> str:
+    """Mint a Workspace session token for a verified email. Carries no ``sub``
+    (no platform identity) — only the email + the portal scope.
 
     Carries an explicit ``iat`` so bulk revocation (ent#281) can date the token
     against the per-email cutoff. Set here rather than in ``create_access_token``
     to keep the claim set of every other token type unchanged.
+
+    ent#375 — the session SLIDES, so two clocks are needed and ``iat`` can only
+    be one of them. ``iat`` moves on every rotation (it is what the revoke cutoff
+    dates against, so it MUST move, otherwise a rotated token would look older
+    than the revoke that should have killed it). ``sst`` — session start — is
+    carried through rotations unchanged and is what the absolute cap measures
+    from. With only ``iat``, rotation would reset the cap on every request and
+    the session would live forever, which is the one thing an absolute cap
+    exists to prevent.
+
+    ``exp`` is the idle deadline, additionally clamped to the absolute cap so a
+    token can never advertise a validity its own session no longer has.
     """
+    now = int(datetime.now(timezone.utc).timestamp())
+    start = int(session_start) if session_start else now
+    idle_s, absolute_s = _portal_session_policy()
+
+    idle_deadline = now + idle_s
+    absolute_deadline = start + absolute_s
+    expires_in = max(1, min(idle_deadline, absolute_deadline) - now)
+
     return create_access_token(
         data={
             "scope": PORTAL_SESSION_SCOPE,
             "email": email.lower(),
-            "iat": int(datetime.now(timezone.utc).timestamp()),
+            "iat": now,
+            "sst": start,
         },
-        expires_delta=timedelta(hours=PORTAL_SESSION_EXPIRE_HOURS),
+        expires_delta=timedelta(seconds=expires_in),
         mode=mode,
     )
 
@@ -342,7 +405,148 @@ def decode_portal_session(token: str) -> Optional[str]:
                 return None
         except (TypeError, ValueError):
             return None  # malformed `iat` — same reasoning as missing
+
+    # ent#375 absolute cap. `exp` is clamped to it at mint, so this is redundant
+    # for a token minted under the CURRENT policy — and load-bearing for one
+    # minted under a wider policy that an operator has since narrowed. Enforcing
+    # it on read is what makes shortening the cap take effect immediately
+    # instead of only for sessions started afterwards.
+    #
+    # A token with no `sst` predates ent#375. Fall back to `iat`: those tokens
+    # were minted under the flat 12-hour lifetime and have already expired, so
+    # the fallback is unreachable in practice and cannot widen anything.
+    _, absolute_s = _portal_session_policy()
+    started = payload.get("sst", payload.get("iat"))
+    if started is not None:
+        try:
+            if int(started) + absolute_s <= int(datetime.now(timezone.utc).timestamp()):
+                return None
+        except (TypeError, ValueError):
+            return None
     return email
+
+
+def portal_session_needs_rotation(token: str) -> bool:
+    """True when `token` is far enough into its idle window to be worth
+    re-minting (ent#375).
+
+    Pure and side-effect-free — a caller can ask without committing to rotate.
+    Rotating on every request would revoke a token that concurrent in-flight
+    requests are still carrying; rotating only past the threshold keeps that
+    window rare.
+    """
+    from config import PORTAL_SESSION_ROTATE_AFTER_FRACTION
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return False
+    if payload.get("scope") != PORTAL_SESSION_SCOPE:
+        return False
+    iat = payload.get("iat")
+    if iat is None:
+        return False
+    idle_s, _ = _portal_session_policy()
+    try:
+        age = int(datetime.now(timezone.utc).timestamp()) - int(iat)
+    except (TypeError, ValueError):
+        return False
+    return age >= idle_s * PORTAL_SESSION_ROTATE_AFTER_FRACTION
+
+
+def renew_portal_session(token: str) -> Optional[str]:
+    """Rotate a live Workspace session token, or None if it may not be renewed.
+
+    Renewal is a NEW grant, so it is held to a stricter standard than reading an
+    existing one:
+
+    * **Fails CLOSED on the revocation store.** `is_token_revoked` and
+      `portal_sessions_revoked_at` both fail OPEN — correct for a read (a Redis
+      blip must not sign every client out), indefensible for a mint. Failing open
+      here would hand a *fresh* token to a session an operator just killed, and
+      the new token post-dates the cutoff, so the kill would not re-apply when
+      Redis came back: one blip at the wrong moment permanently resurrects a
+      revoked session. The issue calls this out and it is the sharpest edge in
+      the feature.
+    * **Never extends past the absolute cap.** `sst` is carried through
+      unchanged, so the cap measures from the original sign-in however many
+      rotations have happened.
+    * **Revokes the token it replaces**, after a short grace, so a superseded
+      token is not left independently valid for its full remaining lifetime.
+
+    Returns the new token; None means "do not renew" and the caller keeps
+    serving the request with the existing one (renewal is opportunistic — a
+    failed renewal must never break a request that was otherwise authorised).
+    """
+    from config import PORTAL_SESSION_ROTATION_GRACE_SECONDS
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+    if payload.get("scope") != PORTAL_SESSION_SCOPE:
+        return None
+    email = payload.get("email")
+    if not email:
+        return None
+    email = email.lower()
+
+    # --- fail-CLOSED revocation checks -------------------------------------
+    r = get_breaker_redis()
+    if r is None:
+        return None  # cannot verify -> do not mint
+    jti = payload.get("jti")
+    try:
+        if jti and r.exists(f"{_JWT_REVOKED_PREFIX}{jti}") > 0:
+            return None
+        raw_cutoff = r.get(_portal_revoked_key(email))
+    except Exception as exc:
+        logger.warning(f"[auth] renew_portal_session: revocation read failed, refusing: {exc}")
+        return None
+
+    iat = payload.get("iat")
+    if raw_cutoff is not None:
+        try:
+            cutoff = int(raw_cutoff.decode() if isinstance(raw_cutoff, (bytes, bytearray)) else raw_cutoff)
+        except (ValueError, AttributeError):
+            return None  # unreadable cutoff -> assume revoked
+        if iat is None:
+            return None
+        try:
+            if int(iat) <= cutoff:
+                return None
+        except (TypeError, ValueError):
+            return None
+
+    # --- absolute cap -------------------------------------------------------
+    now = int(datetime.now(timezone.utc).timestamp())
+    _, absolute_s = _portal_session_policy()
+    started = payload.get("sst", iat)
+    if started is None:
+        return None
+    try:
+        started = int(started)
+    except (TypeError, ValueError):
+        return None
+    if started + absolute_s <= now:
+        return None  # capped out — a fresh sign-in is required
+
+    new_token = create_portal_session_token(email, session_start=started)
+
+    # Retire the old jti, but only after a grace: requests already in flight are
+    # still carrying it, and a hard revoke here would 401 them mid-rotation.
+    if jti:
+        try:
+            r.setex(
+                f"{_JWT_REVOKED_PREFIX}{jti}",
+                PORTAL_SESSION_ROTATION_GRACE_SECONDS,
+                "1",
+            )
+        except Exception as exc:  # pragma: no cover
+            # Best-effort: the superseded token still expires on its own `exp`.
+            logger.warning(f"[auth] renew_portal_session: could not retire old jti: {exc}")
+
+    return new_token
 
 
 def decode_token(token: str) -> Optional[dict]:
