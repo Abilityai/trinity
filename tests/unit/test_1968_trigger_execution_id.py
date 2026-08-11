@@ -572,11 +572,27 @@ def test_webhook_trigger_still_records_its_trigger_type(tmp_path):
 
 
 def _backend_trigger_endpoint() -> str:
-    source = (_REPO / "src" / "backend" / "routers" / "schedules.py").read_text(
-        encoding="utf-8"
-    )
-    marker = "async def trigger_schedule("
-    return source[source.index(marker):][:5000]
+    """The FULL source of `trigger_schedule`, via AST.
+
+    This used to take a fixed 5000-character window from the `async def` marker.
+    That is a byte count standing in for a function boundary, and it broke the
+    moment the handler grew: #2094 added a four-line comment explaining its
+    dependency choice, which pushed the `execution_id` relay from 4835 to 5071
+    characters — 71 past the cliff — and every assertion below started failing
+    against code that was completely correct.
+
+    A test that fails when a COMMENT is added is measuring the wrong thing. The
+    property is "this handler relays execution_id", so read the handler.
+    """
+    import ast
+
+    path = _REPO / "src" / "backend" / "routers" / "schedules.py"
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "trigger_schedule":
+            return ast.get_source_segment(source, node) or ""
+    raise AssertionError("trigger_schedule not found in routers/schedules.py")
 
 
 def test_backend_relays_the_execution_id():
