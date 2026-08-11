@@ -6,7 +6,14 @@
 credentials.json
 
 # Platform-managed directories - DO NOT COMMIT
-.trinity/
+.trinity/*
+!.trinity/pre-check
+!.trinity/post-check
+!.trinity/pre-snapshot
+!.trinity/setup.sh
+!.trinity/persistent-processes.allow
+!.trinity/brain-orb/
+!.trinity/pipelines/
 .claude/commands/trinity/
 
 # Large generated content - DO NOT COMMIT

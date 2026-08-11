@@ -294,7 +294,7 @@ When a single container's `max_parallel_tasks` ceiling — bounded by container 
 - Docker container per agent — correct isolation model, keep
 - `agent-server.py` (FastAPI on port 8000 inside container) — keep
 - Claude Code as the execution runtime — keep
-- `/api/chat`, `/health`, `/api/credentials/update`, `/api/files` endpoints — keep
+- `/api/chat`, `/health`, `/api/credentials/inject`, `/api/files` endpoints — keep (`/api/credentials/update` was listed here until #2008 removed it: it had no callers anywhere)
 - Pre-check hook (`~/.trinity/pre-check`) — keep
 - Credential injection via `.env` + `.credentials.enc` — keep
 

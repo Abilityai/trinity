@@ -30,6 +30,7 @@ from dependencies import (
     get_current_user,
     get_authorized_agent,
     AuthorizedAgent,
+    OwnedAgentByName,
     CurrentUser,
     assert_admin,
     assert_agent_access,
@@ -402,7 +403,7 @@ async def delete_schedule(
 
 @router.post("/{name}/schedules/{schedule_id}/enable")
 async def enable_schedule(
-    name: AuthorizedAgent,
+    name: OwnedAgentByName,  # CSO M1: owner-tier (matches update/delete), not accessor
     schedule_id: str
 ):
     """Enable a schedule."""
@@ -421,7 +422,7 @@ async def enable_schedule(
 
 @router.post("/{name}/schedules/{schedule_id}/disable")
 async def disable_schedule(
-    name: AuthorizedAgent,
+    name: OwnedAgentByName,  # CSO M1: owner-tier (matches update/delete), not accessor
     schedule_id: str
 ):
     """Disable a schedule."""
@@ -440,7 +441,7 @@ async def disable_schedule(
 
 @router.post("/{name}/schedules/{schedule_id}/trigger")
 async def trigger_schedule(
-    name: AuthorizedAgent,
+    name: OwnedAgentByName,  # CSO M1: owner-tier (matches update/delete), not accessor
     schedule_id: str,
     current_user: User = Depends(get_current_user),
     x_source_agent: Optional[str] = Header(None),

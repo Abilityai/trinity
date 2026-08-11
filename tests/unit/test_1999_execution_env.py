@@ -430,15 +430,86 @@ def test_every_spawn_site_builds_its_env_through_the_helper():
     `env={**os.environ, ...}` form would silently re-open the bug, and only a
     grep-shaped assertion fails on that.
     """
-    services = _ROOT / "docker" / "base-image" / "agent_server" / "services"
+    # BOTH trees (#2010 review): `routers/brain_orb.py` already spawns a
+    # subprocess, so a guard that walks only `services/` is the #1965 lesson
+    # ("a guard that walks only one of the two trees is not a guard") one
+    # directory over.
+    agent_server = _ROOT / "docker" / "base-image" / "agent_server"
+    roots = [agent_server / "services", agent_server / "routers"]
     offenders = []
-    for path in services.rglob("*.py"):
-        if path.name == "execution_env.py":
-            continue
-        for num, line in enumerate(path.read_text().splitlines(), 1):
-            if "env={**os.environ" in line or "**os.environ," in line:
-                offenders.append(f"{path.relative_to(_ROOT)}:{num}")
+    for root in roots:
+        for path in root.rglob("*.py"):
+            if path.name == "execution_env.py":
+                continue
+            for num, line in enumerate(path.read_text().splitlines(), 1):
+                if "env={**os.environ" in line or "**os.environ," in line:
+                    offenders.append(f"{path.relative_to(_ROOT)}:{num}")
     assert not offenders, (
         "these spawn sites still snapshot the mutated process env instead of "
         f"calling build_execution_env (#1999): {offenders}"
     )
+
+
+def test_the_router_call_sites_that_keep_1089_working_are_wired():
+    """The AC table cites two `set_runtime_override(...)` calls as what keeps
+    the #1089 token hot-reload working, and nothing covered them: deleting both
+    left the suite green. Static for the same reason as the guard above — the
+    behaviour they protect needs a live container to observe.
+    """
+    import ast
+
+    src = (_ROOT / "docker" / "base-image" / "agent_server" / "routers"
+           / "credentials.py").read_text()
+    tree = ast.parse(src)
+    overrides = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "set_runtime_override"
+    ]
+    keys = {
+        n.args[0].value for n in overrides
+        if n.args and isinstance(n.args[0], ast.Constant)
+    }
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in keys, (
+        "the reload-token route no longer records the rotated token as a "
+        "runtime override — the next subprocess would read the stale .env "
+        "value and #1089 silently stops working"
+    )
+    assert "ANTHROPIC_API_KEY" in keys, (
+        "the remove_api_key path no longer force-unsets ANTHROPIC_API_KEY, so "
+        "a subscription switch leaves the old key applying"
+    )
+    assert any(
+        isinstance(n.args[1], ast.Constant) and n.args[1].value is None
+        for n in overrides if len(n.args) > 1
+    ), "the force-unset form (value=None) is gone — only the file layer remains"
+
+
+# ---------------------------------------------------------------------------
+# Known limitation carried by #2010 — closed by #2023 (PR #2030)
+# ---------------------------------------------------------------------------
+
+def test_update_delivers_quote_bearing_values_intact(tmp_path):
+    """Was `xfail(strict=True)` while #2010 shipped with the write-only
+    escaping; the marker's own reason said it flips to XPASS when #2023 lands,
+    and this is that flip — the marker is gone, the assertions are unchanged.
+
+    What it pins NOW is backward compatibility: these lines reproduce the OLD
+    writer's quote-only escaping, i.e. the `.env` files already sitting on
+    deployed agents' disks from before the encoding became reversible. The
+    #2023 reader must deliver those values intact too, not only ones its own
+    `format_env_line` produced (that round trip is test_2023's job).
+    """
+    import sys
+
+    sys.path.insert(0, str(_ROOT / "docker" / "base-image"))
+    from agent_server.services.execution_env import parse_env_file
+
+    env_file = tmp_path / ".env"
+    for raw in ('pa"ss', "'quoted'", 'tail"'):
+        # The pre-#2023 writer, byte for byte: quote-only escaping.
+        escaped = str(raw).replace('"', '\\"')
+        env_file.write_text(f'K="{escaped}"\n')
+        assert parse_env_file(env_file)["K"] == raw, (
+            f"delivered {parse_env_file(env_file)['K']!r} for {raw!r}"
+        )

@@ -107,7 +107,7 @@ Classic is faster to operate. Fine-grained is safer. Pick the tradeoff that matc
 
 A classic PAT with `repo` scope grants access to **every repository your GitHub user can see** — personal repos, plus any org repos your account has access to. Best when you're comfortable with that reach and want zero-maintenance setup.
 
-![GitHub new classic personal access token page with the `repo` scope checked](../images/pat/classic-token-scopes.png)
+![GitHub new classic personal access token page with the `repo` scope checked](../../screenshots/external-github-pat-scopes.png)
 
 
 **Step 1: Create the token**

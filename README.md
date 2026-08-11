@@ -77,7 +77,7 @@ Each agent runs in its own isolated Docker container with real-time observabilit
 
 <!--
 <div align="center">
-  <video src="https://github.com/user-attachments/assets/REPLACE-AFTER-UPLOAD" width="720" controls poster="docs/assets/screenshots/grid-view-fleet.png"></video>
+  <video src="https://github.com/user-attachments/assets/REPLACE-AFTER-UPLOAD" width="720" controls poster="docs/screenshots/dashboard-grid.png"></video>
 </div>
 -->
 
@@ -243,12 +243,12 @@ If you're an agent working with this repository, **[AGENTS.md](AGENTS.md)** is y
 
 <table>
   <tr>
-    <td width="50%"><a href="docs/assets/screenshots/grid-view-fleet.png"><img src="docs/assets/screenshots/grid-view-fleet.png" alt="Grid view — the fleet as a canvas of agent tiles"/></a><br/><sub><b>Grid view</b> — the whole fleet as tiles: live status, activity sparklines, cost & success per agent, inline Run/Auto toggles.</sub></td>
-    <td width="50%"><a href="docs/assets/screenshots/operations-executions.png"><img src="docs/assets/screenshots/operations-executions.png" alt="Operations — fleet-wide execution history"/></a><br/><sub><b>Operations</b> — every task run across the fleet, with success rate, cost, and per-agent/trigger filters.</sub></td>
+    <td width="50%"><a href="docs/screenshots/dashboard-grid.png"><img src="docs/screenshots/dashboard-grid.png" alt="Grid view — the fleet as a canvas of agent tiles"/></a><br/><sub><b>Grid view</b> — the whole fleet as tiles: live status, activity sparklines, cost & success per agent, inline Run/Auto toggles.</sub></td>
+    <td width="50%"><a href="docs/screenshots/operations-executions.png"><img src="docs/screenshots/operations-executions.png" alt="Operations — fleet-wide execution history"/></a><br/><sub><b>Operations</b> — every task run across the fleet, with success rate, cost, and per-agent/trigger filters.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><a href="docs/assets/screenshots/agent-overview-detail.png"><img src="docs/assets/screenshots/agent-overview-detail.png" alt="Agent Overview — trends, health, and activity"/></a><br/><sub><b>Agent overview</b> — per-agent activity trends, success rate, duration, and health at a glance.</sub></td>
-    <td width="50%"><a href="docs/assets/screenshots/brain-orb.png"><img src="docs/assets/screenshots/brain-orb.png" alt="Brain Orb — an agent's self-rendering knowledge graph"/></a><br/><sub><b>Brain Orb</b> — a knowledge-base agent renders its own mind as a live 3D graph of notes, edges & activity.</sub></td>
+    <td width="50%"><a href="docs/screenshots/agent-overview.png"><img src="docs/screenshots/agent-overview.png" alt="Agent Overview — trends, health, and activity"/></a><br/><sub><b>Agent overview</b> — per-agent activity trends, success rate, duration, and health at a glance.</sub></td>
+    <td width="50%"><a href="docs/screenshots/brain-orb.png"><img src="docs/screenshots/brain-orb.png" alt="Brain Orb — an agent's self-rendering knowledge graph"/></a><br/><sub><b>Brain Orb</b> — a knowledge-base agent renders its own mind as a live 3D graph of notes, edges & activity.</sub></td>
   </tr>
 </table>
 

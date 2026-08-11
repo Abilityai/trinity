@@ -17,7 +17,12 @@ __pycache__/
 .Python
 env/
 venv/
+# No trailing slash: the slash forms match DIRECTORIES only, so a *symlink*
+# named .venv slipped past them and was committed (#2082 shipped one pointing
+# at a developer's home directory). These also match a symlink or a file.
+.venv
 .venv/
+.venv*
 .venv*/
 ENV/
 build/
@@ -124,10 +129,11 @@ repositories/
 *.png
 # Allow PWA icons
 !src/frontend/public/icons/*.png
-# Allow documentation screenshots
+# Allow documentation screenshots — docs/screenshots/ is the ONE canonical store
+# (docs/screenshots/MANIFEST.yaml); docs/assets/screenshots/whats-new/ holds frozen
+# per-release snapshots. Do not add a third negation here — see docs/screenshots/README.md.
 !docs/screenshots/*.png
-!docs/user-docs/images/**/*.png
-!docs/assets/screenshots/**/*.png
+!docs/assets/screenshots/whats-new/**/*.png
 
 # Frontend build output
 src/frontend/dist/

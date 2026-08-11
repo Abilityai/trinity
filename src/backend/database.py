@@ -1457,6 +1457,20 @@ class DatabaseManager:
         """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
         return self._schedule_ops.get_fleet_execution_stats(agent_names, hours)
 
+    def get_fleet_execution_timeline(self, agent_names, group_by: str, hours: int):
+        """Bucketed fleet execution rollups — the time-series sibling of
+        :meth:`get_fleet_execution_stats` (ent#326)."""
+        return self._schedule_ops.get_fleet_execution_timeline(
+            agent_names, group_by, hours
+        )
+
+    def shape_execution_timeline(self, rows, *, group_by: str, hours: int):
+        """Fold/gap-fill the timeline rows (ent#326) — the domain transforms
+        live beside the query, not in the router (Invariant #1)."""
+        return self._schedule_ops.shape_execution_timeline(
+            rows, group_by=group_by, hours=hours
+        )
+
     # =========================================================================
     # Git Configuration Management (delegated to db/schedules.py)
     # =========================================================================
@@ -2963,6 +2977,17 @@ class DatabaseManager:
     def create_audit_entry(self, entry: dict):
         """Insert an audit log entry (append-only)."""
         return self._audit_ops.create_audit_entry(entry)
+
+    def create_audit_entry_chained(self, entry: dict, compute_hash):
+        """Insert a HASH-CHAINED audit entry (#2015).
+
+        The pass-through the facade was missing: `platform_audit_service` calls
+        `db.create_audit_entry_chained(...)`, and without this the hash-chained
+        write path raises `AttributeError` the first time the chain is enabled —
+        i.e. the integrity control fails exactly when it is switched on. Caught
+        by `test_database_facade_delegation`, which is why that guard exists.
+        """
+        return self._audit_ops.create_audit_entry_chained(entry, compute_hash)
 
     def get_audit_entries(self, **filters):
         """Query audit entries with optional filters. See PlatformAuditOperations for kwargs."""

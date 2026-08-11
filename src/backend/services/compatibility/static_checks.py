@@ -351,12 +351,20 @@ def c_s004(snap):  # .claude/projects/ ignored
         else _fail(".claude/projects/ is not excluded — Claude Code session history would be committed")
 
 
-def c_s005(snap):  # .trinity/ ignored
-    # ".trinity/*" satisfies the same intent: Brain-Orb templates use it with a
-    # "!.trinity/brain-orb/" re-include so committed hooks stay tracked while
-    # runtime state stays ignored (trinity-enterprise#76). Git can't re-include
-    # under a dir-form exclusion, so the star-form is the only committable shape.
-    return _ok(".trinity/ is gitignored") if _has_ignore(snap, ".trinity/", ".trinity", ".trinity/*") \
+def c_s005(snap):  # .trinity/ runtime state ignored
+    # ".trinity/*" is the CANONICAL shape since #2070: git cannot re-include a
+    # path under a dir-form exclusion (it never descends into the directory),
+    # so the star form is the only one under which the authored hooks
+    # — pre-check, post-check, setup.sh, brain-orb/, pipelines/ — can stay
+    # tracked while runtime state stays ignored.
+    #
+    # The dir-forms are still ACCEPTED rather than failed: they do exclude the
+    # runtime state this check is about, which is what it grades. A template on
+    # the dir-form that also commits a hook is the #2070 case, and the fleet
+    # merge repairs it on the next Push by replacing that exact line — grading
+    # it a failure here would report a problem the platform fixes itself.
+    return _ok(".trinity/ runtime state is gitignored") \
+        if _has_ignore(snap, ".trinity/*", ".trinity/", ".trinity") \
         else _fail(".trinity/ is not excluded — platform runtime state would be committed")
 
 
