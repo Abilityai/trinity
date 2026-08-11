@@ -33,23 +33,35 @@ AGENT_SERVER_EXECUTION_ENV = (
 )
 
 
-def _exporter_replica(content: str):
-    """A byte-faithful replica of the agent server's post-injection export loop.
+def _real_reader(content: str):
+    """Parse `content` with the AGENT'S OWN reader, loaded by path.
 
-    Kept beside `TestExporterParity.test_source_anchor_still_present`, which
-    fails if the real loop is ever edited — so this replica cannot quietly
-    become fiction.
+    This used to be a hand-written replica of the export loop, guarded by a test
+    that the loop still existed. #2023 retires that arrangement: a replica is a
+    second copy that can only ever be as honest as the last person to sync it,
+    and the guard could prove the original existed but never that the copy still
+    matched it.
+
+    Now the parity claim is direct — `_env_pairs` must agree with the function
+    the agent actually runs. The agent server ships in its own image and cannot
+    be imported normally, so it is loaded by file path (the
+    `test_1965_agent_server_safe_yaml.py` idiom).
     """
-    env = {}
-    for line in content.splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key:
-                env[key] = value
-    return env
+    import importlib.util
+    import tempfile
+
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "docker" / "base-image" / "agent_server" / "services" / "execution_env.py"
+    )
+    spec = importlib.util.spec_from_file_location("_ent127_execution_env", module_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    with tempfile.TemporaryDirectory() as d:
+        env_file = Path(d) / ".env"
+        env_file.write_text(content)
+        return mod.parse_env_file(env_file)
 
 
 PARITY_FIXTURES = [
@@ -80,6 +92,17 @@ PARITY_FIXTURES = [
     "KEY=  spaced  ",
     "lower_key=v",
     "K-E-Y=v",
+    # Backslash shapes (#2023 review): the corpus for the copy most at risk of
+    # drift had NO backslash fixture at all — the exact class the reversible
+    # encoding changes. An escaped quote, an escaped backslash, a run of two,
+    # a trailing one, and the combination that makes order matter.
+    r'KEY="a\"b"',
+    r'KEY="a\\b"',
+    r'KEY="a\\\\b"',
+    r'KEY="a\\"',
+    r'KEY="\\\"quoted\\\""',
+    r"KEY='a\\b'",
+    r'KEY=a\\b',
 ]
 
 
@@ -88,33 +111,31 @@ class TestExporterParity:
 
     @pytest.mark.parametrize("content", PARITY_FIXTURES)
     def test_pairs_match_the_exporter(self, content):
-        assert crs._env_pairs(content.splitlines()) == _exporter_replica(content)
+        assert crs._env_pairs(content.splitlines()) == _real_reader(content)
 
-    def test_source_anchor_still_present(self):
-        """The replica above is only honest while the real loop is unchanged.
+    def test_the_predicate_and_the_reader_cannot_silently_diverge(self):
+        """The parity above compares against the REAL reader, so drift shows up
+        as a failing fixture rather than as a stale replica agreeing with
+        itself. This pins the remaining assumption: that the reader is still the
+        function the spawn path uses.
 
-        Anchored on the OWNING FUNCTION via `ast`, not on a `str.find` offset:
-        a find-based slice returns -1 on a rename, the slice silently becomes
-        `''`, and the guard then asserts against nothing.
-
-        #1999 relocated that loop out of `routers/credentials.py` and into
-        `services/execution_env.parse_env_file` — same parsing, new home and a
-        delete phase. The anchor follows it.
+        Replaces `test_source_anchor_still_present`, which anchored on the
+        byte-faithful `.strip('"').strip("'")` line. #2023 deliberately changed
+        that line, and an anchor on a specific implementation cannot survive an
+        intended change to it — whereas "the predicate agrees with the reader"
+        survives every implementation.
         """
         src = AGENT_SERVER_EXECUTION_ENV.read_text()
         tree = ast.parse(src)
-        owners = []
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                segment = ast.get_source_segment(src, node) or ""
-                if """parsed[key] = value.strip().strip('"').strip("'")""" in segment:
-                    owners.append((node.name, segment))
-
-        assert owners, (
-            "no function in agent_server/services/execution_env.py still "
-            "contains the byte-faithful `.env` value parse — the parity anchor "
-            "moved. Re-derive `_env_pairs` against the new exporter before "
-            "touching this test."
+        builders = [
+            n.name for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == "build_execution_env"
+            and "parse_env_file" in (ast.get_source_segment(src, n) or "")
+        ]
+        assert builders, (
+            "build_execution_env no longer parses .env — the predicate is "
+            "defined as agreement with it, so re-derive before touching this"
         )
 
     def test_the_set_only_mirror_did_not_come_back(self):
@@ -151,7 +172,12 @@ class TestPredicate:
             ("KEY=   ", False),
             ("KEY=\t", False),
             # `.strip('"')` peels ALL layers, so four quotes collapse to empty.
-            ('KEY=""""', False),
+            # #2023: four quotes was 'empty' under the peel-every-layer parse.
+            # One matched pair is now stripped, leaving `""` — a shape the
+            # writer never emits (it would escape both) and which the agent's
+            # reader resolves the same way. Agreement with the runtime is the
+            # contract; shell-style concatenation semantics never were.
+            ('KEY=""""', True),
             # The frontend rewrites a cleared field as KEY="".
             ('KEY=""', False),
         ],
@@ -159,8 +185,20 @@ class TestPredicate:
     def test_emptiness(self, line, expected_set):
         assert ("KEY" in crs._env_keys_with_values([line])) is expected_set
 
-    def test_lone_quote_is_not_a_value(self):
-        assert crs._env_keys_with_values(['KEY="']) == []
+    def test_a_lone_quote_now_reads_as_a_one_character_value(self):
+        """Changed by #2023, deliberately.
+
+        `KEY="` is an unterminated line no writer emits. The old parse stripped
+        the quote and reported the key as unset; the new one leaves it, because
+        stripping a single unmatched quote is what corrupted every value
+        containing a real one.
+
+        Pinned to the NEW answer rather than deleted, because the property that
+        matters is not which answer is prettier — it is that the predicate says
+        whatever the AGENT sees, and the agent's reader now says `"` too. The
+        parity fixtures above enforce that; this records the consequence.
+        """
+        assert crs._env_keys_with_values(['KEY="']) == ["KEY"]
 
     def test_duplicate_last_wins(self):
         assert crs._env_keys_with_values(["KEY=v", "KEY="]) == []

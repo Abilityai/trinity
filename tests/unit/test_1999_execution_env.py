@@ -272,21 +272,25 @@ class TestParsing:
         assert mod.parse_env_file(env_file)["K"] == expected
 
     @pytest.mark.parametrize("line,key,expected", [
-        # Byte-faithful to the export loop this replaces, ON PURPOSE. Each of
-        # these is a quirk someone might "fix" — and the ent#127 predicate
-        # (`credential_requirements_service._env_pairs`, whose source is
-        # spliced into an in-container probe) is defined as agreement with
-        # exactly these results. Improving the parse is a separate change with
-        # ent#127's parity test as its gate; doing it inside a revocation fix
-        # would move that predicate silently.
-        ('K=""""', "K", ""),            # every quote layer peeled, not one pair
-        ('K="\'v\'"', "K", "v"),         # both quote chars stripped, in order
+        # These WERE byte-faithful to the export loop #1999 replaced, pinned
+        # so that improving the parse had to be a deliberate, separate change
+        # with ent#127's parity test as its gate — not a silent drift inside a
+        # revocation fix.
+        #
+        # #2023 is that change, and the pin did its job: three of these fired
+        # when the reader learned to strip ONE matched pair and reverse the
+        # writer's escaping, forcing the decision into the open instead of
+        # letting the predicate move underneath its consumers. The rows that
+        # did not move are left as they were — still quirks a future reader
+        # might "fix" by accident.
+        ('K=""""', "K", '""'),          # #2023: ONE pair stripped, not every layer
+        ('K="\'v\'"', "K", "'v'"),       # #2023: the inner single quotes are data
         ("K='\"v\"'", "K", '"v"'),       # ... so the inner pair survives here
-        ('K="', "K", ""),               # a lone quote is not a value
+        ('K="', "K", '"'),              # #2023: an unterminated quote is not a strip
         ("export K=v", "export K", "v"),  # the name really is two words
         ("K-E-Y=v", "K-E-Y", "v"),      # os.environ accepts it; the child got it
     ])
-    def test_quirks_are_preserved_deliberately(
+    def test_parse_quirks_are_pinned_so_a_change_is_deliberate(
         self, monkeypatch, env_file, line, key, expected
     ):
         mod = _load(monkeypatch, {})
@@ -482,25 +486,19 @@ def test_the_router_call_sites_that_keep_1089_working_are_wired():
 
 
 # ---------------------------------------------------------------------------
-# Known limitation carried by this PR (#2010 review) — closed by #2023/#2030
+# Known limitation carried by #2010 — closed by #2023 (PR #2030)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: /api/credentials/update now round-trips values through the "
-           ".env writer's escaping and back through a parser that strips but "
-           "does not unescape, so a quote-bearing credential is DELIVERED "
-           "corrupted. Pre-#1999 that path mirrored the raw value into "
-           "os.environ and the child inherited it intact. The encoding is made "
-           "reversible in #2023 (PR #2030), which is stacked on this branch; "
-           "this marker flips to XPASS(strict) when that lands.",
-)
 def test_update_delivers_quote_bearing_values_intact(tmp_path):
-    """The one path that never had this loss, stated as a test rather than a
-    paragraph — a silent auth failure of exactly the class #1999 is about.
+    """Was `xfail(strict=True)` while #2010 shipped with the write-only
+    escaping; the marker's own reason said it flips to XPASS when #2023 lands,
+    and this is that flip — the marker is gone, the assertions are unchanged.
 
-    Exercises the writer and the parser as a pair, without the HTTP layer: the
-    corruption is in the encoding, not the route.
+    What it pins NOW is backward compatibility: these lines reproduce the OLD
+    writer's quote-only escaping, i.e. the `.env` files already sitting on
+    deployed agents' disks from before the encoding became reversible. The
+    #2023 reader must deliver those values intact too, not only ones its own
+    `format_env_line` produced (that round trip is test_2023's job).
     """
     import sys
 
@@ -509,7 +507,7 @@ def test_update_delivers_quote_bearing_values_intact(tmp_path):
 
     env_file = tmp_path / ".env"
     for raw in ('pa"ss', "'quoted'", 'tail"'):
-        # The writer, as `update_credentials` runs it today.
+        # The pre-#2023 writer, byte for byte: quote-only escaping.
         escaped = str(raw).replace('"', '\\"')
         env_file.write_text(f'K="{escaped}"\n')
         assert parse_env_file(env_file)["K"] == raw, (

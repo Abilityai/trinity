@@ -12,7 +12,47 @@ import os
 import re
 import json
 import logging
+from pathlib import Path
 from typing import Dict, List, Optional, Set, Any
+
+def _unquote_env_value(value: str) -> str:
+    """The `.env` decoder, borrowed rather than re-implemented (#2023).
+
+    This module builds the REDACTION set, so a decoder that disagrees with the
+    one executions use means a credential is delivered in one form and searched
+    for in another — i.e. silently not redacted from logs. It was a fourth copy
+    of `.strip('"').strip("'")`; before the encoding became reversible the two
+    agreed (both corrupted identically) and redaction happened to work.
+
+    Resolved by PATH rather than by import name because this file is loaded in
+    three shapes — as `agent_server.utils.credential_sanitizer` (package),
+    flat, and standalone by path in the tests — and only the path is the same
+    in all three. `services.execution_env` in particular resolves to the
+    BACKEND package in a test process, which is a different module entirely.
+    Falls back to the old positional strip only if the sibling cannot be
+    loaded at all, so log redaction degrades rather than disappearing.
+    """
+    global _unquote_impl
+    if _unquote_impl is None:
+        try:
+            import importlib.util as _ilu
+
+            _target = Path(__file__).resolve().parents[1] / "services" / "execution_env.py"
+            _spec = _ilu.spec_from_file_location("_agent_execution_env", _target)
+            _mod = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            _unquote_impl = _mod.unquote_env_value
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Could not load the shared .env decoder (%s); falling back to "
+                "positional stripping — quote-bearing credentials may not be "
+                "redacted from logs", exc,
+            )
+            _unquote_impl = lambda v: v.strip().strip('"').strip("'")  # noqa: E731
+    return _unquote_impl(value)
+
+
+_unquote_impl = None
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +196,16 @@ def _load_credential_values() -> Set[str]:
                     if line and not line.startswith('#') and '=' in line:
                         var_name, _, var_value = line.partition('=')
                         var_name = var_name.strip()
-                        var_value = var_value.strip().strip('"').strip("'")
+                        # #2023: the SAME decoder the execution env uses. This
+                        # was a fourth copy of `.strip('"').strip("'")`, and it
+                        # is the one that builds the REDACTION set — so once the
+                        # writer/reader pair became reversible, a credential
+                        # containing a quote was held here in its escaped form
+                        # while executions received the unescaped one, and
+                        # `sanitize_text()` stopped redacting it from logs.
+                        # Before that fix the two agreed (both corrupted
+                        # identically), so redaction happened to work.
+                        var_value = _unquote_env_value(var_value.strip())
                         if var_value and len(var_value) >= 8:
                             for pattern in _sensitive_var_re:
                                 if pattern.match(var_name):

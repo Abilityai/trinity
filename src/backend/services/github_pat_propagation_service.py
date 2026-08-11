@@ -66,10 +66,21 @@ _TOKEN_ENV_KEYS = ("GITHUB_PAT", "GH_TOKEN", "GITHUB_TOKEN")
 def _format_pat_line(pat: str, key: str = "GITHUB_PAT") -> str:
     """Format a `KEY="value"` .env line matching the agent's own .env writer.
 
-    The agent writes credentials as `KEY="value"` with embedded double quotes
-    escaped (see docker/base-image/agent_server/routers/credentials.py).
+    The agent writes credentials through `execution_env.format_env_line`, which
+    escapes the ESCAPE CHARACTER first and then the quote (#2023). This is a
+    SECOND writer of the same file, read back by the same reader, so it must
+    stay byte-identical — the docstring previously asserted a parity that
+    escaping only `"` did not have, and runs of two or more backslashes decoded
+    wrong. Backend code cannot import the agent-side module (different image),
+    so the contract is held by a parity test over a shared corpus
+    (`tests/unit/test_2023_env_quote_round_trip.py`) rather than a shared call.
     """
-    escaped = pat.replace('"', '\\"')
+    if "\n" in pat or "\r" in pat:
+        raise ValueError(
+            f"value for {key!r} contains a newline or carriage return; "
+            ".env is line-oriented and such a value would define an extra key"
+        )
+    escaped = pat.replace("\\", "\\\\").replace('"', '\\"')
     return f'{key}="{escaped}"'
 
 
