@@ -2002,6 +2002,19 @@
       "description": "Credential injects mirrored every .env key into the long-lived agent-server process env, and all five runtime spawn sites (claude_code, headless_executor, codex_runtime, gemini_runtime x2) passed env={**os.environ, ...} - a one-way sync with NO delete phase. A key removed from .env by any non-mirroring write path (SSH, docker exec, or an agent editing its own .env) kept reaching every subsequently-spawned execution until container restart, and was invisible to /proc/<pid>/environ (an exec-time snapshot - runtime os.environ mutations never appear there) AND to docker exec (which shows the container baseline, not this process's mutated env), so credential revocation silently failed with no inspection route that could reveal it. Fix: services/execution_env.py rebuilds the execution env per spawn as INITIAL_ENV (boot baseline = what docker exec shows) + .env (parsed fresh, authoritative for credentials) + RUNTIME_OVERRIDES (#1089 token rotation - applied AFTER the file so a stale token in .env cannot beat an explicit rotation; None = force-unset, which a dict merge cannot express) + extra (EXECUTION_TAG_NAME last, #407). The process mirror gains a delete phase that restores the container baseline rather than popping blind, and only ever undoes keys it itself wrote. Covers: the issue's exact reproduction (inject, delete out-of-band, assert the next execution is clean), re-injecting a cleaned .env, baseline restore vs delete, the #1089 no-regression cases, EXECUTION_TAG_NAME non-displacement, tolerant .env parsing incl. the writer's own backslash escaping (.strip('\"') eats a legitimate trailing quote), unreadable/oversized files degrading to the baseline rather than raising on the spawn path, protected keys (.env is agent-writable and now read at every spawn, so PATH/LD_PRELOAD/BASH_ENV redirection is refused), the name-only drift report added to /api/credentials/status, and a static guard that fails if a sixth spawn site reintroduces the {**os.environ} form."
     },
     {
+      "file": "unit/test_2008_dead_credentials_update.py",
+      "feature": "#2008",
+      "added": "2026-08-05",
+      "categories": [
+        "agent-server",
+        "unit",
+        "security",
+        "credentials",
+        "docs"
+      ],
+      "description": "POST /api/credentials/update had no callers anywhere - not the backend, MCP server, startup.sh, frontend, or enterprise submodule - while its own docstring said 'called by the Trinity backend', agent_server/routers/files.py named it as the SANCTIONED alternative to raw .mcp.json editing (both direct-edit blocks rested on that sentence), and architecture.md listed it as live. So the documented escape hatch for configuring MCP servers did not exist. It also mattered if re-wired: its renderer was a whole-text str.replace over .mcp.json.template, so unlike every other path it DID substitute into `command`, with no validate_mcp_config anywhere on the path - the RCE-by-config class #590 closed, inert only because nothing called it. Resolved by deletion (the decision the issue asks for), because #2007 put the .mcp.json.template renderer where the files actually are: in-container at startup, env-only, validated per server. Covers: the route is gone (AST, not a substring scan - the corrected files.py comment and this test both still mention the string), the request model is gone (a dangling model is how a deleted route comes back), the whole-text replace renderer is gone, and no LIVE doc sends anyone back to it (files.py, architecture.md, API_TEST_REQUIREMENTS, the container diagram). Historical records - docs/archive/**, docs/security-reports/**, the 2026-06 meta-analysis - are deliberately out of scope: they were true when written."
+    },
+    {
       "file": "unit/test_ent326_executions_timeline.py",
       "feature": "trinity-enterprise#326",
       "added": "2026-08-04",

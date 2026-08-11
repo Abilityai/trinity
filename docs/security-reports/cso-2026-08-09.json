@@ -1,0 +1,235 @@
+{
+  "version": "1.1",
+  "date": "2026-08-09",
+  "mode": "daily",
+  "confidence_gate": 8,
+  "scope": "full codebase",
+  "branch": "dev",
+  "baseline_report": "cso-2026-07-13",
+  "phases_run": [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14],
+  "method": "4 parallel phase scanners (secrets/supply-chain, ci-cd+infra, webhook+ai, owasp) over 321 commits since last full audit + fresh-context adversarial refutation of the two disputed findings",
+  "attack_surface": {
+    "backend_routers": 72,
+    "http_routes": 473,
+    "websocket_endpoints": 7,
+    "ci_workflows": 21,
+    "prod_dockerfiles": 5,
+    "docker_networks": 2,
+    "node_projects": 4,
+    "backend_python_deps": 36
+  },
+  "totals": { "critical": 0, "high": 1, "medium": 9, "low": 7, "info": 6 },
+  "findings": [
+    {
+      "id": "H1", "severity": "high", "confidence": 9, "status": "verified",
+      "verification": "double refuted-confirmed (fresh-context)",
+      "category": "access-control-tier",
+      "phase": 9, "persistent": true, "prior_id": "F1 (terminal half, re-rated MED->HIGH)",
+      "file": "src/backend/services/agent_service/terminal.py", "line": 124,
+      "title": "Terminal WS at accessor tier grants chat-shared user a /bin/bash container shell",
+      "description": "handle_terminal_session gates on can_user_access_agent (owner OR shared OR admin), not the owner-only can_user_share_agent. mode=bash (a client ?mode= param the frontend defaults to) resolves to cmd=['/bin/bash'] at terminal.py:203 with no further gate. Prod-reachable via nginx WS-upgrade proxy (no auth_request); raw JWT in first WS message (no ownership-rechecking ticket).",
+      "exploit": "Owner shares agent for chat -> collaborator email auto-whitelisted -> OTP login -> connect wss://host/api/agents/{name}/terminal?mode=bash against a running agent -> exec runs /bin/bash as developer, inherits container Config.Env so printenv dumps CLAUDE_CODE_OAUTH_TOKEN + TRINITY_MCP_API_KEY; .env/.credentials.enc readable; RCE as agent + lateral movement via leaked MCP key.",
+      "recommendation": "Gate the terminal WS (esp. mode=bash) at owner/admin tier (can_user_share_agent / delete-tier), matching the deliberately admin-only SSH-access endpoint.",
+      "caveat": "Terminal tab commented out in owner UI (AgentDetail.vue:883) reduces discoverability, not exploitability; route registered unconditionally."
+    },
+    {
+      "id": "M1", "severity": "medium", "confidence": 9, "status": "verified",
+      "category": "access-control-tier", "phase": 9, "persistent": true, "prior_id": "F1 (schedule half)",
+      "file": "src/backend/routers/schedules.py", "line": 405,
+      "title": "Schedule enable/disable/trigger at accessor tier while update/delete require owner",
+      "description": "enable/disable/trigger (schedules.py:405,424,443) use AuthorizedAgent; DB setter takes no owner check. update_schedule/delete_schedule pass current_user.username and 403 on non-owner. Inconsistent boundary.",
+      "exploit": "Shared user flips owner-intent schedule state (re-enable paused work, disable automation) and fires executions (LLM spend), but cannot edit/delete.",
+      "recommendation": "Move the three control routes to OwnedAgentByName."
+    },
+    {
+      "id": "M2", "severity": "medium", "confidence": 9, "status": "verified",
+      "category": "data-at-rest-plaintext", "phase": 2, "persistent": true, "prior_id": "F4 (narrowed by #1449)",
+      "file": "src/backend/db/schedules/queue.py", "line": 127,
+      "title": "backlog_metadata caller content not nulled at drain; persists on running + FAILED rows",
+      "description": "enqueue json.dumps message/system_prompt/user_message/user_email into backlog_metadata (backlog_service.py:78). #1449 scrub_terminal_backlog_metadata (retention.py:331) NULLs authoritative-terminal rows unconditionally (improvement) but FAILED is excluded and drain-claim (queue.py:127) never nulls. Residual: plaintext on running rows + up to 90 days on FAILED rows; canary G-04 scans queued-only.",
+      "exploit": "A secret embedded by a caller in a task body persists plaintext at rest (DB/backup), unscanned by G-04 once drained.",
+      "recommendation": "Null backlog_metadata at drain-claim (RETURNING already captures it); scrub FAILED rows past the late-CAS resurrection window; widen G-04."
+    },
+    {
+      "id": "M3", "severity": "medium", "confidence": 8, "status": "verified",
+      "category": "supply-chain-cve", "phase": 3, "persistent": false,
+      "file": "src/mcp-server/package.json", "line": 0,
+      "title": "HIGH advisories (ip-address SSRF, undici desync) transitive in mcp-server + helper-mcp prod trees",
+      "description": "npm audit: mcp-server 7 vulns (3 high), helper-mcp 5 (2 high). ip-address <=10.3.0 HIGH (SSRF/trust-boundary) via express-rate-limit; undici 7.0.0-7.28.0 HIGH (desync/CRLF/cache-poison). mcp-server override pins ip-address >=10.2.0, a floor INSIDE the vulnerable range. Transitive -> reachability unproven -> MEDIUM.",
+      "exploit": "The component fronting every agent MCP key ships known-HIGH-CVSS deps; a reachable path would enable SSRF or HTTP desync.",
+      "recommendation": "npm audit fix; raise the ip-address override above 10.3.0. Bump frontend dompurify (H-005 boundary) despite unreachable advisory."
+    },
+    {
+      "id": "M4", "severity": "medium", "confidence": 9, "status": "verified",
+      "category": "supply-chain-process", "phase": 3, "persistent": true, "prior_id": "F2",
+      "file": "src/mcp-server/Dockerfile", "line": 11,
+      "title": "Prod images build via npm install (not npm ci); dev frontend deletes the lockfile",
+      "description": "mcp-server/Dockerfile:11 and frontend/Dockerfile.prod:12 use npm install (floating semver); frontend/Dockerfile:9 (dev) rm -f package-lock.json. Lockfiles exist and are tracked; gap is build-time enforcement.",
+      "exploit": "A poisoned point-release of any ^-ranged dep lands in the next image with no lockfile diff to catch it.",
+      "recommendation": "npm ci in the prod Dockerfiles; stop deleting the dev lockfile."
+    },
+    {
+      "id": "M5", "severity": "medium", "confidence": 9, "status": "verified",
+      "category": "supply-chain-pinning", "phase": 3, "persistent": true, "prior_id": "F5 (+ new backend strays)",
+      "file": "docker/base-image/Dockerfile", "line": 111,
+      "title": "Unpinned deps: base-image pips, base CLIs, backend aiohttp/slackify-markdown, unverified fetches",
+      "description": "base-image Dockerfile:111 installs agent-server pips with zero pins; base CLIs @latest (:78) / unversioned (:81); backend Dockerfile floats aiohttp + slackify-markdown amid an exact-pinned set; base curl|bash (:38) + Go tarball (:42) have no integrity check.",
+      "exploit": "A compromised CLI/pip release executes inside every agent container (holds .env + MCP key) on the next rebuild.",
+      "recommendation": "Pin the pips and the two backend strays; add SHA256 to the Go fetch."
+    },
+    {
+      "id": "M6", "severity": "medium", "confidence": 9, "status": "verified",
+      "category": "secrets-history", "phase": 2, "persistent": false,
+      "file": "src/cli/trinity_cli/_notify.py", "line": 0,
+      "title": "Revoked Resend API key recoverable from git history",
+      "description": "_notify.py (added 3986c50b, removed 3f906af4, refs #1158) shipped an obfuscated Resend key (XOR-split base85). Removal commit documents the key was revoked; file absent from dev. Public indexed history keeps it recoverable via git show.",
+      "exploit": "git show 3986c50b:src/cli/trinity_cli/_notify.py + XOR of the two halves yields the (dead) key.",
+      "recommendation": "Complete the standing git-history-scrub follow-up (filter-repo/BFG + coordinated force-push). Key already revoked."
+    },
+    {
+      "id": "M7", "severity": "medium", "confidence": 6, "status": "verified",
+      "category": "oauth-scope", "phase": 6, "persistent": false,
+      "file": "src/backend/routers/credentials.py", "line": 209,
+      "title": "Google OAuth requests full .../auth/drive scope",
+      "description": "credentials.py:209 requests full Drive read/write/delete (a Google restricted scope) for a credential-injection helper where .../auth/drive.file would suffice. Conditional on operator having configured Google OAuth. No tokens/auth-codes logged.",
+      "exploit": "A compromised/prompt-injected agent holding the injected Google token can exfiltrate/destroy the user's entire Drive.",
+      "recommendation": "Narrow to drive.file unless full Drive is a documented product requirement."
+    },
+    {
+      "id": "M8", "severity": "medium", "confidence": 9, "status": "verified",
+      "category": "ci-cd-hardening", "phase": 4, "persistent": true,
+      "file": ".github/workflows", "line": 0,
+      "title": "First-party actions on floating major tags, not SHA-pinned",
+      "description": "All actions/* and github/codeql-action/* use floating major tags across ~15 workflows. Third-party actions ARE SHA-pinned.",
+      "exploit": "A compromise/retag of a first-party action tag runs attacker code in CI with that workflow's token/secret scope.",
+      "recommendation": "SHA-pin first-party actions (MEDIUM per first-party guidance)."
+    },
+    {
+      "id": "M9", "severity": "medium", "confidence": 8, "status": "verified",
+      "category": "ci-cd-hardening", "phase": 4, "persistent": true, "prior_id": "A9 (permissions half)",
+      "file": ".github/workflows/frontend-build.yml", "line": 0,
+      "title": "frontend-build.yml has no permissions block (fork-reachable pull_request)",
+      "description": "No top-level or job-level permissions:; triggered on pull_request. Default GITHUB_TOKEN scope granted though unused.",
+      "exploit": "A compromised build/test step inherits a broader-than-needed token.",
+      "recommendation": "Add permissions: contents: read."
+    },
+    {
+      "id": "L1", "severity": "low", "confidence": 8, "status": "verified",
+      "verification": "refuted-confirmed (severity tempered)",
+      "category": "access-control-idor", "phase": 9, "persistent": false,
+      "file": "src/backend/routers/event_subscriptions.py", "line": 229,
+      "title": "GET /event-subscriptions/{id} has no owner check (asymmetric with PUT/DELETE)",
+      "description": "get_event_subscription authenticates but performs no tenant/ownership check; PUT/DELETE call assert_agent_owner. Returns subscriber_agent/source_agent/target_message/created_by cross-tenant. Bounded by ~96-bit esub_ id with no cross-tenant harvest surface.",
+      "exploit": "An authenticated user with a leaked subscription id reads another tenant's subscription config; not enumerable.",
+      "recommendation": "Add assert_agent_owner(current_user, sub.subscriber_agent) after the lookup, matching PUT/DELETE."
+    },
+    {
+      "id": "L2", "severity": "low", "confidence": 6, "status": "verified",
+      "category": "auth-timing", "phase": 6, "persistent": true, "prior_id": "A6",
+      "file": "src/backend/adapters/transports/telegram_webhook.py", "line": 54,
+      "title": "Telegram secret token compared with != not constant-time",
+      "description": "actual_token != expected_token; gated behind the URL-path webhook secret lookup first, so timing attack is impractical.",
+      "exploit": "Theoretical byte-by-byte timing recovery of the per-bot secret token.",
+      "recommendation": "hmac.compare_digest(actual_token, expected_token)."
+    },
+    {
+      "id": "L3", "severity": "low", "confidence": 6, "status": "mitigated-csp",
+      "category": "stored-html-injection", "phase": 7, "persistent": true, "prior_id": "A1",
+      "file": "src/frontend/public/brain-orb/orb.js", "line": 441,
+      "title": "Brain-orb raw innerHTML of agent data.json strings",
+      "description": "Raw el.innerHTML sinks with agent-derived strings; markdown note body IS DOMPurified. Prod CSP script-src 'self' with no unsafe-inline blocks execution.",
+      "exploit": "In dev CSP only (unsafe-inline) an onerror= vector is self-XSS; prod blocked.",
+      "recommendation": "Escape via the existing _escHtml; CSP is the single mitigating control."
+    },
+    {
+      "id": "L4", "severity": "low", "confidence": 6, "status": "verified",
+      "category": "ci-cd-injection", "phase": 4, "persistent": true, "prior_id": "A8",
+      "file": ".github/workflows/publish-cli.yml", "line": 73,
+      "title": "publish-cli.yml interpolates git-tag value into run: sed",
+      "description": "steps.version.outputs.version (from the pushed tag) re-embedded via ${{ }} into a sed command. Source requires repo write access (trusted actor).",
+      "exploit": "A crafted tag could break out of the sed expression -> command injection (trusted-actor only).",
+      "recommendation": "Pass the value via env: and reference \"$VERSION\" inside run:."
+    },
+    {
+      "id": "L5", "severity": "low", "confidence": 7, "status": "verified",
+      "category": "ci-cd-hardening", "phase": 4, "persistent": false,
+      "file": ".github/workflows/deploy-dev.yml", "line": 0,
+      "title": "deploy-dev.yml has no permissions block",
+      "description": "No permissions: anywhere. Fires on push to dev (trusted) and uses SSH secrets not GITHUB_TOKEN; least-privilege hygiene.",
+      "exploit": "None concrete; hardening.",
+      "recommendation": "Add permissions: {} / contents: read."
+    },
+    {
+      "id": "L6", "severity": "low", "confidence": 6, "status": "verified",
+      "category": "crypto-config", "phase": 9, "persistent": true, "prior_id": "A5",
+      "file": "src/backend/config.py", "line": 74,
+      "title": "Placeholder SECRET_KEY printed, not raised",
+      "description": "A literal 'your-secret-key-change-in-production' prints CRITICAL and continues, unlike REDIS_URL which hard-raises. Placeholder ships nowhere; empty -> random per-session key.",
+      "exploit": "An operator who pastes the exact placeholder runs with a publicly-known JWT signing key (forgeable admin JWTs). Low likelihood.",
+      "recommendation": "raise RuntimeError on the placeholder, mirroring the REDIS_URL check."
+    },
+    {
+      "id": "L7", "severity": "low", "confidence": 7, "status": "verified",
+      "category": "business-confidentiality", "phase": 2, "persistent": true, "prior_id": "F6",
+      "file": "docs/memory/architecture.md", "line": 0,
+      "title": "Paid-module ids named in live public docs outside the enterprise-docs-guard pattern",
+      "description": "architecture.md + feature-flow docs name entitlement-gated module ids the guard's grep pattern does not cover. Also visible in the OSS bundle's enterprise_features surface (guard's documented allowance), so may be accepted; standing rule says public docs carry no paid-feature catalog.",
+      "exploit": "Business-confidentiality disclosure (names only, no schema/design).",
+      "recommendation": "Policy decision: bless vs genericize + extend the guard token list."
+    }
+  ],
+  "accepted_risk_info": [
+    {"id": "A4", "title": "Dependabot review-bypassing auto-merge PAT", "status": "accepted-risk-unchanged"},
+    {"title": "pipenet dormant public-exposure lib in mcp-server prod tree", "status": "info"},
+    {"title": "python-multipart==0.0.20 — known advisories fixed in <=0.0.20 (likely prior miscalibration)", "status": "info-verify"},
+    {"title": "Dead POST /api/internal/decrypt-and-inject reference (startup.sh:541, models.py:975) — fails closed 404", "status": "housekeeping"},
+    {"title": "ops.py fleet-stop/pause + logs.py retention PUT lack reject_agent_principal (DoS-class, consistency gap)", "status": "info-consistency"},
+    {"title": "CODEOWNERS covers workflows; require_code_owner_reviews enforcement is a live-GitHub check (prior F3)", "status": "live-github-check"}
+  ],
+  "resolved_since_baseline": [
+    "A7 Slack download_file SSRF -> two-tier host-gated + follow_redirects=False (#1951/#1932)",
+    "A10 /user-memory -> execution-ownership check + server-resolved email",
+    "A9 exfil half -> fork PRs receive no secrets + empty-case handled (permissions-block half persists as M9)",
+    "F7 python-multipart -> advisories fixed in <=0.0.20 (likely prior miscalibration)"
+  ],
+  "verified_clean_negatives": [
+    "#589 two-network Redis isolation (hard-coded at all 3 create sites)",
+    "Redis ACL model -@dangerous + fail-closed mandatory dual passwords + config raises on credential-less REDIS_URL",
+    "base_image allowlist enforced on create + both recreate paths",
+    "all 5 agent-scoped self-boundaries reject sibling keys via authorize_heartbeat",
+    "backend->agent X-Trinity-Agent-Token derived + fail-closed; middleware exempts only /health+OPTIONS incl WS",
+    "vendored parity byte-identical: credential_paths.py, model_context.py, safe_yaml.py",
+    "db/ layer parameterized; execute_command_in_container exec-form; skill_sources github.com-only + credential rejection on write AND clone",
+    "channel media SSRF two-tier + follow_redirects=False; template-registry https-only + private-IP-blocked + admin-only",
+    "JWT HS256 + jti blacklist revocation on logout (#187); SSH admin+public-key-only",
+    "auth rate-limiting per-account + per-IP Redis-backed; inline-auth account-scoped (#591)",
+    "CORS explicit allowlist; 422 strips input+ctx; hide_parameters=True",
+    "every v-html via DOMPurify; MCP dedicated-tool descriptions name-only (#846); voice-token config-locked, ephemeral_token field",
+    "webhook context framed + capped (currently a no-op end-to-end)",
+    "no pull_request_target; no github.event shell interpolation; third-party actions SHA-pinned; fork PRs receive no secrets",
+    "no tracked .env (never committed); history secret hits are synthetic fixtures; CLAUDE.local.md untracked"
+  ],
+  "supply_chain_summary": {
+    "python_backend": "exact-pinned except aiohttp + slackify-markdown (M5); python-multipart==0.0.20 (verify)",
+    "python_agent_server": "fully unpinned in base-image Dockerfile (M5)",
+    "node_lockfiles": "present + tracked for all 4 projects; build-time bypass via npm install (M4)",
+    "node_audit_high": "ip-address <=10.3.0 (SSRF) + undici 7.0.0-7.28.0 (desync) transitive in mcp-server/helper-mcp prod (M3)",
+    "install_scripts_prod": "only tldjs@2.3.2 (via pipenet) — benign, env-gated postinstall, no install-time network"
+  },
+  "filter_stats": {
+    "adversarial_refutations_run": 2,
+    "confirmed": 2,
+    "severity_elevated": 1,
+    "severity_tempered": 1
+  },
+  "trend": {
+    "baseline": "cso-2026-07-13",
+    "ceiling_prev": "medium",
+    "ceiling_now": "high",
+    "resolved": 4,
+    "improved": 1,
+    "persistent": 9,
+    "new": 7,
+    "note": "Ceiling rose from MEDIUM to HIGH via a severity re-rating (not a new defect) — last cycle's bundled F1 terminal half, now double-refuted-confirmed as prod-reachable container-shell + credential-exfil."
+  }
+}
