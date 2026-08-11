@@ -49,14 +49,14 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Staleness compares `captured_at` against the newest commit over each entry's
           # `sources`, so the job needs real history. A shallow clone makes the check
           # report "not evaluated" rather than silently passing — but then it buys nothing.
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
 
