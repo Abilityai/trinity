@@ -53,17 +53,53 @@ AGENT = "probe-agent"
 CONTROL_ROUTES = ("enable", "disable", "trigger")
 
 
+def _walk(dependant):
+    for sub in dependant.dependencies:
+        yield sub
+        yield from _walk(sub)
+
+
+def _resolved_dependency_calls(router):
+    """Every callable in every route's dependency graph, as the ROUTE holds it.
+
+    This is the identity that matters: `dependency_overrides` is keyed by object,
+    and these are the exact objects FastAPI will look up at request time.
+    """
+    from fastapi.routing import APIRoute
+
+    calls = []
+    for route in router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for dep in _walk(route.dependant):
+            if callable(dep.call) and hasattr(dep.call, "__qualname__"):
+                calls.append(dep.call)
+    return calls
+
+
 @pytest.fixture(scope="module")
 def client():
     """The real schedules router, with only the auth gates stubbed.
 
-    `get_owned_agent` is overridden — NOT bypassed. The point is to prove the
-    route *binds* its dependency; the owner check itself is `dependencies.py`'s
-    and is covered there. Overriding by function object also means a future swap
-    back to `get_owned_agent_by_name` would leave the override unapplied and the
-    422 would return, so this stays honest.
+    The gates are overridden — NOT bypassed. The point is to prove the route
+    *binds* its dependency; the owner check itself is `dependencies.py`'s and is
+    covered there.
+
+    Overrides are keyed on the function objects the ROUTES actually resolve,
+    discovered by walking each route's dependant graph — not on the objects a
+    fresh `import dependencies` hands back. `dependencies` is on conftest's #762
+    `_SYS_MODULES_INVARIANT_KEYS` list, so its `sys.modules` entry is restored to
+    a baseline between tests; a re-import here can therefore yield a *different*
+    module object, with different function objects, than `routers.schedules`
+    bound at its own import. `dependency_overrides` is an identity-keyed dict, so
+    the override then silently does not apply, the real auth chain runs, and
+    every request 401s.
+
+    That is not hypothetical: the first version of this fixture keyed on
+    `dependencies.get_owned_agent` and passed standalone while failing in the
+    full-suite run with `401 {"detail":"Not authenticated"}` — a *test* failure
+    that reads exactly like a product auth bug.
     """
-    import dependencies
     from models import User
     from routers import schedules
 
@@ -76,9 +112,23 @@ def client():
 
     owner = User(id=1, username="owner", role="admin", email="owner@example.com")
 
-    app.dependency_overrides[dependencies.get_owned_agent] = lambda: AGENT
-    app.dependency_overrides[dependencies.get_authorized_agent] = lambda: AGENT
-    app.dependency_overrides[dependencies.get_current_user] = lambda: owner
+    stubs = {
+        "dependencies.get_owned_agent": lambda: AGENT,
+        "dependencies.get_authorized_agent": lambda: AGENT,
+        "dependencies.get_current_user": lambda: owner,
+    }
+    for call in _resolved_dependency_calls(schedules.router):
+        key = f"{call.__module__}.{call.__qualname__}"
+        if key in stubs:
+            app.dependency_overrides[call] = stubs[key]
+
+    # A stub that matched nothing would leave the real chain in place and every
+    # assertion below would fail confusingly. Fail here instead, where the cause
+    # is visible.
+    assert len(app.dependency_overrides) >= 2, (
+        f"only {len(app.dependency_overrides)} auth dependencies matched by name "
+        "— the router no longer resolves the expected gates, or they were renamed"
+    )
 
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
@@ -148,11 +198,6 @@ def test_the_owner_gate_is_still_wired(client):
     from fastapi.routing import APIRoute
     from routers import schedules
 
-    def deps(dependant):
-        for sub in dependant.dependencies:
-            yield sub
-            yield from deps(sub)
-
     # Compare by qualified NAME, not by function identity. `dependencies` is on
     # conftest's #762 `_SYS_MODULES_INVARIANT_KEYS` list, whose autouse fixture
     # restores that key to a baseline module object between tests — so a fresh
@@ -168,7 +213,7 @@ def test_the_owner_gate_is_still_wired(client):
         )
         names = {
             f"{d.call.__module__}.{d.call.__qualname__}"
-            for d in deps(route.dependant)
+            for d in _walk(route.dependant)
             if callable(d.call) and hasattr(d.call, "__qualname__")
         }
         assert "dependencies.get_owned_agent" in names, (
