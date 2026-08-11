@@ -170,6 +170,17 @@ services:
       # operator manifest, or `disabled` to skip seeding. Empty = bundled
       # config/manifests/default-system.yaml.
       - TRINITY_DEFAULT_SYSTEM_MANIFEST=${TRINITY_DEFAULT_SYSTEM_MANIFEST:-}
+      # ent#237 — the community skills catalog seed. BARE pass-through, NOT
+      # `${VAR:-}`: an empty value is the DOCUMENTED disable for this setting
+      # ("Set the URL to \"\" to disable the seed entirely"), so `${VAR:-}` would
+      # send "" on every install and silently turn the catalog off for everyone.
+      # `${VAR:-github.com/...}` is wrong the other way — it swallows the
+      # operator's explicit disable. Rendered with `docker compose config`:
+      #   bare, unset          -> null (not set) -> config.py default applies
+      #   bare, set to a URL   -> the URL
+      #   bare, set to ""      -> "" -> seed disabled, as documented
+      - TRINITY_DEFAULT_SKILL_SOURCE
+      - TRINITY_DEFAULT_SKILL_SOURCE_REF
       # ent#126: directory the bundled-manifest catalog
       # (GET /api/systems/manifests) reads. Empty = the image's own
       # config/manifests (already bind-mounted :ro below). Point it at another
