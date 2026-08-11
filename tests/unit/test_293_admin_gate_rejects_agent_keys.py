@@ -174,8 +174,19 @@ def test_an_agent_key_cannot_repoint_the_skills_library(monkeypatch):
 
 
 def test_the_same_write_still_works_for_a_human_admin(monkeypatch):
-    """The fix must close the hole without breaking the feature: an operator
-    must still be able to point the fleet at a skills library."""
+    """The gate must discriminate by PRINCIPAL, not blanket-block the route.
+
+    ent#346 changed which key this can be demonstrated on. This test used to
+    write `skills_library_url`; that key is now refused for EVERYONE — human
+    admins included — because `_adopt_legacy_clone` turns it into a
+    `skill_sources` row, so writing it *is* the source-grant action ent#237
+    gates behind its own route. See the companion assertion below.
+
+    The invariant ent#293 exists to protect is unchanged and still worth
+    holding: an agent principal is refused while a human admin is not. Proven
+    here on a key that is genuinely writable, which is what makes the 403 above
+    evidence about the PRINCIPAL rather than about the key.
+    """
     import asyncio
 
     try:
@@ -192,11 +203,50 @@ def test_the_same_write_still_works_for_a_human_admin(monkeypatch):
     )
     monkeypatch.setattr(
         settings_router.db, "get_setting",
-        lambda *a, **k: {"key": "skills_library_url",
-                         "value": "https://github.com/acme/skills",
+        lambda *a, **k: {"key": "public_chat_url",
+                         "value": "https://chat.example.com",
                          "updated_at": "2026-07-30T00:00:00Z"},
         raising=False,
     )
+
+    class _Req:
+        client = type("c", (), {"host": "127.0.0.1"})()
+        url = type("u", (), {"path": "/api/settings/public_chat_url"})()
+        state = type("s", (), {"request_id": "r1"})()
+        headers: dict = {}
+
+    asyncio.run(
+        settings_router.update_setting(
+            key="public_chat_url",
+            body=SystemSettingUpdate(value="https://chat.example.com"),
+            request=_Req(),
+            current_user=HUMAN_ADMIN,
+        )
+    )
+    assert written.get("public_chat_url") == "https://chat.example.com", (
+        "a human admin must still be able to write an ordinary setting — if this "
+        "fails, the agent gate has become a blanket block"
+    )
+
+
+def test_the_skills_library_key_is_refused_for_humans_too(monkeypatch):
+    """ent#346: the key is a SOURCE GRANT, so the principal is not the question.
+
+    ent#293 stopped an agent-scoped key writing it. ent#346 goes further: nobody
+    writes it here, because `_adopt_legacy_clone` converts it into a
+    `skill_sources` row at CUSTOM priority with no validation, which is the
+    grant action `/skills/sources` gates. A human admin gets a 422 pointing at
+    the supported route rather than a silent success that registers a fleet-wide
+    skills source through the back door.
+    """
+    import asyncio
+    from fastapi import HTTPException
+
+    try:
+        from routers import settings as settings_router
+        from db_models import SystemSettingUpdate
+    except ImportError:  # pragma: no cover
+        pytest.skip("backend venv required")
 
     class _Req:
         client = type("c", (), {"host": "127.0.0.1"})()
@@ -204,7 +254,7 @@ def test_the_same_write_still_works_for_a_human_admin(monkeypatch):
         state = type("s", (), {"request_id": "r1"})()
         headers: dict = {}
 
-    try:
+    with pytest.raises(HTTPException) as exc:
         asyncio.run(
             settings_router.update_setting(
                 key="skills_library_url",
@@ -213,26 +263,11 @@ def test_the_same_write_still_works_for_a_human_admin(monkeypatch):
                 current_user=HUMAN_ADMIN,
             )
         )
-    except Exception as e:  # pragma: no cover - surfaces a real regression
-        pytest.fail(f"a human admin must still be able to set the library: {e!r}")
-
-
-# ---------------------------------------------------------------------------
-# Surface coherence — raised in review of this PR
-# ---------------------------------------------------------------------------
-#
-# Closing the admin gate to agent keys had fallout the first audit missed: six
-# MCP tools call admin-gated routes. Four of those 403s are INTENDED and are the
-# grant-vs-use line working —
-#
-#   get_credential_encryption_key  -> pulling the platform master key
-#   get_agent_ssh_access           -> already documents itself as admin-only
-#   register_subscription          -> granting a platform credential
-#   delete_subscription            -> revoking one
-#
-# — but two were reads, not grants, and left a half-working workflow, which is
-# worse than a cleanly closed door. These pin the resolution so the next change
-# to the gate cannot silently re-break them.
+    assert exc.value.status_code == 422
+    assert "POST /api/skills/sources" in exc.value.detail, (
+        "the refusal must name the supported route, or an operator has no way "
+        "forward and routes around the control"
+    )
 
 def _dependency_names(fn) -> set:
     """Names of the FastAPI dependencies a handler actually resolves.

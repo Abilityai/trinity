@@ -367,6 +367,19 @@ class TestRestoreRoundTrip:
 import types as _types
 import unittest.mock as _mock  # noqa: E402
 
+def _reject_embedded_credentials_stub(url: str) -> None:
+    """Mirror of `utils.url_validation.reject_embedded_credentials` (ent#346).
+
+    Kept deliberately faithful rather than a no-op: see the note at its entry in
+    `_STUBS`. Raises the same shape of error on userinfo in the URL.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    if parsed.username or parsed.password:
+        raise ValueError("Repository URL must not embed a token or password.")
+
+
 _STUBBED_MODULE_NAMES = [
     "database",
     "services.settings_service",
@@ -440,6 +453,15 @@ _STUBS = {
         # test_2052_scrubber_authority_parity and
         # test_ent347_pat_scrubber_double_at, which drive the genuine function.
         "scrub_url_credentials_in_text": lambda text: text,
+        # ent#346 added this import to skill_service, which makes it the fifth
+        # name this stub must mirror. Unlike its neighbours it is NOT identity:
+        # the real function RAISES on a URL embedding a token, and that refusal
+        # is the entire point of ent#346. A `lambda url: None` would satisfy the
+        # import and silently accept every tokenized URL — a stub that answers
+        # "fine" to the one question the feature exists to answer no. So mirror
+        # the real predicate instead. Nothing here asserts on it; this only
+        # guarantees the stub cannot be more permissive than production.
+        "reject_embedded_credentials": _reject_embedded_credentials_stub,
     },
 }
 # #1898: the stubs live ONLY for the duration of the import below.

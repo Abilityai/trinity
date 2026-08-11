@@ -48,6 +48,7 @@ from urllib.parse import urlparse, urlunparse
 
 from utils.url_validation import (
     ALLOWED_SKILLS_LIBRARY_HOSTS,
+    reject_embedded_credentials,
     strip_url_credentials,
     validate_skills_library_url,
 )
@@ -669,12 +670,48 @@ class SkillService:
         if not url:
             return None
 
+        # ent#346: validate at the SINK, with the same pair the write routes use
+        # (`routers/skills.py`). This function creates a `skill_sources` row from
+        # a settings string, so it is a source-creation path in every sense
+        # except that it checked nothing.
+        #
+        # `reject_embedded_credentials` matters on its own account: a URL
+        # carrying a PAT would be laundered into a durable row and read back by
+        # anything that lists sources (the ent#334 disclosure).
         try:
-            if db.get_default_skill_source() is None and db.count_skill_sources() == 0:
-                pass  # nothing configured yet — proceed
+            validate_skills_library_url(url)
+            reject_embedded_credentials(url)
+        except ValueError as e:
+            # Refuse, and SAY SO. A bare `logger.warning` — what every failure
+            # here used to get — leaves an operator watching a skills library
+            # that silently never migrates.
+            self._record_adoption_failure(url, f"legacy skills-library URL rejected: {e}")
+            return None
+
+        try:
+            # The guard this replaces read `if <two db calls>: pass` — the calls
+            # were made and the result thrown away, so adoption ran
+            # unconditionally on every sync of every install, forever. That is
+            # what let a URL written AFTER ent#237 still become a source on a
+            # fully-configured fleet, which is the whole exploit chain.
+            #
+            # Adoption is now what the docstring above always claimed: a
+            # migration for an install not yet migrated. Once any source exists
+            # the install is on the source model, and the legacy key is no
+            # longer a migration input — it is an unvalidated back door.
             existing = [s for s in db.list_skill_sources() if s.url == url]
             if existing:
                 return existing[0].id
+
+            if db.count_skill_sources() > 0:
+                self._record_adoption_failure(
+                    url,
+                    "legacy skills_library_url ignored: this install already has "
+                    "skills sources, so it is past migration. Add the repo via "
+                    "POST /api/skills/sources if it is wanted (ent#346).",
+                )
+                return None
+
             branch = get_skills_library_branch() or "main"
             source = db.create_skill_source(
                 name="Migrated library",
@@ -685,7 +722,7 @@ class SkillService:
                 created_by="migration:ent237",
             )
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"legacy skills-library adoption skipped: {e}")
+            self._record_adoption_failure(url, f"legacy skills-library adoption failed: {e}")
             return None
 
         if legacy_git.exists():
@@ -1973,6 +2010,51 @@ print(json.dumps(out))
             )
         except Exception as e:  # noqa: BLE001 — the alarm is decorative
             logger.warning(f"could not raise skills reconcile alarm: {e}")
+
+    def _record_adoption_failure(self, url: str, message: str) -> None:
+        """ERROR + operator alarm for a refused/failed legacy adoption (ent#346).
+
+        Never raises — adoption is fail-soft and must not block a sync of
+        already-migrated sources.
+
+        The AC asks for this because the old code answered every failure with a
+        single `logger.warning` and returned None. Both outcomes then looked
+        identical from outside: a rejected URL and a successful adoption both
+        produced a sync that reported success, so an operator whose library
+        stopped migrating had nothing to see. Refusing is correct; refusing
+        silently is how the refusal gets rediscovered as "skills stopped
+        working".
+
+        The URL is included: it is operator-authored configuration, already
+        visible to admins via the sources API, and the alarm is useless without
+        naming what was refused. `reject_embedded_credentials` runs BEFORE this
+        on the validation path, so a credential-bearing URL is refused by a
+        message that does not echo it — the one case where echoing would leak.
+        """
+        logger.error(f"[ent#346] {message} (url={url})")
+        try:
+            from utils.helpers import utc_now_iso
+
+            db.create_operator_queue_item(
+                RECONCILE_ALARM_AGENT_NAME,
+                {
+                    # Timestamped, so a repeated failure is visible as repeated
+                    # rather than silently deduped by the ON CONFLICT DO NOTHING
+                    # in `create_item`.
+                    "id": f"skills-legacy-adoption-{utc_now_iso()}",
+                    "type": "alert",
+                    "priority": "high",
+                    "title": "Legacy skills-library adoption refused",
+                    "question": message,
+                    "context": {
+                        "alert_type": "skills_legacy_adoption_refused",
+                        "url": url,
+                    },
+                    "expires_at": None,
+                },
+            )
+        except Exception as e:  # noqa: BLE001 — the alarm is decorative
+            logger.warning(f"could not raise skills adoption alarm: {e}")
 
     @staticmethod
     async def _audit_removal(
