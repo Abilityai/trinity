@@ -381,6 +381,54 @@ async def acknowledge_retention_prune(
     return {"success": True, "key": body.key, "window_days": effective}
 
 
+@router.get("/portal-session-policy")
+async def get_portal_session_policy_status(current_user: User = Depends(get_current_user)):
+    """The Workspace session policy actually in force (ent#375).
+
+    READ lives in OSS and is available in EVERY edition, mirroring
+    ``GET /api/settings/retention`` (#1039): the sliding session itself is OSS —
+    every install slides on the shipped defaults — so every install's operator is
+    entitled to see the windows their clients are subject to. Only the *setter*
+    is entitled (``PUT /api/enterprise/portal-session-policy``).
+
+    Gating the read too, which the first cut of the enterprise module did, would
+    have left a community operator unable to see a policy that is nonetheless
+    enforcing on them — a security control they cannot inspect. That is worse
+    than not shipping the panel.
+
+    ``sources`` distinguishes ``db-row`` (an operator chose this) from
+    ``code-default`` (the shipped value, which a future default change can move
+    under them) — the #1638 distinction.
+
+    Admin-only.
+    """
+    assert_admin(current_user)
+
+    from config import (
+        PORTAL_SESSION_MAX_ABSOLUTE_DAYS,
+        PORTAL_SESSION_MIN_IDLE_MINUTES,
+    )
+    from services.entitlement_service import entitlement_service
+    from services.settings_service import settings_service
+
+    idle_s, absolute_s = settings_service.get_portal_session_policy()
+
+    def _source(key: str) -> str:
+        return "db-row" if db.get_setting_value(key, None) is not None else "code-default"
+
+    return {
+        "idle_days": round(idle_s / 86400.0, 4),
+        "absolute_days": round(absolute_s / 86400.0, 4),
+        "sources": {
+            "portal_session_idle_days": _source("portal_session_idle_days"),
+            "portal_session_absolute_days": _source("portal_session_absolute_days"),
+        },
+        "min_idle_minutes": PORTAL_SESSION_MIN_IDLE_MINUTES,
+        "max_absolute_days": PORTAL_SESSION_MAX_ABSOLUTE_DAYS,
+        "editable": "portal_session_policy" in entitlement_service.list_entitled_features(),
+    }
+
+
 @router.get("/retention")
 async def get_retention_status(
     current_user: User = Depends(get_current_user),

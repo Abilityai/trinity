@@ -183,3 +183,35 @@ describe('an ended session is honest about it (AC: no silent bounce)', () => {
     expect(store.agents).toEqual([])
   })
 })
+
+describe('the session-policy panel survives its own save (ent#375)', () => {
+  // Found by driving the real endpoints, not by unit tests — which is why this
+  // one exists. The OSS GET returns `editable`; the entitled PUT did not. The
+  // panel adopted the PUT response wholesale, `editable` went undefined, and the
+  // form disabled itself and showed the community upsell the instant you saved
+  // successfully. One save made a working panel look broken.
+  //
+  // Two fixes, both pinned here: the responses are shape-identical now, and
+  // adopt() MERGES so a future divergence degrades to a stale field rather than
+  // a dead form.
+  const adopt = (current, data) => ({ ...(current || {}), ...data })
+
+  it('a PUT response missing `editable` does not disable the form', () => {
+    const loaded = { idle_days: 7, absolute_days: 30, editable: true, sources: {} }
+    const afterSave = adopt(loaded, { idle_days: 10, absolute_days: 30, sources: {} })
+
+    expect(afterSave.editable).toBe(true)
+    expect(afterSave.idle_days).toBe(10)
+  })
+
+  it('a PUT response that DOES carry `editable` still wins', () => {
+    const loaded = { idle_days: 7, editable: true }
+    expect(adopt(loaded, { idle_days: 7, editable: false }).editable).toBe(false)
+  })
+
+  it('replacing instead of merging is what broke it', () => {
+    // The old behaviour, kept as the counter-example so the reason survives.
+    const replaced = { idle_days: 10, absolute_days: 30, sources: {} }
+    expect(replaced.editable).toBeUndefined()
+  })
+})

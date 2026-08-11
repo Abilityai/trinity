@@ -180,6 +180,17 @@
             <TelemetrySharingPanel />
           </div>
 
+          <!-- Workspace session policy (ent#375). On the Retention tab because it
+               is the same question that tab already answers — how long something
+               is kept — and an operator reasoning about client data lifetime is
+               the one who wants to know how long a client stays signed in. Shown
+               in EVERY edition: the sliding session is OSS and enforcing here
+               regardless, so hiding it would hide a live security control from
+               the operator it applies to. Only the inputs are entitled. -->
+          <div v-if="activeTab === 'retention'" class="mb-6">
+            <PortalSessionPolicyPanel />
+          </div>
+
           <!-- Platform Section -->
           <!-- Admin sign-in email (#82 Phase 1) — lets an existing admin bind a
                real email so they can sign in with email + password, matching
@@ -2363,6 +2374,8 @@ import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
 import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
+import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'
+import { SETTINGS_NUMBER_INPUT_CLASS } from '../components/settings/fieldStyles'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
@@ -2483,13 +2496,10 @@ const retentionForm = reactive({}) // editable copy of the OPS/log windows
 // The `[appearance:textfield]` + `::-webkit-*-spin-button` triple removes the
 // native steppers: nobody nudges a retention window to 90 one click at a time,
 // and the arrows were the loudest thing in a panel whose numbers are typed.
-const RETENTION_INPUT_CLASS =
-  'w-24 px-3 py-2 text-sm rounded-md border border-gray-300 dark:border-gray-600 ' +
-  'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 ' +
-  'focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:border-transparent ' +
-  'disabled:opacity-60 disabled:cursor-not-allowed ' +
-  '[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none ' +
-  '[&::-webkit-inner-spin-button]:appearance-none'
+// ent#375: moved to components/settings/fieldStyles.js so the Workspace-session
+// panel on this same tab uses the identical field styling by construction
+// rather than by a copied string that drifts.
+const RETENTION_INPUT_CLASS = SETTINGS_NUMBER_INPUT_CLASS
 
 const retentionLoading = ref(false)
 const retentionSaving = ref(false)
