@@ -6,7 +6,7 @@
     :state="agents.length ? 'ready' : 'empty'"
     empty-title="No agents yet"
     empty-hint="Create an agent and it appears on this board."
-    :link-to="{ name: 'Agents' }"
+    :link-to="{ name: 'Dashboard', query: { view: 'list' } }"
     link-label="Open the fleet →"
   >
     <template #icon>
