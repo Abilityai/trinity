@@ -2075,6 +2075,30 @@
         "auth"
       ],
       "description": "The Workspace session slides, and cannot slide past its own limits (ent#375). A portal session hard-expired 12h after sign-in with no renewal path, so anyone using the surface on two consecutive days redid the email OTP. It now renews on use (idle window, default 7d), dies on inactivity, and is bounded by an absolute cap (default 30d) no amount of use can extend. Longer-lived sessions are a security trade, so the tests that carry weight are about what renewal must REFUSE. `sst` (session start) is carried through rotations while `iat` moves - `iat` MUST move because the ent#281 revoke cutoff dates against it, so if the cap measured from `iat` every rotation would reset it and a continuously-used session would live forever, which is the one thing an absolute cap exists to prevent. Renewal fails CLOSED on the revocation store while the READ path deliberately still fails OPEN: failing open on renewal would mint a FRESH token for a session an operator just killed, and because the new token post-dates the cutoff the kill would not re-apply when Redis recovered - one blip permanently resurrects it. Both postures are pinned so the stricter one is not applied to the read path by accident (a Redis blip must not sign every client out). The sharpest edge is NOT in the acceptance criteria: `revoke_portal_sessions_for_email` set its Redis cutoff TTL from PORTAL_SESSION_EXPIRE_HOURS, so extending sessions to 30 days without touching it would leave the cutoff evaporating after 12 hours while pre-revoke tokens stayed valid - the next request finds no cutoff and sails through, silently resurrecting any session revoked more than 12h ago. The TTL now tracks the cap. Also: shortening the cap takes effect immediately for sessions already signed in (enforced on read, not only at mint - an operator narrows a cap precisely when current sessions are the problem); a stored policy is clamped ON READ so a direct DB write or default regression cannot produce idle > absolute; a settings-read failure degrades to the shipped defaults rather than 500ing the auth path; rotation is threshold-based rather than per-request, because rotation revokes the token it replaces and rotating constantly races concurrent in-flight requests, and the superseded jti gets a short grace rather than an instant kill. Mutation-tested: revoke TTL reverted to 12h -> caught; renewal made fail-open -> caught; cap measured from `iat` instead of `sst` -> caught."
+    },
+    {
+      "file": "unit/test_2094_dependency_path_param_pairing.py",
+      "feature": "#2094",
+      "added": "2026-08-11",
+      "categories": [
+        "backend",
+        "unit",
+        "security",
+        "routing"
+      ],
+      "description": "An agent dependency must match its route's path-param spelling (#2094). dependencies.py ships two spellings of each agent gate differing ONLY in the Path(...) name they read - OwnedAgent/AuthorizedAgent take `name`, the *ByName pair take `agent_name` - so pairing the wrong one with a route makes the dependency unsatisfiable and FastAPI answers 422 to EVERY caller before the handler runs. #2081 (CSO M1) moved schedule enable/disable/trigger to owner-tier, correct intent, but picked OwnedAgentByName on routes declared /{name}/..., breaking the REST API, the frontend Schedules tab and the MCP toggle/trigger tools. Guards the pairing across all 146 uses in the routers, because the swap is invisible at every layer that normally catches things: it reads as a tightening (one owner gate for another - exactly what the security review asked for), Python is happy (both names import), the failure is a 422 so it looks like a client problem, and it is UNIFORM - no works-for-owner/fails-for-shared asymmetry to notice. Static AST analysis, not app import: test_1483_route_order.py documents what importing main costs - it skipped ALWAYS, standalone included, for months behind a message blaming the wrong cause, and a guard that can silently skip is not a guard. Also asserts the scan found >100 pairings and all four aliases (a guard matching nothing certifies nothing), that the handler's own parameter is spelled like the path param it binds, and names the three regressed routes specifically so the P0 keeps dedicated coverage if the general rule is ever deleted."
+    },
+    {
+      "file": "unit/test_2094_schedule_control_routes_bind.py",
+      "feature": "#2094",
+      "added": "2026-08-11",
+      "categories": [
+        "backend",
+        "unit",
+        "scheduler",
+        "security"
+      ],
+      "description": "enable/disable/trigger must actually REACH their handler (#2094) - the sibling pairing guard proves the annotation is right, this proves the route is, by driving the real schedules.router through a TestClient. Both are needed: the static guard generalises to all 146 dependency uses but only reads source, while this exercises FastAPI's real dependency resolution, which is where the failure lived (a 422 raised during request validation, before any handler code ran). Asserts no missing-path-param 422; that the handler genuinely ran, via its EXACT 404 detail 'Schedule not found' - Starlette's no-route-matched body is {'detail': 'Not Found'}, which a loose \"not found\" substring also satisfies, and the first draft of this file mounted the router with a prefix it already carries, double-prefixing every request into that generic 404 so both tests passed VACUOUSLY; and that #2081's owner-tier intent survives - get_owned_agent resolves and get_authorized_agent does not, so the obvious wrong fix (drop to accessor tier: 422 disappears, security hole returns) fails here. Dependency identity is compared by qualified NAME, not object, because `dependencies` is on conftest's #762 invariant-restore list and a fresh import can hand back a different module object than routers.schedules bound at its import. Mutation-tested: unpatched dev -> 7 failed; accessor-tier fix -> 1 failed; fixed -> 7 passed."
     }
   ]
 }

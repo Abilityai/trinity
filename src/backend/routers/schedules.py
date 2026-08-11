@@ -30,7 +30,7 @@ from dependencies import (
     get_current_user,
     get_authorized_agent,
     AuthorizedAgent,
-    OwnedAgentByName,
+    OwnedAgent,
     CurrentUser,
     assert_admin,
     assert_agent_access,
@@ -403,7 +403,11 @@ async def delete_schedule(
 
 @router.post("/{name}/schedules/{schedule_id}/enable")
 async def enable_schedule(
-    name: OwnedAgentByName,  # CSO M1: owner-tier (matches update/delete), not accessor
+    # CSO M1 (#2081) intent kept — owner-tier, matching update/delete. The
+    # variant must match the PATH PARAM: these routes declare `{name}`, and
+    # OwnedAgentByName reads `agent_name`, so FastAPI could never satisfy it
+    # and rejected every request with 422 before the handler ran (#2094).
+    name: OwnedAgent,
     schedule_id: str
 ):
     """Enable a schedule."""
@@ -422,7 +426,11 @@ async def enable_schedule(
 
 @router.post("/{name}/schedules/{schedule_id}/disable")
 async def disable_schedule(
-    name: OwnedAgentByName,  # CSO M1: owner-tier (matches update/delete), not accessor
+    # CSO M1 (#2081) intent kept — owner-tier, matching update/delete. The
+    # variant must match the PATH PARAM: these routes declare `{name}`, and
+    # OwnedAgentByName reads `agent_name`, so FastAPI could never satisfy it
+    # and rejected every request with 422 before the handler ran (#2094).
+    name: OwnedAgent,
     schedule_id: str
 ):
     """Disable a schedule."""
@@ -441,7 +449,11 @@ async def disable_schedule(
 
 @router.post("/{name}/schedules/{schedule_id}/trigger")
 async def trigger_schedule(
-    name: OwnedAgentByName,  # CSO M1: owner-tier (matches update/delete), not accessor
+    # CSO M1 (#2081) intent kept — owner-tier, matching update/delete. The
+    # variant must match the PATH PARAM: these routes declare `{name}`, and
+    # OwnedAgentByName reads `agent_name`, so FastAPI could never satisfy it
+    # and rejected every request with 422 before the handler ran (#2094).
+    name: OwnedAgent,
     schedule_id: str,
     current_user: User = Depends(get_current_user),
     x_source_agent: Optional[str] = Header(None),
