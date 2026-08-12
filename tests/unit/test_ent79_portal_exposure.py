@@ -274,6 +274,74 @@ def test_playbook_helpers():
 
 
 # ---------------------------------------------------------------------------
+# #2101 — briefing hint belt. With no connector allow-list, every
+# user_invocable skill becomes a hint card and get_roster ships the list for
+# every roster agent on every sign-in; the belt bounds that payload. Pure
+# surface — no patching needed (see PATCHING RULE above for why that matters).
+# ---------------------------------------------------------------------------
+
+def _hint(i: int = 0, **kw):
+    from client_portal.models import PortalPlaybook
+    kw.setdefault("title", f"h{i}")
+    kw.setdefault("starter_prompt", f"/h{i} ")
+    return PortalPlaybook(**kw)
+
+
+def test_briefing_hint_belt_slices():
+    from client_portal import service
+
+    many = [_hint(i) for i in range(service._MAX_BRIEFING_HINTS + 40)]
+    bounded = service._bound_briefing_hints(many)
+    assert len(bounded) == service._MAX_BRIEFING_HINTS
+    assert bounded == many[: service._MAX_BRIEFING_HINTS]  # head, order preserved
+    few = many[:3]
+    assert service._bound_briefing_hints(few) == few       # under the belt: untouched
+    assert service._bound_briefing_hints([]) == []
+
+
+def test_briefing_hint_belt_caps_field_sizes():
+    # Every hint field is agent-author-controlled; a count-only belt is defeated
+    # by 24 multi-MB descriptions, so the belt caps fields too. None stays None.
+    from client_portal import service
+
+    big = _hint(
+        title="t" * 10_000,
+        description="d" * 10_000,
+        starter_prompt="s" * 10_000,
+    )
+    small = _hint(title="small", description=None, starter_prompt="/small ")
+    out = service._bound_briefing_hints([big, small])
+    assert len(out[0].title) == service._MAX_HINT_TITLE_CHARS
+    assert len(out[0].description) == service._MAX_HINT_DESCRIPTION_CHARS
+    assert len(out[0].starter_prompt) == service._MAX_HINT_STARTER_CHARS
+    assert out[1].title == "small" and out[1].description is None
+    assert out[1].starter_prompt == "/small "
+
+
+def test_briefing_hint_belt_bounds_are_sane():
+    # The frontend collapses at 6 (portalUtils HINT_COLLAPSE_LIMIT); the belt
+    # must sit above that (or the toggle could never expand anything) and stay
+    # an actual bound (not effectively unlimited).
+    from client_portal import service
+    assert 6 < service._MAX_BRIEFING_HINTS <= 50
+
+
+def test_agent_briefing_returns_through_the_belt():
+    """The belt only works applied at _agent_briefing's return — a rebase that
+    re-inlines the list construction can silently drop it (the exact drift this
+    guards: PR #2103 rewrites this function's body). Source-level pin, the
+    cheapest proof that the call site survived."""
+    import inspect
+    from client_portal import service
+
+    src = inspect.getsource(service._agent_briefing)
+    assert "_bound_briefing_hints(" in src, (
+        "_agent_briefing no longer routes its return through _bound_briefing_hints — "
+        "the #2101 payload belt has been dropped (likely a merge/rebase casualty)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Portal session sign-in (#78) — verified-email identity, not a users row
 # ---------------------------------------------------------------------------
 

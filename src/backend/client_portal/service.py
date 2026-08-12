@@ -277,6 +277,39 @@ def _playbook_starter(name: str) -> str:
     return f"/{name} "
 
 
+# #2101: belt on the briefing payload. With no connector allow-list configured
+# (the default), EVERY user_invocable skill becomes a hint card, and get_roster
+# ships this list for every roster agent on every sign-in — so a skills-heavy
+# agent bloats the one payload the whole workspace boots from. The frontend
+# collapses past 6 behind a counted "Show all N" (PortalBriefing.vue); this cap
+# bounds what ships at all. The toggle counts the SHIPPED list and its label
+# never claims the agent's full skill set, so a trimmed list stays honest.
+# Field caps too — every hint field is agent-author-controlled, and 24 multi-MB
+# descriptions would defeat a count-only belt (title cap aligns with the
+# ent#380 use-case hint cap; the UI clamps descriptions to two lines anyway).
+_MAX_BRIEFING_HINTS = 24
+_MAX_HINT_TITLE_CHARS = 200
+_MAX_HINT_DESCRIPTION_CHARS = 300
+_MAX_HINT_STARTER_CHARS = 500
+
+
+def _bound_briefing_hints(hints: list) -> list:
+    """#2101: applied as one final slice at ``_agent_briefing``'s return so it
+    binds whichever tier populated the list — never inside a tier's own
+    comprehension, where a rebase can silently drop it. Bounds the hint COUNT
+    and each shipped hint's field sizes (mutating the just-built models in
+    place — nothing else holds a reference)."""
+    bounded = hints[:_MAX_BRIEFING_HINTS]
+    for h in bounded:
+        if h.title and len(h.title) > _MAX_HINT_TITLE_CHARS:
+            h.title = h.title[:_MAX_HINT_TITLE_CHARS]
+        if h.description and len(h.description) > _MAX_HINT_DESCRIPTION_CHARS:
+            h.description = h.description[:_MAX_HINT_DESCRIPTION_CHARS]
+        if h.starter_prompt and len(h.starter_prompt) > _MAX_HINT_STARTER_CHARS:
+            h.starter_prompt = h.starter_prompt[:_MAX_HINT_STARTER_CHARS]
+    return bounded
+
+
 async def _agent_briefing(agent_name: str):
     """Best-effort ``(description, playbooks)`` for the #138 new-chat briefing.
 
@@ -330,7 +363,7 @@ async def _agent_briefing(agent_name: str):
             )
             for pb in resolve_exposed_playbooks(live, allow)
         ]
-        return description, playbooks
+        return description, _bound_briefing_hints(playbooks)
     except Exception:  # noqa: BLE001 — never let enrichment break the roster
         return None, []
 
