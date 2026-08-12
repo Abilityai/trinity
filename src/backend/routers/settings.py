@@ -281,7 +281,6 @@ async def set_telemetry_sharing(
     (fire-and-forget) so the first send includes the disclosed history window;
     disabling stops egress at the next heartbeat. Audit-logged."""
     from dependencies import reject_agent_principal
-
     assert_admin(current_user)
     reject_agent_principal(current_user)
 
@@ -349,8 +348,6 @@ async def acknowledge_retention_prune(
     # is imported here; `require_admin` is a FastAPI Depends factory, not an
     # imperative call). The #1310 auth-wiring refactor left the endpoint 500ing on
     # every request, so the guard's approval path never worked even for a caller.
-    from dependencies import reject_agent_principal
-
     assert_admin(current_user)
     reject_agent_principal(current_user)
 
