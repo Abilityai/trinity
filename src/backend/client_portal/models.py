@@ -63,6 +63,13 @@ class PortalRoster(BaseModel):
     """The client-facing roster: every agent the signed-in email may reach."""
     client_email: Optional[str] = None
     agents: list[PortalAgentCard]
+    # #2128 — whether a chat may include MORE THAN ONE agent on this instance.
+    # Named for the capability, never the module or the edition: this payload
+    # goes to an operator's customer, who can neither buy a missing module nor
+    # act on knowing it exists.
+    # Defaults False so an older client, a partial payload or a failed read
+    # never advertises an affordance that cannot work (the whole of this bug).
+    multi_agent_chat_available: bool = False
 
 
 class PortalAuthRequest(BaseModel):
