@@ -179,13 +179,19 @@ export function failuresTileState({
     }
   }
 
+  // An empty roster is TWO states the tile cannot tell apart: a genuinely empty
+  // fleet (nothing deployed yet, or every agent deleted) and a fleet that could
+  // not be enumerated. Refusing the ✓ is right for both — an all-clear over an
+  // unreadable fleet is the fault this guard exists for — but the copy must not
+  // ASSERT the fault, or a brand-new install is told something is broken. So it
+  // names both causes and stays actionable for either.
   if (rosterSize <= 0) {
     return {
       state: 'empty',
-      emptyTitle: "Fleet list unavailable",
+      emptyTitle: 'Fleet list is empty',
       emptyHint:
-        'No agents could be enumerated, so an all-clear cannot be confirmed. '
-        + 'Check the fleet loads, then refresh.',
+        'Nothing is deployed yet, or the fleet could not be read — either way '
+        + 'an all-clear cannot be confirmed. Refresh if agents are expected.',
       note: null,
     }
   }

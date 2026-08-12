@@ -154,8 +154,20 @@ describe('failuresTileState — the green ✓ needs POSITIVE evidence', () => {
     const s = failuresTileState({ ...HEALTHY, rosterSize: 0 })
     expect(s.state).toBe('empty')
     expect(s.emptyTitle).not.toContain('✓')
-    expect(s.emptyTitle).toBe('Fleet list unavailable')
+    expect(s.emptyTitle).toBe('Fleet list is empty')
     expect(s.emptyHint).toContain('all-clear cannot be confirmed')
+  })
+
+  it('does not ASSERT a fault it cannot distinguish from an empty fleet', () => {
+    // Same branch, opposite risk. An empty roster is equally "nothing deployed
+    // yet" (a brand-new install, or every agent deleted) and "enumeration
+    // broke". Refusing the ✓ is correct for both; telling a fresh install that
+    // its fleet list is UNAVAILABLE is a false alarm on a first-run state. The
+    // copy therefore names both causes and commits to neither.
+    const s = failuresTileState({ ...HEALTHY, rosterSize: 0 })
+    expect(s.emptyHint).toContain('Nothing is deployed yet')
+    expect(s.emptyHint).toContain('could not be read')
+    expect(s.emptyTitle.toLowerCase()).not.toContain('unavailable')
   })
 
   it('no fault combination reaches the ✓ except the fully-healthy one', () => {

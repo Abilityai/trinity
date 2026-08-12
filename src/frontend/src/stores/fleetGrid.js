@@ -407,7 +407,20 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
       // (`response_model=List[FleetExecutionSummary]`), unlike every other
       // fetcher in this store, which reads `res.data.agents` / `res.data.items`.
       // Reading `.items` here would yield a permanently empty tile with no error.
-      recentFailures.value = Array.isArray(res.data) ? res.data : []
+      //
+      // A 200 whose body is NOT that array is a FAULT, not "zero failures".
+      // Coercing it to `[]` while flipping `loaded` true and `error` false hands
+      // `failuresTileState` the exact shape of a healthy empty fleet — the
+      // manufactured-green class this tile exists to refuse, arriving through
+      // the STORE, where the pure function's exhaustive sweep cannot see it.
+      // The sibling `/stats` fetcher already degrades this way (an unreadable
+      // count becomes `null`, i.e. not a confirmed all-clear); this matches it,
+      // and keeps the last known-good rows on screen rather than blanking them.
+      if (!Array.isArray(res.data)) {
+        failuresListError.value = true
+        return
+      }
+      recentFailures.value = res.data
       serverClockSkewMs.value = serverSkewMs(res.headers?.date, Date.now())
       failuresListLoaded.value = true
       failuresListError.value = false

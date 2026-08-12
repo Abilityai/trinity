@@ -226,6 +226,15 @@ function, because the unit suite is node-environment and cannot mount):
    (The durable fix is ent#384's — resolve the accessible set from
    `db.get_all_agent_metadata()` — which is a backend change.)
 
+A **fourth** route lives one layer up, in the store rather than the state
+machine, and is closed there: `GET /api/executions` answers a bare array, so a
+200 whose body is *not* an array is a fault — coercing it to `[]` while flipping
+`loaded` true and `error` false would hand `failuresTileState` the byte-identical
+shape of a healthy empty fleet, invisibly to the pure function's exhaustive
+sweep. `fetchRecentFailures` treats it as a failed cycle instead, matching the
+`/stats` fetcher, which already degrades an unreadable `failed_count` to `null`
+(*unknown*, never zero). Pinned by `tests/unit/fleetGridFailuresFetch.spec.js`.
+
 Note the asymmetry: a *refresh* failure over already-loaded rows stays `ready`
 (stale-while-revalidate). Only the CONFIRMATION requires everything green on this
 cycle.
