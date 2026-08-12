@@ -1058,7 +1058,15 @@ def _inflight_exec_key(execution_id: str) -> str:
     return f"portal_inflight_exec:{execution_id}"
 
 
-def mark_turn_inflight(session_id: str, execution_id: str, ttl_seconds: int = 3600) -> None:
+# The marker describes a turn in progress, so its TTL is the turn's own bound
+# plus slack — not an hour. The client now waits as long as the marker says a
+# turn is running, so an over-long TTL is a spinner that outlives the work: a
+# backend restart mid-turn would leave the composer disabled for the remainder.
+PORTAL_INFLIGHT_TTL_SECONDS = 300 + 60
+
+
+def mark_turn_inflight(session_id: str, execution_id: str,
+                       ttl_seconds: int = PORTAL_INFLIGHT_TTL_SECONDS) -> None:
     """Record that ``session_id`` has a turn running, and WHICH one.
 
     The value is the execution id, not a bare flag: a client that reloads has
@@ -1077,17 +1085,33 @@ def mark_turn_inflight(session_id: str, execution_id: str, ttl_seconds: int = 36
 
 
 def clear_turn_inflight(session_id: str, execution_id: str | None = None) -> None:
-    """Turn is done. Best-effort — the TTL is the backstop."""
+    """This turn is done. Best-effort — the TTL is the backstop.
+
+    Compare-and-delete on the session marker: a second turn on the same thread
+    OVERWRITES it, so an unconditional delete lets a turn that finished (or
+    fast-failed on the resume lock) wipe the marker of one still running. The
+    watching client then sees "nothing in flight", gives up, and offers a Retry
+    that dispatches and bills the turn a second time — the exact double-spend
+    the marker exists to prevent.
+
+    The per-execution key is always safe to delete: it names only this turn.
+    """
     try:
         from redis_breaker_util import get_breaker_redis
         client = get_breaker_redis()
-        if client is not None:
-            if execution_id is None:
-                value = client.get(_inflight_key(session_id))
-                execution_id = value.decode() if isinstance(value, bytes) else value
+        if client is None:
+            return
+        current = client.get(_inflight_key(session_id))
+        current = current.decode() if isinstance(current, bytes) else current
+        if execution_id is None or current == execution_id:
             client.delete(_inflight_key(session_id))
-            if execution_id:
-                client.delete(_inflight_exec_key(execution_id))
+        elif current:
+            logger.info(
+                "portal: leaving inflight marker for session %s — it now names %s, not %s",
+                session_id, current, execution_id,
+            )
+        if execution_id:
+            client.delete(_inflight_exec_key(execution_id))
     except Exception as e:  # noqa: BLE001
         logger.warning("portal inflight DEL failed for %s: %s", session_id, e)
 

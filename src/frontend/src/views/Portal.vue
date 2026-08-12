@@ -257,6 +257,10 @@ const activeAgentName = ref(null)
 // ent#361: the room a multi-agent chat is being held in, if any.
 const activeRoomId = ref(null)
 // The agent a deep link named that this caller cannot reach (ent#358 review).
+// Set when a deep link names an agent this caller cannot reach. Cleared by
+// every navigation away from it — `activeAgent` returns null while it is set,
+// so a latch that never clears leaves the whole Workspace stuck on the
+// access-denied panel for the rest of the SPA session.
 const unreachableAgent = ref(null)
 const pendingSession = ref(null)      // session to load when the conversation (re)mounts
 const prefill = ref('')
@@ -289,6 +293,7 @@ function newChat() {
 }
 
 function startBlankChat() {
+  unreachableAgent.value = null
   pendingSession.value = null; prefill.value = ''; convGen.value++
   if (route.params.sessionId) router.push('/workspace')
 }
@@ -324,18 +329,21 @@ const pickerError = ref(null)
 
 function openRoom(roomId) {
   if (!roomId) return
+  unreachableAgent.value = null
   activeRoomId.value = roomId
   pendingSession.value = null
   convGen.value++
   router.push(`/workspace/r/${roomId}`)
 }
 function newChatWithAgent(name) {
+  unreachableAgent.value = null
   activeAgentName.value = name
   pendingSession.value = null; prefill.value = ''; convGen.value++
   if (route.params.sessionId) router.push('/workspace')
 }
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
 function openThread(t) {
+  unreachableAgent.value = null
   // ent#361: a room row in the merged sidebar opens the room, not a thread.
   if (t.is_room) { openRoom(t.id); return }
   const sid = t.id || t.session_id
