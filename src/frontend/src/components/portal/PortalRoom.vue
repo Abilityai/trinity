@@ -32,6 +32,11 @@
       </div>
 
       <div class="flex items-center gap-1" :class="{ 'ml-auto': !budgetWarning }">
+        <!-- ent#359 AC #4: star from the header, same as a 1:1. -->
+        <PortalStarButton
+          :starred="starred"
+          @toggle="$emit('toggle-star', { id: roomId, is_room: true, starred })"
+        />
         <button
           v-if="!isClosed"
           class="px-2 py-1.5 rounded-lg text-xs font-medium text-action-primary-600 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
@@ -171,12 +176,16 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { renderMarkdown } from '@/utils/markdown'
 import PortalAvatar from './PortalAvatar.vue'
+import PortalStarButton from './PortalStarButton.vue'
 
 const props = defineProps({
   roomId: { type: String, required: true },
   roster: { type: Array, default: () => [] },
+  // ent#359: star state is per-viewer and owned by the shell, not by the room —
+  // a room is shared, a star is not.
+  starred: { type: Boolean, default: false },
 })
-defineEmits(['open-menu', 'rooms-changed'])
+defineEmits(['open-menu', 'rooms-changed', 'toggle-star'])
 
 const store = useClientPortalStore()
 

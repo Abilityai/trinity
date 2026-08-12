@@ -13,7 +13,10 @@ from typing import Optional
 from sqlalchemy import select, func, and_, or_, text, bindparam
 
 from db.engine import get_engine, make_insert
-from db.tables import system_settings, agent_sharing, agent_ownership, users
+from db.tables import (
+    system_settings, agent_sharing, agent_ownership, users,
+    enterprise_portal_chat_state,
+)
 from utils.helpers import utc_now_iso
 
 
@@ -499,3 +502,124 @@ def list_agent_share_emails(agent_name: str) -> list[str]:
     )
     with get_engine().connect() as conn:
         return [r[0] for r in conn.execute(stmt) if r[0]]
+
+
+# --- Per-user chat state: stars + read cursor (ent#359) -----------------------
+# Every function here is keyed on the caller's own (lower-cased) email, so the
+# key IS the tenant scope: there is no way to address, read, or overwrite another
+# user's state, and no filter that could be forgotten.
+
+CHAT_KINDS = ("thread", "room")
+
+# A ceiling on rows one user can create. `star` and `read` both write a row, and
+# neither validates that the chat exists (see the router: a 404 for an unknown id
+# would be an enumeration oracle). Without a cap, that is an unbounded write
+# primitive for anyone holding a portal session.
+MAX_CHAT_STATE_ROWS = 1000
+
+
+def get_chat_state(client_email: str) -> list[dict]:
+    """Every chat-state row for one user: ``chat_kind``, ``chat_id``,
+    ``starred_at``, ``last_read_at``.
+
+    Unbounded read, bounded set: the write path caps how many rows a user can
+    create (``MAX_CHAT_STATE_ROWS``), so there is nothing here to paginate."""
+    stmt = text(
+        "SELECT chat_kind, chat_id, starred_at, last_read_at "
+        "FROM enterprise_portal_chat_state WHERE client_email = :email"
+    )
+    with get_engine().connect() as conn:
+        return [dict(r) for r in conn.execute(
+            stmt, {"email": (client_email or "").lower()}
+        ).mappings()]
+
+
+def count_chat_state_rows(client_email: str) -> int:
+    stmt = text(
+        "SELECT COUNT(*) FROM enterprise_portal_chat_state WHERE client_email = :email"
+    )
+    with get_engine().connect() as conn:
+        return int(conn.execute(stmt, {"email": (client_email or "").lower()}).scalar() or 0)
+
+
+def chat_state_row_exists(client_email: str, chat_kind: str, chat_id: str) -> bool:
+    """Whether this user already has a row for this chat. The row cap must only
+    apply to writes that CREATE one — otherwise a user at the ceiling stops being
+    able to advance a read cursor they already own."""
+    stmt = text(
+        "SELECT 1 FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND chat_kind = :kind AND chat_id = :id"
+    )
+    with get_engine().connect() as conn:
+        return conn.execute(stmt, {
+            "email": (client_email or "").lower(), "kind": chat_kind, "id": chat_id,
+        }).first() is not None
+
+
+def _upsert_chat_state(client_email: str, chat_kind: str, chat_id: str,
+                       now: str, **fields) -> None:
+    """Set the named columns on one (user, kind, id) row, inserting it if absent.
+
+    Only the columns in ``fields`` are touched, so marking a chat read cannot
+    clear its star and vice versa.
+    """
+    email = (client_email or "").lower()
+    values = {
+        "client_email": email, "chat_kind": chat_kind, "chat_id": chat_id,
+        "updated_at": now, **fields,
+    }
+    stmt = (
+        make_insert(enterprise_portal_chat_state)
+        .values(**values)
+        .on_conflict_do_update(
+            index_elements=[
+                enterprise_portal_chat_state.c.client_email,
+                enterprise_portal_chat_state.c.chat_kind,
+                enterprise_portal_chat_state.c.chat_id,
+            ],
+            set_={"updated_at": now, **fields},
+        )
+    )
+    with get_engine().begin() as conn:
+        conn.execute(stmt)
+
+
+def set_chat_star(client_email: str, chat_kind: str, chat_id: str,
+                  starred: bool, now: str) -> None:
+    """Star or unstar one chat for one user. Unstar keeps the row — it still
+    carries the read cursor, and dropping it would mark the chat unread again."""
+    _upsert_chat_state(client_email, chat_kind, chat_id, now,
+                       starred_at=now if starred else None)
+
+
+def mark_chat_read(client_email: str, chat_kind: str, chat_id: str, now: str) -> None:
+    """Advance one chat's read cursor for one user."""
+    _upsert_chat_state(client_email, chat_kind, chat_id, now, last_read_at=now)
+
+
+def count_unread_by_session(client_email: str) -> dict[str, int]:
+    """Per-thread count of agent messages newer than that thread's read cursor.
+
+    A thread with NO cursor reports nothing rather than reporting its whole
+    history as unread. "Unread" is defined relative to a cursor; inventing one at
+    the beginning of time would light up every historical chat the first time
+    this shipped, which is noise, not information. A cursor is written the first
+    time the user opens or sends in a thread, so any live conversation acquires
+    one immediately. (Rooms keep their own seq cursor and are not counted here —
+    see the feature flow's Known Limitations.)
+    """
+    stmt = text(
+        "SELECT m.session_id AS session_id, COUNT(*) AS n "
+        "FROM enterprise_portal_messages m "
+        "JOIN enterprise_portal_chat_state st "
+        "  ON st.client_email = :email AND st.chat_kind = 'thread' "
+        " AND st.chat_id = m.session_id "
+        "WHERE m.client_email = :email "
+        "  AND m.role = 'assistant' "
+        "  AND st.last_read_at IS NOT NULL "
+        "  AND m.created_at > st.last_read_at "
+        "GROUP BY m.session_id"
+    )
+    with get_engine().connect() as conn:
+        rows = conn.execute(stmt, {"email": (client_email or "").lower()}).mappings()
+        return {r["session_id"]: int(r["n"]) for r in rows if r["session_id"]}

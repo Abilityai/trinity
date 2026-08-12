@@ -42,6 +42,15 @@
       </div>
 
       <div class="ml-auto flex items-center gap-1">
+        <!-- ent#359 AC #4: star from the header too. Hidden until the thread
+             exists — a chat with no id yet cannot be pinned, and rendering a
+             control that silently does nothing is the dead end this family of
+             issues keeps removing. -->
+        <PortalStarButton
+          v-if="currentSessionId"
+          :starred="starred"
+          @toggle="$emit('toggle-star', { id: currentSessionId, is_room: false, starred })"
+        />
         <button
           v-if="ttsEnabled"
           class="p-2 rounded-lg transition"
@@ -190,6 +199,7 @@ import { useClientPortalStore } from '@/stores/clientPortal'
 import { renderMarkdown } from '@/utils/markdown'
 import { agentDisplayName } from '@/utils/agentName'
 import PortalAvatar from './PortalAvatar.vue'
+import PortalStarButton from './PortalStarButton.vue'
 import { deliveryFailureReason } from './portalUtils'
 
 const props = defineProps({
@@ -197,8 +207,11 @@ const props = defineProps({
   roster: { type: Array, default: () => [] },
   sessionId: { type: String, default: null },   // current thread, or null for a new chat
   prefill: { type: String, default: '' },
+  // ent#359: whether the CURRENT thread is starred. Owned by the shell (it
+  // holds the per-viewer chat state), rendered here.
+  starred: { type: Boolean, default: false },
 })
-const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu'])
+const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star'])
 
 const store = useClientPortalStore()
 const messages = ref([])

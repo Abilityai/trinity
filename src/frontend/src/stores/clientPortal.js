@@ -241,6 +241,44 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return (data.rooms || []).map((r) => ({ ...r, is_room: true }))
     },
 
+    // ent#359 — per-viewer star + unread state, for BOTH chat kinds in one call.
+    // Threads and rooms come from different endpoints (and different repos) but
+    // sort into a single sidebar list, so their view state has to arrive
+    // together or the list would reshuffle as the second response landed.
+    //
+    // Keyed `${kind}:${id}`: the two id spaces are independent, so an id alone
+    // is not a key.
+    async fetchChatState() {
+      const { data } = await axios.get('/api/enterprise/client-portal/chat-state', {
+        headers: this.authHeader,
+      })
+      const out = {}
+      for (const c of data.chats || []) {
+        if (c && c.kind && c.id) out[`${c.kind}:${c.id}`] = c
+      }
+      return out
+    },
+
+    async setChatStar(kind, chatId, starred) {
+      const url = `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/star`
+      const cfg = { headers: this.authHeader }
+      if (starred) await axios.put(url, null, cfg)
+      else await axios.delete(url, cfg)
+    },
+
+    // Fire-and-forget by design: a failed read marker leaves a stale badge,
+    // which is not worth interrupting navigation over, and the next state fetch
+    // corrects it.
+    async markChatRead(kind, chatId) {
+      try {
+        await axios.post(
+          `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/read`,
+          null,
+          { headers: this.authHeader },
+        )
+      } catch { /* stale badge only */ }
+    },
+
     // `since` is the seq cursor: 0 loads the whole transcript, a later value
     // fetches only what the client has not seen.
     async fetchRoom(roomId, since = 0) {

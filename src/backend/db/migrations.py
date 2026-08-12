@@ -3419,6 +3419,33 @@ def _migrate_portal_session_resume(cursor, conn):
     conn.commit()
 
 
+def _migrate_portal_chat_state(cursor, conn):
+    """Per-user star + read cursor for Workspace chats (ent#359).
+
+    A star belongs to the person who starred it, and a room is shared between
+    several people — so this cannot be a column on the chat row without one
+    user's star appearing in everyone else's sidebar. Keyed by the caller's own
+    email, which makes the row itself the per-user scope.
+
+    ``chat_kind`` distinguishes a portal thread from a room: the two id spaces
+    are independent, so the pair is the key, not the id alone.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS enterprise_portal_chat_state (
+            client_email TEXT NOT NULL,
+            chat_kind TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            starred_at TEXT,
+            last_read_at TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (client_email, chat_kind, chat_id)
+        )
+        """
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -3528,4 +3555,5 @@ MIGRATIONS = [
     ("agent_ownership_a2a_exposed", _migrate_agent_ownership_a2a_exposed),
     ("client_portal_tables_to_oss", _migrate_client_portal_tables_to_oss),
     ("portal_session_resume", _migrate_portal_session_resume),
+    ("portal_chat_state", _migrate_portal_chat_state),
 ]
