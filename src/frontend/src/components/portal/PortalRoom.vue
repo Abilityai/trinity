@@ -87,7 +87,25 @@
           </div>
         </div>
 
-        <div v-if="sending" class="flex items-start gap-2.5">
+        <!-- Who is thinking. Derived from the SERVER (`room.working`), not just
+             the local send, so a client that reloaded mid-turn still sees it —
+             a reload used to make the dots vanish while two agents were still
+             working, which reads as the room having given up. -->
+        <div v-if="workingAgents.length" class="flex items-start gap-2.5">
+          <PortalAvatar :name="workingAgents[0]" :size="28" class="mt-0.5" />
+          <div class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 px-3.5 py-2.5 flex items-center gap-2">
+            <span class="inline-flex gap-1">
+              <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:0ms"></span>
+              <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:150ms"></span>
+              <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:300ms"></span>
+            </span>
+            <span class="text-xs text-gray-500 dark:text-gray-400">
+              {{ workingAgents.length === 1 ? `${workingAgents[0]} is thinking…`
+                : `${workingAgents.join(', ')} are thinking…` }}
+            </span>
+          </div>
+        </div>
+        <div v-else-if="sending" class="flex items-start gap-2.5">
           <span class="inline-flex gap-1 mt-3">
             <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:0ms"></span>
             <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:150ms"></span>
@@ -182,6 +200,11 @@ const agentParticipants = computed(() =>
   (room.value?.participants || []).filter((p) => p.kind === 'agent' && !p.left_at).map((p) => p.identity)
 )
 const isClosed = computed(() => room.value?.status === 'closed')
+
+// Server-reported, so it survives a reload. The local `sending` flag still
+// covers the gap between posting and the first poll, when nobody has been
+// marked working yet.
+const workingAgents = computed(() => room.value?.working || [])
 
 // ent#381: the near-limit signal the Sessions page used to own. Same 80%
 // threshold, same two budgets — messages and cost — so a client sees a room
