@@ -707,18 +707,13 @@
       "raw_nongray": 9,
       "raw_gray": 27,
       "hardcoded_colors": 1
-    },
-    "src/frontend/src/views/enterprise/Sessions.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 23,
-      "hardcoded_colors": 0
     }
   },
   "totals": {
     "raw_nongray": 753,
-    "raw_gray": 7446,
+    "raw_gray": 7423,
     "hardcoded_colors": 383,
     "semantic_tokens": 3459,
-    "files_with_violations": 142
+    "files_with_violations": 141
   }
 }
