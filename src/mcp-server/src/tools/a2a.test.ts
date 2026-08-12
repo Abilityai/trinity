@@ -168,3 +168,75 @@ describe("ent#160 A2A tools — honest gating", () => {
     assert.equal(out.human_only, true);
   });
 });
+
+describe("#736 F8 — the two READS gate agent-scoped keys", () => {
+  // The mutating tools need nothing here: `reject_agent_principal` at the
+  // backend refuses every agent principal outright. The reads do — the backend
+  // resolves an agent-scoped key to its OWNER and checks owner access, so on a
+  // single-owner install any agent could enumerate a SIBLING's registered
+  // outbound endpoint URLs: the targets an operator chose, and the shape of
+  // that fleet's integrations. requirements mcp.md §32.3 already CLAIMED this
+  // gate existed; #736 makes the claim true and corrects the doc.
+
+  it("get_agent_a2a_config denies a non-permitted sibling", async () => {
+    const calls: Recorded[] = [];
+    const tools = makeTools(calls, {
+      getPermittedAgents: async (agent: string) => {
+        calls.push({ method: "getPermittedAgents", args: [agent] });
+        return ["allowed"];
+      },
+    });
+    const out = JSON.parse(
+      await tools.get_agent_a2a_config.execute(
+        { agent_name: "victim" },
+        { session: { scope: "agent", agentName: "attacker" } as any },
+      ),
+    );
+    assert.equal(out.success, false);
+    assert.equal(out.not_authorized, true);
+    assert.equal(
+      calls.filter((c) => c.method === "getA2AConfig").length,
+      0,
+      "a denied read must not reach the backend",
+    );
+  });
+
+  it("list_a2a_endpoints denies a non-permitted sibling", async () => {
+    const calls: Recorded[] = [];
+    const tools = makeTools(calls, {
+      getPermittedAgents: async () => [],
+    });
+    const out = JSON.parse(
+      await tools.list_a2a_endpoints.execute(
+        { agent_name: "victim" },
+        { session: { scope: "agent", agentName: "attacker" } as any },
+      ),
+    );
+    assert.equal(out.not_authorized, true);
+    assert.equal(calls.filter((c) => c.method === "listA2AEndpoints").length, 0);
+  });
+
+  it("allows self and an explicitly permitted target", async () => {
+    for (const target of ["attacker", "allowed"]) {
+      const calls: Recorded[] = [];
+      const tools = makeTools(calls, { getPermittedAgents: async () => ["allowed"] });
+      const out = JSON.parse(
+        await tools.list_a2a_endpoints.execute(
+          { agent_name: target },
+          { session: { scope: "agent", agentName: "attacker" } as any },
+        ),
+      );
+      assert.equal(out.success, true, `${target} should be reachable`);
+    }
+  });
+
+  it("does not gate user- or system-scoped keys", async () => {
+    for (const scope of ["user", "system"]) {
+      const tools = makeTools([]);
+      const out = JSON.parse(
+        await tools.list_a2a_endpoints.execute({ agent_name: "bot" }, { session: { scope } as any }),
+      );
+      assert.equal(out.success, true);
+    }
+  });
+});
