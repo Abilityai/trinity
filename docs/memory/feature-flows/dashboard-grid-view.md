@@ -1,9 +1,9 @@
 # Feature Flow: Dashboard Grid View (magnetic tile canvas)
 
-> **Last Updated**: 2026-07-06 (initial implementation)
+> **Last Updated**: 2026-08-12 (info tiles: Recent failures, ent#100)
 > **Status**: Implemented — third dashboard mode, not default
 > **Issue**: trinity-enterprise#47 (design of record embedded in the issue)
-> **Requirements**: `docs/memory/requirements/core-agent.md` §9.8
+> **Requirements**: `docs/memory/requirements/core-agent.md` §9.8, §9.12 (info tiles)
 
 ## Overview
 
@@ -154,6 +154,123 @@ primitive across further surfaces (Overview trend charts included) is
 trinity-enterprise#253's charter.
 4. **A slow or failed per-agent fetch degrades that one tile only.**
 
+## Info tiles (widget chassis ent#325 · first data tile ent#100)
+
+A **second occupant type** shares the lattice with agent tiles under `widget:<id>`
+keys in the same layout map, so drag / swap / tidy / keyboard / culling apply with
+no second code path. The chassis itself — registry, key namespace, layout v2
+migration, prefs-as-override-map — is documented under **#2126** and deliberately
+not restated here; what follows is only what a data tile adds.
+
+```
+components/tiles/catalog.js            side-effect registration into GRID_WIDGETS
+  └─ components/tiles/RecentFailuresTile.vue      (ent#100, default-on)
+        ├─ components/InfoTile.vue                shell: scope/title/stamp/state/footer link
+        ├─ components/tiles/parts/TileRowList.vue bounded [lead][primary][meta] + optional sub-line
+        └─ utils/executionFailure.js              PURE: state machine, code marker, trigger label
+```
+
+**Props the chassis passes** (`FleetGrid.vue`): `:agents` = the **unfiltered**
+roster (`orgAgents || agents`), and `:now` = the shared 1s tick, **only** when the
+catalog entry declares `wantsTick: true`.
+
+- Unfiltered because an info tile is *fleet*-scope: `props.agents` is the ent#261
+  `visibleAgents` seam, narrowed live per keystroke by the `/` filter, so binding
+  it would degrade every non-matching row's display label to a raw slug as the
+  operator types — on a default-on tile. ent#305 built this seam for the same
+  reason.
+- `wantsTick` because binding the tick unconditionally forces a child update once
+  per second, forever, for every tile on a canvas that also drags at 60fps; epic
+  ent#94 queues eight tiles and most render no clock.
+- `InfoTile` sets `inheritAttrs: false`, so a prop a tile does not declare cannot
+  fall through onto `<article>` as a literal DOM attribute.
+
+### Recent failures (ent#100) — data sources (all existing)
+
+| Tile element | Source |
+|---|---|
+| Failure rows (agent · trigger · age · message) | `GET /api/executions?status=failed&hours=24&limit=4` — **returns a BARE JSON ARRAY**, unlike every other fetcher in this store |
+| "N in 24h" header stamp | `GET /api/executions/stats?hours=24` → `failed_count` |
+| Agent display label | the `:agents` roster (lookup table, never a data source) |
+| Row age | the shared 1s tick, corrected by the server clock offset read from the response's HTTP `Date` header (`utils/timestamps.js::serverSkewMs` — no backend change) |
+
+Both GETs ride `stores/fleetGrid.js::refreshBatchData()`, the one 60s
+visibility-aware poll, **gated on the tile being enabled**; a
+`visibilitychange → visible` listener refreshes immediately on return-to-tab
+rather than waiting out the interval (an event listener, not a second timer).
+The tile itself never fetches — culling *unmounts* tiles, so an `onMounted`
+fetch would re-issue on every pan.
+
+Each GET owns its own `{data, loaded, error}` triple. Sharing one pair
+manufactures a false green in whichever direction is left unguarded.
+
+### The green empty state needs positive evidence
+
+"No failures in 24h ✓" is a positive claim about the fleet on the fleet's own
+monitoring surface. Three independent faults would otherwise produce it, and all
+three are closed in `utils/executionFailure.js::failuresTileState` (a pure
+function, because the unit suite is node-environment and cannot mount):
+
+1. **a failed rows GET** — principle 15 / #1926: an empty state needs a fetch
+   that succeeded and returned zero, never `list.length === 0`;
+2. **a failed `/stats` GET** — the 24h total is a second request, so its failure
+   means *unknown*, not zero; it is never inferred from `rows.length`, because a
+   bounded page cannot yield a 24h total;
+3. **an unenumerable fleet** — `accessible_agent_names` →
+   `docker_service.list_all_agents_fast()`, which returns `[]` when the Docker
+   client is None **and on any exception** (throttled warning). For a non-admin
+   every fleet accessor then early-returns zeros at **HTTP 200**: the fetch
+   "succeeds", `loaded` is honestly true, and a green all-clear is invented by an
+   infrastructure fault. The same fault empties the Grid's own roster, so a
+   non-empty roster is the enumerability signal available with no backend change.
+   (The durable fix is ent#384's — resolve the accessible set from
+   `db.get_all_agent_metadata()` — which is a backend change.)
+
+Note the asymmetry: a *refresh* failure over already-loaded rows stays `ready`
+(stale-while-revalidate). Only the CONFIRMATION requires everything green on this
+cycle.
+
+`/stats` counts `status IN ('failed','error')` while the list endpoint filters
+ONE status, so a fleet whose only recent failures are legacy `'error'` rows would
+otherwise render "3 in 24h" beside a green ✓; that case renders an explanatory
+line instead of the row list.
+
+### Error-code taxonomy: read, never guessed (named AC deviation)
+
+`schedule_executions` has no `error_code` column — the code lives on
+`TerminalEnvelope` in memory and is discarded at the terminal write, leaving
+`error_summary = SUBSTR(error, 1, 200)`. `failureCodeFromSummary` reads an
+**anchored, lower-case, charset-bounded** `[code]` prefix when the platform
+actually emitted one and returns `null` otherwise. It is deliberately not a
+classifier: `services/failure_classifier.py` is a byte-identity-mirrored pair
+with `src/scheduler/failure_classifier.py`, and a third copy in JavaScript
+guessing from a truncation would be a new unenforced mirror producing labels
+nobody can trust. The only writer of that marker today is
+`pull_coordination_service.py`, dark until a pull pilot — so the chip is absent
+on every current install and the freed width goes to the real message. Persisting
+`error_code` is a follow-up; the chip then appears with no UI churn.
+
+`error_summary` is agent/LLM-authored, prompt-injectable text: rendered as text
+interpolation and bound attributes only, never `v-html`.
+
+### Chassis rules a list tile must honour
+
+Centralised in `TileRowList.vue` rather than repeated per tile, because each is
+dashboard-breaking when forgotten:
+
+- **`.nodrag` on every interactive child** — `FleetGrid.onTilePointerDown` checks
+  `e.target.closest('.nodrag')`; without it, clicking a row starts a tile drag.
+- **No internal scroll, ever** — `FleetGrid.onWheel` calls `preventDefault()`
+  unconditionally and zooms, so a nested `overflow-y` is unusable. Bounded data
+  is bounded by construction (server `limit`) with the total stated.
+- **Fixed row tracks + `nowrap` ellipsis** — `InfoTile`'s body is
+  `overflow: hidden`, so an overrun neither scrolls nor ellipsizes: the last row
+  silently vanishes, and the node-environment suite structurally cannot see it.
+  Only the identity column may consume slack; meta columns and any chip are
+  fixed-width with their own ellipsis, so the agent name is not what loses.
+- **Route names must exist** — a `RouterLink` to an unknown route throws during
+  render, aborts Vue's update for the whole tree and freezes the dashboard.
+
 ## Failure modes & edge cases
 
 - Corrupt/unavailable localStorage → default layout, session-local.
@@ -171,10 +288,27 @@ trinity-enterprise#253's charter.
 (@smoke), mode persistence across reload, drag-to-cell with socket preview +
 layout persistence, tidy/reset, and Timeline coexistence (@smoke; Graph mode decommissioned #1689).
 
+Unit (node environment — pure modules and static source guards, no mounting):
+`tests/unit/executionFailure.spec.js` (the ent#100 state machine, including an
+exhaustive sweep proving no fault combination reaches the green ✓),
+`tests/unit/timestamps.spec.js` (`formatCompactAge` boundaries + negative-age
+floor, `serverSkewMs`), `tests/unit/gridTokens.spec.js` (now AUTO-DISCOVERING
+every tile recursively, `parts/` included — it was a hand-written two-entry list,
+so a new tile was unguarded until someone remembered it), and
+`tests/unit/gridTileLinks.spec.js` (now brace-balanced over `link-to=`, `:to=`
+and bare `to:` object literals across `components/tiles/**` — it previously
+matched only a literal `link-to` ATTRIBUTE, so every per-row link was invisible
+to the guard whose failure mode is a frozen dashboard).
+
 ## Out of scope (tracked follow-ups)
 
 Fleet KPI strip; "Needs your attention" + live-activity right rail;
-server-side per-user layout storage.
+server-side per-user layout storage; the widget-chassis documentation itself
+(#2126 — the `widget:*` occupant type, what `InfoTile` deliberately lacks, the
+org-overlay interlock, the layout v1→v2 copy-migration, prefs-as-override-map);
+persisting `error_code` so the failure chip carries the platform taxonomy;
+WS-driven early refresh for the failures tile; the sibling **Next schedules**
+tile (ent#99), held.
 
 ## Org overlay — department zones + reporting lines (trinity-enterprise#305)
 

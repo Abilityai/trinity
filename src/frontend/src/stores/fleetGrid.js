@@ -14,7 +14,9 @@ import {
   isWidgetKey,
   enabledWidgetKeys,
   seedWidgetCells,
+  widgetKey,
 } from '@/utils/gridWidgets'
+import { serverSkewMs } from '@/utils/timestamps'
 
 /**
  * Fleet Grid store (trinity-enterprise#47) — owns the Dashboard Grid view's
@@ -112,6 +114,13 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
   function setWidgetEnabled(id, enabled) {
     widgetPrefs.value = { ...widgetPrefs.value, [id]: !!enabled }
     _persistWidgetPrefs()
+    // Fill a newly-enabled data tile immediately rather than at the next 60s
+    // tick. Guarded on `enabled` because `FleetGrid` passes
+    // `$event.target.checked` straight through: an unguarded call would fire
+    // the whole batch every time a box is UNCHECKED. It re-runs ALL batch
+    // fetches rather than just the toggled tile's — accepted, since this is a
+    // manual toggle and a per-widget fetch registry buys nothing.
+    if (enabled) refreshBatchData()
   }
 
   /** Back to catalog defaults (an empty override map IS "defaults"). */
@@ -364,14 +373,79 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     }
   }
 
+  // ent#100 — "Recent failures" tile data. Two GETs, and they are deliberately
+  // NOT collapsed into one state pair: a bounded page cannot yield a true 24h
+  // total, so `/executions` supplies the rows and `/executions/stats` the
+  // count. Each owns its own {data, loaded, error} triple, because sharing one
+  // pair manufactures a false green in whichever direction is unguarded — the
+  // green "No failures in 24h ✓" is a positive claim about the fleet and
+  // requires BOTH to have succeeded on this cycle (`utils/executionFailure.js`
+  // owns that rule; principle 15 / #1926).
+  //
+  // `loaded` flips true only after a SUCCESS and never back to false, so a
+  // background-refresh failure keeps the last good rows on screen
+  // (stale-while-revalidate) while `error` still records that this cycle failed.
+  const FAILURE_ROWS = 4
+  const recentFailures = ref([])
+  const failuresListLoaded = ref(false)
+  const failuresListError = ref(false)
+  const failures24h = ref(null) // null = UNKNOWN; never inferred from rows.length
+  const failuresStatsLoaded = ref(false)
+  const failuresStatsError = ref(false)
+  // Server-minus-browser clock offset, from the response's HTTP `Date` header
+  // (no backend change, no extra request). Ages are otherwise measured between
+  // two different clocks — see `utils/timestamps.js::serverSkewMs`.
+  const serverClockSkewMs = ref(0)
+
+  async function fetchRecentFailures() {
+    try {
+      const res = await axios.get('/api/executions', {
+        params: { status: 'failed', hours: 24, limit: FAILURE_ROWS },
+        headers: authStore.authHeader,
+      })
+      // NOTE: this endpoint answers a BARE JSON ARRAY
+      // (`response_model=List[FleetExecutionSummary]`), unlike every other
+      // fetcher in this store, which reads `res.data.agents` / `res.data.items`.
+      // Reading `.items` here would yield a permanently empty tile with no error.
+      recentFailures.value = Array.isArray(res.data) ? res.data : []
+      serverClockSkewMs.value = serverSkewMs(res.headers?.date, Date.now())
+      failuresListLoaded.value = true
+      failuresListError.value = false
+    } catch {
+      failuresListError.value = true
+    }
+  }
+
+  async function fetchFailureStats() {
+    try {
+      const res = await axios.get('/api/executions/stats', {
+        params: { hours: 24 },
+        headers: authStore.authHeader,
+      })
+      const n = res.data?.failed_count
+      failures24h.value = typeof n === 'number' ? n : null
+      failuresStatsLoaded.value = true
+      failuresStatsError.value = false
+    } catch {
+      failuresStatsError.value = true
+    }
+  }
+
   let _pollTimer = null
+  let _visibilityHandler = null
 
   function refreshBatchData() {
-    return Promise.allSettled([
-      fetchSyncHealth(),
-      fetchOpQueuePending(),
-      fetchSkillRunnerStatus(),
-    ])
+    const tasks = [fetchSyncHealth(), fetchOpQueuePending(), fetchSkillRunnerStatus()]
+    // Don't pay for a tile that is switched OFF. This reads `activeWidgetKeys`,
+    // which resolves through `GRID_WIDGETS` — a registry populated by
+    // `components/tiles/catalog.js`'s SIDE-EFFECT import from `FleetGrid.vue`.
+    // It is correct here only because `startPolling()` is called from
+    // `FleetGrid.onMounted`, i.e. after that import has run. Noted rather than
+    // left as folklore.
+    if (activeWidgetKeys.value.includes(widgetKey('recent-failures'))) {
+      tasks.push(fetchRecentFailures(), fetchFailureStats())
+    }
+    return Promise.allSettled(tasks)
   }
 
   /** Visibility-aware slow poll; active only while the Grid view is mounted. */
@@ -382,12 +456,28 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
       if (document.hidden) return
       refreshBatchData()
     }, BATCH_POLL_MS)
+    // Refresh on return-to-tab rather than waiting out the interval. The poll
+    // above skips every tick while hidden, so backgrounding the tab for half an
+    // hour and coming back would otherwise show up to 60s of data that is 30
+    // minutes old — tolerable for a chip, not for "No failures in 24h ✓", which
+    // is a positive all-clear. An EVENT LISTENER, not a second timer: the Grid
+    // still runs exactly one poll and one tick.
+    if (typeof document !== 'undefined' && document.addEventListener) {
+      _visibilityHandler = () => {
+        if (!document.hidden) refreshBatchData()
+      }
+      document.addEventListener('visibilitychange', _visibilityHandler)
+    }
   }
 
   function stopPolling() {
     if (_pollTimer) {
       clearInterval(_pollTimer)
       _pollTimer = null
+    }
+    if (_visibilityHandler) {
+      document.removeEventListener('visibilitychange', _visibilityHandler)
+      _visibilityHandler = null
     }
   }
 
@@ -417,6 +507,13 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     syncHealth,
     opQueuePending,
     skillRunnerStatus,
+    recentFailures,
+    failuresListLoaded,
+    failuresListError,
+    failures24h,
+    failuresStatsLoaded,
+    failuresStatsError,
+    serverClockSkewMs,
     refreshBatchData,
     startPolling,
     stopPolling,

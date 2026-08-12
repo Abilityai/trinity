@@ -13,6 +13,7 @@
  */
 import { registerWidget } from '@/utils/gridWidgets'
 import FleetSummaryTile from './FleetSummaryTile.vue'
+import RecentFailuresTile from './RecentFailuresTile.vue'
 
 registerWidget({
   id: 'fleet-summary',
@@ -21,5 +22,16 @@ registerWidget({
   component: FleetSummaryTile,
   adminOnly: false,
   defaultOn: true,
+  cells: { w: 1, h: 1 },
+})
+
+registerWidget({
+  id: 'recent-failures',
+  title: 'Recent failures',
+  component: RecentFailuresTile,
+  adminOnly: false,
+  defaultOn: true,
+  // Its age column is recomputed off the Grid's shared 1s tick, so it opts in.
+  wantsTick: true,
   cells: { w: 1, h: 1 },
 })

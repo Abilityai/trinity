@@ -21,7 +21,26 @@
  *
  * ## Registry shape
  *
- * `{ id, title, icon, component, adminOnly, defaultOn, cells }`
+ * `{ id, title, icon, component, adminOnly, defaultOn, wantsTick, cells }`
+ *
+ * ## The prop contract the chassis honours (ent#100)
+ *
+ * `FleetGrid` renders `<component :is="entry.component" :agents :now />`:
+ *
+ *   - **`agents`** — the UNFILTERED fleet roster (`orgAgents || agents`, the
+ *     seam #305 already established). It is a LOOKUP TABLE (display labels,
+ *     "can the fleet be enumerated at all"), never a data source: a tile's
+ *     numbers come from the store, which fetches on the one batch poll. It is
+ *     deliberately not the ent#261 type-to-filter-narrowed list — an info tile
+ *     is fleet-scope, so narrowing it would degrade every non-matching row's
+ *     label to a raw slug, per keystroke, on a default-on tile.
+ *   - **`now`** — the Grid's shared 1s tick, passed ONLY to tiles that declare
+ *     `wantsTick: true`. Binding it unconditionally would force a child update
+ *     once per second for every tile, forever, on a canvas that also drags at
+ *     60fps; epic #94 queues eight tiles, most of which render no clock.
+ *
+ * A tile needing anything else reads a store — it must NOT fetch in
+ * `onMounted`, because viewport culling unmounts it and panning would re-issue.
  *
  * `cells` is declared now and deliberately ignored by v1 rendering: every
  * tile occupies one cell. Multi-cell occupancy is epic #94's stated v2, and
@@ -75,6 +94,7 @@ export function registerWidget(entry) {
   const normalized = {
     adminOnly: false,
     defaultOn: false,
+    wantsTick: false,
     cells: { w: 1, h: 1 },
     ...entry,
   }

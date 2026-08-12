@@ -68,7 +68,19 @@
  * Interactive children carry `.nodrag`, which `FleetGrid.onTilePointerDown`
  * checks before starting a drag — otherwise clicking a tile's own link would
  * begin a tile drag instead.
+ *
+ * `inheritAttrs: false` because a tile is a thin wrapper whose single root IS
+ * this component: any prop the chassis binds that the wrapping tile did not
+ * declare (`now` on a tile that only declares `agents`, say) would otherwise
+ * fall through twice and land on `<article>` as a literal DOM attribute —
+ * rewritten on every tick, visible in the inspector, meaningless. One line
+ * makes that structurally impossible for every present and future tile; a
+ * lint-style guard over `defineProps` would miss both the array form
+ * (`defineProps([...])`) and the type-only form (`defineProps<{...}>()`),
+ * which are legal and would reintroduce it while passing green.
  */
+defineOptions({ inheritAttrs: false })
+
 defineProps({
   /** Scope prefix rendered before the title: "Fleet", "Host", … */
   scope: { type: String, default: 'Fleet' },

@@ -178,10 +178,20 @@
           :aria-label="w.entry.title + ' info tile — drag to any cell, or use arrow keys'"
           @transitionend="onTileTransitionEnd(w.key, $event)"
         >
+          <!-- `unfilteredAgents`, not `agents`: the ent#261 type-to-filter
+               narrows `props.agents` live, per keystroke, and an info tile is
+               FLEET-scope — its rows are not the search result. Binding the
+               narrowed list would degrade every non-matching row's display
+               label to a raw slug as you type. Same seam the org overlay
+               already uses (#305).
+               `:now` only when the catalog entry declares `wantsTick`, so a
+               tile that renders no clock is not re-rendered once per second
+               forever (epic #94 queues eight tiles). -->
           <component
             :is="w.entry.component"
             v-if="visibleNames.has(w.key)"
-            :agents="agents"
+            :agents="unfilteredAgents"
+            :now="w.entry.wantsTick ? now : undefined"
           />
           <div v-else class="gv-tile-far">{{ w.entry.title }}</div>
         </div>
@@ -417,6 +427,16 @@ const placedAgents = computed(() =>
   props.agents.filter((a) => layout.value[a.name])
 )
 
+/**
+ * The roster WITHOUT the ent#261 type-to-filter narrowing.
+ *
+ * `props.agents` is the `visibleAgents` seam, which the `/` filter narrows live
+ * per keystroke; `props.orgAgents` is the unfiltered list the org overlay (#305)
+ * already needed for the same reason. Fleet-scope consumers — the overlay's
+ * world, and every info tile — read this one.
+ */
+const unfilteredAgents = computed(() => props.orgAgents || props.agents)
+
 // --- info tiles (ent#325) ---
 const tilesMenuOpen = ref(false)
 const widgetCatalog = computed(() => catalogFor(gridStore.isAdmin))
@@ -578,7 +598,7 @@ const {
   cancelOrgDrags,
   destroy: destroyOrg,
 } = useOrgOverlay({
-  agents: computed(() => props.orgAgents || props.agents),
+  agents: unfilteredAgents,
   layout,
   canvasEl,
   vz,
@@ -950,6 +970,8 @@ onBeforeUnmount(() => {
   --gv-btn-border: #bfdbfe;
   --gv-badge-warn-bg: #fef9c3;
   --gv-badge-warn-tx: #a16207;
+  --gv-badge-fail-bg: #fee2e2;
+  --gv-badge-fail-tx: #b91c1c;
   --gv-badge-sys-bg: #f3e8ff;
   --gv-badge-sys-tx: #7e22ce;
   /* ent#139 skill-runner class: teal, distinct from system purple */
@@ -1033,6 +1055,8 @@ onBeforeUnmount(() => {
   --gv-btn-border: #1d4ed8;
   --gv-badge-warn-bg: rgba(113, 63, 18, 0.5);
   --gv-badge-warn-tx: #fde047;
+  --gv-badge-fail-bg: rgba(127, 29, 29, 0.5);
+  --gv-badge-fail-tx: #fca5a5;
   --gv-badge-sys-bg: rgba(88, 28, 135, 0.5);
   --gv-badge-sys-tx: #d8b4fe;
   --gv-badge-runner-bg: rgba(19, 78, 74, 0.55);
