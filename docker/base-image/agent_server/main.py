@@ -27,6 +27,7 @@ from .routers import (
     brain_orb_router,
 )
 from .state import agent_state
+from .services.execution_env import arm_subscription_auth_guard
 from .services.trinity_mcp import inject_trinity_mcp_if_configured
 from .auto_sync import schedule_auto_sync_if_enabled
 from .heartbeat import schedule_heartbeat
@@ -68,6 +69,13 @@ app.include_router(dashboard_router)  # Dashboard endpoint
 app.include_router(skills_router)  # Skills/playbooks listing endpoint
 app.include_router(snapshot_router)  # Snapshot/restore primitives (#384, S3)
 app.include_router(brain_orb_router)  # Brain Orb visualization data (#58)
+
+# #2114: when the boot baseline says subscription auth is active (truthy
+# CLAUDE_CODE_OAUTH_TOKEN on a Claude runtime), force-unset API-key-style auth
+# from every spawn env — a stale .env ANTHROPIC_API_KEY otherwise shadows the
+# subscription token at every spawn (Claude Code prefers the key). Boot-time,
+# not module-import-time, so tests control INITIAL_ENV before arming.
+arm_subscription_auth_guard()
 
 # #389 S1a: auto-sync heartbeat loop (gated by GIT_SYNC_AUTO env var).
 schedule_auto_sync_if_enabled(app)

@@ -331,6 +331,19 @@ async def _hot_reload_subscription_token(agent_name: str) -> str:
       - no resolvable token for the agent's current subscription.
     Returns ``"no_container"`` / ``"not_running"`` when the agent is not a
     running container, mirroring ``_restart_agent``.
+
+    Invariant every caller relies on (#2114): a call here implies the agent is
+    subscription-backed AT SEND TIME — structurally enforced, not conventional:
+    all three producers (auto-switch, manual sub→sub reassignment, key-rollover
+    fan-out) are sub→sub by construction (auth-MODE changes recreate instead),
+    and this helper re-resolves the subscription from the DB below, falling
+    back to restart when no token resolves. That is what makes
+    ``remove_api_key=True`` safe: a subscription-backed Claude agent never has
+    a legitimate ``ANTHROPIC_API_KEY`` at spawn, and post-#1999 the `.env`
+    file is a second source for it that no recreate ever cleans — a stale key
+    there shadows every spawn (Claude Code prefers the key over the OAuth
+    token). Non-Claude runtimes keep ``False``: a legacy subscription row on a
+    Gemini/Codex agent must not strip a `.env` key its own scripts may use.
     """
     try:
         from services.docker_service import (
@@ -338,6 +351,7 @@ async def _hot_reload_subscription_token(agent_name: str) -> str:
             get_agent_status_from_container,
         )
         from services.agent_client import get_agent_client, AgentClientError
+        from services.agent_service.helpers import is_claude_runtime
 
         container = get_agent_container(agent_name)
         if not container:
@@ -352,14 +366,23 @@ async def _hot_reload_subscription_token(agent_name: str) -> str:
             # the recreate path, which re-bakes Config.Env from the DB.
             return await _restart_agent(agent_name)
 
+        # #2114: remove_api_key=True for Claude runtimes. The old False leaned on
+        # "subscription agents never carry ANTHROPIC_API_KEY in env (popped at
+        # create time, lifecycle.py)" — true for Config.Env, false for the .env
+        # FILE post-#1999 (re-read at every spawn, survives every recreate on
+        # the workspace volume). True force-unsets the key at the spawn layer
+        # without touching the file. Label read is best-effort with the same
+        # claude-code default as docker_service.get_agent_runtime.
+        try:
+            runtime = container.labels.get("trinity.agent-runtime", "claude-code") or "claude-code"
+        except Exception:
+            runtime = "claude-code"
+
         client = get_agent_client(agent_name)
         try:
-            # remove_api_key=False is intentional: subscription-backed agents never
-            # carry ANTHROPIC_API_KEY in env (popped at create time, lifecycle.py).
-            # The param is kept for a future mode-change-via-hot-reload caller.
             resp = await client.post(
                 "/api/credentials/reload-token",
-                json={"token": token, "remove_api_key": False},
+                json={"token": token, "remove_api_key": is_claude_runtime(runtime)},
                 timeout=10.0,
             )
         except AgentClientError as e:
@@ -375,6 +398,23 @@ async def _hot_reload_subscription_token(agent_name: str) -> str:
                 f"'{agent_name}'; falling back to restart"
             )
             return await _restart_agent(agent_name)
+
+        # #2114: the endpoint reports (names only) which force-unset keys the
+        # agent's .env would otherwise deliver to spawns. Surface it HERE — the
+        # backend log operators actually read during a subscription incident —
+        # instead of only a once-per-boot line in the container log.
+        try:
+            env_shadow = (resp.json() or {}).get("env_shadow") or []
+        except Exception:
+            env_shadow = []
+        if env_shadow:
+            logger.warning(
+                f"[SUB-003] agent '{agent_name}': .env carries "
+                f"{', '.join(env_shadow)} — would shadow subscription auth at "
+                f"spawn; suppressed via force-unset. If that key previously "
+                f"authenticated this agent, its auth source is now the "
+                f"subscription (#2114)"
+            )
 
         logger.info(f"[SUB-003] Hot-reloaded subscription token for '{agent_name}' (no recreate)")
         return "hot_reloaded"
