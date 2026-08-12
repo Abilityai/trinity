@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 logger = logging.getLogger(__name__)
 
 from models import (
+    A2AOutboundEndpointUpsert,
     AgentDefaultAccessPolicyUpdate,
     AgentDefaultResourcesUpdate,
     AgentQuotaUpdate,
@@ -173,6 +174,7 @@ async def get_public_feature_flags(
         REDELIVERY_GOVERNOR_ENABLED,
     )
     from services.entitlement_service import entitlement_service
+    from services import a2a_outbound_service
     voice_available = VOICE_ENABLED and bool(GEMINI_API_KEY)
     # Brain Orb flags are RUNTIME-RESOLVED (#85): system_settings override →
     # BRAIN_ORB_* env opt-in → OFF. An admin flip via PUT /api/settings/brain-orb
@@ -227,6 +229,12 @@ async def get_public_feature_flags(
         # (stored setting → ELEVENLABS_API_KEY env). Gates the agent-level Voice
         # config UI + the send_voice_reply capability. Non-sensitive boolean.
         "tts_available": bool(settings_service.get_elevenlabs_api_key()),
+        # Outbound A2A (#736) — the kill switch on the platform's first
+        # backend-executed, credentialed, agent-triggerable outbound fetcher.
+        # Runtime-resolved (system_settings → A2A_OUTBOUND_ENABLED env → OFF);
+        # both call routes 404 when off. Observability + UI gating only — the
+        # routes enforce it themselves.
+        "a2a_outbound_available": a2a_outbound_service.is_outbound_enabled(),
         "platform_default_model": settings_service.get_platform_default_model(),
         # Onboarding (trinity-enterprise#52) — is Claude auth configured at all?
         # Trinity agents can't think without it, so the first-run wizard uses
@@ -273,6 +281,7 @@ async def set_telemetry_sharing(
     (fire-and-forget) so the first send includes the disclosed history window;
     disabling stops egress at the next heartbeat. Audit-logged."""
     from dependencies import reject_agent_principal
+
     assert_admin(current_user)
     reject_agent_principal(current_user)
 
@@ -340,6 +349,8 @@ async def acknowledge_retention_prune(
     # is imported here; `require_admin` is a FastAPI Depends factory, not an
     # imperative call). The #1310 auth-wiring refactor left the endpoint 500ing on
     # every request, so the guard's approval path never worked even for a caller.
+    from dependencies import reject_agent_principal
+
     assert_admin(current_user)
     reject_agent_principal(current_user)
 
@@ -2540,6 +2551,136 @@ async def update_elevenlabs_settings(
     return {"success": True, **after}
 
 
+# ============================================================================
+# Outbound A2A endpoint registry (#736 §32.5 FR-2)
+# NOTE: These routes MUST be defined BEFORE the /{key} catch-all (Invariant #4).
+# ============================================================================
+#
+# The OSS target source for `call_a2a_agent`. It lives in `system_settings` as
+# one AES-256-GCM envelope rather than a new table — the shape Invariant #12
+# already blesses for `elevenlabs_api_key_encrypted` — which is why #736 ships
+# with no migration and no Alembic revision.
+#
+# Admin-only AND human-only. `assert_admin` rejects agent principals since
+# ent#293, and `reject_agent_principal` is kept explicitly beside it because
+# this is the GRANT half of the grant-vs-use line: registering an endpoint
+# decides where a credentialed server-side request may go, and an agent-scoped
+# key resolves to its owner carrying the owner's role. *Using* a registered
+# endpoint is agent-callable; *creating* one is not.
+
+
+@router.get("/a2a-endpoints")
+async def list_a2a_outbound_endpoints(
+    current_user: User = Depends(get_current_user)
+):
+    """List the registered outbound A2A endpoints (#736).
+
+    Credentials are never returned — each row reports `has_credentials` only,
+    matching the write-only property the A2A management tools already document.
+    """
+    from dependencies import reject_agent_principal
+
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    from services import a2a_outbound, a2a_outbound_service
+
+    return {
+        "endpoints": a2a_outbound.list_endpoints(""),
+        "enabled": a2a_outbound_service.is_outbound_enabled(),
+    }
+
+
+@router.put("/a2a-endpoints")
+async def upsert_a2a_outbound_endpoint(
+    body: A2AOutboundEndpointUpsert,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Register or update one outbound A2A endpoint by name (#736).
+
+    The URL is SSRF-validated here so an operator finds out immediately rather
+    than at first call — but that is a usability improvement, not the security
+    boundary: the call path re-validates every URL on every call regardless,
+    because a stored row is not trusted and a DNS record can move.
+
+    `credentials` is write-only. Omitting it on an update leaves any existing
+    secret in place; `clear_credentials` removes it. The audit row records
+    whether a credential was set or cleared, never its value.
+    """
+    from dependencies import reject_agent_principal
+
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    from services import a2a_outbound
+
+    credential = body.credentials.get_secret_value() if body.credentials else None
+    try:
+        record = a2a_outbound.upsert_endpoint(
+            body.name,
+            body.url,
+            credential,
+            clear_credential=body.clear_credentials,
+        )
+    except a2a_outbound.EndpointValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="settings_change",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={
+            "setting": "a2a_outbound_endpoints",
+            "action": "upsert",
+            "endpoint": record["name"],
+            "url": record["url"],
+            "credential_set": bool(credential),
+            "credential_cleared": bool(body.clear_credentials),
+        },
+    )
+    return {"success": True, "endpoint": record}
+
+
+@router.delete("/a2a-endpoints/{ref}")
+async def remove_a2a_outbound_endpoint(
+    ref: str,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Remove one registered outbound A2A endpoint by id or name (#736)."""
+    from dependencies import reject_agent_principal
+
+    assert_admin(current_user)
+    reject_agent_principal(current_user)
+
+    from services import a2a_outbound
+
+    removed = a2a_outbound.remove_endpoint(ref)
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"A2A endpoint '{ref}' not found")
+
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="settings_change",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=str(request.url.path),
+        request_id=getattr(request.state, "request_id", None),
+        details={
+            "setting": "a2a_outbound_endpoints",
+            "action": "remove",
+            "endpoint": ref,
+        },
+    )
+    return {"success": True, "removed": ref}
+
+
 @router.get("/{key}")
 async def get_setting(
     key: str,
@@ -2715,6 +2856,25 @@ async def update_setting(
     # a source, not what the string looks like — so block the keys and point at
     # the route that carries the gate. ent#237 already removed the UI writer, so
     # nothing supported breaks.
+    # #736: the outbound A2A endpoint list is a TARGET grant carrying encrypted
+    # credentials — the value is an AES-256-GCM envelope, so a plaintext write
+    # here would both bypass the SSRF/shape validation and corrupt the store
+    # into something the reader refuses (fail-closed, but silently and with a
+    # confusing cause). It is also the answer to "where may a credentialed
+    # server-side request go?", which is exactly the class this catch-all keeps
+    # being a way around (#506 / #1609 / ent#12 / #1644 / ent#14 / ent#346).
+    from services.a2a_outbound import A2A_ENDPOINTS_SETTING
+
+    if key == A2A_ENDPOINTS_SETTING:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} holds encrypted outbound A2A endpoints and must be set via "
+                "PUT /api/settings/a2a-endpoints (admin + human-only, SSRF-validated, "
+                "audit-logged)"
+            ),
+        )
+
     if key in LEGACY_SKILLS_LIBRARY_KEYS:
         raise HTTPException(
             status_code=422,

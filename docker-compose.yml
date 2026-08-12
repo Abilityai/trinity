@@ -64,6 +64,11 @@ services:
       - VOIP_CALL_RATE_WINDOW=${VOIP_CALL_RATE_WINDOW:-60}        # rate-limit window (s)
       - VOIP_TICKET_TTL_SECONDS=${VOIP_TICKET_TTL_SECONDS:-180}   # Media Streams WSS ticket TTL
       - VOIP_INTENT_TTL_SECONDS=${VOIP_INTENT_TTL_SECONDS:-180}   # staged Gemini-intent TTL
+      # Outbound A2A calls (#736) — a Trinity agent tasking an EXTERNAL A2A agent.
+      # Opt-in, default OFF. The DB row (system_settings) is the primary leg, so a
+      # gap here cannot make the feature unreachable — but the env leg still has to
+      # be forwarded or an operator setting it in .env silently does nothing.
+      - A2A_OUTBOUND_ENABLED=${A2A_OUTBOUND_ENABLED:-false}
       # Outbound voice replies via shared TTS (epic #24; Telegram #25). The key
       # gates the feature (empty ⇒ adapters deliver text). Must reach the
       # container or the .env lever is inert (the #1056/#1039 packaging class).
