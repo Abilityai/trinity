@@ -28,6 +28,9 @@ from typing import Optional
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from db_harness import db_backend  # noqa: E402,F401  (pytest fixture)
+
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 _BACKEND_STR = str(_BACKEND)
 while _BACKEND_STR in sys.path:
@@ -171,7 +174,7 @@ def test_agent_principal_is_rejected(router_mod, monkeypatch):
 # Every route to a WRONG empty answer
 # ---------------------------------------------------------------------------
 
-def test_docker_outage_cannot_empty_the_access_set(router_mod, monkeypatch):
+def test_access_set_is_db_derived_not_docker_derived(router_mod):
     """The reason this endpoint does not use `accessible_agent_names`.
 
     That helper resolves through `list_all_agents_fast()`, a Docker
@@ -180,32 +183,29 @@ def test_docker_outage_cannot_empty_the_access_set(router_mod, monkeypatch):
     changing DOCKER_GID would tell every non-admin operator that no agent holds
     any skill, fleet-wide, with no error state anywhere.
 
-    So: break Docker comprehensively and assert the answer is unchanged.
+    Asserted STRUCTURALLY rather than by monkeypatching a Docker sentinel: the
+    router never imports `services.agent_service.helpers`, so a sentinel there
+    can't fire and its "Docker was not consulted" claim would be vacuous — the
+    behavioural half is already covered by the owned-and-shared test above,
+    which passes with a DB-derived set and no Docker at all.
     """
-    _wire(monkeypatch, router_mod)
+    import inspect
 
-    called = {"docker": False}
-
-    def _boom(*_a, **_k):
-        called["docker"] = True
-        return []
-
-    # Whichever way the module might reach Docker, it must not matter.
-    import services.agent_service.helpers as helpers
-    monkeypatch.setattr(helpers, "list_all_agents_fast", _boom, raising=False)
-    monkeypatch.setattr(helpers, "get_accessible_agents", _boom, raising=False)
-    monkeypatch.setattr(
-        helpers, "accessible_agent_names", lambda u: [], raising=False
+    src = inspect.getsource(router_mod._visible_agent_names)
+    assert "get_all_agent_metadata" in src, (
+        "the access set must come from the pure-DB batch read"
+    )
+    assert "accessible_agent_names" not in src.split('"""')[-1], (
+        "accessible_agent_names is Docker-derived and returns [] on any Docker "
+        "fault; using it here reintroduces the fleet-wide false-empty"
     )
 
-    res = _call(router_mod, _User())
-
-    assert [a.name for a in res.assignments["research"]] == ["scout"]
-    assert [a.name for a in res.assignments["writing"]] == ["scribe"]
-    assert not called["docker"], (
-        "the access set must be DB-derived; a Docker read here reintroduces the "
-        "fleet-wide false-empty this endpoint was written to avoid"
-    )
+    # And no import edge to the Docker-backed helper module anywhere in the router.
+    router_src = inspect.getsource(router_mod)
+    assert "from services.agent_service.helpers import" not in router_src
+    assert "agent_service.helpers" not in router_src.replace(
+        "`services.agent_service.helpers.accessible_agent_names`", ""
+    ).replace("`accessible_agent_names`", "")
 
 
 def test_a_skill_with_no_holders_is_absent_not_empty(router_mod, monkeypatch):
@@ -297,43 +297,115 @@ def test_assignments_route_is_not_shadowed_by_a_parameterized_sibling(router_mod
 # ---------------------------------------------------------------------------
 
 class TestHolderPredicate:
-    """These live at the db layer (`get_all_skill_assignments`), which the
-    router tests above stub. Exercised against a real migrated DB so the
-    Core join, not a mock, is what answers."""
+    """The db-layer filters, exercised against a REAL migrated database.
 
-    @pytest.fixture
-    def ops(self, tmp_path, monkeypatch):
-        try:
-            from db.skills import SkillsOperations
-        except ImportError:  # pragma: no cover
-            pytest.skip("backend venv required")
-        return SkillsOperations()
+    An earlier version of this class matched `inspect.getsource` for substrings
+    like `"agent_skills.join("` and `"is_ephemeral"`. That is worse than no
+    test: `"agent_skills.join("` also matches a LEFT OUTER JOIN, and
+    `"is_ephemeral"` also matches the *inverted* predicate — so mutating the
+    accessor to `isouter=True` plus `is_ephemeral == 1` (returning ONLY ghosts,
+    the exact opposite of the contract) still passed every assertion. A test
+    whose docstring claims to guard load-bearing filters, and which survives
+    their inversion, manufactures confidence.
 
-    def test_query_excludes_soft_deleted_ephemeral_and_orphans(self, ops):
-        """Read as a contract assertion over the statement itself: the three
-        filters are each load-bearing and each easy to drop in a later edit.
+    Runs on SQLite always and on PostgreSQL when TEST_POSTGRES_URL is set
+    (`db_backend`, #300), which also covers the Core-vs-`text()` concern by
+    construction rather than by grepping for a substring.
+    """
 
-        * INNER JOIN — an `agent_skills` row with no ownership row is a cascade
-          orphan (canary L-03's territory), not a holder.
-        * `deleted_at IS NULL` — #834 preserves a soft-deleted agent's child
-          rows for up to 180 days, and admins read this unfiltered (ent#335).
-        * ephemeral excluded — a ghost is hard-discarded at budget, so its chip
-          would link to a 404 within minutes and a fan-out burst would inflate
-          every count.
-        """
-        import inspect
-        src = inspect.getsource(ops.get_all_skill_assignments)
+    def test_only_live_non_ghost_owned_rows_count_as_holders(self, db_backend):
+        from db.skills import SkillsOperations
+        from db_harness import run as hrun
 
-        assert "agent_skills.join(" in src, "must INNER JOIN, not select bare"
-        assert "deleted_at.is_(None)" in src
-        assert "is_ephemeral" in src
-        # NULL must read as "not a ghost": `is_ephemeral` is nullable on rows
-        # written before ent#69, so a bare `== 0` silently drops every
-        # pre-ent#69 agent from every holder list.
-        assert "is_ephemeral.is_(None)" in src, (
-            "NULL is_ephemeral (pre-ent#69 rows) must count as not-a-ghost"
+        # One agent per case, each holding the same skill so the returned set
+        # is exactly "which filters let a row through".
+        hrun(
+            "INSERT INTO agent_ownership (agent_name, owner_id, created_at, deleted_at, is_ephemeral, display_label) "
+            "VALUES ('live', 1, '2026-01-01T00:00:00Z', NULL, 0, 'Live One')"
         )
-        # Core, not text() — this module has been 8/8 SQLAlchemy Core since the
-        # #300 dual-backend conversion, and a raw string would have to be
-        # re-proved on PostgreSQL.
-        assert "text(" not in src
+        hrun(
+            "INSERT INTO agent_ownership (agent_name, owner_id, created_at, deleted_at, is_ephemeral, display_label) "
+            "VALUES ('legacy-null-ghost-flag', 1, '2026-01-01T00:00:00Z', NULL, NULL, NULL)"
+        )
+        hrun(
+            "INSERT INTO agent_ownership (agent_name, owner_id, created_at, deleted_at, is_ephemeral, display_label) "
+            "VALUES ('soft-deleted', 1, '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z', 0, NULL)"
+        )
+        hrun(
+            "INSERT INTO agent_ownership (agent_name, owner_id, created_at, deleted_at, is_ephemeral, display_label) "
+            "VALUES ('ghost', 1, '2026-01-01T00:00:00Z', NULL, 1, NULL)"
+        )
+        for agent in ("live", "legacy-null-ghost-flag", "soft-deleted", "ghost", "no-ownership-row"):
+            hrun(
+                "INSERT INTO agent_skills (agent_name, skill_name, assigned_by, assigned_at) "
+                "VALUES (:a, 'research', 'admin', '2026-01-01T00:00:00Z')",
+                a=agent,
+            )
+
+        rows = SkillsOperations().get_all_skill_assignments()
+        holders = {r["agent_name"] for r in rows}
+
+        # `live` — the ordinary case.
+        assert "live" in holders
+        # NULL `is_ephemeral` is every agent created before ent#69. A bare
+        # `is_ephemeral == 0` drops all of them from every holder list.
+        assert "legacy-null-ghost-flag" in holders
+        # #834 preserves a soft-deleted agent's child rows for up to 180 days,
+        # and admins read this endpoint unfiltered (ent#335).
+        assert "soft-deleted" not in holders
+        # A ghost is hard-discarded at budget; its chip would 404 in minutes.
+        assert "ghost" not in holders
+        # A row whose ownership row is gone is a cascade orphan (canary L-03),
+        # not a holder — the INNER JOIN must drop it.
+        assert "no-ownership-row" not in holders
+
+        assert holders == {"live", "legacy-null-ghost-flag"}
+
+    def test_display_label_rides_along_and_null_is_preserved(self, db_backend):
+        """NULL means "render the slug" (ent#181); coercing it here would make a
+        labelled and an unlabelled agent indistinguishable to the client."""
+        from db.skills import SkillsOperations
+        from db_harness import run as hrun
+
+        hrun(
+            "INSERT INTO agent_ownership (agent_name, owner_id, created_at, display_label) "
+            "VALUES ('labelled', 1, '2026-01-01T00:00:00Z', 'Scout — Market Research')"
+        )
+        hrun(
+            "INSERT INTO agent_ownership (agent_name, owner_id, created_at, display_label) "
+            "VALUES ('unlabelled', 1, '2026-01-01T00:00:00Z', NULL)"
+        )
+        for agent in ("labelled", "unlabelled"):
+            hrun(
+                "INSERT INTO agent_skills (agent_name, skill_name, assigned_by, assigned_at) "
+                "VALUES (:a, 'writing', 'admin', '2026-01-01T00:00:00Z')",
+                a=agent,
+            )
+
+        by_name = {
+            r["agent_name"]: r["display_label"]
+            for r in SkillsOperations().get_all_skill_assignments()
+        }
+        assert by_name["labelled"] == "Scout — Market Research"
+        assert by_name["unlabelled"] is None
+
+    def test_one_row_per_assignment_the_join_cannot_multiply(self, db_backend):
+        """`agent_ownership.agent_name` is unique, so the join must be 1:1. A
+        duplicated holder would silently inflate every count on the page."""
+        from db.skills import SkillsOperations
+        from db_harness import run as hrun
+
+        hrun(
+            "INSERT INTO agent_ownership (agent_name, owner_id, created_at) "
+            "VALUES ('solo', 1, '2026-01-01T00:00:00Z')"
+        )
+        for skill in ("alpha", "beta"):
+            hrun(
+                "INSERT INTO agent_skills (agent_name, skill_name, assigned_by, assigned_at) "
+                "VALUES ('solo', :s, 'admin', '2026-01-01T00:00:00Z')",
+                s=skill,
+            )
+
+        rows = SkillsOperations().get_all_skill_assignments()
+        assert len(rows) == 2
+        assert sorted(r["skill_name"] for r in rows) == ["alpha", "beta"]

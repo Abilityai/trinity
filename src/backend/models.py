@@ -3635,8 +3635,10 @@ class SkillAssignmentsResponse(BaseModel):
     own — it means either "nobody holds anything" or "you can see no agents" —
     and a UI that guesses tells a `role=user` with no agents that a skill held
     by forty agents has no holders. `all` (admin, unfiltered) vs `accessible`
-    (owned ∪ shared) lets the client word the zero honestly, or suppress the
-    row entirely when the accessible set is empty.
+    (owned ∪ shared) lets the client word the zero honestly: "no agents yet"
+    only under `all`, "none of your agents" under `accessible` — which is true
+    whether the caller has zero agents or zero assignments among them, so no
+    count of the accessible set is needed and none is sent.
     """
     assignments: Dict[str, List[SkillAssignmentAgent]] = Field(default_factory=dict)
     scope: str = "accessible"

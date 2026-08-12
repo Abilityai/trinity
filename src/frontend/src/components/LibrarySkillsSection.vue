@@ -139,35 +139,43 @@
           </li>
         </ul>
 
-        <!-- ent#384: assignments whose skill is no longer in the library.
-             ent#237's revocation model is "cut a new tag without the offending
-             skill" — after which the operator's very next question is *who
-             still has it*, and a grid keyed by the library listing answers
-             that with silence, permanently. -->
-        <section v-if="store.orphanedAssignments.length" class="mt-6">
-          <h3 class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">
-            Assigned but no longer in the library
-            <span class="ml-1 text-[12.5px] font-[400] text-gray-600 dark:text-gray-400 tabular-nums">
-              {{ store.orphanedAssignments.length }}
-            </span>
-          </h3>
-          <p class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-400">
-            These skills were removed from the library, but the assignments remain. The package
-            stays on each agent until it is unassigned from that agent's Skills tab.
-          </p>
-          <ul class="mt-3 max-h-72 overflow-y-auto space-y-2 pr-1">
-            <li v-for="o in store.orphanedAssignments" :key="o.name">
-              <BaseCard>
-                <div class="flex items-center gap-2 flex-wrap">
-                  <span class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">{{ o.name }}</span>
-                  <BaseBadge variant="warning">not in library</BaseBadge>
-                </div>
-                <AssignedAgents :skill-name="o.name" class="mt-2" />
-              </BaseCard>
-            </li>
-          </ul>
-        </section>
       </div>
+
+      <!-- Rendered as a SIBLING of the branches above, never nested inside the
+           has-skills branch. The revocation case this exists for is precisely
+           the one where the library listing is EMPTY (a tag cut that dropped
+           the skill, or every skill): nested, it lost to the "library has no
+           skills yet" empty card and the operator was told nothing at all
+           about the agents still carrying the package. Its own v-if keeps it
+           invisible when there is nothing orphaned. -->
+      <!-- ent#384: assignments whose skill is no longer in the library.
+           ent#237's revocation model is "cut a new tag without the offending
+           skill" — after which the operator's very next question is *who
+           still has it*, and a grid keyed by the library listing answers
+           that with silence, permanently. -->
+      <section v-if="store.orphanedAssignments.length" class="mt-6">
+        <h3 class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">
+          Assigned but no longer in the library
+          <span class="ml-1 text-[12.5px] font-[400] text-gray-600 dark:text-gray-400 tabular-nums">
+            {{ store.orphanedAssignments.length }}
+          </span>
+        </h3>
+        <p class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-400">
+          These skills were removed from the library, but the assignments remain. The package
+          stays on each agent until it is unassigned from that agent's Skills tab.
+        </p>
+        <ul class="mt-3 max-h-72 overflow-y-auto space-y-2 pr-1">
+          <li v-for="o in store.orphanedAssignments" :key="o.name">
+            <BaseCard>
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">{{ o.name }}</span>
+                <BaseBadge variant="warning">not in library</BaseBadge>
+              </div>
+              <AssignedAgents :skill-name="o.name" class="mt-2" />
+            </BaseCard>
+          </li>
+        </ul>
+      </section>
     </ScanlineReveal>
   </div>
 </template>
@@ -222,12 +230,22 @@ async function onSync() {
 }
 
 // The panel owns its own fetch, which is what keeps the Library's per-section
-// failure isolation intact. It runs once because `Library.vue` LAZY-MOUNTS
-// this panel and then keeps it mounted (v-if visited + v-show active): a
-// Templates-only visitor never pays for it, and a tab switch back does not
-// re-fetch three endpoints. The `hasLoaded` guard is belt-and-braces for any
-// future caller that does remount us.
+// failure isolation intact. It runs once per VISIT, not once per session.
+//
+// The tab-switch case is already handled structurally — `Library.vue`
+// lazy-mounts this panel and then keeps it mounted (`v-if` visited + `v-show`
+// active), so switching tabs never unmounts us and never re-fetches. A
+// `store.hasLoaded` guard here would therefore buy nothing on that path while
+// breaking a different one: the store is a Pinia singleton that outlives the
+// route, so guarding on "ever loaded" makes every LATER visit to /library skip
+// the fetch for the rest of the SPA session. An admin who configures a library
+// in Settings and comes back would keep reading "No skills library is
+// configured" (the unconfigured branch sets `hasLoaded` too) until a full page
+// reload, and newly-assigned or deleted agents would never appear in the
+// chips. Stale-while-revalidate is what keeps the re-fetch invisible: `loading`
+// is `fetching && !hasLoaded`, so a revisit shows the cached data immediately
+// and swaps values in place without replaying the scanline.
 onMounted(() => {
-  if (!store.hasLoaded) store.load()
+  store.load()
 })
 </script>

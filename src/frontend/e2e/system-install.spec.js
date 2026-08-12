@@ -50,11 +50,17 @@ agents:
     template: local:definitely-not-a-real-template-ent126
 `
 
-// ent#263 renamed Templates -> Library and made it stacked sections rather than
-// tabs, so the install surface is a #systems section on /library. /templates
-// still redirects (query AND hash survive the hop), which the first test pins.
+// ent#263 renamed Templates -> Library; ent#384 then made the page TABBED, so
+// the install surface is the `systems` tab on /library (its `#systems` section
+// id survives as the panel's anchor). /templates still redirects (query AND
+// hash survive the hop) and the hash migrates to its tab, which the first test
+// pins. Panels lazy-mount, so an unvisited tab's section is absent from the
+// DOM rather than hidden — always reach a panel by tab, never by scrolling.
 async function openSystemsSection (page) {
-  await page.goto('/library#systems')
+  // ent#384 made the Library tabbed. The legacy `#systems` hash still works
+  // (it migrates to the tab), but address the tab directly here so this helper
+  // does not depend on the migration path the first test already pins.
+  await page.goto('/library?tab=systems')
   await expect(page.getByTestId('manifest-textarea')).toBeVisible()
 }
 
@@ -64,19 +70,26 @@ async function pasteManifest (page, yaml) {
 }
 
 test.describe('System install surface', () => {
-  test('the Library stacks all three asset kinds and the legacy path redirects', async ({ page }) => {
+  test('the Library offers all three asset kinds as tabs and the legacy path redirects', async ({ page }) => {
+    // ent#384 replaced ent#263's stacked sections with a tab strip, so the
+    // three kinds are reachable as TABS rather than coexisting on one scroll.
+    // Panels lazy-mount, so an unvisited section is ABSENT from the DOM, not
+    // merely hidden — assert on the strip, then click through.
     await page.goto('/library')
-    // All three sections coexist on one page (ent#263's stacked model) rather
-    // than hiding behind tabs, so no click is needed to reach any of them.
+    await expect(page.getByRole('button', { name: 'Agent Templates', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Systems', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Skills', exact: true })).toBeVisible()
     await expect(page.locator('#agent-templates')).toBeVisible()
+
+    await page.getByRole('button', { name: 'Systems', exact: true }).click()
     await expect(page.locator('#systems')).toBeVisible()
-    await expect(page.locator('#skills')).toBeVisible()
     await expect(page.getByTestId('manifest-textarea')).toBeVisible()
 
     // The legacy /templates path must keep working, hash included — that
-    // redirect is what any older link or bookmark lands on.
+    // redirect is what any older link or bookmark lands on. ent#384 migrates
+    // the hash to its tab and then clears it, so the landing URL is `?tab=`.
     await page.goto('/templates#systems')
-    await expect(page).toHaveURL(/\/library#systems$/)
+    await expect(page).toHaveURL(/\/library\?tab=systems$/)
     await expect(page.getByTestId('manifest-textarea')).toBeVisible()
   })
 

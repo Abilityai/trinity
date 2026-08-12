@@ -410,7 +410,15 @@ function resolveTab(requested) {
   return visibleTabs.value.some((t) => t.id === requested) ? requested : DEFAULT_TAB
 }
 
-const activeTab = ref(resolveTab(route.query.tab || HASH_TO_TAB[route.hash] || DEFAULT_TAB))
+// What the caller ASKED for, captured once before anything rewrites the URL.
+// The late-role watch below must test this and not the live query: `onMounted`
+// normalizes `?tab=` within a microtask, long before `/api/users/me` returns,
+// so by the time the role arrives a creator's `?tab=systems` has already been
+// rewritten to `?tab=templates` — and a watcher reading `route.query.tab` would
+// see its own normalization and never restore the deep link it exists to save.
+const requestedTab = route.query.tab || HASH_TO_TAB[route.hash] || DEFAULT_TAB
+
+const activeTab = ref(resolveTab(requestedTab))
 
 // Lazy-mount-once: a panel mounts the first time its tab is opened and then
 // stays mounted. Plain `v-if` would re-run each child's onMounted fetch on
@@ -447,9 +455,19 @@ watch(activeTab, (tab) => {
 watch(
   () => route.query.tab,
   (q) => {
-    if (q === undefined) return
-    const resolved = resolveTab(q)
-    if (resolved !== activeTab.value) selectTab(resolved)
+    // `undefined` is NOT a no-op: clicking the NavBar's Library link while on
+    // another tab re-navigates to a bare `/library` on the SAME route record,
+    // so the component is reused and `onMounted` does not re-run. Early
+    // -returning there left the URL saying `/library` while the render stayed
+    // on Skills — and a reload then landed the user somewhere else.
+    const resolved = resolveTab(q ?? DEFAULT_TAB)
+    if (resolved !== activeTab.value) {
+      selectTab(resolved)
+    } else if (q === undefined) {
+      // Same tab, but the address no longer names it — re-stamp it. The
+      // `activeTab` watcher can't do this for us: `activeTab` didn't change.
+      router.replace({ query: { ...route.query, tab: resolved }, hash: '' })
+    }
   }
 )
 
@@ -460,7 +478,7 @@ watch(
 watch(canInstallSystems, (allowed) => {
   if (!allowed && activeTab.value === 'systems') {
     selectTab(DEFAULT_TAB)
-  } else if (allowed && route.query.tab === 'systems' && activeTab.value !== 'systems') {
+  } else if (allowed && requestedTab === 'systems' && activeTab.value !== 'systems') {
     selectTab('systems')
   }
 })

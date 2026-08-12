@@ -32,6 +32,7 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
   const assignmentsScope = ref(null)
   const assignmentsError = ref(null)
   const assignmentsLoaded = ref(false)
+  const assignmentsFetching = ref(false)
 
   // `fetching` is "a request is in flight"; `loading` is "there is nothing to
   // show yet". They were one flag, which is wrong for the ScanlineReveal
@@ -90,11 +91,14 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
         const lib = await api.get('/api/skills/library')
         if (mine !== generation) return
         library.value = lib.data || []
-        // ent#384 — deliberately NOT awaited in the same try as the two calls
-        // above. Who-holds-what is decoration on a browse surface: if it
-        // fails, the library must still render (per-section failure isolation
-        // is a page invariant), with the assignment rows saying so rather
-        // than reading as "assigned to nobody".
+        // ent#384 — awaited here, but SELF-CONTAINED: `loadAssignments`
+        // swallows its own failure into `assignmentsError` and never throws,
+        // so an assignments outage cannot reach this `catch` and blank the
+        // library. Who-holds-what is decoration on a browse surface; the
+        // library must still render (per-section failure isolation is a page
+        // invariant), with the assignment rows saying so rather than reading
+        // as "assigned to nobody". Keep it non-throwing — the isolation lives
+        // in that function, not in this call site.
         await loadAssignments()
       } else {
         library.value = []
@@ -122,6 +126,10 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
   async function loadAssignments() {
     const mine = ++assignmentsGeneration
     assignmentsError.value = null
+    // In-flight flag, not just bookkeeping: `AssignedAgents` renders a retry
+    // control on EVERY skill card, so without it 50 cards offer 50 live
+    // triggers for the same fleet-wide read.
+    assignmentsFetching.value = true
     try {
       const res = await api.get('/api/skills/assignments')
       if (mine !== assignmentsGeneration) return
@@ -135,12 +143,25 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
       assignmentsLoaded.value = false
       assignmentsError.value =
         e?.response?.data?.detail || 'Could not load skill assignments'
+    } finally {
+      if (mine === assignmentsGeneration) assignmentsFetching.value = false
     }
   }
 
-  /** Agents holding `skillName`; `[]` when nobody does. */
+  /**
+   * Agents holding `skillName`; `[]` when nobody does.
+   *
+   * Sorted by the key the chips are RENDERED by (`display_label || name`), not
+   * by the slug the SQL ordered on. They diverge on any fleet using labels,
+   * and since the card shows only the first few before a counted overflow, a
+   * slug-ordered list truncates on a key the reader cannot see — the visible
+   * names look arbitrarily ordered and "+N more" hides a non-obvious set.
+   */
   function agentsFor(skillName) {
-    return assignments.value[skillName] || []
+    const agents = assignments.value[skillName] || []
+    return [...agents].sort((a, b) =>
+      (a.display_label || a.name).localeCompare(b.display_label || b.name)
+    )
   }
 
   /**
@@ -191,6 +212,7 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
   return {
     library, status, loading, fetching, hasLoaded, error, syncing, syncError,
     assignments, assignmentsScope, assignmentsError, assignmentsLoaded,
+    assignmentsFetching,
     emptyReason, orphanedAssignments,
     load, loadAssignments, agentsFor, sync,
   }

@@ -10,9 +10,10 @@
       — unavailable
       <button
         type="button"
-        class="ml-1 text-action-primary-600 dark:text-action-primary-400 hover:underline"
+        :disabled="store.assignmentsFetching"
+        class="ml-1 text-action-primary-600 dark:text-action-primary-400 hover:underline disabled:opacity-45 disabled:cursor-not-allowed disabled:no-underline"
         @click="store.loadAssignments()"
-      >retry</button>
+      >{{ store.assignmentsFetching ? 'retrying…' : 'retry' }}</button>
     </p>
 
     <p v-else-if="!store.assignmentsLoaded" class="text-gray-600 dark:text-gray-400">

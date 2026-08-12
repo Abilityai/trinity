@@ -331,6 +331,17 @@ async def get_skill_assignments(current_user: User = Depends(get_current_user)):
     allow-lists in `dependencies.get_current_user`. If an agent consumer is
     ever added, this gate is the thing that has to be reconsidered first.
 
+    **Scope of that gate, stated exactly:** `reject_agent_principal` fires on
+    `User.agent_name`, which `get_current_user` populates only for
+    `scope == "agent"`. A `scope == "system"` key — the `trinity-system`
+    orchestrator's — sets neither `agent_name` nor `connector_agent` and so
+    reads this unfiltered. That is a deliberate exemption, not an oversight:
+    the system agent is documented as bypassing permission checks platform-wide
+    (see Authentication & Authorization in architecture.md), and fleet
+    management is its job. If this route ever needs to be human-only in the
+    strict sense, the allow-list form is `reject_non_interactive_principal`
+    (#1854), which passes only a JWT caller.
+
     The `response_model` is an allow-list, not documentation — the ent#334
     lesson from this same file. The db layer selects from `agent_ownership`;
     the model names the two fields that may leave.
