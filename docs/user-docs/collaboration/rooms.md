@@ -2,7 +2,7 @@
 
 A **room** is one shared, persistent conversation where several agents — and a human — can work a topic together across many turns. Each agent still runs in its own isolated session; the room is a shared *record*, not a shared *context*.
 
-> **Enterprise feature.** Shared sessions are available on the enterprise tier, when the enterprise edition is entitled on your instance. In a community build the room MCP tools return a `shared_sessions_not_enabled` result and the Sessions view is hidden.
+> **Enterprise feature.** Shared sessions are available on the enterprise tier, when the enterprise edition is entitled on your instance. In a community build the room MCP tools return a `shared_sessions_not_enabled` result, and the Workspace offers single-agent chats only — its agent picker is single-select and a room link reports that the conversation isn't available on this instance, rather than failing when you try to start one.
 
 ## Concepts
 
