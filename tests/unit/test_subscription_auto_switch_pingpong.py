@@ -709,6 +709,28 @@ class TestHotReloadSwitch:
         assert "agent-x" in shadow_warnings[0].getMessage()
 
     @pytest.mark.asyncio
+    async def test_tampered_env_shadow_never_demotes_a_successful_reload(
+        self, auto_switch, monkeypatch
+    ):
+        """#2114 hardening: env_shadow is agent-supplied. A tampered shape
+        (non-list / non-str items) must degrade to no-warning — never
+        TypeError into the function-level except and turn an
+        already-successful hot-reload into a container restart."""
+        post = AsyncMock(
+            return_value=_types.SimpleNamespace(
+                status_code=200,
+                json=lambda: {"env_shadow": [1, None, {"k": "v"}, "OK_NAME"]},
+            )
+        )
+        monkeypatch.setitem(sys.modules, "services.docker_service", _docker_stub())
+        monkeypatch.setitem(sys.modules, "services.agent_client", _agent_client_stub(post=post))
+
+        result = await auto_switch._hot_reload_subscription_token("agent-x")
+
+        assert result == "hot_reloaded"
+        assert auto_switch._restart_calls == []
+
+    @pytest.mark.asyncio
     async def test_falls_back_to_restart_on_404(self, auto_switch, monkeypatch):
         """404 = old base image without the endpoint → restart fallback."""
         post = AsyncMock(return_value=_types.SimpleNamespace(status_code=404))

@@ -317,7 +317,10 @@ def build_execution_env(
             continue
         env[key] = value
 
-    for key, value in _RUNTIME_OVERRIDES.items():
+    # list(): spawns run this in executor threads while the async reload
+    # endpoint mutates the dict on the event loop — a key ADDED mid-iteration
+    # would raise "dictionary changed size during iteration" and fail a spawn.
+    for key, value in list(_RUNTIME_OVERRIDES.items()):
         if value is None:
             # A force-unset that swallows a value `.env` supplied is worth one
             # WARNING (names only, #2114) — per key and actively invalidated,

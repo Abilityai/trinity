@@ -26,6 +26,7 @@ cannot import `src/backend`), matching `test_1999_execution_env.py`.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import logging
 import os
@@ -328,6 +329,32 @@ class TestObservability:
 
         report = {row["key"]: row for row in mod.env_drift_report(env_file=env_file)}
         assert report["GOOGLE_API_KEY"]["suppressed_for_spawn"] is False
+
+
+# ---------------------------------------------------------------------------
+# Boot wiring
+# ---------------------------------------------------------------------------
+
+def test_agent_server_boot_calls_the_arm_at_module_level():
+    """The arm is only worth anything if boot actually runs it. Static (the
+    test_1999 router-wiring idiom): a main.py refactor that drops the call —
+    or moves it inside a function nothing invokes — regresses the
+    restart-durability half of #2114 with green CI. Module-level placement is
+    ALSO the ordering guarantee: main.py's top level executes on import,
+    before uvicorn can serve any request that spawns."""
+    src = (_ROOT / "docker" / "base-image" / "agent_server" / "main.py").read_text()
+    tree = ast.parse(src)
+    module_level_calls = {
+        n.value.func.id
+        for n in tree.body
+        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+        and isinstance(n.value.func, ast.Name)
+    }
+    assert "arm_subscription_auth_guard" in module_level_calls, (
+        "agent_server/main.py no longer arms the subscription-shadow guard at "
+        "boot — a stale .env ANTHROPIC_API_KEY re-shadows subscription auth "
+        "after every container restart (#2114)"
+    )
 
 
 # ---------------------------------------------------------------------------

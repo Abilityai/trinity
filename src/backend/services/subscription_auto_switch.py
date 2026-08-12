@@ -403,8 +403,15 @@ async def _hot_reload_subscription_token(agent_name: str) -> str:
         # agent's .env would otherwise deliver to spawns. Surface it HERE — the
         # backend log operators actually read during a subscription incident —
         # instead of only a once-per-boot line in the container log.
+        # Agent-supplied data: validate shape INSIDE the try — a tampered
+        # response (non-list, non-str items) must degrade to "no warning",
+        # never TypeError out of the function-level except and demote an
+        # already-successful hot-reload into a container restart.
         try:
-            env_shadow = (resp.json() or {}).get("env_shadow") or []
+            raw_shadow = (resp.json() or {}).get("env_shadow") or []
+            if not isinstance(raw_shadow, list):
+                raw_shadow = []
+            env_shadow = [k for k in raw_shadow if isinstance(k, str)][:8]
         except Exception:
             env_shadow = []
         if env_shadow:
