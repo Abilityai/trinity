@@ -465,12 +465,8 @@
 - **Out of scope (follow-ups)**: line routing around tiles; live re-anchor mid-drag; drag-out-of-zone to clear dept; touch port affordance; suggestions from `agent_permissions`/spawn provenance; behavioral consumers of reporting lines (escalation routing).
 - **Flow**: `docs/memory/feature-flows/dashboard-grid-view.md` (§ Org overlay)
 
----
-
----
-
 ### 9.12 Grid Info Tile — Recent Failures (trinity-enterprise#100)
-- **Status**: ✅ Implemented (2026-08-12) · OSS-core
+- **Status**: ✅ Implemented (2026-08-12) · OSS-core (explicit decision — no entitlement gate)
 - **Description**: The first **data** info tile on the Grid's widget chassis (trinity-enterprise#325): the newest failed executions across every accessible agent, with the 24h failure total in the header meta. Failures previously required opening Operations → Executions and applying a filter. Default-on; toggled in the Tiles ▾ menu like any other tile.
 - **Data sources — no backend change**: `GET /api/executions?status=failed&hours=24&limit=4` (rows) and `GET /api/executions/stats?hours=24` (`failed_count`). Both existing, paginated, filtered and access-scoped. Both ride `stores/fleetGrid.js::refreshBatchData()` — the ONE visibility-aware 60s batch poll the Grid already runs — gated on the tile being enabled. **No new endpoint, no schema change, no new timer.** The tile never fetches: viewport culling *unmounts* tiles, so a fetch in `onMounted` would re-issue on every pan.
 - **Honest empty state (the load-bearing requirement)**: "No failures in 24h ✓" is a **positive claim** about the fleet, on the fleet's own monitoring surface, so it requires positive evidence and is unreachable from any of the three faults that would otherwise manufacture it — (1) a failed rows GET (principle 15 / #1926), (2) a failed `/stats` GET (the 24h total is a second request; unknown ≠ zero, and it is never inferred from `rows.length`), (3) an **unenumerable fleet** — `accessible_agent_names` resolves through `docker_service.list_all_agents_fast()`, which returns `[]` on *any* Docker fault, so a non-admin gets HTTP 200 + zeros and a green all-clear invented by an infrastructure failure. A non-empty roster is the client-side enumerability signal. A fourth route is closed in the store: `GET /api/executions` answers a bare array, so a 200 that is not one is treated as a failed cycle rather than coerced to `[]` (which is byte-identical to a healthy empty fleet). The rule lives in `utils/executionFailure.js::failuresTileState` as a pure function so it is unit-assertable under the node-environment suite. An empty roster is deliberately worded as *"Fleet list is empty"* naming both possible causes, since the tile cannot distinguish a fresh install from a failed enumeration — it refuses the ✓ either way without asserting a fault.
@@ -479,6 +475,10 @@
 - **Chassis contract touched**: info tiles now receive the **unfiltered** roster (`orgAgents || agents`, the #305 seam) so the ent#261 type-to-filter cannot degrade a fleet tile's labels to raw slugs per keystroke; and the Grid's shared 1s tick is passed only to catalog entries declaring `wantsTick`, so a tile rendering no clock is not re-rendered every second. `InfoTile` sets `inheritAttrs: false`.
 - **Out of scope**: WS-driven early refresh (v1 rides the poll); the error-code column; the sibling **Next schedules** tile (trinity-enterprise#99), held.
 - **Flow**: `docs/memory/feature-flows/dashboard-grid-view.md` (§ Info tiles)
+
+---
+
+---
 
 ## Brain Orb — The Self-Rendering Mind (trinity-enterprise#58)
 
