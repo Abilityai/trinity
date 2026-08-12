@@ -35,6 +35,20 @@ _spec = importlib.util.spec_from_file_location(
     os.path.join(_backend_path, "utils", "url_validation.py"),
 )
 _mod = importlib.util.module_from_spec(_spec)
+
+# The `sys.modules` entry below is installed at IMPORT time — before any fixture
+# runs — so `monkeypatch.setitem` cannot reach it. The sanctioned alternative is
+# the named snapshot/restore pair (#762 ratchet; precedent:
+# tests/unit/test_telegram_webhook_backfill.py), with one adaptation: that file
+# installs its stubs INSIDE each test, so a snapshot taken at fixture setup is
+# genuinely pre-stub. Here the entry is already in place by then, so the
+# pre-stub value is captured HERE, at module scope — restoring a fixture-time
+# snapshot would just write the stub back and leak it for the rest of the
+# session (`tests/unit/conftest.py`'s `_POP_PREFIXES` sweep does not match this
+# name).
+_STUBBED_MODULE_NAMES = ["backend_url_validation_736"]
+_PRE_STUB_SYS_MODULES = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+
 sys.modules["backend_url_validation_736"] = _mod
 _spec.loader.exec_module(_mod)
 
@@ -44,6 +58,23 @@ A2AEndpointUrlError = _mod.A2AEndpointUrlError
 URL = "https://peer.example.com/a2a/bot"
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Undo this file's import-time `sys.modules` registration after each test.
+
+    `_mod` is held by a module global, so the tests keep working once the entry
+    is gone; what goes away is the cross-file leak.
+    """
+    try:
+        yield
+    finally:
+        for name, value in _PRE_STUB_SYS_MODULES.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
 
 
 @pytest.fixture
