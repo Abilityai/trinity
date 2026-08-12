@@ -2115,6 +2115,9 @@ class DatabaseManager:
     def get_agents_with_skill(self, skill_name: str):
         return self._skills_ops.get_agents_with_skill(skill_name)
 
+    def get_all_skill_assignments(self):
+        return self._skills_ops.get_all_skill_assignments()
+
     # =========================================================================
     # Skill Sources (delegated to db/skill_sources.py) — ent#237 multi-source
     # =========================================================================

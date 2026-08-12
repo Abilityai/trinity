@@ -11,21 +11,22 @@
               Installable assets for your fleet — agent templates, systems, and skills
             </p>
           </div>
-          <!-- In-page jump anchors — deliberately NOT ?kind= filter pills:
-               two disjoint section shapes, stacked (ent#263). -->
-          <nav class="hidden sm:flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
-            <a href="#agent-templates" class="hover:text-gray-700 dark:hover:text-gray-200 hover:underline">Agent templates</a>
-            <span aria-hidden="true">·</span>
-            <a v-if="canInstallSystems" href="#systems" class="hover:text-gray-700 dark:hover:text-gray-200 hover:underline">Systems</a>
-            <span v-if="canInstallSystems" aria-hidden="true">·</span>
-            <a href="#skills" class="hover:text-gray-700 dark:hover:text-gray-200 hover:underline">Skills</a>
-          </nav>
+        </div>
+
+        <!-- Tab strip (ent#384). OverflowTabs is the contract's mandated
+             primitive; `Operations.vue`'s hand-rolled strip is NOT the
+             precedent to copy — only its `?tab=` URL handling is. The three
+             sections became tabs together, deliberately reversing ent#263's
+             stacked-sections choice for the whole page rather than
+             special-casing Skills, so the page keeps exactly one model. -->
+        <div class="mb-6 border-b border-gray-200 dark:border-gray-750">
+          <OverflowTabs :tabs="visibleTabs" v-model="activeTab" />
         </div>
 
         <!-- Agent Templates section (ent#263: the Library's first asset kind).
              Owns its own loading/error/empty states so a templates failure
              never blanks the skills section below. -->
-        <section id="agent-templates" class="mb-12">
+        <section v-show="activeTab === 'templates'" id="agent-templates" class="mb-12">
         <div class="flex items-center justify-between mb-4">
           <h2 class="text-xl font-semibold text-gray-900 dark:text-white">Agent Templates</h2>
           <button
@@ -319,7 +320,12 @@
              require_role("creator") (AC #6), and an operator who cannot use
              it gains nothing from seeing a dead panel in a browse surface.
              Owns its own state, isolated from the fetches around it. -->
-        <section v-if="canInstallSystems" id="systems" class="mb-12">
+        <section
+          v-if="canInstallSystems && visited.has('systems')"
+          v-show="activeTab === 'systems'"
+          id="systems"
+          class="mb-12"
+        >
           <div class="flex items-center justify-between mb-4">
             <h2 class="text-xl font-semibold text-gray-900 dark:text-white">Systems</h2>
           </div>
@@ -335,7 +341,7 @@
              (ent#182: one skill model, no parallel mechanisms); this section
              owns its own loading/error/empty states, isolated from the
              templates fetch above. -->
-        <section id="skills" class="mb-8">
+        <section v-if="visited.has('skills')" v-show="activeTab === 'skills'" id="skills" class="mb-8">
           <LibrarySkillsSection />
         </section>
       </div>
@@ -352,16 +358,18 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import NavBar from '../components/NavBar.vue'
 import CreateAgentModal from '../components/CreateAgentModal.vue'
 import LibrarySkillsSection from '../components/LibrarySkillsSection.vue'
 import SystemInstallPanel from '../components/systems/SystemInstallPanel.vue'
+import OverflowTabs from '../components/OverflowTabs.vue'
 import api from '../api'
 import { useRole } from '../composables/useRole'
 
 const router = useRouter()
+const route = useRoute()
 // #1931: same convention as LibrarySkillsSection.vue on this page — the
 // templates half must not ship the opposite empty-state convention to the
 // skills half. Store-backed (auth), so no page-level fetch is involved.
@@ -370,6 +378,110 @@ const { hasMinRole, isAdmin } = useRole()
 // Mirrors POST /api/systems/deploy's require_role("creator") (AC #6). The
 // server is the enforcement point; this only decides whether to render.
 const canInstallSystems = computed(() => hasMinRole('creator'))
+
+// ---------------------------------------------------------------------------
+// Tabs (ent#384)
+// ---------------------------------------------------------------------------
+// The three sections became tabs together — a deliberate reversal of ent#263's
+// stacked-sections choice for the WHOLE page, so it keeps exactly one model
+// rather than a tabs-plus-stacked hybrid.
+
+const DEFAULT_TAB = 'templates'
+
+// Legacy in-page anchors from the stacked era. `/templates` → `/library`
+// preserves the hash, so old bookmarks and deep links land on the right tab.
+const HASH_TO_TAB = {
+  '#agent-templates': 'templates',
+  '#systems': 'systems',
+  '#skills': 'skills',
+}
+
+// Systems is omitted rather than shown-and-disabled, matching what ent#126
+// already did with the section: a browse surface gains nothing from a dead
+// panel, and POST /api/systems/deploy is the actual enforcement point.
+const visibleTabs = computed(() => [
+  { id: 'templates', label: 'Agent Templates' },
+  ...(canInstallSystems.value ? [{ id: 'systems', label: 'Systems' }] : []),
+  { id: 'skills', label: 'Skills' },
+])
+
+/** A tab id is only valid if it is currently VISIBLE to this role. */
+function resolveTab(requested) {
+  return visibleTabs.value.some((t) => t.id === requested) ? requested : DEFAULT_TAB
+}
+
+// What the caller ASKED for, captured once before anything rewrites the URL.
+// The late-role watch below must test this and not the live query: `onMounted`
+// normalizes `?tab=` within a microtask, long before `/api/users/me` returns,
+// so by the time the role arrives a creator's `?tab=systems` has already been
+// rewritten to `?tab=templates` — and a watcher reading `route.query.tab` would
+// see its own normalization and never restore the deep link it exists to save.
+const requestedTab = route.query.tab || HASH_TO_TAB[route.hash] || DEFAULT_TAB
+
+const activeTab = ref(resolveTab(requestedTab))
+
+// Lazy-mount-once: a panel mounts the first time its tab is opened and then
+// stays mounted. Plain `v-if` would re-run each child's onMounted fetch on
+// every switch (the #1109 teardown rationale doesn't apply — neither
+// SystemInstallPanel nor stores/skillsLibrary owns a poll), while plain
+// `v-show` would mount Skills and Systems for a Templates-only visitor. This
+// also preserves SystemInstallPanel's editor state across switches.
+const visited = ref(new Set([activeTab.value]))
+
+function selectTab(tab) {
+  activeTab.value = tab
+  if (!visited.value.has(tab)) {
+    visited.value = new Set([...visited.value, tab])
+  }
+}
+
+watch(activeTab, (tab) => {
+  selectTab(tab)
+  if (route.query.tab === tab && !route.hash) return
+  // Drop the legacy hash in the same replace: with the jump anchors gone it
+  // would survive pointing at nothing.
+  router.replace({ query: { ...route.query, tab }, hash: '' })
+})
+
+// The render follows the URL for ANY navigation that changes `?tab=` — an
+// external link, a deep link, a history entry. Reading the query once at setup
+// (the shape Operations.vue uses) leaves those cases changing the address bar
+// while the panel stays put.
+//
+// Note tab CLICKS use `router.replace` above, so they deliberately push no
+// history entry: five tab clicks must not cost five Backs to leave the page.
+// Back therefore leaves the Library rather than walking back through tabs,
+// which is the same trade Operations.vue makes.
+watch(
+  () => route.query.tab,
+  (q) => {
+    // `undefined` is NOT a no-op: clicking the NavBar's Library link while on
+    // another tab re-navigates to a bare `/library` on the SAME route record,
+    // so the component is reused and `onMounted` does not re-run. Early
+    // -returning there left the URL saying `/library` while the render stayed
+    // on Skills — and a reload then landed the user somewhere else.
+    const resolved = resolveTab(q ?? DEFAULT_TAB)
+    if (resolved !== activeTab.value) {
+      selectTab(resolved)
+    } else if (q === undefined) {
+      // Same tab, but the address no longer names it — re-stamp it. The
+      // `activeTab` watcher can't do this for us: `activeTab` didn't change.
+      router.replace({ query: { ...route.query, tab: resolved }, hash: '' })
+    }
+  }
+)
+
+// `stores/auth.js` reports `user` until GET /api/users/me lands, so a creator
+// hard-loading `?tab=systems` resolves to the default first. BOTH arms matter:
+// bounce off Systems if the role turns out to be lower, and restore onto it
+// once the role arrives — without the second arm the deep link is simply lost.
+watch(canInstallSystems, (allowed) => {
+  if (!allowed && activeTab.value === 'systems') {
+    selectTab(DEFAULT_TAB)
+  } else if (allowed && requestedTab === 'systems' && activeTab.value !== 'systems') {
+    selectTab('systems')
+  }
+})
 
 const templates = ref([])
 const loading = ref(false)
@@ -444,6 +556,12 @@ const onAgentCreated = (agent) => {
 
 onMounted(() => {
   fetchTemplates()
+  // Normalize the URL to carry `?tab=` (and drop any legacy hash) so the
+  // address bar always names the tab actually on screen — including the case
+  // where the request arrived as a bare `/library` or a `#skills` anchor.
+  if (route.query.tab !== activeTab.value || route.hash) {
+    router.replace({ query: { ...route.query, tab: activeTab.value }, hash: '' })
+  }
 })
 </script>
 
