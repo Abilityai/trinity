@@ -193,7 +193,9 @@ class AgentConfig(BaseModel):
     # only; None → the agent renders under its slug (exactly today's behavior).
     # Same normalization + named validation as the post-creation PUT /label.
     display_label: Optional[str] = None
-    type: Optional[str] = "business-assistant"
+    # #2104: the free-text agent `type` taxonomy is retired — tags are the
+    # classification mechanism. A `type=` kwarg from an older caller is
+    # silently ignored (Pydantic default extra="ignore"), never an error.
     base_image: str = "trinity-agent-base:latest"
     resources: Optional[dict] = {"cpu": "2", "memory": "4g"}
     tools: Optional[List[str]] = ["filesystem", "web_search"]
@@ -287,9 +289,8 @@ class AgentLabelUpdate(BaseModel):
 
 
 class AgentStatus(BaseModel):
-    """Status of an agent container."""
+    """Status of an agent container. (#2104: no `type` — the taxonomy is retired.)"""
     name: str
-    type: str
     status: str
     port: int  # SSH port only - UI no longer exposed externally
     created: datetime

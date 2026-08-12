@@ -569,7 +569,6 @@ export const useNetworkStore = defineStore('network', () => {
           label: systemAgent.name,
           display_label: systemAgent.display_label || null,
           status: systemAgent.status,
-          type: systemAgent.type || 'system',
           owner: systemAgent.owner,
           runtime: systemAgent.runtime || 'claude-code',
           githubRepo: systemAgent.github_repo || null,

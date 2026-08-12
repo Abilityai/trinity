@@ -43,6 +43,12 @@ All bundled templates ship the canonical `.gitignore`, so an agent created from 
 - The **`name`** is a lowercase-hyphens **slug**. It is immutable, guarantees uniqueness, and is what URLs, MCP tool names, schedules, and webhooks resolve to.
 - The **display label** is a separate, editable, human-facing name. It is non-unique and presentation-only; when blank it renders as the slug. You can set it at creation via the optional `display_label` field (max 120 characters), and change it later — see [Managing Agents](managing-agents.md#display-label).
 
+> **Agent `type` is retired.** Older templates and API calls could set a free-text
+> agent `type` (default `business-assistant`). The field carried no behavior and is
+> no longer accepted, stored, or returned anywhere — use **tags** to categorize
+> agents instead (see [Managing Agents](managing-agents.md)). A `type:` line in an
+> existing `template.yaml` is still parsed but ignored, so old templates keep working.
+
 ## How It Works
 
 When you create an agent, Trinity performs these steps in order:
@@ -54,7 +60,7 @@ When you create an agent, Trinity performs these steps in order:
 5. Credential requirements are extracted from `.mcp.json.template`.
 6. If API subscriptions exist, one is auto-assigned via round-robin (fewest agents first).
 7. The agent starts automatically.
-8. The container is labeled for fleet management: `trinity.platform=agent`, `trinity.agent-name`, `trinity.agent-type`, `trinity.template`.
+8. The container is labeled for fleet management: `trinity.platform=agent`, `trinity.agent-name`, `trinity.template`.
 
 ### Compatibility Validation
 

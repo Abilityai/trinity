@@ -107,8 +107,10 @@ def test_resolvable_template_still_loads(monkeypatch, tmp_path, root_index):
     template_data, shared_folders = crud._resolve_local_template(config)
 
     assert template_data["name"] == "fixture-template"
-    # Template fields are still projected onto the config.
-    assert config.type == "research-agent"
+    # Template fields are still projected onto the config — except `type`,
+    # retired in #2104: a legacy template carrying `type:` must stay loadable
+    # with the field left inert (no projection, no validation error).
+    assert not hasattr(config, "type")
     assert config.runtime == "claude-code"
     assert shared_folders is None
 

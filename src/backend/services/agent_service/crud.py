@@ -1090,7 +1090,8 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
         # its template files and only some config mutations are skipped.
         # Unchanged pre-#1759 behaviour, deliberately left out of scope.
         try:
-            config.type = template_data.get("type", config.type)
+            # #2104: template.yaml `type:` stays parseable but is ignored —
+            # the agent type taxonomy is retired (tags classify agents).
             config.resources = template_data.get("resources", config.resources)
             config.tools = template_data.get("tools", config.tools)
             # Read through the tolerant accessor rather than reaching straight
@@ -1426,7 +1427,6 @@ def _stage_config_files(
 
     agent_config = {
         "agent": {
-            "type": config.type,
             "base_image": config.base_image,
             "resources": config.resources,
             "tools": config.tools,
@@ -1509,7 +1509,6 @@ def _build_base_env(config: AgentConfig) -> dict:
     stall-watchdog ceiling and GUARD-001 guardrails overrides."""
     env_vars = {
         'AGENT_NAME': config.name,
-        'AGENT_TYPE': config.type,
         'CREDENTIALS_FILE': '/config/credentials.json',
         'ANTHROPIC_API_KEY': get_anthropic_api_key(),
         'ENABLE_SSH': 'true',
@@ -1927,7 +1926,6 @@ async def _create_agent_container(
     container_labels = {
         'trinity.platform': 'agent',
         'trinity.agent-name': config.name,
-        'trinity.agent-type': config.type,
         'trinity.ssh-port': str(config.port),
         'trinity.cpu': config.resources['cpu'],
         'trinity.memory': config.resources['memory'],
@@ -1993,7 +1991,6 @@ async def _broadcast_agent_created(agent_status: AgentStatus, ws_manager) -> Non
             "event": "agent_created",
             "data": {
                 "name": agent_status.name,
-                "type": agent_status.type,
                 "status": agent_status.status,
                 "port": agent_status.port,
                 "created": agent_status.created.isoformat(),

@@ -200,7 +200,6 @@ return {
     "has_template": bool(labels.get("trinity.template")),
     "agent_name": agent_name,
     "template_name": labels.get("trinity.template", ""),
-    "type": labels.get("trinity.agent-type", ""),
     "resources": {
         "cpu": labels.get("trinity.cpu", ""),
         "memory": labels.get("trinity.memory", "")

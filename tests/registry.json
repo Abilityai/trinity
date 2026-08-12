@@ -2122,6 +2122,18 @@
         "unit"
       ],
       "description": "Client-portal exposure seam (#79): base-URL resolver, exposure-mode read/normalize, setter validation, sign-in/verify, portal-token roundtrip + fence, title-auth resolution. Extended for trinity#2101 with the briefing hint belt: _bound_briefing_hints slices to _MAX_BRIEFING_HINTS preserving head order, the belt sits strictly above the frontend collapse limit (6) and at or under 50, and an inspect.getsource pin proves _agent_briefing still routes its return through the belt (guards the exact drift a PR #2103 rebase could introduce, since that PR rewrites the function body). Pure surfaces, no patching."
+    },
+    {
+      "file": "unit/test_2104_agent_type_retired.py",
+      "feature": "#2104",
+      "added": "2026-08-11",
+      "categories": [
+        "backend",
+        "unit",
+        "models",
+        "refactor"
+      ],
+      "description": "Agent `type` taxonomy retired (#2104): AgentConfig ignores a legacy type= kwarg (enterprise provisioner stays inert), AgentStatus carries no type field, stale trinity.agent-type container labels are tolerated but never surfaced, and a residue guard walks src/backend + mcp-server + frontend + base-image so the retired tokens (label, AGENT_TYPE env, default value) cannot silently re-enter."
     }
   ]
 }

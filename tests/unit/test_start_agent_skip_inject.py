@@ -301,10 +301,12 @@ class TestRecoverRecreate1559:
         assert kwargs["base_volumes"] == {
             "agent-proj-workspace": {"bind": "/home/developer", "mode": "rw"}
         }
-        # type + runtime recovered from the volume's template.yaml.
-        assert kwargs["labels"]["trinity.agent-type"] == "researcher"
+        # runtime recovered from the volume's template.yaml; the template's
+        # `type:` is parsed but IGNORED (#2104) — no label, no env var.
         assert kwargs["labels"]["trinity.agent-runtime"] == "codex"
+        assert "trinity.agent-type" not in kwargs["labels"]
         assert kwargs["env_vars"]["AGENT_RUNTIME"] == "codex"
+        assert "AGENT_TYPE" not in kwargs["env_vars"]
         assert kwargs["env_vars"]["AGENT_NAME"] == "proj"
 
     def test_recreate_missing_container_mounts_a_renamed_agents_real_volume(self):

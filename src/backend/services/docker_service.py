@@ -103,7 +103,6 @@ def get_agent_status_from_container(container) -> AgentStatus:
 
     return AgentStatus(
         name=agent_name,
-        type=labels.get("trinity.agent-type", "unknown"),
         status=normalized_status,
         port=int(labels.get("trinity.ssh-port", "0")),
         created=parse_iso_timestamp(labels["trinity.created"]) if labels.get("trinity.created") else utc_now(),
@@ -197,7 +196,6 @@ def list_all_agents_fast() -> List[AgentStatus]:
             # Extract only data available in labels - no container.attrs or container.image
             agent = AgentStatus(
                 name=agent_name,
-                type=labels.get("trinity.agent-type", "unknown"),
                 status=normalized_status,
                 port=int(labels.get("trinity.ssh-port", "0")),
                 created=parse_iso_timestamp(labels["trinity.created"]) if labels.get("trinity.created") else utc_now(),
