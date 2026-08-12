@@ -396,7 +396,8 @@ class TestDriftReport:
         report = mod.env_drift_report(env_file)
 
         assert report == [
-            {"key": "TOKEN_A", "in_file": True, "in_process_env": False, "equal": False}
+            {"key": "TOKEN_A", "in_file": True, "in_process_env": False,
+             "equal": False, "suppressed_for_spawn": False}
         ]
         assert "secret-value" not in repr(report)
 
@@ -416,6 +417,7 @@ class TestDriftReport:
             "in_file": False,
             "in_process_env": True,
             "equal": False,
+            "suppressed_for_spawn": False,
         }
 
 
@@ -475,14 +477,39 @@ def test_the_router_call_sites_that_keep_1089_working_are_wired():
         "runtime override — the next subprocess would read the stale .env "
         "value and #1089 silently stops working"
     )
-    assert "ANTHROPIC_API_KEY" in keys, (
-        "the remove_api_key path no longer force-unsets ANTHROPIC_API_KEY, so "
-        "a subscription switch leaves the old key applying"
+    # #2114: the force-unset now iterates SUBSCRIPTION_SHADOW_KEYS (one shared
+    # constant, so ANTHROPIC_AUTH_TOKEN cannot drift from ANTHROPIC_API_KEY),
+    # so the key no longer appears as a Constant first-arg. Assert the loop
+    # form is wired instead...
+    unset_loop_over_shadow_keys = any(
+        isinstance(n, ast.For)
+        and isinstance(n.iter, ast.Name)
+        and n.iter.id == "SUBSCRIPTION_SHADOW_KEYS"
+        and any(
+            isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            and c.func.id == "set_runtime_override"
+            and len(c.args) > 1 and isinstance(c.args[1], ast.Constant)
+            and c.args[1].value is None
+            for b in n.body for c in ast.walk(b)
+        )
+        for n in ast.walk(tree)
     )
+    assert unset_loop_over_shadow_keys, (
+        "the remove_api_key path no longer force-unsets the subscription-shadow "
+        "keys, so a subscription switch leaves the old key applying"
+    )
+    # ...and that the shared constant still carries the key this guard
+    # originally pinned (loaded from the spawn module — the single definition).
+    spec = importlib.util.spec_from_file_location("_exec_env_1089_wiring", _MODULE)
+    emod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(emod)
+    assert "ANTHROPIC_API_KEY" in emod.SUBSCRIPTION_SHADOW_KEYS
     assert any(
         isinstance(n.args[1], ast.Constant) and n.args[1].value is None
         for n in overrides if len(n.args) > 1
-    ), "the force-unset form (value=None) is gone — only the file layer remains"
+    ) or unset_loop_over_shadow_keys, (
+        "the force-unset form (value=None) is gone — only the file layer remains"
+    )
 
 
 # ---------------------------------------------------------------------------

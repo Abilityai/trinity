@@ -57,6 +57,36 @@ would leave the token file briefly world-readable under the process umask betwee
 create and chmod. Canonical home: architecture.md
 §"Subscription Token Rotation via Hot-Reload".
 
+**Shadow-proofing (#2114).** Post-#1999 the spawn env re-reads `.env` at every
+spawn, so a stale `.env`-resident `ANTHROPIC_API_KEY` — which Claude Code
+prefers over `CLAUDE_CODE_OAUTH_TOKEN` — silently shadowed the subscription
+token, and SUB-003 mis-attributed the resulting identical auth failures to
+each healthy subscription in turn (2h skip-list poisoning, "no viable
+alternative"). Three coordinated pieces:
+
+- `_hot_reload_subscription_token` sends `remove_api_key=True` **for Claude
+  runtimes** (container label, claude-code default); non-Claude runtimes keep
+  `False` — a legacy subscription row on a Gemini/Codex agent must not strip a
+  `.env` key its own scripts may use.
+- The endpoint's `remove_api_key=True` force-unsets **both** API-key spellings
+  (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` — one shared
+  `SUBSCRIPTION_SHADOW_KEYS` constant in `execution_env.py`) and returns
+  `env_shadow`: names (never values) of force-unset keys the current `.env`
+  still carries. The backend logs a WARNING naming agent + keys when
+  non-empty — the durable operator signal at switch time.
+- **Restart durability** is the agent server's own job: at boot,
+  `arm_subscription_auth_guard()` arms the same force-unset overrides when the
+  container baseline carries a truthy `CLAUDE_CODE_OAUTH_TOKEN` on a Claude
+  runtime (the rotated override-file token is exported by `startup.sh` before
+  the server launches, so it is always baseline). Without this, every plain
+  stop/start re-opened the shadow until the next switch.
+
+Observability: `env_drift_report` marks force-unset keys
+`suppressed_for_spawn` (including keys absent from `.env`), so the drift
+surface cannot show all-green over an active suppression; `build_execution_env`
+logs a per-key memoized WARNING (names only) when a force-unset swallows a
+value `.env` supplied, re-arming if the key is removed and re-added.
+
 ## Trigger Surface
 
 | Layer | Signal | Failure kind |
@@ -102,7 +132,9 @@ enforced by `tests/unit/test_904_sigkill_no_false_auth.py::TestBackendSchedulerP
 | Tests | `tests/unit/test_904_sigkill_no_false_auth.py` | #904 SIGKILL/OOM no-false-AUTH coverage + `TestBackendSchedulerParity` byte-identity guard on the canonical↔mirror classifier (#1088) |
 | Tests | `tests/unit/test_subscription_auto_switch_pingpong.py` | Unit regression for #444 ping-pong prevention; `TestRateLimitAging` (#476) pins 2h-window correctness; `TestHotReloadSwitch` + `TestKeyRolloverFanOut` (#1089) pin the hot-reload helper, auto-switch wire-in, and key-rollover fan-out |
 | Tests | `tests/unit/test_subscription_reassign_hotreload.py` | #1089 — manual sub→sub hot-reload under the lock (no `container_stop`), mode-change still recreates, register/upsert key-rollover fan-out, and the admin-only gate on `register_subscription` (non-admin → 403 before any create or fan-out) |
-| Tests | `tests/unit/test_reload_token_endpoint.py` | #1089 — agent-server `POST /api/credentials/reload-token`: sets env, atomically writes the `/var/lib/trinity/oauth-token` override at `0600`, no `.env` write, `remove_api_key` pops `ANTHROPIC_API_KEY`, empty token → 400 |
+| Tests | `tests/unit/test_reload_token_endpoint.py` | #1089 — agent-server `POST /api/credentials/reload-token`: sets env, atomically writes the `/var/lib/trinity/oauth-token` override at `0600`, no `.env` write, `remove_api_key` pops both shadow keys + arms force-unset overrides + reports `env_shadow` names-only (#2114), empty token → 400 |
+| Agent | `docker/base-image/agent_server/services/execution_env.py` | #2114 — `arm_subscription_auth_guard()` (boot-time force-unset on baseline-token Claude agents), `SUBSCRIPTION_SHADOW_KEYS`, per-key memoized suppression WARNING, `env_drift_report` `suppressed_for_spawn` marker |
+| Tests | `tests/unit/test_2114_subscription_shadow_guard.py` | #2114 — arm trigger matrix (empty-token / non-Claude / terminal / platform-key / .env-managed all inert), override-layer semantics, drift-marker + memo observability, stale-.env-OAuth residual pinned |
 | Tests | `tests/unit/test_subscription_auto_switch_no_cred_import.py` | Chain-level regression for #606 — pins `_restart_agent → start_agent_internal → inject_assigned_credentials` reaches the `lifecycle.py:155` `subscription_mode` short-circuit and never re-enters file-based credential import |
 | Tests | `tests/unit/test_iso_cutoff.py` | Format parity between `iso_cutoff(N)` and `utc_now_iso()` (#476) |
 | Util | `src/backend/utils/helpers.py::iso_cutoff` | Canonical cutoff helper for ISO-Z TEXT comparisons (#476) |
@@ -172,3 +204,4 @@ anyway, so the omission was silent.
 - **Flip-flopping** (#441 update): the 2h skip-list (`is_subscription_rate_limited` ∧ `select_best_alternative_subscription`) is now the only thrash guard. Pre-#441 the threshold also required 2 consecutive 429s before switching, but that gated user-visible failures unnecessarily — the skip-list alone is sufficient because a just-drained sub stays flagged for 2h post-switch.
 - **Concurrent switches** (#799/#1089): a per-agent `agent_switch_lock` serializes the assign+apply window so a manual `PUT /api/subscriptions/agents/{name}` reassignment can't interleave with a concurrent auto-switch. The `old_sub_id` snapshot is taken **inside** that lock, immediately before the DB assign — a concurrent switch therefore can't change the agent's subscription between the read and the assign (TOCTOU). Without this, a sub→sub swap could be mis-classified as an auth-mode change (or vice-versa) and routed into a needless container recreate instead of a hot-reload.
 - **Cleanup**: Records older than 24h are pruned hourly by `CleanupService` (phase 6, #476); the 2h "is rate-limited" window drives candidate filtering independently of cleanup
+- **`.env`-resident `ANTHROPIC_API_KEY` on a subscription agent (#2114)**: suppressed from every spawn (see Shadow-proofing above). A *funded* key that was silently billing instead of the subscription flips to subscription auth after the base-image rebuild — matches the declared assignment; the managed path to API-key auth remains clear-subscription (which recreates). Known residual, deliberately unfixed: a stale `.env` `CLAUDE_CODE_OAUTH_TOKEN` still beats the rotated baseline token after a restart (different fix shape — precedence, not unset; pinned by `test_2114_subscription_shadow_guard.py::TestKnownResidual`)

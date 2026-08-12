@@ -306,3 +306,8 @@ class TokenReloadResponse(BaseModel):
     """Response from a subscription token hot-reload"""
     status: str  # "success"
     reloaded: bool
+    # #2114: NAMES (never values) of force-unset keys present in the current
+    # .env parse — i.e. keys that would shadow subscription auth at spawn were
+    # they not suppressed. The backend logs a WARNING when non-empty, so the
+    # shadow is diagnosed from the backend log at switch time.
+    env_shadow: List[str] = []

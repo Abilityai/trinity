@@ -24,8 +24,9 @@ inputs, rebuilt per spawn rather than accumulated in process state:
     .env                 parsed fresh at every spawn; authoritative for
                          credentials, so a deleted key is deleted.
     RUNTIME_OVERRIDES    a small named dict for values that are deliberately
-                         NOT `.env` credentials — today only the #1089
-                         subscription-token rotation.
+                         NOT `.env` credentials — the #1089 subscription-token
+                         rotation and the #2114 boot-time subscription-shadow
+                         arm (`arm_subscription_auth_guard`).
 
 `RUNTIME_OVERRIDES` is applied AFTER the file, deliberately diverging from the
 issue's sketched ordering. `/api/credentials/reload-token` rotates the
@@ -97,6 +98,25 @@ _ENV_FILE_MAX_BYTES = 1024 * 1024
 
 # Values that are deliberately not `.env` credentials. `None` = force-unset.
 _RUNTIME_OVERRIDES: Dict[str, Optional[str]] = {}
+
+# API-key-style Claude auth names a subscription force-unsets (#2114). Claude
+# Code prefers either of these over CLAUDE_CODE_OAUTH_TOKEN, so a stale value
+# arriving via the `.env` merge silently shadows subscription auth at every
+# spawn. ANTHROPIC_AUTH_TOKEN rides along: same precedence, same shadow class.
+SUBSCRIPTION_SHADOW_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+# Runtime names that mean "Claude Code" — mirrors the backend's
+# CLAUDE_RUNTIME_NAMES (src/backend/services/agent_service/helpers.py),
+# including its unset/empty→claude default. This module is deliberately
+# import-free (loadable standalone), so the pair is kept by this comment,
+# not by an import.
+_CLAUDE_RUNTIME_NAMES = frozenset({"claude-code", "claude"})
+
+# Keys whose file-supplied value build_execution_env has already WARNed about
+# suppressing (names only). Per-key, actively invalidated: a key that stops
+# being suppressed-from-file is discarded, so a key removed from `.env` and
+# later re-added warns again instead of going silent for the process lifetime.
+_SPAWN_SUPPRESS_WARNED: set = set()
 
 # Keys this process has mirrored into `os.environ` from `.env`. Tracked so the
 # mirror can *remove* what a newly-written `.env` no longer contains without
@@ -234,6 +254,43 @@ def runtime_overrides() -> Mapping[str, Optional[str]]:
     return dict(_RUNTIME_OVERRIDES)
 
 
+def arm_subscription_auth_guard() -> bool:
+    """Arm force-unset overrides for API-key-style Claude auth when this
+    container's boot baseline says subscription auth is active (#2114).
+
+    Trigger: `INITIAL_ENV` carries a truthy `CLAUDE_CODE_OAUTH_TOKEN` on a
+    Claude runtime. The baseline is trustworthy for this because the backend
+    bakes the two auth vars mutually exclusively (subscription ⇒ token set,
+    API key popped — lifecycle.py) and `startup.sh` exports the rotated
+    override-file token BEFORE this server launches — so after any plain
+    restart the current token IS the baseline while `_RUNTIME_OVERRIDES`
+    starts empty. Without this arm, a stale `.env`-resident key re-shadows
+    subscription auth on every spawn until the next hot-reload (#2114).
+
+    Deliberately gated OFF for non-Claude runtimes: a vestigial subscription
+    token baked into a pre-#1187 Gemini/Codex container must not strip a
+    `.env` `ANTHROPIC_API_KEY` the agent's own scripts may use — on those
+    runtimes the key never shadows anything (they authenticate from their own
+    keys). Truthiness, not presence: the platform-key create path can bake an
+    empty-string value, which must not arm.
+
+    Called from agent-server boot (main.py), never at module import, so tests
+    control `INITIAL_ENV` before arming. Idempotent; returns True when armed.
+    """
+    runtime = (INITIAL_ENV.get("AGENT_RUNTIME") or "claude-code").lower()
+    if runtime not in _CLAUDE_RUNTIME_NAMES:
+        return False
+    if not INITIAL_ENV.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return False
+    for key in SUBSCRIPTION_SHADOW_KEYS:
+        set_runtime_override(key, None)
+    logger.info(
+        "subscription auth active (baseline token): spawn env force-unsets %s",
+        ", ".join(SUBSCRIPTION_SHADOW_KEYS),
+    )
+    return True
+
+
 # ---------------------------------------------------------------------------
 # The spawn-path entry point
 # ---------------------------------------------------------------------------
@@ -250,7 +307,8 @@ def build_execution_env(
     """
     env: Dict[str, str] = dict(INITIAL_ENV)
 
-    for key, value in parse_env_file(env_file).items():
+    file_env = parse_env_file(env_file)
+    for key, value in file_env.items():
         if key in PROTECTED_KEYS:
             logger.warning(
                 "ignoring %s from .env: it controls what the runtime executes "
@@ -259,8 +317,26 @@ def build_execution_env(
             continue
         env[key] = value
 
-    for key, value in _RUNTIME_OVERRIDES.items():
+    # list(): spawns run this in executor threads while the async reload
+    # endpoint mutates the dict on the event loop — a key ADDED mid-iteration
+    # would raise "dictionary changed size during iteration" and fail a spawn.
+    for key, value in list(_RUNTIME_OVERRIDES.items()):
         if value is None:
+            # A force-unset that swallows a value `.env` supplied is worth one
+            # WARNING (names only, #2114) — per key and actively invalidated,
+            # so a key removed from `.env` and later re-added warns again.
+            suppressed_from_file = key in file_env and key not in PROTECTED_KEYS
+            if suppressed_from_file:
+                if key not in _SPAWN_SUPPRESS_WARNED:
+                    logger.warning(
+                        "spawn env suppresses %s present in .env (runtime "
+                        "override force-unset — if this key previously "
+                        "authenticated this agent, its auth source has "
+                        "changed)", key,
+                    )
+                    _SPAWN_SUPPRESS_WARNED.add(key)
+            else:
+                _SPAWN_SUPPRESS_WARNED.discard(key)
             env.pop(key, None)
         else:
             env[key] = value
@@ -328,8 +404,14 @@ def env_drift_report(env_file: Path = ENV_FILE) -> list:
     present on each side and whether the two agree.
     """
     file_env = parse_env_file(env_file)
+    # Force-unset keys are part of the drift story even when absent from
+    # `.env` and never mirrored — without them a suppressed key could read
+    # all-green here while every spawn omits it, which is exactly the
+    # "inspection agrees with the file, disagrees with reality" failure this
+    # report exists to end (#2114).
+    force_unset = {k for k, v in _RUNTIME_OVERRIDES.items() if v is None}
     report = []
-    for key in sorted(set(file_env) | set(_MIRRORED_KEYS)):
+    for key in sorted(set(file_env) | set(_MIRRORED_KEYS) | force_unset):
         in_file = key in file_env
         in_proc = key in os.environ
         report.append({
@@ -337,5 +419,6 @@ def env_drift_report(env_file: Path = ENV_FILE) -> list:
             "in_file": in_file,
             "in_process_env": in_proc,
             "equal": bool(in_file and in_proc and file_env[key] == os.environ[key]),
+            "suppressed_for_spawn": key in force_unset,
         })
     return report
