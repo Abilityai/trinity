@@ -220,6 +220,52 @@ export const useClientPortalStore = defineStore('clientPortal', {
       }
     },
 
+    // --- Multi-agent chats, backed by rooms (ent#361) ------------------------
+    //
+    // A chat with ONE agent stays a portal thread: that path resumes, streams
+    // and reattaches (ent#358/#286). A chat with two or more is a room, because
+    // rooms are the only substrate that models several agents, @mention-waking
+    // and per-participant budgets. The sidebar merges both.
+
+    async createRoom(agentNames, name) {
+      const { data } = await axios.post(
+        '/api/rooms',
+        { name: name || 'New chat', agents: agentNames },
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
+    async fetchRooms() {
+      const { data } = await axios.get('/api/rooms', { headers: this.authHeader })
+      return (data.rooms || []).map((r) => ({ ...r, is_room: true }))
+    },
+
+    // `since` is the seq cursor: 0 loads the whole transcript, a later value
+    // fetches only what the client has not seen.
+    async fetchRoom(roomId, since = 0) {
+      const { data } = await axios.get(`/api/rooms/${roomId}`, {
+        headers: this.authHeader, params: { since },
+      })
+      return data
+    },
+
+    async postRoomMessage(roomId, content) {
+      const { data } = await axios.post(
+        `/api/rooms/${roomId}/messages`, { content },
+        { headers: this.authHeader }
+      )
+      return data   // {room_id, seq, mentions, woke}
+    },
+
+    async addRoomParticipant(roomId, agentName) {
+      const { data } = await axios.post(
+        `/api/rooms/${roomId}/participants`, { agent_name: agentName, role: 'member' },
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
     // The client's conversation threads with an agent (most-recent first) — the
     // chat-history list backing the session switcher.
     async fetchSessions(agentName) {
@@ -346,7 +392,23 @@ export const useClientPortalStore = defineStore('clientPortal', {
           return sessions.map((s) => ({ ...s, agent_name: a.name }))
         } catch { return [] }
       }))
-      const merged = lists.flat()
+      // ent#361: multi-agent chats are rooms, and they belong in the same list —
+      // to the user these are all just conversations. Room fetch failure
+      // degrades to threads-only rather than emptying the sidebar (an
+      // unentitled or OSS build has no rooms at all, and that is not an error).
+      let rooms = []
+      try { rooms = await this.fetchRooms() } catch { rooms = [] }
+
+      const merged = lists.flat().concat(rooms.map((r) => ({
+        ...r,
+        // Normalised onto the thread shape the sidebar already renders, so one
+        // list component handles both kinds.
+        title: r.name,
+        last_message_at: r.last_message_at || r.created_at,
+        agent_names: (r.participants || [])
+          .filter((p) => p.kind === 'agent')
+          .map((p) => p.identity),
+      })))
       merged.sort((x, y) => {
         const tx = x.last_message_at || x.created_at || ''
         const ty = y.last_message_at || y.created_at || ''

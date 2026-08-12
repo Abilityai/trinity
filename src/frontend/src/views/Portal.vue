@@ -154,6 +154,16 @@
       </main>
     </div>
 
+    <!-- ent#361: picking who is in a chat is an explicit act now -->
+    <PortalAgentPicker
+      v-if="pickerOpen"
+      :agents="store.agents"
+      :busy="pickerBusy"
+      :error="pickerError"
+      @confirm="onPickerConfirm"
+      @cancel="() => { pickerOpen = false; pickerError = null }"
+    />
+
     <!-- Files panel -->
     <PortalFilesPanel v-if="filesOpen && activeAgent" :agent="activeAgent" @close="filesOpen = false" />
   </div>
@@ -168,6 +178,7 @@ import PortalConversation from '@/components/portal/PortalConversation.vue'
 import PortalBriefing from '@/components/portal/PortalBriefing.vue'
 import PortalFilesPanel from '@/components/portal/PortalFilesPanel.vue'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
+import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import { resolveAgentLanding } from '@/components/portal/portalUtils'
 
 const store = useClientPortalStore()
@@ -220,6 +231,8 @@ async function onVerify() {
 // ---- Shell state --------------------------------------------------------------
 const threads = ref([])
 const activeAgentName = ref(null)
+// ent#361: the room a multi-agent chat is being held in, if any.
+const activeRoomId = ref(null)
 const pendingSession = ref(null)      // session to load when the conversation (re)mounts
 const prefill = ref('')
 const filesOpen = ref(false)
@@ -236,9 +249,56 @@ const activeAgent = computed(() => {
 const convKey = computed(() => `${activeAgentName.value || (store.agents[0]?.name) || ''}#${convGen.value}`)
 
 // ---- Navigation handlers ------------------------------------------------------
+// ent#361: "+ New chat" is now an explicit act — pick who is in it. The old
+// behaviour (reset to a blank single-agent thread) is what the picker's
+// one-agent path still does, so nothing is lost, it is just no longer implicit.
+const pickerOpen = ref(false)
+const pickerBusy = ref(false)
+
 function newChat() {
+  pickerOpen.value = true
+}
+
+function startBlankChat() {
   pendingSession.value = null; prefill.value = ''; convGen.value++
   if (route.params.sessionId) router.push('/workspace')
+}
+
+async function onPickerConfirm(agentNames) {
+  if (!agentNames.length) return
+  // ONE agent stays a portal thread: that path resumes, streams and reattaches
+  // (ent#358/#286). TWO OR MORE needs a room — the only substrate that models
+  // several agents and @mention-waking.
+  if (agentNames.length === 1) {
+    pickerOpen.value = false
+    newChatWithAgent(agentNames[0])
+    return
+  }
+  pickerBusy.value = true
+  try {
+    const room = await store.createRoom(agentNames, `Chat with ${agentNames.join(', ')}`)
+    pickerOpen.value = false
+    await refreshThreads()
+    openRoom(room.id || room.room_id)
+  } catch (err) {
+    // Keep the picker open with the reason: closing it would leave the user
+    // guessing whether anything happened.
+    pickerError.value = err?.response?.data?.detail?.message
+      || err?.response?.data?.detail
+      || 'Could not start that chat.'
+  } finally {
+    pickerBusy.value = false
+  }
+}
+
+const pickerError = ref(null)
+
+function openRoom(roomId) {
+  if (!roomId) return
+  activeRoomId.value = roomId
+  pendingSession.value = null
+  convGen.value++
+  router.push(`/workspace/r/${roomId}`)
 }
 function newChatWithAgent(name) {
   activeAgentName.value = name
