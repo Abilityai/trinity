@@ -77,6 +77,10 @@
               class="rounded-2xl rounded-br-md px-3.5 py-2 text-sm whitespace-pre-wrap"
               :class="m.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white'"
             >{{ m.content }}</div>
+            <p
+              v-if="m.failed && m.error"
+              class="text-xs text-status-danger-700 dark:text-status-danger-300 text-right max-w-[32ch]"
+            >{{ m.error }}</p>
             <button
               v-if="m.failed"
               class="text-xs text-status-danger-600 dark:text-status-danger-400 hover:underline inline-flex items-center gap-1"
@@ -179,6 +183,7 @@ import { useClientPortalStore } from '@/stores/clientPortal'
 import { renderMarkdown } from '@/utils/markdown'
 import { agentDisplayName } from '@/utils/agentName'
 import PortalAvatar from './PortalAvatar.vue'
+import { deliveryFailureReason } from './portalUtils'
 
 const props = defineProps({
   agent: { type: Object, required: true },      // {name, owner, avatar_url, description, playbooks, voice_available}
@@ -301,7 +306,7 @@ async function deliver(text) {
     attachments.value = []
     return true
   } catch (err) {
-    return { error: err }
+    return { error: deliveryFailureReason(err) }
   } finally {
     sending.value = false
     clearInterval(elapsedTimer)
@@ -312,21 +317,22 @@ async function deliver(text) {
 async function send() {
   const text = input.value.trim()
   if (!text || sending.value) return
-  const msg = { role: 'user', content: text, failed: false }
+  const msg = { role: 'user', content: text, failed: false, error: null }
   messages.value.push(msg)
   input.value = ''
   autoGrow()
   await scrollDown()
   const res = await deliver(text)
-  if (res !== true) msg.failed = true
+  if (res !== true) { msg.failed = true; msg.error = res?.error || null }
 }
 
 async function retry(i) {
   const msg = messages.value[i]
   if (!msg || sending.value) return
   msg.failed = false
+  msg.error = null
   const res = await deliver(msg.content)
-  if (res !== true) msg.failed = true
+  if (res !== true) { msg.failed = true; msg.error = res?.error || null }
 }
 
 // ---- Voice: speak replies (TTS) + dictate (STT) — carried over from #78 -------

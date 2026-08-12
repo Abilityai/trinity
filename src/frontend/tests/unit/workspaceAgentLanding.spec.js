@@ -11,7 +11,7 @@
  * thread must not silently resume the last one).
  */
 import { describe, it, expect } from 'vitest'
-import { resolveAgentLanding } from '@/components/portal/portalUtils'
+import { resolveAgentLanding, deliveryFailureReason } from '@/components/portal/portalUtils'
 
 const agents = [{ name: 'scribe' }, { name: 'auditor' }]
 // As `fetchAllSessions` returns them: most recent first.
@@ -60,5 +60,43 @@ describe('resolveAgentLanding', () => {
     expect(resolveAgentLanding({ agent: 'scribe' })).toBeNull()
     expect(resolveAgentLanding({ agent: 'scribe', agents, threads: null }))
       .toEqual({ agentName: 'scribe', sessionId: null })
+  })
+})
+
+describe('deliveryFailureReason', () => {
+  const err = (status, detail) => ({ response: { status, data: { detail } } })
+
+  it('shows the backend reason verbatim — that is the whole point', () => {
+    // Each of these is a real ClientPortalError the Workspace can hit, and the
+    // user cannot tell them apart from a bare "Not delivered".
+    for (const detail of [
+      "The agent couldn't respond (it may be offline). Please try again.",
+      'The agent is busy. Please try again shortly.',
+      'The request timed out — try a simpler message.',
+      'This conversation is already handling a message. Please try again shortly.',
+    ]) {
+      expect(deliveryFailureReason(err(502, detail))).toBe(detail)
+    }
+  })
+
+  it('never renders a non-string detail at the user', () => {
+    // FastAPI 422s send a list; a naive `String(detail)` prints "[object Object]".
+    for (const detail of [[{ msg: 'bad' }], { msg: 'bad' }, null, undefined, '', '   ']) {
+      const out = deliveryFailureReason(err(422, detail))
+      expect(typeof out).toBe('string')
+      expect(out).not.toMatch(/object Object/)
+      expect(out.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('distinguishes a dead connection from a server answer', () => {
+    expect(deliveryFailureReason({ message: 'Network Error' })).toMatch(/connection/i)
+    expect(deliveryFailureReason(undefined)).toMatch(/connection/i)
+  })
+
+  it('has its own words for the statuses that carry no detail', () => {
+    expect(deliveryFailureReason(err(413))).toMatch(/too large/i)
+    expect(deliveryFailureReason(err(429))).toMatch(/too many/i)
+    expect(deliveryFailureReason(err(500))).toMatch(/500/)
   })
 })

@@ -89,3 +89,23 @@ export function resolveAgentLanding({ agent, forceNew = false, agents = [], thre
     sessionId: latest ? (latest.id || latest.session_id || null) : null,
   }
 }
+
+// ent#358: the Workspace is now the ONLY continuous-conversation surface, so a
+// send failure it cannot explain is a dead end — there is nowhere else for the
+// user to go and find out why. The backend already answers with a specific,
+// user-facing reason ("The agent is busy", "The request timed out", "This
+// conversation is already handling a message", "The agent couldn't respond (it
+// may be offline)"); the UI was discarding it and rendering a bare
+// "Not delivered · Retry", which reads the same whether the agent is stopped,
+// busy, or the turn simply timed out.
+export function deliveryFailureReason(err) {
+  const detail = err?.response?.data?.detail
+  if (typeof detail === 'string' && detail.trim()) return detail.trim()
+  // A ClientPortalError always sends a string. Anything else is a framework
+  // shape (a 422 validation list, {msg: ...}) — say something true rather than
+  // rendering "[object Object]" at the user.
+  if (!err?.response) return "Couldn't reach Trinity — check your connection and try again."
+  if (err.response.status === 413) return 'That message or attachment is too large.'
+  if (err.response.status === 429) return 'Too many messages just now — wait a moment and retry.'
+  return `The message wasn't delivered (error ${err.response.status}).`
+}
