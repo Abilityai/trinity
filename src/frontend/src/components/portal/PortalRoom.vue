@@ -22,7 +22,16 @@
         </div>
       </div>
 
-      <div class="ml-auto flex items-center gap-1">
+      <!-- ent#381 AC#3: budget observability follows the room into workspace
+           chrome. It lived only on the Sessions page (ParticipantsRail), and a
+           room that closes at a cap with no prior warning reads as the agents
+           going quiet. Shown from ~80% so there is time to react, not as a
+           permanent gauge nobody asked for. -->
+      <div v-if="budgetWarning" class="ml-auto mr-2 text-xs text-status-warning-600 dark:text-status-warning-400 truncate" :title="budgetWarning">
+        {{ budgetWarning }}
+      </div>
+
+      <div class="flex items-center gap-1" :class="{ 'ml-auto': !budgetWarning }">
         <button
           v-if="!isClosed"
           class="px-2 py-1.5 rounded-lg text-xs font-medium text-action-primary-600 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
@@ -173,6 +182,27 @@ const agentParticipants = computed(() =>
   (room.value?.participants || []).filter((p) => p.kind === 'agent' && !p.left_at).map((p) => p.identity)
 )
 const isClosed = computed(() => room.value?.status === 'closed')
+
+// ent#381: the near-limit signal the Sessions page used to own. Same 80%
+// threshold, same two budgets — messages and cost — so a client sees a room
+// approaching its end rather than discovering it after the fact.
+const BUDGET_WARN_AT = 0.8
+
+const budgetWarning = computed(() => {
+  const r = room.value
+  if (!r || r.status !== 'open') return null
+  const used = r.message_count ?? 0
+  const maxMsgs = r.max_messages ?? 0
+  if (maxMsgs && used / maxMsgs >= BUDGET_WARN_AT) {
+    return `${used}/${maxMsgs} messages`
+  }
+  const cost = r.cost ?? 0
+  const maxCost = r.max_cost_usd ?? 0
+  if (maxCost && cost / maxCost >= BUDGET_WARN_AT) {
+    return `$${cost.toFixed(2)}/$${maxCost.toFixed(2)}`
+  }
+  return null
+})
 
 const closedReason = computed(() => ({
   max_messages: 'message limit reached',

@@ -100,3 +100,25 @@ describe('deliveryFailureReason', () => {
     expect(deliveryFailureReason(err(500))).toMatch(/500/)
   })
 })
+
+describe('retired Sessions routes (ent#381)', () => {
+  // The router file is the contract here: a redirect that drops the room id
+  // would land a shared deep link on a generic index, which is how "we kept
+  // your links working" quietly stops being true.
+  it('maps a room deep link onto the equivalent workspace room', async () => {
+    const src = await import('fs').then((fs) =>
+      fs.readFileSync(new URL('../../src/router/index.js', import.meta.url), 'utf8'))
+
+    expect(src).not.toMatch(/component:.*enterprise\/Sessions\.vue/)
+    expect(src).toMatch(/path: '\/sessions\/:roomId\?'/)
+    // The room id must reach the workspace room route, and query + hash survive.
+    expect(src).toMatch(/\/workspace\/r\/\$\{to\.params\.roomId\}/)
+    expect(src).toMatch(/query: to\.query, hash: to\.hash/)
+  })
+
+  it('the nav entry is gone', async () => {
+    const src = await import('fs').then((fs) =>
+      fs.readFileSync(new URL('../../src/components/NavBar.vue', import.meta.url), 'utf8'))
+    expect(src).not.toMatch(/to="\/sessions"/)
+  })
+})

@@ -207,15 +207,20 @@ export const routes = [
     meta: { requiresAuth: true, requiresEntitlement: 'audit', title: 'Audit Log' }
   },
   {
-    // Shared sessions / rooms (ent#170, backend ent#169). Top-level view — a
-    // room spans multiple agents, so it is NOT an Agent Detail tab. Gated Vue in
-    // the OSS bundle (portal precedent): the route + NavBar entry only appear
-    // when `shared_sessions` is in enterprise_features; the guard below catches a
-    // direct URL. `:roomId?` makes a session deep-linkable / refresh-safe.
+    // ent#381: the standalone Sessions page is retired — a multi-agent Workspace
+    // chat runs on the same ent#8 rooms substrate, so keeping both was two nav
+    // entries for one job. The DATA is untouched; only this UI is gone.
+    //
+    // Function form so query and hash survive: these URLs were deep-linked and
+    // shared, and a room id maps exactly onto the Workspace room route, so a
+    // link to a specific room still lands on that conversation rather than
+    // dumping the user at a generic index.
     path: '/sessions/:roomId?',
-    name: 'Sessions',
-    component: () => import('../views/enterprise/Sessions.vue'),
-    meta: { requiresAuth: true, requiresEntitlement: 'shared_sessions', title: 'Sessions' }
+    redirect: to => (
+      to.params.roomId
+        ? { path: `/workspace/r/${to.params.roomId}`, query: to.query, hash: to.hash }
+        : { path: '/workspace', query: to.query, hash: to.hash }
+    ),
   },
   {
     // Workspace (ent#357, formerly "Client Portal") — a view of the agents
