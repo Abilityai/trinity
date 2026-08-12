@@ -275,6 +275,18 @@ def list_endpoints(agent_name: str) -> List[Dict[str, Any]]:
     return out
 
 
+def list_oss_endpoints() -> List[Dict[str, Any]]:
+    """The OSS `system_settings` list, read DIRECTLY — not through the seam.
+
+    Deliberately not `list_endpoints()`: that one answers "what can this agent
+    call?", which a registered enterprise provider may legitimately shadow. The
+    admin surface manages THIS store, and its GET must show what its own PUT and
+    DELETE write — otherwise an entitled install would list one set of endpoints
+    and edit another.
+    """
+    return [_public_record(r) for r in _load_endpoint_records()]
+
+
 # ---------------------------------------------------------------------------
 # Admin mutators for the OSS list. Called ONLY from the admin + human-only
 # settings route — they are here rather than in the router because the storage

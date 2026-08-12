@@ -805,3 +805,127 @@ def test_the_poll_route_is_not_effect_guarded(client):
                            and isinstance(fn.body[0].value, ast.Constant)) else fn.body
     code = "\n".join(ast.dump(node) for node in body)
     assert "effect_guard" not in code
+
+
+# =========================================================================== #
+# 11. The OSS endpoint store (Option 4: system_settings, no new table)
+# =========================================================================== #
+@pytest.fixture()
+def oss_store(monkeypatch):
+    """An in-memory `system_settings` + a real encrypt/decrypt round trip."""
+    store = {}
+
+    class _Crypto:
+        def encrypt(self, payload):
+            return json.dumps(payload)
+
+        def decrypt(self, envelope):
+            return json.loads(envelope)
+
+    import database
+
+    monkeypatch.setattr(database.db, "get_setting_value",
+                        lambda key, default=None: store.get(key, default), raising=False)
+    monkeypatch.setattr(database.db, "set_setting",
+                        lambda key, value: store.__setitem__(key, value), raising=False)
+    monkeypatch.setattr(
+        "services.credential_encryption.CredentialEncryptionService", _Crypto, raising=False
+    )
+
+    async def _ok(url):
+        return PEER
+
+    monkeypatch.setattr(a2a_client, "validate_endpoint", _ok)
+    monkeypatch.setattr("utils.url_validation.validate_a2a_endpoint_url", lambda url: PEER)
+    a2a_outbound.clear_provider()
+    return store
+
+
+def test_an_endpoint_round_trips_through_the_encrypted_setting(oss_store):
+    record = a2a_outbound.upsert_endpoint("partner", PEER.url, "the-secret")
+    assert record["name"] == "partner"
+    assert record["has_credentials"] is True
+    assert "the-secret" not in json.dumps(record), "a read must never echo the credential"
+
+    resolved = a2a_outbound.resolve_endpoint("bot", "partner")
+    assert resolved is not None
+    assert resolved.url == PEER.url
+    assert resolved.credential == "the-secret"
+
+    # Resolvable by id as well as by name.
+    assert a2a_outbound.resolve_endpoint("bot", record["id"]) is not None
+
+
+def test_the_stored_value_is_one_envelope_under_the_documented_key(oss_store):
+    a2a_outbound.upsert_endpoint("partner", PEER.url, "s")
+    assert list(oss_store) == [a2a_outbound.A2A_ENDPOINTS_SETTING]
+
+
+def test_an_update_without_a_credential_keeps_the_existing_one(oss_store):
+    """Write-only means an operator can repoint or rename without re-typing a
+    secret they may not have."""
+    a2a_outbound.upsert_endpoint("partner", PEER.url, "keep-me")
+    a2a_outbound.upsert_endpoint("partner", "https://peer.example.com/a2a/other")
+    resolved = a2a_outbound.resolve_endpoint("bot", "partner")
+    assert resolved.credential == "keep-me"
+    assert resolved.url.endswith("/other")
+
+
+def test_clear_credentials_removes_it(oss_store):
+    a2a_outbound.upsert_endpoint("partner", PEER.url, "gone-soon")
+    a2a_outbound.upsert_endpoint("partner", PEER.url, clear_credential=True)
+    assert a2a_outbound.resolve_endpoint("bot", "partner").credential is None
+
+
+def test_removal_is_by_id_or_name_and_honest_about_a_miss(oss_store):
+    a2a_outbound.upsert_endpoint("partner", PEER.url)
+    assert a2a_outbound.remove_endpoint("nope") is False
+    assert a2a_outbound.remove_endpoint("partner") is True
+    assert a2a_outbound.resolve_endpoint("bot", "partner") is None
+
+
+def test_an_unreadable_store_resolves_nothing_rather_than_raising(oss_store, monkeypatch):
+    """Fail-closed, and specifically NOT fail-open: an unreadable list resolves
+    nothing, so every call is refused with "endpoint not found"."""
+    oss_store[a2a_outbound.A2A_ENDPOINTS_SETTING] = "not json at all"
+    assert a2a_outbound.resolve_endpoint("bot", "partner") is None
+    assert a2a_outbound.list_oss_endpoints() == []
+
+
+def test_the_admin_list_reads_the_oss_store_not_the_seam(oss_store):
+    """A registered enterprise provider answers a different question ("what can
+    THIS agent call?"). An admin panel whose GET and PUT addressed different
+    stores would be worse than no panel."""
+    a2a_outbound.upsert_endpoint("oss-one", PEER.url)
+
+    class _Enterprise:
+        def resolve_endpoint(self, agent_name, ref):
+            return None
+
+        def list_endpoints(self, agent_name):
+            return [{"id": "ent-1", "name": "enterprise-only", "url": "https://x/", }]
+
+    a2a_outbound.register_provider(_Enterprise())
+    assert [e["name"] for e in a2a_outbound.list_oss_endpoints()] == ["oss-one"]
+    assert [e["name"] for e in a2a_outbound.list_endpoints("bot")] == ["enterprise-only"]
+
+
+def test_a_registered_url_is_validated_at_write_time_too(oss_store, monkeypatch):
+    """A usability improvement, not the security boundary — the call path
+    re-validates regardless, because a stored row is not trusted and a DNS
+    record can move."""
+    from utils.url_validation import A2AEndpointUrlError
+
+    def _refuse(url):
+        raise A2AEndpointUrlError("endpoint_not_https", "must use HTTPS")
+
+    monkeypatch.setattr("utils.url_validation.validate_a2a_endpoint_url", _refuse)
+    with pytest.raises(a2a_outbound.EndpointValidationError):
+        a2a_outbound.upsert_endpoint("bad", "http://peer.example.com/a2a")
+
+
+def test_the_endpoint_list_is_bounded(oss_store):
+    for i in range(a2a_outbound.MAX_ENDPOINTS):
+        a2a_outbound.upsert_endpoint(f"ep-{i}", PEER.url)
+    with pytest.raises(a2a_outbound.EndpointValidationError):
+        a2a_outbound.upsert_endpoint("one-too-many", PEER.url)

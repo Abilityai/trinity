@@ -2577,6 +2577,11 @@ async def list_a2a_outbound_endpoints(
 
     Credentials are never returned — each row reports `has_credentials` only,
     matching the write-only property the A2A management tools already document.
+
+    Reads the OSS store directly rather than through the resolver seam: a
+    registered enterprise provider may legitimately answer a different question
+    ("what can THIS agent call?"), and an admin panel whose GET and PUT
+    addressed different stores would be worse than no panel.
     """
     from dependencies import reject_agent_principal
 
@@ -2586,7 +2591,7 @@ async def list_a2a_outbound_endpoints(
     from services import a2a_outbound, a2a_outbound_service
 
     return {
-        "endpoints": a2a_outbound.list_endpoints(""),
+        "endpoints": a2a_outbound.list_oss_endpoints(),
         "enabled": a2a_outbound_service.is_outbound_enabled(),
     }
 

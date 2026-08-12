@@ -192,6 +192,19 @@ def _pinned_url(url: str, address: str) -> str:
     The connection then goes to an address the validator approved, while
     `Host` + `sni_hostname` carry the registered name so TLS still
     authenticates it. IPv6 needs bracket form or the authority is unparseable.
+
+    **The mechanism is a pinned-version dependency, so state it.** httpx passes
+    per-request `extensions` through to httpcore, whose connection code reads
+    `extensions["sni_hostname"]` and uses it as `server_hostname` for
+    `start_tls` — which is what Python's `ssl` verifies the certificate against.
+    Verified against the pinned httpx 0.28.1 / httpcore 1.0.9. `httpcore` is NOT
+    pinned in `docker/backend/Dockerfile` (only `httpx==0.28.1`, which requires
+    `httpcore==1.*`), so a future 1.x that ignored the extension would leave the
+    connection pinned but the SNI wrong — TLS would then fail closed against the
+    IP's certificate rather than silently connect somewhere unvalidated, which
+    is the safe direction. `tests/unit/test_736_a2a_outbound_transport.py` pins
+    that WE set it; nothing can pin that httpcore keeps honouring it short of a
+    live TLS handshake, so this comment is the record.
     """
     parts = urlsplit(url)
     host = f"[{address}]" if ":" in address else address
@@ -365,26 +378,39 @@ async def _read_capped(
 # Dialect cache
 # ---------------------------------------------------------------------------
 
-_dialect_cache: Dict[str, Tuple[float, str]] = {}
+#: origin → (stored_at, dialect_version, resolved_rpc_url)
+#:
+#: The rpc target is cached WITH the dialect, not derived again on a cache hit.
+#: Deriving it would be wrong whenever the operator registered the ORIGIN rather
+#: than a path: the first call learns the real endpoint from the card's `url`
+#: (e.g. `/a2a/bot`), and a later poll re-deriving from the registered URL would
+#: POST to `/` — a different endpoint, silently. The two values are learned from
+#: the same card read, so they expire together.
+_dialect_cache: Dict[str, Tuple[float, str, str]] = {}
 
 
-def _cached_dialect(origin: str) -> Optional[Dialect]:
+def _cached_target(origin: str) -> Optional[Tuple[Dialect, str]]:
+    """`(dialect, rpc_url)` learned from a recent card read, or None."""
     entry = _dialect_cache.get(origin)
     if not entry:
         return None
-    stored_at, version = entry
+    stored_at, version, rpc_url = entry
     if time.monotonic() - stored_at > A2A_DIALECT_CACHE_TTL:
         _dialect_cache.pop(origin, None)
         return None
-    return a2a_protocol.DIALECT_V03 if version == "0.3" else None
+    if version != "0.3":
+        # Only v0.3 is claimed; an unrecognised cached version is a miss rather
+        # than a guess.
+        return None
+    return a2a_protocol.DIALECT_V03, rpc_url
 
 
-def _cache_dialect(origin: str, dialect: Dialect) -> None:
-    _dialect_cache[origin] = (time.monotonic(), dialect.version)
+def _cache_target(origin: str, dialect: Dialect, rpc_url: str) -> None:
+    _dialect_cache[origin] = (time.monotonic(), dialect.version, rpc_url)
 
 
 def clear_dialect_cache() -> None:
-    """Drop the negotiated-dialect cache (tests, and any future admin action)."""
+    """Drop the negotiated dialect + target cache (tests; any future admin action)."""
     _dialect_cache.clear()
 
 
@@ -677,8 +703,8 @@ async def call_endpoint(
                 dialect = a2a_protocol.resolve_dialect(card.get("protocolVersion"))
             except UnsupportedProtocolVersion as exc:
                 raise A2ACallError("unsupported_protocol_version", str(exc)) from None
-            _cache_dialect(origin, dialect)
             rpc_url = resolve_rpc_target(endpoint, card)
+            _cache_target(origin, dialect, rpc_url)
 
             params = {
                 "message": a2a_protocol.text_message(
@@ -724,25 +750,22 @@ async def get_task(
         factory = client_factory or _http_client
         async with factory(timeout) as client:
             origin = f"{endpoint.hostname}:{endpoint.port}"
-            dialect = _cached_dialect(origin)
-            if dialect is None:
+            cached = _cached_target(origin)
+            if cached is None:
                 card = await fetch_card(client, endpoint)
                 try:
                     dialect = a2a_protocol.resolve_dialect(card.get("protocolVersion"))
                 except UnsupportedProtocolVersion as exc:
                     raise A2ACallError("unsupported_protocol_version", str(exc)) from None
-                _cache_dialect(origin, dialect)
                 rpc_url = resolve_rpc_target(endpoint, card)
+                _cache_target(origin, dialect, rpc_url)
             else:
-                # A cached dialect means this origin's card was read recently and
-                # its rpc target verified then. Re-deriving from the registered
-                # URL keeps the poll on the SAME origin without a second card
-                # fetch; the same-origin pin is unaffected because the origin is
-                # the registered one by construction.
-                parts = urlsplit(endpoint.url)
-                rpc_url = endpoint.url if (parts.path or "").rstrip("/") else urlunsplit(
-                    (parts.scheme, parts.netloc, "/", "", "")
-                )
+                # Both values came from ONE card read of this origin, which the
+                # same-origin pin already validated. Re-deriving the target here
+                # instead would be wrong for an operator who registered the
+                # origin: the card named the real endpoint, and a re-derivation
+                # would poll `/`.
+                dialect, rpc_url = cached
 
             body = await _rpc(
                 client, endpoint, rpc_url, credential, dialect.get_task, {"id": task_id}

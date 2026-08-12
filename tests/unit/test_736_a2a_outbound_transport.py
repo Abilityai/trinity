@@ -599,6 +599,30 @@ def test_get_task_polls_the_same_endpoint():
     assert body["params"]["id"] == "remote-42"
 
 
+def test_a_poll_after_an_origin_only_registration_hits_the_endpoint_the_card_named():
+    """The cache stores the RESOLVED TARGET, not just the dialect.
+
+    An operator may legitimately register the ORIGIN (the registry field is
+    documented as "endpoint OR Agent Card URL"). The first call learns the real
+    endpoint from the card's `url`; a poll that re-derived the target from the
+    registered URL would POST to `/` instead — a different endpoint, silently,
+    and only for origin-registered peers.
+    """
+    a2a_client.clear_dialect_cache()
+    seen = []
+    _call(endpoint_url=ORIGIN_ONLY.url, validated=ORIGIN_ONLY,
+          client_factory=_two_hop(record=seen))
+    assert seen[1].url.path == "/a2a/bot"
+
+    seen2 = []
+    asyncio.run(a2a_client.get_task(
+        endpoint_url=ORIGIN_ONLY.url, credential="tok", task_id="t-1",
+        validated=ORIGIN_ONLY, client_factory=_two_hop(record=seen2),
+    ))
+    assert [r.method for r in seen2] == ["POST"], "poll re-fetched the card"
+    assert seen2[0].url.path == "/a2a/bot", "poll went to the wrong endpoint"
+
+
 def test_a_cached_dialect_saves_the_poll_a_second_card_fetch():
     """Without the cache every call AND every poll pays a second full egress
     just to re-read one field — and a poll would burn the caller's own rate
