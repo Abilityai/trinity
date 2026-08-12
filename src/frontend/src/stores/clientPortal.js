@@ -302,6 +302,20 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // entitlement gate's one-sentence 403 when it is mounted but unlicensed. A
     // coded detail therefore PROVES the substrate is present; treat it as an
     // ordinary refusal and let the caller surface the server's own words.
+    //
+    // Runs on all FIVE room calls, for the same reason `_requireRooms` does —
+    // and here it is not redundant. `refreshThreads()` is event-driven, not
+    // periodic, so a capability that lapses while a room is OPEN is only ever
+    // observed by the room's own calls: without this the 3s poll swallows its
+    // 404 (`load()` only reports on a full load), sending shows the generic
+    // "That message was not delivered.", and the state never converges — the
+    // gate is correct at load and the room is a dead end for the rest of the
+    // session. With it, the poll lowers the flag, `<PortalRoom>` unmounts, and
+    // the room route's honest refusal takes the stage. That is AC #4 holding
+    // THROUGH a transition, and it is only safe because of the discriminator
+    // above: `/api/rooms/:id` answers a uniform coded 404 for a room the caller
+    // is not in, and reading THAT as absence would let a stale room link switch
+    // an entitled workspace to single-select.
     _noteRoomsRefusal(err) {
       const status = err?.response?.status
       if (status !== 404 && status !== 403) return err
@@ -344,28 +358,40 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // fetches only what the client has not seen.
     async fetchRoom(roomId, since = 0) {
       this._requireRooms()
-      const { data } = await axios.get(`/api/rooms/${roomId}`, {
-        headers: this.authHeader, params: { since },
-      })
-      return data
+      try {
+        const { data } = await axios.get(`/api/rooms/${roomId}`, {
+          headers: this.authHeader, params: { since },
+        })
+        return data
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
     },
 
     async postRoomMessage(roomId, content) {
       this._requireRooms()
-      const { data } = await axios.post(
-        `/api/rooms/${roomId}/messages`, { content },
-        { headers: this.authHeader }
-      )
-      return data   // {room_id, seq, mentions, woke}
+      try {
+        const { data } = await axios.post(
+          `/api/rooms/${roomId}/messages`, { content },
+          { headers: this.authHeader }
+        )
+        return data   // {room_id, seq, mentions, woke}
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
     },
 
     async addRoomParticipant(roomId, agentName) {
       this._requireRooms()
-      const { data } = await axios.post(
-        `/api/rooms/${roomId}/participants`, { agent_name: agentName, role: 'member' },
-        { headers: this.authHeader }
-      )
-      return data
+      try {
+        const { data } = await axios.post(
+          `/api/rooms/${roomId}/participants`, { agent_name: agentName, role: 'member' },
+          { headers: this.authHeader }
+        )
+        return data
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
     },
 
     // The client's conversation threads with an agent (most-recent first) — the

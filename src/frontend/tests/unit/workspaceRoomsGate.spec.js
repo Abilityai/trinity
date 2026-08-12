@@ -371,6 +371,35 @@ describe('#2128 store gate', () => {
     expect(store.multiAgentChatAvailable).toBe(false)
   })
 
+  it.each([
+    ['fetchRoom', (s) => s.fetchRoom('r1'), 'get'],
+    ['postRoomMessage', (s) => s.postRoomMessage('r1', 'hi'), 'post'],
+    ['addRoomParticipant', (s) => s.addRoomParticipant('r1', 'scout'), 'post'],
+  ])('F20f %s self-heals too — nothing else converges an OPEN room', async (_n, call, verb) => {
+    // `refreshThreads()` is event-driven, not periodic, so a capability that
+    // lapses while a room is open is only ever observed by the room's own
+    // calls. Without the heal here the 3s poll swallows its 404 and the room
+    // is a dead end for the rest of the session.
+    const store = signedInStore()
+    store.multiAgentChatAvailable = true
+    axios[verb].mockRejectedValueOnce({ response: { status: 404, data: { detail: 'Not Found' } } })
+    await expect(call(store)).rejects.toMatchObject({ code: 'rooms_unavailable' })
+    expect(store.multiAgentChatAvailable).toBe(false)
+  })
+
+  it('F20g a room the caller is not in does NOT switch the workspace off', async () => {
+    // `/api/rooms/:id` answers a uniform CODED 404 for a room the caller is not
+    // a member of (enumeration-safety). Reading that as absence would let one
+    // stale room link flip an entitled workspace to single-select.
+    const store = signedInStore()
+    store.multiAgentChatAvailable = true
+    axios.get.mockRejectedValueOnce({
+      response: { status: 404, data: { detail: { code: 'room_not_found', message: 'Room not found' } } },
+    })
+    await expect(store.fetchRoom('someone-elses-room')).rejects.toBeTruthy()
+    expect(store.multiAgentChatAvailable).toBe(true)
+  })
+
   it('F20b a 500 from the rooms endpoint does NOT lower the flag', async () => {
     const store = signedInStore()
     store.multiAgentChatAvailable = true
