@@ -532,6 +532,12 @@ services:
       # inline-auth path (request/verify/playbooks/chat). Functional via its
       # 15000ms default; wired so the lever is not inert.
       - MCP_INLINE_AUTH_TIMEOUT_MS=${MCP_INLINE_AUTH_TIMEOUT_MS:-15000}
+      # #736 ceiling for the mcp-server's own outbound-A2A fetches
+      # (call_a2a_agent / get_a2a_task). It must stay BELOW the MCP client's
+      # gateway abort so WE give up first and can return a pollable receipt
+      # instead of an opaque `fetch failed` over a call that completed anyway.
+      # Functional via its 40000ms default; wired so the lever is not inert.
+      - MCP_A2A_TIMEOUT_MS=${MCP_A2A_TIMEOUT_MS:-40000}
       # ent#328: `ask_trinity` POSTs here for grounded Trinity docs answers.
       # Empty = the public Cloud Function default baked into the client. Wired
       # through compose because an env var the container never receives is not
