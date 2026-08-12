@@ -65,6 +65,9 @@ class _StubProvider:
 #: fixture's lambda rather than the resolution ladder.
 _REAL_IS_ENABLED = a2a_outbound_service.is_outbound_enabled
 
+#: Same reason, for the activity writer the autouse fixture stubs out.
+_REAL_RECORD_ACTIVITY = a2a_outbound_service._record_activity
+
 
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch):
@@ -1009,3 +1012,86 @@ def test_a_stored_credential_is_stripped_before_it_becomes_a_header(oss_store):
     a2a_outbound.upsert_endpoint("partner", PEER.url, "  tok-123  ")
     resolved = a2a_outbound.resolve_endpoint("bot", "partner")
     assert resolved.credential == "tok-123"
+
+
+# =========================================================================== #
+# 12. The activity row (F12) — the requirement no test exercised
+# =========================================================================== #
+def _record_activity_calls(monkeypatch, *, raiser=None):
+    """Drive the REAL `_record_activity` against a recording activity service.
+
+    Every other test in this file monkeypatches `_record_activity` to a no-op,
+    which left F12 — "one `agent_activities` row per outbound call" — entirely
+    unverified. The write is deliberately fail-open, so a wrong enum name or a
+    changed `track_activity` signature would swallow itself into a WARNING and
+    the row would simply never appear: exactly the shape of a requirement that
+    ships inert. Its whole justification is that the audit log is admin-gated
+    and unwatched while this stream is the one an operator actually sees.
+    """
+    import services.activity_service as activity_module
+
+    opened, closed = [], []
+
+    class _Recorder:
+        async def track_activity(self, **kwargs):
+            if raiser:
+                raise raiser
+            opened.append(kwargs)
+            return "act-1"
+
+        async def complete_activity(self, activity_id, **kwargs):
+            closed.append((activity_id, kwargs))
+            return True
+
+    monkeypatch.setattr(activity_module, "activity_service", _Recorder())
+    return opened, closed
+
+
+def test_one_activity_row_is_written_per_outbound_call(monkeypatch, endpoint):
+    from models import ActivityState, ActivityType
+
+    opened, closed = _record_activity_calls(monkeypatch)
+    # The autouse fixture stubbed `_record_activity`; restore the real one.
+    monkeypatch.setattr(a2a_outbound_service, "_record_activity", _REAL_RECORD_ACTIVITY)
+
+    asyncio.run(a2a_outbound_service._record_activity(
+        "bot", "partner", "peer.example.com", "completed"
+    ))
+
+    assert len(opened) == 1, "no agent_activities row was written"
+    assert opened[0]["agent_name"] == "bot"
+    assert opened[0]["activity_type"] == ActivityType.AGENT_COLLABORATION
+    assert opened[0]["triggered_by"] == "agent"
+    details = opened[0]["details"]
+    assert details["direction"] == "a2a_outbound"
+    assert details["endpoint"] == "partner"
+    assert details["host"] == "peer.example.com"
+    # Host only — never the URL, the message, or the credential.
+    assert not any(k in details for k in ("url", "message", "credential"))
+    assert len(closed) == 1
+    assert closed[0][0] == "act-1"
+    assert closed[0][1]["status"] == ActivityState.COMPLETED
+
+
+def test_a_failed_call_is_recorded_as_a_failed_activity(monkeypatch):
+    from models import ActivityState
+
+    opened, closed = _record_activity_calls(monkeypatch)
+    monkeypatch.setattr(a2a_outbound_service, "_record_activity", _REAL_RECORD_ACTIVITY)
+
+    asyncio.run(a2a_outbound_service._record_activity(
+        "bot", "partner", "peer.example.com", "failed", error="card_origin_mismatch"
+    ))
+    assert closed[0][1]["status"] == ActivityState.FAILED
+    assert closed[0][1]["error"] == "card_origin_mismatch"
+
+
+def test_an_activity_write_failure_never_breaks_the_call(monkeypatch):
+    """Fail-open is the right call for observability — but it is only defensible
+    while the happy path is actually proven above."""
+    _record_activity_calls(monkeypatch, raiser=RuntimeError("db down"))
+    monkeypatch.setattr(a2a_outbound_service, "_record_activity", _REAL_RECORD_ACTIVITY)
+
+    asyncio.run(a2a_outbound_service._record_activity(
+        "bot", "partner", "peer.example.com", "completed"
+    ))  # must not raise
