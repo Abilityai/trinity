@@ -186,16 +186,17 @@
             {{ store.manifestText.length }} characters
           </span>
         </div>
-        <textarea
+        <BaseTextarea
           id="manifest-yaml"
-          :value="store.manifestText"
+          mono
+          :model-value="store.manifestText"
           rows="16"
           spellcheck="false"
           placeholder="name: my-system&#10;agents:&#10;  worker:&#10;    template: local:default"
-          class="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 p-3 font-mono text-sm text-gray-900 dark:text-gray-100 focus:border-action-primary-500 focus:ring-action-primary-500"
+          class="mt-1"
           data-testid="manifest-textarea"
-          @input="store.setManifestText($event.target.value)"
-        ></textarea>
+          @update:model-value="store.setManifestText($event)"
+        />
       </div>
 
       <!-- Error -->
@@ -259,6 +260,7 @@ import { useRouter } from 'vue-router'
 import { useSystemsStore } from '../../stores/systems'
 import ManifestPreview from './ManifestPreview.vue'
 import DeployResult from './DeployResult.vue'
+import BaseTextarea from '../base/BaseTextarea.vue'
 
 // Mirrors the server-side byte cap on SystemDeployRequest.manifest. `file.size`
 // is in bytes and so is the server's validator, so the two agree exactly.
