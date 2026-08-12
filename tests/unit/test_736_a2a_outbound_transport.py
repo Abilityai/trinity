@@ -761,3 +761,28 @@ def test_same_origin_agrees_with_the_validators_host_canonicalisation():
     assert not a2a_client._same_origin(
         "https://xn--e1afmkfd.com/a2a", "https://other.example.com/a2a"
     )
+
+
+def test_the_card_fetch_uses_its_own_shorter_timeout():
+    """`A2A_CARD_FETCH_TIMEOUT` was declared, commented "whole card fetch", and
+    never applied — both hops ran on the RPC client's 30 s budget.
+
+    The arithmetic the total deadline was built on (10 s card + 30 s RPC + slack
+    = 45 s) only holds if the card really gets 10 s: otherwise a slow card can
+    eat 30 s of the 45 s window and leave the CREDENTIALED send 15 s. A cap that
+    is declared and unwired is worse than one that was never claimed.
+    """
+    seen = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.extensions.get("timeout")))
+        return _json(CARD if request.method == "GET" else _rpc_ok())
+
+    _call(client_factory=_factory(_handler))
+    card_timeout, rpc_timeout = seen[0][1], seen[1][1]
+    assert card_timeout["read"] == a2a_client.A2A_CARD_FETCH_TIMEOUT
+    assert rpc_timeout["read"] == a2a_client.A2A_RPC_TIMEOUT
+    assert a2a_client.A2A_CARD_FETCH_TIMEOUT < a2a_client.A2A_RPC_TIMEOUT
+    # The deadline must still cover both hops end to end.
+    assert (a2a_client.A2A_CARD_FETCH_TIMEOUT + a2a_client.A2A_RPC_TIMEOUT
+            <= a2a_client.A2A_TOTAL_DEADLINE)

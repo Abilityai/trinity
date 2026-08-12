@@ -91,7 +91,8 @@ logger = logging.getLogger(__name__)
 # a knob on a security boundary, and the operator control that matters is the
 # kill switch. Recorded in requirements so a future reviewer does not "promote"
 # them.
-A2A_CARD_FETCH_TIMEOUT = 10.0        # seconds, whole card fetch
+A2A_CARD_FETCH_TIMEOUT = 10.0        # seconds, whole card fetch (its own
+                                     # per-request budget, NOT the client default)
 A2A_RPC_TIMEOUT = 30.0               # seconds; strictly below the MCP client's
                                      # own 30-60s gateway abort (see H4 below)
 A2A_CONNECT_TIMEOUT = 10.0
@@ -325,6 +326,7 @@ async def _read_capped(
     content: Optional[bytes] = None,
     error_prefix: str,
     secret: Optional[str] = None,
+    timeout: Optional[httpx.Timeout] = None,
 ) -> bytes:
     """Issue one pinned request and read the body under a hard WIRE-byte ceiling.
 
@@ -347,6 +349,7 @@ async def _read_capped(
             headers=request_headers,
             content=content,
             extensions={"sni_hostname": sni},
+            **({"timeout": timeout} if timeout is not None else {}),
         ) as resp:
             if 300 <= resp.status_code < 400:
                 raise A2ACallError(
@@ -503,6 +506,12 @@ async def fetch_card(
         max_bytes=A2A_CARD_MAX_BYTES,
         headers={"Accept": "application/json"},
         error_prefix="card",
+        # The card gets its OWN, shorter budget. The client is built with the
+        # RPC timeout because that hop is the one that matters, but leaving the
+        # card on it breaks the arithmetic the total deadline rests on (10 s
+        # card + 30 s RPC + slack = 45 s): a slow card would otherwise eat 30 s
+        # of the window and leave the CREDENTIALED send 15 s.
+        timeout=httpx.Timeout(A2A_CARD_FETCH_TIMEOUT, connect=A2A_CONNECT_TIMEOUT),
     )
     try:
         card = json.loads(raw.decode("utf-8"))
