@@ -95,7 +95,7 @@ _CHAT_LIMIT_DETAIL = "Too many messages to this agent."
 _UPLOAD_LIMIT_DETAIL = "Too many uploads."
 
 
-def _require_roster(agent_name: str, email: str) -> None:
+def _require_roster(agent_name: str, email: str, include_owned: bool = False) -> None:
     """Uniform 404 for an agent outside the caller's roster.
 
     The services re-check this — it is duplicated here deliberately, as an
@@ -107,7 +107,7 @@ def _require_roster(agent_name: str, email: str) -> None:
     body is never `read()` into memory, and no docker work is done, for an agent
     the caller cannot reach.
     """
-    if not service.agent_on_roster(agent_name, email):
+    if not service.agent_on_roster(agent_name, email, include_owned):
         raise HTTPException(status_code=404, detail="Agent not found")
 
 
@@ -456,18 +456,20 @@ async def my_agents(principal: PortalPrincipal = Depends(get_portal_principal)):
 
 
 @router.get("/search", response_model=PortalSearchResults)
-def portal_search(q: str = "", limit: int = 30, email: str = Depends(get_portal_identity)):
+def portal_search(q: str = "", limit: int = 30, principal: PortalPrincipal = Depends(get_portal_principal)):
     """Cross-chat search over the signed-in client's conversations (all rostered
     agents), by thread title or message content — the portal's main-page search.
     Roster-scoped; a short/empty query returns no results (never an error)."""
-    return service.search_chats(email, q, limit=min(max(limit, 1), 50))
+    # No agent gate here: search is scoped to the caller's own portal rows by
+    # email, so there is no roster decision to mirror.
+    return service.search_chats(principal.email, q, limit=min(max(limit, 1), 50))
 
 
 @router.post("/agents/{agent_name}/chat", response_model=PortalChatResponse)
 async def portal_chat(
     agent_name: str,
     body: PortalChatRequest,
-    email: str = Depends(get_portal_identity),
+    principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """One client chat turn to a rostered agent. Identity from
     `get_portal_identity` (portal session token or operator preview); scoped to
@@ -479,9 +481,14 @@ async def portal_chat(
     the agent's capacity limiter (which bounds concurrency, not spend) is not a
     sufficient control on its own.
     """
+    email = principal.email
+    # ent#358: the scope of what a caller can DO must equal what they can
+    # SEE — `get_roster` unions owned agents for a platform session, so the
+    # gate below has to as well, or an owner 404s on their own agent.
+    include_owned = principal.is_platform
     from services import rate_limiter
 
-    _require_roster(agent_name, email)
+    _require_roster(agent_name, email, include_owned)
     # Burst first: a rejected burst returns before the hourly window records a
     # hit, so a client held at the per-minute limit does not also burn their
     # hourly budget. (The converse costs one burst slot on an hourly rejection —
@@ -494,7 +501,8 @@ async def portal_chat(
         detail=_CHAT_LIMIT_DETAIL,
     )
     try:
-        result = await service.portal_chat(agent_name, body.message, email, session_id=body.session_id)
+        result = await service.portal_chat(agent_name, body.message, email, session_id=body.session_id,
+                                          include_owned=include_owned)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return PortalChatResponse(**result)
@@ -502,17 +510,22 @@ async def portal_chat(
 
 @router.post("/agents/{agent_name}/tts")
 async def portal_tts(agent_name: str, body: PortalTtsRequest,
-                     email: str = Depends(get_portal_identity)):
+                     principal: PortalPrincipal = Depends(get_portal_principal)):
     """Speak a reply in portal voice mode (#78) — returns `audio/mpeg` (MP3) for
     the given text via the shared ElevenLabs voice layer, using the agent's
     configured voice. Roster-scoped (miss → 404); 404 when voice isn't available,
     422 when synthesis fails / exceeds the cost cap (client keeps the text).
     Rate-limited per (client, agent) — it's a paid, client-facing surface."""
+    email = principal.email
+    # ent#358: the scope of what a caller can DO must equal what they can
+    # SEE — `get_roster` unions owned agents for a platform session, so the
+    # gate below has to as well, or an owner 404s on their own agent.
+    include_owned = principal.is_platform
     from services import rate_limiter
     # 20 syntheses / minute per client+agent, on top of tts_service's char cap.
     rate_limiter.enforce(f"portal_tts:{email}:{agent_name}", 20, 60)
     try:
-        audio = await service.synthesize_portal_tts(agent_name, email, body.text)
+        audio = await service.synthesize_portal_tts(agent_name, email, body.text, include_owned=include_owned)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return Response(content=audio, media_type="audio/mpeg")
@@ -520,11 +533,16 @@ async def portal_tts(agent_name: str, body: PortalTtsRequest,
 
 @router.post("/agents/{agent_name}/stt")
 async def portal_stt(agent_name: str, file: UploadFile = File(...),
-                     email: str = Depends(get_portal_identity)):
+                     principal: PortalPrincipal = Depends(get_portal_principal)):
     """Speech-to-text for portal voice input (#78) — the Firefox/Safari fallback
     when the browser has no Web Speech API. Accepts a recorded audio clip, returns
     `{text}` via ElevenLabs Scribe. Roster-scoped (miss → 404); rate-limited per
     (client, agent); fail-soft (client just types on any error)."""
+    email = principal.email
+    # ent#358: the scope of what a caller can DO must equal what they can
+    # SEE — `get_roster` unions owned agents for a platform session, so the
+    # gate below has to as well, or an owner 404s on their own agent.
+    include_owned = principal.is_platform
     from services import rate_limiter
     rate_limiter.enforce(f"portal_stt:{email}:{agent_name}", 20, 60)
     audio = await file.read()
@@ -532,6 +550,7 @@ async def portal_stt(agent_name: str, file: UploadFile = File(...),
         text = await service.transcribe_portal_audio(
             agent_name, email, file.filename or "audio.webm",
             file.content_type or "application/octet-stream", audio,
+            include_owned=include_owned,
         )
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
@@ -539,46 +558,66 @@ async def portal_stt(agent_name: str, file: UploadFile = File(...),
 
 
 @router.get("/agents/{agent_name}/sessions", response_model=PortalSessions)
-def portal_sessions(agent_name: str, email: str = Depends(get_portal_identity)):
+def portal_sessions(agent_name: str, principal: PortalPrincipal = Depends(get_portal_principal)):
     """The client's conversation threads with a rostered agent (most-recent first)
     — the chat-history list. Roster-scoped (miss → 404)."""
+    email = principal.email
+    # ent#358: the scope of what a caller can DO must equal what they can
+    # SEE — `get_roster` unions owned agents for a platform session, so the
+    # gate below has to as well, or an owner 404s on their own agent.
+    include_owned = principal.is_platform
     try:
-        return service.list_sessions(agent_name, email)
+        return service.list_sessions(agent_name, email, include_owned=include_owned)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
 @router.post("/agents/{agent_name}/sessions", response_model=PortalSessionSummary)
-def portal_create_session(agent_name: str, email: str = Depends(get_portal_identity)):
+def portal_create_session(agent_name: str, principal: PortalPrincipal = Depends(get_portal_principal)):
     """Open a fresh conversation thread ("New chat"). Roster-scoped (miss → 404).
     Returns the empty session; its title fills in on the first message."""
+    email = principal.email
+    # ent#358: the scope of what a caller can DO must equal what they can
+    # SEE — `get_roster` unions owned agents for a platform session, so the
+    # gate below has to as well, or an owner 404s on their own agent.
+    include_owned = principal.is_platform
     try:
-        return service.create_session(agent_name, email)
+        return service.create_session(agent_name, email, include_owned=include_owned)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
 @router.get("/agents/{agent_name}/history", response_model=PortalHistory)
 def portal_history(agent_name: str, session_id: str | None = None,
-                   email: str = Depends(get_portal_identity)):
+                   principal: PortalPrincipal = Depends(get_portal_principal)):
     """The client's persisted conversation with a rostered agent (oldest-first),
     so it survives a refresh / re-sign-in. With ``?session_id=`` returns that
     thread; without, the most-recent one. Roster-scoped (miss → 404).
     """
+    email = principal.email
+    # ent#358: the scope of what a caller can DO must equal what they can
+    # SEE — `get_roster` unions owned agents for a platform session, so the
+    # gate below has to as well, or an owner 404s on their own agent.
+    include_owned = principal.is_platform
     try:
-        return service.get_history(agent_name, email, session_id=session_id)
+        return service.get_history(agent_name, email, session_id=session_id, include_owned=include_owned)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
 @router.get("/agents/{agent_name}/documents", response_model=PortalDocuments)
-def portal_documents(agent_name: str, email: str = Depends(get_portal_identity)):
+def portal_documents(agent_name: str, principal: PortalPrincipal = Depends(get_portal_principal)):
     """Files a rostered agent has shared (FILES-001), with download URLs. Scoped
     to the caller's roster (miss → uniform 404). The `?sig=` token gates the
     public OSS download route, so no portal auth rides on the link.
     """
+    email = principal.email
+    # ent#358: the scope of what a caller can DO must equal what they can
+    # SEE — `get_roster` unions owned agents for a platform session, so the
+    # gate below has to as well, or an owner 404s on their own agent.
+    include_owned = principal.is_platform
     try:
-        return service.portal_documents(agent_name, email)
+        return service.portal_documents(agent_name, email, include_owned=include_owned)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
@@ -587,7 +626,7 @@ def portal_documents(agent_name: str, email: str = Depends(get_portal_identity))
 async def portal_upload(
     agent_name: str,
     file: UploadFile = File(...),
-    email: str = Depends(get_portal_identity),
+    principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """Upload a file to a rostered agent (lands in `~/inbox/<client-email>/`).
     Scoped to the caller's roster (miss → 404); size-capped, filename sanitized.
@@ -597,6 +636,11 @@ async def portal_upload(
     than accumulates, so without this the per-request work is unbounded. Keyed on
     email alone: the cost being bounded here is the operator's, not one agent's.
     """
+    email = principal.email
+    # ent#358: the scope of what a caller can DO must equal what they can
+    # SEE — `get_roster` unions owned agents for a platform session, so the
+    # gate below has to as well, or an owner 404s on their own agent.
+    include_owned = principal.is_platform
     from services import rate_limiter
 
     # Both gates run before `read()`, which is what materialises the body in RAM,
@@ -609,7 +653,7 @@ async def portal_upload(
     # here the 25 MiB is already on disk. Rejecting earlier than this would need
     # middleware (or a Content-Length pre-check), not an in-handler gate — do not
     # let a comment here claim otherwise.
-    _require_roster(agent_name, email)
+    _require_roster(agent_name, email, include_owned)
     rate_limiter.enforce(
         f"portal_upload:{email}", PORTAL_UPLOAD_BURST_LIMIT, 60, detail=_UPLOAD_LIMIT_DETAIL
     )
@@ -619,19 +663,25 @@ async def portal_upload(
     )
     data = await file.read()
     try:
-        result = await service.portal_upload_document(agent_name, email, file.filename or "upload", data)
+        result = await service.portal_upload_document(agent_name, email, file.filename or "upload", data,
+                                                       include_owned=include_owned)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return PortalUpload(**result)
 
 
 @router.get("/agents/{agent_name}/uploads", response_model=PortalUploads)
-async def portal_uploads(agent_name: str, email: str = Depends(get_portal_identity)):
+async def portal_uploads(agent_name: str, principal: PortalPrincipal = Depends(get_portal_principal)):
     """Files the client has sent to this rostered agent (their inbox) — so they
     can review what they've uploaded. Roster-scoped (miss → 404); empty when the
     agent is offline.
     """
+    email = principal.email
+    # ent#358: the scope of what a caller can DO must equal what they can
+    # SEE — `get_roster` unions owned agents for a platform session, so the
+    # gate below has to as well, or an owner 404s on their own agent.
+    include_owned = principal.is_platform
     try:
-        return await service.list_client_uploads(agent_name, email)
+        return await service.list_client_uploads(agent_name, email, include_owned=include_owned)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)

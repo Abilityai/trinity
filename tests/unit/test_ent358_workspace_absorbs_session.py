@@ -106,7 +106,7 @@ def portal(monkeypatch):
         recorder=None,
     )
 
-    monkeypatch.setattr(svc, "agent_on_roster", lambda a, e: True)
+    monkeypatch.setattr(svc, "agent_on_roster", lambda a, e, include_owned=False: True)
     monkeypatch.setattr(svc, "_build_portal_system_prompt", lambda a, e: None)
     monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s: SESSION)
     monkeypatch.setattr(svc, "_spawn_title_generation", lambda *a, **kw: None)
@@ -484,3 +484,53 @@ def test_a_failed_turn_does_not_cache_its_session_id(portal):
         _run(svc.portal_chat(AGENT, "hi", EMAIL, SESSION))
 
     assert state.cached_writes == []
+
+
+# ---------------------------------------------------------------------------
+# Scope: what you can DO must equal what you can SEE
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def roster(monkeypatch):
+    """Stub the two roster reads the scope gate is built from."""
+    from client_portal import service as svc
+    from client_portal import db as portal_db
+
+    monkeypatch.setattr(portal_db, "get_shared_roster",
+                        lambda email: [{"agent_name": "shared-with-me"}])
+    monkeypatch.setattr(portal_db, "get_owned_roster",
+                        lambda email: [{"agent_name": "my-own-agent"}])
+    return svc
+
+
+def test_an_owner_can_act_on_their_own_agent(roster):
+    """The bug that made the Workspace unusable.
+
+    `get_roster(include_owned=True)` (ent#357's one-click platform entry) shows
+    a platform user the agents they OWN, but the scope gate read only the
+    SHARED roster — and Trinity refuses a self-share, so an owner's agents are
+    never in that set. Result: every agent visible in the sidebar 404'd on
+    every action, with no way to grant yourself access.
+    """
+    assert roster.agent_on_roster("my-own-agent", "me@example.com", include_owned=True) is True
+    assert roster.agent_on_roster("shared-with-me", "me@example.com", include_owned=True) is True
+
+
+def test_a_client_session_never_reaches_owned_agents(roster):
+    """The other half, and the reason this is opt-in rather than defaulted.
+
+    An external client's scope is exactly what was shared with them. If the
+    flag defaulted on, a portal-token session for an email that also owns
+    agents would silently gain access to every one of them — the hazard
+    `get_roster`'s own docstring warns about.
+    """
+    assert roster.agent_on_roster("my-own-agent", "me@example.com") is False
+    assert roster.agent_on_roster("my-own-agent", "me@example.com", include_owned=False) is False
+    # What WAS shared still works, both ways.
+    assert roster.agent_on_roster("shared-with-me", "me@example.com") is True
+
+
+def test_an_agent_on_neither_roster_is_refused(roster):
+    for include_owned in (True, False):
+        assert roster.agent_on_roster("stranger", "me@example.com", include_owned=include_owned) is False

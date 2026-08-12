@@ -62,16 +62,17 @@ def portal(tmp_path, monkeypatch):
 
     # Everything is on-roster except names starting with "off-".
     monkeypatch.setattr(
-        service, "agent_on_roster", lambda agent_name, email: not agent_name.startswith("off-")
+        service, "agent_on_roster",
+        lambda agent_name, email, include_owned=False: not agent_name.startswith("off-")
     )
 
     calls: list[tuple] = []
 
-    async def _fake_chat(agent_name, message, email, session_id=None):
+    async def _fake_chat(agent_name, message, email, session_id=None, include_owned=False):
         calls.append(("chat", agent_name, email))
         return {"response": "ok", "session_id": "s1", "cost": 0.0}
 
-    async def _fake_upload(agent_name, email, filename, data):
+    async def _fake_upload(agent_name, email, filename, data, include_owned=False):
         calls.append(("upload", agent_name, email))
         return {"filename": filename, "size_bytes": len(data), "path": f"/inbox/{filename}"}
 
@@ -111,13 +112,23 @@ class _Upload:
         return b"x" * 10
 
 
+# ent#358: the gated endpoints take the PRINCIPAL, not a bare email — the scope
+# decision needs `is_platform` (a platform session's roster includes the agents
+# it owns; a client's does not). These tests exercise the client side, so
+# is_platform=False, which is also the value that keeps the old expectations
+# meaningful: an off-roster agent must still 404 before the limiter runs.
+def _principal(email):
+    from client_portal.portal_auth import PortalPrincipal
+    return PortalPrincipal(email=email, is_platform=False)
+
+
 def _chat(portal_router, agent="atlas", email="bob@example.com"):
-    return asyncio.run(portal_router.portal_chat(agent, _Body(), email=email))
+    return asyncio.run(portal_router.portal_chat(agent, _Body(), principal=_principal(email)))
 
 
 def _upload(portal_router, agent="atlas", email="bob@example.com", upload=None):
     upload = upload or _Upload()
-    return asyncio.run(portal_router.portal_upload(agent, file=upload, email=email))
+    return asyncio.run(portal_router.portal_upload(agent, file=upload, principal=_principal(email)))
 
 
 def _raises_429(fn, *args, **kwargs):

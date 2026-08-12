@@ -368,7 +368,8 @@ async def _agent_briefing(agent_name: str):
         return None, []
 
 
-async def synthesize_portal_tts(agent_name: str, email: str, text: str) -> bytes:
+async def synthesize_portal_tts(agent_name: str, email: str, text: str,
+                                include_owned: bool = False) -> bytes:
     """Text-to-speech for a portal reply (voice mode, #78). Roster-scoped (miss →
     404). Reuses the shared ElevenLabs `tts_service` with the agent's configured
     voice. Raises ClientPortalError when voice isn't available (no key / no voice)
@@ -376,7 +377,7 @@ async def synthesize_portal_tts(agent_name: str, email: str, text: str) -> bytes
     just keeps the text reply. Returns MP3 bytes (played directly in the browser)."""
     from services import tts_service
 
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     body = (text or "").strip()
     if not body:
@@ -406,7 +407,8 @@ _STT_TIMEOUT = 60.0
 
 
 async def transcribe_portal_audio(agent_name: str, email: str, filename: str,
-                                  content_type: str, audio: bytes) -> str:
+                                  content_type: str, audio: bytes,
+                                  include_owned: bool = False) -> str:
     """Transcribe a client's recorded audio to text (portal voice input, #78).
     Roster-scoped (miss → 404). Fail-soft: any provider/format problem raises a
     ClientPortalError so the client just types instead of getting a 500. Gated on
@@ -414,7 +416,7 @@ async def transcribe_portal_audio(agent_name: str, email: str, filename: str,
     from services import tts_service   # shares the ElevenLabs key/availability check
     import config
 
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     if not audio:
         raise ClientPortalError(400, "No audio")
@@ -452,11 +454,31 @@ async def transcribe_portal_audio(agent_name: str, email: str, filename: str,
     return text
 
 
-def agent_on_roster(agent_name: str, email: str | None) -> bool:
-    """True iff ``agent_name`` is on the caller's roster (shared with ``email``,
-    non-deleted, non-system) — the exact set the roster endpoint returns. The
-    chat scope is the roster: a client can only talk to what they can see."""
-    return agent_name in {r["agent_name"] for r in db.get_shared_roster(email or "")}
+def agent_on_roster(agent_name: str, email: str | None,
+                    include_owned: bool = False) -> bool:
+    """True iff ``agent_name`` is on the caller's roster. The scope of what a
+    caller can DO must equal the scope of what they can SEE — anything else is
+    either a leak or a dead end.
+
+    ``include_owned`` mirrors ``get_roster``'s parameter of the same name and
+    must be passed the same value: the principal's ``is_platform``. It is not a
+    default, for the reason spelled out there — an external client's scope is
+    exactly what was shared with them, and flipping this on for a portal-token
+    session would hand them agents they were never given.
+
+    ent#358: this used to read only the SHARED roster while
+    ``get_roster(include_owned=True)`` (ent#357, the one-click platform entry)
+    also returned OWNED agents. Trinity refuses a self-share, so an owner's own
+    agents are never in the shared set — meaning an owner saw their agents in
+    the Workspace sidebar and got a uniform 404 from every action on them, with
+    no way to grant themselves access. Harmless while the Workspace was a
+    secondary surface; fatal once it is the only one.
+    """
+    if agent_name in {r["agent_name"] for r in db.get_shared_roster(email or "")}:
+        return True
+    if include_owned:
+        return agent_name in {r["agent_name"] for r in db.get_owned_roster(email or "")}
+    return False
 
 
 _HISTORY_CONTEXT_MESSAGES = 20  # last ~10 turns fed back to the model as context
@@ -703,7 +725,8 @@ def _build_portal_system_prompt(agent_name: str, email: str) -> str | None:
 
 
 async def portal_chat(agent_name: str, message: str, email: str,
-                      session_id: str | None = None) -> dict:
+                      session_id: str | None = None,
+                      include_owned: bool = False) -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -712,7 +735,7 @@ async def portal_chat(agent_name: str, message: str, email: str,
     The turn lands in ``session_id`` when given (validated to belong to the
     caller), else the client's most-recent session, else a freshly-opened one —
     so history is threaded per conversation, not one flat log per agent (#78)."""
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         # Uniform 404 — never disclose whether an agent the client can't reach exists.
         raise ClientPortalError(404, "Agent not found")
 
@@ -917,18 +940,18 @@ async def portal_chat(agent_name: str, message: str, email: str,
     return {"response": reply, "cost": cost, "session_id": session_id}
 
 
-def list_sessions(agent_name: str, email: str) -> dict:
+def list_sessions(agent_name: str, email: str, include_owned: bool = False) -> dict:
     """A client's conversation threads with a rostered agent (most-recent first).
     Roster-scoped (miss → 404)."""
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     return {"agent_name": agent_name, "sessions": db.list_portal_sessions(agent_name, email)}
 
 
-def create_session(agent_name: str, email: str) -> dict:
+def create_session(agent_name: str, email: str, include_owned: bool = False) -> dict:
     """Open a fresh, empty conversation thread and return its summary. Roster-scoped
     (miss → 404). Title fills in from the first message on the first turn."""
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     sid = uuid.uuid4().hex
     now = utc_now_iso()
@@ -996,13 +1019,14 @@ def search_chats(email: str, query: str, limit: int = 30) -> dict:
     return {"query": q, "results": results}
 
 
-def get_history(agent_name: str, email: str, session_id: str | None = None) -> dict:
+def get_history(agent_name: str, email: str, session_id: str | None = None,
+                include_owned: bool = False) -> dict:
     """A client's conversation with a rostered agent (oldest-first). Roster-scoped
     (miss → 404). With ``session_id`` it returns that thread (validated to belong
     to the caller — miss → 404); with none it returns the client's most-recent
     thread, so an opening drawer resumes where they left off. Survives refresh /
     re-sign-in — reads the private enterprise_portal_messages table."""
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     if session_id:
         if not db.get_portal_session(session_id, agent_name, email):
@@ -1013,7 +1037,7 @@ def get_history(agent_name: str, email: str, session_id: str | None = None) -> d
     return {"agent_name": agent_name, "session_id": session_id, "messages": messages}
 
 
-def portal_documents(agent_name: str, email: str) -> dict:
+def portal_documents(agent_name: str, email: str, include_owned: bool = False) -> dict:
     """List the files a rostered agent has shared (FILES-001), each with a
     download URL. Scoped to the caller's roster (miss → 404). Download URLs are
     built from the PORTAL base URL (#79 resolver) so a private-deployment portal
@@ -1021,7 +1045,7 @@ def portal_documents(agent_name: str, email: str) -> dict:
     as the portal page). The `?sig=` token is the download credential — the OSS
     `/api/files/{id}` route is public and token-gated, so no portal auth rides on
     the link."""
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
 
     from database import db as core_db
@@ -1115,11 +1139,12 @@ def _legacy_email_dir(email: str) -> str:
     return _email_slug(email)
 
 
-async def portal_upload_document(agent_name: str, email: str, filename: str, data: bytes) -> dict:
+async def portal_upload_document(agent_name: str, email: str, filename: str, data: bytes,
+                                 include_owned: bool = False) -> dict:
     """Upload a client file into a rostered agent's per-client inbox
     (``~/inbox/<client-email>/<file>``). Scoped to the caller's roster (miss →
     404). Size-capped; filename sanitized (basename, no traversal)."""
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
 
     safe = _safe_filename(filename)
@@ -1429,11 +1454,11 @@ async def _collect_inbox_for_turn(agent_name: str, email: str, message: str):
     return images, image_names, doc_files
 
 
-async def list_client_uploads(agent_name: str, email: str) -> dict:
+async def list_client_uploads(agent_name: str, email: str, include_owned: bool = False) -> dict:
     """Files the client has uploaded to this rostered agent (their inbox). Lets a
     client review what they've sent. Roster-scoped (miss → 404); empty when the
     agent is offline (downloads still list from the DB independently)."""
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     return {"agent_name": agent_name, "uploads": await _read_inbox(agent_name, email)}
 
