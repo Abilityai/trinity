@@ -115,6 +115,18 @@ class PortalChatResponse(BaseModel):
     session_id: Optional[str] = None
 
 
+class PortalTurnStarted(BaseModel):
+    """A turn that has been dispatched but not finished (ent#286).
+
+    The 202 answer from the streaming route. ``execution_id`` is what the
+    client subscribes to for live tool activity; ``session_id`` echoes the
+    thread so a client that sent none can adopt it immediately rather than
+    waiting for the turn to end.
+    """
+    execution_id: str
+    session_id: Optional[str] = None
+
+
 class PortalSessionSummary(BaseModel):
     """One conversation thread in a client↔agent history list."""
     id: str
@@ -196,6 +208,10 @@ class PortalHistory(BaseModel):
     agent_name: str
     session_id: Optional[str] = None
     messages: list[PortalHistoryMessage]
+    # ent#286: set when a turn is running on this thread RIGHT NOW. A client
+    # that reloaded mid-turn subscribes to this id to reattach to the live
+    # stream instead of showing a thread that looks finished.
+    in_flight_execution_id: Optional[str] = None
 
 
 # --- Operator controls over a signed-in client (ent#281) ----------------------

@@ -3389,6 +3389,36 @@ def _migrate_client_portal_tables_to_oss(cursor, conn):
     conn.commit()
 
 
+def _migrate_portal_session_resume(cursor, conn):
+    """Give a Workspace thread the resume state a Session row already had (ent#358).
+
+    The Workspace absorbs the Session surface, so it has to resume the way the
+    Session did — `claude --print --resume <uuid>` against a cached id, not a
+    replay of prior messages as prompt text. These are the three columns that
+    make that possible, and they are the same three `agent_sessions` carries.
+
+    Additive and defaulted: existing threads land with a NULL cache, so their
+    next turn is a cold turn that writes a JSONL and caches its id. No thread
+    loses history — history persistence is untouched.
+    """
+    cursor.execute("PRAGMA table_info(enterprise_portal_sessions)")
+    existing = {row[1] for row in cursor.fetchall()}
+    if not existing:
+        # Table absent (client_portal tables migration has not run yet on this
+        # DB) — its CREATE already carries these columns, so nothing to do.
+        return
+    for col_name, col_type in (
+        ("cached_claude_session_id", "TEXT"),
+        ("last_resume_at", "TEXT"),
+        ("consecutive_resume_failures", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if col_name not in existing:
+            cursor.execute(
+                f"ALTER TABLE enterprise_portal_sessions ADD COLUMN {col_name} {col_type}"
+            )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -3497,4 +3527,5 @@ MIGRATIONS = [
     ("skill_sources_table", _migrate_skill_sources_table),
     ("agent_ownership_a2a_exposed", _migrate_agent_ownership_a2a_exposed),
     ("client_portal_tables_to_oss", _migrate_client_portal_tables_to_oss),
+    ("portal_session_resume", _migrate_portal_session_resume),
 ]

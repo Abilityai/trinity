@@ -1,5 +1,5 @@
 """
-Session tab endpoints — `--resume`-default chat surface.
+Session endpoints — per-platform-user `--resume` conversations.
 
 Phase 2 of docs/planning/SESSION_TAB_2026-04.md. Six endpoints that mirror
 the structure of routers/chat.py (same auth model, same TaskExecutionService)
@@ -7,15 +7,19 @@ but persist to the parallel agent_sessions / agent_session_messages tables
 and request `persist_session=True` so each turn reattaches via Claude Code's
 `--resume` flag.
 
+**The UI surface is retired (ent#358).** Agent Detail no longer renders a
+Session panel — the Workspace is the one continuous-conversation surface, and
+it runs the same engine (services/session_turn_service.py) against its own
+tables. These endpoints and their rows stay: existing sessions remain readable,
+and nothing here is a dead path for an API caller.
+
 Surface gated on `services.settings_service.is_session_tab_enabled()`. When
 the flag is off, every endpoint returns 404 — the route exists but the
-feature is invisible. Default off until Phase 5 rollout.
+feature is invisible.
 """
 
-import asyncio
 import json
 import logging
-import secrets
 from datetime import datetime
 from typing import Optional
 
@@ -25,10 +29,29 @@ from database import db
 from db_models import WebFileUpload, SessionMessageInsert
 from dependencies import AuthorizedAgent, get_current_user
 from models import CreateSessionRequest, SessionMessageRequest, User
-from services.docker_service import get_agent_container, get_agent_status_from_container
+from services.docker_service import get_agent_container
 from services.session_cleanup_service import get_session_cleanup_service
+from services.session_turn_service import (
+    InflightSentinel,
+    LOCK_POLL_INTERVAL_SECONDS,
+    LOCK_RELEASE_LUA,
+    LOCK_TTL_FALLBACK,
+    LOCK_WAIT_TOTAL_SECONDS,
+    RESUME_NOT_FOUND_MARKERS,
+    RUNTIMES_WITHOUT_SESSION_TAB_RESUME,
+    ResumeLock,
+    clear_session_inflight,
+    get_async_redis,
+    is_resume_not_found,
+    is_turn_in_flight,
+    resolve_lock_ttl,
+    run_resumable_turn,
+    session_inflight_key,
+    session_lock_key,
+    set_session_inflight,
+    supports_session_resume,
+)
 from services.settings_service import is_session_tab_enabled
-from services.task_execution_service import get_task_execution_service
 from services.upload_service import (
     decode_web_file,
     process_file_uploads,
@@ -53,33 +76,6 @@ def _enabled_or_404() -> None:
     """Phase 1.6 flag gate. 404 keeps the surface invisible when off."""
     if not is_session_tab_enabled():
         raise HTTPException(status_code=404, detail="Not Found")
-
-
-# #1187 Phase H: runtimes whose Session-tab turns must NOT use the cached-UUID
-# `--resume` machinery. They support plain chat continuity (in the Chat tab) but
-# not the Session tab's Claude-JSONL resume/fallback/reaping model, so we run a
-# stateless turn for them instead. ONE backend constant (decision 1) — keep in
-# sync with the agent-side `RuntimeCapabilities.session_tab_resume`.
-RUNTIMES_WITHOUT_SESSION_TAB_RESUME = {"codex"}
-
-
-def _supports_session_tab_resume(agent_name: str) -> bool:
-    """False for runtimes (e.g. Codex) that lack the cached-UUID `--resume`
-    machinery. Defaults to True on any lookup failure — assume Claude-like
-    so a transient Docker hiccup never silently downgrades a real session."""
-    try:
-        container = get_agent_container(agent_name)
-        if container is None:
-            return True
-        status = get_agent_status_from_container(container)
-        runtime = (status.runtime or "claude-code").lower()
-        return runtime not in RUNTIMES_WITHOUT_SESSION_TAB_RESUME
-    except Exception:
-        logger.warning(
-            "[Session] runtime lookup failed for %s; assuming resume-capable",
-            agent_name, exc_info=True,
-        )
-        return True
 
 
 def _session_or_404(session_id: str, user: User, agent_name: str):
@@ -152,279 +148,32 @@ def _serialize_message(msg) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Redis primitives — resume lock (#20992) + in-flight sentinel (#759)
+# Resumable-turn engine — moved to services/session_turn_service.py (ent#358)
 # ---------------------------------------------------------------------------
 
-# Two distinct Redis primitives gate session turns:
-#
-# 1. `session_lock:{agent}:{uuid}` — per-(agent, claude_uuid) lock that
-#    serialises concurrent `claude --resume <same-uuid>` calls (Anthropic
-#    #20992: concurrent resume calls corrupt the JSONL). Cold turns (no
-#    cached UUID yet) skip this lock — there's no JSONL to corrupt.
-#
-# 2. `session_inflight:{session_id}` — per-session sentinel SET for the
-#    duration of any turn (cold or warm). Drives the `turn_in_progress`
-#    field on GET sessions/{id} so the UI can reattach on activation
-#    (Issue #759). Distinct from the resume lock because the lock skips
-#    cold turns, whereas the in-flight signal must cover them.
-#
-# TTL for both is dynamic: at acquire time we look up the per-agent
-# `execution_timeout_seconds` (default 900) and add a 30s buffer, capped
-# at 7230s. Stale-lock cleanup after a backend crash is bounded by this
-# TTL (worst case ≈ 2h); admins can manually `DEL` if needed.
+# The Redis resume lock, the in-flight sentinel, the runtime capability gate and
+# the resume-not-found detection all used to live here as module privates. They
+# now back BOTH continuous-conversation surfaces (this one and Workspace chat),
+# so they moved to a service — Invariant #1, and one engine cannot drift from
+# itself. The private aliases are kept: this module's behaviour is unchanged,
+# and the tests that pin these names keep pinning the same objects.
+_LOCK_TTL_FALLBACK = LOCK_TTL_FALLBACK
+_LOCK_WAIT_TOTAL_SECONDS = LOCK_WAIT_TOTAL_SECONDS
+_LOCK_POLL_INTERVAL_SECONDS = LOCK_POLL_INTERVAL_SECONDS
+_LOCK_RELEASE_LUA = LOCK_RELEASE_LUA
+_session_lock_key = session_lock_key
+_session_inflight_key = session_inflight_key
+_resolve_lock_ttl = resolve_lock_ttl
+_get_async_redis = get_async_redis
+_set_session_inflight = set_session_inflight
+_clear_session_inflight = clear_session_inflight
+_is_turn_in_flight = is_turn_in_flight
+_ResumeLock = ResumeLock
+_InflightSentinel = InflightSentinel
+_is_resume_not_found = is_resume_not_found
+_supports_session_tab_resume = supports_session_resume
+_RESUME_NOT_FOUND_MARKERS = RESUME_NOT_FOUND_MARKERS
 
-_LOCK_TTL_FALLBACK = 7230          # cap + default on lookup failure (≈ 2h)
-_LOCK_WAIT_TOTAL_SECONDS = 30.0    # hard ceiling for chat UX
-_LOCK_POLL_INTERVAL_SECONDS = 0.25
-
-_LOCK_RELEASE_LUA = """
-if redis.call('GET', KEYS[1]) == ARGV[1] then
-    return redis.call('DEL', KEYS[1])
-else
-    return 0
-end
-"""
-
-
-def _session_lock_key(agent_name: str, claude_session_id: str) -> str:
-    """Canonical key for the per-(agent, uuid) resume lock.
-
-    Extracted as a helper so the producer (``_ResumeLock``) and any
-    future consumer that probes lock state share one source of truth. A
-    typo here would be a silent split-brain — locks claimed against one
-    key, probed against another.
-    """
-    return f"session_lock:{agent_name}:{claude_session_id}"
-
-
-def _session_inflight_key(session_id: str) -> str:
-    """Sentinel key set for the duration of any session turn.
-
-    Distinct from the resume lock — that one serialises JSONL writes;
-    this one signals "a turn is in flight on this session id" to the
-    UI's onActivated re-sync (Issue #759). Covers cold turns, which the
-    lock skips by design.
-    """
-    return f"session_inflight:{session_id}"
-
-
-def _resolve_lock_ttl(agent_name: str) -> int:
-    """Resolve a turn's TTL from the agent's per-agent execution timeout.
-
-    Uses ``db.get_execution_timeout(agent_name)`` (default 900s) plus a
-    30s buffer, capped at ``_LOCK_TTL_FALLBACK``. Falls back to the cap
-    on any lookup failure — safer to over-TTL than under-TTL since both
-    keys are auto-expiring strings, not state we care to keep precise.
-    """
-    try:
-        timeout = db.get_execution_timeout(agent_name)
-        return min(timeout + 30, _LOCK_TTL_FALLBACK)
-    except Exception as e:
-        logger.warning(
-            "[Session] get_execution_timeout failed for %s (%s) — using fallback %ds",
-            agent_name,
-            e,
-            _LOCK_TTL_FALLBACK,
-        )
-        return _LOCK_TTL_FALLBACK
-
-
-def _get_async_redis():
-    """Lazy async-Redis client. Returns None if unavailable."""
-    try:
-        import redis.asyncio as aioredis  # noqa: WPS433
-        from config import REDIS_URL  # noqa: WPS433
-    except Exception as e:
-        logger.warning("[Session] Cannot import async Redis client: %s", e)
-        return None
-    try:
-        return aioredis.from_url(REDIS_URL, decode_responses=True)
-    except Exception as e:
-        logger.warning("[Session] Cannot construct async Redis client: %s", e)
-        return None
-
-
-async def _set_session_inflight(session_id: str, ttl: int) -> None:
-    """SET the in-flight sentinel for a session. Degrades silently."""
-    redis = _get_async_redis()
-    if redis is None:
-        return
-    try:
-        await redis.set(_session_inflight_key(session_id), "1", ex=ttl)
-    except Exception as e:
-        logger.warning(
-            "[Session] inflight SET failed for %s (%s) — degraded mode",
-            session_id,
-            e,
-        )
-
-
-async def _clear_session_inflight(session_id: str) -> None:
-    """DEL the in-flight sentinel. Best-effort; TTL is the backstop."""
-    redis = _get_async_redis()
-    if redis is None:
-        return
-    try:
-        await redis.delete(_session_inflight_key(session_id))
-    except Exception as e:
-        logger.warning(
-            "[Session] inflight DEL failed for %s (%s) — TTL will expire",
-            session_id,
-            e,
-        )
-
-
-async def _is_turn_in_flight(session_id: str) -> bool:
-    """Whether a turn is currently in flight on this session.
-
-    Reads the sentinel set at the start of ``send_session_message``.
-    Covers cold + warm turns. Returns False if Redis is unavailable
-    (degraded mode — frontend should fall back to message_count delta to
-    detect completion).
-    """
-    redis = _get_async_redis()
-    if redis is None:
-        return False
-    try:
-        return bool(await redis.exists(_session_inflight_key(session_id)))
-    except Exception as e:
-        logger.warning(
-            "[Session] inflight EXISTS failed for %s (%s) — degraded",
-            session_id,
-            e,
-        )
-        return False
-
-
-class _ResumeLock:
-    """Async context manager for the per-session turn lock.
-
-    Two key shapes:
-      * **warm turn** — ``session_lock:{agent}:{claude_session_id}`` keyed by
-        the cached Claude UUID (via ``_session_lock_key``).
-      * **cold turn** — ``session_lock:cold:{session_id}`` keyed by the
-        persisted session row id (#779). Cold turns previously short-circuited
-        to ``key=None`` (no lock), allowing two concurrent first-turn POSTs to
-        race on ``update_cached_claude_session_id`` and orphan a JSONL.
-
-    Acts as a no-op when Redis is unavailable (degraded mode — log and
-    proceed; lock contention is an optimisation, not a correctness gate at
-    the platform layer).
-    """
-
-    def __init__(
-        self,
-        agent_name: str,
-        claude_session_id: Optional[str],
-        session_id: str,
-        ttl_seconds: int = _LOCK_TTL_FALLBACK,
-    ):
-        self._key = (
-            _session_lock_key(agent_name, claude_session_id)
-            if claude_session_id
-            else f"session_lock:cold:{session_id}"
-        )
-        self._ttl = ttl_seconds
-        self._token = secrets.token_urlsafe(16)
-        self._redis = None
-        self._held = False
-
-    async def __aenter__(self) -> "_ResumeLock":
-        self._redis = _get_async_redis()
-        if self._redis is None:
-            logger.warning(
-                "[Session] Redis unavailable for resume lock %s — proceeding unlocked",
-                self._key,
-            )
-            return self
-
-        deadline = asyncio.get_event_loop().time() + _LOCK_WAIT_TOTAL_SECONDS
-        while True:
-            try:
-                acquired = await self._redis.set(
-                    self._key,
-                    self._token,
-                    nx=True,
-                    ex=self._ttl,
-                )
-            except Exception as e:
-                logger.warning(
-                    "[Session] Redis SET failed for %s (%s) — proceeding unlocked",
-                    self._key,
-                    e,
-                )
-                self._redis = None
-                return self
-
-            if acquired:
-                self._held = True
-                return self
-            if asyncio.get_event_loop().time() >= deadline:
-                raise HTTPException(
-                    status_code=429,
-                    detail={
-                        "error": "Another turn on this session is in progress",
-                        "retry_after": 5,
-                        "session_lock_key": self._key,
-                    },
-                )
-            await asyncio.sleep(_LOCK_POLL_INTERVAL_SECONDS)
-
-    async def __aexit__(self, exc_type, exc, tb) -> None:
-        if not self._held or self._redis is None:
-            return
-        try:
-            await self._redis.eval(_LOCK_RELEASE_LUA, 1, self._key, self._token)
-        except Exception as e:
-            logger.warning(
-                "[Session] Lock release failed for %s (%s) — TTL will expire it",
-                self._key,
-                e,
-            )
-
-
-class _InflightSentinel:
-    """Async context manager that brackets a session turn with the sentinel.
-
-    SET on enter, DEL on exit (success or exception). The DEL is
-    guaranteed-best-effort: if Redis is down or the call fails, the TTL
-    is the backstop. Used by the turn handler so the UI's onActivated
-    re-sync (#759) sees an accurate ``turn_in_progress`` flag — including
-    on cold turns that the resume lock skips by design.
-    """
-
-    def __init__(self, session_id: str, ttl_seconds: int):
-        self._session_id = session_id
-        self._ttl = ttl_seconds
-
-    async def __aenter__(self) -> "_InflightSentinel":
-        await _set_session_inflight(self._session_id, self._ttl)
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb) -> None:
-        await _clear_session_inflight(self._session_id)
-
-
-# ---------------------------------------------------------------------------
-# Resume-fallback detection (Phase 2.2)
-# ---------------------------------------------------------------------------
-
-# When `claude --resume <uuid>` cannot find the JSONL the CLI prints
-# "No conversation found with session ID: ..." to stderr. The agent server
-# bubbles that up as the 5xx body that lands in TaskExecutionResult.error.
-# We match on the substring (case-insensitive) so a wording bump in a future
-# Claude release still triggers the fallback path. E2/E3 in the design doc.
-_RESUME_NOT_FOUND_MARKERS = (
-    "no conversation found",
-    "session not found",
-)
-
-
-def _is_resume_not_found(error_text: Optional[str]) -> bool:
-    if not error_text:
-        return False
-    lowered = error_text.lower()
-    return any(marker in lowered for marker in _RESUME_NOT_FOUND_MARKERS)
 
 
 # ---------------------------------------------------------------------------
@@ -612,76 +361,44 @@ async def send_session_message(
     async with _InflightSentinel(session.id, lock_ttl):
         cached_uuid = db.get_cached_claude_session_id(session.id)
 
-        # #1187 Phase H: for runtimes lacking the cached-UUID --resume model
-        # (Codex), run a plain stateless turn — the Claude-specific resume +
-        # JSONL-not-found fallback below would mis-handle their failure markers.
-        # Only pay the runtime lookup when there's actually a cached UUID to drop.
-        if cached_uuid and not _supports_session_tab_resume(name):
-            logger.info(
-                "[Session] agent=%s runtime lacks session-tab resume — "
-                "running a stateless turn (no --resume)", name,
-            )
-            cached_uuid = None
-
-        service = get_task_execution_service()
-        fallback_fired = False
-        fallback_reason: Optional[str] = None
-
-        async with _ResumeLock(name, cached_uuid, session.id, ttl_seconds=lock_ttl):
-            # Step 4: cold or resume turn.
-            result = await service.execute_task(
-                agent_name=name,
-                message=effective_message,
-                triggered_by="session",
-                source_user_id=current_user.id,
-                source_user_email=user_email,
-                model=body.model,
-                timeout_seconds=body.timeout_seconds,
-                resume_session_id=cached_uuid,
-                persist_session=True,
-                subscription_id=session.subscription_id,
-                images=image_data or None,
+        # Steps 3–5 (runtime gate, resume lock, cold-retry fallback) are the
+        # shared engine — see services/session_turn_service.py. This surface
+        # owns only its own bookkeeping: clearing the stale cache and counting
+        # the failure, inside the lock, before the retry runs.
+        def _on_resume_failure() -> None:
+            db.clear_cached_claude_session_id(session.id)
+            failure_count = db.mark_resume_failure(session.id)
+            logger.warning(
+                "[Session] event=session_resume_fallback agent=%s session=%s "
+                "stale_uuid=%s consecutive_failures=%d reason=%s",
+                name,
+                session.id,
+                cached_uuid,
+                failure_count,
+                "resume_jsonl_not_found",
             )
 
-            # Step 5: resume-failure fallback. Only triggers when we *had* a
-            # cached UUID and execute_task came back failed with the marker.
-            if (
-                cached_uuid
-                and result.status != "success"
-                and _is_resume_not_found(result.error)
-            ):
-                fallback_fired = True
-                fallback_reason = "resume_jsonl_not_found"
-                db.clear_cached_claude_session_id(session.id)
-                failure_count = db.mark_resume_failure(session.id)
-                logger.warning(
-                    "[Session] event=session_resume_fallback agent=%s session=%s "
-                    "stale_uuid=%s consecutive_failures=%d reason=%s",
-                    name,
-                    session.id,
-                    cached_uuid,
-                    failure_count,
-                    fallback_reason,
-                )
-                # Retry once cold. Lock is no longer relevant — the stale UUID
-                # is gone, and the new cold turn will write a fresh JSONL with
-                # a new UUID (no contention with anyone else by definition).
-                # Use effective_message + image_data so any uploaded files
-                # (already written to the workspace before the first attempt)
-                # are still referenced in the prompt + sent as vision blocks.
-                result = await service.execute_task(
-                    agent_name=name,
-                    message=effective_message,
-                    triggered_by="session",
-                    source_user_id=current_user.id,
-                    source_user_email=user_email,
-                    model=body.model,
-                    timeout_seconds=body.timeout_seconds,
-                    resume_session_id=None,
-                    persist_session=True,
-                    subscription_id=session.subscription_id,
-                    images=image_data or None,
-                )
+        # `effective_message` + `image_data` are reused on the cold retry so any
+        # uploaded files (already written to the workspace before the first
+        # attempt) are still referenced in the prompt + sent as vision blocks.
+        turn = await run_resumable_turn(
+            agent_name=name,
+            session_key=session.id,
+            message=effective_message,
+            cached_uuid=cached_uuid,
+            triggered_by="session",
+            lock_ttl=lock_ttl,
+            on_resume_failure=_on_resume_failure,
+            source_user_id=current_user.id,
+            source_user_email=user_email,
+            model=body.model,
+            timeout_seconds=body.timeout_seconds,
+            subscription_id=session.subscription_id,
+            images=image_data or None,
+        )
+        result = turn.result
+        fallback_fired = turn.fallback_fired
+        fallback_reason = turn.fallback_reason
 
         if result.status != "success":
             # Bubble execute_task's classified error up. The user message is

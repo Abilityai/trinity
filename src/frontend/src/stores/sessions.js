@@ -5,6 +5,14 @@ import { useAuthStore } from './auth'
 /**
  * Session tab store (SESSION_TAB_2026-04 Phase 3.2).
  *
+ * ent#358: the Agent Detail Session panel this store was written for is gone —
+ * the Workspace is the continuous-conversation surface now and talks to the
+ * portal endpoints instead. What is still load-bearing here is
+ * `loadFeatureFlags()`, which several views read for voice / workspace /
+ * brain-orb gating. The session actions below still map 1:1 to live endpoints
+ * over `agent_sessions` (which remain readable by design), so they are kept
+ * rather than deleted; retiring them belongs with retiring those endpoints.
+ *
  * Wraps the six /api/agents/{name}/sessions* endpoints. State is keyed
  * by agentName so tab switching between agents doesn't bleed sessions.
  *
@@ -26,7 +34,7 @@ export const useSessionsStore = defineStore('sessions', {
     errorByAgent: {},
 
     // -- Per-session turn state (Issue #759) --------------------------------
-    // SessionPanel lives inside an AgentDetail view that is wrapped in
+    // This store's consumer lived inside an AgentDetail view wrapped in
     // <KeepAlive>, so the same component instance services all `/agents/*`
     // routes. Local refs would survive navigation and bleed across agents.
     // Keying turn state by sessionId scopes it to the actual conversation.
@@ -198,7 +206,7 @@ export const useSessionsStore = defineStore('sessions', {
      * Issue #759 — in-flight state lives in the store keyed by sessionId
      * (`inFlightBySession`, `errorBySession`, `fallbackNoticeBySession`)
      * so it survives KeepAlive deactivation and doesn't bleed across
-     * agents (one SessionPanel instance services all `/agents/*` routes).
+     * agents (one panel instance serviced all `/agents/*` routes).
      *
      * Optimistic insert without rollback: the user's message is appended
      * to `messagesBySession` synchronously so the UI doesn't sit on a
@@ -370,7 +378,7 @@ export const useSessionsStore = defineStore('sessions', {
     },
 
     // ----- polling (reattach to in-flight turn on KeepAlive activation) --
-    // The flow: on `onActivated` in SessionPanel, call loadSession; if the
+    // The flow: on the panel's `onActivated`, call loadSession; if the
     // returned session row has `turn_in_progress=true` AND no assistant
     // reply has landed since the last user message, call startPolling.
     // Ref-counted so two activations on the same session don't double-fire.

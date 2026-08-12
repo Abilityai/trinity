@@ -91,9 +91,12 @@ screenshots:
   - file: agent-chat.png
     title: Agent Detail — Chat tab
     route: /agents/{name}?tab=chat
-    shows: The unified Chat tab with the session-mode toggle on.
+    shows: >-
+      The Chat tab — stateless per-turn chat, plus the link across to the
+      Workspace. The session-mode toggle it used to show was retired with the
+      Session surface (ent#358); continuous conversation lives in the Workspace.
     sources:
-      - src/frontend/src/components/SessionPanel.vue
+      - src/frontend/src/components/ChatPanel.vue
       - src/frontend/src/components/chat
     captured_at: 2026-08-09
     captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b

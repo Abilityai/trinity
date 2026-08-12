@@ -40,6 +40,10 @@ pytestmark = pytest.mark.unit
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SESSIONS_ROUTER_PY = _PROJECT_ROOT / "src" / "backend" / "routers" / "sessions.py"
+# ent#358: the resume engine (ResumeLock and friends) moved out of the router
+# into a service shared with Workspace chat. Engine assertions read the service;
+# call-site assertions still read the router.
+_TURN_SERVICE_PY = _PROJECT_ROOT / "src" / "backend" / "services" / "session_turn_service.py"
 
 
 # ---------------------------------------------------------------------------
@@ -82,8 +86,8 @@ def test_resume_lock_init_requires_session_id():
     Before #779: ``def __init__(self, agent_name, claude_session_id)``.
     After  #779: ``def __init__(self, agent_name, claude_session_id, session_id)``.
     """
-    tree = ast.parse(_read(_SESSIONS_ROUTER_PY))
-    cls = _find_class(tree, "_ResumeLock")
+    tree = ast.parse(_read(_TURN_SERVICE_PY))
+    cls = _find_class(tree, "ResumeLock")
     init = _find_method(cls, "__init__")
 
     arg_names = [a.arg for a in init.args.args]
@@ -108,7 +112,7 @@ def test_resume_lock_cold_turn_uses_session_id_key():
     which would silently disable the lock for the very race window this
     class exists to prevent (#779).
     """
-    src = _read(_SESSIONS_ROUTER_PY)
+    src = _read(_TURN_SERVICE_PY)
 
     # Positive: the cold-turn key literal is present, parameterised by session_id.
     assert re.search(
@@ -119,7 +123,7 @@ def test_resume_lock_cold_turn_uses_session_id_key():
     # Negative: no path leaves ``self._key`` as ``None``. Any future refactor
     # that wires a None-key fallback back into _ResumeLock would re-open #779.
     tree = ast.parse(src)
-    cls = _find_class(tree, "_ResumeLock")
+    cls = _find_class(tree, "ResumeLock")
     init = _find_method(cls, "__init__")
     init_src = _function_source(src, init)
     assert not re.search(r"self\._key\s*=\s*None", init_src), (
@@ -136,7 +140,7 @@ def test_resume_lock_cold_turn_uses_session_id_key():
 
 def test_resume_lock_warm_turn_key_unchanged():
     """The warm-turn key shape stays the same — fix is purely additive."""
-    src = _read(_SESSIONS_ROUTER_PY)
+    src = _read(_TURN_SERVICE_PY)
     assert re.search(
         r'f["\']session_lock:\{agent_name\}:\{claude_session_id\}["\']',
         src,
@@ -149,19 +153,28 @@ def test_resume_lock_warm_turn_key_unchanged():
 
 
 def test_message_endpoint_passes_session_id_to_resume_lock():
-    """The single ``_ResumeLock(...)`` call must pass ``session.id`` so the
-    cold-turn key is bound to the persisted session row."""
-    src = _read(_SESSIONS_ROUTER_PY)
+    """The cold-turn lock key must stay bound to the persisted session row.
 
-    call_sites = re.findall(r"_ResumeLock\([^)]+\)", src)
+    ent#358 split this across two files — the engine constructs the lock, the
+    caller names the session — so both halves are pinned. The engine must still
+    have exactly ONE construction site: a second one would be a second key
+    convention, which is the split-brain this guard exists to prevent.
+    """
+    engine_src = _read(_TURN_SERVICE_PY)
+    call_sites = re.findall(r"[^_\w]ResumeLock\([^)]+\)", engine_src)
     assert len(call_sites) == 1, (
-        f"expected exactly one _ResumeLock(...) call site; found {len(call_sites)}: "
-        f"{call_sites!r}"
+        f"expected exactly one ResumeLock(...) call site in the engine; "
+        f"found {len(call_sites)}: {call_sites!r}"
+    )
+    assert "session_key" in call_sites[0], (
+        f"ResumeLock call must pass the caller's session key (third arg); "
+        f"got {call_sites[0]!r}"
     )
 
-    call = call_sites[0]
-    assert "session.id" in call, (
-        f"_ResumeLock call must pass session.id (third arg); got {call!r}"
+    router_src = _read(_SESSIONS_ROUTER_PY)
+    assert "session_key=session.id" in router_src, (
+        "send_session_message must bind the lock to the persisted session row "
+        "by passing session_key=session.id"
     )
 
 
@@ -175,9 +188,9 @@ def test_aenter_no_longer_short_circuits_on_none_key():
     the no-op cold-turn path. With the fix, self._key is never None, so the
     guard is dead code AND would silently break the new cold-turn lock if
     reintroduced. Pin its absence."""
-    src = _read(_SESSIONS_ROUTER_PY)
+    src = _read(_TURN_SERVICE_PY)
     tree = ast.parse(src)
-    cls = _find_class(tree, "_ResumeLock")
+    cls = _find_class(tree, "ResumeLock")
     aenter = _find_method(cls, "__aenter__")
     body = _function_source(src, aenter)
     assert "self._key is None" not in body, (
@@ -187,9 +200,9 @@ def test_aenter_no_longer_short_circuits_on_none_key():
 
 def test_aexit_no_longer_short_circuits_on_none_key():
     """Same for ``__aexit__``."""
-    src = _read(_SESSIONS_ROUTER_PY)
+    src = _read(_TURN_SERVICE_PY)
     tree = ast.parse(src)
-    cls = _find_class(tree, "_ResumeLock")
+    cls = _find_class(tree, "ResumeLock")
     aexit = _find_method(cls, "__aexit__")
     body = _function_source(src, aexit)
     assert "self._key is None" not in body, (

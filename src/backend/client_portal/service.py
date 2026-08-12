@@ -18,6 +18,7 @@ Self-contained: reads the OSS ``public_chat_url`` row directly (mirroring
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
@@ -414,7 +415,8 @@ async def _agent_briefing(agent_name: str):
         return None, []
 
 
-async def synthesize_portal_tts(agent_name: str, email: str, text: str) -> bytes:
+async def synthesize_portal_tts(agent_name: str, email: str, text: str,
+                                include_owned: bool = False) -> bytes:
     """Text-to-speech for a portal reply (voice mode, #78). Roster-scoped (miss →
     404). Reuses the shared ElevenLabs `tts_service` with the agent's configured
     voice. Raises ClientPortalError when voice isn't available (no key / no voice)
@@ -422,7 +424,7 @@ async def synthesize_portal_tts(agent_name: str, email: str, text: str) -> bytes
     just keeps the text reply. Returns MP3 bytes (played directly in the browser)."""
     from services import tts_service
 
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     body = (text or "").strip()
     if not body:
@@ -452,7 +454,8 @@ _STT_TIMEOUT = 60.0
 
 
 async def transcribe_portal_audio(agent_name: str, email: str, filename: str,
-                                  content_type: str, audio: bytes) -> str:
+                                  content_type: str, audio: bytes,
+                                  include_owned: bool = False) -> str:
     """Transcribe a client's recorded audio to text (portal voice input, #78).
     Roster-scoped (miss → 404). Fail-soft: any provider/format problem raises a
     ClientPortalError so the client just types instead of getting a 500. Gated on
@@ -460,7 +463,7 @@ async def transcribe_portal_audio(agent_name: str, email: str, filename: str,
     from services import tts_service   # shares the ElevenLabs key/availability check
     import config
 
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     if not audio:
         raise ClientPortalError(400, "No audio")
@@ -498,11 +501,31 @@ async def transcribe_portal_audio(agent_name: str, email: str, filename: str,
     return text
 
 
-def agent_on_roster(agent_name: str, email: str | None) -> bool:
-    """True iff ``agent_name`` is on the caller's roster (shared with ``email``,
-    non-deleted, non-system) — the exact set the roster endpoint returns. The
-    chat scope is the roster: a client can only talk to what they can see."""
-    return agent_name in {r["agent_name"] for r in db.get_shared_roster(email or "")}
+def agent_on_roster(agent_name: str, email: str | None,
+                    include_owned: bool = False) -> bool:
+    """True iff ``agent_name`` is on the caller's roster. The scope of what a
+    caller can DO must equal the scope of what they can SEE — anything else is
+    either a leak or a dead end.
+
+    ``include_owned`` mirrors ``get_roster``'s parameter of the same name and
+    must be passed the same value: the principal's ``is_platform``. It is not a
+    default, for the reason spelled out there — an external client's scope is
+    exactly what was shared with them, and flipping this on for a portal-token
+    session would hand them agents they were never given.
+
+    ent#358: this used to read only the SHARED roster while
+    ``get_roster(include_owned=True)`` (ent#357, the one-click platform entry)
+    also returned OWNED agents. Trinity refuses a self-share, so an owner's own
+    agents are never in the shared set — meaning an owner saw their agents in
+    the Workspace sidebar and got a uniform 404 from every action on them, with
+    no way to grant themselves access. Harmless while the Workspace was a
+    secondary surface; fatal once it is the only one.
+    """
+    if agent_name in {r["agent_name"] for r in db.get_shared_roster(email or "")}:
+        return True
+    if include_owned:
+        return agent_name in {r["agent_name"] for r in db.get_owned_roster(email or "")}
+    return False
 
 
 _HISTORY_CONTEXT_MESSAGES = 20  # last ~10 turns fed back to the model as context
@@ -749,7 +772,9 @@ def _build_portal_system_prompt(agent_name: str, email: str) -> str | None:
 
 
 async def portal_chat(agent_name: str, message: str, email: str,
-                      session_id: str | None = None) -> dict:
+                      session_id: str | None = None,
+                      include_owned: bool = False,
+                      execution_id: str | None = None) -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -757,10 +782,26 @@ async def portal_chat(agent_name: str, message: str, email: str,
 
     The turn lands in ``session_id`` when given (validated to belong to the
     caller), else the client's most-recent session, else a freshly-opened one —
-    so history is threaded per conversation, not one flat log per agent (#78)."""
-    if not agent_on_roster(agent_name, email):
+    so history is threaded per conversation, not one flat log per agent (#78).
+
+    ent#286: ``execution_id`` lets a caller that has ALREADY created the
+    execution row hand it in, so it can hand the id to a client and have it
+    subscribe to the live stream while this coroutine is still running. The
+    turn itself is identical either way — this function stays the one place a
+    portal turn happens, which is what keeps the streaming path from becoming a
+    second, drifting implementation."""
+    if not agent_on_roster(agent_name, email, include_owned):
         # Uniform 404 — never disclose whether an agent the client can't reach exists.
         raise ClientPortalError(404, "Agent not found")
+
+    # Imported here, like every other service this module reaches for: the
+    # portal package is imported during app construction, and the execution
+    # stack it pulls in is heavier than this module's own import cost.
+    from services.session_turn_service import (
+        ResumeLockBusy,
+        run_resumable_turn,
+        supports_session_resume,
+    )
 
     session_id = _resolve_session_id(agent_name, email, session_id)
     client_message = message  # what the client typed — persisted verbatim (no context/manifest)
@@ -776,10 +817,35 @@ async def portal_chat(agent_name: str, message: str, email: str,
         logger.warning("portal title-state read failed for session %s: %s", session_id, e)
         is_first_exchange = False
 
+    # ent#358: does this thread reattach to a live Claude session?
+    #
+    # A resumed turn carries the real thing — tool results, mid-skill state,
+    # reasoning state — so the history prefix below is not just redundant there,
+    # it is worse than redundant: it re-pays for context the session already
+    # holds, and a summary of a conversation sitting next to the conversation
+    # invites the model to treat the summary as the record.
+    #
+    # The capability check runs HERE rather than being left to the engine
+    # because it decides how the message is composed. Passing None through when
+    # the runtime has no `--resume` (Codex) keeps the engine's own check a no-op
+    # — it only looks when there is a cached id to drop.
+    cached_uuid = None
+    try:
+        cached_uuid = db.get_cached_claude_session_id(session_id)
+    except Exception as e:  # noqa: BLE001 — a cache read must never block a turn
+        logger.warning("portal resume-cache read failed for session %s: %s", session_id, e)
+    if cached_uuid and not supports_session_resume(agent_name):
+        cached_uuid = None
+    resuming = bool(cached_uuid)
+
     # #78: feed the recent conversation back so the agent remembers across turns.
     # History is persisted AFTER each turn, so this read never includes the
     # current one; scoped to THIS session so threads stay isolated. Best-effort —
     # a history hiccup must not block the chat.
+    #
+    # Still the ONLY continuity a cold turn has (a brand-new thread, a reaped
+    # JSONL, a runtime without `--resume`), so it is read unconditionally and
+    # kept for the cold-retry message even when this turn resumes.
     history = []
     try:
         history = db.get_portal_messages(
@@ -788,6 +854,21 @@ async def portal_chat(agent_name: str, message: str, email: str,
     except Exception as e:  # noqa: BLE001
         logger.warning("portal history-context read failed for %s/%s: %s", agent_name, email, e)
     convo_context = _format_history_context(history)
+
+    # ent#286: the user's message lands NOW, before the turn runs — not after.
+    #
+    # Both halves used to be written together at the end, so a browser refresh
+    # mid-turn showed the thread with the sent message missing: indistinguishable
+    # from having lost it, while the turn was in fact still running. The Session
+    # tab made this call long ago for the same reason ("the message log still
+    # reflects what the user typed vs. a silent loss"). A turn that then fails
+    # leaves a user message with no reply, which is the honest record.
+    #
+    # ORDER MATTERS, and two things above depend on it: `is_first_exchange` reads
+    # the thread's title before this writes the derived one, and the history
+    # context below must not contain the very message it is context FOR. Both
+    # reads happen first, deliberately.
+    _persist_user_turn(agent_name, email, session_id, client_message)
 
     # #78: make the agent aware of the client's uploaded files. Images are handed
     # to the model as VISION blocks (so "what's in the picture" works) and MUST
@@ -820,14 +901,18 @@ async def portal_chat(agent_name: str, message: str, email: str,
         )
     # Compose the execution message: prior conversation (context) → file manifest
     # → the client's actual message. Each section is optional.
-    prefix = ""
-    if convo_context:
-        prefix += convo_context + "\n\n"
+    #
+    # ent#358: two messages, not one. The turn message drops the history block
+    # when resuming (the session already remembers); `cold_message` always keeps
+    # it, and is what the engine sends if the resume fails and it retries cold —
+    # the retry has no session memory, so it needs the replay back.
+    manifest_prefix = ""
     if manifest_parts:
-        prefix += "[Client Portal] " + " ".join(manifest_parts) + "\n\n"
-    message = prefix + message
+        manifest_prefix = "[Client Portal] " + " ".join(manifest_parts) + "\n\n"
+    history_prefix = (convo_context + "\n\n") if convo_context else ""
 
-    from services.task_execution_service import get_task_execution_service
+    cold_message = history_prefix + manifest_prefix + message
+    message = (manifest_prefix + message) if resuming else cold_message
 
     # ent#212: inject the client's durable per-user memory (MEM-001) + the #1205
     # public-channel custom instructions into the turn, so a delegated end user
@@ -841,15 +926,42 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # `verified_email and not is_group` gate is trivially satisfied here.
     system_prompt = _build_portal_system_prompt(agent_name, email)
 
-    result = await get_task_execution_service().execute_task(
-        agent_name=agent_name,
-        message=message,
-        triggered_by="public",          # external-caller path; "Public" analytics bucket
-        source_user_email=email,
-        timeout_seconds=300,
-        images=images or None,          # referenced inbox images as vision input (#78)
-        system_prompt=system_prompt,
-    )
+    # ent#358: the shared resume engine — cached uuid → per-(agent, uuid) lock →
+    # `persist_session=True` → one cold retry if the JSONL is gone. Identical to
+    # what the Session surface ran, which is the whole point: absorbing that
+    # surface must not change how a conversation remembers.
+    def _on_resume_failure() -> None:
+        try:
+            db.clear_cached_claude_session_id(session_id)
+            failures = db.mark_resume_failure(session_id)
+            logger.warning(
+                "portal resume fallback: agent=%s session=%s stale_uuid=%s failures=%d",
+                agent_name, session_id, cached_uuid, failures,
+            )
+        except Exception as e:  # noqa: BLE001 — bookkeeping must not eat the retry
+            logger.warning("portal resume-failure bookkeeping failed for %s: %s", session_id, e)
+
+    try:
+        turn = await run_resumable_turn(
+            agent_name=agent_name,
+            session_key=session_id,
+            message=message,
+            cold_message=cold_message,
+            cached_uuid=cached_uuid,
+            triggered_by="public",      # external-caller path; "Public" analytics bucket
+            on_resume_failure=_on_resume_failure,
+            source_user_email=email,
+            timeout_seconds=300,
+            images=images or None,      # referenced inbox images as vision input (#78)
+            system_prompt=system_prompt,
+            execution_id=execution_id,  # ent#286: pre-created row, so the client can already be watching
+        )
+    except ResumeLockBusy:
+        # A concurrent turn holds this thread's lock. Same shape as the "agent
+        # is busy" answer below — the client retries, nothing is lost.
+        raise ClientPortalError(429, "This conversation is already handling a message. Please try again shortly.")
+
+    result = turn.result
 
     status = getattr(result, "status", None)
     if status in ("failed", "cancelled"):
@@ -860,17 +972,32 @@ async def portal_chat(agent_name: str, message: str, email: str,
             raise ClientPortalError(504, "The request timed out — try a simpler message.")
         raise ClientPortalError(502, "The agent couldn't respond (it may be offline). Please try again.")
 
+    # Cache the id the turn ran under so the NEXT turn resumes it.
+    #
+    # AFTER the success gate, matching the Session surface: a failed turn can
+    # still have written a JSONL, and caching that id would point every later
+    # turn at a session whose last act was to fail. Best-effort — a failed cache
+    # write costs continuity on the following turn (it goes cold), never this
+    # turn's already-billed answer.
+    if turn.real_uuid and turn.real_uuid != cached_uuid:
+        try:
+            db.update_cached_claude_session_id(session_id, turn.real_uuid)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "portal resume-cache write failed for session %s: %s", session_id, e
+            )
+
     reply = getattr(result, "response", "") or ""
     cost = getattr(result, "cost", None)
 
-    # Persist the turn so the conversation survives a refresh / re-sign-in (#78).
+    # Persist the reply so the conversation survives a refresh / re-sign-in (#78).
+    # The user's half was written BEFORE the turn ran (see `_persist_user_turn`),
+    # so a reload mid-turn shows what was sent instead of an empty thread.
     # Best-effort — a persistence hiccup must never fail an already-billed turn.
     try:
         now = utc_now_iso()
-        db.add_portal_message(uuid.uuid4().hex, agent_name, email, "user", client_message, None, now, session_id=session_id)
         db.add_portal_message(uuid.uuid4().hex, agent_name, email, "assistant", reply, cost, now, session_id=session_id)
-        # Advance the thread's activity + set its title from the first message.
-        db.touch_portal_session(session_id, now, added=2, title_if_empty=_derive_title(client_message))
+        db.touch_portal_session(session_id, now, added=1)
     except Exception as e:  # noqa: BLE001
         logger.warning("portal chat history persist failed for %s/%s: %s", agent_name, email, e)
 
@@ -884,18 +1011,307 @@ async def portal_chat(agent_name: str, message: str, email: str,
     return {"response": reply, "cost": cost, "session_id": session_id}
 
 
-def list_sessions(agent_name: str, email: str) -> dict:
+def _persist_user_turn(agent_name: str, email: str, session_id: str, content: str) -> None:
+    """Write the client's own message, before the turn runs. Best-effort.
+
+    Idempotent against a RETRY. The message is written before the turn so a
+    mid-turn reload never looks like data loss — but that also means a turn
+    that FAILS leaves the row behind, and the UI offers Retry. Without this
+    guard the retry writes the same text a second time: the thread shows it
+    twice, `message_count` double-counts, and the duplicate is replayed into
+    the next cold turn's context, telling the model the client asked twice.
+
+    The test is "is this already the last thing said, with no answer since" —
+    which is exactly the state a failed turn leaves behind, and never the state
+    of someone deliberately sending the same message again after a reply.
+    """
+    try:
+        recent = db.get_portal_messages(agent_name, email, limit=1, session_id=session_id)
+        if recent and recent[-1].get("role") == "user" and recent[-1].get("content") == content:
+            logger.info("portal: skipping duplicate user row on retry for session %s", session_id)
+            return
+    except Exception as e:  # noqa: BLE001 — a read failure must not block the turn
+        logger.warning("portal duplicate-check failed for %s: %s", session_id, e)
+
+    try:
+        now = utc_now_iso()
+        db.add_portal_message(uuid.uuid4().hex, agent_name, email, "user", content,
+                              None, now, session_id=session_id)
+        db.touch_portal_session(session_id, now, added=1,
+                                title_if_empty=_derive_title(content))
+    except Exception as e:  # noqa: BLE001 — never block a turn on bookkeeping
+        logger.warning("portal user-message persist failed for %s/%s: %s", agent_name, email, e)
+
+
+def _inflight_key(session_id: str) -> str:
+    return f"portal_inflight:{session_id}"
+
+
+def _inflight_exec_key(execution_id: str) -> str:
+    """Reverse index: is THIS execution the in-flight turn?
+
+    The SSE proxy asks that question on every attach retry, and it used to be
+    answered by scanning the whole keyspace — a fleet-wide SCAN, synchronous,
+    inside an async generator, every 0.4s per attaching stream. A second key
+    makes it an O(1) GET.
+    """
+    return f"portal_inflight_exec:{execution_id}"
+
+
+def mark_turn_inflight(session_id: str, execution_id: str, ttl_seconds: int = 3600) -> None:
+    """Record that ``session_id`` has a turn running, and WHICH one.
+
+    The value is the execution id, not a bare flag: a client that reloads has
+    lost the id it was streaming, and this is where it gets it back. Mirrors the
+    Session tab's `session_inflight:` sentinel (#759), which exists for exactly
+    this reattach problem. TTL is the backstop for a backend that dies mid-turn.
+    """
+    try:
+        from redis_breaker_util import get_breaker_redis
+        client = get_breaker_redis()
+        if client is not None:
+            client.set(_inflight_key(session_id), execution_id, ex=ttl_seconds)
+            client.set(_inflight_exec_key(execution_id), session_id, ex=ttl_seconds)
+    except Exception as e:  # noqa: BLE001 — degraded reattach, never a failed turn
+        logger.warning("portal inflight SET failed for %s: %s", session_id, e)
+
+
+def clear_turn_inflight(session_id: str, execution_id: str | None = None) -> None:
+    """Turn is done. Best-effort — the TTL is the backstop."""
+    try:
+        from redis_breaker_util import get_breaker_redis
+        client = get_breaker_redis()
+        if client is not None:
+            if execution_id is None:
+                value = client.get(_inflight_key(session_id))
+                execution_id = value.decode() if isinstance(value, bytes) else value
+            client.delete(_inflight_key(session_id))
+            if execution_id:
+                client.delete(_inflight_exec_key(execution_id))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal inflight DEL failed for %s: %s", session_id, e)
+
+
+def get_turn_inflight_matches(execution_id: str) -> bool:
+    """Whether ``execution_id`` is the turn currently marked in flight.
+
+    Asked by the SSE proxy when the agent says 404: "not registered YET" (keep
+    waiting) versus "already finished" (end the stream cleanly) look identical
+    from the agent, and only the marker can tell them apart.
+
+    An O(1) GET on the reverse key. It used to SCAN the entire shared keyspace
+    — which holds slot, breaker, heartbeat and idempotency keys for the whole
+    fleet — synchronously, inside an async generator, on every 0.4s attach
+    retry. Fail-open (True) on a Redis problem: a bounded extra wait is a far
+    better failure than cutting off a turn that is genuinely streaming.
+    """
+    try:
+        from redis_breaker_util import get_breaker_redis
+        client = get_breaker_redis()
+        if client is None:
+            return True
+        return client.get(_inflight_exec_key(execution_id)) is not None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal inflight match failed for %s: %s", execution_id, e)
+        return True
+
+
+def get_turn_inflight(session_id: str) -> str | None:
+    """The execution id of the turn currently running on this thread, if any.
+
+    Returns None when Redis is unavailable — a degraded reattach (the client
+    shows no live activity and picks the reply up on its next load) is far
+    better than a false "still working" that never resolves.
+    """
+    try:
+        from redis_breaker_util import get_breaker_redis
+        client = get_breaker_redis()
+        if client is None:
+            return None
+        value = client.get(_inflight_key(session_id))
+        if value is None:
+            return None
+        return value.decode() if isinstance(value, bytes) else str(value)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal inflight GET failed for %s: %s", session_id, e)
+        return None
+
+
+# --- Streaming turns (ent#286) -----------------------------------------------
+# The Workspace could not show live tool activity for one structural reason: the
+# client never learned the execution id, because `portal_chat` only returns when
+# the turn is already over. The agent has streamed its log all along
+# (`GET /api/executions/{id}/stream`), and the backend already proxies exactly
+# that for public links — the only missing piece was an id, early.
+#
+# So: create the execution row FIRST, hand the id back immediately, and run the
+# same `portal_chat` coroutine as a background task. Deliberately NOT the #1083
+# fire-and-forget path, which would have meant a lock lease, a cold retry split
+# across a callback, and three terminal writes moving — plus it is
+# `DISPATCH_ASYNC`-gated and Claude-only, so streaming would have been dark by
+# default and absent on other runtimes. In-process, every runtime, no flag, and
+# the turn logic does not move an inch.
+
+_INFLIGHT_TURNS: set = set()
+
+
+def _fail_unstarted_execution(execution_id: str, reason: str) -> None:
+    """Write a terminal for a row whose turn never reached the agent.
+
+    The row is created BEFORE the background turn so the client has something to
+    subscribe to. Anything that raises before `execute_task` — a resume lock
+    held by another tab, a thread-resolution failure, an inbox read — therefore
+    leaves it RUNNING forever: it shows as live in Executions, and the cleanup
+    watchdog eventually fabricates a FAILED "silent launch failure" against a
+    perfectly healthy agent.
+
+    Safe against a race with a turn that DID start: `update_execution_status`
+    guards non-success terminals against overwriting any already-terminal row
+    (RELIABILITY-005), so a real completion always wins over this.
+    """
+    try:
+        from database import db as core_db
+        core_db.update_execution_status(
+            execution_id, "failed",
+            error=(reason or "The turn did not start")[:500],
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort; the watchdog is the backstop
+        logger.warning("portal: could not finalize unstarted execution %s: %s",
+                       execution_id, e)
+
+
+def _agent_is_running(agent_name: str) -> bool:
+    """Whether the agent could take a turn right now.
+
+    A named seam rather than an inline Docker call, so a caller (and a test) has
+    ONE unambiguous thing to reason about. The inline version resolved
+    `services.docker_service` at call time, which made the check depend on which
+    copy of that module happened to be in `sys.modules` — under the full suite a
+    sibling module installs a MagicMock stub there, and a MagicMock container's
+    `.status` is never "running", so a healthy agent read as stopped.
+
+    Fails OPEN: a Docker read error is not evidence the agent is down, and
+    refusing a healthy turn is the worse error.
+    """
+    from services.docker_service import get_agent_container
+    try:
+        container = get_agent_container(agent_name)
+        return bool(container) and getattr(container, "status", None) == "running"
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal running-check failed for %s: %s", agent_name, e)
+        return True
+
+
+async def start_portal_turn(agent_name: str, message: str, email: str,
+                            session_id: str | None = None,
+                            include_owned: bool = False) -> dict:
+    """Begin a turn and return as soon as it is dispatchable.
+
+    Returns ``{execution_id, session_id}``. The caller subscribes to the
+    execution stream with that id; the turn finishes in the background and
+    persists exactly as a synchronous one does.
+
+    The roster gate runs HERE, before any row is created — a caller outside
+    scope must not be able to mint executions (or stream ids) at all.
+    """
+    if not agent_on_roster(agent_name, email, include_owned):
+        raise ClientPortalError(404, "Agent not found")
+
+    # Refuse a turn the agent cannot possibly run, BEFORE anything is created.
+    #
+    # Without this the dispatch answers 202 for a stopped agent, the client
+    # subscribes and gets 503, and a doomed background turn plus an orphan
+    # execution row are left behind — and the client, having been told the turn
+    # started, has no error to show. The synchronous path surfaces exactly this
+    # as a 502, so this says the same thing at the same moment in the flow.
+    if not _agent_is_running(agent_name):
+        raise ClientPortalError(
+            502, "The agent couldn't respond (it may be offline). Please try again."
+        )
+
+    # Resolve the thread up front so the client can adopt it immediately rather
+    # than waiting for the turn; `portal_chat` resolving it again is idempotent.
+    session_id = _resolve_session_id(agent_name, email, session_id)
+
+    from database import db as core_db
+    try:
+        subscription_id = core_db.get_agent_subscription_id(agent_name)
+    except Exception:  # noqa: BLE001 — usage tracking, never a gate
+        subscription_id = None
+
+    execution = core_db.create_task_execution(
+        agent_name=agent_name,
+        message=message,
+        triggered_by="public",
+        source_user_email=email,
+        subscription_id=subscription_id,
+    )
+    execution_id = execution.id if execution else None
+    if not execution_id:
+        # No id means no stream to subscribe to. Fail loudly rather than hand
+        # back a turn the client can never watch.
+        raise ClientPortalError(500, "Could not start the conversation. Please try again.")
+
+    mark_turn_inflight(session_id, execution_id)
+
+    async def _run() -> None:
+        try:
+            await portal_chat(agent_name, message, email, session_id=session_id,
+                              include_owned=include_owned, execution_id=execution_id)
+        except ClientPortalError as e:
+            # The client sees this on the stream (the agent's log ends) and in
+            # the execution row; there is no request left to raise into.
+            logger.info("portal streaming turn %s ended: %s", execution_id, e.detail)
+            _fail_unstarted_execution(execution_id, e.detail)
+        except Exception as exc:  # noqa: BLE001 — a background task must never die silently
+            logger.exception("portal streaming turn %s crashed", execution_id)
+            _fail_unstarted_execution(execution_id, f"{type(exc).__name__}: {exc}")
+        finally:
+            # Always clear, on every exit path: a stuck marker would leave the
+            # UI reattaching to a turn that ended, forever (until the TTL).
+            clear_turn_inflight(session_id, execution_id)
+
+    # Strong ref until it finishes: a bare create_task can be garbage-collected
+    # mid-flight (the #1083 footgun), which would abandon a billed turn.
+    task = asyncio.create_task(_run())
+    _INFLIGHT_TURNS.add(task)
+    task.add_done_callback(_INFLIGHT_TURNS.discard)
+
+    return {"execution_id": execution_id, "session_id": session_id}
+
+
+def execution_belongs_to_caller(execution_id: str, agent_name: str, email: str) -> bool:
+    """Whether ``email`` may watch ``execution_id`` on ``agent_name``.
+
+    Three conditions, all required: the row exists, it belongs to this agent,
+    and it was started by this caller. The last one is the one that matters —
+    executions are agent-scoped, so without it any client of a shared agent
+    could stream another client's conversation by guessing an id.
+    """
+    from database import db as core_db
+    try:
+        execution = core_db.get_execution(execution_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("portal stream: execution lookup failed for %s", execution_id)
+        return False
+    if not execution or execution.agent_name != agent_name:
+        return False
+    owner = (getattr(execution, "source_user_email", None) or "").lower()
+    return bool(owner) and owner == (email or "").lower()
+
+
+def list_sessions(agent_name: str, email: str, include_owned: bool = False) -> dict:
     """A client's conversation threads with a rostered agent (most-recent first).
     Roster-scoped (miss → 404)."""
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     return {"agent_name": agent_name, "sessions": db.list_portal_sessions(agent_name, email)}
 
 
-def create_session(agent_name: str, email: str) -> dict:
+def create_session(agent_name: str, email: str, include_owned: bool = False) -> dict:
     """Open a fresh, empty conversation thread and return its summary. Roster-scoped
     (miss → 404). Title fills in from the first message on the first turn."""
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     sid = uuid.uuid4().hex
     now = utc_now_iso()
@@ -963,13 +1379,14 @@ def search_chats(email: str, query: str, limit: int = 30) -> dict:
     return {"query": q, "results": results}
 
 
-def get_history(agent_name: str, email: str, session_id: str | None = None) -> dict:
+def get_history(agent_name: str, email: str, session_id: str | None = None,
+                include_owned: bool = False) -> dict:
     """A client's conversation with a rostered agent (oldest-first). Roster-scoped
     (miss → 404). With ``session_id`` it returns that thread (validated to belong
     to the caller — miss → 404); with none it returns the client's most-recent
     thread, so an opening drawer resumes where they left off. Survives refresh /
     re-sign-in — reads the private enterprise_portal_messages table."""
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     if session_id:
         if not db.get_portal_session(session_id, agent_name, email):
@@ -977,10 +1394,19 @@ def get_history(agent_name: str, email: str, session_id: str | None = None) -> d
     else:
         session_id = db.get_latest_portal_session_id(agent_name, email)
     messages = db.get_portal_messages(agent_name, email, session_id=session_id) if session_id else []
-    return {"agent_name": agent_name, "session_id": session_id, "messages": messages}
+    # ent#286: a client that reloaded mid-turn has lost the execution id it was
+    # streaming. It arrives here, on the fetch the client already makes on
+    # mount, so reattaching costs no extra round trip.
+    inflight = get_turn_inflight(session_id) if session_id else None
+    return {
+        "agent_name": agent_name,
+        "session_id": session_id,
+        "messages": messages,
+        "in_flight_execution_id": inflight,
+    }
 
 
-def portal_documents(agent_name: str, email: str) -> dict:
+def portal_documents(agent_name: str, email: str, include_owned: bool = False) -> dict:
     """List the files a rostered agent has shared (FILES-001), each with a
     download URL. Scoped to the caller's roster (miss → 404). Download URLs are
     built from the PORTAL base URL (#79 resolver) so a private-deployment portal
@@ -988,7 +1414,7 @@ def portal_documents(agent_name: str, email: str) -> dict:
     as the portal page). The `?sig=` token is the download credential — the OSS
     `/api/files/{id}` route is public and token-gated, so no portal auth rides on
     the link."""
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
 
     from database import db as core_db
@@ -1082,11 +1508,12 @@ def _legacy_email_dir(email: str) -> str:
     return _email_slug(email)
 
 
-async def portal_upload_document(agent_name: str, email: str, filename: str, data: bytes) -> dict:
+async def portal_upload_document(agent_name: str, email: str, filename: str, data: bytes,
+                                 include_owned: bool = False) -> dict:
     """Upload a client file into a rostered agent's per-client inbox
     (``~/inbox/<client-email>/<file>``). Scoped to the caller's roster (miss →
     404). Size-capped; filename sanitized (basename, no traversal)."""
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
 
     safe = _safe_filename(filename)
@@ -1396,11 +1823,11 @@ async def _collect_inbox_for_turn(agent_name: str, email: str, message: str):
     return images, image_names, doc_files
 
 
-async def list_client_uploads(agent_name: str, email: str) -> dict:
+async def list_client_uploads(agent_name: str, email: str, include_owned: bool = False) -> dict:
     """Files the client has uploaded to this rostered agent (their inbox). Lets a
     client review what they've sent. Roster-scoped (miss → 404); empty when the
     agent is offline (downloads still list from the DB independently)."""
-    if not agent_on_roster(agent_name, email):
+    if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     return {"agent_name": agent_name, "uploads": await _read_inbox(agent_name, email)}
 

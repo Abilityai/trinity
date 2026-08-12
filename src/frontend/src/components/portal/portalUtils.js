@@ -64,3 +64,64 @@ export function planHintDisplay(hints, expanded, limit = HINT_COLLAPSE_LIMIT) {
     collapsible,
   }
 }
+
+// ent#358: resolve a `/workspace?agent=<name>` landing.
+//
+// This is where anything that used to point at the Agent Detail Session surface
+// arrives after the redirect. Such a link names an AGENT, never a thread, so
+// "which conversation" has to be decided here: the caller's most recent thread
+// with that agent, or a fresh one when there is none. `?new=1` forces fresh.
+//
+// Returns null when the query names no agent, or one the caller cannot reach.
+// Not an error: the roster is the authority, and a stale or hand-edited link
+// should land in the Workspace rather than in a dead end.
+//
+// `threads` is expected most-recent-first (as `fetchAllSessions` returns it),
+// so the first match is the latest.
+// An axios failure (`isAxiosError`, or a request that never got an answer) is
+// the transport's story to tell. Anything else carrying a message is an Error
+// we threw ourselves, and its text is more useful than a guess about the
+// network.
+function isTransportError(err) {
+  const code = err?.code || ''
+  return err?.isAxiosError === true
+    || err?.request !== undefined
+    || code === 'ECONNABORTED' || code === 'ERR_NETWORK' || code === 'ETIMEDOUT'
+}
+
+export function resolveAgentLanding({ agent, forceNew = false, agents = [], threads = [] } = {}) {
+  if (!agent || typeof agent !== 'string') return null
+  if (!Array.isArray(agents) || !agents.some((a) => a && a.name === agent)) return null
+  if (forceNew) return { agentName: agent, sessionId: null }
+
+  const latest = (Array.isArray(threads) ? threads : []).find((t) => t && t.agent_name === agent)
+  return {
+    agentName: agent,
+    sessionId: latest ? (latest.id || latest.session_id || null) : null,
+  }
+}
+
+// ent#358: the Workspace is now the ONLY continuous-conversation surface, so a
+// send failure it cannot explain is a dead end — there is nowhere else for the
+// user to go and find out why. The backend already answers with a specific,
+// user-facing reason ("The agent is busy", "The request timed out", "This
+// conversation is already handling a message", "The agent couldn't respond (it
+// may be offline)"); the UI was discarding it and rendering a bare
+// "Not delivered · Retry", which reads the same whether the agent is stopped,
+// busy, or the turn simply timed out.
+export function deliveryFailureReason(err) {
+  const detail = err?.response?.data?.detail
+  if (typeof detail === 'string' && detail.trim()) return detail.trim()
+  // An Error we threw ourselves carries its own explanation and no `.response`.
+  // Falling through to the network branch told the user their CONNECTION had
+  // failed when in fact the request succeeded and the turn was still running —
+  // which pushed them toward a Retry that re-ran and re-billed it.
+  if (!err?.response && err?.message && !isTransportError(err)) return err.message
+  // A ClientPortalError always sends a string. Anything else is a framework
+  // shape (a 422 validation list, {msg: ...}) — say something true rather than
+  // rendering "[object Object]" at the user.
+  if (!err?.response) return "Couldn't reach Trinity — check your connection and try again."
+  if (err.response.status === 413) return 'That message or attachment is too large.'
+  if (err.response.status === 429) return 'Too many messages just now — wait a moment and retry.'
+  return `The message wasn't delivered (error ${err.response.status}).`
+}

@@ -310,6 +310,49 @@
   zero chat surfaces. `?tab=session` aliases to the Chat tab; execution-resume
   (`resumeSessionId`) forces legacy for that landing without changing the saved
   preference. See architecture → Session Tab.
+- **Surface retired (5.9)**: the Session surface no longer renders on Agent Detail.
+  The tables, endpoints, and the `--resume` engine all stay — the Workspace owns
+  the surface now. See 5.9.
+
+### 5.9 Workspace absorbs the Session surface
+- **Status**: ✅ Implemented (2026-08-12)
+- **Requirement ID**: WORKSPACE_SESSION_ABSORB
+- **GitHub Issue**: abilityai/trinity-enterprise#358
+- **Description**: Trinity had two overlapping continuous-conversation surfaces —
+  the Agent Detail Session mode and Workspace chat. The Workspace becomes the one.
+  The Session **surface** is removed from Agent Detail; the Session **engine**
+  (`claude --print --resume <uuid>`, the per-`(agent, uuid)` resume lock, the
+  cold-retry fallback, the JSONL reaper) is not removed — it is what Workspace
+  chat now runs on.
+- **Continuity is the contract, not the redirect.** Before this change, Workspace
+  chat was a stateless `execute_task` with the last N messages replayed as a text
+  prompt prefix: conversational recall only, no tool-result memory, no mid-skill
+  state, no reasoning state. Absorbing the Session surface into that would have
+  been a silent downgrade for every owner who used it. So parity comes first —
+  a Workspace thread resumes exactly the way a Session did.
+- **Key Features**:
+  - `enterprise_portal_sessions` gains `cached_claude_session_id`,
+    `last_resume_at`, `consecutive_resume_failures` — the same three fields that
+    make `agent_sessions` resumable, on the thread that replaces it
+  - Workspace turns run through the shared resumable-turn service: cached UUID →
+    resume lock → `execute_task(persist_session=True, resume_session_id=…)` →
+    single cold retry on a missing JSONL → cache the real UUID
+  - History replay is **suppressed on a resume turn** — real session memory
+    replaces it. The prompt prefix survives only where it is still the only
+    continuity there is: a cold turn, and a runtime without `--resume` (Codex)
+  - The JSONL reaper keep-set is the **union** of `agent_sessions` and
+    `enterprise_portal_sessions` cached UUIDs. Without the union the 6h sweep
+    deletes live Workspace JSONLs one hour after they are written, and continuity
+    breaks with no error anywhere
+  - `?tab=session` and legacy session deep links redirect to
+    `/workspace?agent=<name>`, query-preserving
+  - Existing `agent_sessions` rows stay readable — endpoints, store, and data are
+    untouched; only the Agent Detail entry point goes away
+- **Non-goal**: streaming. The Session surface never streamed (a synchronous POST
+  plus a reattach poller, #1376/#759), so absorbing it into a non-streaming
+  Workspace is not a regression. Workspace streaming is tracked separately in
+  abilityai/trinity-enterprise#286 and is **not** a prerequisite of this change.
+- **Flow**: `docs/memory/feature-flows/session-tab.md`
 
 ---
 

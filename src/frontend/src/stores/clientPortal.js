@@ -172,6 +172,100 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
+    // ent#286: begin a turn and get its id back immediately (202), so the UI can
+    // show live tool activity while the agent works. The synchronous
+    // `sendPortalChat` above is untouched — it stays the documented API surface
+    // for headless clients (ent#83), and is still the fallback when streaming
+    // is unavailable.
+    async startPortalChat(agentName, message, sessionId = null) {
+      const { data } = await axios.post(
+        `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
+        { message, session_id: sessionId },
+        { headers: this.authHeader }
+      )
+      return data   // {execution_id, session_id}
+    },
+
+    // Read one turn's live log. `fetch` + ReadableStream rather than
+    // EventSource: EventSource cannot send an Authorization header, which would
+    // force the portal token into the query string — the same credential-in-URL
+    // leak #550 removed from WebSockets. `onEvent` is called per parsed SSE
+    // payload; the promise resolves when the stream ends.
+    async streamPortalExecution(agentName, executionId, onEvent, { signal } = {}) {
+      const res = await fetch(
+        `/api/enterprise/client-portal/agents/${agentName}/executions/${executionId}/stream`,
+        { headers: { ...this.authHeader, Accept: 'text/event-stream' }, signal }
+      )
+      if (!res.ok || !res.body) throw new Error(`stream failed: ${res.status}`)
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      // SSE frames are separated by a blank line and can be split across
+      // chunks, so parse on the boundary rather than per chunk.
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const frames = buffer.split('\n\n')
+        buffer = frames.pop() || ''
+        for (const frame of frames) {
+          const line = frame.split('\n').find((l) => l.startsWith('data:'))
+          if (!line) continue
+          let payload
+          try { payload = JSON.parse(line.slice(5).trim()) } catch { continue }
+          onEvent(payload)
+          if (payload?.type === 'stream_end') return
+        }
+      }
+    },
+
+    // --- Multi-agent chats, backed by rooms (ent#361) ------------------------
+    //
+    // A chat with ONE agent stays a portal thread: that path resumes, streams
+    // and reattaches (ent#358/#286). A chat with two or more is a room, because
+    // rooms are the only substrate that models several agents, @mention-waking
+    // and per-participant budgets. The sidebar merges both.
+
+    async createRoom(agentNames, name) {
+      const { data } = await axios.post(
+        '/api/rooms',
+        { name: name || 'New chat', agents: agentNames },
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
+    async fetchRooms() {
+      const { data } = await axios.get('/api/rooms', { headers: this.authHeader })
+      return (data.rooms || []).map((r) => ({ ...r, is_room: true }))
+    },
+
+    // `since` is the seq cursor: 0 loads the whole transcript, a later value
+    // fetches only what the client has not seen.
+    async fetchRoom(roomId, since = 0) {
+      const { data } = await axios.get(`/api/rooms/${roomId}`, {
+        headers: this.authHeader, params: { since },
+      })
+      return data
+    },
+
+    async postRoomMessage(roomId, content) {
+      const { data } = await axios.post(
+        `/api/rooms/${roomId}/messages`, { content },
+        { headers: this.authHeader }
+      )
+      return data   // {room_id, seq, mentions, woke}
+    },
+
+    async addRoomParticipant(roomId, agentName) {
+      const { data } = await axios.post(
+        `/api/rooms/${roomId}/participants`, { agent_name: agentName, role: 'member' },
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
     // The client's conversation threads with an agent (most-recent first) — the
     // chat-history list backing the session switcher.
     async fetchSessions(agentName) {
@@ -252,7 +346,13 @@ export const useClientPortalStore = defineStore('clientPortal', {
         `/api/enterprise/client-portal/agents/${agentName}/history`,
         { headers: this.authHeader, params: sessionId ? { session_id: sessionId } : {} }
       )
-      return { sessionId: data.session_id || null, messages: data.messages || [] }
+      return {
+        sessionId: data.session_id || null,
+        messages: data.messages || [],
+        // ent#286: non-null when a turn is running on this thread right now —
+        // what a client that reloaded mid-turn resubscribes to.
+        inFlightExecutionId: data.in_flight_execution_id || null,
+      }
     },
 
     // Files the client has sent to an agent (their inbox) — lets them review
@@ -292,7 +392,23 @@ export const useClientPortalStore = defineStore('clientPortal', {
           return sessions.map((s) => ({ ...s, agent_name: a.name }))
         } catch { return [] }
       }))
-      const merged = lists.flat()
+      // ent#361: multi-agent chats are rooms, and they belong in the same list —
+      // to the user these are all just conversations. Room fetch failure
+      // degrades to threads-only rather than emptying the sidebar (an
+      // unentitled or OSS build has no rooms at all, and that is not an error).
+      let rooms = []
+      try { rooms = await this.fetchRooms() } catch { rooms = [] }
+
+      const merged = lists.flat().concat(rooms.map((r) => ({
+        ...r,
+        // Normalised onto the thread shape the sidebar already renders, so one
+        // list component handles both kinds.
+        title: r.name,
+        last_message_at: r.last_message_at || r.created_at,
+        agent_names: (r.participants || [])
+          .filter((p) => p.kind === 'agent')
+          .map((p) => p.identity),
+      })))
       merged.sort((x, y) => {
         const tx = x.last_message_at || x.created_at || ''
         const ty = y.last_message_at || y.created_at || ''

@@ -95,8 +95,20 @@
 
       <!-- Main stage -->
       <main class="flex-1 min-w-0 flex flex-col bg-white dark:bg-gray-900">
+        <!-- ent#361: a room takes the stage when the URL names one. The
+             single-agent conversation is untouched below — different
+             substrate, different component, no shared state. -->
+        <PortalRoom
+          v-if="activeRoomIdFromRoute"
+          :key="activeRoomIdFromRoute"
+          :room-id="activeRoomIdFromRoute"
+          :roster="store.agents"
+          @open-menu="mobileNav = true"
+          @rooms-changed="refreshThreads"
+        />
+
         <PortalConversation
-          v-if="activeAgent"
+          v-else-if="activeAgent"
           :key="convKey"
           :agent="activeAgent"
           :roster="store.agents"
@@ -118,7 +130,17 @@
              which reads as "your operator hasn't shared anything" whether the
              module is absent, the roster call failed, or the list is genuinely
              empty — a dead end in two of the three cases. -->
-        <div v-else class="flex-1 flex flex-col items-center justify-center text-center px-6">
+        <div v-else-if="unreachableAgent" class="flex-1 flex flex-col items-center justify-center text-center px-6">
+          <svg class="w-10 h-10 text-gray-300 dark:text-gray-700 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" /></svg>
+          <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">
+            You don't have access to <span class="font-mono">{{ unreachableAgent }}</span>
+          </p>
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">
+            That link points at an agent that isn't shared with you. Pick one from the sidebar, or ask whoever sent the link.
+          </p>
+        </div>
+
+        <div v-else-if="!activeRoomIdFromRoute" class="flex-1 flex flex-col items-center justify-center text-center px-6">
           <svg class="w-10 h-10 text-gray-300 dark:text-gray-700 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
           <template v-if="store.unavailable">
             <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">Workspace isn't available on this instance</p>
@@ -154,6 +176,16 @@
       </main>
     </div>
 
+    <!-- ent#361: picking who is in a chat is an explicit act now -->
+    <PortalAgentPicker
+      v-if="pickerOpen"
+      :agents="store.agents"
+      :busy="pickerBusy"
+      :error="pickerError"
+      @confirm="onPickerConfirm"
+      @cancel="() => { pickerOpen = false; pickerError = null }"
+    />
+
     <!-- Files panel -->
     <PortalFilesPanel v-if="filesOpen && activeAgent" :agent="activeAgent" @close="filesOpen = false" />
   </div>
@@ -168,6 +200,9 @@ import PortalConversation from '@/components/portal/PortalConversation.vue'
 import PortalBriefing from '@/components/portal/PortalBriefing.vue'
 import PortalFilesPanel from '@/components/portal/PortalFilesPanel.vue'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
+import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
+import PortalRoom from '@/components/portal/PortalRoom.vue'
+import { resolveAgentLanding } from '@/components/portal/portalUtils'
 
 const store = useClientPortalStore()
 const route = useRoute()
@@ -219,6 +254,10 @@ async function onVerify() {
 // ---- Shell state --------------------------------------------------------------
 const threads = ref([])
 const activeAgentName = ref(null)
+// ent#361: the room a multi-agent chat is being held in, if any.
+const activeRoomId = ref(null)
+// The agent a deep link named that this caller cannot reach (ent#358 review).
+const unreachableAgent = ref(null)
 const pendingSession = ref(null)      // session to load when the conversation (re)mounts
 const prefill = ref('')
 const filesOpen = ref(false)
@@ -226,7 +265,11 @@ const mobileNav = ref(false)
 const convGen = ref(0)                // bumps on explicit thread switches → remount
 
 const activeSessionId = computed(() => route.params.sessionId || null)
+// ent#361: `/workspace/r/:roomId` is the multi-agent chat.
+const activeRoomIdFromRoute = computed(() => route.params.roomId || null)
 const activeAgent = computed(() => {
+  // Never substitute a different agent for one the caller asked for by name.
+  if (unreachableAgent.value) return null
   if (!activeAgentName.value) return store.agents[0] || null
   return store.agents.find((a) => a.name === activeAgentName.value) || { name: activeAgentName.value }
 })
@@ -235,9 +278,56 @@ const activeAgent = computed(() => {
 const convKey = computed(() => `${activeAgentName.value || (store.agents[0]?.name) || ''}#${convGen.value}`)
 
 // ---- Navigation handlers ------------------------------------------------------
+// ent#361: "+ New chat" is now an explicit act — pick who is in it. The old
+// behaviour (reset to a blank single-agent thread) is what the picker's
+// one-agent path still does, so nothing is lost, it is just no longer implicit.
+const pickerOpen = ref(false)
+const pickerBusy = ref(false)
+
 function newChat() {
+  pickerOpen.value = true
+}
+
+function startBlankChat() {
   pendingSession.value = null; prefill.value = ''; convGen.value++
   if (route.params.sessionId) router.push('/workspace')
+}
+
+async function onPickerConfirm(agentNames) {
+  if (!agentNames.length) return
+  // ONE agent stays a portal thread: that path resumes, streams and reattaches
+  // (ent#358/#286). TWO OR MORE needs a room — the only substrate that models
+  // several agents and @mention-waking.
+  if (agentNames.length === 1) {
+    pickerOpen.value = false
+    newChatWithAgent(agentNames[0])
+    return
+  }
+  pickerBusy.value = true
+  try {
+    const room = await store.createRoom(agentNames, `Chat with ${agentNames.join(', ')}`)
+    pickerOpen.value = false
+    await refreshThreads()
+    openRoom(room.id || room.room_id)
+  } catch (err) {
+    // Keep the picker open with the reason: closing it would leave the user
+    // guessing whether anything happened.
+    pickerError.value = err?.response?.data?.detail?.message
+      || err?.response?.data?.detail
+      || 'Could not start that chat.'
+  } finally {
+    pickerBusy.value = false
+  }
+}
+
+const pickerError = ref(null)
+
+function openRoom(roomId) {
+  if (!roomId) return
+  activeRoomId.value = roomId
+  pendingSession.value = null
+  convGen.value++
+  router.push(`/workspace/r/${roomId}`)
 }
 function newChatWithAgent(name) {
   activeAgentName.value = name
@@ -246,6 +336,8 @@ function newChatWithAgent(name) {
 }
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
 function openThread(t) {
+  // ent#361: a room row in the merged sidebar opens the room, not a thread.
+  if (t.is_room) { openRoom(t.id); return }
   const sid = t.id || t.session_id
   activeAgentName.value = t.agent_name || activeAgentName.value
   pendingSession.value = sid; prefill.value = ''; convGen.value++
@@ -289,6 +381,42 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
   if (known) { activeAgentName.value = known.agent_name; pendingSession.value = sid; convGen.value++ }
 })
 
+// ent#358: `/workspace?agent=<name>` opens that agent's conversation directly —
+// the landing spot for anything that used to point at the Agent Detail Session
+// surface. The decision itself (which agent, which thread) is a pure function in
+// portalUtils so it can be tested without mounting the shell.
+function resolveAgentQuery() {
+  const landing = resolveAgentLanding({
+    agent: route.query.agent,
+    forceNew: !!route.query.new,
+    agents: store.agents,
+    threads: threads.value,
+  })
+  if (!landing) {
+    // The link named an agent this caller cannot reach (un-shared since the URL
+    // was created, renamed, deleted). Falling through used to let `activeAgent`
+    // default to the FIRST agent on the roster, so the user landed in someone
+    // else's conversation believing it was the one they clicked — and could
+    // send it context meant for another agent. Say so instead.
+    if (route.query.agent) {
+      unreachableAgent.value = String(route.query.agent)
+      activeAgentName.value = null
+      pendingSession.value = null
+      convGen.value++
+      return true
+    }
+    return false
+  }
+  unreachableAgent.value = null
+
+  activeAgentName.value = landing.agentName
+  prefill.value = ''
+  convGen.value++
+  pendingSession.value = landing.sessionId
+  if (landing.sessionId) router.replace(`/workspace/c/${landing.sessionId}`)
+  return true
+}
+
 async function bootstrap() {
   await store.fetchRoster()
   await refreshThreads()
@@ -298,7 +426,9 @@ async function bootstrap() {
     if (known) { activeAgentName.value = known.agent_name; pendingSession.value = sid }
     else pendingSession.value = sid   // let the conversation resolve/load it
     convGen.value++
+    return
   }
+  resolveAgentQuery()
 }
 
 onMounted(async () => { if (store.isClientSignedIn) await bootstrap() })

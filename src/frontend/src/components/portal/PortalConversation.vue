@@ -77,6 +77,10 @@
               class="rounded-2xl rounded-br-md px-3.5 py-2 text-sm whitespace-pre-wrap"
               :class="m.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white'"
             >{{ m.content }}</div>
+            <p
+              v-if="m.failed && m.error"
+              class="text-xs text-status-danger-700 dark:text-status-danger-300 text-right max-w-[32ch]"
+            >{{ m.error }}</p>
             <button
               v-if="m.failed"
               class="text-xs text-status-danger-600 dark:text-status-danger-400 hover:underline inline-flex items-center gap-1"
@@ -96,13 +100,20 @@
         <!-- Long-turn status: elapsed-aware, not just bouncing dots -->
         <div v-if="sending" class="flex items-start gap-2.5">
           <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
-          <div class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 px-3.5 py-2.5 flex items-center gap-2">
-            <span class="inline-flex gap-1">
-              <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:0ms"></span>
-              <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:150ms"></span>
-              <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:300ms"></span>
-            </span>
-            <span v-if="elapsed >= 4" class="text-xs text-gray-400">{{ statusLabel }}</span>
+          <div class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 px-3.5 py-2.5 flex flex-col gap-1.5">
+            <div class="flex items-center gap-2">
+              <span class="inline-flex gap-1">
+                <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:0ms"></span>
+                <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:150ms"></span>
+                <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:300ms"></span>
+              </span>
+              <span v-if="elapsed >= 4" class="text-xs text-gray-400">{{ statusLabel }}</span>
+            </div>
+            <!-- ent#286: what the agent is doing right now. Only while streaming;
+                 a non-streaming turn keeps exactly the old indicator. -->
+            <ul v-if="streaming && liveActivity.length" class="text-xs text-gray-500 dark:text-gray-400 space-y-0.5">
+              <li v-for="(step, si) in liveActivity" :key="si" class="truncate max-w-[36ch]">{{ step }}</li>
+            </ul>
           </div>
         </div>
       </div>
@@ -179,6 +190,7 @@ import { useClientPortalStore } from '@/stores/clientPortal'
 import { renderMarkdown } from '@/utils/markdown'
 import { agentDisplayName } from '@/utils/agentName'
 import PortalAvatar from './PortalAvatar.vue'
+import { deliveryFailureReason } from './portalUtils'
 
 const props = defineProps({
   agent: { type: Object, required: true },      // {name, owner, avatar_url, description, playbooks, voice_available}
@@ -209,12 +221,45 @@ const render = (c) => renderMarkdown(c || '')
 async function loadThread(sessionId) {
   loadingHistory.value = true
   messages.value = []
+  let inFlight = null
   try {
-    const { sessionId: resolved, messages: msgs } = await store.fetchHistory(props.agent.name, sessionId || null)
+    const { sessionId: resolved, messages: msgs, inFlightExecutionId } =
+      await store.fetchHistory(props.agent.name, sessionId || null)
     currentSessionId.value = sessionId || resolved || null
     messages.value = (msgs || []).map((m) => ({ role: m.role, content: m.content }))
+    inFlight = inFlightExecutionId
   } catch { /* start empty */ }
   finally { loadingHistory.value = false; await scrollDown() }
+
+  // ent#286: a turn was still running when this client loaded — reattach to it
+  // rather than showing a thread that looks finished. The user's message is
+  // already in `messages` (persisted at dispatch), so what is missing is only
+  // the "working" state and the reply.
+  if (inFlight) await reattach(inFlight)
+}
+
+// Rejoin a turn already in progress. The agent replays its buffered log before
+// streaming live, so a client that reloaded sees what it missed.
+async function reattach(executionId) {
+  if (sending.value) return
+  sending.value = true
+  streaming.value = true
+  liveActivity.value = []
+  elapsed.value = 0
+  clearInterval(elapsedTimer)
+  elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
+  try {
+    await store.streamPortalExecution(props.agent.name, executionId, onStreamEvent)
+    const data = await awaitPersistedReply(currentSessionId.value)
+    if (data?.response) messages.value.push({ role: 'assistant', content: data.response })
+  } catch { /* the reply lands in history on the next load */ }
+  finally {
+    sending.value = false
+    streaming.value = false
+    liveActivity.value = []
+    clearInterval(elapsedTimer)
+    await scrollDown()
+  }
 }
 
 watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {
@@ -290,7 +335,64 @@ async function deliver(text) {
   elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
   const startedNew = currentSessionId.value === null
   try {
-    const data = await store.sendPortalChat(props.agent.name, text, currentSessionId.value)
+    // ent#286: stream the turn so tool activity is visible while it runs.
+    //
+    // The fallback to the synchronous send is allowed in exactly ONE case: the
+    // DISPATCH itself failed, so no turn exists. Once dispatch returns, the turn
+    // is running on the server and re-sending would run it a second time —
+    // double spend, double side effects. Anything that goes wrong after that
+    // point is a failure to WATCH the turn, and the answer is to go and read
+    // its result, never to send it again.
+    let data = null
+    let started = null
+    // Read before anything is dispatched: after the fact it is impossible to
+    // tell this turn's reply from the previous one's.
+    const baseline = await persistedAssistantCount(currentSessionId.value)
+    try {
+      started = await store.startPortalChat(props.agent.name, text, currentSessionId.value)
+    } catch (dispatchErr) {
+      // Nothing was created, so a retry is safe — but only retry when the
+      // ROUTE is what failed. A 404/405 means an older backend without this
+      // endpoint; a network error means the request never landed. Any other
+      // status is the server's real answer about this turn ("the agent is
+      // offline", "you are rate limited"), and re-asking synchronously just
+      // earns the same answer a second time while the user waits twice as long
+      // to hear it.
+      const status = dispatchErr?.response?.status
+      const routeMissing = status === 404 || status === 405 || !dispatchErr?.response
+      if (!routeMissing) throw dispatchErr
+      // eslint-disable-next-line no-console
+      console.debug('[workspace] streaming route unavailable, using sync send', dispatchErr)
+      data = await store.sendPortalChat(props.agent.name, text, currentSessionId.value)
+    }
+
+    if (started) {
+      if (started.session_id && currentSessionId.value !== started.session_id) {
+        // Adopt the thread NOW rather than at the end, so a refresh mid-turn
+        // reattaches to it instead of opening a second conversation.
+        currentSessionId.value = started.session_id
+        emit('session-adopted', started.session_id)
+      }
+      streaming.value = true
+      liveActivity.value = []
+      try {
+        await store.streamPortalExecution(props.agent.name, started.execution_id, onStreamEvent)
+      } catch (streamErr) {
+        // Watching failed; the turn did not. Fall through and read its result.
+        // eslint-disable-next-line no-console
+        console.debug('[workspace] lost the stream, reading the result instead', streamErr)
+      } finally {
+        streaming.value = false
+        liveActivity.value = []
+      }
+      data = await awaitPersistedReply(started.session_id || currentSessionId.value, baseline)
+      if (!data) {
+        // The server reports nothing running and no new reply — a genuine
+        // no-answer. Report it; never re-send, the turn was already billed.
+        throw new Error('The agent did not reply. Check the conversation in a moment.')
+      }
+    }
+
     messages.value.push({ role: 'assistant', content: data.response || '(no response)' })
     if (voiceMode.value && ttsEnabled.value && data.response) speak(data.response)
     if (data.session_id && currentSessionId.value !== data.session_id) {
@@ -301,7 +403,7 @@ async function deliver(text) {
     attachments.value = []
     return true
   } catch (err) {
-    return { error: err }
+    return { error: deliveryFailureReason(err) }
   } finally {
     sending.value = false
     clearInterval(elapsedTimer)
@@ -309,24 +411,97 @@ async function deliver(text) {
   }
 }
 
+// ent#286 — live turn state. `liveActivity` holds a short, human-readable trail
+// of what the agent is doing right now; it is transient and never persisted.
+const streaming = ref(false)
+const liveActivity = ref([])
+const LIVE_ACTIVITY_MAX = 6
+
+// One log entry from the agent's stream → at most one line of visible activity.
+// Deliberately conservative: the stream is Claude's raw log, so anything not
+// recognised is ignored rather than rendered as noise at a client.
+function onStreamEvent(evt) {
+  if (!evt || evt.type === 'stream_end') return
+  let label = null
+  if (evt.type === 'tool_use' || evt.tool_name) label = `Using ${evt.tool_name || 'a tool'}…`
+  else if (evt.type === 'thinking') label = 'Thinking…'
+  else if (evt.type === 'error') label = 'Hit a problem — recovering…'
+  if (!label) return
+  if (liveActivity.value[liveActivity.value.length - 1] === label) return  // don't stutter
+  liveActivity.value.push(label)
+  if (liveActivity.value.length > LIVE_ACTIVITY_MAX) liveActivity.value.shift()
+}
+
+// The stream ends when the AGENT's execution ends, but the reply is persisted
+// by the backend a moment later — and sometimes much later, because a failed
+// `--resume` retries the whole turn cold under a NEW execution the client is
+// no longer watching.
+//
+// So the wait is bounded by the SERVER's own answer, not by a stopwatch. While
+// `in_flight_execution_id` is set on the thread, a turn is still running and
+// the only correct thing to do is keep waiting; a fixed deadline here declared
+// live, billed turns "not delivered" and offered a Retry that ran and billed
+// them a second time.
+//
+// `baselineAssistants` is the count read from the SERVER before dispatch. Using
+// the local list instead let a retry return the PREVIOUS turn's reply on its
+// first poll — the answer to the wrong question, while a second turn ran unseen.
+const REPLY_POLL_MS = 700
+const REPLY_IDLE_GIVE_UP = 8      // ~5.6s of the server saying "nothing running"
+
+async function awaitPersistedReply(sessionId, baselineAssistants) {
+  let idlePolls = 0
+  for (;;) {
+    let data
+    try {
+      data = await store.fetchHistory(props.agent.name, sessionId || null)
+    } catch {
+      // A hiccup reading history is not evidence the turn failed.
+      await new Promise((r) => setTimeout(r, REPLY_POLL_MS))
+      continue
+    }
+    const assistants = (data.messages || []).filter((m) => m.role === 'assistant')
+    if (assistants.length > baselineAssistants) {
+      const last = assistants[assistants.length - 1]
+      return { response: last.content, cost: last.cost, session_id: data.sessionId || sessionId }
+    }
+    // Still running server-side? Then keep waiting, however long it takes.
+    if (data.inFlightExecutionId) { idlePolls = 0 }
+    else if (++idlePolls >= REPLY_IDLE_GIVE_UP) return null
+    await new Promise((r) => setTimeout(r, REPLY_POLL_MS))
+  }
+}
+
+// Assistant count as the SERVER sees it — the baseline a reply must exceed.
+async function persistedAssistantCount(sessionId) {
+  if (!sessionId) return 0
+  try {
+    const data = await store.fetchHistory(props.agent.name, sessionId)
+    return (data.messages || []).filter((m) => m.role === 'assistant').length
+  } catch {
+    return 0
+  }
+}
+
 async function send() {
   const text = input.value.trim()
   if (!text || sending.value) return
-  const msg = { role: 'user', content: text, failed: false }
-  messages.value.push(msg)
+  const index = messages.value.push({ role: 'user', content: text, failed: false, error: null }) - 1
   input.value = ''
   autoGrow()
   await scrollDown()
   const res = await deliver(text)
-  if (res !== true) msg.failed = true
+  if (res !== true) markFailed(index, text, res?.error)
 }
 
 async function retry(i) {
   const msg = messages.value[i]
   if (!msg || sending.value) return
+  const content = msg.content
   msg.failed = false
-  const res = await deliver(msg.content)
-  if (res !== true) msg.failed = true
+  msg.error = null
+  const res = await deliver(content)
+  if (res !== true) markFailed(i, content, res?.error)
 }
 
 // ---- Voice: speak replies (TTS) + dictate (STT) — carried over from #78 -------
