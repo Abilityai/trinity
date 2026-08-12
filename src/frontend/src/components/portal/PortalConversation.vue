@@ -348,10 +348,18 @@ async function deliver(text) {
     try {
       started = await store.startPortalChat(props.agent.name, text, currentSessionId.value)
     } catch (dispatchErr) {
-      // Nothing was created. The synchronous path is a safe retry, and it is
-      // also what an older backend without this route needs.
+      // Nothing was created, so a retry is safe — but only retry when the
+      // ROUTE is what failed. A 404/405 means an older backend without this
+      // endpoint; a network error means the request never landed. Any other
+      // status is the server's real answer about this turn ("the agent is
+      // offline", "you are rate limited"), and re-asking synchronously just
+      // earns the same answer a second time while the user waits twice as long
+      // to hear it.
+      const status = dispatchErr?.response?.status
+      const routeMissing = status === 404 || status === 405 || !dispatchErr?.response
+      if (!routeMissing) throw dispatchErr
       // eslint-disable-next-line no-console
-      console.debug('[workspace] streaming dispatch unavailable, using sync send', dispatchErr)
+      console.debug('[workspace] streaming route unavailable, using sync send', dispatchErr)
       data = await store.sendPortalChat(props.agent.name, text, currentSessionId.value)
     }
 
@@ -442,25 +450,42 @@ async function awaitPersistedReply(sessionId, { tries = 15, delayMs = 700 } = {}
 }
 
 
+// Mark a sent message as undelivered, THROUGH the reactive array.
+//
+// `messages` is a ref([]), so pushing a plain object stores the raw target and
+// Vue only proxies it when you read `messages.value[i]`. Mutating the local
+// variable you pushed writes past the proxy: the value changes, nothing
+// re-renders, and the failure is invisible — which is exactly why a failed send
+// showed no error at all. `retry()` never had the bug because it starts from
+// `messages.value[i]`.
+function markFailed(index, content, error) {
+  const row = messages.value[index]
+  // The array can be replaced under us (thread switch, history reload). Only
+  // mark the row if it is still the message we sent.
+  if (!row || row.role !== 'user' || row.content !== content) return
+  row.failed = true
+  row.error = error || null
+}
+
 async function send() {
   const text = input.value.trim()
   if (!text || sending.value) return
-  const msg = { role: 'user', content: text, failed: false, error: null }
-  messages.value.push(msg)
+  const index = messages.value.push({ role: 'user', content: text, failed: false, error: null }) - 1
   input.value = ''
   autoGrow()
   await scrollDown()
   const res = await deliver(text)
-  if (res !== true) { msg.failed = true; msg.error = res?.error || null }
+  if (res !== true) markFailed(index, text, res?.error)
 }
 
 async function retry(i) {
   const msg = messages.value[i]
   if (!msg || sending.value) return
+  const content = msg.content
   msg.failed = false
   msg.error = null
-  const res = await deliver(msg.content)
-  if (res !== true) { msg.failed = true; msg.error = res?.error || null }
+  const res = await deliver(content)
+  if (res !== true) markFailed(i, content, res?.error)
 }
 
 // ---- Voice: speak replies (TTS) + dictate (STT) — carried over from #78 -------
