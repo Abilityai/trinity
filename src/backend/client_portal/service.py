@@ -18,6 +18,7 @@ Self-contained: reads the OSS ``public_chat_url`` row directly (mirroring
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
@@ -726,7 +727,8 @@ def _build_portal_system_prompt(agent_name: str, email: str) -> str | None:
 
 async def portal_chat(agent_name: str, message: str, email: str,
                       session_id: str | None = None,
-                      include_owned: bool = False) -> dict:
+                      include_owned: bool = False,
+                      execution_id: str | None = None) -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -734,7 +736,14 @@ async def portal_chat(agent_name: str, message: str, email: str,
 
     The turn lands in ``session_id`` when given (validated to belong to the
     caller), else the client's most-recent session, else a freshly-opened one —
-    so history is threaded per conversation, not one flat log per agent (#78)."""
+    so history is threaded per conversation, not one flat log per agent (#78).
+
+    ent#286: ``execution_id`` lets a caller that has ALREADY created the
+    execution row hand it in, so it can hand the id to a client and have it
+    subscribe to the live stream while this coroutine is still running. The
+    turn itself is identical either way — this function stays the one place a
+    portal turn happens, which is what keeps the streaming path from becoming a
+    second, drifting implementation."""
     if not agent_on_roster(agent_name, email, include_owned):
         # Uniform 404 — never disclose whether an agent the client can't reach exists.
         raise ClientPortalError(404, "Agent not found")
@@ -884,6 +893,7 @@ async def portal_chat(agent_name: str, message: str, email: str,
             timeout_seconds=300,
             images=images or None,      # referenced inbox images as vision input (#78)
             system_prompt=system_prompt,
+            execution_id=execution_id,  # ent#286: pre-created row, so the client can already be watching
         )
     except ResumeLockBusy:
         # A concurrent turn holds this thread's lock. Same shape as the "agent
@@ -938,6 +948,102 @@ async def portal_chat(agent_name: str, message: str, email: str,
         _spawn_title_generation(agent_name, session_id, client_message, reply)
 
     return {"response": reply, "cost": cost, "session_id": session_id}
+
+
+# --- Streaming turns (ent#286) -----------------------------------------------
+# The Workspace could not show live tool activity for one structural reason: the
+# client never learned the execution id, because `portal_chat` only returns when
+# the turn is already over. The agent has streamed its log all along
+# (`GET /api/executions/{id}/stream`), and the backend already proxies exactly
+# that for public links — the only missing piece was an id, early.
+#
+# So: create the execution row FIRST, hand the id back immediately, and run the
+# same `portal_chat` coroutine as a background task. Deliberately NOT the #1083
+# fire-and-forget path, which would have meant a lock lease, a cold retry split
+# across a callback, and three terminal writes moving — plus it is
+# `DISPATCH_ASYNC`-gated and Claude-only, so streaming would have been dark by
+# default and absent on other runtimes. In-process, every runtime, no flag, and
+# the turn logic does not move an inch.
+
+_INFLIGHT_TURNS: set = set()
+
+
+async def start_portal_turn(agent_name: str, message: str, email: str,
+                            session_id: str | None = None,
+                            include_owned: bool = False) -> dict:
+    """Begin a turn and return as soon as it is dispatchable.
+
+    Returns ``{execution_id, session_id}``. The caller subscribes to the
+    execution stream with that id; the turn finishes in the background and
+    persists exactly as a synchronous one does.
+
+    The roster gate runs HERE, before any row is created — a caller outside
+    scope must not be able to mint executions (or stream ids) at all.
+    """
+    if not agent_on_roster(agent_name, email, include_owned):
+        raise ClientPortalError(404, "Agent not found")
+
+    # Resolve the thread up front so the client can adopt it immediately rather
+    # than waiting for the turn; `portal_chat` resolving it again is idempotent.
+    session_id = _resolve_session_id(agent_name, email, session_id)
+
+    from database import db as core_db
+    try:
+        subscription_id = core_db.get_agent_subscription_id(agent_name)
+    except Exception:  # noqa: BLE001 — usage tracking, never a gate
+        subscription_id = None
+
+    execution = core_db.create_task_execution(
+        agent_name=agent_name,
+        message=message,
+        triggered_by="public",
+        source_user_email=email,
+        subscription_id=subscription_id,
+    )
+    execution_id = execution.id if execution else None
+    if not execution_id:
+        # No id means no stream to subscribe to. Fail loudly rather than hand
+        # back a turn the client can never watch.
+        raise ClientPortalError(500, "Could not start the conversation. Please try again.")
+
+    async def _run() -> None:
+        try:
+            await portal_chat(agent_name, message, email, session_id=session_id,
+                              include_owned=include_owned, execution_id=execution_id)
+        except ClientPortalError as e:
+            # The client sees this on the stream (the agent's log ends) and in
+            # the execution row; there is no request left to raise into.
+            logger.info("portal streaming turn %s ended: %s", execution_id, e.detail)
+        except Exception:  # noqa: BLE001 — a background task must never die silently
+            logger.exception("portal streaming turn %s crashed", execution_id)
+
+    # Strong ref until it finishes: a bare create_task can be garbage-collected
+    # mid-flight (the #1083 footgun), which would abandon a billed turn.
+    task = asyncio.create_task(_run())
+    _INFLIGHT_TURNS.add(task)
+    task.add_done_callback(_INFLIGHT_TURNS.discard)
+
+    return {"execution_id": execution_id, "session_id": session_id}
+
+
+def execution_belongs_to_caller(execution_id: str, agent_name: str, email: str) -> bool:
+    """Whether ``email`` may watch ``execution_id`` on ``agent_name``.
+
+    Three conditions, all required: the row exists, it belongs to this agent,
+    and it was started by this caller. The last one is the one that matters —
+    executions are agent-scoped, so without it any client of a shared agent
+    could stream another client's conversation by guessing an id.
+    """
+    from database import db as core_db
+    try:
+        execution = core_db.get_execution(execution_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("portal stream: execution lookup failed for %s", execution_id)
+        return False
+    if not execution or execution.agent_name != agent_name:
+        return False
+    owner = (getattr(execution, "source_user_email", None) or "").lower()
+    return bool(owner) and owner == (email or "").lower()
 
 
 def list_sessions(agent_name: str, email: str, include_owned: bool = False) -> dict:

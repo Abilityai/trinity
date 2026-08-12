@@ -12,10 +12,13 @@ change. Reads report the resolved base URL actually in use.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 
+import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import StreamingResponse
 
 from dependencies import (
     CurrentUser,
@@ -27,6 +30,8 @@ from dependencies import (
 )
 from models import User
 
+from services.agent_auth import agent_httpx_client
+from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
 
 from . import service
@@ -53,6 +58,7 @@ from .models import (
     PortalSessions,
     PortalSessionSummary,
     PortalTtsRequest,
+    PortalTurnStarted,
     PortalUpload,
     PortalUploads,
 )
@@ -685,3 +691,105 @@ async def portal_uploads(agent_name: str, principal: PortalPrincipal = Depends(g
         return await service.list_client_uploads(agent_name, email, include_owned=include_owned)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+# --- Streaming turns (ent#286) -----------------------------------------------
+
+@router.post("/agents/{agent_name}/chat/stream", response_model=PortalTurnStarted, status_code=202)
+async def portal_chat_stream(
+    agent_name: str,
+    body: PortalChatRequest,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Begin a turn and return its id immediately (202) so the client can watch it.
+
+    A SEPARATE route rather than a mode on `POST .../chat`: ent#83 documented
+    that endpoint as the integration surface for fully custom, API-only clients,
+    and silently turning its 200-with-a-reply into a 202-with-an-id would break
+    every one of them.
+
+    Rate limited on the SAME keys as the synchronous route — otherwise this
+    would be a way to buy unlimited turns by asking for them a different way.
+    """
+    from services import rate_limiter
+
+    email = principal.email
+    include_owned = principal.is_platform
+
+    _require_roster(agent_name, email, include_owned)
+    rate_limiter.enforce(
+        f"portal_chat:{email}:{agent_name}", PORTAL_CHAT_BURST_LIMIT, 60, detail=_CHAT_LIMIT_DETAIL
+    )
+    rate_limiter.enforce(
+        f"portal_chat_hourly:{email}:{agent_name}", PORTAL_CHAT_HOURLY_LIMIT, 3600,
+        detail=_CHAT_LIMIT_DETAIL,
+    )
+    try:
+        started = await service.start_portal_turn(
+            agent_name, body.message, email,
+            session_id=body.session_id, include_owned=include_owned,
+        )
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    return PortalTurnStarted(**started)
+
+
+@router.get("/agents/{agent_name}/executions/{execution_id}/stream")
+async def portal_stream_execution(
+    agent_name: str,
+    execution_id: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Live SSE for one of the caller's OWN turns.
+
+    Three gates, in order: the agent must be on the caller's roster, the
+    execution must belong to that agent, and it must have been started by this
+    caller. The third is the load-bearing one — executions are agent-scoped, so
+    without it any client of a shared agent could watch another client's
+    conversation by guessing an id.
+
+    A completed execution still streams: the agent replays its buffered log and
+    ends with `stream_end`, which is what makes a browser refresh mid-turn
+    reattach instead of starting a second turn.
+    """
+    email = principal.email
+    include_owned = principal.is_platform
+
+    _require_roster(agent_name, email, include_owned)
+    if not service.execution_belongs_to_caller(execution_id, agent_name, email):
+        # Uniform 404, exactly like the roster miss above — never confirm that
+        # an execution exists to someone who may not watch it.
+        raise HTTPException(status_code=404, detail="Execution not found")
+
+    container = get_agent_container(agent_name)
+    if not container or container.status != "running":
+        raise HTTPException(status_code=503, detail="Agent is not running")
+
+    async def proxy_stream():
+        agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/stream"
+        try:
+            async with agent_httpx_client(agent_name, timeout=None) as client:
+                async with client.stream("GET", agent_url) as response:
+                    if response.status_code != 200:
+                        yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
+                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                        return
+                    async for chunk in response.aiter_text():
+                        yield chunk
+        except httpx.ConnectError:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to connect to agent'})}\n\n"
+            yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+        except Exception as e:  # noqa: BLE001 — the stream must always terminate cleanly
+            logger.error("[PortalStream] error streaming %s from %s: %s", execution_id, agent_name, e)
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Stream interrupted'})}\n\n"
+            yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+
+    return StreamingResponse(
+        proxy_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

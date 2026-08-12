@@ -100,13 +100,20 @@
         <!-- Long-turn status: elapsed-aware, not just bouncing dots -->
         <div v-if="sending" class="flex items-start gap-2.5">
           <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
-          <div class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 px-3.5 py-2.5 flex items-center gap-2">
-            <span class="inline-flex gap-1">
-              <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:0ms"></span>
-              <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:150ms"></span>
-              <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:300ms"></span>
-            </span>
-            <span v-if="elapsed >= 4" class="text-xs text-gray-400">{{ statusLabel }}</span>
+          <div class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 px-3.5 py-2.5 flex flex-col gap-1.5">
+            <div class="flex items-center gap-2">
+              <span class="inline-flex gap-1">
+                <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:0ms"></span>
+                <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:150ms"></span>
+                <span class="w-1.5 h-1.5 rounded-full bg-gray-400 animate-bounce" style="animation-delay:300ms"></span>
+              </span>
+              <span v-if="elapsed >= 4" class="text-xs text-gray-400">{{ statusLabel }}</span>
+            </div>
+            <!-- ent#286: what the agent is doing right now. Only while streaming;
+                 a non-streaming turn keeps exactly the old indicator. -->
+            <ul v-if="streaming && liveActivity.length" class="text-xs text-gray-500 dark:text-gray-400 space-y-0.5">
+              <li v-for="(step, si) in liveActivity" :key="si" class="truncate max-w-[36ch]">{{ step }}</li>
+            </ul>
           </div>
         </div>
       </div>
@@ -295,7 +302,35 @@ async function deliver(text) {
   elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
   const startedNew = currentSessionId.value === null
   try {
-    const data = await store.sendPortalChat(props.agent.name, text, currentSessionId.value)
+    // ent#286: stream the turn so tool activity is visible while it runs.
+    // Falls back to the synchronous send on ANY streaming failure — an older
+    // backend without the route, a proxy that buffers SSE, a stopped agent.
+    // The fallback is the point: streaming is an improvement to how a turn is
+    // watched, never a new way for one to fail.
+    let data = null
+    try {
+      const started = await store.startPortalChat(props.agent.name, text, currentSessionId.value)
+      if (started?.session_id && currentSessionId.value !== started.session_id) {
+        // Adopt the thread NOW rather than at the end, so a refresh mid-turn
+        // reattaches to it instead of opening a second conversation.
+        currentSessionId.value = started.session_id
+        emit('session-adopted', started.session_id)
+      }
+      streaming.value = true
+      liveActivity.value = []
+      await store.streamPortalExecution(props.agent.name, started.execution_id, onStreamEvent)
+      data = await awaitPersistedReply(started.session_id || currentSessionId.value)
+    } catch (streamErr) {
+      // eslint-disable-next-line no-console
+      console.debug('[workspace] streaming unavailable, falling back to sync send', streamErr)
+      data = null
+    } finally {
+      streaming.value = false
+      liveActivity.value = []
+    }
+
+    if (!data) data = await store.sendPortalChat(props.agent.name, text, currentSessionId.value)
+
     messages.value.push({ role: 'assistant', content: data.response || '(no response)' })
     if (voiceMode.value && ttsEnabled.value && data.response) speak(data.response)
     if (data.session_id && currentSessionId.value !== data.session_id) {
@@ -313,6 +348,49 @@ async function deliver(text) {
     await scrollDown()
   }
 }
+
+// ent#286 — live turn state. `liveActivity` holds a short, human-readable trail
+// of what the agent is doing right now; it is transient and never persisted.
+const streaming = ref(false)
+const liveActivity = ref([])
+const LIVE_ACTIVITY_MAX = 6
+
+// One log entry from the agent's stream → at most one line of visible activity.
+// Deliberately conservative: the stream is Claude's raw log, so anything not
+// recognised is ignored rather than rendered as noise at a client.
+function onStreamEvent(evt) {
+  if (!evt || evt.type === 'stream_end') return
+  let label = null
+  if (evt.type === 'tool_use' || evt.tool_name) label = `Using ${evt.tool_name || 'a tool'}…`
+  else if (evt.type === 'thinking') label = 'Thinking…'
+  else if (evt.type === 'error') label = 'Hit a problem — recovering…'
+  if (!label) return
+  if (liveActivity.value[liveActivity.value.length - 1] === label) return  // don't stutter
+  liveActivity.value.push(label)
+  if (liveActivity.value.length > LIVE_ACTIVITY_MAX) liveActivity.value.shift()
+}
+
+// The stream ends when the AGENT's execution ends, but the reply is persisted
+// by the backend a moment later — so the last assistant message is read back,
+// with a bounded wait, rather than assumed present. Returns null if it never
+// shows, which sends `deliver` down the synchronous path instead of inventing
+// a reply.
+async function awaitPersistedReply(sessionId, { tries = 15, delayMs = 700 } = {}) {
+  const before = messages.value.filter((m) => m.role === 'assistant').length
+  for (let i = 0; i < tries; i++) {
+    try {
+      const { messages: msgs } = await store.fetchHistory(props.agent.name, sessionId || null)
+      const assistants = (msgs || []).filter((m) => m.role === 'assistant')
+      if (assistants.length > before) {
+        const last = assistants[assistants.length - 1]
+        return { response: last.content, cost: last.cost, session_id: sessionId }
+      }
+    } catch { /* keep waiting — a hiccup here must not fail an answered turn */ }
+    await new Promise((r) => setTimeout(r, delayMs))
+  }
+  return null
+}
+
 
 async function send() {
   const text = input.value.trim()

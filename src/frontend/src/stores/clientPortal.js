@@ -172,6 +172,54 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
+    // ent#286: begin a turn and get its id back immediately (202), so the UI can
+    // show live tool activity while the agent works. The synchronous
+    // `sendPortalChat` above is untouched — it stays the documented API surface
+    // for headless clients (ent#83), and is still the fallback when streaming
+    // is unavailable.
+    async startPortalChat(agentName, message, sessionId = null) {
+      const { data } = await axios.post(
+        `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
+        { message, session_id: sessionId },
+        { headers: this.authHeader }
+      )
+      return data   // {execution_id, session_id}
+    },
+
+    // Read one turn's live log. `fetch` + ReadableStream rather than
+    // EventSource: EventSource cannot send an Authorization header, which would
+    // force the portal token into the query string — the same credential-in-URL
+    // leak #550 removed from WebSockets. `onEvent` is called per parsed SSE
+    // payload; the promise resolves when the stream ends.
+    async streamPortalExecution(agentName, executionId, onEvent, { signal } = {}) {
+      const res = await fetch(
+        `/api/enterprise/client-portal/agents/${agentName}/executions/${executionId}/stream`,
+        { headers: { ...this.authHeader, Accept: 'text/event-stream' }, signal }
+      )
+      if (!res.ok || !res.body) throw new Error(`stream failed: ${res.status}`)
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      // SSE frames are separated by a blank line and can be split across
+      // chunks, so parse on the boundary rather than per chunk.
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const frames = buffer.split('\n\n')
+        buffer = frames.pop() || ''
+        for (const frame of frames) {
+          const line = frame.split('\n').find((l) => l.startsWith('data:'))
+          if (!line) continue
+          let payload
+          try { payload = JSON.parse(line.slice(5).trim()) } catch { continue }
+          onEvent(payload)
+          if (payload?.type === 'stream_end') return
+        }
+      }
+    },
+
     // The client's conversation threads with an agent (most-recent first) — the
     // chat-history list backing the session switcher.
     async fetchSessions(agentName) {

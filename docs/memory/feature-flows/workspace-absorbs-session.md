@@ -1,7 +1,7 @@
 # Feature: the Workspace absorbs the Session surface
 
 > **Status**: ✅ Implemented (2026-08-12)
-> **Issue**: abilityai/trinity-enterprise#358
+> **Issues**: abilityai/trinity-enterprise#358 (absorb) · abilityai/trinity-enterprise#286 (streaming)
 > **Requirement**: `docs/memory/requirements/core-agent.md` §5.9
 > **Related**: [session-tab.md](session-tab.md) (the engine, still accurate), [architecture.md → Resumable Turns](../architecture.md#resumable-turns)
 
@@ -31,7 +31,7 @@ already paid for. Moving users from the first column to the second without
 closing that gap would have looked fine in every demo and failed exactly when a
 conversation got long enough to matter.
 
-## The prerequisite that wasn't
+## The prerequisite that wasn't (and what we did with it)
 
 The issue named ent#286 (Workspace streaming) as a hard prerequisite, on the
 reasoning that "the session tab streams; workspace chat does not."
@@ -41,7 +41,8 @@ It doesn't. `SessionPanel.vue` had no `EventSource`, no `WebSocket`, no SSE;
 stream endpoint. The reply arrived in one piece, with a reattach poller covering
 long turns. Absorbing a non-streaming surface into a non-streaming surface is
 not a regression, so ent#286 was decoupled — it is a Workspace improvement, not
-a gate on this one.
+a gate on this one. It then shipped in the same PR anyway, by choice rather than
+by dependency; see [Streaming](#streaming-ent286-same-pr).
 
 The **real** prerequisite was continuity parity, which is most of this change.
 
@@ -150,11 +151,45 @@ untouched — AC #3. Only the entry point went away.
 | `src/frontend/tests/unit/workspaceAgentLanding.spec.js` | the `?agent=` landing, including the roster miss and `?new=1` |
 | `src/frontend/e2e/workspace-absorbs-session.spec.js` | the redirect, that it replaces history, and that no mode toggle remains |
 
+## Streaming (ent#286, same PR)
+
+Landed alongside, because the two rewrite the same function and doing them
+separately would have meant writing the resume semantics and then immediately
+rewriting where they execute.
+
+The blocker was never SSE — the agent has streamed its log since long before
+this, and `routers/public.py` already proxies it for public links. It was that
+`portal_chat` only returns when the turn is over, so the client never learned an
+execution id to subscribe with.
+
+`start_portal_turn` creates the execution row first, returns
+`{execution_id, session_id}` as a 202, and runs the *same* `portal_chat`
+coroutine as an in-process background task. That choice is the whole design:
+
+| If it rode #1083 fire-and-forget | In-process |
+|---|---|
+| resume lock becomes a lease across a callback | stays an `async with` |
+| cold retry splits across the terminal | stays synchronous |
+| history/title/UUID-cache writes all move | none move |
+| `DISPATCH_ASYNC`-gated, Claude-only | no flag, every runtime |
+
+`POST .../chat` stays synchronous (ent#83's documented headless surface);
+streaming is the additive `POST .../chat/stream`. The frontend falls back to the
+synchronous send on any streaming failure — an older backend, a buffering proxy,
+a stopped agent — because streaming is an improvement to how a turn is *watched*,
+never a new way for one to fail.
+
+**Reading a stream requires all three:** the agent on the caller's roster, the
+execution belonging to that agent, and the execution having been started by that
+caller (`source_user_email`). The third is the one that matters — executions are
+agent-scoped, so two clients of a shared agent can reach each other's ids.
+
 ## Known Limitations
 
 | Limitation | Detail |
 |---|---|
-| **Workspace chat still doesn't stream** | Unchanged by this work, and not introduced by it — neither surface streamed. Tracked as ent#286. |
+| **The reply is read back, not streamed** | The agent's stream ends when its execution ends, but the reply is persisted a moment later, so the client polls history briefly (bounded) for the new assistant message. Token-by-token rendering of the reply itself is a further step. |
+| **A backend restart mid-turn loses the terminal** | The background task dies with the process. No worse than the synchronous path (whose request died too), but unlike #1083 there is no callback to recover it. |
 | **A pre-existing thread's next turn is cold** | Existing Workspace threads have no cached id, so the first turn after deploy replays history and starts a fresh session. Self-healing, one turn. |
 | **Codex Workspace threads keep the old behaviour** | No `--resume`, so they stay on history replay. Correct, but it means continuity quality now differs by runtime within the same surface. |
 | **`stores/sessions.js` keeps actions nothing calls** | Its turn/session actions map 1:1 to endpoints that are still live and still serve `agent_sessions` data (AC #3). Pruning them is cleanup for whoever retires those endpoints. |
