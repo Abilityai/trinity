@@ -240,6 +240,15 @@ export const routes = [
     component: () => import('../views/Portal.vue'),
     meta: { title: 'Workspace', hideHelpWidget: true }
   },
+  {
+    // ent#361: a multi-agent chat is a ROOM, not a portal thread — different
+    // substrate, different id space — so it gets its own deep link rather than
+    // overloading `/c/`.
+    path: '/workspace/r/:roomId',
+    name: 'WorkspaceRoom',
+    component: () => import('../views/Portal.vue'),
+    meta: { title: 'Workspace', hideHelpWidget: true }
+  },
   // ent#357 legacy paths. Function form so query AND hash survive the hop —
   // these URLs were handed to real clients by email, and a client landing on a
   // dead link has no way to report it. `/portal/c/:sessionId` keeps the thread.

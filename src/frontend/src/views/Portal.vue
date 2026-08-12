@@ -95,8 +95,20 @@
 
       <!-- Main stage -->
       <main class="flex-1 min-w-0 flex flex-col bg-white dark:bg-gray-900">
+        <!-- ent#361: a room takes the stage when the URL names one. The
+             single-agent conversation is untouched below — different
+             substrate, different component, no shared state. -->
+        <PortalRoom
+          v-if="activeRoomIdFromRoute"
+          :key="activeRoomIdFromRoute"
+          :room-id="activeRoomIdFromRoute"
+          :roster="store.agents"
+          @open-menu="mobileNav = true"
+          @rooms-changed="refreshThreads"
+        />
+
         <PortalConversation
-          v-if="activeAgent"
+          v-else-if="activeAgent"
           :key="convKey"
           :agent="activeAgent"
           :roster="store.agents"
@@ -118,7 +130,7 @@
              which reads as "your operator hasn't shared anything" whether the
              module is absent, the roster call failed, or the list is genuinely
              empty — a dead end in two of the three cases. -->
-        <div v-else class="flex-1 flex flex-col items-center justify-center text-center px-6">
+        <div v-else-if="!activeRoomIdFromRoute" class="flex-1 flex flex-col items-center justify-center text-center px-6">
           <svg class="w-10 h-10 text-gray-300 dark:text-gray-700 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
           <template v-if="store.unavailable">
             <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">Workspace isn't available on this instance</p>
@@ -179,6 +191,7 @@ import PortalBriefing from '@/components/portal/PortalBriefing.vue'
 import PortalFilesPanel from '@/components/portal/PortalFilesPanel.vue'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
+import PortalRoom from '@/components/portal/PortalRoom.vue'
 import { resolveAgentLanding } from '@/components/portal/portalUtils'
 
 const store = useClientPortalStore()
@@ -240,6 +253,8 @@ const mobileNav = ref(false)
 const convGen = ref(0)                // bumps on explicit thread switches → remount
 
 const activeSessionId = computed(() => route.params.sessionId || null)
+// ent#361: `/workspace/r/:roomId` is the multi-agent chat.
+const activeRoomIdFromRoute = computed(() => route.params.roomId || null)
 const activeAgent = computed(() => {
   if (!activeAgentName.value) return store.agents[0] || null
   return store.agents.find((a) => a.name === activeAgentName.value) || { name: activeAgentName.value }
@@ -307,6 +322,8 @@ function newChatWithAgent(name) {
 }
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
 function openThread(t) {
+  // ent#361: a room row in the merged sidebar opens the room, not a thread.
+  if (t.is_room) { openRoom(t.id); return }
   const sid = t.id || t.session_id
   activeAgentName.value = t.agent_name || activeAgentName.value
   pendingSession.value = sid; prefill.value = ''; convGen.value++
