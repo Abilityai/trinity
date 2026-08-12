@@ -395,6 +395,24 @@ def reset_transition_memo() -> None:
     _refusal_episodes.clear()
 
 
+def _describe_exception(e: BaseException) -> str:
+    """`type: message`, and never raises — `str(e)` on a foreign exception can.
+
+    Used for BOTH the stored `_RefusalEpisode.last_error` and the per-attempt
+    WARNING. The stored form is an eager f-string, so a raising `__str__` escapes
+    directly. The log form looks safer — deferred `%s` formatting is logging's
+    problem — but only in production, where `handleError` prints a traceback to
+    stderr and carries on; pytest's `LogCaptureHandler` re-raises it. Either way a
+    function documented "never raises" must not carry a raise-capable expression
+    on its failure path: that mismatch between stated contract and actual
+    behaviour is #1833 itself, and this module is the last place to repeat it.
+    """
+    try:
+        return f"{type(e).__name__}: {e}"
+    except Exception:                       # pragma: no cover - pathological
+        return type(e).__name__
+
+
 def _alarm_id(setting_key: str, window_days: int) -> str:
     """Natural key: one alarm per (setting, window), idempotent by construction.
 
@@ -422,6 +440,11 @@ def announce_refusal(
     safe by construction: `create_item` is idempotent on the natural key, and the
     queue item authorizes NOTHING (the ack endpoint is the gate), so a re-attempt
     can neither re-authorize a prune nor wedge one.
+
+    The "never raises" claim leans on `evaluate`'s guarantee that
+    `verdict.candidates` is an int: the message below formats it EAGERLY, so a
+    verdict carrying an object with a raising `__format__` would escape. Every
+    production caller passes an `evaluate` verdict; do not relax that.
 
     SECURITY: carries counts and identifiers ONLY — never sample rows. Queue rows
     are durable and operator-visible, and `schedule_executions.message`/`response`/
@@ -517,7 +540,7 @@ def announce_refusal(
         # The alarm is decorative; the refusal already happened and is logged.
         # Never let a failed alarm change the outcome. `alarm_delivered` stays
         # False, so the next cycle re-attempts (#1834) — the whole point.
-        ep.last_error = f"{type(e).__name__}: {e}"
+        ep.last_error = _describe_exception(e)
         elapsed = now - ep.first_refused_at
         if not ep.escalated and elapsed > ALARM_ESCALATION_AGE_SECONDS:
             ep.escalated = True
@@ -534,8 +557,15 @@ def announce_refusal(
                 setting_key, int(elapsed), ep.attempts, ep.last_error,
             )
         else:
+            # `ep.last_error`, NOT the raw `e`: deferred `%s` formatting is
+            # normally logging's problem (it prints to stderr via handleError and
+            # carries on), but a foreign exception whose `__str__` raises then
+            # produces a silent stderr traceback in production — and pytest's
+            # LogCaptureHandler re-raises it outright, so the same line would
+            # break "never raises" under test. Same information, no raise.
             logger.warning("[RetentionGuard] could not raise alarm for %s "
-                           "(attempt %d): %s", setting_key, ep.attempts, e)
+                           "(attempt %d): %s",
+                           setting_key, ep.attempts, ep.last_error)
         return
     # "Delivered" means the call did not raise — see `_RefusalEpisode`.
     ep.alarm_delivered = True

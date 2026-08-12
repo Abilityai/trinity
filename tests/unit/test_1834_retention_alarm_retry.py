@@ -260,6 +260,33 @@ class TestFailedAlarmIsRetried:
         assert len(warnings) == 4, "each failed attempt reports itself"
 
 
+    def test_an_exception_whose_str_raises_does_not_escape(self, guard_db):
+        """`announce_refusal` says "Never raises", and the retry path introduced
+        the first EAGERLY-formatted use of the exception (`last_error`).
+
+        `logger.warning(..., e)` looks safe because `%s` formatting is deferred —
+        but only in production, where `handleError` prints a traceback to stderr
+        and carries on. pytest's `LogCaptureHandler` RE-RAISES it, which is how
+        this test found the second site after the first was fixed. Both now go
+        through `_describe_exception`. A function whose stated contract and actual
+        behaviour disagree is #1833 itself, so it is not repeated here.
+        """
+        class Hostile(RuntimeError):
+            def __str__(self):
+                raise ValueError("even my message is broken")
+
+        def sink(agent_name, item):
+            raise Hostile()
+
+        guard_db.create_operator_queue_item = sink
+
+        _RG.announce_refusal(_KEY, "rows", 5, _verdict())   # must not raise
+
+        ep = _RG._refusal_episodes[_KEY]
+        assert ep.alarm_delivered is False, "a failure must never read as delivery"
+        assert ep.last_error == "Hostile", "degrade to the type name, not a crash"
+
+
 class TestEpisodeBoundaries:
 
     def test_a_window_change_starts_a_fresh_episode(self, guard_db, caplog):
