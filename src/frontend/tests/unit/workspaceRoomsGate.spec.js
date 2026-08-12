@@ -191,6 +191,19 @@ describe('#2128 structure guards', () => {
       'room URL falls through and opens a DIFFERENT agent\'s conversation ' +
       '(activeAgent defaults to the first roster entry), or renders a blank <main>.'
     ).toBeLessThan(convAt)
+
+    // …and FOLLOW <PortalRoom>. The chain is load-bearing in both directions:
+    // put the refusal first and it shadows the room outright, so an ENTITLED
+    // instance never opens one. Today that also fails to compile (a `v-else-if`
+    // with nothing before it), which is a guarantee about Vue rather than about
+    // this file — assert the property directly rather than inherit it.
+    const roomAt = src.indexOf('<PortalRoom')
+    expect(roomAt, '<PortalRoom is gone').toBeGreaterThan(-1)
+    expect(
+      roomAt,
+      '<PortalRoom must come FIRST: the refusal is the fallback for a room URL ' +
+      'this instance cannot open, never the branch that handles one it can'
+    ).toBeLessThan(branchAt)
   })
 
   it('F18 the capability is a term in <PortalRoom>\'s own v-if', () => {
