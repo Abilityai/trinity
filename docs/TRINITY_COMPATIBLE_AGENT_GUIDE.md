@@ -423,6 +423,15 @@ platforms:
   - local
 
 # === GIT CONFIGURATION ===
+#
+# NOTE (#2137): the `git:` block below is INERT — no Trinity backend code reads
+# `push_enabled`, `commit_paths`, or `ignore_paths`, and none of the bundled
+# templates declare it. Sync behaviour is decided by source-mode vs working-branch
+# at agent creation, `agent_git_config.auto_sync_enabled`, and the agent's own
+# `.gitignore`. It is documented here for historical shape only; the compatibility
+# checks that used to validate it (T-017, G-003, G-004, G-005) were retired for
+# gating on a field nothing consumes. Do not write it expecting an effect.
+#
 # Two sync modes are available:
 #
 # SOURCE MODE (default): Pull-only from GitHub
@@ -607,12 +616,12 @@ needs.
 
 Declaring `STRIPE_API_KEY` in `credentials:` is a **separate edit** from
 referencing `${STRIPE_API_KEY}` in `.mcp.json.template`, and the compatibility
-check K-002 fails if the two disagree.
+check T-015 fails if the two disagree.
 
 That is a real cost and we're not pretending otherwise: three of Trinity's own six
 default GitHub templates declare **zero** credentials while their
 `.mcp.json.template` references between two and six, and their `.env.example`
-documents seven to twelve. Those templates are K-002-red today and stay red until
+documents seven to twelve. Those templates are T-015-red today and stay red until
 someone does the edit.
 
 We keep it that way on purpose. If `.mcp.json.template` counted as a declaration,
@@ -1766,7 +1775,7 @@ An agent is Trinity-compatible if:
 - [ ] Sensitive files excluded from git sync paths
 
 ### Credentials (see "Declaring Credentials")
-- [ ] Every `${VAR}` in `.mcp.json.template` is declared in `credentials:` (K-002 checks this)
+- [ ] Every `${VAR}` in `.mcp.json.template` is declared in `credentials:` (T-015 checks this)
 - [ ] Every declared variable is documented in `.env.example` (K-001 checks this)
 - [ ] `credentials: {}` is stated explicitly if the agent needs nothing
 - [ ] No platform-injected variable (`GEMINI_API_KEY`, `GITHUB_PAT`, `TRINITY_*`, …) is

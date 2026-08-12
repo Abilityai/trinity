@@ -641,7 +641,7 @@ def declared_credential_names(block) -> List[str]:
     The union of `credentials.mcp_servers.<server>.env_vars` and
     `credentials.env_file` — the two places a template names a credential. This
     is the "what did the author declare" universe: the cross-reference target for
-    `credential_setup:` and the `listed` set the K-002/T-015 compatibility gate
+    `credential_setup:` and the `listed` set the T-015 compatibility gate
     compares `${VAR}` references against.
 
     Deduplicated, order-preserving (first declaration wins) so a caller can build
@@ -923,7 +923,7 @@ def normalize_credential_requirements(data, *, source_trust: str):
     **NEVER RAISES, and that is a load-bearing security property, not a nicety.**
     Two callers make it so: `_build_template` runs inside bare list comprehensions
     in `get_all_templates()`, where a raise is an HTTP 500 and an EMPTY CATALOG —
-    the exact bug PR-A closed; and the K-002/T-015 HARD compatibility gate consumes
+    the exact bug PR-A closed; and the T-015 HARD compatibility gate consumes
     the same readers, where a raise downgrades to a verdict indistinguishable from
     a pass. Callers on those paths ALSO wrap this, deliberately: the property must
     not rest on one function's discipline.
@@ -1816,7 +1816,7 @@ def extract_env_vars_from_mcp_json(file_path: Path) -> Dict[str, List[str]]:
 
     # The shared detector charset, NOT uppercase-only: `${my_var}` is substituted
     # at runtime, so an uppercase-only finder here left a real reference invisible
-    # to the deploy-time credential-gap warning while K-001/K-002 HARD-failed on
+    # to the deploy-time credential-gap warning while K-001/T-015 HARD-failed on
     # the same variable. See services/credential_charset.py. (ent#128)
     pattern = CREDENTIAL_DETECTOR_REF_RE
     result = {}

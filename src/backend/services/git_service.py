@@ -1286,7 +1286,12 @@ def delete_agent_git_config(agent_name: str) -> bool:
 # under it never apply (which is also why compat check S-005 accepts it).
 _TRINITY_AUTHORED_PATHS: Tuple[str, ...] = (
     ".trinity/pre-check",       # SCHED-COND-001 conditional-schedule hook (#454)
-    ".trinity/post-check",      # output-contract validator (compat I-005)
+    # Template-authored output-contract validator. No platform executor runs it
+    # today (compat check I-005 was retired in #2137 as gating on a fiction), but
+    # the path stays: #2070 derives the `!` re-includes from this tuple, and 14
+    # bundled templates already ship `!.trinity/post-check`, so removing it would
+    # untrack an authored hook on the next push — the exact #2070 regression.
+    ".trinity/post-check",
     ".trinity/pre-snapshot",    # data-snapshot quiesce hook (#1169)
     ".trinity/setup.sh",        # startup setup convention (trinity-enterprise#76)
     ".trinity/persistent-processes.allow",  # orphan-sweep allowlist patterns (#1501)

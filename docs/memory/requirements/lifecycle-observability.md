@@ -197,7 +197,7 @@ checks, 11 categories), the single source of truth kept in lockstep with
   skills) are omitted for non-Claude runtimes (Codex/Gemini, #1187).
 - **FR-7 — Reuse/consolidate**: builds on the #950/#982 deploy-local logic
   (`_is_platform_injected`, the `${VAR}`/`.env.example` parsing) for the
-  C-001/C-002 and K-001/K-002 overlaps, and on `git_service._GITIGNORE_PATTERNS`
+  C-001/C-002 and K-001/T-015 overlaps, and on `git_service._GITIGNORE_PATTERNS`
   + `_detect_git_dir` for the fixes.
 
 **API**: `GET /api/agents/{name}/compatibility?include_ai=` (read; STATIC live +

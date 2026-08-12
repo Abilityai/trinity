@@ -163,9 +163,14 @@ _EXPECTED_SKIPS = {
 # The `.gitignore`-decidable checks: the four HARD security ones plus G-001.
 GITIGNORE_HARD_IDS = ["S-001", "S-002", "S-004", "S-005", "G-001"]
 # Every check whose verdict is decided by `.gitignore` content alone.
+# G-002 was retired in #2137: it compared against the 58-entry fleet-wide
+# `_GITIGNORE_PATTERNS` that Trinity injects at git-init (`.bashrc`, `.ssh/`,
+# `.claude/plugins/`, …) — content no template author can or should author —
+# while every author-controllable line in it is already owned by S-001..S-008.
+# Those, plus F-003 and G-001, still carry this guard's whole guarantee.
 GITIGNORE_ALL_IDS = [
     "F-003", "S-001", "S-002", "S-004", "S-005",
-    "S-006", "S-007", "S-008", "G-001", "G-002",
+    "S-006", "S-007", "S-008", "G-001",
 ]
 
 _HEADER = """\
@@ -400,7 +405,7 @@ def test_guarded_template_passes_gitignore_hard_checks(name):
 @pytest.mark.parametrize("name", GUARDED_TEMPLATES)
 def test_guarded_template_has_no_gitignore_findings(name):
     """The user-visible outcome: no `.gitignore`-decidable finding of any
-    severity remains (F-003/S-006/S-007/S-008 soft, G-002 canonical parity)."""
+    severity remains (F-003/S-006/S-007/S-008 soft, G-001 no blanket exclusion)."""
     results = run_static(snapshot_for(TEMPLATES_DIR / name), GITIGNORE_ALL_IDS)
     _assert_all_pass(results, GITIGNORE_ALL_IDS, f"template {name}")
 
