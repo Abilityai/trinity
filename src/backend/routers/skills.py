@@ -27,7 +27,13 @@ from dependencies import (
 )
 from database import db
 from db_models import AgentSkill, SkillInfo, AgentSkillsUpdate
-from models import SkillsLibraryStatus, SkillSourceCreate, SkillSourceUpdate
+from models import (
+    SkillAssignmentAgent,
+    SkillAssignmentsResponse,
+    SkillsLibraryStatus,
+    SkillSourceCreate,
+    SkillSourceUpdate,
+)
 from db.skill_sources import DuplicateSkillSource, DefaultSourceExists
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from utils.url_validation import (
@@ -258,6 +264,107 @@ async def sync_library(admin_user: User = Depends(require_admin)):
 # ============================================================================
 # Agent Skills Assignment Endpoints
 # ============================================================================
+
+def _visible_agent_names(current_user: User) -> Optional[set]:
+    """The agents this caller may see named, resolved from the DB (ent#384).
+
+    Returns None for an admin (no filter), else the set of agent names the
+    caller owns or has been shared.
+
+    **Deliberately not `services.agent_service.helpers.accessible_agent_names`,
+    which is the helper the issue named.** That one resolves through
+    `get_accessible_agents` → `list_all_agents_fast()`, i.e. a Docker
+    `containers.list()` that returns `[]` when the daemon is unreachable or the
+    socket is denied — logged only as a throttled WARNING (#1131). Routed
+    through it, a Docker fault would answer this endpoint with an empty set for
+    every non-admin, which the UI can only render as "no agent holds any
+    skill", fleet-wide, with no error anywhere. That is a confident wrong zero
+    arriving through the *access* layer, where a store-level "a failed fetch is
+    not an empty result" rule structurally cannot catch it, and changing
+    `DOCKER_GID` is enough to trigger it.
+
+    `db.get_all_agent_metadata()` is one pure-DB batch query that already
+    carries `owner_username`, `is_shared_with_user` and `WHERE ao.deleted_at IS
+    NULL`. Access semantics are identical — admin ⇒ all, else owned ∪ shared —
+    so this narrows nothing and widens nothing except that the DB set also
+    contains the caller's OWN agents that currently have no container (#1747
+    documents that state as routine: soft-delete recovery, a pruned daemon, a
+    crash mid-create). It never contains somebody else's agent.
+
+    Email drives only the sharing join and comes from the same `users` row both
+    auth paths already read, so it is as reliable here as in the helper.
+    """
+    if current_user.role == "admin":
+        return None
+    metadata = db.get_all_agent_metadata(current_user.email or "")
+    return {
+        name
+        for name, meta in metadata.items()
+        if meta.get("owner_username") == current_user.username
+        or meta.get("is_shared_with_user")
+    }
+
+
+@router.get("/skills/assignments", response_model=SkillAssignmentsResponse)
+async def get_skill_assignments(current_user: User = Depends(get_current_user)):
+    """Which agents hold each skill, for the whole library, in one read (ent#384).
+
+    Backs the Library's Skills tab, where every skill block names its holders.
+    ONE endpoint rather than one call per block: the per-block shape is the N+1
+    mount loop the ent#260 List view deleted rather than migrated.
+
+    **Access-scoped, and that is a disclosure boundary rather than a display
+    detail.** Unscoped, this is a fleet-wide agent-name enumeration oracle for
+    any authenticated `role=user` — the Invariant #8 class already called out
+    for `GET /api/subscriptions`. Admins read it unfiltered; everyone else sees
+    only agents they own or that are shared with them. What is new here even
+    within that grant is the *shape*: a capability map of the fleet. Widen this
+    gate deliberately, or not at all.
+
+    `reject_agent_principal` on top of the auth dependency: an agent-scoped MCP
+    key resolves to its owner CARRYING the owner's role (ent#293), so on a
+    default admin-owned install every agent's injected `TRINITY_MCP_API_KEY`
+    would read the unfiltered map. There is deliberately no MCP tool for this
+    surface and no agent consumer, which makes the gate free — and it matches
+    this router's own `/skills/library/{name}` (ent#139) and `/skills/sources`
+    (ent#293) gates. Ghost and connector keys are already fenced by their
+    allow-lists in `dependencies.get_current_user`. If an agent consumer is
+    ever added, this gate is the thing that has to be reconsidered first.
+
+    The `response_model` is an allow-list, not documentation — the ent#334
+    lesson from this same file. The db layer selects from `agent_ownership`;
+    the model names the two fields that may leave.
+
+    Size: one entry per (agent, skill) pair the caller may see, so O(agents ×
+    skills) — roughly 25k entries for a 500-agent fleet carrying 50 skills.
+    Deliberately uncapped: a cap would understate holder counts, which is the
+    exact failure this endpoint exists to remove. The UI bounds *rendering*
+    instead.
+    """
+    reject_agent_principal(current_user)
+
+    visible = _visible_agent_names(current_user)
+
+    assignments: Dict[str, List[SkillAssignmentAgent]] = {}
+    for row in db.get_all_skill_assignments():
+        agent_name = row["agent_name"]
+        # `visible is None` is admin (no filter) and MUST NOT collapse with an
+        # empty set, which is a real non-admin who can reach no agent at all.
+        # A falsy check here would hand that user the whole fleet.
+        if visible is not None and agent_name not in visible:
+            continue
+        assignments.setdefault(row["skill_name"], []).append(
+            SkillAssignmentAgent(
+                name=agent_name,
+                display_label=row.get("display_label"),
+            )
+        )
+
+    return SkillAssignmentsResponse(
+        assignments=assignments,
+        scope="all" if visible is None else "accessible",
+    )
+
 
 @router.get("/agents/{agent_name}/skills", response_model=List[AgentSkill])
 async def get_agent_skills(

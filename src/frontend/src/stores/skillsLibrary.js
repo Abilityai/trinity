@@ -23,10 +23,39 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
                             // fields ({configured,url,branch,cloned,last_sync,
                             // commit_sha,skill_count}); ent#237/PR #1901 keeps
                             // them verbatim and adds sources[]
-  const loading = ref(false)
+  // ent#384 — GET /api/skills/assignments, the fleet skill→agents map.
+  // `assignments` is {skillName: [{name, display_label}]}; a skill with no
+  // holders is simply absent. `assignmentsScope` is 'all' (admin, unfiltered)
+  // or 'accessible' (owned ∪ shared) and is what lets the UI word a zero
+  // honestly — see the endpoint's own docstring.
+  const assignments = ref({})
+  const assignmentsScope = ref(null)
+  const assignmentsError = ref(null)
+  const assignmentsLoaded = ref(false)
+
+  // `fetching` is "a request is in flight"; `loading` is "there is nothing to
+  // show yet". They were one flag, which is wrong for the ScanlineReveal
+  // contract (§ data loading: "Loading means 'no data yet', never 'fetch in
+  // flight'") — with a single flag, every revisit replays the beam over data
+  // that is already on screen.
+  const fetching = ref(false)
+  const hasLoaded = ref(false)
   const error = ref(null)   // a load failure is an ERROR state, never "empty"
   const syncing = ref(false)
   const syncError = ref(null)
+
+  const loading = computed(() => fetching.value && !hasLoaded.value)
+
+  // Generation guards: the Skills panel can be unmounted and remounted by a
+  // tab switch while a request is in flight, so a slow first response must not
+  // land on top of a newer one.
+  //
+  // Two counters, not one. `loadAssignments` is independently callable (the
+  // per-card retry), and sharing a counter would let that retry invalidate an
+  // in-flight `load()` — whose `finally` is generation-guarded and would then
+  // never clear `fetching`, stranding the flag true forever.
+  let generation = 0
+  let assignmentsGeneration = 0
 
   /**
    * Why the section has nothing to show — a FLEET-scoped 4-state
@@ -46,10 +75,12 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
   })
 
   async function load() {
-    loading.value = true
+    const mine = ++generation
+    fetching.value = true
     error.value = null
     try {
       const s = await api.get('/api/skills/library/status')
+      if (mine !== generation) return
       status.value = s.data
       // Only ask for the list once we know a library exists. An unconfigured
       // library is a KNOWN empty state (reported by `status.configured`);
@@ -57,16 +88,78 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
       // wrong "no skills yet" (the no-swallow rule, stores/skills.js lesson).
       if (s.data?.configured) {
         const lib = await api.get('/api/skills/library')
+        if (mine !== generation) return
         library.value = lib.data || []
+        // ent#384 — deliberately NOT awaited in the same try as the two calls
+        // above. Who-holds-what is decoration on a browse surface: if it
+        // fails, the library must still render (per-section failure isolation
+        // is a page invariant), with the assignment rows saying so rather
+        // than reading as "assigned to nobody".
+        await loadAssignments()
       } else {
         library.value = []
+        assignments.value = {}
+        assignmentsScope.value = null
+        assignmentsLoaded.value = false
       }
+      hasLoaded.value = true
     } catch (e) {
+      if (mine !== generation) return
       error.value = e?.response?.data?.detail || 'Could not load the skills library'
     } finally {
-      loading.value = false
+      if (mine === generation) fetching.value = false
     }
   }
+
+  /**
+   * The fleet skill→agents map. Failure is contained here on purpose: it sets
+   * `assignmentsError` and leaves `assignments` empty-but-UNLOADED, so the UI
+   * can distinguish "nobody holds this" from "we could not find out". Those
+   * two render identically if you only look at an empty map, and rendering the
+   * second as the first is the confident-wrong-zero the endpoint's DB-derived
+   * access set exists to prevent on the server side.
+   */
+  async function loadAssignments() {
+    const mine = ++assignmentsGeneration
+    assignmentsError.value = null
+    try {
+      const res = await api.get('/api/skills/assignments')
+      if (mine !== assignmentsGeneration) return
+      assignments.value = res.data?.assignments || {}
+      assignmentsScope.value = res.data?.scope || null
+      assignmentsLoaded.value = true
+    } catch (e) {
+      if (mine !== assignmentsGeneration) return
+      assignments.value = {}
+      assignmentsScope.value = null
+      assignmentsLoaded.value = false
+      assignmentsError.value =
+        e?.response?.data?.detail || 'Could not load skill assignments'
+    }
+  }
+
+  /** Agents holding `skillName`; `[]` when nobody does. */
+  function agentsFor(skillName) {
+    return assignments.value[skillName] || []
+  }
+
+  /**
+   * Assignments whose skill is no longer in the library (ent#384).
+   *
+   * ent#237's documented revocation path is "cut a new tag without the
+   * offending skill". After that the library listing no longer carries it, so
+   * a page keyed by the listing answers "who still has it?" with silence —
+   * exactly when the operator most needs the answer. The rows are still in
+   * `agent_skills` and the endpoint still returns them, so surface them.
+   */
+  const orphanedAssignments = computed(() => {
+    if (!assignmentsLoaded.value) return []
+    const known = new Set(library.value.map((s) => s.name))
+    return Object.entries(assignments.value)
+      .filter(([name]) => !known.has(name))
+      .map(([name, agents]) => ({ name, agents }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+  })
 
   /**
    * Admin "Sync now". The server clones/pulls synchronously and a FIRST clone
@@ -96,7 +189,9 @@ export const useSkillsLibraryStore = defineStore('skillsLibrary', () => {
   }
 
   return {
-    library, status, loading, error, syncing, syncError,
-    emptyReason, load, sync,
+    library, status, loading, fetching, hasLoaded, error, syncing, syncError,
+    assignments, assignmentsScope, assignmentsError, assignmentsLoaded,
+    emptyReason, orphanedAssignments,
+    load, loadAssignments, agentsFor, sync,
   }
 })

@@ -3609,3 +3609,34 @@ class SkillsLibraryStatus(BaseModel):
     # Legacy flat fields (first source in resolution order). Not URLs.
     branch: Optional[str] = None
     commit_sha: Optional[str] = None
+
+
+class SkillAssignmentAgent(BaseModel):
+    """One agent holding a skill, as it leaves `GET /api/skills/assignments`.
+
+    An allow-list for the same reason as `SkillsLibraryStatus` above (ent#334):
+    the db layer selects from `agent_ownership`, whose columns include
+    subscription ids, resource limits and encrypted-credential pointers. Naming
+    the two fields that may leave makes the next column added to that table
+    fail-closed instead of shipping by default.
+
+    `display_label` is the ent#181 human-facing name; NULL means the UI renders
+    the slug. It discloses nothing new — `GET /api/agents` already serves it for
+    exactly the set this endpoint is scoped to.
+    """
+    name: str
+    display_label: Optional[str] = None
+
+
+class SkillAssignmentsResponse(BaseModel):
+    """Fleet-wide skill→agents map for the Library's Skills tab (ent#384).
+
+    `scope` is not decoration. An empty `assignments` map is ambiguous on its
+    own — it means either "nobody holds anything" or "you can see no agents" —
+    and a UI that guesses tells a `role=user` with no agents that a skill held
+    by forty agents has no holders. `all` (admin, unfiltered) vs `accessible`
+    (owned ∪ shared) lets the client word the zero honestly, or suppress the
+    row entirely when the accessible set is empty.
+    """
+    assignments: Dict[str, List[SkillAssignmentAgent]] = Field(default_factory=dict)
+    scope: str = "accessible"

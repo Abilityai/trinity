@@ -44,14 +44,41 @@ test.describe('smoke', () => {
   })
 
   test('@smoke library page loads', async ({ page }) => {
-    // ent#263 — chrome-only anchors (page h1 + both section headings): the CI
-    // stack has no configured skills library, so never assert on skill/library
-    // DATA (the unconfigured empty state is the expected render), and never
-    // getByText(/library/i) (the nav link matches everywhere).
+    // ent#263 → ent#384 — chrome-only anchors: the CI stack has no configured
+    // skills library, so never assert on skill/library DATA (the unconfigured
+    // empty state is the expected render), and never getByText(/library/i)
+    // (the nav link matches everywhere).
+    //
+    // ent#384 made the sections TABS, so only the active tab's heading is on
+    // screen. Assert the default tab, then switch. Tab labels are asserted at
+    // the default desktop viewport on purpose — OverflowTabs collapses the
+    // strip behind a counted "More ▾" at narrow widths.
     await page.goto('/library')
     await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible({ timeout: 10000 })
     await expect(page.getByRole('heading', { name: 'Agent Templates', exact: true })).toBeVisible()
+
+    await page.getByRole('button', { name: 'Skills', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Skills', exact: true })).toBeVisible()
+    // The tab is URL-addressable, which is what makes the legacy anchors and
+    // any future deep link work.
+    await expect(page).toHaveURL(/[?&]tab=skills/)
+  })
+
+  test('@smoke library skills tab is deep-linkable', async ({ page }) => {
+    // ent#384 — a cold load of ?tab=skills must land on Skills, not bounce to
+    // the default tab.
+    await page.goto('/library?tab=skills')
+    await expect(page.getByRole('heading', { name: 'Skills', exact: true })).toBeVisible({ timeout: 10000 })
+    await expect(page.getByRole('heading', { name: 'Agent Templates', exact: true })).toBeHidden()
+  })
+
+  test('@smoke library legacy section anchor resolves to its tab', async ({ page }) => {
+    // ent#263 shipped in-page anchors; ent#384 replaced them with tabs. Old
+    // bookmarks and the /templates redirect (which preserves the hash) must
+    // still land on the right tab rather than a dead anchor.
+    await page.goto('/library#skills')
+    await expect(page.getByRole('heading', { name: 'Skills', exact: true })).toBeVisible({ timeout: 10000 })
+    await expect(page).toHaveURL(/[?&]tab=skills/)
   })
 
   test('@smoke templates path redirects to library', async ({ page }) => {

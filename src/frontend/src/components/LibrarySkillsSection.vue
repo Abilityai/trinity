@@ -2,22 +2,28 @@
   <div>
     <div class="flex items-start justify-between gap-4 mb-4">
       <div class="min-w-0">
-        <h2 class="text-xl font-semibold text-gray-900 dark:text-white">Skills</h2>
+        <h2 class="text-[18px] font-[650] text-gray-900 dark:text-gray-100">Skills</h2>
         <!-- Sync-state header — leads with what the DISK knows (commit SHA +
              skill count, reliable across workers). `last_sync` is per-worker
              in-memory state and reads null on the other uvicorn worker or
              after a restart: render it only when truthy, never lead with
              "Last synced: never". -->
-        <div v-if="store.status?.configured" class="mt-1 text-sm text-gray-500 dark:text-gray-400 space-y-0.5">
+        <div v-if="store.status?.configured" class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-400 space-y-0.5">
           <p>
             <template v-if="store.status.cloned">
-              <span v-if="shortSha" class="font-mono text-xs">{{ shortSha }}</span>
+              <span v-if="shortSha" class="font-mono text-[11px] tabular-nums">{{ shortSha }}</span>
               <span v-if="shortSha"> · </span>
-              <span>{{ store.status.skill_count }} skill{{ store.status.skill_count === 1 ? '' : 's' }}</span>
+              <span class="tabular-nums">{{ store.status.skill_count }}</span>
+              <span> skill{{ store.status.skill_count === 1 ? '' : 's' }}</span>
               <span v-if="store.status.branch"> · {{ store.status.branch }}</span>
             </template>
             <template v-else>Configured — never synced</template>
-            <span v-if="store.status.last_sync"> · last synced {{ new Date(store.status.last_sync).toLocaleString() }}</span>
+            <span v-if="store.status.last_sync">
+              · last synced
+              <time :datetime="store.status.last_sync" :title="absoluteTime(store.status.last_sync)">
+                {{ relativeTime(store.status.last_sync) }}
+              </time>
+            </span>
           </p>
           <!-- ent#334: the repo URL is gone from this payload. It was
                admin-only in the template, but the template is not the
@@ -27,100 +33,142 @@
                `GET /skills/sources`. -->
         </div>
       </div>
-      <button
+      <BaseButton
         v-if="isAdmin && store.status?.configured"
-        @click="onSync"
-        :disabled="store.syncing"
+        variant="secondary"
+        size="sm"
+        class="shrink-0"
+        :loading="store.syncing"
+        loading-label="Syncing…"
         title="Pull the latest skills from the library repository"
-        class="shrink-0 px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
-      >{{ store.syncing ? 'Syncing…' : 'Sync now' }}</button>
-    </div>
-
-    <p v-if="store.syncError" class="mb-3 text-sm text-status-danger-600 dark:text-status-danger-400">{{ store.syncError }}</p>
-
-    <p v-if="store.loading" class="text-sm text-gray-500 dark:text-gray-400">Loading skills…</p>
-
-    <!-- A fetch error is an ERROR, not an empty library (no-swallow rule):
-         say so and offer a retry instead of a confident wrong empty state. -->
-    <div v-else-if="store.error" class="rounded-lg border border-status-danger-200 dark:border-status-danger-800 p-5 text-sm">
-      <p class="text-status-danger-600 dark:text-status-danger-400">{{ store.error }}</p>
-      <button @click="store.load()" class="mt-2 text-action-primary-600 dark:text-action-primary-400 hover:underline">
-        Try again
-      </button>
-    </div>
-
-    <!-- Empty states (AC#5): each teaches the next action, per viewer role.
-         Which one shows is decided by the store's fleet-scoped discriminator,
-         so the section can't invent a fifth. -->
-    <div v-else-if="store.emptyReason === 'unconfigured'" class="rounded-lg border border-gray-200 dark:border-gray-700 p-5 text-sm">
-      <p class="font-medium text-gray-900 dark:text-gray-100">No skills library is configured</p>
-      <p class="mt-1 text-gray-500 dark:text-gray-400">
-        Skills come from a git repository shared across the fleet. Once it's configured,
-        every agent can be assigned skills from it.
-      </p>
-      <router-link
-        v-if="isAdmin"
-        to="/settings?tab=agents"
-        class="mt-3 inline-block px-3 py-1.5 rounded-lg bg-action-primary-600 hover:bg-action-primary-700 text-white text-sm"
-      >
-        Configure a skills library in Settings
-      </router-link>
-      <p v-else class="mt-3 text-gray-500 dark:text-gray-400">Ask your admin to configure a skills library.</p>
-    </div>
-
-    <div v-else-if="store.emptyReason === 'not_cloned'" class="rounded-lg border border-gray-200 dark:border-gray-700 p-5 text-sm">
-      <p class="font-medium text-gray-900 dark:text-gray-100">Configured but never synced</p>
-      <p class="mt-1 text-gray-500 dark:text-gray-400">The library repository hasn't been cloned yet.</p>
-      <button
-        v-if="isAdmin"
         @click="onSync"
-        :disabled="store.syncing"
-        class="mt-3 px-3 py-1.5 rounded-lg bg-action-primary-600 hover:bg-action-primary-700 text-white text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-      >{{ store.syncing ? 'Syncing…' : 'Sync now' }}</button>
-      <p v-else class="mt-3 text-gray-500 dark:text-gray-400">Ask your admin to run a sync.</p>
+      >Sync now</BaseButton>
     </div>
 
-    <div v-else-if="store.emptyReason === 'empty'" class="rounded-lg border border-gray-200 dark:border-gray-700 p-5 text-sm">
-      <p class="font-medium text-gray-900 dark:text-gray-100">The library has no skills yet</p>
-      <p class="mt-1 text-gray-500 dark:text-gray-400">Add a skill directory to the repository, then Sync.</p>
-    </div>
+    <InlineError v-if="store.syncError" :message="store.syncError" class="mb-3" />
 
-    <!-- Fleet browse cards. Interpolation only — skills come from a synced
-         git repo (semi-trusted content): no v-html, no :href bound to any
-         library-derived string. Assignment stays per-agent (ent#182: one
-         skill model, no parallel mechanisms) — cards link to the agents list. -->
-    <ul v-else class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-      <li
-        v-for="s in store.library"
-        :key="s.name"
-        class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg p-4 flex flex-col"
-      >
-        <div class="flex items-center gap-2 flex-wrap">
-          <span class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ s.name }}</span>
-          <!-- Forward-compat slots (ent#237 / PR #1901): dormant until the
-               multi-source library lands and SkillInfo carries these. -->
-          <span
-            v-if="s.source_name"
-            class="text-[11px] px-1.5 py-0.5 rounded-full bg-action-primary-100 dark:bg-action-primary-900/50 text-action-primary-700 dark:text-action-primary-300"
-          >{{ s.source_name }}</span>
-          <span
-            v-if="s.shadowed_by?.length"
-            class="text-[11px] px-1.5 py-0.5 rounded-full bg-status-warning-100 dark:bg-status-warning-900/50 text-status-warning-800 dark:text-status-warning-300"
-            :title="`Shadowed by: ${s.shadowed_by.join(', ')}`"
-          >shadowed</span>
-        </div>
-        <p v-if="s.description" class="mt-1 text-xs text-gray-500 dark:text-gray-400 flex-grow">{{ s.description }}</p>
-        <div v-else class="flex-grow"></div>
-        <SkillContractChips :skill="s" show-version class="mt-2" />
-        <p v-if="deps(s)" class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">Requires {{ deps(s) }}</p>
-        <router-link
-          to="/agents"
-          class="mt-3 text-xs text-action-primary-600 dark:text-action-primary-400 hover:underline"
-        >
-          Assign via an agent's Skills tab →
+    <!-- ONE persistent ScanlineReveal instance with the branching INSIDE its
+         slot (ent#245): sibling v-if branches AROUND the component remount it,
+         which re-inits from loading=false so the reveal never plays. `reveal`
+         is false on the error/empty terminals — they snap in rather than
+         playing the celebratory pass for content that isn't there. -->
+    <ScanlineReveal :loading="store.loading" :reveal="hasSkills">
+      <!-- A fetch error is an ERROR, not an empty library (no-swallow rule):
+           say so and offer a retry instead of a confident wrong empty state. -->
+      <LoadFailed
+        v-if="store.error"
+        title="Couldn't load the skills library"
+        message="The library list could not be fetched. This is not the same as an empty library."
+        :detail="store.error"
+        :retrying="store.fetching"
+        @retry="store.load()"
+      />
+
+      <!-- Empty states: each teaches the next action, per viewer role. Which
+           one shows is decided by the store's fleet-scoped discriminator, so
+           the section can't invent a fifth. Gated on a fetch that SUCCEEDED
+           (`hasLoaded`), never on `library.length === 0` (#1926). -->
+      <BaseCard v-else-if="showEmpty && store.emptyReason === 'unconfigured'">
+        <p class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">No skills library is configured</p>
+        <p class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-400">
+          Skills come from a git repository shared across the fleet. Once it's configured,
+          every agent can be assigned skills from it.
+        </p>
+        <router-link v-if="isAdmin" to="/settings?tab=agents" class="mt-3 inline-block">
+          <BaseButton size="sm">Configure a skills library in Settings</BaseButton>
         </router-link>
-      </li>
-    </ul>
+        <p v-else class="mt-3 text-[12.5px] text-gray-600 dark:text-gray-400">Ask your admin to configure a skills library.</p>
+      </BaseCard>
+
+      <BaseCard v-else-if="showEmpty && store.emptyReason === 'not_cloned'">
+        <p class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">Configured but never synced</p>
+        <p class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-400">The library repository hasn't been cloned yet.</p>
+        <BaseButton
+          v-if="isAdmin"
+          size="sm"
+          class="mt-3"
+          :loading="store.syncing"
+          loading-label="Syncing…"
+          @click="onSync"
+        >Sync now</BaseButton>
+        <p v-else class="mt-3 text-[12.5px] text-gray-600 dark:text-gray-400">Ask your admin to run a sync.</p>
+      </BaseCard>
+
+      <BaseCard v-else-if="showEmpty && store.emptyReason === 'empty'">
+        <p class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">The library has no skills yet</p>
+        <p class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-400">Add a skill directory to the repository, then Sync.</p>
+      </BaseCard>
+
+      <!-- Fleet browse cards. Interpolation only — skills come from a synced
+           git repo (semi-trusted content): no v-html, no :href bound to any
+           library-derived string. Assignment stays a WRITE on each agent's
+           Skills tab (ent#182: one skill model); ent#384 added the READ of
+           who already holds each skill, not a second write path. -->
+      <div v-else-if="hasSkills">
+        <ul class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <li v-for="s in store.library" :key="s.name">
+            <BaseCard class="h-full flex flex-col">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">{{ s.name }}</span>
+                <!-- ent#237 multi-source provenance. -->
+                <BaseBadge v-if="s.source_name" variant="info">{{ s.source_name }}</BaseBadge>
+                <BaseBadge
+                  v-if="s.shadowed_by?.length"
+                  variant="warning"
+                  :title="`Shadowed by: ${s.shadowed_by.join(', ')}`"
+                >shadowed</BaseBadge>
+              </div>
+              <p v-if="s.description" class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-400 flex-grow">{{ s.description }}</p>
+              <div v-else class="flex-grow"></div>
+              <SkillContractChips :skill="s" show-version class="mt-2" />
+              <p v-if="deps(s)" class="mt-1 text-[11px] text-gray-600 dark:text-gray-400">Requires {{ deps(s) }}</p>
+
+              <!-- ent#384: who already holds this skill. -->
+              <AssignedAgents :skill-name="s.name" class="mt-3" />
+
+              <!-- Kept on EVERY card, not only the zero-holder one: the chips
+                   above point at existing holders, which is the wrong
+                   direction for "give this to another agent". -->
+              <router-link
+                to="/agents"
+                class="mt-3 text-[11px] text-action-primary-600 dark:text-action-primary-400 hover:underline"
+              >
+                Assign via an agent's Skills tab →
+              </router-link>
+            </BaseCard>
+          </li>
+        </ul>
+
+        <!-- ent#384: assignments whose skill is no longer in the library.
+             ent#237's revocation model is "cut a new tag without the offending
+             skill" — after which the operator's very next question is *who
+             still has it*, and a grid keyed by the library listing answers
+             that with silence, permanently. -->
+        <section v-if="store.orphanedAssignments.length" class="mt-6">
+          <h3 class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">
+            Assigned but no longer in the library
+            <span class="ml-1 text-[12.5px] font-[400] text-gray-600 dark:text-gray-400 tabular-nums">
+              {{ store.orphanedAssignments.length }}
+            </span>
+          </h3>
+          <p class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-400">
+            These skills were removed from the library, but the assignments remain. The package
+            stays on each agent until it is unassigned from that agent's Skills tab.
+          </p>
+          <ul class="mt-3 max-h-72 overflow-y-auto space-y-2 pr-1">
+            <li v-for="o in store.orphanedAssignments" :key="o.name">
+              <BaseCard>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">{{ o.name }}</span>
+                  <BaseBadge variant="warning">not in library</BaseBadge>
+                </div>
+                <AssignedAgents :skill-name="o.name" class="mt-2" />
+              </BaseCard>
+            </li>
+          </ul>
+        </section>
+      </div>
+    </ScanlineReveal>
   </div>
 </template>
 
@@ -129,7 +177,14 @@ import { computed, onMounted } from 'vue'
 import { useSkillsLibraryStore } from '../stores/skillsLibrary'
 import { useRole } from '../composables/useRole'
 import SkillContractChips from './skills/SkillContractChips.vue'
+import AssignedAgents from './skills/AssignedAgents.vue'
 import { deps } from './skills/contract'
+import BaseBadge from './base/BaseBadge.vue'
+import BaseButton from './base/BaseButton.vue'
+import BaseCard from './base/BaseCard.vue'
+import InlineError from './InlineError.vue'
+import LoadFailed from './LoadFailed.vue'
+import ScanlineReveal from './ScanlineReveal.vue'
 
 const store = useSkillsLibraryStore()
 const { isAdmin } = useRole()
@@ -138,15 +193,41 @@ const shortSha = computed(() =>
   store.status?.commit_sha ? String(store.status.commit_sha).slice(0, 7) : ''
 )
 
-// ent#334 removed `primarySourceUrl` — the flat `url` no longer ships in this
-// payload, so nothing here renders a URL. `stripUserinfo` moved to its one
-// remaining consumer, SkillSourcesPanel (the admin sources list).
+const hasSkills = computed(() => store.library.length > 0)
+
+// An empty state requires a fetch that SUCCEEDED and returned zero (#1926) —
+// never `library.length === 0`, which is also true mid-flight and after a
+// failure. `store.error` owns the failed branch above this one.
+const showEmpty = computed(() => store.hasLoaded && !hasSkills.value)
+
+/** Relative for recency, absolute on hover (principle 22). */
+function relativeTime(iso) {
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return ''
+  const mins = Math.round((Date.now() - then) / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.round(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  return `${Math.round(hrs / 24)}d ago`
+}
+
+function absoluteTime(iso) {
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString()
+}
 
 async function onSync() {
   await store.sync()
 }
 
+// The panel owns its own fetch, which is what keeps the Library's per-section
+// failure isolation intact. It runs once because `Library.vue` LAZY-MOUNTS
+// this panel and then keeps it mounted (v-if visited + v-show active): a
+// Templates-only visitor never pays for it, and a tab switch back does not
+// re-fetch three endpoints. The `hasLoaded` guard is belt-and-braces for any
+// future caller that does remount us.
 onMounted(() => {
-  store.load()
+  if (!store.hasLoaded) store.load()
 })
 </script>
