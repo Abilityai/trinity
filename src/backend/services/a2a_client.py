@@ -500,6 +500,24 @@ def resolve_rpc_target(validated: ValidatedPublicUrl, card: Dict[str, Any]) -> s
     registered_path = (parts.path or "").rstrip("/")
 
     if isinstance(declared, str) and declared.strip():
+        # `_same_origin` compares `hostname`, which STRIPS userinfo — so
+        # `https://u:p@peer.example.com/a2a` would compare equal to
+        # `https://peer.example.com/a2a`. `_pinned_url` happens to drop the
+        # userinfo when it rebuilds the authority, so nothing leaks today, but
+        # that is a coincidence of one helper rather than a decision. A card
+        # declaring credentials in its own URL is anomalous; refuse it by name
+        # instead of relying on a downstream accident.
+        declared_parts = urlsplit(declared.strip())
+        if declared_parts.username or declared_parts.password or "@" in (declared_parts.netloc or ""):
+            logger.error(
+                "[a2a_client] card for %s declares a url embedding credentials; refusing",
+                validated.hostname,
+            )
+            raise A2ACallError(
+                "card_url_invalid",
+                "The A2A endpoint's agent card declares a url embedding credentials. "
+                "Refused.",
+            )
         if not _same_origin(declared, validated.url):
             logger.error(
                 "[a2a_client] card for %s declares a cross-origin url; refusing",

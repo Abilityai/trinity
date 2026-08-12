@@ -341,6 +341,7 @@ agent an error object as if it were an answer.
 | `card_too_large` / `rpc_too_large` | 502 | Wire-byte ceiling hit mid-stream |
 | `card_encoding` / `rpc_encoding` | 502 | Compressed body refused, not decoded |
 | `card_origin_mismatch` | 502 | Card `url` on another origin (logged ERROR) |
+| `card_url_invalid` | 502 | Card `url` embeds credentials — `_same_origin` compares `hostname`, which strips userinfo, so this would otherwise compare equal to the registered origin |
 | `card_url_ambiguous` | 502 | Registered path the card does not declare |
 | `unsupported_protocol_version` | 502 | A `1.x` card (documented, not claimed) |
 | `remote_error` | 502 | JSON-RPC error, including on HTTP 200 |

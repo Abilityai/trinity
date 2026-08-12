@@ -640,3 +640,23 @@ def test_a_cached_dialect_saves_the_poll_a_second_card_fetch():
         )
     )
     assert [r.method for r in seen2] == ["POST"], "poll re-fetched the card"
+
+
+def test_a_card_url_embedding_credentials_is_refused():
+    """`_same_origin` compares `hostname`, which strips userinfo, so
+    `https://u:p@peer.example.com/a2a` would compare EQUAL to the registered
+    origin. `_pinned_url` happens to drop userinfo when it rebuilds the
+    authority — but that is a coincidence of one helper, not a decision, and a
+    card declaring credentials in its own URL is anomalous either way."""
+    card = dict(CARD, url="https://user:pw@peer.example.com/a2a/bot")
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(client_factory=_two_hop(card=card))
+    assert exc.value.reason == "card_url_invalid"
+
+
+def test_the_pinned_url_never_carries_userinfo():
+    """Belt for the same property at the other end: whatever the authority
+    contained, the URL the socket sees is scheme + IP + port + path."""
+    pinned = a2a_client._pinned_url("https://user:pw@peer.example.com/a2a", "93.184.216.34")
+    assert "user" not in pinned and "pw" not in pinned
+    assert pinned == "https://93.184.216.34/a2a"
