@@ -1124,6 +1124,28 @@ def get_turn_inflight(session_id: str) -> str | None:
 _INFLIGHT_TURNS: set = set()
 
 
+def _agent_is_running(agent_name: str) -> bool:
+    """Whether the agent could take a turn right now.
+
+    A named seam rather than an inline Docker call, so a caller (and a test) has
+    ONE unambiguous thing to reason about. The inline version resolved
+    `services.docker_service` at call time, which made the check depend on which
+    copy of that module happened to be in `sys.modules` — under the full suite a
+    sibling module installs a MagicMock stub there, and a MagicMock container's
+    `.status` is never "running", so a healthy agent read as stopped.
+
+    Fails OPEN: a Docker read error is not evidence the agent is down, and
+    refusing a healthy turn is the worse error.
+    """
+    from services.docker_service import get_agent_container
+    try:
+        container = get_agent_container(agent_name)
+        return bool(container) and getattr(container, "status", None) == "running"
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal running-check failed for %s: %s", agent_name, e)
+        return True
+
+
 async def start_portal_turn(agent_name: str, message: str, email: str,
                             session_id: str | None = None,
                             include_owned: bool = False) -> dict:
@@ -1146,14 +1168,7 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
     # execution row are left behind — and the client, having been told the turn
     # started, has no error to show. The synchronous path surfaces exactly this
     # as a 502, so this says the same thing at the same moment in the flow.
-    from services.docker_service import get_agent_container
-    try:
-        container = get_agent_container(agent_name)
-        running = bool(container) and container.status == "running"
-    except Exception as e:  # noqa: BLE001 — a Docker hiccup must not fail-closed
-        logger.warning("portal running-check failed for %s: %s", agent_name, e)
-        running = True
-    if not running:
+    if not _agent_is_running(agent_name):
         raise ClientPortalError(
             502, "The agent couldn't respond (it may be offline). Please try again."
         )

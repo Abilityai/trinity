@@ -86,9 +86,12 @@ def portal(monkeypatch):
     # Default: the agent is up. A turn is refused for a stopped agent, so every
     # test that isn't ABOUT that needs the healthy case; the ones that are
     # override this.
-    import services.docker_service as docker_service
-    monkeypatch.setattr(docker_service, "get_agent_container",
-                        lambda name: types.SimpleNamespace(status="running"))
+    #
+    # Patched on the SEAM, not on services.docker_service: a sibling module
+    # installs a MagicMock stub for that module at collection time, and patching
+    # one copy while the code resolves another is why these tests passed alone
+    # and failed in the full suite.
+    monkeypatch.setattr(svc, "_agent_is_running", lambda name: True)
     return svc, state
 
 
@@ -340,9 +343,7 @@ def test_a_stopped_agent_is_refused_before_anything_is_created(portal, monkeypat
     result was the same message persisted twice, 320ms apart.
     """
     svc, state = portal
-    import services.docker_service as docker_service
-    monkeypatch.setattr(docker_service, "get_agent_container",
-                        lambda name: types.SimpleNamespace(status="exited"))
+    monkeypatch.setattr(svc, "_agent_is_running", lambda name: False)
 
     with pytest.raises(svc.ClientPortalError) as excinfo:
         _run(svc.start_portal_turn(AGENT, "hello", EMAIL, SESSION))
@@ -354,9 +355,7 @@ def test_a_stopped_agent_is_refused_before_anything_is_created(portal, monkeypat
 
 def test_a_running_agent_still_dispatches(portal, monkeypatch):
     svc, state = portal
-    import services.docker_service as docker_service
-    monkeypatch.setattr(docker_service, "get_agent_container",
-                        lambda name: types.SimpleNamespace(status="running"))
+    monkeypatch.setattr(svc, "_agent_is_running", lambda name: True)
 
     out = _run(svc.start_portal_turn(AGENT, "hello", EMAIL, SESSION))
     assert out["execution_id"] == EXEC_ID
@@ -365,12 +364,18 @@ def test_a_running_agent_still_dispatches(portal, monkeypatch):
 def test_a_docker_hiccup_does_not_block_a_turn(portal, monkeypatch):
     """Fail OPEN on the running-check: Docker being briefly unreadable is not
     evidence the agent is down, and refusing a healthy turn is the worse error."""
-    svc, state = portal
-    import services.docker_service as docker_service
+    svc, _ = portal
 
     def _boom(name):
         raise RuntimeError("docker socket down")
 
-    monkeypatch.setattr(docker_service, "get_agent_container", _boom)
-    out = _run(svc.start_portal_turn(AGENT, "hello", EMAIL, SESSION))
-    assert out["execution_id"] == EXEC_ID
+    # Exercises the REAL seam so the fail-open branch is what is under test,
+    # not a lambda standing in for it. Patched on the sys.modules ENTRY, which
+    # is the exact object `_agent_is_running`'s in-function import resolves —
+    # `import services.docker_service as m` can bind a different copy when a
+    # sibling module has stubbed it, which is the whole bug this file just hit.
+    import sys
+    module = sys.modules["services.docker_service"]
+    monkeypatch.setattr(module, "get_agent_container", _boom)
+
+    assert svc._agent_is_running(AGENT) is True
