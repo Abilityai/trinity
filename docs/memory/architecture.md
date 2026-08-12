@@ -1326,9 +1326,17 @@ absent, because promising an affordance that cannot work is the bug it fixes), a
 for the *capability* rather than the module or the edition, since this payload is served
 to an operator's customer. When it is false the picker is single-select, all five room
 store actions refuse before issuing a request, and `/workspace/r/:roomId` renders an
-honest refusal instead of mounting the room; a definitive 404/403 from the room endpoint
-self-heals the flag mid-session, so an entitlement that lapses between roster load and
-confirm collapses the picker rather than dead-ending. The frontend gate is **UX, not
+honest refusal instead of mounting the room; a 404/403 from any of the five self-heals the
+flag mid-session, so a capability that lapses between roster load and confirm — or while a
+room is open, which nothing else converges, since the sidebar refresh is event-driven — is
+observed by the next room call rather than dead-ending. **The status alone is not the
+signal**: a serving module authors its own refusals as a structured `detail: {code, …}`
+(*you cannot reach that agent* → 403, *you are not in that room* → uniform 404), while
+absence is a plain string — the framework's own "Not Found" for an unmounted route, the
+entitlement gate's sentence for mounted-but-unlicensed. Only the string form lowers the
+flag; a coded refusal is passed through so the server's own words reach the user, because
+reading one denied request as absence would turn it into a session-long false claim about
+the operator's build. The frontend gate is **UX, not
 containment** — a portal token legitimately reaches the room endpoints where they exist,
 and the real boundary is the serving module's own roster-scoped access plus
 membership-scoped uniform 404s. Room data is untouched by the flag and reappears intact
