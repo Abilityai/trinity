@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol
 
@@ -69,6 +70,10 @@ MAX_ENDPOINTS = 50
 MAX_ENDPOINT_NAME_LEN = 200
 MAX_ENDPOINT_URL_LEN = 2048
 MAX_ENDPOINT_CREDENTIAL_LEN = 8192
+
+#: Printable ASCII, no whitespace — the same class `models._PAT_SAFE_RE` uses,
+#: and a strict subset of what h11 will put on the wire.
+_HEADER_SAFE_CREDENTIAL = re.compile(r"^[\x21-\x7E]+$")
 
 
 @dataclass(frozen=True)
@@ -342,10 +347,21 @@ def upsert_endpoint(
         raise EndpointValidationError(
             f"Endpoint URL is too long (max {MAX_ENDPOINT_URL_LEN} characters)"
         )
-    if credential is not None and len(credential) > MAX_ENDPOINT_CREDENTIAL_LEN:
-        raise EndpointValidationError(
-            f"Endpoint credential is too long (max {MAX_ENDPOINT_CREDENTIAL_LEN} characters)"
-        )
+    if credential is not None:
+        if len(credential) > MAX_ENDPOINT_CREDENTIAL_LEN:
+            raise EndpointValidationError(
+                f"Endpoint credential is too long (max {MAX_ENDPOINT_CREDENTIAL_LEN} characters)"
+            )
+        # Header-safety, checked at the STORE and not only at the request model:
+        # this value becomes an `Authorization: Bearer …` header, and h11 rejects
+        # an illegal header value by ECHOING it into an exception the calling
+        # agent then reads through the 502 body. Same guard and same reason as
+        # `models._validate_pat_secret` (ent#109). Never echo the value.
+        if credential.strip() and not _HEADER_SAFE_CREDENTIAL.match(credential.strip()):
+            raise EndpointValidationError(
+                "Endpoint credential contains characters that are not valid in an "
+                "HTTP header (whitespace, line breaks or control characters)."
+            )
     try:
         validate_a2a_endpoint_url(clean_url)
     except A2AEndpointUrlError as exc:
@@ -360,7 +376,7 @@ def upsert_endpoint(
             if clear_credential:
                 record.pop("credential", None)
             elif credential:
-                record["credential"] = credential
+                record["credential"] = credential.strip()
             _store_endpoint_records(records)
             return _public_record(record)
 
@@ -374,7 +390,7 @@ def upsert_endpoint(
         "url": clean_url,
     }
     if credential and not clear_credential:
-        record["credential"] = credential
+        record["credential"] = credential.strip()
     records.append(record)
     _store_endpoint_records(records)
     return _public_record(record)

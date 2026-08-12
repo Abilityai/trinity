@@ -660,3 +660,104 @@ def test_the_pinned_url_never_carries_userinfo():
     pinned = a2a_client._pinned_url("https://user:pw@peer.example.com/a2a", "93.184.216.34")
     assert "user" not in pinned and "pw" not in pinned
     assert pinned == "https://93.184.216.34/a2a"
+
+
+# --------------------------------------------------------------------------- #
+# 13. Review findings (#736 review pass)
+# --------------------------------------------------------------------------- #
+def test_a_transport_error_echoing_the_credential_is_scrubbed():
+    """The one credential-leak path layer 1.5 did not cover.
+
+    `sanitize_outbound_text` guards the RESPONSE. It does not guard the
+    `A2ACallError.detail` built from an httpx exception — and that detail
+    reaches the calling LLM through the 502 body and the backend log. h11
+    rejects an illegal header value by **echoing it** (verified:
+    `LocalProtocolError: Illegal header value b'Bearer …'`), which is exactly
+    why `models._validate_pat_secret` exists (ent#109). A stored credential
+    carrying a stray line break — the routine paste artifact — therefore turned
+    the transport error into a credential disclosure.
+    """
+    secret = "qKt7Zr2wXn4vLp9sDf1gHj6bYcVmA0eRtUiOpQwZ"
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return _json(CARD)
+        raise httpx.LocalProtocolError(f"Illegal header value b'Bearer {secret}'")
+
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(credential=secret, client_factory=_factory(_handler))
+    assert exc.value.reason == "rpc_unreachable"
+    assert secret not in exc.value.detail, "the credential reached the error detail"
+
+
+def test_a_poll_does_not_inherit_a_sibling_endpoints_cached_target():
+    """Two endpoints on ONE host are two different trust relationships.
+
+    The negotiated `(dialect, rpc_url)` used to be cached under
+    `hostname:port`, so after any call to `https://host/a2a/alice` a poll for
+    the separately-registered `https://host/a2a/bob` reused Alice's resolved
+    target — delivering **Bob's credential to Alice's endpoint** and polling
+    the wrong agent. A multi-tenant peer with per-path agents is exactly the
+    deployment the registered-path rule exists to support.
+    """
+    a2a_client.clear_dialect_cache()
+    alice = ValidatedPublicUrl(url="https://peer.example.com/a2a/alice",
+                               hostname="peer.example.com", port=443,
+                               addresses=("93.184.216.34",))
+    bob = ValidatedPublicUrl(url="https://peer.example.com/a2a/bob",
+                             hostname="peer.example.com", port=443,
+                             addresses=("93.184.216.34",))
+
+    def _peer_at(path):
+        return _two_hop(card=dict(CARD, url=f"https://peer.example.com{path}"))
+
+    _call(endpoint_url=alice.url, credential="ALICE", validated=alice,
+          client_factory=_peer_at("/a2a/alice"))
+
+    seen = []
+    asyncio.run(a2a_client.get_task(
+        endpoint_url=bob.url, credential="BOB", task_id="t-1", validated=bob,
+        client_factory=_two_hop(card=dict(CARD, url="https://peer.example.com/a2a/bob"),
+                                record=seen),
+    ))
+    posts = [r for r in seen if r.method == "POST"]
+    assert posts, "the poll issued no request"
+    assert posts[0].url.path == "/a2a/bob", "Bob's poll reused Alice's cached target"
+    assert posts[0].headers["authorization"] == "Bearer BOB"
+
+
+@pytest.mark.parametrize("declared", [
+    "https://[::1",              # unterminated IPv6 authority — urlsplit raises
+    "https://peer.example.com:notaport/a2a/bot",
+])
+def test_a_malformed_card_url_is_refused_by_name_not_raised(declared):
+    """Every field of the card is peer-controlled, so a malformed one must
+    produce a named refusal, never an unhandled `ValueError` — which escapes
+    the client, the orchestrator's `except A2ACallError`, and the router's
+    error map, and surfaces as a peer-triggerable HTTP 500."""
+    card = dict(CARD, url=declared)
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        _call(client_factory=_two_hop(card=card))
+    assert exc.value.reason in {"card_url_invalid", "card_origin_mismatch"}
+
+
+def test_same_origin_agrees_with_the_validators_host_canonicalisation():
+    """One normalisation, used everywhere — the SV-7 rule, which the card
+    comparison was left out of.
+
+    `_validate_public_https_url` canonicalises the host to its IDNA A-label and
+    resolves THAT. `_same_origin` compared the raw strings, so an IDN peer
+    declaring the punycode form its own server emits — the normal case — was
+    refused as a cross-origin card against a registered U-label URL.
+    """
+    assert a2a_client._same_origin(
+        "https://xn--e1afmkfd.com/a2a", "https://пример.com/a2a"
+    )
+    # …and the reverse direction.
+    assert a2a_client._same_origin(
+        "https://пример.com/a2a", "https://xn--e1afmkfd.com/a2a"
+    )
+    # Still not equal when the hosts genuinely differ.
+    assert not a2a_client._same_origin(
+        "https://xn--e1afmkfd.com/a2a", "https://other.example.com/a2a"
+    )

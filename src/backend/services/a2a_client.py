@@ -80,6 +80,7 @@ from utils.credential_sanitizer import (
 from utils.url_validation import (
     A2AEndpointUrlError,
     ValidatedPublicUrl,
+    canonical_host as _canonical_host,
     validate_a2a_endpoint_url,
 )
 
@@ -231,7 +232,15 @@ def _same_origin(a: str, b: str) -> bool:
         make Trinity unreachable by its own rule, breaking #738 federation;
       * case-insensitive host and trailing-dot stripping — `Host.` and `host`
         resolve identically;
-      * IPv6 bracket forms compared after normalisation.
+      * IPv6 bracket forms compared after normalisation;
+      * **the SAME host canonicalisation the validator used** (`_canonical_host`,
+        UTS-46 nontransitional IDNA). The registered URL keeps whatever form the
+        operator typed while `ValidatedPublicUrl.hostname` holds the A-label, and
+        a peer's card declares whichever form its own server emits — usually the
+        A-label. Comparing raw strings therefore refused a perfectly ordinary IDN
+        peer as "cross-origin". One normalisation, used by the parser, the
+        resolver and this comparison, is the whole point of the rule (SV-7); the
+        card comparison was the one place left out of it.
     """
     def _key(url: str) -> Optional[Tuple[str, str, int]]:
         try:
@@ -239,7 +248,11 @@ def _same_origin(a: str, b: str) -> bool:
         except ValueError:
             return None
         scheme = (p.scheme or "").lower()
-        host = (p.hostname or "").lower().rstrip(".")
+        try:
+            raw_host = p.hostname or ""
+        except ValueError:
+            return None
+        host = _canonical_host(raw_host) or raw_host.lower().rstrip(".")
         if not scheme or not host:
             return None
         try:
@@ -311,6 +324,7 @@ async def _read_capped(
     headers: Dict[str, str],
     content: Optional[bytes] = None,
     error_prefix: str,
+    secret: Optional[str] = None,
 ) -> bytes:
     """Issue one pinned request and read the body under a hard WIRE-byte ceiling.
 
@@ -378,12 +392,23 @@ async def _read_capped(
     except httpx.TimeoutException:
         raise A2ACallError("timeout", "The A2A endpoint timed out.") from None
     except httpx.HTTPError as exc:
-        # `exc` may echo the URL; it never carries the credential (that is a
-        # header), but scrub userinfo anyway — the URL could have come from a
-        # future path that did not reject it.
+        # This is the ONE place a foreign string becomes an error the calling
+        # LLM reads (through the 502 body) and the backend logs, so it gets the
+        # same treatment as the response body — exact-value first.
+        #
+        # "it never carries the credential (that is a header)" was wrong: h11
+        # rejects an illegal header value by ECHOING it
+        # (`LocalProtocolError: Illegal header value b'Bearer <token>'`), which
+        # is the documented reason `models._validate_pat_secret` exists
+        # (ent#109). A stored credential carrying a stray line break — the
+        # routine paste artifact — turned a transport error into a credential
+        # disclosure. The write path now rejects such a credential; this is the
+        # layer that holds when a row was written by some other path.
+        detail = scrub_secret_and_urls(str(exc), secret or "")
+        detail = redact_url_userinfo(sanitize_text(detail))
         raise A2ACallError(
             f"{error_prefix}_unreachable",
-            f"The A2A endpoint could not be reached: {redact_url_userinfo(str(exc))}",
+            f"The A2A endpoint could not be reached: {detail}",
         ) from None
 
 
@@ -391,7 +416,7 @@ async def _read_capped(
 # Dialect cache
 # ---------------------------------------------------------------------------
 
-#: origin → (stored_at, dialect_version, resolved_rpc_url)
+#: REGISTERED ENDPOINT URL → (stored_at, dialect_version, resolved_rpc_url)
 #:
 #: The rpc target is cached WITH the dialect, not derived again on a cache hit.
 #: Deriving it would be wrong whenever the operator registered the ORIGIN rather
@@ -399,17 +424,31 @@ async def _read_capped(
 #: (e.g. `/a2a/bot`), and a later poll re-deriving from the registered URL would
 #: POST to `/` — a different endpoint, silently. The two values are learned from
 #: the same card read, so they expire together.
+#:
+#: **Keyed on the registered URL, NOT on the origin.** One host can carry several
+#: separately-registered endpoints — a multi-tenant peer with an agent per path is
+#: exactly what the registered-path rule exists to support — and those are
+#: different trust relationships with different credentials. Under an origin key,
+#: a call to `https://host/a2a/alice` populated the entry that a poll for
+#: `https://host/a2a/bob` then read, so Bob's poll went to Alice's URL carrying
+#: **Bob's credential**. The registered URL is what `resolve_rpc_target` derives
+#: from, so it is the only key under which the cached answer is the same answer.
 _dialect_cache: Dict[str, Tuple[float, str, str]] = {}
 
 
-def _cached_target(origin: str) -> Optional[Tuple[Dialect, str]]:
+def _target_cache_key(validated: ValidatedPublicUrl) -> str:
+    """The cache identity of a resolved endpoint: its registered URL."""
+    return validated.url
+
+
+def _cached_target(cache_key: str) -> Optional[Tuple[Dialect, str]]:
     """`(dialect, rpc_url)` learned from a recent card read, or None."""
-    entry = _dialect_cache.get(origin)
+    entry = _dialect_cache.get(cache_key)
     if not entry:
         return None
     stored_at, version, rpc_url = entry
     if time.monotonic() - stored_at > A2A_DIALECT_CACHE_TTL:
-        _dialect_cache.pop(origin, None)
+        _dialect_cache.pop(cache_key, None)
         return None
     if version != "0.3":
         # Only v0.3 is claimed; an unrecognised cached version is a miss rather
@@ -418,8 +457,8 @@ def _cached_target(origin: str) -> Optional[Tuple[Dialect, str]]:
     return a2a_protocol.DIALECT_V03, rpc_url
 
 
-def _cache_target(origin: str, dialect: Dialect, rpc_url: str) -> None:
-    _dialect_cache[origin] = (time.monotonic(), dialect.version, rpc_url)
+def _cache_target(cache_key: str, dialect: Dialect, rpc_url: str) -> None:
+    _dialect_cache[cache_key] = (time.monotonic(), dialect.version, rpc_url)
 
 
 def clear_dialect_cache() -> None:
@@ -500,6 +539,25 @@ def resolve_rpc_target(validated: ValidatedPublicUrl, card: Dict[str, Any]) -> s
     registered_path = (parts.path or "").rstrip("/")
 
     if isinstance(declared, str) and declared.strip():
+        declared = declared.strip()
+        # EVERY field of the card is peer-controlled, so a malformed one must
+        # produce a named refusal. `urlsplit` RAISES on an unterminated IPv6
+        # authority (`https://[::1`), and that ValueError escaped this function,
+        # the orchestrator's `except A2ACallError` and the router's error map —
+        # surfacing as a peer-triggerable HTTP 500 with a logged traceback.
+        try:
+            declared_parts = urlsplit(declared)
+            _ = declared_parts.port          # raises on a junk port, same class
+        except ValueError:
+            logger.error(
+                "[a2a_client] card for %s declares an unparseable url; refusing",
+                validated.hostname,
+            )
+            raise A2ACallError(
+                "card_url_invalid",
+                "The A2A endpoint's agent card declares a url that is not a valid "
+                "URL. Refused.",
+            ) from None
         # `_same_origin` compares `hostname`, which STRIPS userinfo — so
         # `https://u:p@peer.example.com/a2a` would compare equal to
         # `https://peer.example.com/a2a`. `_pinned_url` happens to drop the
@@ -507,7 +565,6 @@ def resolve_rpc_target(validated: ValidatedPublicUrl, card: Dict[str, Any]) -> s
         # that is a coincidence of one helper rather than a decision. A card
         # declaring credentials in its own URL is anomalous; refuse it by name
         # instead of relying on a downstream accident.
-        declared_parts = urlsplit(declared.strip())
         if declared_parts.username or declared_parts.password or "@" in (declared_parts.netloc or ""):
             logger.error(
                 "[a2a_client] card for %s declares a url embedding credentials; refusing",
@@ -529,14 +586,14 @@ def resolve_rpc_target(validated: ValidatedPublicUrl, card: Dict[str, Any]) -> s
                 "registered endpoint. Refused — a card cannot redirect a credentialed "
                 "call.",
             )
-        if registered_path and urlsplit(declared).path.rstrip("/") != registered_path:
+        if registered_path and (declared_parts.path or "").rstrip("/") != registered_path:
             raise A2ACallError(
                 "card_url_ambiguous",
                 "The registered A2A endpoint URL carries a path that the peer's card "
                 "does not declare. Register the endpoint's origin, or a URL matching "
                 "the card's declared url exactly.",
             )
-        return declared.strip()
+        return declared
 
     if registered_path:
         # No declared url and a registered path: the operator named a specific
@@ -657,6 +714,7 @@ async def _rpc(
         headers=headers,
         content=json.dumps(envelope).encode("utf-8"),
         error_prefix="rpc",
+        secret=credential,
     )
     try:
         body = json.loads(raw.decode("utf-8"))
@@ -728,14 +786,13 @@ async def call_endpoint(
         timeout = httpx.Timeout(A2A_RPC_TIMEOUT, connect=A2A_CONNECT_TIMEOUT)
         factory = client_factory or _http_client
         async with factory(timeout) as client:
-            origin = f"{endpoint.hostname}:{endpoint.port}"
             card = await fetch_card(client, endpoint)
             try:
                 dialect = a2a_protocol.resolve_dialect(card.get("protocolVersion"))
             except UnsupportedProtocolVersion as exc:
                 raise A2ACallError("unsupported_protocol_version", str(exc)) from None
             rpc_url = resolve_rpc_target(endpoint, card)
-            _cache_target(origin, dialect, rpc_url)
+            _cache_target(_target_cache_key(endpoint), dialect, rpc_url)
 
             params = {
                 "message": a2a_protocol.text_message(
@@ -780,8 +837,8 @@ async def get_task(
         timeout = httpx.Timeout(A2A_RPC_TIMEOUT, connect=A2A_CONNECT_TIMEOUT)
         factory = client_factory or _http_client
         async with factory(timeout) as client:
-            origin = f"{endpoint.hostname}:{endpoint.port}"
-            cached = _cached_target(origin)
+            cache_key = _target_cache_key(endpoint)
+            cached = _cached_target(cache_key)
             if cached is None:
                 card = await fetch_card(client, endpoint)
                 try:
@@ -789,7 +846,7 @@ async def get_task(
                 except UnsupportedProtocolVersion as exc:
                     raise A2ACallError("unsupported_protocol_version", str(exc)) from None
                 rpc_url = resolve_rpc_target(endpoint, card)
-                _cache_target(origin, dialect, rpc_url)
+                _cache_target(cache_key, dialect, rpc_url)
             else:
                 # Both values came from ONE card read of this origin, which the
                 # same-origin pin already validated. Re-deriving the target here

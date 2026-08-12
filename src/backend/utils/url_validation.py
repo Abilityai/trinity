@@ -376,7 +376,7 @@ class ValidatedPublicUrl:
     addresses: Tuple[str, ...]
 
 
-def _canonical_host(hostname: str) -> Optional[str]:
+def canonical_host(hostname: str) -> Optional[str]:
     """Canonicalise a hostname the way a browser resolves it, or `None`.
 
     UTS-46 nontransitional via the `idna` package, matching
@@ -418,6 +418,10 @@ def _canonical_host(hostname: str) -> Optional[str]:
         except UnicodeEncodeError:
             return None
         return host
+
+
+#: Private alias retained so existing readers of the old name keep working.
+_canonical_host = canonical_host
 
 
 def _validate_public_https_url(
@@ -480,7 +484,7 @@ def _validate_public_https_url(
     if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
         raise ValueError(credential_advice)
 
-    hostname = _canonical_host(parsed.hostname or "")
+    hostname = canonical_host(parsed.hostname or "")
     if not hostname:
         raise ValueError(f"{label} must have a valid hostname")
 

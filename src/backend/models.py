@@ -3723,3 +3723,31 @@ class A2AOutboundEndpointUpsert(BaseModel):
     url: str = Field(..., min_length=1, max_length=2048)
     credentials: Optional[SecretStr] = Field(default=None)
     clear_credentials: bool = False
+
+    @field_validator("credentials")
+    @classmethod
+    def _validate_credential(cls, v: Optional[SecretStr]) -> Optional[SecretStr]:
+        """Reject a header-unsafe credential — the same guard, for the same
+        reason, as `_validate_pat_secret` (ent#109).
+
+        This value becomes an `Authorization: Bearer …` header on the outbound
+        POST, and h11 rejects an illegal header value by **echoing it**. A
+        credential carrying a stray line break — the routine paste artifact —
+        would therefore reappear inside the transport error the calling agent
+        reads and the backend logs. `error_handlers.validation_error_without_input`
+        strips Pydantic's `input` from every 422, so refusing here does not move
+        the leak into the rejection.
+        """
+        if v is None:
+            return None
+        raw = v.get_secret_value().strip()
+        if not raw:
+            return None
+        if not _PAT_SAFE_RE.match(raw):
+            # Never echo the value — that is the leak this guard prevents.
+            raise ValueError(
+                "credentials contains characters that are not valid in an HTTP "
+                "header (whitespace, line breaks or control characters). Paste "
+                "the token again without surrounding whitespace."
+            )
+        return SecretStr(raw)

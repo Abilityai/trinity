@@ -939,3 +939,73 @@ def test_the_endpoint_list_is_bounded(oss_store):
         a2a_outbound.upsert_endpoint(f"ep-{i}", PEER.url)
     with pytest.raises(a2a_outbound.EndpointValidationError):
         a2a_outbound.upsert_endpoint("one-too-many", PEER.url)
+
+
+@pytest.mark.parametrize("bad", [
+    "tok\nX-Injected: 1",   # the routine paste artifact — and a header-splitting shape
+    "tok\rX: 1",
+    "tok with space",
+    "tok\x00",
+])
+def test_a_header_unsafe_credential_is_refused_at_the_store(oss_store, bad):
+    """h11 rejects an illegal header value by ECHOING it, so a credential
+    carrying a line break reappears inside the transport error the calling agent
+    reads through the 502 body and the backend logs. Same guard, same reason as
+    `models._validate_pat_secret` (ent#109). Refused at the store as well as at
+    the request model, because the model is only one of the writers."""
+    with pytest.raises(a2a_outbound.EndpointValidationError) as exc:
+        a2a_outbound.upsert_endpoint("partner", PEER.url, bad)
+    assert bad.strip() not in str(exc.value), "the refusal echoed the credential"
+
+
+def test_the_request_model_refuses_a_header_unsafe_credential():
+    from pydantic import ValidationError
+
+    from models import A2AOutboundEndpointUpsert
+
+    with pytest.raises(ValidationError):
+        A2AOutboundEndpointUpsert(
+            name="partner", url=PEER.url, credentials="tok\nX-Injected: 1"
+        )
+
+
+def test_the_422_for_a_rejected_credential_does_not_echo_it():
+    """The other half of the ent#109 pairing, pinned for this new SecretStr field.
+
+    Pydantic records the rejected value in `errors()[i]["input"]`, so a charset
+    guard on a secret field only CLOSES the leak when
+    `error_handlers.validation_error_without_input` strips it — otherwise the
+    guard merely relocates the leak from a 500 into a 422. `_VALUE_BEARING_KEYS`
+    is field-name-agnostic, so this holds by construction; the test is here so a
+    future narrowing of that handler fails loudly against a live secret field.
+    """
+    import asyncio as _asyncio
+    import json as _json
+
+    from fastapi.exceptions import RequestValidationError
+    from pydantic import ValidationError
+
+    from error_handlers import validation_error_without_input
+    from models import A2AOutboundEndpointUpsert
+
+    try:
+        A2AOutboundEndpointUpsert(
+            name="partner", url=PEER.url, credentials="tok\nX-Injected: 1"
+        )
+        raise AssertionError("the model accepted a header-unsafe credential")
+    except ValidationError as exc:
+        response = _asyncio.run(
+            validation_error_without_input(None, RequestValidationError(exc.errors()))
+        )
+
+    body = _json.loads(bytes(response.body).decode())
+    assert "X-Injected" not in _json.dumps(body)
+    assert response.status_code == 422
+
+
+def test_a_stored_credential_is_stripped_before_it_becomes_a_header(oss_store):
+    """Surrounding whitespace is stripped rather than refused — it is the
+    commonest paste artifact and carries no ambiguity."""
+    a2a_outbound.upsert_endpoint("partner", PEER.url, "  tok-123  ")
+    resolved = a2a_outbound.resolve_endpoint("bot", "partner")
+    assert resolved.credential == "tok-123"
