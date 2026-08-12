@@ -85,7 +85,7 @@
     },
     "src/frontend/src/components/ConfirmDialog.vue": {
       "raw_nongray": 0,
-      "raw_gray": 18,
+      "raw_gray": 9,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/ConnectorChannelPanel.vue": {
@@ -290,7 +290,7 @@
     },
     "src/frontend/src/components/ResourceModal.vue": {
       "raw_nongray": 0,
-      "raw_gray": 25,
+      "raw_gray": 13,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/RunningStateToggle.vue": {

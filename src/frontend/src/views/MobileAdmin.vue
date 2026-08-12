@@ -101,7 +101,6 @@
                     <span class="status-dot" :class="agent.status === 'running' ? 'bg-status-success-400' : 'bg-gray-500'"></span>
                     <span class="text-xs text-gray-400">{{ agent.status }}</span>
                     <span v-if="agent.autonomy_enabled" class="autonomy-badge auto">AUTO</span>
-                    <span v-if="agent.type" class="type-badge">{{ agent.type }}</span>
                   </div>
                   <!-- Success rate bar -->
                   <div v-if="getAgentSuccessPercent(agent.name) > 0" class="success-bar-row">
@@ -1395,14 +1394,6 @@ watch(() => authStore.isAuthenticated, (isAuth) => {
   height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
-}
-
-.type-badge {
-  font-size: 11px;
-  padding: 1px 6px;
-  background: #374151;
-  border-radius: 4px;
-  color: #9ca3af;
 }
 
 .agent-actions {

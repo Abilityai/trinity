@@ -53,7 +53,10 @@
                   class="text-sm font-medium text-gray-900 dark:text-gray-100"
                   :title="agentNameTooltip(agentsStore.agentRefForSlug(targetAgent.name))"
                 >{{ agentDisplayName(agentsStore.agentRefForSlug(targetAgent.name)) }}</span>
-                <span v-if="targetAgent.type" class="ml-2 text-xs text-gray-500 dark:text-gray-400">[{{ targetAgent.type }}]</span>
+                <!-- #2104: the retired [type] suffix is replaced by the canonical
+                     slug, shown when a display label hides it — agents stay
+                     unambiguous without hovering for the tooltip (§1.3.1 FR-4). -->
+                <span v-if="hasDistinctLabel(agentsStore.agentRefForSlug(targetAgent.name))" class="ml-2 text-xs text-gray-500 dark:text-gray-400">{{ targetAgent.name }}</span>
               </div>
               <span :class="[
                 'px-2 py-0.5 text-xs font-medium rounded-full',
@@ -104,7 +107,7 @@
 <script setup>
 import { computed, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
-import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
+import { agentDisplayName, agentNameTooltip, hasDistinctLabel } from '../utils/agentName'
 import { useAgentPermissions } from '../composables/useAgentPermissions'
 
 const props = defineProps({

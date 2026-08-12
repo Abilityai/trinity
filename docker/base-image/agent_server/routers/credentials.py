@@ -22,7 +22,9 @@ from ..models import (
 )
 from ..state import agent_state
 from ..services.execution_env import (
+    SUBSCRIPTION_SHADOW_KEYS,
     env_drift_report,
+    parse_env_file,
     set_runtime_override,
     sync_process_env,
 )
@@ -106,7 +108,10 @@ async def reload_subscription_token(request: TokenReloadRequest):
 
     os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = request.token
     if request.remove_api_key:
-        os.environ.pop("ANTHROPIC_API_KEY", None)
+        # #2114: ANTHROPIC_AUTH_TOKEN rides along — Claude Code honors it with
+        # the same key-over-OAuth precedence, so it is the same shadow class.
+        for shadow_key in SUBSCRIPTION_SHADOW_KEYS:
+            os.environ.pop(shadow_key, None)
 
     # #1999: spawned processes build their env from INITIAL_ENV + .env +
     # overrides, and this token is deliberately NOT a .env credential — so
@@ -114,8 +119,17 @@ async def reload_subscription_token(request: TokenReloadRequest):
     # Recording it as a runtime override is what keeps #1089 working; `None`
     # is a force-unset the file layer cannot express.
     set_runtime_override("CLAUDE_CODE_OAUTH_TOKEN", request.token)
+    env_shadow: List[str] = []
     if request.remove_api_key:
-        set_runtime_override("ANTHROPIC_API_KEY", None)
+        # #2114: report (names only) which force-unset keys the current .env
+        # would otherwise deliver to spawns — the backend logs this at switch
+        # time, so the shadow is diagnosed where operators actually look.
+        # Same parser as the spawn path; never a second ad-hoc parse.
+        file_env = parse_env_file()
+        for shadow_key in SUBSCRIPTION_SHADOW_KEYS:
+            set_runtime_override(shadow_key, None)
+            if shadow_key in file_env:
+                env_shadow.append(shadow_key)
 
     # Persist to the writable-layer override. Parent dir is created + chowned in
     # the Dockerfile, so the agent (UID 1000) can write here. Create the file
@@ -135,7 +149,7 @@ async def reload_subscription_token(request: TokenReloadRequest):
     refresh_credential_values()
 
     logger.info("Hot-reloaded CLAUDE_CODE_OAUTH_TOKEN (next subprocess; in-flight turns unaffected)")
-    return TokenReloadResponse(status="success", reloaded=True)
+    return TokenReloadResponse(status="success", reloaded=True, env_shadow=env_shadow)
 
 
 @router.get("/api/credentials/status")

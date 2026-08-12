@@ -599,6 +599,29 @@ class TestHotReloadSwitch:
     def auto_switch(self, monkeypatch):
         import importlib
 
+        # #2114: _hot_reload_subscription_token lazily imports
+        # is_claude_runtime from services.agent_service.helpers. Resolve that
+        # import deterministically by installing our OWN leaf stub (real
+        # predicate semantics — mirrors CLAUDE_RUNTIME_NAMES incl. the
+        # unset/empty→claude default) plus a parent entry, so the machinery
+        # never runs the real services.agent_service package __init__. Both a
+        # real first-import (crud → git_service → database names our stub db
+        # lacks) and a foreign stub left by an earlier file
+        # (test_subscription_auto_switch_no_cred_import leaves one whose
+        # is_claude_runtime is not the real predicate) otherwise decide this
+        # fixture's fate by test ORDER. monkeypatch restores both entries.
+        parent_pkg = sys.modules.get("services.agent_service") or _types.ModuleType(
+            "services.agent_service"
+        )
+        helpers_stub = _types.ModuleType("services.agent_service.helpers")
+        helpers_stub.CLAUDE_RUNTIME_NAMES = frozenset({"claude-code", "claude"})
+        helpers_stub.is_claude_runtime = (
+            lambda runtime: (runtime or "claude-code").lower()
+            in helpers_stub.CLAUDE_RUNTIME_NAMES
+        )
+        monkeypatch.setitem(sys.modules, "services.agent_service", parent_pkg)
+        monkeypatch.setitem(sys.modules, "services.agent_service.helpers", helpers_stub)
+
         stub_db = _install_database_stub()
         # Token resolution defaults: agent on sub-a, sub-a token present.
         stub_db.get_agent_subscription_id.return_value = "sub-a"
@@ -632,7 +655,80 @@ class TestHotReloadSwitch:
         post.assert_awaited_once()
         args, kwargs = post.call_args
         assert args[0] == "/api/credentials/reload-token"
+        # #2114: True for Claude runtimes — post-#1999 the .env FILE is a second
+        # source for ANTHROPIC_API_KEY that no recreate cleans, and a stale key
+        # there shadows the subscription token at every spawn. The stub
+        # container has no readable runtime label, which resolves to the
+        # claude-code default (same ladder as docker_service.get_agent_runtime).
+        assert kwargs["json"] == {"token": "sk-ant-oat01-new-token", "remove_api_key": True}
+
+    @pytest.mark.asyncio
+    async def test_non_claude_runtime_keeps_remove_api_key_false(self, auto_switch, monkeypatch):
+        """#2114: a legacy subscription row on a Gemini/Codex agent must not
+        strip a .env ANTHROPIC_API_KEY its own scripts may use — on those
+        runtimes the key never shadows anything."""
+        post = AsyncMock(return_value=_types.SimpleNamespace(status_code=200))
+        gemini_container = _types.SimpleNamespace(
+            labels={"trinity.agent-runtime": "gemini-cli"}
+        )
+        monkeypatch.setitem(
+            sys.modules, "services.docker_service", _docker_stub(container=gemini_container)
+        )
+        monkeypatch.setitem(sys.modules, "services.agent_client", _agent_client_stub(post=post))
+
+        result = await auto_switch._hot_reload_subscription_token("agent-x")
+
+        assert result == "hot_reloaded"
+        _, kwargs = post.call_args
         assert kwargs["json"] == {"token": "sk-ant-oat01-new-token", "remove_api_key": False}
+
+    @pytest.mark.asyncio
+    async def test_env_shadow_in_response_logs_backend_warning(self, auto_switch, monkeypatch, caplog):
+        """#2114: the endpoint reports (names only) which force-unset keys the
+        agent's .env would otherwise deliver — the backend surfaces that in ITS
+        log, where operators actually look during a subscription incident."""
+        import logging
+
+        post = AsyncMock(
+            return_value=_types.SimpleNamespace(
+                status_code=200, json=lambda: {"env_shadow": ["ANTHROPIC_API_KEY"]}
+            )
+        )
+        monkeypatch.setitem(sys.modules, "services.docker_service", _docker_stub())
+        monkeypatch.setitem(sys.modules, "services.agent_client", _agent_client_stub(post=post))
+
+        with caplog.at_level(logging.WARNING):
+            result = await auto_switch._hot_reload_subscription_token("agent-x")
+
+        assert result == "hot_reloaded"
+        shadow_warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "ANTHROPIC_API_KEY" in r.getMessage()
+        ]
+        assert len(shadow_warnings) == 1
+        assert "agent-x" in shadow_warnings[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_tampered_env_shadow_never_demotes_a_successful_reload(
+        self, auto_switch, monkeypatch
+    ):
+        """#2114 hardening: env_shadow is agent-supplied. A tampered shape
+        (non-list / non-str items) must degrade to no-warning — never
+        TypeError into the function-level except and turn an
+        already-successful hot-reload into a container restart."""
+        post = AsyncMock(
+            return_value=_types.SimpleNamespace(
+                status_code=200,
+                json=lambda: {"env_shadow": [1, None, {"k": "v"}, "OK_NAME"]},
+            )
+        )
+        monkeypatch.setitem(sys.modules, "services.docker_service", _docker_stub())
+        monkeypatch.setitem(sys.modules, "services.agent_client", _agent_client_stub(post=post))
+
+        result = await auto_switch._hot_reload_subscription_token("agent-x")
+
+        assert result == "hot_reloaded"
+        assert auto_switch._restart_calls == []
 
     @pytest.mark.asyncio
     async def test_falls_back_to_restart_on_404(self, auto_switch, monkeypatch):

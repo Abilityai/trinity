@@ -213,11 +213,12 @@ const gridStore = useFleetGridStore()
 const name = computed(() => props.agent.name)
 const isSystemAgent = computed(() => props.agent.is_system === true)
 
-// ent#139 — agent-class variant. Keyed off the agent's TYPE (the trinity.agent-type
-// label the runner is created with), so the tile needs no extra per-agent field
-// and degrades to the standard tile the moment the feature is absent: with the
-// module unmounted no agent carries this type, and `runnerStatus` stays null.
-const isSkillRunner = computed(() => props.agent.type === 'skill-runner')
+// ent#139/#2104 — agent-class variant. Keyed off the runner's FIXED NAME
+// (`trinity-skill-runner` is a fixed-name singleton, RUNNER_AGENT_NAME in the
+// enterprise provisioner), so the tile needs no per-agent field and degrades to
+// the standard tile when the feature is absent: with the module unmounted
+// `runnerStatus` stays null and only the styling remains.
+const isSkillRunner = computed(() => props.agent.name === 'trinity-skill-runner')
 const runnerStatus = computed(() => (isSkillRunner.value ? gridStore.skillRunnerStatus : null))
 const avatarRingClass = computed(() => {
   if (isSystemAgent.value) return 'border-accent-purple-400 dark:border-accent-purple-500'

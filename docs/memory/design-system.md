@@ -118,6 +118,20 @@ System UI stack — what the product already ships. **Six sizes, no more.**
 
 Shared primitives are the unit of consistency: **compose them, never re-implement them.** A hand-rolled button/input/badge/card is a defect even when it looks identical. All primitives consume tokens only, work in both themes, and are keyboard/focus correct.
 
+**Shipped implementations (#2122)** — the form/surface layer lives in `src/frontend/src/components/base/` (the Input/Select/Textarea field recipe is one shared constant, `base/fieldClasses.js`, so the three cannot drift):
+
+| Primitive | File | Reference adoption |
+|---|---|---|
+| BaseButton | `components/base/BaseButton.vue` | `ConfirmDialog.vue` actions · TemplateRegistryPanel Save/Reset |
+| BaseInput | `components/base/BaseInput.vue` | TemplateRegistryPanel registry URL |
+| BaseSelect | `components/base/BaseSelect.vue` | `ResourceModal.vue` memory/CPU |
+| BaseToggle | `components/base/BaseToggle.vue` | TemplateRegistryPanel enable switch |
+| BaseTextarea | `components/base/BaseTextarea.vue` | `SystemInstallPanel.vue` manifest editor (mono) |
+| BaseBadge | `components/base/BaseBadge.vue` | TemplateRegistryPanel status + Default chips |
+| BaseCard | `components/base/BaseCard.vue` | `CredentialSetupChecklist.vue` surface |
+
+The dark tinted-ground recipe `token-500 at 16%` is expressible as `token-500/16` because the config extends the opacity scale with `16` — before #2122 those classes silently compiled to **nothing** (16 is not in Tailwind's default scale), so the dark chips that used them shipped without a background. The behavioral/state primitives were already shipped and keep their homes: `ConfirmDialog.vue`, `OverflowTabs.vue`, `LoadFailed.vue`/`InlineError.vue`, `ScanlineReveal.vue`.
+
 ### BaseButton
 
 **Anatomy:** inline-flex, 7px icon gap, radius 6px, 1px transparent border, transition 120ms ease (background/border/color).

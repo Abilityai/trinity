@@ -278,6 +278,14 @@ def _playbook_starter(name: str) -> str:
     return f"/{name} "
 
 
+# ent#380: bounds on the use-case fallback hints. The text is template-author
+# controlled and ships on every roster load, so cap count (layout sanity — the
+# briefing is a card grid, not a document) and per-hint length (a "use case"
+# longer than this is not a starter prompt).
+_MAX_USE_CASE_HINTS = 6
+_MAX_USE_CASE_CHARS = 200
+
+
 # #2101: belt on the briefing payload. With no connector allow-list configured
 # (the default), EVERY user_invocable skill becomes a hint card, and get_roster
 # ships this list for every roster agent on every sign-in — so a skills-heavy
@@ -311,13 +319,40 @@ def _bound_briefing_hints(hints: list) -> list:
     return bounded
 
 
-async def _agent_briefing(agent_name: str):
-    """Best-effort ``(description, playbooks)`` for the #138 new-chat briefing.
+def _use_case_hints(use_cases) -> list[PortalPlaybook]:
+    """template.yaml ``use_cases`` ("What You Can Ask") → composer hint cards.
 
-    Live agent data — template ``description`` from ``/info`` and the
-    client-visible playbooks (the operator's connector allow-list ∩
-    ``user_invocable``) from ``/api/skills``. Any failure (agent stopped, slow,
-    no connector) yields ``(None, [])`` so the roster stays fast and never errors.
+    The ent#380 fallback tier: shown only when the agent exposes no playbooks.
+    Each entry pre-fills the composer verbatim (never auto-sends) — same
+    contract as a playbook starter, so the frontend renders one hint shape.
+    Defensive over agent-supplied JSON: non-list ⇒ no hints; non-string /
+    blank entries dropped; capped at ``_MAX_USE_CASE_HINTS`` × ``_MAX_USE_CASE_CHARS``.
+    """
+    if not isinstance(use_cases, list):
+        return []
+    hints: list[PortalPlaybook] = []
+    for uc in use_cases:
+        if not isinstance(uc, str):
+            continue
+        text = uc.strip()[:_MAX_USE_CASE_CHARS]
+        if not text:
+            continue
+        hints.append(PortalPlaybook(title=text, description=None, starter_prompt=text))
+        if len(hints) >= _MAX_USE_CASE_HINTS:
+            break
+    return hints
+
+
+async def _agent_briefing(agent_name: str):
+    """Best-effort ``(description, hints)`` for the #138 new-chat briefing.
+
+    Live agent data from ``/api/template/info`` — the template ``description``
+    plus the ent#380 hint ladder: the client-visible playbooks (the operator's
+    connector allow-list ∩ ``user_invocable``, from ``/api/skills``), falling
+    back to the template-declared ``use_cases`` ("What You Can Ask") when no
+    playbook is exposed. The curated exposable-skills config (ent#178) slots
+    into this same seam once it exists. Any failure (agent stopped, slow, no
+    connector) yields ``(None, [])`` so the roster stays fast and never errors.
     """
     from services.docker_service import get_agent_container
     from services.agent_auth import agent_httpx_client
@@ -330,12 +365,18 @@ async def _agent_briefing(agent_name: str):
             return None, []
 
         base = f"http://agent-{agent_name}:8000"
-        description, live = None, []
+        description, use_cases, live = None, [], []
         async with agent_httpx_client(agent_name, timeout=5.0) as client:
             try:
-                r = await client.get(f"{base}/info")
+                # /api/template/info is the canonical metadata route (the same
+                # one InfoPanel, A2A cards and avatars read). #138 shipped this
+                # call against a nonexistent `/info` — best-effort swallowed the
+                # 404, so descriptions were silently always None (ent#380).
+                r = await client.get(f"{base}/api/template/info")
                 if r.status_code == 200:
-                    description = (r.json() or {}).get("description") or None
+                    info = r.json() or {}
+                    description = info.get("description") or None
+                    use_cases = info.get("use_cases") or []
             except Exception:  # noqa: BLE001 — briefing is best-effort
                 pass
             try:
@@ -364,6 +405,11 @@ async def _agent_briefing(agent_name: str):
             )
             for pb in resolve_exposed_playbooks(live, allow)
         ]
+        # ent#380 fallback ladder: an operator-exposed playbook set is the
+        # curated capability surface and wins outright; only an agent with NO
+        # exposed playbooks advertises its template's "What You Can Ask".
+        if not playbooks:
+            playbooks = _use_case_hints(use_cases)
         return description, _bound_briefing_hints(playbooks)
     except Exception:  # noqa: BLE001 — never let enrichment break the roster
         return None, []

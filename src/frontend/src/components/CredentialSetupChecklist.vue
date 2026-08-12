@@ -42,6 +42,7 @@
  * inject path. One writer, no new backend write surface.
  */
 import { computed, ref, watch } from 'vue'
+import BaseCard from './base/BaseCard.vue'
 
 const props = defineProps({
   report: { type: Object, default: null },
@@ -189,7 +190,9 @@ watch(
 </script>
 
 <template>
-  <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
+  <!-- The surface is BaseCard (#2122); `flush` because the header/body
+       sections own their internal padding. -->
+  <BaseCard flush>
     <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-start justify-between gap-3">
       <div>
         <h3 class="text-lg font-medium text-gray-900 dark:text-white">Credential Setup</h3>
@@ -351,5 +354,5 @@ watch(
     <p v-else-if="loading" class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400">
       Checking credential requirements…
     </p>
-  </div>
+  </BaseCard>
 </template>

@@ -1523,7 +1523,6 @@ container = docker_client.containers.run(
     labels={
         'trinity.platform': 'agent',
         'trinity.agent-name': config.name,
-        'trinity.agent-type': config.type,
         'trinity.ssh-port': str(config.port),
         'trinity.template': config.template or '',
         'trinity.owner': current_user.username

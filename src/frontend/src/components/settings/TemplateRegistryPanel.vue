@@ -12,12 +12,7 @@
     <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
       <div class="flex items-center gap-2">
         <h2 class="text-lg font-medium text-gray-900 dark:text-white">Template registry</h2>
-        <span
-          v-if="config.source === 'default'"
-          class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300"
-        >
-          Default
-        </span>
+        <BaseBadge v-if="config.source === 'default'">Default</BaseBadge>
       </div>
       <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
         Where Trinity reads its list of GitHub starter templates from. If it can't be
@@ -75,25 +70,12 @@
               <template v-else>Off — only your bundled templates are listed.</template>
             </p>
           </div>
-          <button
-            type="button"
+          <BaseToggle
+            :model-value="!!config.enabled"
             :disabled="saving || config.hard_disabled"
-            role="switch"
-            :aria-checked="String(!!config.enabled)"
             aria-label="Use the remote template registry"
-            :class="[
-              'relative inline-flex h-6 w-11 flex-shrink-0 rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800 disabled:opacity-45',
-              config.enabled ? 'bg-action-primary-600' : 'bg-gray-300 dark:bg-gray-600',
-            ]"
-            @click="toggle"
-          >
-            <span
-              :class="[
-                'inline-block h-5 w-5 transform rounded-full bg-white transition-transform mt-0.5',
-                config.enabled ? 'translate-x-5' : 'translate-x-0.5',
-              ]"
-            ></span>
-          </button>
+            @update:model-value="toggle"
+          />
         </div>
 
         <!-- URL -->
@@ -102,33 +84,32 @@
             Registry URL
           </label>
           <div class="mt-1 flex flex-col gap-2 sm:flex-row">
-            <input
+            <BaseInput
               id="template-registry-url"
               v-model="urlDraft"
               type="url"
               spellcheck="false"
               :placeholder="config.default_url"
               :disabled="saving"
-              class="flex-1 min-w-0 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100 text-sm font-mono disabled:opacity-45"
+              class="flex-1 min-w-0"
               @keyup.enter="save"
             />
-            <div class="flex gap-2">
-              <button
-                type="button"
+            <div class="flex items-start gap-2">
+              <BaseButton
                 :disabled="saving || !dirty"
-                class="px-3 py-2 text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700 focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800 disabled:opacity-45"
+                :loading="saving"
+                loading-label="Saving…"
                 @click="save"
               >
-                {{ saving ? 'Saving…' : 'Save' }}
-              </button>
-              <button
-                type="button"
+                Save
+              </BaseButton>
+              <BaseButton
+                variant="secondary"
                 :disabled="saving || config.source !== 'settings'"
-                class="px-3 py-2 text-sm font-medium rounded-md border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800 disabled:opacity-45"
                 @click="reset"
               >
                 Reset
-              </button>
+              </BaseButton>
             </div>
           </div>
           <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -143,14 +124,11 @@
              an operator can see that their registry 404s. -->
         <div class="rounded-md border border-gray-200 dark:border-gray-700 px-4 py-3">
           <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span
-              class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium"
-              :class="statusChipClass"
-            >
+            <BaseBadge :variant="statusVariant">
               <!-- Shape as well as hue (principle 24). -->
               <span aria-hidden="true">{{ statusGlyph }}</span>
               {{ statusLabel }}
-            </span>
+            </BaseBadge>
             <span class="text-xs text-gray-500 dark:text-gray-400 tabular-nums">
               {{ status.template_count }} template{{ status.template_count === 1 ? '' : 's' }}
             </span>
@@ -195,6 +173,10 @@ import { ref, computed, onMounted } from 'vue'
 import api from '../../api'
 import InlineError from '../InlineError.vue'
 import LoadFailed from '../LoadFailed.vue'
+import BaseBadge from '../base/BaseBadge.vue'
+import BaseButton from '../base/BaseButton.vue'
+import BaseInput from '../base/BaseInput.vue'
+import BaseToggle from '../base/BaseToggle.vue'
 
 const EMPTY_STATUS = {
   last_fetch_at: null,
@@ -265,16 +247,10 @@ const statusGlyph = computed(() => {
   return '○'
 })
 
-const statusChipClass = computed(() => {
-  if (status.value.last_status === 'ok') {
-    return 'bg-status-success-100 text-status-success-700 dark:bg-status-success-500/16 dark:text-status-success-300'
-  }
-  if (status.value.last_status === 'failed') {
-    return status.value.stale
-      ? 'bg-status-warning-100 text-status-warning-700 dark:bg-status-warning-500/16 dark:text-status-warning-300'
-      : 'bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-500/16 dark:text-status-danger-300'
-  }
-  return 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300'
+const statusVariant = computed(() => {
+  if (status.value.last_status === 'ok') return 'success'
+  if (status.value.last_status === 'failed') return status.value.stale ? 'warning' : 'danger'
+  return 'neutral'
 })
 
 function fmt(iso) {

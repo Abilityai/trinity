@@ -1300,15 +1300,15 @@ async def _read_template_yaml_from_volume(agent_name: str) -> dict:
     """Read the agent's `template.yaml` off its persisted workspace volume
     without a running container (#1559).
 
-    After a soft-delete the container (and its `trinity.agent-type` /
-    `trinity.agent-runtime` labels) is gone, but the workspace volume — which
+    After a soft-delete the container (and its `trinity.agent-runtime`
+    label) is gone, but the workspace volume — which
     carries the committed `template.yaml` — survives. A throwaway, network-less
     base-image container `cat`s the file. Tolerant: any failure (missing file,
     unparseable) returns `{}` so the caller falls back to safe defaults.
 
     #1665: resolves the volume through the ownership row — for a renamed agent
     the current name names no volume, so this silently read nothing and the
-    caller rebuilt on default agent-type/runtime instead of the committed ones.
+    caller rebuilt on the default runtime instead of the committed one.
     """
     volume_name = _workspace_volume_name(agent_name)
     try:
@@ -1386,7 +1386,7 @@ async def recreate_missing_container(agent_name: str):
     validate_base_image(image)
 
     tmpl = await _read_template_yaml_from_volume(agent_name)
-    agent_type = tmpl.get("type") or "business-assistant"
+    # #2104: template.yaml `type:` is parsed but ignored — the taxonomy is retired.
     runtime_cfg = tmpl.get("runtime", {})
     if isinstance(runtime_cfg, dict):
         runtime = (runtime_cfg.get("type") or "claude-code").lower()
@@ -1421,7 +1421,6 @@ async def recreate_missing_container(agent_name: str):
     # --- Base env (mirrors crud.create_agent_internal's baked set) ---
     env_vars = {
         "AGENT_NAME": agent_name,
-        "AGENT_TYPE": agent_type,
         "CREDENTIALS_FILE": "/config/credentials.json",
         "ENABLE_SSH": "true",
         "ENABLE_AGENT_UI": "true",
@@ -1486,7 +1485,6 @@ async def recreate_missing_container(agent_name: str):
     labels = {
         "trinity.platform": "agent",
         "trinity.agent-name": agent_name,
-        "trinity.agent-type": agent_type,
         "trinity.ssh-port": str(ssh_port),
         "trinity.cpu": cpu,
         "trinity.memory": memory,

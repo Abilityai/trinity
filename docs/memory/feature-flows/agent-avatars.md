@@ -610,16 +610,7 @@ Smart prompt priority chain (highest priority first):
 2. **Running agent's template.yaml** — Fetched via `GET http://agent-{name}:8000/api/template/info`:
    - `avatar_prompt` field → used as-is (explicit, highest quality)
    - `description` + `display_name` → built as `"{display_name}: {description}"`
-3. **Type-based fallback** — Built from Docker label type. Robot/android aesthetic, visually distinct from custom avatars:
-
-| Agent Type | Description |
-|------------|-------------|
-| `business-assistant` | Sleek chrome and navy metallic android executive |
-| `code-assistant` | Matte black android with glowing teal circuit traces |
-| `research-assistant` | Brushed silver robot with amber eyes and spectacle frames |
-| `creative-assistant` | Iridescent holographic android with purple-pink surface |
-| `data-analyst` | Gunmetal robot with grid lines and green glowing eyes |
-| (other/unknown) | Smooth dark metallic android with indigo glowing eyes |
+3. **Name-hash fallback** — `_get_style_for_agent(agent_name)` deterministically picks one of the `_DEFAULT_AVATAR_STYLES` robot/android descriptions from a hash of the agent NAME (`routers/avatar.py`), so each agent gets a distinct look with no other metadata. (#2104: the retired agent `type` plays no part; an earlier type-keyed style table documented here never matched the shipped name-hash implementation.)
 
 Type-based prompt format: `"{type_description} named {agent_name}"`
 

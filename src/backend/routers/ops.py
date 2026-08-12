@@ -99,7 +99,6 @@ async def get_fleet_status(
 
         agent_status = {
             "name": agent_name,
-            "type": agent.type,
             "status": agent.status,
             "is_system": is_system,
             "created_at": agent.created.isoformat() if agent.created else None,
@@ -1259,7 +1258,6 @@ async def get_auth_report(
         agent_info = {
             "name": agent_name,
             "status": agent.status,
-            "type": agent.type,
         }
 
         if subscription:
