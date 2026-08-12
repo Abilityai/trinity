@@ -321,9 +321,25 @@ outcomes ARE audit-logged (`AuditEventType.AUTHENTICATION`, `login_success`/`log
   (Invariant #13: backend router + MCP tool stay in sync).
 - **Surface**: read the exposure state, card URL, advertised skills,
   allow-list, and registered outbound endpoints; toggle exposure; add
-  and remove inbound identities. Mutating tools are owner-gated at the
-  backend; the MCP layer applies the same `{self} ∪ permitted` gate for
-  agent-scoped keys as the rest of the tool surface.
+  and remove inbound identities. Mutating tools are owner-gated **and
+  human-only** (`reject_agent_principal`) at the backend.
+- **Agent-key gating — corrected (#736)**: an earlier revision of this
+  section claimed the MCP layer applied "the same `{self} ∪ permitted`
+  gate for agent-scoped keys as the rest of the tool surface". It did
+  not: `tools/a2a.ts` contained no `checkAgentAccess` and relied wholly
+  on the backend's owner gate. That was doc/code drift, and it was not
+  harmless — the backend resolves an agent-scoped key to its OWNER, so
+  the **reads** (`get_agent_a2a_config`, `list_a2a_endpoints`) let any
+  agent enumerate a *sibling* agent's registered outbound endpoint URLs.
+  #736 adds the `{self} ∪ permitted` gate to those two read tools, which
+  is what this bullet now describes. The mutating tools need no such
+  gate: `reject_agent_principal` at the backend already refuses every
+  agent principal outright.
+- **Note on the runtime call**: `call_a2a_agent` / `get_a2a_task` are
+  **not** part of this management plane — see §32.5. Their MCP-layer gate
+  is deliberately **self-only**, not `{self} ∪ permitted`, because the
+  backend route is self-only (§32.5 FR-10) and a wider MCP check would be
+  inert.
 - **UI counterpart**: `components/A2aPanel.vue` on the agent's Sharing
   tab.
 
@@ -369,6 +385,230 @@ outcomes ARE audit-logged (`AuditEventType.AUTHENTICATION`, `login_success`/`log
   explicitly not a security boundary — failing closed would silently
   empty a card and break discovery invisibly.
 - **Flow**: `docs/memory/feature-flows/a2a-inbound-server.md`
+
+### 32.5 A2A Outbound Calls — `call_a2a_agent` (#736)
+- **Status**: 🚧 In Progress
+- **Implements**: abilityai/trinity#736 (epic trinity-enterprise#156)
+- **Description**: The runtime half of A2A. §32.2 makes a Trinity agent
+  *reachable*; this makes it a *caller* — a Trinity agent asks Trinity to
+  task an external A2A agent (Google ADK, LangChain, AWS Bedrock, a remote
+  Trinity) and gets the result back in the same tool call. Two MCP tools,
+  `call_a2a_agent` and `get_a2a_task`; one backend route pair; no
+  agent-server involvement (the egress is backend → internet, never
+  through the agent container).
+- **Open-core**: **OSS-core, by owner ruling** — the parent epic records
+  *"Outbound = OSS. A Trinity agent calling out to an external A2A agent
+  (#736) stays open-core."* There is therefore **no `requires_entitlement`
+  anywhere on the call path**, and the OSS build ships its own target
+  registry (FR-2) so the tool is functional, not merely ungated. Recorded
+  here so the ruling is never re-inferred from the fact that it merged
+  (the ent#326 / ent#384 discipline).
+
+#### FR-1 — The caller never supplies a URL
+The tool signature is `call_a2a_agent(agent_name, endpoint, message, …)`,
+where `endpoint` is the **name or id of a pre-registered endpoint**, not a
+URL. The issue's filed AC1 (`call_a2a_agent(agent_card_url, …)`) is
+**rejected**: an agent's parameters are LLM-generated and prompt-injectable,
+so a URL parameter turns any document the agent reads into an authenticated,
+credentialed, server-side request to an attacker-chosen address — from inside
+the platform network, where Redis, the Docker socket and cloud metadata live.
+No IP filtering makes that safe, because filtering is a blocklist race (DNS
+rebinding, CGNAT, IPv6-mapped forms, redirect chains) while a registry is a
+whitelist of things a human deliberately typed. The **cost is stated**: an
+agent cannot discover-and-call a novel A2A peer at runtime; an operator
+registers it first.
+
+#### FR-2 — Two target sources, one seam; OSS owns a real one
+`services/a2a_outbound.py` is a provider seam mirroring `a2a_gate.py`'s
+registration shape with **inverted failure semantics**: `a2a_gate` fails
+OPEN and its docstring says that is acceptable *because it is not a
+security boundary*; this one **is** one, so no provider, a provider that
+raises, and a provider that returns a malformed object all **refuse**.
+- **OSS provider (shipped)**: admin-managed named endpoints in
+  `system_settings`, each credential wrapped in an AES-256-GCM envelope —
+  the location Invariant #12 already blesses for
+  `elevenlabs_api_key_encrypted`. **No new table, no migration, no Alembic
+  revision.** Managed by one admin-only + human-only settings route.
+- **Enterprise provider (future)**: a per-agent registry may register and
+  takes precedence. The enterprise A2A module ships **no decrypt path and
+  no outbound provider today**, which is why OSS owns one — a seam alone
+  would have made the tool answer "no targets" on 100% of installs.
+- Resolution is **platform-scope** in OSS: a named endpoint is available to
+  every agent on the instance. Per-agent scoping is the enterprise delta.
+
+#### FR-3 — Every URL is SSRF-validated at CALL time, wherever it came from
+Registration validates a URL with `startswith("http://") or
+startswith("https://")` and a length cap — no SSRF check, and plain `http://`
+is accepted. "It is in the registry" therefore does **not** mean "safe to
+fetch". `utils/url_validation.validate_a2a_endpoint_url` runs on every call:
+HTTPS only (an `http://` row is refused at *use*, with a message telling the
+operator to re-register — never silently upgraded), ≤2048 chars, no userinfo
+(refused, never stripped), IDNA/A-label normalised **once** so the parser and
+the resolver cannot disagree about which host was approved, and every address
+`getaddrinfo` returns must be public — one private/loopback/reserved/
+link-local/multicast/unspecified/CGNAT record fails the whole endpoint. DNS
+failure is fatal. Refusal messages are fixed strings and **never** contain a
+resolved address (an operator-visible message that echoes an internal IP is a
+topology oracle).
+
+#### FR-4 — DNS rebinding is closed by connect-time IP pinning, not accepted
+The sibling `validate_template_registry_url` records rebinding as an accepted
+residual; that is right for a display-only catalog and **wrong here, because
+this request carries a credential**. One resolution produces one validated IP;
+both hops connect to that IP while presenting the original hostname for `Host`,
+SNI **and certificate verification**, so TLS still authenticates the registered
+name. Stated trade: pinning one address means a host whose selected A record is
+down fails even though its siblings are up.
+
+#### FR-5 — Credentials come from the registry, and registering is a trust decision
+The credential is bound to the registry entry, decrypted server-side, and
+attached as `Authorization: Bearer` on the RPC POST **only**. The card fetch is
+uncredentialed. The issue's AC3 (`A2A_{DOMAIN}_TOKEN` in the calling agent's
+`.env`, selected by card domain) is **rejected**: `.env` is agent-writable, so
+the agent could plant a credential; domain-keyed selection lets a
+remote-controlled string answer "which secret do I send?"; and reading it would
+mean `docker exec`ing plaintext into backend memory on every call when Trinity
+already has encrypted server-side storage for exactly this.
+
+**Disclosed honestly**: the sanitiser removes the *literal* credential from
+anything returned. A cooperating remote that base64s, splits or rot13s it
+defeats that, and no programmatic control fixes it. **Registering an endpoint
+grants that endpoint the ability to exfiltrate its own credential.** This is
+stated on the settings surface and in the user doc, because it reframes
+registration as what it actually is — a trust decision about a peer.
+
+#### FR-6 — `message/send` only; no SSE; no fake `stream` parameter
+Filed AC4 (stream token chunks back to the calling agent over SSE) is
+**rejected**: an MCP tool call is one request and one response — a FastMCP
+`execute()` returns a string, so there is no channel for chunks to reach the
+calling agent's turn. It would also buy nothing against the primary target:
+Trinity's own `message/stream` awaits the whole atomic agent turn and emits
+exactly two events. A `stream` parameter is **not accepted at all** — a
+parameter that is accepted and silently does not stream is a lie in a schema
+agents read.
+
+#### FR-7 — Long remote work returns a handle; no Trinity execution row
+A non-terminal remote task returns `state` + `task_id` + `context_id`, and
+`get_a2a_task` issues `tasks/get` against the same resolved endpoint. Filed AC6
+(Redis `a2a:task:{taskId}` + an `execution_id` for `get_execution_result`) is
+**rejected**: `get_execution_result` reads `schedule_executions`, i.e.
+executions *of Trinity agents*. Minting a row for an external call would pollute
+fleet cost/analytics (EXEC-022, §Overview analytics), capacity accounting, and
+the canary invariants that reason about `running` rows (E-01/E-05). No new
+`triggered_by` value is created, so `_VALID_TRIGGERS` / `_TRIGGER_BUCKETS` /
+`_AUTONOMOUS_TRIGGERS` are correctly untouched — a later revision that mints a
+row must update all three.
+
+#### FR-8 — Dedup is best-effort and agent-cooperative, not at-most-once
+Wired to `effect_guard` (#1084), the fifth sink, because an outbound A2A call is
+an irreversible external effect in the same class as `send_message` /
+`call_user` / `share_file`. Invariant #18 does not apply — no execution is
+created.
+- **Identity is `{endpoint_id, resolved_url, context_id, task_id}` and
+  `dedup_label` is a REQUIRED tool parameter.** Keying on the endpoint alone
+  (the `send_message` shape) is correct for a notification sink and **wrong for
+  a request/response conversation**: a second call to the same endpoint with a
+  *different message* would read as a completed replay and return the answer to
+  the **first** question, with no error and no log. The message body is
+  deliberately **not** in the key (#1084's rule — an LLM-generated body is
+  non-deterministic across a re-run and would defeat re-delivery dedup entirely).
+- `execution_id` is an agent-supplied parameter and the guard **fails open when
+  it is absent**, so this is honest best-effort, not a guarantee. It is the
+  fifth sink with that shape, enlarging the debt architecture.md already names
+  as a blocking prerequisite for pull-mode default-ON.
+- An in-flight duplicate raises → **409**, never a silent skip.
+
+#### FR-9 — Caps, deadlines and a fleet bound
+Card fetch ≤256 KiB, RPC response ≤1 MiB, outbound message ≤100 000 chars, text
+returned to the agent ≤32 KiB with an explicit truncation marker (the agent's
+context window is the real budget). Bodies are read with `httpx.AsyncClient` +
+`aiter_raw()` under a running wire-byte total; any `Content-Encoding` other than
+`identity` is **refused, not decoded** (measured: 199 KiB gzip → ~458 MB decoded
+allocation); a 3xx is a **failure, not a hop**, on both hops; `trust_env=False`
+so `HTTP_PROXY`/`HTTPS_PROXY` cannot make the validated target irrelevant (the
+CA env vars are re-honoured explicitly, since `trust_env=False` would otherwise
+silently drop `SSL_CERT_FILE`). The RPC timeout is **30 s**, well below the MCP
+client's own 30–60 s gateway abort, plus a **total wall-clock deadline** —
+httpx's `read` timeout is per-read, so a trickle-feeding tarpit resets it
+forever and stays under the byte cap. DNS resolution runs off the event loop
+(`asyncio.to_thread`): a synchronous `getaddrinfo` on a per-call agent path
+freezes an entire worker's loop, which no per-agent rate limit bounds. Bounds
+are **per-agent 30/60 s AND a fleet-wide Redis key** — a per-process semaphore
+would be per-worker (prod runs `--workers 2`) and blocking on one recreates the
+coroutine hold it prevents.
+**These constants are deliberately not settings-backed** — do not "promote" them.
+
+#### FR-10 — Authorization: use, not grant
+MCP advertisement is the `operatorOnly` **allowlist** (`{user, agent, system}`),
+so connector and anonymous sessions cannot see or call the tools. The backend
+route is `AuthorizedAgentByName` **plus an agent-scoped self-check** — an agent
+key may spend only **its own** agent's endpoint budget. `reject_agent_principal`
+is deliberately **not** used: this is a *use* of a capability an admin already
+granted by registering the endpoint, not a *grant* (the Invariant #8 line).
+Registration itself stays admin + human-only. The MCP-layer check is **self-only
+for `scope === "agent"`**, matching the backend exactly — a `{self} ∪ permitted`
+check there would deny a strict subset of what the backend denies, i.e. block
+nothing while costing a `getPermittedAgents` round-trip per call.
+
+#### FR-11 — Kill switch, default OFF
+`A2A_OUTBOUND_ENABLED` resolves `system_settings` row → env → **OFF**, the
+brain-orb shape, so an admin can flip it with no restart and a compose gap can
+never make it unreachable. Both routes **404** when off (Trinity's "capability
+not present" answer), and `a2a_outbound_available` is surfaced in
+`GET /api/settings/feature-flags`. The env leg is wired into **both** compose
+files and `.env.example` in the same change — six recorded recurrences of a knob
+shipping inert say that is not optional. This is the platform's first
+backend-executed, credentialed, agent-triggerable outbound fetcher; every
+comparable surface (`DISPATCH_ASYNC`, `CANARY_ENABLED`, `VOIP_ENABLED`,
+`MCP_INLINE_AUTH_ENABLED`, `BRAIN_ORB_*`) ships default-OFF.
+
+**Fail-open composition, stated rather than emergent**: `rate_limiter` and
+`idempotency_service` both fail open, on the same infrastructure. With Redis
+down this path has neither an effective rate bound nor dedup, simultaneously.
+That matches every other sink and Trinity's availability bias — and it is an
+additional argument for the kill switch being the control an operator actually
+reaches for.
+
+#### FR-12 — Dialect is card-driven, defaulting to v0.3
+The issue's *"Target v1.0 only"* is **rejected with evidence**: Trinity's own
+card pins `protocolVersion: 0.3.0` and its server dispatches slash method names
+(`message/send`, `tasks/get`), so a v1.0-only client **cannot talk to Trinity**
+— and #738 (Trinity-to-Trinity federation), the primary consumer, is downstream
+of this issue. An absent or unparseable version is treated as v0.3, which is the
+spec's own back-compat rule and what makes federation work with zero
+configuration. A `1.x` card is **refused** (`unsupported_protocol_version`) in
+this MVP rather than guessed at: no v1.0 peer exists to test against, and FR-6
+already used "untestable ⇒ do not ship it" to reject SSE. The dialect table is
+documented in `services/a2a_protocol.py` so the arm is one line when a peer
+exists. The negotiated dialect is cached briefly per endpoint — otherwise every
+call *and every poll* pays a second full egress just to re-read one field.
+
+#### FR-13 — The card is a hint, not an authority
+ent#159 (signed cards) is `status-blocked`, and #736 does not wait for it —
+because the plan removes the card's authority instead of trying to verify it. A
+signature scheme whose own scope is "validate when signed, warn when unsigned"
+cannot be the boundary for a credentialed fetch: an attacker simply does not
+sign.
+- The card's declared `url` must be **same-origin** with the registered
+  endpoint (scheme + host + port, default-port-equivalent, IDNA-normalised,
+  trailing dot stripped, IPv6 bracket forms equal). Trinity's own card emits no
+  explicit port, so getting default-port equivalence wrong would make Trinity
+  unreachable by its own rule.
+- `securitySchemes` **never** selects the credential. The card cannot cause a
+  different credential to be chosen, nor a credential to be attached to an
+  unregistered origin.
+- **Card-vs-RPC normalisation**: the card is always derived from
+  `{scheme}://{netloc}/.well-known/agent-card.json`. If the registered URL
+  carries a path, it is accepted as the RPC target **only** when the card's
+  declared `url` matches it exactly; ambiguity is refused with a named error.
+- An unreachable card therefore blocks the RPC (the same-origin pin depends on
+  it) — a card outage takes a healthy endpoint down, which is the fail-closed
+  direction and is recorded, not hidden.
+- Errors ride in the JSON-RPC body on **HTTP 200** (Trinity's own server does
+  this), so the client parses the body for `error` even on 200 → **502**,
+  `success: false`. A status-only check would read every remote failure as a
+  success.
+- **Flow**: `docs/memory/feature-flows/a2a-outbound-call.md`
 
 ---
 
