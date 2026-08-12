@@ -657,13 +657,21 @@ def _map_call_error(exc: A2ACallError) -> HTTPException:
 
 
 def _assert_outbound_self(current_user: User, agent_name: str) -> None:
-    """An agent-scoped key may spend only its OWN agent's endpoint budget.
+    """An agent-scoped key may place outbound calls only AS ITSELF.
 
     `AuthorizedAgentByName` resolves an agent key to its OWNER and checks owner
-    access, so without this a permitted sibling could burn a neighbour's
-    registered credential. The asymmetry is deliberate and worth stating: which
-    agents a caller may *reach* is a sharing question; which agent's credential
-    it may *spend* is not, and that one is self-only.
+    access, so without this a permitted sibling could place calls under a
+    neighbour's name.
+
+    Be precise about what that buys, because the obvious reading is wrong under
+    the shipped OSS provider: endpoints there are **platform-scope**, so there
+    is no "own" versus "neighbour" credential — every agent may name every
+    registered endpoint. What this check protects is **attribution**: the
+    rate-limit key, the audit row and the `agent_activities` row all name the
+    agent that actually spent the call, so a sibling cannot launder its egress
+    through a neighbour. It also holds the line for a future per-agent provider,
+    where the obvious reading becomes the literal one — which is why it is here
+    now rather than added later, after the surface has callers.
 
     `reject_agent_principal` is deliberately NOT used. This is a *use* of a
     capability an admin already granted by registering the endpoint, not a

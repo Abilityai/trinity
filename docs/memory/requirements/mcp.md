@@ -543,7 +543,15 @@ coroutine hold it prevents.
 MCP advertisement is the `operatorOnly` **allowlist** (`{user, agent, system}`),
 so connector and anonymous sessions cannot see or call the tools. The backend
 route is `AuthorizedAgentByName` **plus an agent-scoped self-check** — an agent
-key may spend only **its own** agent's endpoint budget. `reject_agent_principal`
+key may call only **as itself**. Note precisely what that buys under the OSS
+provider, because the obvious reading is wrong: endpoints there are
+**platform-scope**, so there is no "own" versus "neighbour" credential to
+protect — every agent may name every registered endpoint. What the self-check
+protects is **attribution**: the rate-limit key, the audit row and the
+`agent_activities` row all name the agent that actually spent the call, and a
+sibling cannot launder its egress through a neighbour's name. It also holds the
+line for a future per-agent provider, where the obvious reading becomes the
+literal one. `reject_agent_principal`
 is deliberately **not** used: this is a *use* of a capability an admin already
 granted by registering the endpoint, not a *grant* (the Invariant #8 line).
 Registration itself stays admin + human-only. The MCP-layer check is **self-only
@@ -563,12 +571,20 @@ backend-executed, credentialed, agent-triggerable outbound fetcher; every
 comparable surface (`DISPATCH_ASYNC`, `CANARY_ENABLED`, `VOIP_ENABLED`,
 `MCP_INLINE_AUTH_ENABLED`, `BRAIN_ORB_*`) ships default-OFF.
 
-**Fail-open composition, stated rather than emergent**: `rate_limiter` and
-`idempotency_service` both fail open, on the same infrastructure. With Redis
-down this path has neither an effective rate bound nor dedup, simultaneously.
-That matches every other sink and Trinity's availability bias — and it is an
-additional argument for the kill switch being the control an operator actually
-reaches for.
+**Degradation under infrastructure loss, stated rather than emergent.** The two
+bounds on this path do **not** share a failure domain, so the "lose Redis, lose
+both" reading is wrong in both halves. `rate_limiter` fails *soft*, not open: a
+Redis outage drops it to a bounded per-worker in-process sliding window
+(`_check_inprocess`), so the limit survives and only its scope narrows from
+fleet-wide to per-worker — `--workers 2` means an effective 2x, not unbounded.
+`idempotency_service` is not on Redis at all: `effect_guard` claims rows in the
+`idempotency_keys` **table**, so dedup is unaffected by a Redis outage and fails
+open only when a DB write fails, at which point the platform is already down.
+The genuine fail-open on this path is the one FR-8 names — `execution_id` is an
+agent-supplied parameter and the guard fails open when it is absent — and that,
+not a Redis outage, is where the residual lives. The kill switch remains the
+control an operator reaches for, but it is not compensating for a bound that
+disappears.
 
 #### FR-12 — Dialect is card-driven, defaulting to v0.3
 The issue's *"Target v1.0 only"* is **rejected with evidence**: Trinity's own
@@ -581,8 +597,14 @@ configuration. A `1.x` card is **refused** (`unsupported_protocol_version`) in
 this MVP rather than guessed at: no v1.0 peer exists to test against, and FR-6
 already used "untestable ⇒ do not ship it" to reject SSE. The dialect table is
 documented in `services/a2a_protocol.py` so the arm is one line when a peer
-exists. The negotiated dialect is cached briefly per endpoint — otherwise every
-call *and every poll* pays a second full egress just to re-read one field.
+exists. The negotiated dialect and the resolved RPC target are cached briefly
+**per registered endpoint** — keyed on the registered URL, never on the origin,
+because one host can carry several separately-registered endpoints and those are
+different trust relationships with different credentials. The cache is read by
+`get_a2a_task` only: a poll would otherwise pay a second full egress just to
+re-read one field, while `call_a2a_agent` deliberately re-reads the card every
+time so the same-origin pin is re-evaluated against fresh peer state on every
+credentialed send.
 
 #### FR-13 — The card is a hint, not an authority
 ent#159 (signed cards) is `status-blocked`, and #736 does not wait for it —

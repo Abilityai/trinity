@@ -75,7 +75,8 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
       allowed: false,
       reason:
         `Agent '${authContext.agentName}' may only place outbound A2A calls as itself, ` +
-        `not as '${targetAgent}'. Registered endpoint credentials are per-agent.`,
+        `not as '${targetAgent}'. Outbound calls are attributed to the calling agent — ` +
+        `its rate budget, its audit row, its activity row.`,
     };
   };
 
@@ -94,6 +95,7 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
       flags.not_found = true;
       if (/endpoint_not_found/i.test(message)) {
         flags.endpoint_not_found = true;
+        // Retrying with a guessed name cannot succeed — the list is operator-owned.
       } else {
         flags.outbound_disabled = true;
       }
@@ -123,8 +125,11 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
       description:
         "Task an EXTERNAL A2A-protocol agent (Google ADK, LangChain, AWS Bedrock, another " +
         "Trinity) and return its answer. The target must be PRE-REGISTERED by an administrator " +
-        "— you choose it by name with `endpoint`, and you cannot supply a URL. Run " +
-        "list_a2a_endpoints, or ask your operator to register one, if you do not know the name. " +
+        "— you choose it by name with `endpoint`, and you cannot supply a URL. Ask your " +
+        "operator for the registered name if you do not know it; there is deliberately no " +
+        "agent-facing listing, because the registered URLs are the shape of the fleet's " +
+        "integrations. (`list_a2a_endpoints` reads a different, per-agent store and will not " +
+        "name a target this tool can call.) " +
         "`dedup_label` is required and must DIFFER for each distinct question you ask in this " +
         "turn: calls are deduplicated on the endpoint and conversation, not on your message, so " +
         "reusing a label returns the earlier answer. If the remote replies with state 'working' " +

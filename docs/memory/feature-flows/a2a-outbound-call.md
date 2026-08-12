@@ -149,12 +149,17 @@ genuinely cancellable awaits.
 2. **`AuthorizedAgentByName`** — owner, admin, or shared.
 3. **Agent self-check** — an agent-scoped key may call only **as itself**.
    `AuthorizedAgentByName` resolves an agent key to its OWNER, so without this
-   a *permitted sibling* could spend a neighbour's registered credential. The
-   asymmetry is deliberate: which agents you may **reach** is a sharing
-   question; whose credential you may **spend** is not.
-   `reject_agent_principal` is **not** used — this is a *use* of a capability
-   an admin already granted by registering the endpoint, not a *grant*
-   (Invariant #8's grant-vs-use line).
+   a *permitted sibling* could place calls under a neighbour's name. Be precise
+   about what that buys under the OSS provider, because the obvious reading is
+   wrong: endpoints there are **platform-scope**, so there is no "own" versus
+   "neighbour" credential — every agent may name every registered endpoint.
+   What the check protects is **attribution**: the rate-limit key, the audit row
+   and the `agent_activities` row all name the agent that actually spent the
+   call, so a sibling cannot launder its egress through a neighbour. It also
+   holds the line for a future per-agent provider, where the obvious reading
+   becomes the literal one. `reject_agent_principal` is **not** used — this is a
+   *use* of a capability an admin already granted by registering the endpoint,
+   not a *grant* (Invariant #8's grant-vs-use line).
 4. **Rate bounds** — per-agent *and* fleet, both through the Redis limiter. A
    per-agent limit bounds one agent; the fleet is the actual exhaustion path.
 5. **Resolution** — fail-closed. No provider, a raising provider, a malformed
@@ -312,13 +317,21 @@ blocking prerequisite for pull-mode default-ON.
 
 ---
 
-## Fail-open composition, stated rather than emergent
+## Degradation under infrastructure loss, stated rather than emergent
 
-`rate_limiter` and `idempotency_service` both fail open, **on the same
-infrastructure**. With Redis down this path has neither an effective rate bound
-nor dedup, simultaneously. That matches every other sink and Trinity's
-availability bias — and it is an additional argument for the kill switch being
-the control an operator actually reaches for.
+The two bounds on this path do **not** share a failure domain, so the tempting
+"lose Redis, lose both" reading is wrong in both halves.
+
+| Control | Backing store | With Redis unreachable |
+|---|---|---|
+| `rate_limiter.enforce` | Redis ZSET | fails **soft** — `_check_inprocess`, a bounded per-worker sliding window. The limit survives; its scope narrows from fleet-wide to per-worker, so `--workers 2` means an effective 2x, not unbounded |
+| `effect_guard` (`idempotency_service`) | the `idempotency_keys` **table** | unaffected. It is not on Redis at all; it fails open only on a DB write failure, at which point the platform is already down |
+
+The genuine fail-open here is the one FR-8 names: `execution_id` is an
+agent-supplied parameter and the guard fails open when it is absent. That, not a
+Redis outage, is where the residual lives. The kill switch remains the control
+an operator reaches for — but it is not compensating for a bound that
+disappears.
 
 ---
 
@@ -391,9 +404,18 @@ documented in `a2a_protocol.py` and deliberately **not claimed** — there is no
 v1.0 peer to verify it against, and §FR-6 already used "untestable ⇒ do not
 ship it" to reject SSE.
 
-The negotiated dialect is cached briefly per origin: otherwise every call *and
-every poll* pays a second full egress to re-read one field, and a poll would
-burn the caller's own rate budget doing it.
+The negotiated dialect and the resolved RPC target are cached briefly **per
+registered endpoint** — keyed on the registered URL, never on the origin. One
+host can carry several separately-registered endpoints (a multi-tenant peer with
+an agent per path is exactly what the registered-path rule supports), and two
+registry rows are two trust relationships with two credentials; an origin key
+let a call to one of them decide where a *sibling's* poll sent its credential.
+
+Only `get_a2a_task` reads the cache. A poll would otherwise pay a second full
+egress to re-read one field and burn the caller's own rate budget doing it,
+whereas `call_a2a_agent` re-reads the card on every call by design, so the
+same-origin pin is re-evaluated against fresh peer state before every
+credentialed send.
 
 ---
 

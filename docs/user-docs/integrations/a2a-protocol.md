@@ -49,7 +49,7 @@ The same controls are available as MCP tools, so you can expose and configure ag
 | `set_agent_a2a_exposure` | Toggle A2A exposure on/off |
 | `get_agent_a2a_card` | Fetch the served Agent Card JSON |
 | `set_a2a_inbound_allowlist` | Add/remove inbound identities |
-| `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint` | Manage the outbound endpoint registry |
+| `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint` | Manage the **per-agent** outbound endpoint list (see the note under *Outbound endpoints* for which list `call_a2a_agent` resolves against) |
 
 Exposure and credential operations are **owner/admin and human-only** — an agent-scoped key can't flip its own exposure. Reads use the standard agent-access gate.
 
@@ -130,7 +130,9 @@ By default, any caller authenticated as an owner/shared identity for the agent m
 
 ## Outbound endpoints
 
-Register the external A2A endpoints your agent is allowed to call (name + URL + optional credential). Credentials are stored **encrypted and never shown again** — the UI only indicates whether an endpoint has one (`🔒 credentialed`). This registry feeds the agent's outbound A2A calls — see **Part 3** below for how an agent actually places one.
+Register the external A2A endpoints your agent is allowed to call (name + URL + optional credential). Credentials are stored **encrypted and never shown again** — the UI only indicates whether an endpoint has one (`🔒 credentialed`).
+
+> **Which list does `call_a2a_agent` actually read?** Trinity resolves an outbound target through a provider seam, and in this build the resolver is the **platform-wide** list you manage in [Part 3](#register-an-endpoint-admin-human-only) — not this per-agent panel. If you register a target here and your agent answers `endpoint_not_found`, that is why: register it in Part 3. The per-agent panel becomes the resolver on a build that registers a provider for it, in which case it takes precedence.
 
 ---
 
