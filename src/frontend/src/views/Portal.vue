@@ -99,13 +99,55 @@
              single-agent conversation is untouched below — different
              substrate, different component, no shared state. -->
         <PortalRoom
-          v-if="activeRoomIdFromRoute"
+          v-if="activeRoomIdFromRoute && store.multiAgentChatAvailable"
           :key="activeRoomIdFromRoute"
           :room-id="activeRoomIdFromRoute"
           :roster="store.agents"
           @open-menu="mobileNav = true"
           @rooms-changed="refreshThreads"
         />
+
+        <!-- #2128: the URL names a room this instance cannot open. This branch
+             must catch EVERY remaining room-URL case, and its position between
+             the two components above and below is load-bearing: falling through
+             to PortalConversation opens a DIFFERENT agent's chat under a room
+             link (activeAgent defaults to the first roster entry), and falling
+             past that lands on the `!activeRoomIdFromRoute` block whose guard is
+             false here — rendering a completely blank <main>.
+
+             Gating the RENDER, not just a watcher, is also what stops
+             PortalRoom::onMounted issuing GET /api/rooms/:id at all.
+
+             Four sub-states, not one: fail-closed is right for the affordance
+             and wrong for the copy that explains it. Only a roster that loaded
+             CLEANLY and reported the capability absent may say "not available
+             on this instance" — saying it during a transient 5xx on an entitled
+             instance would be a false statement about the operator's build, on
+             the one surface whose whole bar is honest status. -->
+        <div v-else-if="activeRoomIdFromRoute" class="flex-1 flex flex-col items-center justify-center text-center px-6">
+          <svg class="w-10 h-10 text-gray-300 dark:text-gray-700 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
+          <template v-if="!store.rosterLoaded || store.loading">
+            <p class="text-sm text-gray-500 dark:text-gray-400">Opening this conversation…</p>
+          </template>
+          <template v-else-if="store.unavailable">
+            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">{{ WORKSPACE_UNAVAILABLE_TITLE }}</p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">
+              It isn't enabled here. Ask an administrator if you expected access.
+            </p>
+          </template>
+          <template v-else-if="store.error">
+            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">{{ ROSTER_LOAD_FAILED_TITLE }}</p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">{{ store.error }}</p>
+            <button class="mt-3 text-sm text-action-primary-600 hover:underline" @click="store.fetchRoster()">Try again</button>
+          </template>
+          <template v-else>
+            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">This conversation isn't available on this instance</p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">
+              Chats with more than one agent aren't enabled here. Start a chat with a single agent instead.
+            </p>
+            <button class="mt-3 text-sm text-action-primary-600 hover:underline" @click="leaveRoomRoute">Start a new chat</button>
+          </template>
+        </div>
 
         <PortalConversation
           v-else-if="activeAgent"
@@ -143,13 +185,13 @@
         <div v-else-if="!activeRoomIdFromRoute" class="flex-1 flex flex-col items-center justify-center text-center px-6">
           <svg class="w-10 h-10 text-gray-300 dark:text-gray-700 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
           <template v-if="store.unavailable">
-            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">Workspace isn't available on this instance</p>
+            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">{{ WORKSPACE_UNAVAILABLE_TITLE }}</p>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">
               It isn't enabled here. Ask an administrator if you expected access.
             </p>
           </template>
           <template v-else-if="store.error">
-            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">Couldn't load your agents</p>
+            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">{{ ROSTER_LOAD_FAILED_TITLE }}</p>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">{{ store.error }}</p>
             <button class="mt-3 text-sm text-action-primary-600 hover:underline" @click="store.fetchRoster()">Try again</button>
           </template>
@@ -180,6 +222,7 @@
     <PortalAgentPicker
       v-if="pickerOpen"
       :agents="store.agents"
+      :multi="store.multiAgentChatAvailable"
       :busy="pickerBusy"
       :error="pickerError"
       @confirm="onPickerConfirm"
@@ -194,7 +237,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useClientPortalStore } from '@/stores/clientPortal'
+import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE } from '@/stores/clientPortal'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
 import PortalConversation from '@/components/portal/PortalConversation.vue'
 import PortalBriefing from '@/components/portal/PortalBriefing.vue'
@@ -288,9 +331,21 @@ function newChat() {
   pickerOpen.value = true
 }
 
+// #2128 — every exit from the main stage tested ONLY `sessionId`, so on a
+// /workspace/r/:id URL none of them changed the route. That was invisible while
+// the room always rendered; the moment a room URL can resolve to a refusal, it
+// makes that refusal a state the user cannot leave by any control except the
+// one on the refusal itself — a dead end created by the very fix meant to
+// remove one. `roomId` belongs in the same test for the same reason.
+function leaveRoomRoute() {
+  activeRoomId.value = null
+  pendingSession.value = null; prefill.value = ''; convGen.value++
+  router.push('/workspace')
+}
+
 function startBlankChat() {
   pendingSession.value = null; prefill.value = ''; convGen.value++
-  if (route.params.sessionId) router.push('/workspace')
+  if (route.params.sessionId || route.params.roomId) router.push('/workspace')
 }
 
 async function onPickerConfirm(agentNames) {
@@ -312,15 +367,30 @@ async function onPickerConfirm(agentNames) {
   } catch (err) {
     // Keep the picker open with the reason: closing it would leave the user
     // guessing whether anything happened.
-    pickerError.value = err?.response?.data?.detail?.message
-      || err?.response?.data?.detail
-      || 'Could not start that chat.'
+    // #2128 — the store refuses a room call on an instance with no rooms
+    // substrate, and self-heals the flag on a definitive 404/403 mid-session,
+    // so the picker collapses to single-select on this same tick. A typed code,
+    // never message-sniffing: the generic path below must stay intact, because
+    // a `true` flag does not guarantee success (the client may lack access to
+    // one selected agent) and that reason still has to surface.
+    pickerError.value = err?.code === 'rooms_unavailable'
+      ? (err.message || MULTI_AGENT_UNAVAILABLE)
+      : (err?.response?.data?.detail?.message
+        || err?.response?.data?.detail
+        || 'Could not start that chat.')
   } finally {
     pickerBusy.value = false
   }
 }
 
 const pickerError = ref(null)
+
+// #2128 — shared by the room-route refusal branch and the no-room empty state
+// below it, which are the same four states rendered in the same file. Local
+// consts, not a module: both consumers live here, and a component extraction
+// for two <p> pairs is more abstraction than the duplication costs.
+const WORKSPACE_UNAVAILABLE_TITLE = "Workspace isn't available on this instance"
+const ROSTER_LOAD_FAILED_TITLE = "Couldn't load your agents"
 
 function openRoom(roomId) {
   if (!roomId) return
@@ -332,7 +402,10 @@ function openRoom(roomId) {
 function newChatWithAgent(name) {
   activeAgentName.value = name
   pendingSession.value = null; prefill.value = ''; convGen.value++
-  if (route.params.sessionId) router.push('/workspace')
+  // #2128: `roomId` too — see leaveRoomRoute above. Without it, picking one
+  // agent from the picker while parked on a room URL leaves the room route (and
+  // so the refusal) on screen, and the chat the user asked for never appears.
+  if (route.params.sessionId || route.params.roomId) router.push('/workspace')
 }
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
 function openThread(t) {
@@ -438,6 +511,8 @@ function onSignOut() {
   store.signOut()
   threads.value = []; activeAgentName.value = null; pendingSession.value = null
   step.value = 'email'; email.value = ''; code.value = ''
-  if (route.params.sessionId) router.push('/workspace')
+  // #2128: `roomId` too — otherwise a sign-out from a room URL carries that
+  // room id into the next session's address bar.
+  if (route.params.sessionId || route.params.roomId) router.push('/workspace')
 }
 </script>
