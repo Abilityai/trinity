@@ -6,7 +6,8 @@
       <div class="shrink-0 px-4 pt-4 pb-3 border-b border-gray-200 dark:border-gray-800">
         <h2 class="text-sm font-semibold">Start a chat</h2>
         <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-          Pick one agent, or several to put them in the same conversation.
+          {{ multi ? 'Pick one agent, or several to put them in the same conversation.'
+            : 'Pick an agent to chat with.' }}
         </p>
       </div>
 
@@ -20,8 +21,9 @@
           type="button"
           class="w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition"
           :class="{ 'bg-gray-50 dark:bg-gray-800': selected.includes(a.name) }"
-          role="checkbox"
-          :aria-checked="selected.includes(a.name)"
+          :role="multi ? 'checkbox' : null"
+          :aria-checked="multi ? selected.includes(a.name) : null"
+          :aria-pressed="multi ? null : selected.includes(a.name)"
           @click="toggle(a.name)"
         >
           <span
@@ -47,11 +49,16 @@
       <div class="shrink-0 px-4 py-3 border-t border-gray-200 dark:border-gray-800 flex items-center gap-2">
         <!-- The count is the only hint that picking two behaves differently
              (a room rather than a thread); the wording stays in the user's
-             vocabulary — they are choosing who is in the conversation. -->
+             vocabulary — they are choosing who is in the conversation. In
+             single-select the third clause is unreachable, so it is not shown:
+             #2128 hides the affordance rather than explaining its absence, and
+             an explanation here would put the operator's billing tier in front
+             of their customer to no purpose. -->
         <span class="text-xs text-gray-500 dark:text-gray-400 flex-1">
           {{ selected.length === 0 ? 'Nobody selected'
             : selected.length === 1 ? '1 agent'
-            : `${selected.length} agents — they will share this conversation` }}
+            : multi ? `${selected.length} agents — they will share this conversation`
+            : `${selected.length} agents` }}
         </span>
         <button
           type="button"
@@ -82,8 +89,9 @@
  * (the only substrate that models several agents and @mention-waking). The
  * caller decides which; this component only reports who was chosen.
  */
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
+import { applyAgentSelection, collapseSelection } from './portalUtils'
 
 const props = defineProps({
   agents: { type: Array, default: () => [] },
@@ -91,16 +99,31 @@ const props = defineProps({
   // Shown in place rather than closing the dialog: dismissing on failure would
   // leave the user guessing whether a chat was created.
   error: { type: String, default: null },
+  // #2128 — may this chat hold more than one agent? A chat with two or more is
+  // a room, and a build without that substrate serves no room endpoint at all,
+  // so offering the multi-select there is an affordance that can only ever
+  // dead-end.
+  //
+  // Default FALSE, not true: a caller that forgets to bind gets the surface
+  // that works everywhere rather than reintroducing this bug. The component
+  // reports who was chosen and nothing else — it says nothing about WHY the
+  // affordance is missing, because the viewer here is the operator's customer.
+  multi: { type: Boolean, default: false },
 })
 const emit = defineEmits(['confirm', 'cancel'])
 
 const selected = ref([])
 
 function toggle(name) {
-  const i = selected.value.indexOf(name)
-  if (i === -1) selected.value.push(name)
-  else selected.value.splice(i, 1)
+  selected.value = applyAgentSelection(selected.value, name, { multi: props.multi })
 }
+
+// The capability can flip while the dialog is open — a late roster resolving,
+// or the store's self-heal firing on a definitive refusal. Collapse rather than
+// leaving a two-agent selection that Start can no longer confirm.
+watch(() => props.multi, (isMulti) => {
+  selected.value = collapseSelection(selected.value, { multi: isMulti })
+})
 
 function confirm() {
   if (!selected.value.length) return

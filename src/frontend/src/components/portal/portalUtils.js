@@ -125,3 +125,31 @@ export function deliveryFailureReason(err) {
   if (err.response.status === 429) return 'Too many messages just now — wait a moment and retry.'
   return `The message wasn't delivered (error ${err.response.status}).`
 }
+
+// #2128 — one place decides what a click does to the selection, so single- and
+// multi-select cannot drift, and the collapse case is testable with no harness.
+//
+// `multi: false` is the fail-safe shape: on a build with no rooms substrate a
+// chat can only ever hold one agent, so clicking another REPLACES the pick
+// rather than adding to it. Clicking the selected one clears it (the picker's
+// Start button is disabled on an empty selection, so "none" is a reachable and
+// harmless state — and a control you cannot un-press is worse).
+//
+// Always returns a NEW array; the caller's ref is never mutated in place.
+export function applyAgentSelection(selected, name, { multi = false } = {}) {
+  const list = Array.isArray(selected) ? selected : []
+  const has = list.includes(name)
+  if (!multi) return has ? [] : [name]
+  return has ? list.filter((n) => n !== name) : list.concat(name)
+}
+
+// Collapse an existing selection when the capability turns out to be absent —
+// a late roster, or the store's self-heal firing while the dialog is open.
+// Keeps the MOST RECENT pick: in single-select, the last thing you clicked is
+// what you chose. Identity when multi-select is live, or when there is nothing
+// to collapse.
+export function collapseSelection(selected, { multi = false } = {}) {
+  const list = Array.isArray(selected) ? selected : []
+  if (multi || list.length <= 1) return list
+  return [list[list.length - 1]]
+}
