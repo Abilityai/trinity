@@ -149,6 +149,34 @@ def consume_acknowledgement(setting_key: str) -> None:
     db.delete_setting(_ack_key(setting_key))
 
 
+def _describe_exception(e: BaseException) -> str:
+    """`type: message`, and never raises — `str(e)` on a foreign exception can.
+
+    Used by EVERY failure path in this module — `evaluate`'s three `except`
+    branches and `announce_refusal`'s stored `_RefusalEpisode.last_error` plus its
+    per-attempt WARNING. The stored form is an eager f-string, so a raising
+    `__str__` escapes directly. The log form looks safer — deferred `%s`
+    formatting is logging's problem — but only in production, where `handleError`
+    prints a traceback to stderr and carries on; pytest's `LogCaptureHandler`
+    re-raises it. Either way a function documented "never raises" must not carry a
+    raise-capable expression on its failure path: that mismatch between stated
+    contract and actual behaviour is #1833 itself, and this module is the last
+    place to repeat it.
+
+    Defined ABOVE `evaluate` on purpose. It was originally added for
+    `announce_refusal` alone and `evaluate` — the function #1833 is named after,
+    and the one whose docstring promises "does not raise" — kept passing the raw
+    exception into deferred `%s` on all three of its refusal paths. Measured: with
+    a re-raising handler installed, `evaluate` raised straight out of a refusal.
+    Fixing one site and leaving its sibling is the incomplete-fix class this
+    module has now hit twice.
+    """
+    try:
+        return f"{type(e).__name__}: {e}"
+    except Exception:                       # pragma: no cover - pathological
+        return type(e).__name__
+
+
 def evaluate(
     setting_key: str,
     window_days: int,
@@ -201,9 +229,12 @@ def evaluate(
         # "strictly more than threshold" — all the comparison needs.
         candidates = count_fn(threshold + 1)
     except Exception as e:
+        # `_describe_exception`, never the raw `e`: deferred `%s` formatting means a
+        # foreign exception whose `__str__` raises escapes THIS function, whose
+        # docstring promises it does not (measured under a re-raising handler).
         logger.error(
             "[RetentionGuard] %s: candidate count failed (%s) — REFUSING prune "
-            "(fail-closed, #1644)", setting_key, e,
+            "(fail-closed, #1644)", setting_key, _describe_exception(e),
         )
         return GuardVerdict(False, -1, threshold, "count_failed")
 
@@ -226,14 +257,18 @@ def evaluate(
         under = candidates <= threshold
         negative = candidates < 0
         if type(under) is not bool or type(negative) is not bool:
+            # Name BOTH comparisons: reporting only `under` produced the useless
+            # "comparison returned bool, expected bool" whenever it was `__lt__`
+            # that misbehaved.
             raise TypeError(
-                f"comparison returned {type(under).__name__}, expected bool"
+                f"__le__ returned {type(under).__name__}, "
+                f"__lt__ returned {type(negative).__name__}; expected bool from both"
             )
     except Exception as e:
         logger.error(
             "[RetentionGuard] %s: could not decide from a candidate count of "
             "type %s (%s) — REFUSING prune (fail-closed, #1644)",
-            setting_key, type(candidates).__name__, e,
+            setting_key, type(candidates).__name__, _describe_exception(e),
         )
         return GuardVerdict(False, -1, threshold, "count_uninterpretable")
 
@@ -245,9 +280,14 @@ def evaluate(
         # an unbounded prune: the count does not bound the delete
         # (`prune_execution_logs` takes no count and drains fully), so that is
         # #1638 replayed.
+        # `type(...).__name__`, not the value: `candidates` is a foreign object that
+        # merely answered two comparisons with real bools, so its `__str__` can still
+        # raise out of the deferred `%s` — the same class as the `except` branches
+        # above. A negative count is an error sentinel; its exact value diagnoses
+        # nothing the type does not.
         logger.error(
-            "[RetentionGuard] %s: negative candidate count (%s) — REFUSING prune "
-            "(fail-closed, #1644)", setting_key, candidates,
+            "[RetentionGuard] %s: negative candidate count (of type %s) — REFUSING "
+            "prune (fail-closed, #1644)", setting_key, type(candidates).__name__,
         )
         return GuardVerdict(False, -1, threshold, "count_negative")
 
@@ -275,7 +315,7 @@ def evaluate(
     except Exception as e:
         logger.error(
             "[RetentionGuard] %s: acknowledgement lookup failed (%s) — REFUSING "
-            "prune (fail-closed, #1644)", setting_key, e,
+            "prune (fail-closed, #1644)", setting_key, _describe_exception(e),
         )
         return GuardVerdict(False, reported, threshold, "ack_lookup_failed")
 
@@ -405,24 +445,6 @@ def reset_transition_memo() -> None:
     _refusal_episodes.clear()
 
 
-def _describe_exception(e: BaseException) -> str:
-    """`type: message`, and never raises — `str(e)` on a foreign exception can.
-
-    Used for BOTH the stored `_RefusalEpisode.last_error` and the per-attempt
-    WARNING. The stored form is an eager f-string, so a raising `__str__` escapes
-    directly. The log form looks safer — deferred `%s` formatting is logging's
-    problem — but only in production, where `handleError` prints a traceback to
-    stderr and carries on; pytest's `LogCaptureHandler` re-raises it. Either way a
-    function documented "never raises" must not carry a raise-capable expression
-    on its failure path: that mismatch between stated contract and actual
-    behaviour is #1833 itself, and this module is the last place to repeat it.
-    """
-    try:
-        return f"{type(e).__name__}: {e}"
-    except Exception:                       # pragma: no cover - pathological
-        return type(e).__name__
-
-
 def _alarm_id(setting_key: str, window_days: int) -> str:
     """Natural key: one alarm per (setting, window), idempotent by construction.
 
@@ -473,17 +495,41 @@ def announce_refusal(
     # keeps its first content for a given (setting, window); the re-fired ERROR is
     # the signal for a reason change.
     #
-    # KNOWN RESIDUAL, stated rather than discovered later: because the row keeps
-    # its FIRST content, an `over_threshold` -> undecidable flip at an unchanged
-    # window leaves the durable alarm still saying "acknowledge to proceed" — the
-    # very thing `_UNDECIDABLE_REASONS` below exists to stop the alarm saying,
-    # surviving in the durable half. It is bounded and inert rather than unsafe:
-    # the corrected text DOES fire as a fresh ERROR, and an ack given under the
-    # stale prompt is not consumed while the sweep stays undecidable (`evaluate`
-    # returns before `is_acknowledged`), so it neither authorizes this prune nor
-    # is silently spent. Fixing it needs an UPDATE path the alarm sink does not
-    # have — `create_item` is INSERT ... ON CONFLICT DO NOTHING — so it is a
-    # follow-up, not a one-liner.
+    # COST of keying on the reason, accepted deliberately: a `count_fn` that FLAPS
+    # between two reasons (say `count_failed` <-> `over_threshold` as a DB blip
+    # comes and goes) makes every cycle "fresh", so the transition ERROR fires
+    # every 5 minutes — up to 288/day, which is the alert-muting mode this memo
+    # exists to prevent — and each fresh episode resets `first_refused_at`, so the
+    # escalation below never trips. Judged the better trade anyway: the alternative
+    # (window-only freshness) silently swallowed #1833's new signal entirely, and a
+    # flapping count function is itself a defect that ought to be loud. If this is
+    # ever observed in the wild, dampen it with a per-key minimum re-ERROR interval
+    # rather than by reverting to a reason-blind key.
+    #
+    # KNOWN RESIDUAL, in BOTH directions, stated rather than discovered later:
+    # because the row keeps its FIRST content for a given (setting, window), a
+    # reason flip leaves the durable alarm describing the OLD reason. The two
+    # directions are not equally harmless, and only one of them is inert.
+    #
+    #   over_threshold -> undecidable: the row still says "acknowledge to proceed".
+    #     Bounded and inert — the corrected text fires as a fresh ERROR, and an ack
+    #     given under the stale prompt is not consumed while the sweep stays
+    #     undecidable (`evaluate` returns before `is_acknowledged`), so it neither
+    #     authorizes this prune nor is silently spent.
+    #
+    #   undecidable -> over_threshold: the row still says "an acknowledgement will
+    #     NOT clear this — the sweep's count function must be fixed", when by then
+    #     an acknowledgement is EXACTLY the available remedy. This one is NOT
+    #     inert: it tells the operator not to take the one action that would
+    #     unblock the sweep, in the durable half specifically designed to outlive a
+    #     log nobody is tailing, so the prune can stay blocked indefinitely. It is
+    #     the worse direction and the reason this is a tracked follow-up rather
+    #     than an accepted quirk.
+    #
+    # Fixing it needs either `verdict.reason` in `_alarm_id` (a second durable row
+    # per reason, and its natural-key shape is pinned) or an UPDATE path the alarm
+    # sink does not have — `create_item` is INSERT ... ON CONFLICT DO NOTHING. Both
+    # are design decisions, not one-liners, hence the follow-up.
     fresh = ep is None or (ep.window_days, ep.reason) != (window_days, verdict.reason)
     if fresh:
         # ARM BEFORE THE ATTEMPT (#1897's ordering): the record exists before
@@ -515,6 +561,42 @@ def announce_refusal(
             f"reason={verdict.reason}. Nothing was deleted. An acknowledgement "
             f"will NOT clear this — the sweep's count function must be fixed "
             f"(#1644/#1833)."
+        )
+    elif verdict.candidates < 0:
+        # An approvable refusal whose count could not be REPRESENTED: a non-finite
+        # or non-integer count (NaN, inf, Decimal) compares fine, so it lands here
+        # as `over_threshold`, but publication normalised it to the -1 "unknown"
+        # sentinel. The generic wording then rendered the exact nonsense the
+        # `_UNDECIDABLE_REASONS` split was written to stop — "-1 candidate(s)
+        # exceeds threshold 1000".
+        #
+        # It gets its OWN branch rather than folding into the undecidable one,
+        # because the undecidable text would be a fresh lie here: an acknowledgement
+        # DOES clear this (measured — a NaN count with an ack returns
+        # `acknowledged`/allowed, pinned by `test_1771a::test_nan_count_with_ack_is_
+        # allowed`), since `is_acknowledged` is reached on this path. So: drop the
+        # impossible number, keep the instruction that works. Routing non-finite
+        # counts to `count_uninterpretable` instead would be the tidier-looking fix
+        # and is WRONG twice: it breaks that pin, and it reclassifies a refusal an
+        # ack genuinely clears as one it cannot.
+        #
+        # UNFIXED HALF, deliberately: this repairs the durable ALARM only. The same
+        # `-1` still reaches `pending_acknowledgements` at GET /api/settings/
+        # retention, where `Settings.vue` renders it as "-1 items past the N-day
+        # window" beside an Approve control. Before #1833 that surface did not read
+        # better — a raw NaN `json.dumps`'d to a bare `NaN`, which a browser's
+        # JSON.parse rejects, taking the whole panel down — so this is a quiet wrong
+        # number where there used to be a loud broken page, on an admin-only surface
+        # for a count shape no accessor produces. Fixing it properly is a frontend
+        # change (render "an unreportable count" for the -1 sentinel), which is the
+        # same deferred follow-up as rendering `blocked_sweeps` at all.
+        message = (
+            f"[Cleanup] REFUSED {label} prune: the candidate count exceeds threshold "
+            f"{verdict.threshold} at a {window_days}-day window ({source}) but is not "
+            f"a whole number, so it cannot be reported (the sweep's count function "
+            f"should return an int). reason={verdict.reason}. Nothing was deleted. "
+            f"Acknowledge via POST /api/settings/retention/acknowledge to proceed "
+            f"(#1644)."
         )
     else:
         message = (

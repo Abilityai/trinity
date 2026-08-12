@@ -231,6 +231,81 @@ class TestEvaluateDoesNotRaise:
         assert (v.allowed, v.reason) == (False, "count_negative")
         assert v.candidates == -1
 
+    def test_no_refusal_path_raises_when_the_exception_str_raises(self, guard_db):
+        """The sibling of `test_1834::test_an_exception_whose_str_raises_does_not_
+        escape`, for the function #1833 is actually named after.
+
+        `evaluate`'s docstring promises "does not raise", and all three of its
+        `except` branches passed the raw exception into deferred `%s`. That looks
+        safe — `%s` formatting is logging's problem, and in production
+        `handleError` prints to stderr and carries on — but pytest's
+        `LogCaptureHandler` RE-RAISES, and measured before the fix `evaluate` raised
+        straight out of a REFUSAL under a re-raising handler. `_describe_exception`
+        was added for exactly this class and applied only to `announce_refusal`;
+        this test is why the sibling could not stay unfixed.
+
+        Fourth appearance of the incomplete-fix class this module keeps hitting: fix
+        the site the reasoning points at, leave the one beside it.
+        """
+        class Hostile(RuntimeError):
+            def __str__(self):
+                raise ValueError("even my message is broken")
+
+        def raising_count(limit):
+            raise Hostile()
+
+        v = _RG.evaluate(_KEY, 90, raising_count)          # must not raise
+        assert (v.allowed, v.reason) == (False, "count_failed")
+
+        def hostile_ack(setting_key, window_days):
+            raise Hostile()
+
+        import unittest.mock as _mock
+        with _mock.patch.object(_RG, "is_acknowledged", hostile_ack):
+            v = _RG.evaluate(_KEY, 90, lambda limit: 10**6)  # must not raise
+        assert (v.allowed, v.reason) == (False, "ack_lookup_failed")
+
+    def test_a_negative_count_with_a_hostile_repr_still_refuses(self, guard_db):
+        """The `count_negative` log used to interpolate the raw foreign value.
+
+        Reaching that branch only proves the object answered two comparisons with
+        real bools — it says nothing about `__str__`, so the same deferred-`%s`
+        escape applied. The value diagnoses nothing its type does not, so the log
+        names the type.
+        """
+        class BadStr:
+            def __le__(self, other):
+                return True
+
+            def __lt__(self, other):
+                return True          # negative -> the count_negative branch
+
+            def __str__(self):
+                raise ValueError("nope")
+
+            __repr__ = __str__
+
+        v = _RG.evaluate(_KEY, 90, lambda limit: BadStr())   # must not raise
+        assert (v.allowed, v.reason) == (False, "count_negative")
+        assert v.candidates == -1
+
+    def test_the_uninterpretable_log_names_which_comparison_misbehaved(
+        self, guard_db, caplog
+    ):
+        """Reporting only `__le__`'s type produced the useless "comparison returned
+        bool, expected bool" whenever it was `__lt__` that misbehaved."""
+        class LeOkLtBad:
+            def __le__(self, other):
+                return True          # a real bool
+
+            def __lt__(self, other):
+                return "nope"        # not a bool
+
+        with caplog.at_level(logging.ERROR):
+            v = _RG.evaluate(_KEY, 90, lambda limit: LeOkLtBad())
+        assert v.reason == "count_uninterpretable"
+        assert "__lt__ returned str" in caplog.text, caplog.text
+
     def test_negative_and_uninterpretable_are_distinguishable(self, guard_db):
         """Three error reasons, three different fixes. Collapsing them would put
         "your DB is down" in the alarm for "your accessor returns a string"."""
@@ -339,6 +414,43 @@ class TestRefusalReachesTheOperator:
             "an ack is never read for this reason — telling the operator to send "
             "one sends them somewhere that cannot help"
         )
+
+    def test_an_unrepresentable_over_threshold_count_is_not_reported_as_minus_one(
+        self, guard_db
+    ):
+        """The nonsense string `_UNDECIDABLE_REASONS` was created to prevent could
+        still be emitted by the branch it does NOT cover.
+
+        A NaN / inf / Decimal count compares fine, so it refuses as an APPROVABLE
+        `over_threshold` — but publication normalises it to the `-1` unknown
+        sentinel, and the generic wording then rendered exactly
+        "-1 candidate(s) exceeds threshold 1000", the string plan §B.4b quotes as
+        its motivation.
+
+        It gets its own wording rather than the undecidable one, because the
+        undecidable text would be a FRESH lie here: an acknowledgement really does
+        clear this path (asserted below), since `is_acknowledged` is reached. Drop
+        the impossible number, keep the instruction that works.
+        """
+        v = _RG.evaluate(_KEY, 90, lambda limit: float("nan"))
+        assert (v.allowed, v.reason, v.candidates) == (False, "over_threshold", -1)
+
+        _RG.announce_refusal(_KEY, "execution rows", 90, v)
+        _agent, item = guard_db.queue_items[0]
+        question = item["question"]
+
+        assert "-1 candidate(s)" not in question, question
+        assert "not a whole number" in question
+        # The remedy that DOES work must survive.
+        assert "/api/settings/retention/acknowledge" in question
+        assert "will NOT clear this" not in question, (
+            "an ack does clear this path — saying otherwise would be a new lie"
+        )
+
+        # Proof of that claim, not an assumption.
+        _RG.record_acknowledgement(_KEY, 90)
+        after = _RG.evaluate(_KEY, 90, lambda limit: float("nan"))
+        assert (after.allowed, after.reason) == (True, "acknowledged")
 
     def test_an_over_threshold_refusal_still_asks_for_an_acknowledgement(
         self, guard_db
