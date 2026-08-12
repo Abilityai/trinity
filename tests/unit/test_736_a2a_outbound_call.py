@@ -812,25 +812,30 @@ def test_the_poll_route_is_not_effect_guarded(client):
 # =========================================================================== #
 @pytest.fixture()
 def oss_store(monkeypatch):
-    """An in-memory `system_settings` + a real encrypt/decrypt round trip."""
+    """An in-memory `system_settings` + the REAL AES-256-GCM round trip.
+
+    The crypto is deliberately not stubbed. An earlier revision patched
+    `services.credential_encryption.CredentialEncryptionService` by string
+    target; it passed in isolation and failed the moment the file ran inside the
+    full suite, because `tests/unit/conftest.py` restores `sys.modules` entries
+    between tests and the patched module object was no longer the one
+    `a2a_outbound` resolved at call time. Setting a real key (the shape used by
+    `test_77_webhook_secret_db.py` and half a dozen siblings) removes the
+    fragile patch AND makes the test better: the property under examination is
+    that the endpoint list survives a genuine encrypt/decrypt cycle, which is
+    what Invariant #12 is actually about.
+    """
+    import secrets
+
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", secrets.token_hex(32))
+
     store = {}
-
-    class _Crypto:
-        def encrypt(self, payload):
-            return json.dumps(payload)
-
-        def decrypt(self, envelope):
-            return json.loads(envelope)
-
     import database
 
     monkeypatch.setattr(database.db, "get_setting_value",
                         lambda key, default=None: store.get(key, default), raising=False)
     monkeypatch.setattr(database.db, "set_setting",
                         lambda key, value: store.__setitem__(key, value), raising=False)
-    monkeypatch.setattr(
-        "services.credential_encryption.CredentialEncryptionService", _Crypto, raising=False
-    )
 
     async def _ok(url):
         return PEER
@@ -856,9 +861,14 @@ def test_an_endpoint_round_trips_through_the_encrypted_setting(oss_store):
     assert a2a_outbound.resolve_endpoint("bot", record["id"]) is not None
 
 
-def test_the_stored_value_is_one_envelope_under_the_documented_key(oss_store):
-    a2a_outbound.upsert_endpoint("partner", PEER.url, "s")
+def test_the_stored_value_is_one_encrypted_envelope_under_the_documented_key(oss_store):
+    """Option 4's decisive property: no new table, ONE `system_settings` row —
+    and the credential is not readable in it (Invariant #12)."""
+    a2a_outbound.upsert_endpoint("partner", PEER.url, "super-secret-value")
     assert list(oss_store) == [a2a_outbound.A2A_ENDPOINTS_SETTING]
+    stored = oss_store[a2a_outbound.A2A_ENDPOINTS_SETTING]
+    assert "super-secret-value" not in stored, "credential is at rest in plaintext"
+    assert PEER.url not in stored, "the envelope is not encrypting its contents"
 
 
 def test_an_update_without_a_credential_keeps_the_existing_one(oss_store):
