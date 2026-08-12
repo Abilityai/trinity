@@ -320,6 +320,57 @@ describe('#2128 store gate', () => {
     expect(store.multiAgentChatAvailable).toBe(false)
   })
 
+  it.each([
+    [403, 'agent_not_accessible', "You do not have access to agent 'scout'"],
+    [404, 'room_not_found', 'Room not found'],
+    [410, 'room_closed', 'This room is closed'],
+  ])('F20c a coded %i refusal is a DENIAL, not an absent engine', async (status, code, message) => {
+    // The status alone is not the signal. On a fully ENTITLED instance the
+    // rooms module answers "you can't reach that agent" with a 403 and "you're
+    // not in that room" with a uniform 404 — both with its own structured
+    // detail. Lowering the capability on those turns one denied request into a
+    // session-long false claim about the operator's build, and replaces the
+    // only message that tells the user what to do.
+    const store = signedInStore()
+    store.multiAgentChatAvailable = true
+    axios.post.mockRejectedValueOnce({ response: { status, data: { detail: { code, message } } } })
+
+    await expect(store.createRoom(['a', 'b'], 'x')).rejects.toMatchObject({
+      response: { data: { detail: { code } } },
+    })
+    expect(
+      store.multiAgentChatAvailable,
+      'a refusal the serving module authored proves the module is SERVING'
+    ).toBe(true)
+  })
+
+  it('F20d a coded refusal keeps the server\'s own words', async () => {
+    // The generic path in onPickerConfirm reads `detail.message`; clobbering
+    // `err.code`/`err.message` would route it into the rooms-unavailable arm
+    // and the real reason would never reach the user.
+    const store = signedInStore()
+    store.multiAgentChatAvailable = true
+    axios.post.mockRejectedValueOnce({
+      response: { status: 403, data: { detail: { code: 'agent_not_accessible', message: 'nope' } } },
+    })
+    const err = await store.createRoom(['a', 'b'], 'x').catch((e) => e)
+    expect(err.code).toBeUndefined()
+    expect(err.message).not.toBe(MULTI_AGENT_UNAVAILABLE)
+  })
+
+  it.each([
+    [404, 'Not Found'],                                                   // route never mounted
+    [403, "Enterprise feature 'x' is not licensed for this instance."],   // mounted, unlicensed
+  ])('F20e a STRING-detail %i is absence and still self-heals', async (status, detail) => {
+    const store = signedInStore()
+    store.multiAgentChatAvailable = true
+    axios.post.mockRejectedValueOnce({ response: { status, data: { detail } } })
+    await expect(store.createRoom(['a', 'b'], 'x')).rejects.toMatchObject({
+      code: 'rooms_unavailable',
+    })
+    expect(store.multiAgentChatAvailable).toBe(false)
+  })
+
   it('F20b a 500 from the rooms endpoint does NOT lower the flag', async () => {
     const store = signedInStore()
     store.multiAgentChatAvailable = true

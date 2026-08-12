@@ -287,9 +287,26 @@ export const useClientPortalStore = defineStore('clientPortal', {
     //
     // 404/403 only. A network error or a 5xx is "could not ask", not "is
     // absent", and lowering on those would unmount a live room over a blip.
+    //
+    // But the STATUS ALONE IS NOT THE SIGNAL, and reading it as one is a live
+    // bug: on a fully entitled instance the rooms module answers "you cannot
+    // reach that agent" with a 403 and "you are not in that room" with a
+    // uniform 404. Lowering on those turns one denied request into a
+    // session-long false claim about the operator's build — and overwrites the
+    // only message that tells the user what to do.
+    //
+    // The two are cleanly separable by the BODY, because absence and denial are
+    // authored by different layers: a module that is SERVING answers with its
+    // own structured `detail: {code, message}`, while absence is a plain string
+    // — FastAPI's own "Not Found" when the route was never mounted, and the
+    // entitlement gate's one-sentence 403 when it is mounted but unlicensed. A
+    // coded detail therefore PROVES the substrate is present; treat it as an
+    // ordinary refusal and let the caller surface the server's own words.
     _noteRoomsRefusal(err) {
       const status = err?.response?.status
       if (status !== 404 && status !== 403) return err
+      const detail = err?.response?.data?.detail
+      if (detail && typeof detail === 'object' && detail.code) return err
       this.multiAgentChatAvailable = false
       err.code = 'rooms_unavailable'
       err.message = MULTI_AGENT_UNAVAILABLE
