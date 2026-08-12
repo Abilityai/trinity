@@ -7,7 +7,6 @@ version: "1.0.0"
 author: Trinity Platform
 priority: 10  # Lower = higher in list (after system templates)
 
-type: business-assistant
 
 # Use Gemini runtime instead of Claude Code
 runtime:

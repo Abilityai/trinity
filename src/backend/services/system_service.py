@@ -1405,7 +1405,7 @@ def _preflight_template(
     from services.agent_service.crud import _get_default_resource, _resolve_local_template
 
     # A throwaway config: `_resolve_local_template` mutates the object it is
-    # given (type/resources/tools/runtime from template.yaml). The manifest's
+    # given (resources/tools/runtime from template.yaml). The manifest's
     # resources are COPIED in rather than handed over, so neither the resolver
     # nor the normalizers below (which write canonical values back) can mutate
     # the parsed manifest during what must stay a read-only preview.

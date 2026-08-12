@@ -49,7 +49,6 @@ logger = logging.getLogger(__name__)
 
 # Constants
 SYSTEM_AGENT_TEMPLATE = "local:trinity-system"
-SYSTEM_AGENT_TYPE = "system-orchestrator"
 SYSTEM_AGENT_OWNER = "admin"  # System agent is owned by admin
 SYSTEM_AGENT_NETWORK = "trinity-agent-network"
 
@@ -346,8 +345,7 @@ class SystemAgentService:
             # refusal here means the shipped template is malformed — fail loudly.
             template_data = load_template_yaml(f.read())
 
-        # Get configuration from template
-        agent_type = template_data.get("type", SYSTEM_AGENT_TYPE)
+        # Get configuration from template (#2104: `type:` ignored — taxonomy retired)
         resources = template_data.get("resources", {"cpu": "4", "memory": "8g"})
         mcp_servers = template_data.get("mcp_servers", [])
 
@@ -373,7 +371,6 @@ class SystemAgentService:
         # Build environment variables
         env_vars = {
             'AGENT_NAME': SYSTEM_AGENT_NAME,
-            'AGENT_TYPE': agent_type,
             'ANTHROPIC_API_KEY': get_anthropic_api_key(),
             'ENABLE_SSH': 'true',
             'ENABLE_AGENT_UI': 'true',
@@ -447,7 +444,6 @@ class SystemAgentService:
         labels = {
             'trinity.platform': 'agent',
             'trinity.agent-name': SYSTEM_AGENT_NAME,
-            'trinity.agent-type': agent_type,
             'trinity.ssh-port': str(ssh_port),  # Required for port tracking
             'trinity.cpu': str(resources.get('cpu', '4')),
             'trinity.memory': resources.get('memory', '8g'),

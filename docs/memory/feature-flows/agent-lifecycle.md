@@ -188,7 +188,8 @@ The agent router uses a **thin router + service layer** architecture:
 ```python
 class AgentConfig(BaseModel):
     name: str
-    type: Optional[str] = "business-assistant"
+    # (#2104: the free-text `type` taxonomy is retired — a legacy `type=` kwarg
+    # is silently ignored; tags classify agents)
     base_image: str = "trinity-agent-base:latest"
     resources: Optional[dict] = {"cpu": "2", "memory": "4g"}
     tools: Optional[List[str]] = ["filesystem", "web_search"]
@@ -767,7 +768,6 @@ Auto-generated on agent creation with `scope='agent'`, `agent_name=<this agent>`
 |-------|---------|
 | `trinity.platform=agent` | Identifies Trinity agents |
 | `trinity.agent-name` | Agent name |
-| `trinity.agent-type` | Type (business-assistant, etc.) |
 | `trinity.ssh-port` | SSH port number |
 | `trinity.cpu` | CPU allocation |
 | `trinity.memory` | Memory limit |

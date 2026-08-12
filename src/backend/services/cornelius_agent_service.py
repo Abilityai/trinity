@@ -59,7 +59,6 @@ logger = logging.getLogger(__name__)
 
 CORNELIUS_AGENT_NAME = "cornelius"
 CORNELIUS_TEMPLATE = "github:Abilityai/cornelius"
-CORNELIUS_TYPE = "knowledge-base"
 CORNELIUS_OWNER = "admin"  # seeded under the admin account, like the system agent
 
 # Durable "already seeded" marker (system_settings KV — no migration).
@@ -211,7 +210,6 @@ class CorneliusAgentService:
 
         config = AgentConfig(
             name=CORNELIUS_AGENT_NAME,
-            type=CORNELIUS_TYPE,
             template=CORNELIUS_TEMPLATE,
             # resources / tools / capabilities / runtime are read from the bundled
             # template.yaml inside create_agent_internal.

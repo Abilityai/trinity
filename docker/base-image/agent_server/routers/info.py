@@ -255,8 +255,8 @@ async def get_template_info():
         "version": template_data.get("version", ""),
         "author": template_data.get("author", ""),
         "updated": template_data.get("updated", ""),
-        # Type and resources
-        "type": template_data.get("type", ""),
+        # Resources (#2104: `type` retired — the backend also strips it from
+        # older images' responses at the /info proxy)
         "resources": template_data.get("resources", {}),
         # Use cases - example prompts for users
         "use_cases": template_data.get("use_cases", []),

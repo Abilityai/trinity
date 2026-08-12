@@ -274,6 +274,173 @@ def test_playbook_helpers():
 
 
 # ---------------------------------------------------------------------------
+# ent#380 — chat-surface capability hints: template `use_cases` fallback +
+# the /api/template/info route fix (the #138 `/info` call never existed on the
+# agent server, so description enrichment silently 404'd to None).
+# ---------------------------------------------------------------------------
+
+class _FakeResp:
+    def __init__(self, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = payload if payload is not None else {}
+
+    def json(self):
+        return self._payload
+
+
+class _FakeAgentClient:
+    """Route-by-suffix stand-in for the agent-server httpx client."""
+
+    def __init__(self, routes):
+        self.routes = routes          # {url-suffix: _FakeResp}
+        self.calls = []
+
+    async def get(self, url):
+        self.calls.append(url)
+        for suffix, resp in self.routes.items():
+            if url.endswith(suffix):
+                return resp
+        return _FakeResp(404, {})
+
+
+def _wire_briefing(monkeypatch, routes, connector_cfg=None):
+    """Point _agent_briefing's function-local deps at fakes; return the client.
+
+    Patching follows this file's PATCHING RULE: the service resolves
+    `from services.x import y` through sys.modules, so fakes go onto the
+    module object `_services_module` returns.
+    """
+    from contextlib import asynccontextmanager
+    import database
+
+    client = _FakeAgentClient(routes)
+
+    class _Running:
+        status = "running"
+
+    monkeypatch.setattr(
+        _services_module("docker_service"), "get_agent_container", lambda name: _Running()
+    )
+
+    @asynccontextmanager
+    async def fake_httpx(name, timeout=None):
+        yield client
+
+    monkeypatch.setattr(_services_module("agent_auth"), "agent_httpx_client", fake_httpx)
+    # No real DB row needed — the connector allow-list is injected directly.
+    monkeypatch.setattr(database.db, "get_connector_config", lambda name: connector_cfg)
+    return client
+
+
+def test_use_case_hints_sanitization():
+    """Agent-supplied `use_cases` is untrusted JSON: non-list ⇒ nothing, junk
+    entries dropped, whitespace stripped, count and length capped."""
+    from client_portal import service
+
+    assert service._use_case_hints(None) == []
+    assert service._use_case_hints("not a list") == []
+    assert service._use_case_hints({"a": 1}) == []
+
+    hints = service._use_case_hints([
+        "  Summarize this week  ",   # stripped
+        "",                          # dropped
+        "   ",                       # dropped
+        42,                          # dropped (non-string)
+        {"title": "nope"},           # dropped (non-string)
+        "x" * 500,                   # truncated to the per-hint cap
+    ])
+    assert [h.title for h in hints][:1] == ["Summarize this week"]
+    assert hints[0].starter_prompt == "Summarize this week"
+    assert hints[0].description is None
+    assert len(hints[1].title) == service._MAX_USE_CASE_CHARS
+
+    # Count cap: 10 valid entries → _MAX_USE_CASE_HINTS cards.
+    many = service._use_case_hints([f"ask {i}" for i in range(10)])
+    assert len(many) == service._MAX_USE_CASE_HINTS
+
+
+def test_briefing_reads_template_info_and_falls_back_to_use_cases(monkeypatch):
+    """No exposed playbook ⇒ the template's "What You Can Ask" becomes the hint
+    set, and description now actually arrives (the /api/template/info fix)."""
+    from client_portal import service
+
+    client = _wire_briefing(monkeypatch, {
+        "/api/template/info": _FakeResp(200, {
+            "description": "Atlas does research.",
+            "use_cases": ["Summarize this week", "Draft the client email"],
+        }),
+        "/api/skills": _FakeResp(200, {"skills": []}),
+    })
+
+    description, hints = _run(service._agent_briefing("atlas"))
+    assert description == "Atlas does research."
+    assert [h.starter_prompt for h in hints] == [
+        "Summarize this week", "Draft the client email",
+    ]
+    # The metadata read goes to the canonical route — not the nonexistent /info.
+    assert any(u.endswith("/api/template/info") for u in client.calls)
+    assert not any(u.endswith("agent-atlas:8000/info") for u in client.calls)
+
+
+def test_briefing_exposed_playbooks_win_over_use_cases(monkeypatch):
+    """The operator-curated playbook set is the capability surface — template
+    use_cases never dilute it (ent#380 ladder)."""
+    from client_portal import service
+
+    _wire_briefing(monkeypatch, {
+        "/api/template/info": _FakeResp(200, {
+            "description": "Atlas does research.",
+            "use_cases": ["Generic template pitch"],
+        }),
+        "/api/skills": _FakeResp(200, {"skills": [
+            {"name": "weekly-report", "description": "A weekly digest", "user_invocable": True},
+        ]}),
+    })
+
+    _, hints = _run(service._agent_briefing("atlas"))
+    assert [h.starter_prompt for h in hints] == ["/weekly-report "]
+
+
+def test_briefing_policy_filtered_playbooks_still_fall_back(monkeypatch):
+    """Playbooks that the exposure policy filters out (user_invocable=False /
+    off the allow-list) leave an EMPTY curated set — the ladder then falls
+    through to use_cases rather than showing nothing."""
+    from client_portal import service
+
+    _wire_briefing(
+        monkeypatch,
+        {
+            "/api/template/info": _FakeResp(200, {"use_cases": ["Ask me about your data"]}),
+            "/api/skills": _FakeResp(200, {"skills": [
+                {"name": "internal-maintenance", "user_invocable": False},
+                {"name": "not-exposed", "user_invocable": True},
+            ]}),
+        },
+        connector_cfg={"enabled": True, "exposed_playbooks": []},  # operator exposed none
+    )
+
+    _, hints = _run(service._agent_briefing("atlas"))
+    assert [h.starter_prompt for h in hints] == ["Ask me about your data"]
+
+
+def test_briefing_metadata_failure_still_yields_playbooks(monkeypatch):
+    """A failing /api/template/info read must not take the playbook tier down
+    with it (each fetch is independently best-effort)."""
+    from client_portal import service
+
+    _wire_briefing(monkeypatch, {
+        "/api/template/info": _FakeResp(500, {}),
+        "/api/skills": _FakeResp(200, {"skills": [
+            {"name": "weekly-report", "user_invocable": True},
+        ]}),
+    })
+
+    description, hints = _run(service._agent_briefing("atlas"))
+    assert description is None
+    assert [h.starter_prompt for h in hints] == ["/weekly-report "]
+
+
+# ---------------------------------------------------------------------------
 # #2101 — briefing hint belt. With no connector allow-list, every
 # user_invocable skill becomes a hint card and get_roster ships the list for
 # every roster agent on every sign-in; the belt bounds that payload. Pure

@@ -45,7 +45,7 @@ export function createAgentTools(
     listAgents: {
       name: "list_agents",
       description:
-        "List all agents in the Trinity platform with their status, type, and resource allocation. " +
+        "List all agents in the Trinity platform with their status and resource allocation. " +
         "Returns an array of agents with details like name, status (running/stopped), ports, and creation time.",
       parameters: z.object({}),
       execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
@@ -86,7 +86,7 @@ export function createAgentTools(
       name: "get_agent",
       description:
         "Get detailed information about a specific agent by name. " +
-        "Returns the agent's status, type, port assignments, resource limits, and container ID.",
+        "Returns the agent's status, port assignments, resource limits, and container ID.",
       parameters: z.object({
         name: z.string().describe("The name of the agent to retrieve"),
       }),
@@ -217,12 +217,6 @@ export function createAgentTools(
           .describe(
             "Unique name for the agent. Will be sanitized for Docker compatibility."
           ),
-        type: z
-          .string()
-          .optional()
-          .describe(
-            "Agent type (e.g., 'business-assistant', 'code-developer'). Default: 'business-assistant'"
-          ),
         template: z
           .string()
           .optional()
@@ -309,7 +303,6 @@ export function createAgentTools(
       execute: async (
         args: {
           name: string;
-          type?: string;
           template?: string;
           resources?: { cpu?: string; memory?: string };
           tools?: string[];
@@ -323,7 +316,6 @@ export function createAgentTools(
       ) => {
         const config = {
           name: args.name,
-          type: args.type,
           template: args.template,
           resources: args.resources
             ? {

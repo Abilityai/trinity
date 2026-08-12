@@ -1273,6 +1273,20 @@ every existing install. Tables are versioned on the OSS two-track runner
 both `agent_name` columns are registered in `AGENT_REFS` (CASCADE) — which the enterprise
 track never was, so an agent rename used to strand a client's portal history.
 
+**New-chat briefing hints (ent#138 / ent#380):** each roster card ships a briefing —
+description + capability hint cards `playbooks[]{title,description,starter_prompt}` —
+resolved best-effort at sign-in (`service.py::_agent_briefing`, from the agent's
+`/api/template/info` + `/api/skills`), so the empty-chat screen renders with zero extra
+fetches. The hint set is a **ladder**: the operator's exposed playbooks (connector
+allow-list ∩ `user_invocable` — the same policy the MCP connector advertises) win
+outright; an agent exposing none falls back to its template-declared `use_cases`
+("What You Can Ask"), sanitized and capped (6 × 200 chars). Clicking a hint **pre-fills
+the composer, never auto-sends** (`PortalBriefing.vue` → `prefill`). The future curated
+exposable-skills config (ent#178) slots into this same seam. Chats are strictly
+single-agent (the picker starts a new chat), so hints scope to the active agent by
+construction. ent#380 also fixed the briefing's metadata read — #138 called a
+nonexistent agent `/info` route, so descriptions were silently always `None`.
+
 **Briefing hint grid is bounded (#2101):** with no connector allow-list configured every
 `user_invocable` skill becomes a "Things you can ask" card, so the hint set is belted
 server-side (`_agent_briefing` ships ≤24 — one final slice at the return so it binds

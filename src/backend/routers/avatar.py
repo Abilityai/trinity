@@ -88,8 +88,8 @@ def _avatar_http_for_result(result) -> tuple[int, str]:
     kind = getattr(result, "error_kind", None) or "unknown"
     return _AVATAR_ERROR_HTTP.get(kind, _AVATAR_ERROR_HTTP["unknown"])
 
-# Diverse visual styles for default avatars — deterministically assigned from agent name hash
-# so each agent gets a unique look even when they share the same Docker type.
+# Diverse visual styles for default avatars — deterministically assigned from
+# agent name hash so each agent gets a unique look.
 _DEFAULT_AVATAR_STYLES = [
     "A sleek humanoid robot with a polished chrome and dark navy metallic face, glowing indigo eyes, minimal geometric features, clean modern design like a luxury android executive",
     "A stylized android with a matte black face panel covered in faintly glowing teal circuit traces, bright cyan eyes, angular geometric features like a futuristic coding machine",
@@ -145,7 +145,7 @@ async def generate_default_avatars(
     """Generate default avatars for all agents that don't have a custom one.
 
     Admin-only. Uses the same Gemini pipeline as custom avatars with an
-    auto-generated prompt derived from each agent's name and type.
+    auto-generated prompt derived from each agent's name.
     No emotion variants or reference images for defaults.
     """
     assert_admin(current_user, detail="Only admins can generate default avatars")
@@ -171,11 +171,11 @@ async def generate_default_avatars(
             "message": "All agents already have custom avatars",
         }
 
-    # Get agent types from Docker labels
+    # Existence check against Docker — only generate for agents that exist
     from services.docker_service import list_all_agents_fast
 
     all_agents = list_all_agents_fast()
-    agent_type_map = {a.name: a.type for a in all_agents}
+    agent_names = {a.name for a in all_agents}
 
     generated = []
     errors = []
@@ -185,7 +185,7 @@ async def generate_default_avatars(
 
     for agent_name in sorted(agent_names_needing):
         # Skip agents that don't exist in Docker
-        if agent_name not in agent_type_map:
+        if agent_name not in agent_names:
             skipped += 1
             continue
 

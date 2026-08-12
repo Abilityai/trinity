@@ -2,7 +2,6 @@
 
 export interface Agent {
   name: string;
-  type: string;
   status: string;
   port: number;  // SSH port only - UI no longer exposed externally
   created: string;
@@ -23,7 +22,6 @@ export interface Agent {
 
 export interface AgentConfig {
   name: string;
-  type?: string;
   base_image?: string;
   resources?: {
     cpu: string;
@@ -152,7 +150,6 @@ export interface AgentTemplateInfo {
   description?: string;
   version?: string;
   author?: string;
-  type?: string;
   resources?: {
     cpu?: string;
     memory?: string;

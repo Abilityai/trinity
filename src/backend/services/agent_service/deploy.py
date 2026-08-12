@@ -632,7 +632,6 @@ async def deploy_local_agent_logic(
         agent_config = AgentConfig(
             name=version_name,
             template=f"local:{version_name}",
-            type=template_data.get("type", "business-assistant"),
             resources=template_data.get("resources", {"cpu": "2", "memory": "4g"}),
             runtime=runtime_type,
             runtime_model=runtime_model

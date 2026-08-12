@@ -371,7 +371,6 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
             raise HTTPException(status_code=404, detail="Agent not found")
         agent_dict = {
             "name": agent_name,
-            "type": "",
             "status": "stopped",
             "port": 0,
             "created": owner_row.get("created_at"),
@@ -523,7 +522,8 @@ async def create_agent_endpoint(
         details={
             "template": getattr(config, "template", None),
             "base_image": getattr(config, "base_image", None),
-            "agent_type": getattr(config, "agent_type", None),
+            # #2104: the always-null `agent_type` field (a typo for the retired
+            # `type`) is dropped rather than fixed — the taxonomy is gone.
             # trinity-enterprise#15: import provenance — intent always; for a
             # copy the snapshot's source repo + exact SHA (the only durable
             # record of what a volume-lost snapshot agent was cloned from).

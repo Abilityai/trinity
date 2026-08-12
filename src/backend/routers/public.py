@@ -218,8 +218,11 @@ async def get_public_link_info(token: str, request: Request):
     read_only_data = db.get_read_only_mode(agent_name)
     is_read_only = read_only_data.get("enabled", False)
 
-    # Get display name and description from template.yaml (if agent running)
-    agent_display_name = agent_name  # Fallback to agent name
+    # Get display name and description from template.yaml (if agent running).
+    # #2104: fallback is the owner-set display label, then the slug — never the
+    # retired agent-type container label (which titled links after the old
+    # default taxonomy value).
+    agent_display_name = db.get_display_label(agent_name) or agent_name
     agent_description = None
 
     if agent_available:
@@ -228,14 +231,14 @@ async def get_public_link_info(token: str, request: Request):
                 response = await client.get(f"http://agent-{agent_name}:8000/api/template/info")
                 if response.status_code == 200:
                     info = response.json()
-                    agent_display_name = info.get("name") or info.get("display_name") or agent_name
+                    agent_display_name = (
+                        info.get("name") or info.get("display_name") or agent_display_name
+                    )
                     agent_description = info.get("description")
         except Exception as e:
             logger.warning(f"Failed to fetch template info for {agent_name}: {e}")
-            # Use container labels as fallback
-            if container:
-                labels = container.labels or {}
-                agent_display_name = labels.get("trinity.agent-type", agent_name)
+            # #2104: keep the display-label/slug fallback set above — never the
+            # container's retired agent-type label.
 
     return PublicLinkInfo(
         valid=True,

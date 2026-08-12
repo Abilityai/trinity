@@ -975,7 +975,7 @@ class PublicLinkInfo(BaseModel):
 
 | Field | Primary Source | Fallback |
 |-------|---------------|----------|
-| `agent_display_name` | `template.yaml` via `/api/template/info` | Container label `trinity.agent-type`, then agent name |
+| `agent_display_name` | `template.yaml` via `/api/template/info` | Owner-set display label, then agent name (#2104 — the agent-type container label is retired and never rendered) |
 | `agent_description` | `template.yaml` via `/api/template/info` | None |
 | `is_autonomous` | `agents` table `autonomy_enabled` column | `false` |
 | `is_read_only` | `agents` table `read_only_enabled` column | `false` |

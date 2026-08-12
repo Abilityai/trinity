@@ -316,7 +316,6 @@ curl -X POST http://localhost:8000/api/agents \
 ### Agent Container Labels
 - `trinity.platform=agent` - Identifies Trinity agents
 - `trinity.agent-name` - Agent name
-- `trinity.agent-type` - Type (business-assistant, etc.)
 - `trinity.template` - Template used
 
 ### Credential Pattern
