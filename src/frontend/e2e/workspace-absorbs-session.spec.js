@@ -15,7 +15,12 @@ import { test, expect } from '@playwright/test'
  *
  * Deliberately no live-chat round-trip here: routing is the contract this
  * change owns, and the conversation itself is covered by the Workspace specs.
- * That also keeps this spec fast and Claude-free, so it can carry @smoke.
+ *
+ * Tagging splits on ONE question — does the test need the agent to exist? The
+ * redirect fires from a guard that runs before the agent is ever fetched, so it
+ * holds for any name and carries @smoke. Asserting on the Chat tab needs the
+ * agent page to actually render, which needs a real agent, so that one is
+ * @interactive like the spec it replaces.
  *
  * Required env: ADMIN_PASSWORD (enforced by auth.setup.js) and
  * SESSION_TEST_AGENT (defaults to "testfix"). The agent must already exist.
@@ -23,14 +28,14 @@ import { test, expect } from '@playwright/test'
 
 const TEST_AGENT = process.env.SESSION_TEST_AGENT || 'testfix'
 
-test.describe('@smoke session surface retired into the Workspace', () => {
-  test('?tab=session redirects to the Workspace for that agent', async ({ page }) => {
+test.describe('session surface retired into the Workspace', () => {
+  test('@smoke ?tab=session redirects to the Workspace for that agent', async ({ page }) => {
     await page.goto(`/agents/${TEST_AGENT}?tab=session`)
 
     await expect(page).toHaveURL(new RegExp(`/workspace\\?.*agent=${TEST_AGENT}`))
   })
 
-  test('the redirect replaces history rather than stacking it', async ({ page }) => {
+  test('@smoke the redirect replaces history rather than stacking it', async ({ page }) => {
     await page.goto('/')
     await page.goto(`/agents/${TEST_AGENT}?tab=session`)
     await expect(page).toHaveURL(/\/workspace/)
@@ -41,7 +46,9 @@ test.describe('@smoke session surface retired into the Workspace', () => {
     await expect(page).not.toHaveURL(/tab=session/)
   })
 
-  test('the Chat tab has no session-mode toggle', async ({ page }) => {
+  // @interactive — needs SESSION_TEST_AGENT to exist; the smoke job has no
+  // guaranteed agent, and a missing one renders "Agent not found" (no tabs).
+  test('@interactive the Chat tab has no session-mode toggle', async ({ page }) => {
     await page.goto(`/agents/${TEST_AGENT}?tab=chat`)
 
     await expect(page.getByText('Session mode')).toHaveCount(0)
