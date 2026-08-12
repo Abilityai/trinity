@@ -130,6 +130,16 @@
              which reads as "your operator hasn't shared anything" whether the
              module is absent, the roster call failed, or the list is genuinely
              empty — a dead end in two of the three cases. -->
+        <div v-else-if="unreachableAgent" class="flex-1 flex flex-col items-center justify-center text-center px-6">
+          <svg class="w-10 h-10 text-gray-300 dark:text-gray-700 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" /></svg>
+          <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">
+            You don't have access to <span class="font-mono">{{ unreachableAgent }}</span>
+          </p>
+          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">
+            That link points at an agent that isn't shared with you. Pick one from the sidebar, or ask whoever sent the link.
+          </p>
+        </div>
+
         <div v-else-if="!activeRoomIdFromRoute" class="flex-1 flex flex-col items-center justify-center text-center px-6">
           <svg class="w-10 h-10 text-gray-300 dark:text-gray-700 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
           <template v-if="store.unavailable">
@@ -246,6 +256,8 @@ const threads = ref([])
 const activeAgentName = ref(null)
 // ent#361: the room a multi-agent chat is being held in, if any.
 const activeRoomId = ref(null)
+// The agent a deep link named that this caller cannot reach (ent#358 review).
+const unreachableAgent = ref(null)
 const pendingSession = ref(null)      // session to load when the conversation (re)mounts
 const prefill = ref('')
 const filesOpen = ref(false)
@@ -256,6 +268,8 @@ const activeSessionId = computed(() => route.params.sessionId || null)
 // ent#361: `/workspace/r/:roomId` is the multi-agent chat.
 const activeRoomIdFromRoute = computed(() => route.params.roomId || null)
 const activeAgent = computed(() => {
+  // Never substitute a different agent for one the caller asked for by name.
+  if (unreachableAgent.value) return null
   if (!activeAgentName.value) return store.agents[0] || null
   return store.agents.find((a) => a.name === activeAgentName.value) || { name: activeAgentName.value }
 })
@@ -378,7 +392,22 @@ function resolveAgentQuery() {
     agents: store.agents,
     threads: threads.value,
   })
-  if (!landing) return false
+  if (!landing) {
+    // The link named an agent this caller cannot reach (un-shared since the URL
+    // was created, renamed, deleted). Falling through used to let `activeAgent`
+    // default to the FIRST agent on the roster, so the user landed in someone
+    // else's conversation believing it was the one they clicked — and could
+    // send it context meant for another agent. Say so instead.
+    if (route.query.agent) {
+      unreachableAgent.value = String(route.query.agent)
+      activeAgentName.value = null
+      pendingSession.value = null
+      convGen.value++
+      return true
+    }
+    return false
+  }
+  unreachableAgent.value = null
 
   activeAgentName.value = landing.agentName
   prefill.value = ''

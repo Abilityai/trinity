@@ -555,3 +555,85 @@ def test_the_current_message_is_not_replayed_as_its_own_context(portal):
     assert rec.calls[0]["message"] == "hello", (
         "the turn's own message was replayed back to it as conversation context"
     )
+
+
+# ---------------------------------------------------------------------------
+# Review fixes
+# ---------------------------------------------------------------------------
+
+
+def test_a_retry_after_a_failed_turn_does_not_duplicate_the_user_message(portal, monkeypatch):
+    """Review finding: persisting the user's half BEFORE the turn (so a reload
+    never looks like data loss) meant a failed turn left the row behind, and the
+    UI's Retry wrote it again — the thread showed it twice, message_count
+    double-counted, and the duplicate was replayed into the next cold turn's
+    context, telling the model the client asked twice.
+    """
+    svc, state = portal
+    from client_portal import db as portal_db
+
+    written = []
+    monkeypatch.setattr(portal_db, "add_portal_message",
+                        lambda mid, agent, email, role, content, cost, ts, session_id=None:
+                        written.append((role, content)))
+    # The state a failed turn leaves: the client's message is last, unanswered.
+    monkeypatch.setattr(portal_db, "get_portal_messages",
+                        lambda *a, **kw: [{"role": "user", "content": "draft the invoice"}])
+
+    svc._persist_user_turn(AGENT, EMAIL, SESSION, "draft the invoice")
+    assert written == [], "the retry re-persisted the same user message"
+
+    # A genuinely new message still lands.
+    svc._persist_user_turn(AGENT, EMAIL, SESSION, "actually, make it two")
+    assert written == [("user", "actually, make it two")]
+
+
+def test_the_same_text_after_a_reply_is_not_treated_as_a_retry(portal, monkeypatch):
+    """The guard must not swallow someone deliberately repeating themselves —
+    only the exact state a failed turn leaves (their message last, unanswered)."""
+    svc, state = portal
+    from client_portal import db as portal_db
+
+    written = []
+    monkeypatch.setattr(portal_db, "add_portal_message",
+                        lambda mid, agent, email, role, content, cost, ts, session_id=None:
+                        written.append((role, content)))
+    monkeypatch.setattr(portal_db, "get_portal_messages",
+                        lambda *a, **kw: [{"role": "assistant", "content": "done"}])
+
+    svc._persist_user_turn(AGENT, EMAIL, SESSION, "do it again")
+    assert written == [("user", "do it again")]
+
+
+def test_a_turn_that_never_started_gets_a_terminal(portal, monkeypatch):
+    """Review finding: the execution row is created BEFORE the background turn
+    so the client has something to subscribe to, but nothing wrote a terminal
+    for a raise that happened before execute_task — leaving the row RUNNING
+    forever and inviting the cleanup watchdog to fabricate a 'silent launch
+    failure' against a healthy agent."""
+    svc, _ = portal
+    from database import db as core_db
+
+    calls = []
+    monkeypatch.setattr(core_db, "update_execution_status",
+                        lambda eid, status, **kw: calls.append((eid, status, kw.get("error"))))
+
+    svc._fail_unstarted_execution("exec-1", "This conversation is already handling a message.")
+
+    assert len(calls) == 1
+    eid, status, error = calls[0]
+    assert (eid, status) == ("exec-1", "failed")
+    assert "already handling" in error
+
+
+def test_finalizing_an_unstarted_execution_never_raises(portal, monkeypatch):
+    """It runs on the failure path of a background task; raising there would
+    replace a useful log line with an unhandled-exception traceback."""
+    svc, _ = portal
+    from database import db as core_db
+
+    def _boom(*a, **kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(core_db, "update_execution_status", _boom)
+    svc._fail_unstarted_execution("exec-1", "reason")   # must not raise

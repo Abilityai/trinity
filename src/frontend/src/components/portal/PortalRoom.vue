@@ -255,7 +255,15 @@ function isMine(m) {
   return m.sender_kind !== 'agent' && m.kind !== 'system'
 }
 
+// Only ONE load at a time. The 3s poll can otherwise overlap a send() or
+// addAgent() load: both read the same `since` cursor, both receive the same
+// messages, and both concat them — duplicate bubbles and duplicate Vue keys on
+// one seq, self-correcting only on a full reload.
+let loading_ = false
+
 async function load({ full = false } = {}) {
+  if (loading_ && !full) return
+  loading_ = true
   try {
     const since = full ? 0 : (messages.value.length ? messages.value[messages.value.length - 1].seq : 0)
     const data = await store.fetchRoom(props.roomId, since)
@@ -267,6 +275,7 @@ async function load({ full = false } = {}) {
   } catch (err) {
     if (full) sendError.value = 'Could not load this conversation.'
   } finally {
+    loading_ = false
     loading.value = false
   }
 }

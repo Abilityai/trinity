@@ -1012,7 +1012,27 @@ async def portal_chat(agent_name: str, message: str, email: str,
 
 
 def _persist_user_turn(agent_name: str, email: str, session_id: str, content: str) -> None:
-    """Write the client's own message, before the turn runs. Best-effort."""
+    """Write the client's own message, before the turn runs. Best-effort.
+
+    Idempotent against a RETRY. The message is written before the turn so a
+    mid-turn reload never looks like data loss — but that also means a turn
+    that FAILS leaves the row behind, and the UI offers Retry. Without this
+    guard the retry writes the same text a second time: the thread shows it
+    twice, `message_count` double-counts, and the duplicate is replayed into
+    the next cold turn's context, telling the model the client asked twice.
+
+    The test is "is this already the last thing said, with no answer since" —
+    which is exactly the state a failed turn leaves behind, and never the state
+    of someone deliberately sending the same message again after a reply.
+    """
+    try:
+        recent = db.get_portal_messages(agent_name, email, limit=1, session_id=session_id)
+        if recent and recent[-1].get("role") == "user" and recent[-1].get("content") == content:
+            logger.info("portal: skipping duplicate user row on retry for session %s", session_id)
+            return
+    except Exception as e:  # noqa: BLE001 — a read failure must not block the turn
+        logger.warning("portal duplicate-check failed for %s: %s", session_id, e)
+
     try:
         now = utc_now_iso()
         db.add_portal_message(uuid.uuid4().hex, agent_name, email, "user", content,
@@ -1025,6 +1045,17 @@ def _persist_user_turn(agent_name: str, email: str, session_id: str, content: st
 
 def _inflight_key(session_id: str) -> str:
     return f"portal_inflight:{session_id}"
+
+
+def _inflight_exec_key(execution_id: str) -> str:
+    """Reverse index: is THIS execution the in-flight turn?
+
+    The SSE proxy asks that question on every attach retry, and it used to be
+    answered by scanning the whole keyspace — a fleet-wide SCAN, synchronous,
+    inside an async generator, every 0.4s per attaching stream. A second key
+    makes it an O(1) GET.
+    """
+    return f"portal_inflight_exec:{execution_id}"
 
 
 def mark_turn_inflight(session_id: str, execution_id: str, ttl_seconds: int = 3600) -> None:
@@ -1040,17 +1071,23 @@ def mark_turn_inflight(session_id: str, execution_id: str, ttl_seconds: int = 36
         client = get_breaker_redis()
         if client is not None:
             client.set(_inflight_key(session_id), execution_id, ex=ttl_seconds)
+            client.set(_inflight_exec_key(execution_id), session_id, ex=ttl_seconds)
     except Exception as e:  # noqa: BLE001 — degraded reattach, never a failed turn
         logger.warning("portal inflight SET failed for %s: %s", session_id, e)
 
 
-def clear_turn_inflight(session_id: str) -> None:
+def clear_turn_inflight(session_id: str, execution_id: str | None = None) -> None:
     """Turn is done. Best-effort — the TTL is the backstop."""
     try:
         from redis_breaker_util import get_breaker_redis
         client = get_breaker_redis()
         if client is not None:
+            if execution_id is None:
+                value = client.get(_inflight_key(session_id))
+                execution_id = value.decode() if isinstance(value, bytes) else value
             client.delete(_inflight_key(session_id))
+            if execution_id:
+                client.delete(_inflight_exec_key(execution_id))
     except Exception as e:  # noqa: BLE001
         logger.warning("portal inflight DEL failed for %s: %s", session_id, e)
 
@@ -1062,24 +1099,18 @@ def get_turn_inflight_matches(execution_id: str) -> bool:
     waiting) versus "already finished" (end the stream cleanly) look identical
     from the agent, and only the marker can tell them apart.
 
-    Scans the small set of live markers rather than taking a session id, so the
-    stream route does not need to know which thread the execution belongs to.
-    Fail-open (True) on a Redis problem — a bounded extra wait is a far better
-    failure than cutting off a turn that is genuinely streaming.
+    An O(1) GET on the reverse key. It used to SCAN the entire shared keyspace
+    — which holds slot, breaker, heartbeat and idempotency keys for the whole
+    fleet — synchronously, inside an async generator, on every 0.4s attach
+    retry. Fail-open (True) on a Redis problem: a bounded extra wait is a far
+    better failure than cutting off a turn that is genuinely streaming.
     """
     try:
         from redis_breaker_util import get_breaker_redis
         client = get_breaker_redis()
         if client is None:
             return True
-        for key in client.scan_iter(match=_inflight_key("*"), count=100):
-            value = client.get(key)
-            if value is None:
-                continue
-            current = value.decode() if isinstance(value, bytes) else str(value)
-            if current == execution_id:
-                return True
-        return False
+        return client.get(_inflight_exec_key(execution_id)) is not None
     except Exception as e:  # noqa: BLE001
         logger.warning("portal inflight match failed for %s: %s", execution_id, e)
         return True
@@ -1122,6 +1153,31 @@ def get_turn_inflight(session_id: str) -> str | None:
 # the turn logic does not move an inch.
 
 _INFLIGHT_TURNS: set = set()
+
+
+def _fail_unstarted_execution(execution_id: str, reason: str) -> None:
+    """Write a terminal for a row whose turn never reached the agent.
+
+    The row is created BEFORE the background turn so the client has something to
+    subscribe to. Anything that raises before `execute_task` — a resume lock
+    held by another tab, a thread-resolution failure, an inbox read — therefore
+    leaves it RUNNING forever: it shows as live in Executions, and the cleanup
+    watchdog eventually fabricates a FAILED "silent launch failure" against a
+    perfectly healthy agent.
+
+    Safe against a race with a turn that DID start: `update_execution_status`
+    guards non-success terminals against overwriting any already-terminal row
+    (RELIABILITY-005), so a real completion always wins over this.
+    """
+    try:
+        from database import db as core_db
+        core_db.update_execution_status(
+            execution_id, "failed",
+            error=(reason or "The turn did not start")[:500],
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort; the watchdog is the backstop
+        logger.warning("portal: could not finalize unstarted execution %s: %s",
+                       execution_id, e)
 
 
 def _agent_is_running(agent_name: str) -> bool:
@@ -1206,12 +1262,14 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
             # The client sees this on the stream (the agent's log ends) and in
             # the execution row; there is no request left to raise into.
             logger.info("portal streaming turn %s ended: %s", execution_id, e.detail)
-        except Exception:  # noqa: BLE001 — a background task must never die silently
+            _fail_unstarted_execution(execution_id, e.detail)
+        except Exception as exc:  # noqa: BLE001 — a background task must never die silently
             logger.exception("portal streaming turn %s crashed", execution_id)
+            _fail_unstarted_execution(execution_id, f"{type(exc).__name__}: {exc}")
         finally:
             # Always clear, on every exit path: a stuck marker would leave the
             # UI reattaching to a turn that ended, forever (until the TTL).
-            clear_turn_inflight(session_id)
+            clear_turn_inflight(session_id, execution_id)
 
     # Strong ref until it finishes: a bare create_task can be garbage-collected
     # mid-flight (the #1083 footgun), which would abandon a billed turn.

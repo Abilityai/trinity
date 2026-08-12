@@ -90,8 +90,20 @@ describe('deliveryFailureReason', () => {
   })
 
   it('distinguishes a dead connection from a server answer', () => {
-    expect(deliveryFailureReason({ message: 'Network Error' })).toMatch(/connection/i)
+    // Shaped like a real axios transport failure — `isAxiosError` + `request`,
+    // which is what distinguishes "the network died" from an Error we threw.
+    const networkErr = { isAxiosError: true, request: {}, code: 'ERR_NETWORK', message: 'Network Error' }
+    expect(deliveryFailureReason(networkErr)).toMatch(/connection/i)
     expect(deliveryFailureReason(undefined)).toMatch(/connection/i)
+  })
+
+  it("keeps our own Error's message instead of blaming the connection", () => {
+    // `deliver()` throws this when the server reports the turn finished with no
+    // reply. Calling it a connection failure is false — the request succeeded —
+    // and pushes the user toward a Retry that re-runs a billed turn.
+    const ours = new Error('The agent did not reply. Check the conversation in a moment.')
+    expect(deliveryFailureReason(ours)).toBe(
+      'The agent did not reply. Check the conversation in a moment.')
   })
 
   it('has its own words for the statuses that carry no detail', () => {

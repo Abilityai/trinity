@@ -17,8 +17,10 @@ import logging
 import os
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi import (
+    APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile,
+)
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from dependencies import (
     CurrentUser,
@@ -705,6 +707,7 @@ _STREAM_ATTACH_POLL_S = 0.4
 async def portal_chat_stream(
     agent_name: str,
     body: PortalChatRequest,
+    request: Request,
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """Begin a turn and return its id immediately (202) so the client can watch it.
@@ -730,13 +733,50 @@ async def portal_chat_stream(
         f"portal_chat_hourly:{email}:{agent_name}", PORTAL_CHAT_HOURLY_LIMIT, 3600,
         detail=_CHAT_LIMIT_DETAIL,
     )
+    # Invariant #18: a producer boundary that creates an execution accepts an
+    # Idempotency-Key. This route creates one, so a retried dispatch — a proxy
+    # replay, a client timeout-and-resend — would otherwise run and BILL the
+    # turn twice. Scoped per (agent, client) so two clients cannot collide on a
+    # key, and fail-open: a dedup failure must never block a real turn.
+    from services import idempotency_service
+
+    # Read off the request rather than as a typed `Header(...)` param: this
+    # module uses `from __future__ import annotations`, which turns the
+    # annotation into a ForwardRef that pydantic cannot resolve for a header
+    # (500 at request time, not import time — so it only shows up when called).
+    idempotency_key = request.headers.get("Idempotency-Key")
+
+    scope = f"portal_stream:{agent_name}:{email}"
+    decision = idempotency_service.begin(scope, idempotency_key)
+    if decision.replay:
+        if decision.in_flight:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "request_in_progress",
+                    "message": "A request with this Idempotency-Key is still being processed.",
+                    "execution_id": decision.execution_id,
+                },
+            )
+        return JSONResponse(
+            content=decision.snapshot or {"execution_id": decision.execution_id},
+            headers={"X-Idempotent-Replay": "true"},
+            status_code=202,
+        )
+
     try:
         started = await service.start_portal_turn(
             agent_name, body.message, email,
             session_id=body.session_id, include_owned=include_owned,
         )
     except ClientPortalError as e:
+        idempotency_service.fail(decision)
         raise HTTPException(status_code=e.status_code, detail=e.detail)
+    except Exception:
+        idempotency_service.fail(decision)
+        raise
+
+    idempotency_service.complete(decision, started.get("execution_id"), started)
     return PortalTurnStarted(**started)
 
 

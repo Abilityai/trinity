@@ -345,6 +345,9 @@ async function deliver(text) {
     // its result, never to send it again.
     let data = null
     let started = null
+    // Read before anything is dispatched: after the fact it is impossible to
+    // tell this turn's reply from the previous one's.
+    const baseline = await persistedAssistantCount(currentSessionId.value)
     try {
       started = await store.startPortalChat(props.agent.name, text, currentSessionId.value)
     } catch (dispatchErr) {
@@ -382,9 +385,10 @@ async function deliver(text) {
         streaming.value = false
         liveActivity.value = []
       }
-      data = await awaitPersistedReply(started.session_id || currentSessionId.value)
+      data = await awaitPersistedReply(started.session_id || currentSessionId.value, baseline)
       if (!data) {
-        // The turn produced no reply within the wait. Report it — do NOT re-send.
+        // The server reports nothing running and no new reply — a genuine
+        // no-answer. Report it; never re-send, the turn was already billed.
         throw new Error('The agent did not reply. Check the conversation in a moment.')
       }
     }
@@ -429,42 +433,54 @@ function onStreamEvent(evt) {
 }
 
 // The stream ends when the AGENT's execution ends, but the reply is persisted
-// by the backend a moment later — so the last assistant message is read back,
-// with a bounded wait, rather than assumed present. Returns null if it never
-// shows, which sends `deliver` down the synchronous path instead of inventing
-// a reply.
-async function awaitPersistedReply(sessionId, { tries = 15, delayMs = 700 } = {}) {
-  const before = messages.value.filter((m) => m.role === 'assistant').length
-  for (let i = 0; i < tries; i++) {
+// by the backend a moment later — and sometimes much later, because a failed
+// `--resume` retries the whole turn cold under a NEW execution the client is
+// no longer watching.
+//
+// So the wait is bounded by the SERVER's own answer, not by a stopwatch. While
+// `in_flight_execution_id` is set on the thread, a turn is still running and
+// the only correct thing to do is keep waiting; a fixed deadline here declared
+// live, billed turns "not delivered" and offered a Retry that ran and billed
+// them a second time.
+//
+// `baselineAssistants` is the count read from the SERVER before dispatch. Using
+// the local list instead let a retry return the PREVIOUS turn's reply on its
+// first poll — the answer to the wrong question, while a second turn ran unseen.
+const REPLY_POLL_MS = 700
+const REPLY_IDLE_GIVE_UP = 8      // ~5.6s of the server saying "nothing running"
+
+async function awaitPersistedReply(sessionId, baselineAssistants) {
+  let idlePolls = 0
+  for (;;) {
+    let data
     try {
-      const { messages: msgs } = await store.fetchHistory(props.agent.name, sessionId || null)
-      const assistants = (msgs || []).filter((m) => m.role === 'assistant')
-      if (assistants.length > before) {
-        const last = assistants[assistants.length - 1]
-        return { response: last.content, cost: last.cost, session_id: sessionId }
-      }
-    } catch { /* keep waiting — a hiccup here must not fail an answered turn */ }
-    await new Promise((r) => setTimeout(r, delayMs))
+      data = await store.fetchHistory(props.agent.name, sessionId || null)
+    } catch {
+      // A hiccup reading history is not evidence the turn failed.
+      await new Promise((r) => setTimeout(r, REPLY_POLL_MS))
+      continue
+    }
+    const assistants = (data.messages || []).filter((m) => m.role === 'assistant')
+    if (assistants.length > baselineAssistants) {
+      const last = assistants[assistants.length - 1]
+      return { response: last.content, cost: last.cost, session_id: data.sessionId || sessionId }
+    }
+    // Still running server-side? Then keep waiting, however long it takes.
+    if (data.inFlightExecutionId) { idlePolls = 0 }
+    else if (++idlePolls >= REPLY_IDLE_GIVE_UP) return null
+    await new Promise((r) => setTimeout(r, REPLY_POLL_MS))
   }
-  return null
 }
 
-
-// Mark a sent message as undelivered, THROUGH the reactive array.
-//
-// `messages` is a ref([]), so pushing a plain object stores the raw target and
-// Vue only proxies it when you read `messages.value[i]`. Mutating the local
-// variable you pushed writes past the proxy: the value changes, nothing
-// re-renders, and the failure is invisible — which is exactly why a failed send
-// showed no error at all. `retry()` never had the bug because it starts from
-// `messages.value[i]`.
-function markFailed(index, content, error) {
-  const row = messages.value[index]
-  // The array can be replaced under us (thread switch, history reload). Only
-  // mark the row if it is still the message we sent.
-  if (!row || row.role !== 'user' || row.content !== content) return
-  row.failed = true
-  row.error = error || null
+// Assistant count as the SERVER sees it — the baseline a reply must exceed.
+async function persistedAssistantCount(sessionId) {
+  if (!sessionId) return 0
+  try {
+    const data = await store.fetchHistory(props.agent.name, sessionId)
+    return (data.messages || []).filter((m) => m.role === 'assistant').length
+  } catch {
+    return 0
+  }
 }
 
 async function send() {

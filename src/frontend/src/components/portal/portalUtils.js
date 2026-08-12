@@ -78,6 +78,17 @@ export function planHintDisplay(hints, expanded, limit = HINT_COLLAPSE_LIMIT) {
 //
 // `threads` is expected most-recent-first (as `fetchAllSessions` returns it),
 // so the first match is the latest.
+// An axios failure (`isAxiosError`, or a request that never got an answer) is
+// the transport's story to tell. Anything else carrying a message is an Error
+// we threw ourselves, and its text is more useful than a guess about the
+// network.
+function isTransportError(err) {
+  const code = err?.code || ''
+  return err?.isAxiosError === true
+    || err?.request !== undefined
+    || code === 'ECONNABORTED' || code === 'ERR_NETWORK' || code === 'ETIMEDOUT'
+}
+
 export function resolveAgentLanding({ agent, forceNew = false, agents = [], threads = [] } = {}) {
   if (!agent || typeof agent !== 'string') return null
   if (!Array.isArray(agents) || !agents.some((a) => a && a.name === agent)) return null
@@ -101,6 +112,11 @@ export function resolveAgentLanding({ agent, forceNew = false, agents = [], thre
 export function deliveryFailureReason(err) {
   const detail = err?.response?.data?.detail
   if (typeof detail === 'string' && detail.trim()) return detail.trim()
+  // An Error we threw ourselves carries its own explanation and no `.response`.
+  // Falling through to the network branch told the user their CONNECTION had
+  // failed when in fact the request succeeded and the turn was still running —
+  // which pushed them toward a Retry that re-ran and re-billed it.
+  if (!err?.response && err?.message && !isTransportError(err)) return err.message
   // A ClientPortalError always sends a string. Anything else is a framework
   // shape (a 422 validation list, {msg: ...}) — say something true rather than
   // rendering "[object Object]" at the user.

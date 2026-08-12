@@ -461,13 +461,22 @@ async def run_resumable_turn(
             # Retry once cold. The stale UUID is gone, so the new turn writes a
             # fresh JSONL under a new id — no contention with anyone, by
             # definition.
+            #
+            # The retry gets its OWN execution row. Attempt 1's row is already
+            # terminal (the failure above CAS-wrote it FAILED) and its
+            # agent-side stream has closed, so reusing that id would write a
+            # second terminal to a finished row, emit a spurious
+            # agent.task.failed, and run a 30-120s turn under an id the client
+            # has already stopped watching. `execute_task` creates the row when
+            # none is supplied.
+            retry_kwargs = {k: v for k, v in execute_kwargs.items() if k != "execution_id"}
             result = await service.execute_task(
                 agent_name=agent_name,
                 message=cold_message if cold_message is not None else message,
                 triggered_by=triggered_by,
                 resume_session_id=None,
                 persist_session=True,
-                **execute_kwargs,
+                **retry_kwargs,
             )
             resumed_with = None
 
