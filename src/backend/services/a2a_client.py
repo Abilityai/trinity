@@ -263,9 +263,22 @@ async def validate_endpoint(url: str) -> ValidatedPublicUrl:
 
     `socket.getaddrinfo` is synchronous and can hang for the resolver's own
     timeout. On an admin settings write that is tolerable; on a per-call agent
-    path it freezes every other request on the worker. Its own short budget
-    bounds the thread's usefulness — the thread itself cannot be cancelled, so
-    the budget is deliberately small and this await is NOT the total deadline.
+    path it freezes every other request on the worker — a far cheaper denial of
+    service than holding one coroutine, and one that no per-agent rate limit
+    bounds.
+
+    Two residuals, stated because `wait_for` around `to_thread` looks like a
+    deadline and is not one:
+
+    * **The thread is not cancelled.** On timeout this raises and the caller
+      gets a clean refusal, but the worker thread keeps sitting in
+      `getaddrinfo` until the resolver gives up. That is why the budget is
+      small, and why this await is deliberately NOT the call's total deadline
+      (`_with_deadline` wraps genuinely cancellable network awaits instead).
+    * **The default executor is bounded** (`min(32, cpu+4)` threads). A flood
+      against a stalling resolver exhausts it, after which further calls queue
+      and time out *here* — a refusal, not a blocked loop. Fail-closed, and the
+      per-agent + fleet rate bounds run before this is ever reached.
     """
     try:
         return await asyncio.wait_for(
