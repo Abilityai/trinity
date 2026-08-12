@@ -576,10 +576,13 @@ async def get_retention_status(
         # #1709: sweeps a cleanup cycle would refuse right now, awaiting an admin
         # ack via POST /api/settings/retention/acknowledge. Empty ⇒ nothing pending.
         "pending_acknowledgements": pending_acknowledgements,
-        # #1833: sweeps the guard is refusing for a reason an acknowledgement
-        # CANNOT clear (the count failed / could not be interpreted / was a
-        # negative error sentinel, or the ack lookup itself failed). These are
-        # blocked, not pending — the sweep's count function has to be fixed.
+        # #1833: sweeps the guard is refusing for a reason this panel cannot
+        # offer an approve control for (the count failed / could not be
+        # interpreted / was a negative error sentinel, or the ack lookup itself
+        # failed). Blocked, not pending. SCOPE: the same two ack-gated sweeps
+        # `_ack_sweeps` re-runs above — the other six windows are not evaluated
+        # here at all, so a refusal on those reaches an operator only through the
+        # durable operator-queue alarm `cleanup_service` raises.
         "blocked_sweeps": blocked_sweeps,
         "windows": {
             # Log archival (env-driven; LOG_* escape hatch)

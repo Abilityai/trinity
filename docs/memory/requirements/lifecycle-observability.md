@@ -116,9 +116,12 @@
   bare `NaN` is valid to Python and rejected by a browser's `JSON.parse`.
   A refusal an ack cannot clear says so instead of prescribing one, and the
   endpoint reports it under `blocked_sweeps` rather than showing a clean
-  'nothing pending' for a sweep that is blocked forever. (There is no
-  'threshold unreadable' path: the threshold is a constant, so that failure
-  mode does not exist.)
+  'nothing pending' for a sweep that is blocked forever — scoped, like the
+  `pending_acknowledgements` list beside it, to the two ack-gated sweeps
+  that endpoint re-runs (agents, schedules). The other six windows are not
+  evaluated there; their refusals reach an operator through the durable
+  operator-queue alarm only. (There is no 'threshold unreadable' path: the
+  threshold is a constant, so that failure mode does not exist.)
 - **Expected behaviour**: a legitimate first-enable of retention on a
   mature install *will* trip the guard once, and that is intended — the
   guard cannot distinguish a large legitimate backlog from a mistyped

@@ -338,6 +338,16 @@ _clock = time.monotonic
 # approve something that approving cannot fix (the sweep's `count_fn` has to be
 # fixed instead). Kept beside the reasons themselves so a new refusal reason has
 # to decide which side it is on.
+#
+# `ack_lookup_failed` is deliberately NOT in this set, and the two operator
+# surfaces classify it differently ON PURPOSE — do not "align" them without
+# reading this. It is reached only AFTER the count was found genuinely over
+# threshold, so an acknowledgement IS the right remedy and becomes effective the
+# moment a transient settings-read failure clears; the alarm therefore keeps the
+# acknowledge instruction. `GET /api/settings/retention` still routes it to
+# `blocked_sweeps` rather than `pending_acknowledgements`, because a panel cannot
+# usefully offer an approve CONTROL while the path that reads the approval is the
+# thing that is broken — the click would appear to succeed and change nothing.
 _UNDECIDABLE_REASONS = frozenset(
     {"count_failed", "count_uninterpretable", "count_negative"}
 )
@@ -462,6 +472,18 @@ def announce_refusal(
     # reason is noise, and its natural-key shape is pinned), so the durable row
     # keeps its first content for a given (setting, window); the re-fired ERROR is
     # the signal for a reason change.
+    #
+    # KNOWN RESIDUAL, stated rather than discovered later: because the row keeps
+    # its FIRST content, an `over_threshold` -> undecidable flip at an unchanged
+    # window leaves the durable alarm still saying "acknowledge to proceed" — the
+    # very thing `_UNDECIDABLE_REASONS` below exists to stop the alarm saying,
+    # surviving in the durable half. It is bounded and inert rather than unsafe:
+    # the corrected text DOES fire as a fresh ERROR, and an ack given under the
+    # stale prompt is not consumed while the sweep stays undecidable (`evaluate`
+    # returns before `is_acknowledged`), so it neither authorizes this prune nor
+    # is silently spent. Fixing it needs an UPDATE path the alarm sink does not
+    # have — `create_item` is INSERT ... ON CONFLICT DO NOTHING — so it is a
+    # follow-up, not a one-liner.
     fresh = ep is None or (ep.window_days, ep.reason) != (window_days, verdict.reason)
     if fresh:
         # ARM BEFORE THE ATTEMPT (#1897's ordering): the record exists before
