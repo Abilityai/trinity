@@ -37,14 +37,17 @@ Two providers, one seam (§32.5 FR-2)
   already blesses for `elevenlabs_api_key_encrypted`. No new table, no SQLite
   migration, no Alembic revision. Platform-scope: a named endpoint is available
   to every agent on the instance.
-* **Enterprise (future):** a registered provider takes precedence and may scope
-  endpoints per agent. The enterprise A2A module today ships an endpoint
-  registry with **no decrypt path and no provider**, which is exactly why OSS
-  owns a working source: a seam alone would have shipped a tool that answers
-  "no targets configured" on 100% of installs, including entitled ones.
+* **Private module (future):** a registered provider takes precedence and may
+  scope endpoints per agent.
 
-The epic's owner ruling is *"Outbound = OSS"*, so there is no
-`requires_entitlement` anywhere on this path.
+OSS ships a working source and not merely the seam, because a seam with no
+registered provider resolves nothing — the tool would answer "no targets
+configured" on every install, which is not what the owner's *"Outbound = OSS"*
+ruling can mean. There is no `requires_entitlement` anywhere on this path.
+
+This is a public open-core SEAM FILE: its comments describe the MECHANISM only
+and must never name a paid catalog or a private module's internals (#1461 —
+a comment in a seam is unguarded prose that discloses just as a doc does).
 """
 from __future__ import annotations
 

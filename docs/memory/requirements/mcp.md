@@ -429,10 +429,11 @@ raises, and a provider that returns a malformed object all **refuse**.
   the location Invariant #12 already blesses for
   `elevenlabs_api_key_encrypted`. **No new table, no migration, no Alembic
   revision.** Managed by one admin-only + human-only settings route.
-- **Enterprise provider (future)**: a per-agent registry may register and
-  takes precedence. The enterprise A2A module ships **no decrypt path and
-  no outbound provider today**, which is why OSS owns one — a seam alone
-  would have made the tool answer "no targets" on 100% of installs.
+- **Enterprise provider (future)**: a private module may register a provider
+  that takes precedence and scope endpoints per agent. OSS ships a working
+  source rather than only the seam because a seam with no registered provider
+  resolves nothing, i.e. the tool would answer "no targets configured" on every
+  install — which is not what "outbound = OSS" can mean.
 - Resolution is **platform-scope** in OSS: a named endpoint is available to
   every agent on the instance. Per-agent scoping is the enterprise delta.
 

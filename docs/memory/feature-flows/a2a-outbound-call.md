@@ -8,10 +8,18 @@ a remote Trinity) and gets the answer back inside the same tool call.
 **OSS-core by decision**, not by omission. The parent epic
 (trinity-enterprise#156) records the owner's ruling — *"Outbound = OSS. A
 Trinity agent calling out to an external A2A agent (#736) stays open-core."* —
-so there is no `requires_entitlement` anywhere on the call path, and OSS ships
-its own target registry rather than a seam that answers "no targets" on every
-install. Recorded here so the ruling is never re-inferred from the mere fact
-that this merged (the ent#326 / ent#384 discipline).
+so there is no `requires_entitlement` anywhere on the call path. OSS also ships
+a working target source, not merely the seam: a seam with no registered
+provider resolves nothing, so the tool would answer "no targets configured" on
+every install, which is not what the ruling can mean. Recorded here so the
+ruling is never re-inferred from the mere fact that this merged (the ent#326 /
+ent#384 discipline).
+
+> **Note for the owner.** Option 4 (an OSS platform-scope list) narrows a
+> private module's role here to **per-agent scoping plus the managed UI**. If
+> that scoping was deliberate monetization, the OSS list becomes the floor and
+> a per-agent provider gates on top — a one-line change at this seam. That is a
+> product call, not an engineering one, and it is deliberately not made here.
 
 Requirements: `docs/memory/requirements/mcp.md` §32.5.
 
