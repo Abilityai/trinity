@@ -1265,6 +1265,17 @@ onMounted(async () => {
   // worth of requests on a view that is unmounting.
   if (redirectRetiredSessionLink()) return
 
+  // #2130: apply the ?tab=/resume landing BEFORE any await. It reads only
+  // route.query and writes local refs — nothing in it needs loaded agent data,
+  // and the whole tab area sits behind `v-if="agent"`, so writing activeTab
+  // early just makes the FIRST render land on the requested tab. Running it
+  // after the awaits below meant the deep-link waited on the slowest unrelated
+  // mount call: on a RUNNING agent that batch also holds the
+  // checkDashboardExists/checkBrainOrbCapability container round-trips (~10s
+  // measured), so the page showed Overview for that window and then stole a tab
+  // the user had clicked in the meantime.
+  applyDeepLinkRouting()
+
   // Load agent first (other calls may depend on agent data)
   await loadAgent()
 
@@ -1285,9 +1296,6 @@ onMounted(async () => {
   ])
   startEmotionCycling()
   startAllPolling()
-
-  // Handle tab / resume deep-link (from Timeline or ExecutionDetail navigation)
-  applyDeepLinkRouting()
 })
 
 // onActivated fires when component is shown (after being cached by KeepAlive)
@@ -1295,6 +1303,14 @@ onActivated(async () => {
   // ent#358: same guard as onMounted — AgentDetail is KeepAlive-cached, so a
   // session deep-link opened on an already-visited agent lands here instead.
   if (redirectRetiredSessionLink()) return
+
+  // EXEC-023 (#1672): re-apply the full tab + resume landing here, not just the
+  // tab — onMounted does NOT fire for a KeepAlive-cached instance, so this is
+  // the path the common "Continue as Chat" navigation actually takes.
+  // #2130: and apply it BEFORE the awaits below, for the same reason as
+  // onMounted — this hook re-awaits loadAgent() plus, on a running agent, the
+  // two container round-trips.
+  applyDeepLinkRouting()
 
   // Restart polling when returning to this view
   startAllPolling()
@@ -1308,11 +1324,6 @@ onActivated(async () => {
     await checkDashboardExists()
     await checkBrainOrbCapability()
   }
-
-  // EXEC-023 (#1672): re-apply the full tab + resume landing here, not just the
-  // tab. onMounted does NOT fire for a KeepAlive-cached instance, so this is the
-  // path the common "Continue as Chat" navigation actually takes.
-  applyDeepLinkRouting()
 
   // DEPRECATED: Terminal tab hidden (candidate for removal)
   // if (activeTab.value === 'terminal') {
