@@ -218,10 +218,11 @@ def evaluate(
         # threshold)` True, and the guard would ALLOW a prune on a count it never
         # understood — a silent fail-OPEN introduced by the fix for a fail-closed
         # bug. Every real numeric comparison (int, float, inf, nan, bool) returns
-        # exactly `bool`, so nothing legitimate is rejected. It does also reject
-        # `numpy.bool_` and any `bool` subclass: correct and fail-closed today
-        # (all 8 accessors return a Python int), and stated here so a future
-        # numpy/pandas-backed `count_fn` fails legibly rather than mysteriously.
+        # exactly `bool`, so nothing legitimate is rejected. (`bool` is final in
+        # CPython, so there is no subclass case; what this DOES also reject is
+        # `numpy.bool_`, which is not a `bool` at all — correct and fail-closed
+        # today, since all 8 accessors return a Python int, and stated here so a
+        # future numpy/pandas-backed `count_fn` fails legibly, not mysteriously.)
         under = candidates <= threshold
         negative = candidates < 0
         if type(under) is not bool or type(negative) is not bool:
