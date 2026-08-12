@@ -809,6 +809,21 @@ async def portal_chat(agent_name: str, message: str, email: str,
         logger.warning("portal history-context read failed for %s/%s: %s", agent_name, email, e)
     convo_context = _format_history_context(history)
 
+    # ent#286: the user's message lands NOW, before the turn runs — not after.
+    #
+    # Both halves used to be written together at the end, so a browser refresh
+    # mid-turn showed the thread with the sent message missing: indistinguishable
+    # from having lost it, while the turn was in fact still running. The Session
+    # tab made this call long ago for the same reason ("the message log still
+    # reflects what the user typed vs. a silent loss"). A turn that then fails
+    # leaves a user message with no reply, which is the honest record.
+    #
+    # ORDER MATTERS, and two things above depend on it: `is_first_exchange` reads
+    # the thread's title before this writes the derived one, and the history
+    # context below must not contain the very message it is context FOR. Both
+    # reads happen first, deliberately.
+    _persist_user_turn(agent_name, email, session_id, client_message)
+
     # #78: make the agent aware of the client's uploaded files. Images are handed
     # to the model as VISION blocks (so "what's in the picture" works) and MUST
     # NOT be read as text — reading a binary floods the stream-json pipe and can
@@ -929,14 +944,14 @@ async def portal_chat(agent_name: str, message: str, email: str,
     reply = getattr(result, "response", "") or ""
     cost = getattr(result, "cost", None)
 
-    # Persist the turn so the conversation survives a refresh / re-sign-in (#78).
+    # Persist the reply so the conversation survives a refresh / re-sign-in (#78).
+    # The user's half was written BEFORE the turn ran (see `_persist_user_turn`),
+    # so a reload mid-turn shows what was sent instead of an empty thread.
     # Best-effort — a persistence hiccup must never fail an already-billed turn.
     try:
         now = utc_now_iso()
-        db.add_portal_message(uuid.uuid4().hex, agent_name, email, "user", client_message, None, now, session_id=session_id)
         db.add_portal_message(uuid.uuid4().hex, agent_name, email, "assistant", reply, cost, now, session_id=session_id)
-        # Advance the thread's activity + set its title from the first message.
-        db.touch_portal_session(session_id, now, added=2, title_if_empty=_derive_title(client_message))
+        db.touch_portal_session(session_id, now, added=1)
     except Exception as e:  # noqa: BLE001
         logger.warning("portal chat history persist failed for %s/%s: %s", agent_name, email, e)
 
@@ -948,6 +963,101 @@ async def portal_chat(agent_name: str, message: str, email: str,
         _spawn_title_generation(agent_name, session_id, client_message, reply)
 
     return {"response": reply, "cost": cost, "session_id": session_id}
+
+
+def _persist_user_turn(agent_name: str, email: str, session_id: str, content: str) -> None:
+    """Write the client's own message, before the turn runs. Best-effort."""
+    try:
+        now = utc_now_iso()
+        db.add_portal_message(uuid.uuid4().hex, agent_name, email, "user", content,
+                              None, now, session_id=session_id)
+        db.touch_portal_session(session_id, now, added=1,
+                                title_if_empty=_derive_title(content))
+    except Exception as e:  # noqa: BLE001 — never block a turn on bookkeeping
+        logger.warning("portal user-message persist failed for %s/%s: %s", agent_name, email, e)
+
+
+def _inflight_key(session_id: str) -> str:
+    return f"portal_inflight:{session_id}"
+
+
+def mark_turn_inflight(session_id: str, execution_id: str, ttl_seconds: int = 3600) -> None:
+    """Record that ``session_id`` has a turn running, and WHICH one.
+
+    The value is the execution id, not a bare flag: a client that reloads has
+    lost the id it was streaming, and this is where it gets it back. Mirrors the
+    Session tab's `session_inflight:` sentinel (#759), which exists for exactly
+    this reattach problem. TTL is the backstop for a backend that dies mid-turn.
+    """
+    try:
+        from redis_breaker_util import get_breaker_redis
+        client = get_breaker_redis()
+        if client is not None:
+            client.set(_inflight_key(session_id), execution_id, ex=ttl_seconds)
+    except Exception as e:  # noqa: BLE001 — degraded reattach, never a failed turn
+        logger.warning("portal inflight SET failed for %s: %s", session_id, e)
+
+
+def clear_turn_inflight(session_id: str) -> None:
+    """Turn is done. Best-effort — the TTL is the backstop."""
+    try:
+        from redis_breaker_util import get_breaker_redis
+        client = get_breaker_redis()
+        if client is not None:
+            client.delete(_inflight_key(session_id))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal inflight DEL failed for %s: %s", session_id, e)
+
+
+def get_turn_inflight_matches(execution_id: str) -> bool:
+    """Whether ``execution_id`` is the turn currently marked in flight.
+
+    Asked by the SSE proxy when the agent says 404: "not registered YET" (keep
+    waiting) versus "already finished" (end the stream cleanly) look identical
+    from the agent, and only the marker can tell them apart.
+
+    Scans the small set of live markers rather than taking a session id, so the
+    stream route does not need to know which thread the execution belongs to.
+    Fail-open (True) on a Redis problem — a bounded extra wait is a far better
+    failure than cutting off a turn that is genuinely streaming.
+    """
+    try:
+        from redis_breaker_util import get_breaker_redis
+        client = get_breaker_redis()
+        if client is None:
+            return True
+        for key in client.scan_iter(match=_inflight_key("*"), count=100):
+            value = client.get(key)
+            if value is None:
+                continue
+            current = value.decode() if isinstance(value, bytes) else str(value)
+            if current == execution_id:
+                return True
+        return False
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal inflight match failed for %s: %s", execution_id, e)
+        return True
+
+
+def get_turn_inflight(session_id: str) -> str | None:
+    """The execution id of the turn currently running on this thread, if any.
+
+    Returns None when Redis is unavailable — a degraded reattach (the client
+    shows no live activity and picks the reply up on its next load) is far
+    better than a false "still working" that never resolves.
+    """
+    try:
+        from redis_breaker_util import get_breaker_redis
+        client = get_breaker_redis()
+        if client is None:
+            return None
+        value = client.get(_inflight_key(session_id))
+        if value is None:
+            return None
+        return value.decode() if isinstance(value, bytes) else str(value)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal inflight GET failed for %s: %s", session_id, e)
+        return None
 
 
 # --- Streaming turns (ent#286) -----------------------------------------------
@@ -1006,6 +1116,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
         # back a turn the client can never watch.
         raise ClientPortalError(500, "Could not start the conversation. Please try again.")
 
+    mark_turn_inflight(session_id, execution_id)
+
     async def _run() -> None:
         try:
             await portal_chat(agent_name, message, email, session_id=session_id,
@@ -1016,6 +1128,10 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
             logger.info("portal streaming turn %s ended: %s", execution_id, e.detail)
         except Exception:  # noqa: BLE001 — a background task must never die silently
             logger.exception("portal streaming turn %s crashed", execution_id)
+        finally:
+            # Always clear, on every exit path: a stuck marker would leave the
+            # UI reattaching to a turn that ended, forever (until the TTL).
+            clear_turn_inflight(session_id)
 
     # Strong ref until it finishes: a bare create_task can be garbage-collected
     # mid-flight (the #1083 footgun), which would abandon a billed turn.
@@ -1140,7 +1256,16 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
     else:
         session_id = db.get_latest_portal_session_id(agent_name, email)
     messages = db.get_portal_messages(agent_name, email, session_id=session_id) if session_id else []
-    return {"agent_name": agent_name, "session_id": session_id, "messages": messages}
+    # ent#286: a client that reloaded mid-turn has lost the execution id it was
+    # streaming. It arrives here, on the fetch the client already makes on
+    # mount, so reattaching costs no extra round trip.
+    inflight = get_turn_inflight(session_id) if session_id else None
+    return {
+        "agent_name": agent_name,
+        "session_id": session_id,
+        "messages": messages,
+        "in_flight_execution_id": inflight,
+    }
 
 
 def portal_documents(agent_name: str, email: str, include_owned: bool = False) -> dict:

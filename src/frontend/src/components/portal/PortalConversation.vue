@@ -221,12 +221,45 @@ const render = (c) => renderMarkdown(c || '')
 async function loadThread(sessionId) {
   loadingHistory.value = true
   messages.value = []
+  let inFlight = null
   try {
-    const { sessionId: resolved, messages: msgs } = await store.fetchHistory(props.agent.name, sessionId || null)
+    const { sessionId: resolved, messages: msgs, inFlightExecutionId } =
+      await store.fetchHistory(props.agent.name, sessionId || null)
     currentSessionId.value = sessionId || resolved || null
     messages.value = (msgs || []).map((m) => ({ role: m.role, content: m.content }))
+    inFlight = inFlightExecutionId
   } catch { /* start empty */ }
   finally { loadingHistory.value = false; await scrollDown() }
+
+  // ent#286: a turn was still running when this client loaded — reattach to it
+  // rather than showing a thread that looks finished. The user's message is
+  // already in `messages` (persisted at dispatch), so what is missing is only
+  // the "working" state and the reply.
+  if (inFlight) await reattach(inFlight)
+}
+
+// Rejoin a turn already in progress. The agent replays its buffered log before
+// streaming live, so a client that reloaded sees what it missed.
+async function reattach(executionId) {
+  if (sending.value) return
+  sending.value = true
+  streaming.value = true
+  liveActivity.value = []
+  elapsed.value = 0
+  clearInterval(elapsedTimer)
+  elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
+  try {
+    await store.streamPortalExecution(props.agent.name, executionId, onStreamEvent)
+    const data = await awaitPersistedReply(currentSessionId.value)
+    if (data?.response) messages.value.push({ role: 'assistant', content: data.response })
+  } catch { /* the reply lands in history on the next load */ }
+  finally {
+    sending.value = false
+    streaming.value = false
+    liveActivity.value = []
+    clearInterval(elapsedTimer)
+    await scrollDown()
+  }
 }
 
 watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {

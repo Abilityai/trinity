@@ -695,6 +695,12 @@ async def portal_uploads(agent_name: str, principal: PortalPrincipal = Depends(g
 
 # --- Streaming turns (ent#286) -----------------------------------------------
 
+# How long to keep trying to attach to a turn the agent has not registered yet,
+# and how often. The wait is bounded by the turn still being in flight, so this
+# ceiling only matters when the marker outlives the agent-side execution.
+_STREAM_ATTACH_TIMEOUT_S = 30.0
+_STREAM_ATTACH_POLL_S = 0.4
+
 @router.post("/agents/{agent_name}/chat/stream", response_model=PortalTurnStarted, status_code=202)
 async def portal_chat_stream(
     agent_name: str,
@@ -766,16 +772,46 @@ async def portal_stream_execution(
         raise HTTPException(status_code=503, detail="Agent is not running")
 
     async def proxy_stream():
+        # The agent answers 404 in TWO harmless situations, and treating either
+        # as fatal is what made a mid-turn reload look broken:
+        #
+        #   too early — the client subscribes the instant it gets the 202, but
+        #     the turn passes through admission, capacity and the resume lock
+        #     before the agent registers it. Measured at ~1-2s on a warm agent.
+        #   too late  — the turn is over and the agent has dropped its buffered
+        #     log. Nothing is wrong; the reply is in history.
+        #
+        # So: retry briefly while the turn is still live, and end the stream
+        # cleanly (never `error`) when it simply is not streamable. The client
+        # reads the persisted reply on `stream_end` either way.
         agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/stream"
+        deadline = asyncio.get_event_loop().time() + _STREAM_ATTACH_TIMEOUT_S
         try:
             async with agent_httpx_client(agent_name, timeout=None) as client:
-                async with client.stream("GET", agent_url) as response:
-                    if response.status_code != 200:
-                        yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
+                while True:
+                    async with client.stream("GET", agent_url) as response:
+                        if response.status_code == 200:
+                            async for chunk in response.aiter_text():
+                                yield chunk
+                            return
+                        if response.status_code != 404:
+                            yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
+                            yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                            return
+                    # 404 — is this turn still worth waiting for?
+                    if not service.get_turn_inflight_matches(execution_id):
+                        # Finished (or never ran). Not an error: end cleanly so
+                        # the client goes and reads the reply.
                         yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
                         return
-                    async for chunk in response.aiter_text():
-                        yield chunk
+                    if asyncio.get_event_loop().time() >= deadline:
+                        logger.info(
+                            "[PortalStream] gave up attaching to %s on %s after %ss",
+                            execution_id, agent_name, _STREAM_ATTACH_TIMEOUT_S,
+                        )
+                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                        return
+                    await asyncio.sleep(_STREAM_ATTACH_POLL_S)
         except httpx.ConnectError:
             yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to connect to agent'})}\n\n"
             yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"

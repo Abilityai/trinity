@@ -534,3 +534,24 @@ def test_a_client_session_never_reaches_owned_agents(roster):
 def test_an_agent_on_neither_roster_is_refused(roster):
     for include_owned in (True, False):
         assert roster.agent_on_roster("stranger", "me@example.com", include_owned=include_owned) is False
+
+
+def test_the_current_message_is_not_replayed_as_its_own_context(portal):
+    """Ordering guard (ent#286 fallout).
+
+    Persisting the user's message early — so a mid-turn reload doesn't look
+    like message loss — put it in the table BEFORE the history read that builds
+    the context block, so a cold turn arrived as "Client: hello" followed by
+    "hello". The reads that must not see it (thread title for first-exchange
+    detection, history for context) now happen first, deliberately.
+    """
+    svc, state = portal
+    state.cached = None
+    state.history = []          # nothing prior — this is turn one
+    rec = state.install([_Result()])
+
+    _run(svc.portal_chat(AGENT, "hello", EMAIL, SESSION))
+
+    assert rec.calls[0]["message"] == "hello", (
+        "the turn's own message was replayed back to it as conversation context"
+    )

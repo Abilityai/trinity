@@ -300,7 +300,13 @@ export const useClientPortalStore = defineStore('clientPortal', {
         `/api/enterprise/client-portal/agents/${agentName}/history`,
         { headers: this.authHeader, params: sessionId ? { session_id: sessionId } : {} }
       )
-      return { sessionId: data.session_id || null, messages: data.messages || [] }
+      return {
+        sessionId: data.session_id || null,
+        messages: data.messages || [],
+        // ent#286: non-null when a turn is running on this thread right now —
+        // what a client that reloaded mid-turn resubscribes to.
+        inFlightExecutionId: data.in_flight_execution_id || null,
+      }
     },
 
     // Files the client has sent to an agent (their inbox) — lets them review

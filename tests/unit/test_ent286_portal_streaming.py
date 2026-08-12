@@ -216,3 +216,108 @@ async def _drain(coro):
     while svc._INFLIGHT_TURNS:
         await asyncio.sleep(0.01)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Reattach after a reload
+# ---------------------------------------------------------------------------
+
+
+class _FakeRedis:
+    def __init__(self, data=None, broken=False):
+        self.data = dict(data or {})
+        self.broken = broken
+
+    def set(self, k, v, ex=None):
+        if self.broken:
+            raise RuntimeError("redis down")
+        self.data[k] = v
+
+    def get(self, k):
+        if self.broken:
+            raise RuntimeError("redis down")
+        return self.data.get(k)
+
+    def delete(self, k):
+        if self.broken:
+            raise RuntimeError("redis down")
+        self.data.pop(k, None)
+
+    def scan_iter(self, match=None, count=None):
+        if self.broken:
+            raise RuntimeError("redis down")
+        return iter(list(self.data.keys()))
+
+
+@pytest.fixture()
+def redis_stub(monkeypatch):
+    import redis_breaker_util
+    fake = _FakeRedis()
+    monkeypatch.setattr(redis_breaker_util, "get_breaker_redis", lambda: fake)
+    return fake
+
+
+def test_the_inflight_marker_carries_the_execution_id(redis_stub):
+    """A bare "busy" flag would not be enough: a client that reloaded has lost
+    the id it was streaming, and this is where it gets it back."""
+    from client_portal import service as svc
+
+    svc.mark_turn_inflight(SESSION, EXEC_ID)
+    assert svc.get_turn_inflight(SESSION) == EXEC_ID
+
+    svc.clear_turn_inflight(SESSION)
+    assert svc.get_turn_inflight(SESSION) is None
+
+
+def test_a_running_turn_is_distinguishable_from_a_finished_one(redis_stub):
+    """The agent answers 404 for both "not registered yet" and "already over".
+    Only the marker tells them apart — and the proxy needs that to know whether
+    to keep waiting or end the stream cleanly."""
+    from client_portal import service as svc
+
+    svc.mark_turn_inflight(SESSION, EXEC_ID)
+    assert svc.get_turn_inflight_matches(EXEC_ID) is True
+    assert svc.get_turn_inflight_matches("some-other-execution") is False
+
+    svc.clear_turn_inflight(SESSION)
+    assert svc.get_turn_inflight_matches(EXEC_ID) is False
+
+
+def test_marker_lookups_fail_open_toward_waiting(monkeypatch):
+    """Redis is unavailable. Waiting a bounded extra moment for a turn that
+    might be streaming beats cutting off one that is."""
+    import redis_breaker_util
+    from client_portal import service as svc
+
+    monkeypatch.setattr(redis_breaker_util, "get_breaker_redis", lambda: _FakeRedis(broken=True))
+    assert svc.get_turn_inflight_matches(EXEC_ID) is True
+    # ...but the per-session read has no safe default to invent, so it says
+    # "nothing in flight" and the client picks the reply up from history.
+    assert svc.get_turn_inflight(SESSION) is None
+
+
+def test_a_started_turn_is_marked_and_then_cleared(portal, redis_stub):
+    """End to end over the marker: set at dispatch, gone once the turn ends —
+    on every exit path, or the UI reattaches forever to a turn that is over."""
+    from client_portal import service as svc
+
+    _run(_drain(svc.start_portal_turn(AGENT, "hello", EMAIL, SESSION)))
+    assert svc.get_turn_inflight(SESSION) is None
+
+
+def test_the_marker_is_set_while_the_turn_is_still_running(portal, redis_stub, monkeypatch):
+    """The half that matters for a reload: while the turn runs, the marker
+    names it."""
+    from client_portal import service as svc
+
+    seen = {}
+
+    async def _slow_chat(agent_name, message, email, session_id=None,
+                         include_owned=False, execution_id=None):
+        seen["during"] = svc.get_turn_inflight(session_id)
+        return {"response": "done", "cost": 0.0, "session_id": session_id}
+
+    monkeypatch.setattr(svc, "portal_chat", _slow_chat)
+    _run(_drain(svc.start_portal_turn(AGENT, "hello", EMAIL, SESSION)))
+
+    assert seen["during"] == EXEC_ID
