@@ -156,6 +156,35 @@
             @pointerdown.stop.prevent="startConnect(agent.name, $event)"
           ></span>
         </div>
+
+        <!-- Info tiles (ent#325). Same `.gv-tile` chassis and the same
+             `data-agent` hook, so drag / swap-with-preview / keyboard /
+             culling / the snap socket all apply with no second code path.
+             Deliberately NO connect handle: an info tile is not an org node
+             and can never be a reporting-line endpoint. -->
+        <div
+          v-for="w in placedWidgets"
+          :key="w.key"
+          class="gv-tile gv-tile-widget"
+          :class="{
+            dragging: draggingName === w.key,
+            snapping: snappingName === w.key,
+            locked: lockedName === w.key,
+          }"
+          :style="tileStyle(w.key)"
+          :data-agent="w.key"
+          role="listitem"
+          tabindex="0"
+          :aria-label="w.entry.title + ' info tile — drag to any cell, or use arrow keys'"
+          @transitionend="onTileTransitionEnd(w.key, $event)"
+        >
+          <component
+            :is="w.entry.component"
+            v-if="visibleNames.has(w.key)"
+            :agents="agents"
+          />
+          <div v-else class="gv-tile-far">{{ w.entry.title }}</div>
+        </div>
       </div>
     </div>
 
@@ -172,6 +201,35 @@
       </button>
     </div>
     <span class="gv-zoomlvl">{{ Math.round(vz * 100) }}%</span>
+
+    <!-- Tiles menu (ent#325). Placed in the existing bottom control cluster
+         rather than as a fifth top-level header button: the grid header
+         already carries Tidy up / Reset layout and gained Zones / Lines /
+         Group by dept / New dept from #305, and the issue's scope note asks
+         that the responsive ladder not be widened unconditionally. -->
+    <div class="gv-tilesctl">
+      <button
+        type="button"
+        class="act"
+        :class="{ on: tilesMenuOpen }"
+        aria-haspopup="true"
+        :aria-expanded="tilesMenuOpen"
+        title="Show or hide fleet info tiles"
+        @click="tilesMenuOpen = !tilesMenuOpen"
+      >Tiles ▾</button>
+      <div v-if="tilesMenuOpen" class="gv-tilesmenu" @pointerdown.stop>
+        <p v-if="!widgetCatalog.length" class="empty">No info tiles available.</p>
+        <label v-for="w in widgetCatalog" :key="w.id">
+          <input
+            type="checkbox"
+            :checked="isWidgetOn(w)"
+            @change="gridStore.setWidgetEnabled(w.id, $event.target.checked)"
+          />
+          <span>{{ w.title }}</span>
+        </label>
+        <button type="button" class="reset" @click="resetTiles">Reset to defaults</button>
+      </div>
+    </div>
 
     <!-- PROTOTYPE org overlay controls -->
     <div class="gv-orgctl">
@@ -249,6 +307,8 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import AgentTile from './AgentTile.vue'
+// Side-effect import: registers the info-tile catalog into GRID_WIDGETS.
+import './tiles/catalog'
 import { useFleetGridStore } from '@/stores/fleetGrid'
 import {
   CELL_W,
@@ -263,6 +323,13 @@ import {
   layoutBBox,
   occupantAt,
 } from '@/utils/gridLayout'
+import {
+  catalogFor,
+  isWidgetEnabled,
+  widgetById,
+  widgetIdFromKey,
+} from '@/utils/gridWidgets'
+import { zoneAt } from '@/utils/gridOrg'
 import { useOrgOverlay } from '@/composables/useOrgOverlay'
 
 /**
@@ -350,11 +417,46 @@ const placedAgents = computed(() =>
   props.agents.filter((a) => layout.value[a.name])
 )
 
+// --- info tiles (ent#325) ---
+const tilesMenuOpen = ref(false)
+const widgetCatalog = computed(() => catalogFor(gridStore.isAdmin))
+function isWidgetOn(entry) {
+  return isWidgetEnabled(entry, gridStore.widgetPrefs)
+}
+function resetTiles() {
+  gridStore.resetWidgets()
+  tilesMenuOpen.value = false
+}
+
+/** Enabled tiles that have a position — the widget analogue of placedAgents. */
+const placedWidgets = computed(() =>
+  gridStore.activeWidgetKeys
+    .filter((key) => layout.value[key])
+    .map((key) => ({ key, entry: widgetById(widgetIdFromKey(key)) }))
+    .filter((w) => w.entry && w.entry.component)
+)
+
+/**
+ * Veto cells that fall inside a department frame when seeding a new tile
+ * (#305 interlock D). Rows -3..-1 are empty of TILES, but a department whose
+ * members were dragged upward has a hull that reaches there, and a tile
+ * seeded inside that frame would read as one of its members.
+ */
+function isCellBlocked(c, r) {
+  if (!zones.value || zones.value.length === 0) return false
+  const [x, y] = cellXY(c, r)
+  return !!zoneAt(zones.value, x + CELL_W / 2, y + CELL_H / 2)
+}
+
 function syncLayoutFromAgents() {
   const names = props.agents.map((a) => a.name)
   const systemNames = new Set(props.agents.filter((a) => a.is_system).map((a) => a.name))
-  gridStore.syncLayout(names, systemNames, newcomerOriginFor)
+  gridStore.syncLayout(names, systemNames, newcomerOriginFor, isCellBlocked)
 }
+
+// Toggling a tile on/off re-runs the reconcile so it is seeded (or dropped)
+// immediately rather than on the next roster change.
+watch(() => gridStore.activeWidgetKeys.join('\n'), () => syncLayoutFromAgents())
 
 
 // --- viewport culling (#47: render/hydrate only tiles near the viewport) ---
@@ -365,15 +467,25 @@ const visibleNames = computed(() => {
   if (!vw || !vh) return set
   const x0 = -vtx.value / vz.value
   const y0 = -vty.value / vz.value
-  const w = vw / vz.value
+  const w2 = vw / vz.value
   const h = vh / vz.value
-  const mx = w * 0.6
+  const mx = w2 * 0.6
   const my = h * 0.6
   for (const agent of placedAgents.value) {
     const p = layout.value[agent.name]
     const [x, y] = cellXY(p.c, p.r)
-    if (x + CELL_W >= x0 - mx && x <= x0 + w + mx && y + CELL_H >= y0 - my && y <= y0 + h + my) {
+    if (x + CELL_W >= x0 - mx && x <= x0 + w2 + mx && y + CELL_H >= y0 - my && y <= y0 + h + my) {
       set.add(agent.name)
+    }
+  }
+  // Info tiles cull on the same rule (ent#325) — a far-away tile renders a
+  // light placeholder and fetches nothing, exactly like an agent tile.
+  for (const w of placedWidgets.value) {
+    const p = layout.value[w.key]
+    if (!p) continue
+    const [x, y] = cellXY(p.c, p.r)
+    if (x + CELL_W >= x0 - mx && x <= x0 + w2 + mx && y + CELL_H >= y0 - my && y <= y0 + h + my) {
+      set.add(w.key)
     }
   }
   if (draggingName.value) set.add(draggingName.value)
@@ -757,6 +869,11 @@ function resetToDefault() {
   const names = props.agents.map((a) => a.name)
   const systemNames = new Set(props.agents.filter((a) => a.is_system).map((a) => a.name))
   gridStore.resetLayout(names, systemNames)
+  // `resetLayout` rebuilds the AGENT default layout only, so re-run the
+  // reconcile to seed enabled tiles back into the band above it (ent#325) —
+  // otherwise "Reset layout" silently removes every info tile until the next
+  // roster change happens to trigger a sync.
+  syncLayoutFromAgents()
   nextTick(fitView)
 }
 
@@ -848,6 +965,15 @@ onBeforeUnmount(() => {
   --gv-bk-man: #14b8a6;
   --gv-bk-ext: #ec4899;
   --gv-dots: rgba(17, 24, 39, 0.12);
+  /* ent#325 info-tile chassis. Defined in BOTH blocks: a token defined in one
+     theme only is the same bug the tiles shipped with — a live fallback that
+     never flips. --gv-radius matches .gv-tile's 12px so the inner surface and
+     the chassis share a corner. */
+  --gv-radius: 12px;
+  --gv-peg-bg: #111827;
+  --gv-peg-fg: #f9fafb;
+  --gv-danger-border: rgba(220, 38, 38, 0.35);
+  --gv-skel: rgba(17, 24, 39, 0.07);
   /* Layered depth: top-edge highlight (glass lip) + tight contact shadow +
      mid key shadow + soft ambient falloff. */
   --gv-tile-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0) 55%);
@@ -921,6 +1047,14 @@ onBeforeUnmount(() => {
   --gv-bk-man: #2dd4bf;
   --gv-bk-ext: #f472b6;
   --gv-dots: rgba(249, 250, 251, 0.08);
+  /* ent#325 info-tile chassis — dark half. The peg inverts (light chip on the
+     dark card) so it reads as a raised marker in both themes rather than
+     disappearing into the tile. */
+  --gv-radius: 12px;
+  --gv-peg-bg: #f9fafb;
+  --gv-peg-fg: #111827;
+  --gv-danger-border: rgba(248, 113, 113, 0.45);
+  --gv-skel: rgba(249, 250, 251, 0.10);
   --gv-drag-shadow: 0 28px 56px -12px rgba(0, 0, 0, 0.75);
   --gv-tile-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 55%);
   --gv-tile-shadow:
@@ -1312,6 +1446,88 @@ onBeforeUnmount(() => {
 .gv-tile.linktarget {
   border-color: color-mix(in srgb, var(--gv-blue) 70%, var(--gv-border));
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--gv-blue) 20%, transparent), var(--gv-tile-shadow);
+}
+
+/* --- info tiles: Tiles menu + widget chassis (ent#325) --- */
+/* Sits directly under the org cluster, sharing its chrome, so the header
+   ladder gains no fifth top-level button. */
+.gv-tilesctl {
+  position: absolute;
+  top: 58px;
+  right: 16px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.gv-tilesctl > button {
+  border: 0;
+  background: var(--gv-panel);
+  border: 1px solid var(--gv-border);
+  color: var(--gv-muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  box-shadow: var(--gv-tile-shadow, 0 1px 2px rgba(0, 0, 0, 0.08));
+}
+.gv-tilesctl > button:hover,
+.gv-tilesctl > button.on {
+  background: var(--gv-btn-bg-hover);
+  color: var(--gv-fg);
+}
+.gv-tilesmenu {
+  min-width: 190px;
+  padding: 8px;
+  border-radius: 10px;
+  background: var(--gv-panel);
+  border: 1px solid var(--gv-border);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gv-tilesmenu label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--gv-fg);
+  cursor: pointer;
+}
+.gv-tilesmenu label:hover {
+  background: var(--gv-btn-bg-hover);
+}
+.gv-tilesmenu .empty {
+  margin: 0;
+  padding: 6px;
+  font-size: 12px;
+  color: var(--gv-muted);
+}
+.gv-tilesmenu .reset {
+  margin-top: 4px;
+  border: 0;
+  border-top: 1px solid var(--gv-tile-border, rgba(0, 0, 0, 0.08));
+  background: transparent;
+  color: var(--gv-muted);
+  font: inherit;
+  font-size: 11px;
+  padding: 7px 6px 3px;
+  text-align: left;
+  cursor: pointer;
+}
+.gv-tilesmenu .reset:hover {
+  color: var(--gv-fg);
+}
+/* The widget chassis reuses .gv-tile wholesale (drag physics, snap, focus
+   ring). Only the drop shadow differs, so an info tile reads as board
+   furniture rather than as a fleet member. */
+.gv-tile-widget {
+  --gv-tile-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
 .gv-orgctl {

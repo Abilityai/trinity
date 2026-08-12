@@ -66,7 +66,13 @@ test.describe('dashboard type-to-filter (trinity-enterprise#261)', () => {
     // and the grid canvas stays MOUNTED (transient zero-match while typing
     // must never unmount the pane — plan eng F1 pin).
     await pillInput(page).fill('zzz')
-    await expect(page.locator('.gv-tile')).toHaveCount(0)
+    // Agent tiles only. ent#325 puts info tiles on the same `.gv-tile` chassis
+    // (deliberately — drag/keyboard/culling/snap all reuse one code path), and
+    // they are NOT agents: the filter is an agent filter, `placedWidgets` never
+    // consults it, and the zero-match card says "No agents match", which stays
+    // true with a fleet-summary tile on the canvas. A bare `.gv-tile` count
+    // asserts something this spec never meant to claim.
+    await expect(page.locator('.gv-tile:not(.gv-tile-widget)')).toHaveCount(0)
     await expect(queryEmpty(page)).toBeVisible()
     await expect(queryEmpty(page)).toContainText('No agents match "zzz"')
     await expect(page.getByRole('button', { name: 'Get started' })).toHaveCount(0)

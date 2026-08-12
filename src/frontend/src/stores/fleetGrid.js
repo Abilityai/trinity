@@ -10,6 +10,11 @@ import {
   tidyLayout,
   occupantAt,
 } from '@/utils/gridLayout'
+import {
+  isWidgetKey,
+  enabledWidgetKeys,
+  seedWidgetCells,
+} from '@/utils/gridWidgets'
 
 /**
  * Fleet Grid store (trinity-enterprise#47) — owns the Dashboard Grid view's
@@ -27,7 +32,17 @@ import {
  *     while the Grid is mounted.
  */
 
-const LAYOUT_KEY = 'trinity-grid-layout-v1'
+// ent#325: layout v2 admits `widget:*` keys alongside agents. The key is
+// bumped rather than reused so a v1 client and a v2 client on the same browser
+// cannot fight over one blob — and the migration is a one-time COPY, leaving
+// v1 in place, so downgrading is not a data-loss event.
+const LAYOUT_KEY_V1 = 'trinity-grid-layout-v1'
+const LAYOUT_KEY = 'trinity-grid-layout-v2'
+// Sparse `{ widgetId: boolean }` OVERRIDE map — see gridWidgets.isWidgetEnabled.
+// Its own key: the org overlay (#305) persists Zones/Lines under keys of its
+// own and the tile prefs must not be entangled with either, so that "Reset
+// tiles" cannot clobber an overlay toggle (ent#325 scope note).
+const WIDGET_PREFS_KEY = 'trinity-grid-widgets-v1'
 const ANALYTICS_WINDOW = '14d' // one fetch feeds Activity·14d + Context·7d (last 7 entries)
 const ANALYTICS_STALE_MS = 5 * 60 * 1000
 const HYDRATE_CONCURRENCY = 4
@@ -52,12 +67,65 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     try {
       const raw = localStorage.getItem(LAYOUT_KEY)
       const parsed = raw ? JSON.parse(raw) : null
-      _savedRaw = parsed && typeof parsed === 'object' ? parsed : {}
+      if (parsed && typeof parsed === 'object') {
+        _savedRaw = parsed
+        return _savedRaw
+      }
+      // One-time v1 -> v2 migration. v1 holds agent keys only, so the copy is
+      // straight; widgets are seeded afterwards by `syncLayout` into the band
+      // above the fleet, which is why an existing constellation does not move.
+      const legacy = localStorage.getItem(LAYOUT_KEY_V1)
+      const legacyParsed = legacy ? JSON.parse(legacy) : null
+      _savedRaw =
+        legacyParsed && typeof legacyParsed === 'object' ? { ...legacyParsed } : {}
+      if (Object.keys(_savedRaw).length) {
+        try {
+          localStorage.setItem(LAYOUT_KEY, JSON.stringify(_savedRaw))
+        } catch {
+          /* private mode */
+        }
+      }
     } catch {
       _savedRaw = {}
     }
     return _savedRaw
   }
+
+  // --- info-tile show/hide preferences (ent#325) ---
+  const widgetPrefs = ref({})
+  try {
+    const raw = localStorage.getItem(WIDGET_PREFS_KEY)
+    const parsed = raw ? JSON.parse(raw) : null
+    if (parsed && typeof parsed === 'object') widgetPrefs.value = parsed
+  } catch {
+    /* defaults */
+  }
+
+  function _persistWidgetPrefs() {
+    try {
+      localStorage.setItem(WIDGET_PREFS_KEY, JSON.stringify(widgetPrefs.value))
+    } catch {
+      /* private mode — session-local */
+    }
+  }
+
+  function setWidgetEnabled(id, enabled) {
+    widgetPrefs.value = { ...widgetPrefs.value, [id]: !!enabled }
+    _persistWidgetPrefs()
+  }
+
+  /** Back to catalog defaults (an empty override map IS "defaults"). */
+  function resetWidgets() {
+    widgetPrefs.value = {}
+    _persistWidgetPrefs()
+  }
+
+  const isAdmin = computed(() => authStore.user?.role === 'admin')
+
+  /** Layout keys of the tiles that should be on the board for this viewer. */
+  const activeWidgetKeys = computed(() =>
+    enabledWidgetKeys(isAdmin.value, widgetPrefs.value)
+  )
 
   function _persist() {
     _savedRaw = { ..._loadSavedRaw(), ...layout.value }
@@ -75,16 +143,34 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
    * nearest free cell. Falls back to the deterministic default layout when
    * nothing usable is saved.
    */
-  function syncLayout(agentNames, systemNames = new Set(), originFor = null) {
-    const saved = { ..._loadSavedRaw(), ...layout.value }
+  function syncLayout(
+    agentNames,
+    systemNames = new Set(),
+    originFor = null,
+    isCellBlocked = null
+  ) {
+    const widgetKeys = activeWidgetKeys.value
+    let saved = { ..._loadSavedRaw(), ...layout.value }
     if (Object.keys(saved).length === 0) {
-      layout.value = defaultLayout(agentNames, systemNames)
-      _persist()
-      return
+      saved = defaultLayout(agentNames, systemNames)
     }
-    const { layout: healed, changed } = normalizeLayout(saved, agentNames, originFor)
+    // Seed any enabled tile that has never been placed into the band ABOVE the
+    // fleet, consulting the caller's veto for cells inside a department frame
+    // (#305 interlock D). Seeding BEFORE normalize means the tile arrives with
+    // a real position rather than being treated as a homeless newcomer and
+    // dropped at the board origin, on top of the agents.
+    const unplaced = widgetKeys.filter((k) => !saved[k])
+    if (unplaced.length) {
+      saved = { ...saved, ...seedWidgetCells(saved, unplaced, isCellBlocked) }
+    }
+    const { layout: healed, changed } = normalizeLayout(
+      saved,
+      agentNames,
+      originFor,
+      widgetKeys
+    )
     layout.value = healed
-    if (changed) _persist()
+    if (changed || unplaced.length) _persist()
   }
 
   /** Drop a tile on `(c, r)`; an occupied target swaps with the dragged tile. */
@@ -106,6 +192,9 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
   function resetLayout(agentNames, systemNames = new Set()) {
     try {
       localStorage.removeItem(LAYOUT_KEY)
+      // v1 too, or the next _loadSavedRaw migrates the stale blob straight
+      // back in and "Reset layout" appears not to have worked (ent#325).
+      localStorage.removeItem(LAYOUT_KEY_V1)
     } catch {
       /* ignore */
     }
@@ -121,9 +210,21 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     _persist()
   }
 
-  /** Replace the whole layout (org-overlay "Group by department" arrange). */
+  /**
+   * Replace the layout (org-overlay "Group by department" / zone tidy).
+   *
+   * Belt to `gridOrg`'s braces (ent#325 interlock A): those helpers now carry
+   * `widget:*` keys through themselves, but this was a blind wholesale replace
+   * and a single caller forgetting to pass the current layout would silently
+   * delete every info tile. Two independent guards, because one of them being
+   * the only guard is exactly how the bug existed in the first place.
+   */
   function applyLayout(map) {
-    layout.value = { ...map }
+    const carried = {}
+    for (const [k, p] of Object.entries(layout.value)) {
+      if (isWidgetKey(k) && !(k in map)) carried[k] = p
+    }
+    layout.value = { ...carried, ...map }
     _persist()
   }
 
@@ -298,6 +399,11 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
 
   return {
     layout,
+    widgetPrefs,
+    activeWidgetKeys,
+    isAdmin,
+    setWidgetEnabled,
+    resetWidgets,
     syncLayout,
     moveTile,
     tidy,
