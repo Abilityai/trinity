@@ -68,13 +68,17 @@ def entitlements(monkeypatch):
     seam and restored afterwards.
 
     B9 — the fixture pins `sys.modules["services.entitlement_service"]` to the
-    module it just imported instead of trusting a bare import to return the real
-    thing. Three test files replace that key with a bare `MagicMock()`, and until
-    #2128 it was absent from conftest's restore tuple, so in a polluted order the
-    import under test would resolve to a mock whose `is_entitled` returns a mock
-    — which pydantic coerces to True on a bool field, i.e. an OSS build silently
-    advertising the feature. The conftest key is the real fix; this is the belt
-    that makes THIS file's verdict independent of run order either way.
+    module it just imported, instead of trusting a bare import to return the
+    real thing.
+
+    Three other test files replace that key with a bare `MagicMock()`. All three
+    restore it (`patch.dict(...).stop()` in a fixture `finally`, plus
+    `monkeypatch.delitem`), so there is no live leak today — measured on the full
+    unit tier, not assumed. But a mock's `is_entitled` returns a mock, and
+    pydantic coerces one to True on a bool field, so IF a future file ever left
+    one behind, the capability would read *available* on a community build. The
+    identity assertion below is what makes that fail loudly here rather than go
+    green on a lie (verified by planting exactly that leak).
     """
     import importlib
 
@@ -142,13 +146,7 @@ async def test_registered_rooms_module_reports_available(roster_db, entitlements
 
 @pytest.mark.asyncio
 async def test_empty_registry_reports_unavailable(roster_db, entitlements, monkeypatch):
-    """B2 — a community build: nothing registered, so nothing is offered.
-
-    This is the assertion that goes green for the wrong reason if the helper
-    drops its `bool()` cast AND an earlier test leaked a MagicMock for the
-    registry — run this file after `test_ent123_tokenless_clone.py` to exercise
-    that path.
-    """
+    """B2 — a community build: nothing registered, so nothing is offered."""
     monkeypatch.delenv("TRINITY_OSS_ONLY", raising=False)
     _install(entitlements)
     email = _seed(roster_db)

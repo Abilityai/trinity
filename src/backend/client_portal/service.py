@@ -232,10 +232,16 @@ def _multi_agent_chat_available() -> bool:
     """
     try:
         from services.entitlement_service import entitlement_service
-        # bool() is not decoration: a leaked MagicMock in a polluted test order
-        # makes this return a mock, and pydantic COERCES that to True on the
-        # response model rather than raising — so the field would silently
-        # report *available* on a community build.
+        # bool() so the return matches the annotation for ANY implementation of
+        # the registry. A non-bool falsy value (None from a partial stub) is a
+        # ValidationError on the response model's bool field, i.e. a 500 raised
+        # OUTSIDE this try — the cast makes it fail closed instead.
+        #
+        # It is NOT a defence against a leaked test double: a MagicMock is
+        # truthy, and pydantic coerces one to True anyway, so cast or not the
+        # field would read *available*. What actually catches that is the
+        # module-identity assertion in the test file, which fails loudly rather
+        # than going green on a lie (measured, #2128).
         return bool(entitlement_service.is_entitled(_ROOMS_FEATURE_ID))
     except Exception:  # noqa: BLE001 — a roster must never 500 over a capability bit
         logger.warning(
