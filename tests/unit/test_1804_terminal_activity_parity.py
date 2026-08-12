@@ -106,9 +106,48 @@ ALLOWLIST = {
         "and the backlog are full. Admission-path: nothing was admitted, so "
         "execute_task step 3 never opened a dispatch activity."
     ),
+    (
+        "client_portal/service.py",
+        "_fail_unstarted_execution",
+    ): (
+        "ent#286 pre-created streaming row. It exists so the client has an id "
+        "to subscribe to BEFORE the turn is dispatched, and this helper only "
+        "runs when the background turn raised before execute_task saw that id "
+        "(a resume lock held by another tab, a thread-resolution failure) — so "
+        "step 3 never opened a dispatch activity. Same lifecycle position as "
+        "the admission-path entries above. If execute_task DID run, its own "
+        "terminal wins the CAS and this write is a no-op."
+    ),
 }
 
-_SCAN_DIRS = ("services", "routers")
+# Directories walked by the guard. NOT free-form: `test_scan_covers_every_
+# package_that_writes_a_terminal` below proves this tuple still covers every
+# backend package that actually calls a terminal writer, so adopting a module
+# into OSS core cannot silently leave it unguarded (which is exactly what
+# happened to `client_portal/` between ent#356 and ent#286 — see #2131).
+_SCAN_DIRS = ("services", "routers", "client_portal")
+
+# Top-level backend locations that contain a terminal-writer call but are
+# deliberately NOT scanned, each with the reason. The coverage test consults
+# this, so an unlisted newcomer fails rather than being skipped.
+_UNSCANNED_JUSTIFIED = {
+    "database.py": (
+        "The db facade DELEGATES update_execution_status to ScheduleOperations "
+        "(Invariant #2). It is the persistence layer the contract is defined "
+        "against, not a caller with an activity obligation — scanning it would "
+        "flag the plumbing that every legitimate closer runs through."
+    ),
+}
+
+# The ONLY exclusion, and it needs a reason: the submodule is optional
+# (`update = none`, #1443) and owns its own migration/test tracks, so a guard
+# that reached into it would be stronger on core-team clones than on OSS ones
+# — i.e. not a guard. Nothing else is excluded on purpose: `migrations/` was
+# briefly in this tuple and taken back out, because Alembic revisions write
+# raw `op.execute("UPDATE ...")` rather than calling the db facade, so they
+# cannot match TERMINAL_WRITERS anyway — the exclusion bought nothing and
+# would have silently swallowed the surprising case if one ever appeared.
+_COVERAGE_EXCLUDED_PREFIXES = ("enterprise/",)
 
 
 def _call_attrs(node: ast.AST) -> set:
@@ -187,6 +226,62 @@ class TestTerminalWriteActivityParity:
     def test_allowlist_entries_carry_a_justification(self):
         thin = [k for k, v in ALLOWLIST.items() if len(v.strip()) < 60]
         assert not thin, f"#1804 allowlist entries need a real justification: {thin}"
+
+    def test_scan_covers_every_package_that_writes_a_terminal(self):
+        """The guard's blind spot is its own directory list.
+
+        #1804 anchored the contract on terminal WRITES rather than on emission,
+        which survives a writer moving between functions or files. It does not
+        survive a writer appearing in a package nobody thought to walk — and
+        that is not hypothetical: ent#356 moved `client_portal/` into OSS core,
+        ent#286 added `_fail_unstarted_execution` to it, and the guard reported
+        green throughout because `_SCAN_DIRS` was written when that code lived
+        in the submodule (#2131).
+
+        So this asserts the coverage assumption directly: every backend
+        location holding a terminal-writer call is either scanned or carries a
+        written justification for why it is not.
+        """
+        offenders = {}
+        for path in sorted(_BACKEND.rglob("*.py")):
+            rel = path.relative_to(_BACKEND).as_posix()
+            if rel.startswith(_COVERAGE_EXCLUDED_PREFIXES):
+                continue
+            try:
+                tree = ast.parse(path.read_text())
+            except SyntaxError:  # pragma: no cover - a parse failure is its own bug
+                continue
+            if not any(
+                (c.func.attr if isinstance(c.func, ast.Attribute) else
+                 c.func.id if isinstance(c.func, ast.Name) else None) in TERMINAL_WRITERS
+                for c in ast.walk(tree) if isinstance(c, ast.Call)
+            ):
+                continue
+            top = rel.split("/")[0]
+            if top in _SCAN_DIRS or top in _UNSCANNED_JUSTIFIED:
+                continue
+            offenders.setdefault(top, []).append(rel)
+
+        assert not offenders, (
+            "#1804/#2131: these backend locations call a terminal writer but the "
+            "parity guard never walks them, so the close contract is unenforced "
+            "there. Add the package to _SCAN_DIRS (preferred), or add it to "
+            "_UNSCANNED_JUSTIFIED with a reason:\n"
+            + "\n".join(f"  {k}: {sorted(v)}" for k, v in sorted(offenders.items()))
+        )
+
+    def test_unscanned_justifications_are_real_and_still_apply(self):
+        """A justification for a file that moved is not a justification."""
+        problems = []
+        for rel, why in _UNSCANNED_JUSTIFIED.items():
+            if not (_BACKEND / rel).exists():
+                problems.append(f"{rel} (missing)")
+            elif len(why.strip()) < 60:
+                problems.append(f"{rel} (justification too thin)")
+        assert not problems, (
+            "#2131 _UNSCANNED_JUSTIFIED entries need to exist and explain "
+            f"themselves: {problems}"
+        )
 
     def test_the_guard_actually_fires(self):
         """A guard nobody has seen fail is a guard nobody knows works."""
