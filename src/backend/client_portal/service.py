@@ -1103,15 +1103,26 @@ def clear_turn_inflight(session_id: str, execution_id: str | None = None) -> Non
             return
         current = client.get(_inflight_key(session_id))
         current = current.decode() if isinstance(current, bytes) else current
-        if execution_id is None or current == execution_id:
+
+        if execution_id is None:
+            # No id given: clear whatever this session currently names. The
+            # reverse key has to be resolved from the session marker here —
+            # skipping it leaves the SSE proxy reporting a finished turn as
+            # still in flight until the TTL expires.
+            if current:
+                client.delete(_inflight_exec_key(current))
+            client.delete(_inflight_key(session_id))
+            return
+
+        if current == execution_id:
             client.delete(_inflight_key(session_id))
         elif current:
             logger.info(
                 "portal: leaving inflight marker for session %s — it now names %s, not %s",
                 session_id, current, execution_id,
             )
-        if execution_id:
-            client.delete(_inflight_exec_key(execution_id))
+        # Always safe: this key names only the turn being cleared.
+        client.delete(_inflight_exec_key(execution_id))
     except Exception as e:  # noqa: BLE001
         logger.warning("portal inflight DEL failed for %s: %s", session_id, e)
 
