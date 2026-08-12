@@ -369,22 +369,60 @@ traffic can reach the durable queue (#2048) — a cron-driven agent will read ~0
 under M1 below and pick from its `pull_eligible` column *before* flipping
 anything; a week of soak on a cron-only agent measures nothing.
 
-Then run M4 + M6 + M7 on the pilot for the 7 days *preceding* the flip and keep
-the output. Without a baseline, a 4% success-rate dip during the soak is
+Then run M4 + M6 + M7 + M9 on the pilot for the 7 days *preceding* the flip and
+keep the output. Without a baseline, a 4% success-rate dip during the soak is
 unattributable and the write-up degrades to "felt fine".
+
+**Record the baseline as a breakdown by failure class, never as one percentage.**
+A single "7.7% failed" is unusable, because the classes move independently and
+only one of them is about pull:
+
+```sql
+SELECT CASE
+         WHEN error LIKE 'Subscription usage limit%'      THEN 'quota'
+         WHEN error LIKE 'Task execution timed out%'      THEN 'caller_timeout'
+         WHEN error LIKE '%recovered by watchdog%'        THEN 'lost_result'
+         ELSE COALESCE(LEFT(error, 60), '(none)')
+       END AS failure_class,
+       COUNT(*) AS n
+FROM schedule_executions
+WHERE agent_name = '<agent>' AND status = 'failed'
+  AND started_at::timestamptz > now() - interval '7 days'
+GROUP BY 1 ORDER BY 2 DESC;
+```
+
+- **`lost_result`** — the class pull exists to remove (the agent finished, the
+  result never landed, the watchdog wrote the row off hours later). This count is
+  the number the soak is trying to drive to zero. Under pull the same event
+  surfaces as M5 instead: lease expiry → re-queue of the same `execution_id` →
+  poison-park at cap.
+- **`caller_timeout`** — see the M6 warning below. Do **not** expect these to
+  reappear under treatment; their disappearance proves nothing.
+- **`quota`** — exogenous. Exclude from the M6 comparison entirely, and check M1
+  volume mid-window: a quota-exhausted stretch starves the treatment arm and you
+  end up soaking a near-idle agent. Don't open the window right before a weekly
+  subscription reset.
 
 ### The set
 
-| ID | Answers | AC |
-|----|---------|-----|
-| M1 | Is pull actually carrying load? | coverage (the #1766 premise) |
-| M2 | Push/pull split over time | coverage |
-| M3 | Is the agent over its configured concurrency? | no slot/backlog drift |
-| M4 | Lost or phantom executions | no lost/phantom |
-| M5 | Re-delivery + poison-park behaviour | leases behave as designed |
-| M6 | Outcome regression vs baseline | no regression |
-| M7 | Canary state | canary green throughout |
-| M8 | Queue starvation | no drift |
+| ID | Answers | AC | When to run |
+|----|---------|-----|-------------|
+| M1 | Is pull actually carrying load? | coverage (the #1766 premise) | once + mid-window |
+| M2 | Push/pull split over time | coverage | once at end |
+| M3 | Is the agent over its configured concurrency? | no slot/backlog drift | **sampled, at peak** |
+| M4 | Lost or phantom executions | no lost/phantom | **sampled, hourly** |
+| M5 | Re-delivery + poison-park behaviour | leases behave as designed | once at end |
+| M6 | Outcome regression vs baseline | no regression | baseline + end |
+| M7 | Canary state | canary green throughout | once at end |
+| M8 | Queue starvation | no drift | once at end |
+| M9 | Caller-side timeouts (M6 counter-check) | no regression | baseline + end |
+
+**M3 and M4 must be sampled, not run once.** M3 counts *concurrent* leased rows,
+so a single daily run lands off-peak and never sees the overbooking it exists to
+catch. M4 is subtler: its predicate is `status IN ('queued','running')`, and
+`cleanup_service`'s stale sweep eventually fails stranded rows to `failed` — at
+which point they leave the predicate and M4 reads clean. **A soak that genuinely
+lost executions reports zero rows if M4 is only run at the end.**
 
 **M1 — is the pull path carrying anything?** The single most important query: if
 `pulled` is ~0 the soak is measuring nothing and everything downstream is void.
@@ -546,21 +584,43 @@ ORDER BY created_at DESC;
 Every row at the cap in the first query must have a `poison-` item here. A park
 with no alert is a silent drop — treat as a blocker.
 
-**M6 — outcome regression.** Compare against the pre-flight baseline.
+**M6 — outcome regression.** Compare against the pre-flight baseline. Bound this
+on the flip timestamp — **not** a rolling `interval '7 days'`, which straddles the
+flip and blends control rows into the treatment number, diluting the exact
+regression the query exists to find.
 
 ```sql
+-- :flip_ts = the moment the pilot agent was RECREATED (not the backend restart)
 SELECT status, COUNT(*),
        ROUND(AVG(duration_ms)::numeric, 0) AS avg_ms,
        ROUND(SUM(cost)::numeric, 4)        AS cost
 FROM schedule_executions
 WHERE agent_name = '<agent>'
-  AND started_at::timestamptz > now() - interval '7 days'
+  AND started_at::timestamptz >= :flip_ts
 GROUP BY 1 ORDER BY 2 DESC;
 ```
 
 Watch for a `failed` share above baseline and for `duration_ms` inflation (pull
 adds up to one poll interval of latency by design — the worker idles up to 15s
 between claims, so a small p50 rise is expected, a p95 blow-up is not).
+
+> **M6 alone will over-credit pull. Do not read a lower `failed` share as a win.**
+>
+> Under push, a caller that gives up (`chat_with_agent` sequential, or any `/task`
+> caller with a short budget) kills the turn and the row is written `failed` with
+> `Task execution timed out after N seconds`. Under pull that budget no longer
+> governs the row: the lease is `execution_timeout_seconds + SLOT_TTL_BUFFER`, so
+> the work runs to its natural end and the row lands **`success`** — while the
+> caller still got nothing in time. Nothing improved; the failure moved off the
+> row.
+>
+> The row cannot tell you this happened. `schedule_executions` never records the
+> caller's timeout budget, so no query over it can separate "pull fixed it" from
+> "pull outran the caller." A pilot whose baseline carries a meaningful
+> `caller_timeout` share can therefore book a large, entirely fake M6 improvement.
+>
+> **The check is M9 (caller-side), and it must be baselined before the flip** —
+> afterwards the information no longer exists.
 
 **M7 — canary.** With E-05 lease-excluded (this branch), violations should be
 genuinely rare.
@@ -588,12 +648,52 @@ A steadily rising `oldest_s` with healthy workers means claims are failing;
 with busy workers it just means the agent is undersized — check M3 before
 concluding.
 
+**M9 — caller-side timeouts (the M6 counter-check).** The only observable that
+survives the flip. Under push, a caller giving up produces BOTH a
+`[Chat Timeout Recovery]` line in the MCP server and a `failed` row; under pull it
+produces the log line and a `success` row. So the two counts **diverging** is the
+signature of the M6 trap, and neither count alone is interpretable.
+
+```bash
+# Durable copy (Vector, survives container log rotation — #1871 bounds docker logs)
+docker exec trinity-vector sh -c \
+  "grep -h 'Chat Timeout Recovery' /data/logs/platform.json" \
+  | jq -r 'select(.message | contains("<agent>")) | .timestamp' | sort | uniq -c
+
+# Live tail equivalent
+docker logs trinity-mcp-server 2>&1 | grep -c "Chat Timeout Recovery.*<agent>"
+```
+
+Read it against M6's `caller_timeout` baseline class:
+
+| M9 log lines | M6 `caller_timeout` rows | Reading |
+|---|---|---|
+| ~baseline | ~0 (was N) | **The trap.** Callers still time out; the rows just stopped recording it. No improvement. |
+| ~0 | ~0 | Genuine — callers now get answers inside their budget. |
+| ↑ above baseline | ~0 | Regression: pull's poll interval pushed more callers past their budget. |
+
+**Limitation, stated so it isn't rediscovered mid-analysis:** true
+receipt→terminal wall-clock — the number the calling orchestrator actually feels
+(`PULL_PILOT_946_SOAK.md` §3a) — is recorded **nowhere** on the platform. The row
+carries no caller budget and no receipt timestamp. If that number is wanted, the
+caller has to log it, and that instrumentation must exist *before* the flip.
+
 ### Abort criteria
 
 Stop the soak and revert if any of these hold: a non-empty **M4**; **M3**
 `leased_running > cap`; a critical canary violation on the pilot (**M7**); a
 park with no operator alert (**M5**); or a `failed` share materially above the
-pre-flight baseline (**M6**).
+pre-flight baseline (**M6**), **excluding the `quota` class** — a subscription
+limit is exogenous and reverting pull will not fix it.
+
+M9 is **not** an abort criterion; it is the interpretation guard on M6. A soak
+that ends with a *better* M6 and an unchanged M9 has not demonstrated anything
+and must not be written up as a pass.
+
+**A pre-existing critical violation on the candidate pilot has to be resolved or
+explicitly carved out before the flip**, not during the window — otherwise the
+soak trips its own abort rule at t=0, or worse, trains the operator to ignore the
+one signal the "canary green throughout" AC rests on.
 
 ### Rollback
 
