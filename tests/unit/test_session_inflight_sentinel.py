@@ -46,6 +46,11 @@ pytestmark = pytest.mark.unit
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SESSIONS_ROUTER_PY = _PROJECT_ROOT / "src" / "backend" / "routers" / "sessions.py"
+# ent#358: the resume/inflight engine moved out of the router into a service
+# shared with Workspace chat. `_read`/`_tree` stay on the router (the call site,
+# the sentinel wrap and the serializer still live there); `_service_read`/
+# `_service_tree` read the moved engine.
+_TURN_SERVICE_PY = _PROJECT_ROOT / "src" / "backend" / "services" / "session_turn_service.py"
 
 
 def _read() -> str:
@@ -55,6 +60,19 @@ def _read() -> str:
 
 def _tree() -> ast.Module:
     return ast.parse(_read())
+
+
+def _router_tree() -> ast.Module:
+    return _tree()
+
+
+def _service_read() -> str:
+    assert _TURN_SERVICE_PY.is_file(), f"missing {_TURN_SERVICE_PY}"
+    return _TURN_SERVICE_PY.read_text()
+
+
+def _service_tree() -> ast.Module:
+    return ast.parse(_service_read())
 
 
 def _find_func(tree: ast.Module, name: str):
@@ -80,8 +98,7 @@ def test_session_lock_key_helper_returns_canonical_prefix():
     """Pin `session_lock:{agent_name}:{claude_session_id}`. Frontend
     debug scripts and ops dashboards may grep this prefix; renames break
     them silently."""
-    tree = _tree()
-    fn = _find_func(tree, "_session_lock_key")
+    fn = _find_func(_service_tree(), "session_lock_key")
     assert fn is not None, "_session_lock_key helper missing"
 
     # Body should be a single Return with an f-string whose literal portion
@@ -96,8 +113,7 @@ def test_session_lock_key_helper_returns_canonical_prefix():
 
 def test_session_inflight_key_helper_returns_canonical_prefix():
     """Sentinel namespace `session_inflight:` distinct from the lock."""
-    tree = _tree()
-    fn = _find_func(tree, "_session_inflight_key")
+    fn = _find_func(_service_tree(), "session_inflight_key")
     assert fn is not None, "_session_inflight_key helper missing"
     src = ast.unparse(fn)
     assert "session_inflight:" in src, (
@@ -108,8 +124,8 @@ def test_session_inflight_key_helper_returns_canonical_prefix():
 def test_inflight_namespace_is_distinct_from_lock_namespace():
     """The two primitives serve different purposes — if their prefixes
     collide we'd serialise cold-turn JSONL writes by accident. Pin the
-    separation."""
-    src = _read()
+    separation. Both key helpers live in the shared engine (ent#358)."""
+    src = _service_read()
     # Both prefixes must appear as standalone literals.
     assert re.search(r'"session_lock:', src) is not None
     assert re.search(r'"session_inflight:', src) is not None
@@ -128,7 +144,7 @@ def test_resume_lock_uses_lock_key_helper_in_init():
     string instead of calling the helper, a future rename of the helper
     leaves them split-brained. The fix is one shared call site."""
     tree = _tree()
-    cls = _find_class(tree, "_ResumeLock")
+    cls = _find_class(_service_tree(), "ResumeLock")
     assert cls is not None, "_ResumeLock class missing"
 
     init = None
@@ -139,7 +155,7 @@ def test_resume_lock_uses_lock_key_helper_in_init():
     assert init is not None, "_ResumeLock.__init__ missing"
 
     src = ast.unparse(init)
-    assert "_session_lock_key" in src, (
+    assert "session_lock_key" in src, (
         "_ResumeLock.__init__ must construct its key via _session_lock_key(); "
         "do not duplicate the string literal in this class."
     )
@@ -149,7 +165,7 @@ def test_resume_lock_init_accepts_ttl_seconds_kwarg():
     """Dynamic TTL is essential for long turns — without it, the static
     300s lock TTL drops mid-turn and allows concurrent JSONL writes."""
     tree = _tree()
-    cls = _find_class(tree, "_ResumeLock")
+    cls = _find_class(_service_tree(), "ResumeLock")
     init = next(
         n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"
     )
@@ -196,18 +212,20 @@ def test_send_session_message_wraps_turn_in_inflight_sentinel():
 
 
 def test_send_session_message_passes_dynamic_ttl_to_resume_lock():
-    """`_ResumeLock` must be constructed with `ttl_seconds=lock_ttl`
-    (sourced from `_resolve_lock_ttl(name)`) — not the old static
-    constant."""
-    tree = _tree()
+    """The turn must run under a dynamic TTL sourced from
+    `_resolve_lock_ttl(name)` — not the old static constant. ent#358 moved the
+    lock itself into the shared engine, so the router now hands the resolved
+    TTL to `run_resumable_turn(lock_ttl=…)`; the property under test (a
+    per-agent TTL reaches the lock) is unchanged."""
+    tree = _router_tree()
     handler = _find_func(tree, "send_session_message")
     src = ast.unparse(handler)
     assert "_resolve_lock_ttl" in src, (
         "send_session_message must resolve a dynamic TTL via _resolve_lock_ttl(name)"
     )
-    assert "ttl_seconds=lock_ttl" in src or "ttl_seconds=" in src, (
-        "send_session_message must pass ttl_seconds= to _ResumeLock; the "
-        "static 300s constant has been removed."
+    assert "lock_ttl=lock_ttl" in src or "ttl_seconds=" in src, (
+        "send_session_message must pass the resolved TTL through to the resume "
+        "lock; the static 300s constant has been removed."
     )
 
 
@@ -273,15 +291,15 @@ def _exec_resolve_lock_ttl(timeout_value=None, raises=False):
     and the function body only depends on ``db.get_execution_timeout``,
     ``logger``, and the constant.
     """
-    tree = _tree()
-    fn = _find_func(tree, "_resolve_lock_ttl")
-    assert fn is not None, "_resolve_lock_ttl missing"
+    tree = _service_tree()
+    fn = _find_func(tree, "resolve_lock_ttl")
+    assert fn is not None, "resolve_lock_ttl missing"
 
     # Extract the constant from the module source so the test is pinned
     # to the actual value, not a duplicated literal.
-    src = _read()
-    match = re.search(r"_LOCK_TTL_FALLBACK\s*=\s*(\d+)", src)
-    assert match is not None, "_LOCK_TTL_FALLBACK constant missing"
+    src = _service_read()
+    match = re.search(r"^LOCK_TTL_FALLBACK\s*=\s*(\d+)", src, re.M)
+    assert match is not None, "LOCK_TTL_FALLBACK constant missing"
     fallback = int(match.group(1))
 
     # Build a minimal namespace for exec.
@@ -296,12 +314,12 @@ def _exec_resolve_lock_ttl(timeout_value=None, raises=False):
             pass
 
     ns = {
-        "_LOCK_TTL_FALLBACK": fallback,
+        "LOCK_TTL_FALLBACK": fallback,
         "db": _DB(),
         "logger": _Logger(),
     }
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "<ast>", "exec"), ns)
-    return ns["_resolve_lock_ttl"]("any-agent"), fallback
+    return ns["resolve_lock_ttl"]("any-agent"), fallback
 
 
 def test_resolve_lock_ttl_adds_30s_buffer():

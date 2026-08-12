@@ -716,6 +716,15 @@ async def portal_chat(agent_name: str, message: str, email: str,
         # Uniform 404 — never disclose whether an agent the client can't reach exists.
         raise ClientPortalError(404, "Agent not found")
 
+    # Imported here, like every other service this module reaches for: the
+    # portal package is imported during app construction, and the execution
+    # stack it pulls in is heavier than this module's own import cost.
+    from services.session_turn_service import (
+        ResumeLockBusy,
+        run_resumable_turn,
+        supports_session_resume,
+    )
+
     session_id = _resolve_session_id(agent_name, email, session_id)
     client_message = message  # what the client typed — persisted verbatim (no context/manifest)
 
@@ -730,10 +739,35 @@ async def portal_chat(agent_name: str, message: str, email: str,
         logger.warning("portal title-state read failed for session %s: %s", session_id, e)
         is_first_exchange = False
 
+    # ent#358: does this thread reattach to a live Claude session?
+    #
+    # A resumed turn carries the real thing — tool results, mid-skill state,
+    # reasoning state — so the history prefix below is not just redundant there,
+    # it is worse than redundant: it re-pays for context the session already
+    # holds, and a summary of a conversation sitting next to the conversation
+    # invites the model to treat the summary as the record.
+    #
+    # The capability check runs HERE rather than being left to the engine
+    # because it decides how the message is composed. Passing None through when
+    # the runtime has no `--resume` (Codex) keeps the engine's own check a no-op
+    # — it only looks when there is a cached id to drop.
+    cached_uuid = None
+    try:
+        cached_uuid = db.get_cached_claude_session_id(session_id)
+    except Exception as e:  # noqa: BLE001 — a cache read must never block a turn
+        logger.warning("portal resume-cache read failed for session %s: %s", session_id, e)
+    if cached_uuid and not supports_session_resume(agent_name):
+        cached_uuid = None
+    resuming = bool(cached_uuid)
+
     # #78: feed the recent conversation back so the agent remembers across turns.
     # History is persisted AFTER each turn, so this read never includes the
     # current one; scoped to THIS session so threads stay isolated. Best-effort —
     # a history hiccup must not block the chat.
+    #
+    # Still the ONLY continuity a cold turn has (a brand-new thread, a reaped
+    # JSONL, a runtime without `--resume`), so it is read unconditionally and
+    # kept for the cold-retry message even when this turn resumes.
     history = []
     try:
         history = db.get_portal_messages(
@@ -774,14 +808,18 @@ async def portal_chat(agent_name: str, message: str, email: str,
         )
     # Compose the execution message: prior conversation (context) → file manifest
     # → the client's actual message. Each section is optional.
-    prefix = ""
-    if convo_context:
-        prefix += convo_context + "\n\n"
+    #
+    # ent#358: two messages, not one. The turn message drops the history block
+    # when resuming (the session already remembers); `cold_message` always keeps
+    # it, and is what the engine sends if the resume fails and it retries cold —
+    # the retry has no session memory, so it needs the replay back.
+    manifest_prefix = ""
     if manifest_parts:
-        prefix += "[Client Portal] " + " ".join(manifest_parts) + "\n\n"
-    message = prefix + message
+        manifest_prefix = "[Client Portal] " + " ".join(manifest_parts) + "\n\n"
+    history_prefix = (convo_context + "\n\n") if convo_context else ""
 
-    from services.task_execution_service import get_task_execution_service
+    cold_message = history_prefix + manifest_prefix + message
+    message = (manifest_prefix + message) if resuming else cold_message
 
     # ent#212: inject the client's durable per-user memory (MEM-001) + the #1205
     # public-channel custom instructions into the turn, so a delegated end user
@@ -795,15 +833,41 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # `verified_email and not is_group` gate is trivially satisfied here.
     system_prompt = _build_portal_system_prompt(agent_name, email)
 
-    result = await get_task_execution_service().execute_task(
-        agent_name=agent_name,
-        message=message,
-        triggered_by="public",          # external-caller path; "Public" analytics bucket
-        source_user_email=email,
-        timeout_seconds=300,
-        images=images or None,          # referenced inbox images as vision input (#78)
-        system_prompt=system_prompt,
-    )
+    # ent#358: the shared resume engine — cached uuid → per-(agent, uuid) lock →
+    # `persist_session=True` → one cold retry if the JSONL is gone. Identical to
+    # what the Session surface ran, which is the whole point: absorbing that
+    # surface must not change how a conversation remembers.
+    def _on_resume_failure() -> None:
+        try:
+            db.clear_cached_claude_session_id(session_id)
+            failures = db.mark_resume_failure(session_id)
+            logger.warning(
+                "portal resume fallback: agent=%s session=%s stale_uuid=%s failures=%d",
+                agent_name, session_id, cached_uuid, failures,
+            )
+        except Exception as e:  # noqa: BLE001 — bookkeeping must not eat the retry
+            logger.warning("portal resume-failure bookkeeping failed for %s: %s", session_id, e)
+
+    try:
+        turn = await run_resumable_turn(
+            agent_name=agent_name,
+            session_key=session_id,
+            message=message,
+            cold_message=cold_message,
+            cached_uuid=cached_uuid,
+            triggered_by="public",      # external-caller path; "Public" analytics bucket
+            on_resume_failure=_on_resume_failure,
+            source_user_email=email,
+            timeout_seconds=300,
+            images=images or None,      # referenced inbox images as vision input (#78)
+            system_prompt=system_prompt,
+        )
+    except ResumeLockBusy:
+        # A concurrent turn holds this thread's lock. Same shape as the "agent
+        # is busy" answer below — the client retries, nothing is lost.
+        raise ClientPortalError(429, "This conversation is already handling a message. Please try again shortly.")
+
+    result = turn.result
 
     status = getattr(result, "status", None)
     if status in ("failed", "cancelled"):
@@ -813,6 +877,21 @@ async def portal_chat(agent_name: str, message: str, email: str,
         if "timed out" in err:
             raise ClientPortalError(504, "The request timed out — try a simpler message.")
         raise ClientPortalError(502, "The agent couldn't respond (it may be offline). Please try again.")
+
+    # Cache the id the turn ran under so the NEXT turn resumes it.
+    #
+    # AFTER the success gate, matching the Session surface: a failed turn can
+    # still have written a JSONL, and caching that id would point every later
+    # turn at a session whose last act was to fail. Best-effort — a failed cache
+    # write costs continuity on the following turn (it goes cold), never this
+    # turn's already-billed answer.
+    if turn.real_uuid and turn.real_uuid != cached_uuid:
+        try:
+            db.update_cached_claude_session_id(session_id, turn.real_uuid)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "portal resume-cache write failed for session %s: %s", session_id, e
+            )
 
     reply = getattr(result, "response", "") or ""
     cost = getattr(result, "cost", None)

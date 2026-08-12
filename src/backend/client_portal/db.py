@@ -14,6 +14,7 @@ from sqlalchemy import select, func, and_, or_, text, bindparam
 
 from db.engine import get_engine, make_insert
 from db.tables import system_settings, agent_sharing, agent_ownership, users
+from utils.helpers import utc_now_iso
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -292,6 +293,92 @@ def touch_portal_session(session_id: str, now: str, added: int = 2,
     )
     with get_engine().begin() as conn:
         conn.execute(stmt, {"now": now, "added": added, "title": title_if_empty, "id": session_id})
+
+
+# --- Thread resume state (ent#358) --------------------------------------------
+# A Workspace thread reattaches to a Claude session the way a Session-tab row
+# does. These four accessors are the portal-side twin of the `agent_sessions`
+# ones in db/sessions.py; the engine that consumes them is shared
+# (services/session_turn_service.py).
+
+def get_cached_claude_session_id(session_id: str) -> Optional[str]:
+    """The Claude session id this thread last ran under, or None for a thread
+    that has never completed a turn (its next turn is cold)."""
+    stmt = text(
+        "SELECT cached_claude_session_id FROM enterprise_portal_sessions WHERE id = :id"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {"id": session_id}).first()
+        return row[0] if row and row[0] else None
+
+
+def update_cached_claude_session_id(session_id: str, claude_session_id: str) -> None:
+    """Cache the id the turn actually ran under, and reset the failure streak —
+    a successful turn is the definition of a healthy resume chain."""
+    stmt = text(
+        "UPDATE enterprise_portal_sessions "
+        "SET cached_claude_session_id = :uuid, "
+        "    last_resume_at = :now, "
+        "    consecutive_resume_failures = 0 "
+        "WHERE id = :id"
+    )
+    with get_engine().begin() as conn:
+        conn.execute(stmt, {"uuid": claude_session_id, "now": utc_now_iso(), "id": session_id})
+
+
+def clear_cached_claude_session_id(session_id: str) -> None:
+    """Drop a stale cached id so the next turn runs cold. Called when Claude
+    reports the JSONL is gone — reaped, or never written."""
+    stmt = text(
+        "UPDATE enterprise_portal_sessions "
+        "SET cached_claude_session_id = NULL WHERE id = :id"
+    )
+    with get_engine().begin() as conn:
+        conn.execute(stmt, {"id": session_id})
+
+
+def mark_resume_failure(session_id: str) -> int:
+    """Increment and return the consecutive-resume-failure count.
+
+    Observability, not control flow: nothing throttles on this number. A thread
+    whose count climbs is one whose JSONL keeps disappearing, which is worth
+    seeing in the row rather than only in logs.
+    """
+    with get_engine().begin() as conn:
+        conn.execute(
+            # COALESCE, though both migrations backfill 0: a hand-patched or
+            # partially-migrated column would otherwise turn a counter bump into
+            # a NULL, and this runs on the failure path where nothing is watching.
+            text(
+                "UPDATE enterprise_portal_sessions "
+                "SET consecutive_resume_failures = COALESCE(consecutive_resume_failures, 0) + 1 "
+                "WHERE id = :id"
+            ),
+            {"id": session_id},
+        )
+        row = conn.execute(
+            text(
+                "SELECT consecutive_resume_failures "
+                "FROM enterprise_portal_sessions WHERE id = :id"
+            ),
+            {"id": session_id},
+        ).first()
+        return int(row[0]) if row and row[0] is not None else 0
+
+
+def list_active_claude_session_ids(agent_name: str) -> list[str]:
+    """Every Claude session id a Workspace thread of this agent still points at.
+
+    The JSONL reaper unions this with the `agent_sessions` keep set. Without it
+    the sweep deletes live Workspace JSONLs an hour after they are written, and
+    every thread silently goes cold — the failure has no error, only amnesia.
+    """
+    stmt = text(
+        "SELECT DISTINCT cached_claude_session_id FROM enterprise_portal_sessions "
+        "WHERE agent_name = :agent AND cached_claude_session_id IS NOT NULL"
+    )
+    with get_engine().connect() as conn:
+        return [r[0] for r in conn.execute(stmt, {"agent": agent_name}).all() if r[0]]
 
 
 # --- Blocked client identities (ent#281) --------------------------------------

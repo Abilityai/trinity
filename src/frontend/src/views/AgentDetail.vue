@@ -140,46 +140,29 @@
               <TasksPanel :agent-name="agent.name" :agent-status="agent.status" :highlight-execution-id="route.query.execution" :initial-message="taskPrefillMessage" @create-schedule="handleCreateSchedule" />
             </div>
 
-            <!-- Chat Tab Content (#1112: unified Chat tab with a Session-mode toggle).
-                 v-show keeps the active surface mounted so state/polling survives tab switches. -->
+            <!-- Chat Tab Content.
+                 ent#358: the Session-mode toggle is gone — continuous
+                 conversation lives in the Workspace now, which resumes the same
+                 way this surface used to (see the "Continue in Workspace" link
+                 below). What stays here is the stateless per-turn chat, which
+                 the Workspace does NOT replace.
+                 v-show keeps the surface mounted so state/polling survives tab switches. -->
             <div v-show="activeTab === 'chat'" class="flex-1 overflow-hidden flex flex-col">
-              <!-- Session-mode toggle — hidden when the Session surface is unavailable
-                   (feature flag off, or Codex runtime without --resume machinery). -->
-              <div
-                v-if="sessionAvailable"
-                class="flex items-center justify-end gap-2 px-3 py-1.5 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40"
-              >
-                <span
-                  class="text-xs text-gray-500 dark:text-gray-400"
-                  title="Session mode resumes the same Claude session each turn (--resume), preserving memory, tool-result state, and reasoning across turns. Off = stateless, ephemeral per-turn chat."
-                >Session mode</span>
-                <button
-                  type="button"
-                  role="switch"
-                  :aria-checked="effectiveChatMode === 'session'"
-                  @click="toggleChatMode"
-                  :class="[
-                    effectiveChatMode === 'session' ? 'bg-action-primary-600' : 'bg-gray-300 dark:bg-gray-600',
-                    'relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-action-primary-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800'
-                  ]"
+              <div class="flex items-center justify-end gap-2 px-3 py-1.5 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40">
+                <span class="text-xs text-gray-500 dark:text-gray-400">
+                  Stateless chat — each message starts fresh.
+                </span>
+                <router-link
+                  :to="{ path: '/workspace', query: { agent: agent.name } }"
+                  class="text-xs font-medium text-action-primary-600 hover:text-action-primary-700 dark:text-action-primary-400 dark:hover:text-action-primary-300"
+                  title="The Workspace keeps one continuous conversation — memory, tool results and reasoning carry across turns."
                 >
-                  <span
-                    :class="[
-                      effectiveChatMode === 'session' ? 'translate-x-4' : 'translate-x-0',
-                      'pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out'
-                    ]"
-                  />
-                </button>
+                  Continue in Workspace →
+                </router-link>
               </div>
 
               <div class="flex-1 overflow-hidden">
-                <SessionPanel
-                  v-if="effectiveChatMode === 'session'"
-                  :agent-name="agent.name"
-                  :agent-status="agent.status"
-                />
                 <ChatPanel
-                  v-else
                   :agent-name="agent.name"
                   :agent-status="agent.status"
                   :resume-session-id="resumeSessionId"
@@ -390,7 +373,6 @@ import TerminalPanelContent from '../components/TerminalPanelContent.vue'
 import SkillsPanel from '../components/SkillsPanel.vue'
 import PlaybooksPanel from '../components/PlaybooksPanel.vue'
 import ChatPanel from '../components/ChatPanel.vue'
-import SessionPanel from '../components/SessionPanel.vue'  // SESSION_TAB_2026-04 Phase 3
 import NeverminedPanel from '../components/NeverminedPanel.vue'
 import A2aPanel from '../components/A2aPanel.vue'  // trinity-enterprise#158: A2A config tab
 import OverflowTabs from '../components/OverflowTabs.vue'  // #1114: tab overflow dropdown
@@ -421,35 +403,43 @@ const activeTab = ref('overview')  // #1107: Overview is the default landing tab
 // Single source — referenced in onMounted + onActivated (#1107: dedupe + overview).
 const DEEP_LINK_TABS = ['overview', 'tasks', 'chat', 'reports', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'settings', 'info']
 // Legacy ?tab= ids that moved/renamed — keep old deep-links working (#1108).
-// #1112: the Session tab collapsed into Chat, so ?tab=session resolves to chat
-// (the session-mode toggle, not the tab id, selects the surface).
-const TAB_ALIASES = { guardrails: 'settings', session: 'chat' }
+// ent#358: `session` is no longer an alias — it REDIRECTS (see below). The
+// surface it named lives in the Workspace now, so resolving it to a local tab
+// would silently land the user on stateless chat while their link asked for a
+// continuous conversation.
+const TAB_ALIASES = { guardrails: 'settings' }
 // Resolve a ?tab= value to a live tab id (applying aliases), or null if unknown.
 function resolveDeepLinkTab(requested) {
   const resolved = TAB_ALIASES[requested] || requested
   return DEEP_LINK_TABS.includes(resolved) ? resolved : null
 }
-// Apply the ?tab=/?resumeSessionId= deep-link landing. Called from BOTH onMounted
-// AND onActivated: AgentDetail is KeepAlive-cached (App.vue), so the common path —
-// open agent (caches it), click into an execution, "Continue as Chat" back — hits
-// onActivated, NOT onMounted. Handling the resume ONLY in onMounted silently dropped
-// it: routeForcedMode stayed null, effectiveChatMode fell back to the default 'session'
-// mode, SessionPanel rendered instead of ChatPanel, and the resume id was discarded
-// with no error and no banner (EXEC-023 #1672). One shared fn so the two hooks can't
-// drift again.
+// Apply the ?tab= deep-link landing. Called from BOTH onMounted AND onActivated:
+// AgentDetail is KeepAlive-cached (App.vue), so the common path — open agent
+// (caches it), click into an execution, "Continue as Chat" back — hits
+// onActivated, NOT onMounted. Handling it in onMounted alone silently dropped
+// the landing with no error and no banner (EXEC-023 #1672). One shared fn so the
+// two hooks can't drift again.
+//
 function applyDeepLinkRouting() {
   if (route.query.tab) {
     const resolvedTab = resolveDeepLinkTab(route.query.tab)
     if (resolvedTab) activeTab.value = resolvedTab
-    // #1112: a legacy ?tab=session deep-link expresses session-mode intent.
-    if (route.query.tab === 'session') chatMode.value = 'session'
   }
-  // #1112/#1672: an execution resume (ExecutionDetail "Continue as Chat") carries a
-  // claude_session_id only the legacy ChatPanel resumes — force legacy for this
-  // landing WITHOUT persisting to the user's saved preference. Clear the transient
-  // override on any non-resume landing so a prior resume doesn't stick legacy mode
-  // for the rest of the SPA session (the KeepAlive instance outlives the navigation).
-  routeForcedMode.value = resumeSessionId.value ? 'legacy' : null
+}
+
+// ent#358: a `?tab=session` link (or any older session deep link) asked for the
+// continuous-conversation surface. That surface is the Workspace now, so send
+// them there — query-preserving, minus the tab key that no longer names
+// anything here. `replace`, not `push`: the retired URL should not sit in the
+// back stack waiting to bounce them again.
+//
+// Called FIRST in both lifecycle hooks and returns true when it navigates, so
+// the caller can skip setting up a view that is about to unmount.
+function redirectRetiredSessionLink() {
+  if (route.query.tab !== 'session') return false
+  const { tab, ...rest } = route.query
+  router.replace({ path: '/workspace', query: { ...rest, agent: route.params.name } })
+  return true
 }
 // Tabs that flex-fill the viewport (page enters h-screen fullscreen layout).
 // #1112: Chat (both session and legacy modes render ChatMessages, which depends
@@ -491,29 +481,12 @@ const tokenStats = ref(null)
 const resumeSessionId = computed(() => route.query.resumeSessionId || null)
 const resumeExecutionId = computed(() => route.query.executionId || null)
 
-// #1112: Chat-tab session-mode toggle. The unified Chat tab renders SessionPanel
-// (--resume continuity) or the legacy ChatPanel (stateless). The user's choice
-// persists per-user via localStorage (one preference across agents), default ON.
-const CHAT_MODE_KEY = 'trinity.chatMode'
-const chatMode = ref(localStorage.getItem(CHAT_MODE_KEY) === 'legacy' ? 'legacy' : 'session')
-// Transient routing override (NOT persisted): execution-resume must land on the
-// legacy ChatPanel, which owns resumeSessionId — without changing the saved pref.
-const routeForcedMode = ref(null)
-// Session surface is available only when the platform flag is on AND the runtime
-// has --resume machinery (Codex does not, #1187).
-const sessionAvailable = computed(
-  () => sessionsStore.sessionTabEnabled && agent.value?.runtime !== 'codex'
-)
-const effectiveChatMode = computed(() => {
-  if (!sessionAvailable.value) return 'legacy'      // feature-flag / codex fallback
-  if (routeForcedMode.value) return routeForcedMode.value
-  return chatMode.value
-})
-function toggleChatMode() {
-  routeForcedMode.value = null                       // user intent overrides routing
-  chatMode.value = effectiveChatMode.value === 'session' ? 'legacy' : 'session'
-  try { localStorage.setItem(CHAT_MODE_KEY, chatMode.value) } catch (e) { /* ignore */ }
-}
+// ent#358: the Chat tab no longer forks between a session surface and a
+// stateless one. Continuous conversation moved to the Workspace, which runs the
+// same --resume engine; what remains here is the stateless per-turn chat that
+// ExecutionDetail's "Continue as Chat" resumes into (EXEC-023 #1672), so the
+// mode toggle, its localStorage preference and the transient routing override
+// all went with the surface they selected.
 
 // Initialize composables
 const { notification, showNotification, dismissNotification } = useNotification()
@@ -837,10 +810,9 @@ const visibleTabs = computed(() => {
     { id: 'chat', label: 'Chat' }
   ]
 
-  // #1112: the Session tab collapsed into the single Chat tab above. The
-  // Session surface is now reached via the Chat tab's "Session mode" toggle
-  // (default ON), gated on the same feature-flag + non-Codex-runtime condition
-  // (see `sessionAvailable`). No separate tab entry.
+  // #1112 collapsed the Session tab into the Chat tab above; ent#358 retired
+  // the surface entirely — continuous conversation is the Workspace's job now.
+  // The Chat tab keeps stateless per-turn chat and links across.
 
   // Dashboard tab - only show if agent has a dashboard.yaml file (insert after Tasks)
   if (hasDashboard.value) {
@@ -1289,6 +1261,10 @@ function stopAllPolling() {
 
 // Initialize on mount
 onMounted(async () => {
+  // ent#358: a retired session deep-link navigates away — don't spend a mount's
+  // worth of requests on a view that is unmounting.
+  if (redirectRetiredSessionLink()) return
+
   // Load agent first (other calls may depend on agent data)
   await loadAgent()
 
@@ -1316,6 +1292,10 @@ onMounted(async () => {
 
 // onActivated fires when component is shown (after being cached by KeepAlive)
 onActivated(async () => {
+  // ent#358: same guard as onMounted — AgentDetail is KeepAlive-cached, so a
+  // session deep-link opened on an already-visited agent lands here instead.
+  if (redirectRetiredSessionLink()) return
+
   // Restart polling when returning to this view
   startAllPolling()
   // Refresh agent data

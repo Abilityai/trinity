@@ -64,3 +64,28 @@ export function planHintDisplay(hints, expanded, limit = HINT_COLLAPSE_LIMIT) {
     collapsible,
   }
 }
+
+// ent#358: resolve a `/workspace?agent=<name>` landing.
+//
+// This is where anything that used to point at the Agent Detail Session surface
+// arrives after the redirect. Such a link names an AGENT, never a thread, so
+// "which conversation" has to be decided here: the caller's most recent thread
+// with that agent, or a fresh one when there is none. `?new=1` forces fresh.
+//
+// Returns null when the query names no agent, or one the caller cannot reach.
+// Not an error: the roster is the authority, and a stale or hand-edited link
+// should land in the Workspace rather than in a dead end.
+//
+// `threads` is expected most-recent-first (as `fetchAllSessions` returns it),
+// so the first match is the latest.
+export function resolveAgentLanding({ agent, forceNew = false, agents = [], threads = [] } = {}) {
+  if (!agent || typeof agent !== 'string') return null
+  if (!Array.isArray(agents) || !agents.some((a) => a && a.name === agent)) return null
+  if (forceNew) return { agentName: agent, sessionId: null }
+
+  const latest = (Array.isArray(threads) ? threads : []).find((t) => t && t.agent_name === agent)
+  return {
+    agentName: agent,
+    sessionId: latest ? (latest.id || latest.session_id || null) : null,
+  }
+}

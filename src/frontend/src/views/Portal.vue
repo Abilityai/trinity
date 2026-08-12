@@ -168,6 +168,7 @@ import PortalConversation from '@/components/portal/PortalConversation.vue'
 import PortalBriefing from '@/components/portal/PortalBriefing.vue'
 import PortalFilesPanel from '@/components/portal/PortalFilesPanel.vue'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
+import { resolveAgentLanding } from '@/components/portal/portalUtils'
 
 const store = useClientPortalStore()
 const route = useRoute()
@@ -289,6 +290,27 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
   if (known) { activeAgentName.value = known.agent_name; pendingSession.value = sid; convGen.value++ }
 })
 
+// ent#358: `/workspace?agent=<name>` opens that agent's conversation directly —
+// the landing spot for anything that used to point at the Agent Detail Session
+// surface. The decision itself (which agent, which thread) is a pure function in
+// portalUtils so it can be tested without mounting the shell.
+function resolveAgentQuery() {
+  const landing = resolveAgentLanding({
+    agent: route.query.agent,
+    forceNew: !!route.query.new,
+    agents: store.agents,
+    threads: threads.value,
+  })
+  if (!landing) return false
+
+  activeAgentName.value = landing.agentName
+  prefill.value = ''
+  convGen.value++
+  pendingSession.value = landing.sessionId
+  if (landing.sessionId) router.replace(`/workspace/c/${landing.sessionId}`)
+  return true
+}
+
 async function bootstrap() {
   await store.fetchRoster()
   await refreshThreads()
@@ -298,7 +320,9 @@ async function bootstrap() {
     if (known) { activeAgentName.value = known.agent_name; pendingSession.value = sid }
     else pendingSession.value = sid   // let the conversation resolve/load it
     convGen.value++
+    return
   }
+  resolveAgentQuery()
 }
 
 onMounted(async () => { if (store.isClientSignedIn) await bootstrap() })

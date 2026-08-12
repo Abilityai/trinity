@@ -465,6 +465,11 @@ enterprise_portal_sessions = Table(
     Column("created_at", Text),
     Column("last_message_at", Text),
     Column("message_count", Integer),
+    # ent#358 — resume state, mirroring agent_sessions: the Workspace thread
+    # reattaches to its Claude session instead of replaying history as text.
+    Column("cached_claude_session_id", Text),
+    Column("last_resume_at", Text),
+    Column("consecutive_resume_failures", Integer),
 )
 
 enterprise_portal_messages = Table(

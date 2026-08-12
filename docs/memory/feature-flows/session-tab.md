@@ -1,6 +1,15 @@
 # Feature: Session Tab — `--resume`-default chat surface
 
 > **Status**: ✅ Implemented (2026-05-01), GA (2026-05-04). Default ON (`session_tab_enabled` flag, settable to false to disable platform-wide).
+> **⚠️ SURFACE RETIRED (2026-08-12, abilityai/trinity-enterprise#358).** The Agent
+> Detail Session surface no longer exists — `SessionPanel.vue` and the Chat tab's
+> Session-mode toggle are deleted, and `?tab=session` redirects to
+> `/workspace?agent=<name>`. Everything else in this document is still live: the
+> tables, the six endpoints, the turn semantics, the JSONL reaper, and the
+> `--resume` engine itself, which now lives in
+> `services/session_turn_service.py` and backs **both** conversation surfaces.
+> The Workspace is the one that renders — read this flow for the engine, and
+> [workspace-absorbs-session.md](workspace-absorbs-session.md) for the move.
 > **Design doc**: [docs/planning/SESSION_TAB_2026-04.md](../../planning/SESSION_TAB_2026-04.md) — read first if you're touching anything in this flow.
 
 ## Overview
@@ -244,3 +253,4 @@ These items are NOT bugs — they are design boundaries we explicitly chose, def
 - [parallel-headless-execution.md](parallel-headless-execution.md) — the `task_execution_service.execute_task` shared pipeline this surface plugs into.
 - [continue-execution-as-chat.md](continue-execution-as-chat.md) — the EXEC-023 `resume_session_id` plumbing this surface inherits from.
 - [websocket-event-bus.md](websocket-event-bus.md) — RELIABILITY-003 transport for any WebSocket events this flow emits.
+- [workspace-absorbs-session.md](workspace-absorbs-session.md) — ent#358: how the Workspace took over this surface, and the continuity parity that had to land first.

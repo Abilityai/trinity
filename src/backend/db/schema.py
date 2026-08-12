@@ -519,6 +519,11 @@ TABLES = {
     # scoped) nor `public_chat_messages` (link_id scoped) fits; hence a small
     # dedicated pair keyed by (agent, client email).
     # -------------------------------------------------------------------------
+    # ent#358: the last three columns make a Workspace thread RESUMABLE — the
+    # same trio `agent_sessions` carries. A thread now reattaches to its Claude
+    # session (`claude --print --resume <uuid>`) instead of replaying history as
+    # a prompt prefix, which is what let the Workspace absorb the Session
+    # surface without downgrading continuity.
     "enterprise_portal_sessions": """
         CREATE TABLE IF NOT EXISTS enterprise_portal_sessions (
             id TEXT PRIMARY KEY,
@@ -527,7 +532,10 @@ TABLES = {
             title TEXT,
             created_at TEXT NOT NULL,
             last_message_at TEXT,
-            message_count INTEGER NOT NULL DEFAULT 0
+            message_count INTEGER NOT NULL DEFAULT 0,
+            cached_claude_session_id TEXT,
+            last_resume_at TEXT,
+            consecutive_resume_failures INTEGER NOT NULL DEFAULT 0
         )
     """,
 
