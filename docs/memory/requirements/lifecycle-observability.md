@@ -56,14 +56,30 @@
   exceeds the threshold, logging at ERROR and raising an `operator_queue`
   alarm naming the setting, the window, the window's source
   (`db-row`/`code-default`), and the counts. The prune proceeds only after
-  an admin acknowledges it. Covers all **7** window-driven prunes.
+  an admin acknowledges it. Covers all **8** window-driven prunes
+  (`RETENTION_OPS_KEYS` has carried 8 since #1296 added
+  `agent_reminders_retention_days`; `cleanup_service` has 8 `_guard_allows`
+  sites). `cleanup_service` is not the only consumer:
+  `GET /api/settings/retention` re-runs the same `evaluate` live so the
+  Settings panel can offer an approve control, and that call is unwrapped.
 - **Why**: #1638 fixed one *mechanism* (a retroactive default change).
   It left every other route to a destructive window open — an unvalidated
   `PUT /api/settings/ops/config`, a future default regression, a direct DB
   write. The guard does not care how the bad window arrived.
 - **Acknowledgement**: `POST /api/settings/retention/acknowledge`
   (admin **and** human-only) is **the gate**; the operator-queue item is an
-  alarm and authorizes nothing. An ack is **bound to the window in force**
+  alarm and authorizes nothing — which is what makes it safe to RETRY a
+  failed alarm write every cycle for the life of the refusal episode
+  (#1834; the memo used to be written before the attempt, so one failed
+  write permanently suppressed its own retry and the durable half of the
+  signal was lost until a restart or a window change). There is deliberately
+  no give-up: this sink is the platform's own DB, whose outages routinely
+  outlast any budget, so abandoning would ship #1834's symptom inside
+  #1834's fix. The per-attempt WARNING escalates **once** to ERROR past
+  `ALARM_ESCALATION_AGE_SECONDS`. 'Delivered' means the call did not raise,
+  never 'a row was inserted' — `create_item` returns the id of the row that
+  exists, so a second worker's conflict no-op would otherwise retry forever.
+  An ack is **bound to the window in force**
   (409 on mismatch — approving a prune at 30 days does not approve one at
   1 day) and **single-use** (consumed once the prune runs, so the guard
   re-arms and one approval can never authorize an unboundedly larger
@@ -82,10 +98,27 @@
   raising is a code change with a reviewer, not a text box. Surfaced read-only at
   `GET /api/settings/retention` → `guard.max_rows`. Per-sweep floors: rows →
   the constant, schedules → 100, agents → **0**.
-- **Fail-closed**: any error — the count throws, the ack lookup throws —
-  **refuses** the prune. A guard that fails open is worse than no guard
-  because it manufactures confidence. (There is no 'threshold unreadable'
-  path: the threshold is a constant, so that failure mode does not exist.)
+- **Fail-closed**: any error **refuses** the prune — the count throws
+  (`count_failed`), the count cannot be compared to the threshold
+  (`count_uninterpretable`, #1833), the count is negative, i.e. an error
+  sentinel rather than a count (`count_negative`, #1833 — `-1 <= threshold`
+  is True and `-1` is the module's own 'unknown' value, so this was a real
+  fail-OPEN), the ack lookup throws (`ack_lookup_failed`). A guard that
+  fails open is worse than no guard because it manufactures confidence —
+  and one that RAISES instead of refusing keeps the data (control never
+  reaches `db.prune_*`) while losing the alarm, so #1833 moved the
+  comparisons inside the try rather than documenting the raise. The
+  comparison result is type-checked, not coerced: a `__le__` returning a
+  truthy non-bool would make a bare `bool(...)` True and authorize a prune
+  on a count the guard never understood. `verdict.candidates` is always an
+  int (`-1` = unknown) because it reaches the alarm message, the alarm
+  `context` via `json.dumps`, and `GET /api/settings/retention`, where a
+  bare `NaN` is valid to Python and rejected by a browser's `JSON.parse`.
+  A refusal an ack cannot clear says so instead of prescribing one, and the
+  endpoint reports it under `blocked_sweeps` rather than showing a clean
+  'nothing pending' for a sweep that is blocked forever. (There is no
+  'threshold unreadable' path: the threshold is a constant, so that failure
+  mode does not exist.)
 - **Expected behaviour**: a legitimate first-enable of retention on a
   mature install *will* trip the guard once, and that is intended — the
   guard cannot distinguish a large legitimate backlog from a mistyped

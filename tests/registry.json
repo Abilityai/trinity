@@ -2146,6 +2146,31 @@
         "unit"
       ],
       "description": "#2114 subscription-shadow guard: arm_subscription_auth_guard trigger matrix (baseline-token arms; empty-string token, non-Claude runtime, terminal-auth, platform-key, .env-managed auth all inert), override-layer semantics (hot-reload window without baseline, extra-last precedence, explicit override beats arm), observability (per-key WARNING memo with active invalidation via re-add, mirror deliberately unguarded while env_drift_report carries suppressed_for_spawn incl. keys absent from .env — the widened iteration set), and the DELIBERATELY UNFIXED stale-.env-OAuth residual pinned by name. Standalone module load by path (test_1999 idiom); names-only logging asserted (stale value must not appear in caplog.text)."
+    },
+    {
+      "file": "unit/test_1833_retention_guard_contract.py",
+      "feature": "#1833",
+      "added": "2026-08-12",
+      "categories": [
+        "backend",
+        "unit",
+        "retention",
+        "reliability"
+      ],
+      "description": "#1833 retention blast-radius guard contract: `evaluate` refuses instead of raising. Every uninterpretable count shape (None/str/object/Mock/dict/list/bytes/tuple/type) -> `count_uninterpretable`; a `__le__` (or `__lt__`) returning a TRUTHY NON-BOOL refuses — the fail-OPEN a `bool()`-only fix would ship, and the one test that goes red against it; negative counts refuse as error sentinels (`count_negative`, previously allowed through); the three error reasons stay distinguishable; `verdict.candidates` is always an int so the alarm context survives `json.dumps(allow_nan=False)`; NaN/float behaviour deliberately unchanged; the refusal reaches the operator queue through the real `_guard_allows`; an undecidable refusal does not prescribe an acknowledgement no ack path ever reads; and the second, UNWRAPPED consumer `GET /api/settings/retention` returns 200 with the sweep under `blocked_sweeps` instead of 500-ing the approve panel. Doubles only, no backend."
+    },
+    {
+      "file": "unit/test_1834_retention_alarm_retry.py",
+      "feature": "#1834",
+      "added": "2026-08-12",
+      "categories": [
+        "backend",
+        "unit",
+        "retention",
+        "reliability",
+        "operator-queue"
+      ],
+      "description": "#1834 refusal-alarm retry: a failed `create_operator_queue_item` is re-attempted every cycle for the life of the refusal episode (the memo used to be written before the attempt, permanently suppressing its own retry). Covers the retry through two REAL `_run_cleanup_inner` cycles (the issue's literal claim is 'no later CYCLE retries it'); never-give-up + escalate-exactly-once, with the budget read from `ALARM_ESCALATION_AGE_SECONDS` rather than hard-coded and the clock driven via the injectable `_RG._clock`; the transition ERROR still firing once per episode while retrying; freshness keyed on (window, REASON) so #1833's new signal is not swallowed; delivery meaning 'did not raise' under ON CONFLICT DO NOTHING; two-worker convergence on one alarm; and both directions of the #1644 invariant that the queue item authorizes nothing. Doubles only, no backend."
     }
   ]
 }

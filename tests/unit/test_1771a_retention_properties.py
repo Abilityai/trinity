@@ -479,9 +479,12 @@ class TestAlarmTransitions:
         the #1638 failure mode repeated. It must equally not UNDER-fire — a
         narrowed window is a new blast radius and has to re-alarm.
 
-        The expected count is recomputed from the memo's contract (fresh iff
-        `_last_refused[key] != window`), never read back from the implementation's
-        own bookkeeping.
+        The expected count is recomputed from the memo's contract, never read
+        back from the implementation's own bookkeeping. Since #1834 freshness keys
+        on `(window, reason)` rather than window alone; every refusal generated
+        here carries the same `over_threshold` reason, so the window-only oracle
+        below remains exactly equivalent — stated rather than assumed, because a
+        future op that varied the reason would silently need a second term.
         """
         key = "execution_row_retention_days"
         with isolated_guard() as db:

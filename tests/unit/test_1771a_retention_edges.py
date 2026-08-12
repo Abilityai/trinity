@@ -7,7 +7,7 @@ surfaces #1644's suite executes but never asserts:
 * exactly-at-threshold decisions (`<=` at `retention_guard.py:183`) — the existing
   suite only probes 12-vs-1000 and 1001-vs-1000, so the one comparison that decides
   whether a prune runs is never tested at its own boundary;
-* the `_last_refused` transition memo, the alarm's log LEVEL, its COUNT, and its
+* the refusal-episode transition memo, the alarm's log LEVEL, its COUNT, and its
   PAYLOAD — `announce_refusal`/`note_allowed`/`_alarm_id` all run today
   (`test_1644:177`, `test_cleanup_inner_sweeps:105`) but nothing asserts what they
   did, which is precisely the state in which a mutant survives;
@@ -353,7 +353,7 @@ class TestAckLifecycle:
 
 
 # ---------------------------------------------------------------------------
-# C — announce_refusal / _last_refused / note_allowed / _alarm_id
+# C — announce_refusal / _refusal_episodes / note_allowed / _alarm_id
 # ---------------------------------------------------------------------------
 
 
