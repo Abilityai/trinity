@@ -82,6 +82,13 @@ def portal(monkeypatch):
     monkeypatch.setattr(core_db, "create_task_execution", _create)
     monkeypatch.setattr(core_db, "get_agent_subscription_id", lambda a: "sub-1")
     monkeypatch.setattr(core_db, "get_execution", lambda eid: state.row)
+
+    # Default: the agent is up. A turn is refused for a stopped agent, so every
+    # test that isn't ABOUT that needs the healthy case; the ones that are
+    # override this.
+    import services.docker_service as docker_service
+    monkeypatch.setattr(docker_service, "get_agent_container",
+                        lambda name: types.SimpleNamespace(status="running"))
     return svc, state
 
 
@@ -321,3 +328,49 @@ def test_the_marker_is_set_while_the_turn_is_still_running(portal, redis_stub, m
     _run(_drain(svc.start_portal_turn(AGENT, "hello", EMAIL, SESSION)))
 
     assert seen["during"] == EXEC_ID
+
+
+def test_a_stopped_agent_is_refused_before_anything_is_created(portal, monkeypatch):
+    """A turn the agent cannot run must fail at dispatch, not after.
+
+    Accepting it returned 202, so the client believed a turn had started; the
+    stream then 503'd, leaving an orphan execution row, a doomed background
+    task, and a client with nothing to show the user. Worse, a client that
+    treats a failed stream as a failed dispatch re-sends — and the observed
+    result was the same message persisted twice, 320ms apart.
+    """
+    svc, state = portal
+    import services.docker_service as docker_service
+    monkeypatch.setattr(docker_service, "get_agent_container",
+                        lambda name: types.SimpleNamespace(status="exited"))
+
+    with pytest.raises(svc.ClientPortalError) as excinfo:
+        _run(svc.start_portal_turn(AGENT, "hello", EMAIL, SESSION))
+
+    assert excinfo.value.status_code == 502
+    assert "offline" in excinfo.value.detail.lower()
+    assert state.created == [], "an execution row was created for a turn that cannot run"
+
+
+def test_a_running_agent_still_dispatches(portal, monkeypatch):
+    svc, state = portal
+    import services.docker_service as docker_service
+    monkeypatch.setattr(docker_service, "get_agent_container",
+                        lambda name: types.SimpleNamespace(status="running"))
+
+    out = _run(svc.start_portal_turn(AGENT, "hello", EMAIL, SESSION))
+    assert out["execution_id"] == EXEC_ID
+
+
+def test_a_docker_hiccup_does_not_block_a_turn(portal, monkeypatch):
+    """Fail OPEN on the running-check: Docker being briefly unreadable is not
+    evidence the agent is down, and refusing a healthy turn is the worse error."""
+    svc, state = portal
+    import services.docker_service as docker_service
+
+    def _boom(name):
+        raise RuntimeError("docker socket down")
+
+    monkeypatch.setattr(docker_service, "get_agent_container", _boom)
+    out = _run(svc.start_portal_turn(AGENT, "hello", EMAIL, SESSION))
+    assert out["execution_id"] == EXEC_ID

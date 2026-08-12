@@ -336,14 +336,27 @@ async function deliver(text) {
   const startedNew = currentSessionId.value === null
   try {
     // ent#286: stream the turn so tool activity is visible while it runs.
-    // Falls back to the synchronous send on ANY streaming failure — an older
-    // backend without the route, a proxy that buffers SSE, a stopped agent.
-    // The fallback is the point: streaming is an improvement to how a turn is
-    // watched, never a new way for one to fail.
+    //
+    // The fallback to the synchronous send is allowed in exactly ONE case: the
+    // DISPATCH itself failed, so no turn exists. Once dispatch returns, the turn
+    // is running on the server and re-sending would run it a second time —
+    // double spend, double side effects. Anything that goes wrong after that
+    // point is a failure to WATCH the turn, and the answer is to go and read
+    // its result, never to send it again.
     let data = null
+    let started = null
     try {
-      const started = await store.startPortalChat(props.agent.name, text, currentSessionId.value)
-      if (started?.session_id && currentSessionId.value !== started.session_id) {
+      started = await store.startPortalChat(props.agent.name, text, currentSessionId.value)
+    } catch (dispatchErr) {
+      // Nothing was created. The synchronous path is a safe retry, and it is
+      // also what an older backend without this route needs.
+      // eslint-disable-next-line no-console
+      console.debug('[workspace] streaming dispatch unavailable, using sync send', dispatchErr)
+      data = await store.sendPortalChat(props.agent.name, text, currentSessionId.value)
+    }
+
+    if (started) {
+      if (started.session_id && currentSessionId.value !== started.session_id) {
         // Adopt the thread NOW rather than at the end, so a refresh mid-turn
         // reattaches to it instead of opening a second conversation.
         currentSessionId.value = started.session_id
@@ -351,18 +364,22 @@ async function deliver(text) {
       }
       streaming.value = true
       liveActivity.value = []
-      await store.streamPortalExecution(props.agent.name, started.execution_id, onStreamEvent)
+      try {
+        await store.streamPortalExecution(props.agent.name, started.execution_id, onStreamEvent)
+      } catch (streamErr) {
+        // Watching failed; the turn did not. Fall through and read its result.
+        // eslint-disable-next-line no-console
+        console.debug('[workspace] lost the stream, reading the result instead', streamErr)
+      } finally {
+        streaming.value = false
+        liveActivity.value = []
+      }
       data = await awaitPersistedReply(started.session_id || currentSessionId.value)
-    } catch (streamErr) {
-      // eslint-disable-next-line no-console
-      console.debug('[workspace] streaming unavailable, falling back to sync send', streamErr)
-      data = null
-    } finally {
-      streaming.value = false
-      liveActivity.value = []
+      if (!data) {
+        // The turn produced no reply within the wait. Report it — do NOT re-send.
+        throw new Error('The agent did not reply. Check the conversation in a moment.')
+      }
     }
-
-    if (!data) data = await store.sendPortalChat(props.agent.name, text, currentSessionId.value)
 
     messages.value.push({ role: 'assistant', content: data.response || '(no response)' })
     if (voiceMode.value && ttsEnabled.value && data.response) speak(data.response)

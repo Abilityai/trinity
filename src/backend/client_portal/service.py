@@ -1093,6 +1093,25 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
     if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
 
+    # Refuse a turn the agent cannot possibly run, BEFORE anything is created.
+    #
+    # Without this the dispatch answers 202 for a stopped agent, the client
+    # subscribes and gets 503, and a doomed background turn plus an orphan
+    # execution row are left behind — and the client, having been told the turn
+    # started, has no error to show. The synchronous path surfaces exactly this
+    # as a 502, so this says the same thing at the same moment in the flow.
+    from services.docker_service import get_agent_container
+    try:
+        container = get_agent_container(agent_name)
+        running = bool(container) and container.status == "running"
+    except Exception as e:  # noqa: BLE001 — a Docker hiccup must not fail-closed
+        logger.warning("portal running-check failed for %s: %s", agent_name, e)
+        running = True
+    if not running:
+        raise ClientPortalError(
+            502, "The agent couldn't respond (it may be offline). Please try again."
+        )
+
     # Resolve the thread up front so the client can adopt it immediately rather
     # than waiting for the turn; `portal_chat` resolving it again is idempotent.
     session_id = _resolve_session_id(agent_name, email, session_id)
