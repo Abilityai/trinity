@@ -106,8 +106,6 @@ def _compute_new_gitignore(check_id: str, current: str) -> str:
         # Ensure a .gitignore exists with the canonical pattern list.
         base = current if current.strip() else ""
         return _append_missing(base, list(_GITIGNORE_PATTERNS))
-    if check_id == "G-002":
-        return _append_missing(current, list(_GITIGNORE_PATTERNS))
     if check_id == "G-001":
         removed = _remove_blanket_claude(current)
         return _append_missing(removed, _G001_REPLACEMENTS)

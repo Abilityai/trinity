@@ -112,14 +112,14 @@ confidently-wrong green: of 25 bundled templates, 12 declare `credentials: {}`
 and 13 declare nothing, so a legacy template with `${SLACK_BOT_TOKEN}` in
 `.mcp.json.template` would render "Ready — this agent needs no credentials".
 The codebase already treats undeclared-but-referenced as a HARD compatibility
-failure (K-002 → T-015).
+failure (T-015; the duplicate K-002 was retired in #2137).
 
 A fourth state therefore exists: when `credentials:` yields **zero** records and
 `.mcp.json.template` / `.env.example` yield operator-suppliable `${VAR}`s, the
 UI says *"this template hasn't declared its credentials"* and lists the observed
 names as **advisory** rows. They are an anti-green signal only — never
 `required`, never counted in `blocking`. `.mcp.json.template` does not become a
-declaration authority; the schema's authoring note forbids it and K-002 polices
+declaration authority; the schema's authoring note forbids it and T-015 polices
 the divergence.
 
 ### Tri-states, preserved end to end

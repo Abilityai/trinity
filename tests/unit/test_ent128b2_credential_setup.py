@@ -1213,7 +1213,7 @@ def test_test_codex_is_the_enriched_reference_example():
 
 def test_no_reference_example_asks_for_a_platform_injected_variable():
     """G3 amendment: an example using `GEMINI_API_KEY` would violate the very rule
-    the guide documents, and would make a K-002 fixture pass VACUOUSLY."""
+    the guide documents, and would make a T-015 fixture pass VACUOUSLY."""
     from services.template_service import _is_platform_injected
 
     for name, data in _bundled_templates():
