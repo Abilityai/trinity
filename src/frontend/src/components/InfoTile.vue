@@ -115,7 +115,12 @@ defineProps({
   background: var(--gv-tile, rgba(255, 255, 255, 0.9));
   border: 1px solid var(--gv-border, #e5e7eb);
   box-shadow: var(--gv-tile-shadow, 0 1px 2px rgba(0, 0, 0, 0.06));
-  overflow: hidden;
+  /* Deliberately NOT `overflow: hidden`: this box is the peg's containing
+     block, so clipping here amputates the half-inset peg into a 16px sliver
+     jammed against the left border with the glyph sliced down the middle —
+     the defect the tiles shipped with. `.it-body` already clips the content
+     that actually needs it, and `AgentTile`'s avatar overhangs its own tile
+     the same way (`gridLayout.GAP_X` is sized for exactly that). */
 }
 .it.is-error {
   border-color: var(--gv-danger-border, rgba(220, 38, 38, 0.35));
