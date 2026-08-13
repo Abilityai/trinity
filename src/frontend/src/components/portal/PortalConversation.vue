@@ -417,7 +417,12 @@ async function deliver(text) {
       currentSessionId.value = data.session_id
       emit('session-adopted', data.session_id)
     }
-    if (startedNew || currentSessionId.value) emit('sessions-changed')
+    // ent#359: carry WHICH thread finished. The shell marks a completed turn
+    // read only when the user is still looking at it — this event fires even
+    // after the user has navigated away (the send is an async closure that
+    // outlives the component), and without the id the shell cannot tell the two
+    // apart, so it cleared the badge for a reply the user never saw.
+    if (startedNew || currentSessionId.value) emit('sessions-changed', currentSessionId.value)
     attachments.value = []
     return true
   } catch (err) {

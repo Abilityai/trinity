@@ -70,6 +70,19 @@ export function totalUnread(threads) {
     .reduce((sum, t) => sum + (Number(t?.unread) || 0), 0)
 }
 
+// ent#359: whether a turn that just finished should clear its unread badge.
+//
+// Only when the user is still looking at that thread. The conversation's send
+// is an async closure that outlives its component, so the "turn done" event
+// fires even after the user navigated away mid-turn — which is the main way a
+// reply legitimately arrives unseen. Marking read unconditionally cleared
+// exactly the badge the feature exists to show, making it near-unreachable in
+// normal use (open a chat, and it is marked read; stay, and it is marked read;
+// leave, and it was marked read anyway).
+export function shouldMarkTurnRead(completedSessionId, openSessionId) {
+  return !!completedSessionId && completedSessionId === openSessionId
+}
+
 // Normalise a room onto the thread shape the sidebar renders, so one list
 // component handles both kinds.
 //

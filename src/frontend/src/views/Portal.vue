@@ -212,7 +212,7 @@ import PortalFilesPanel from '@/components/portal/PortalFilesPanel.vue'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
-import { resolveAgentLanding } from '@/components/portal/portalUtils'
+import { resolveAgentLanding, shouldMarkTurnRead } from '@/components/portal/portalUtils'
 
 const store = useClientPortalStore()
 const route = useRoute()
@@ -405,8 +405,14 @@ async function refreshThreads() {
 // definition. Without this, the reply the user just watched arrive would land
 // after the read cursor set at dispatch and badge the chat they are sitting in
 // — a notification for something they are actively reading.
-function onConversationTurnDone() {
-  markRead('thread', activeSessionId.value || pendingSession.value)
+function onConversationTurnDone(sessionId) {
+  // Only if the user is STILL in that thread. The conversation's send is an
+  // async closure that outlives the component, so this fires even when they
+  // have navigated away mid-turn — which is the main way a reply legitimately
+  // arrives unseen. Marking read unconditionally cleared exactly the badge the
+  // feature exists to show, and made it near-unreachable in normal use.
+  const open = activeSessionId.value || pendingSession.value
+  if (shouldMarkTurnRead(sessionId, open)) markRead('thread', sessionId)
   return refreshThreads()
 }
 

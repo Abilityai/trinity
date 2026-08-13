@@ -14,7 +14,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   partitionStarred, unreadByAgent, totalUnread, rowAgents, groupThreadsByDate,
-  normalizeRoomRow,
+  normalizeRoomRow, shouldMarkTurnRead,
 } from '../../src/components/portal/portalUtils'
 
 const iso = (d) => new Date(d).toISOString()
@@ -113,6 +113,30 @@ describe('normalising a room onto the thread shape', () => {
       id: 'r1', created_at: '2026-01-01T00:00:00Z', last_message_at: '2026-02-02T00:00:00Z',
     })
     expect(row.last_message_at).toBe('2026-02-02T00:00:00Z')
+  })
+})
+
+describe('clearing a badge when a turn finishes', () => {
+  // The gate that makes the badge reachable at all. Without it the feature was
+  // near-dead: open a chat and it is marked read; stay in it and it is marked
+  // read; navigate away mid-turn and it was STILL marked read, because the
+  // send is an async closure that outlives the component and fired the same
+  // event either way.
+  it('clears it when the user is still in that thread', () => {
+    expect(shouldMarkTurnRead('t1', 't1')).toBe(true)
+  })
+
+  it('leaves it when the user moved to another chat mid-turn', () => {
+    expect(shouldMarkTurnRead('t1', 't2')).toBe(false)
+  })
+
+  it('leaves it when the user moved to a blank new chat', () => {
+    expect(shouldMarkTurnRead('t1', null)).toBe(false)
+  })
+
+  it('is false for a turn with no thread id rather than matching a null open one', () => {
+    expect(shouldMarkTurnRead(null, null)).toBe(false)
+    expect(shouldMarkTurnRead(undefined, undefined)).toBe(false)
   })
 })
 
