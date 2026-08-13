@@ -94,7 +94,7 @@ The **Logs** tab on the Agent Detail page shows the container's stdout/stderr wi
 
 ## What is the compatibility report on the Overview tab, and can Trinity fix what it finds?
 
-Once an agent is running, Trinity checks its workspace against roughly 100 best-practice conventions — a valid `template.yaml`, a non-gitignored `.claude/` directory, accidentally committed secrets, and more — and shows the findings in the Agent Detail **Overview** tab, ranked HARD / SOFT / INFO. It is purely advisory and never blocks creation or deployment; Claude-specific checks are skipped for Codex and Gemini agents. The ten gitignore-related findings offer a one-click **Fix** button that rewrites the agent's `.gitignore` in place — the change stays uncommitted until the agent's next git sync. Use **Re-run analysis** to re-check at any time. See [Creating Agents](../agents/creating-agents.md).
+Once an agent is running, Trinity checks its workspace against 88 best-practice conventions — a valid `template.yaml`, a non-gitignored `.claude/` directory, accidentally committed secrets, and more — and shows the findings in the Agent Detail **Overview** tab, ranked HARD / SOFT / INFO. It is purely advisory and never blocks creation or deployment; Claude-specific checks are skipped for Codex and Gemini agents. The nine gitignore-related findings offer a one-click **Fix** button that rewrites the agent's `.gitignore` in place — the change stays uncommitted until the agent's next git sync. Use **Re-run analysis** to re-check at any time. See [Creating Agents](../agents/creating-agents.md).
 
 ## I already have a GitHub repo — how do I turn it into an agent?
 

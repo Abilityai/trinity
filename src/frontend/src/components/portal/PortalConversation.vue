@@ -248,9 +248,14 @@ async function reattach(executionId) {
   elapsed.value = 0
   clearInterval(elapsedTimer)
   elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
+  // The baseline is what is on screen right now: this client reloaded INTO a
+  // running turn, so every assistant message it can see predates that turn.
+  // Passing nothing made `assistants.length > undefined` false on every poll,
+  // so the reply never rendered and the user had to reload a second time.
+  const baseline = messages.value.filter((m) => m.role === 'assistant').length
   try {
     await store.streamPortalExecution(props.agent.name, executionId, onStreamEvent)
-    const data = await awaitPersistedReply(currentSessionId.value)
+    const data = await awaitPersistedReply(currentSessionId.value, baseline)
     if (data?.response) messages.value.push({ role: 'assistant', content: data.response })
   } catch { /* the reply lands in history on the next load */ }
   finally {
@@ -448,10 +453,16 @@ function onStreamEvent(evt) {
 // first poll — the answer to the wrong question, while a second turn ran unseen.
 const REPLY_POLL_MS = 700
 const REPLY_IDLE_GIVE_UP = 8      // ~5.6s of the server saying "nothing running"
+// An absolute ceiling on top of the server's answer. The marker is TTL-bounded
+// server-side, but a stuck or unreachable marker must not leave the composer
+// disabled forever — this caps the spinner at a little beyond the longest turn.
+const REPLY_MAX_WAIT_MS = 6 * 60 * 1000
 
 async function awaitPersistedReply(sessionId, baselineAssistants) {
   let idlePolls = 0
+  const deadline = Date.now() + REPLY_MAX_WAIT_MS
   for (;;) {
+    if (Date.now() > deadline) return null
     let data
     try {
       data = await store.fetchHistory(props.agent.name, sessionId || null)
@@ -481,6 +492,21 @@ async function persistedAssistantCount(sessionId) {
   } catch {
     return 0
   }
+}
+
+// Mark a sent message as undelivered, THROUGH the reactive array.
+//
+// `messages` is a ref([]), so pushing a plain object stores the raw target and
+// Vue only proxies it when you read `messages.value[i]`. Mutating the local
+// variable you pushed writes past the proxy: the value changes, nothing
+// re-renders, and the failure is invisible.
+function markFailed(index, content, error) {
+  const row = messages.value[index]
+  // The array can be replaced under us (thread switch, history reload). Only
+  // mark the row if it is still the message we sent.
+  if (!row || row.role !== 'user' || row.content !== content) return
+  row.failed = true
+  row.error = error || null
 }
 
 async function send() {

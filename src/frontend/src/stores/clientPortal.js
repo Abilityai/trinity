@@ -16,6 +16,19 @@ const PORTAL_TOKEN_KEY = 'trinity.portalToken'
 // Lower-case: axios normalises response header names.
 const SESSION_ROTATION_HEADER = 'x-trinity-session-token'
 
+// #2128 — the one sentence shown when a chat with several agents cannot be
+// started on this instance. Exported from the STORE, not from portalUtils: this
+// is the message the store's own guard throws, and no store in this codebase
+// imports from `@/components` — adding that edge would invert the dependency
+// direction for one string.
+//
+// It states the capability and stops. Never "not licensed", never an edition
+// name, never an upgrade prompt: the audience for this surface is the
+// operator's customer, who can neither buy the missing module nor act on
+// knowing it exists.
+export const MULTI_AGENT_UNAVAILABLE =
+  'Chats with more than one agent are not available on this instance.'
+
 // ent#375 — adopt a rotated session token wherever it arrives.
 //
 // ONE interceptor rather than touching all 13 request sites: a new portal call
@@ -79,6 +92,20 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // Where the user was when it expired, so re-authenticating returns them
     // there instead of the roster root.
     resumePath: null,
+    // #2128 — may a chat hold MORE THAN ONE agent on this instance? Carried on
+    // the roster payload, because the platform feature-flag endpoint is
+    // JWT-gated and an external client on a portal session cannot read it.
+    //
+    // Default false is the live policy for everything unconfigured, so it has
+    // to be the safe value: the picker renders single-select until a roster
+    // actually says otherwise, and the component never sees an undefined
+    // tri-state.
+    multiAgentChatAvailable: false,
+    // Set once a roster attempt REACHED A VERDICT for this session. The room
+    // route needs to tell "still loading" from "loaded, and the answer is no" —
+    // without it a hard-loaded /workspace/r/:id would flash a refusal it then
+    // takes back on an entitled instance.
+    rosterLoaded: false,
   }),
 
   getters: {
@@ -156,6 +183,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.agents = []
       this.sessionExpired = false
       this.resumePath = null
+      // #2128: both are per-session facts. A different client signing in on the
+      // same browser must not inherit the previous one's capability verdict,
+      // and `rosterLoaded` must go back to "no verdict yet" or the room route
+      // would read a stale one as authoritative.
+      this.multiAgentChatAvailable = false
+      this.rosterLoaded = false
       localStorage.removeItem(PORTAL_TOKEN_KEY)
     },
 
@@ -227,43 +260,138 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // rooms are the only substrate that models several agents, @mention-waking
     // and per-participant budgets. The sidebar merges both.
 
+    // #2128 — ONE chokepoint in front of every room call. A build with no rooms
+    // substrate must never issue one: the request is a guaranteed 4xx whose
+    // generic failure copy is the dead end this issue is about.
+    //
+    // Applied to all FIVE room actions, not just the two reachable today. Three
+    // of them have exactly one caller each, inside a component the render gate
+    // stops mounting — so gating them is redundant *for the current call graph*,
+    // which is precisely the claim `learnings.md` 2026-07-01 records failing: a
+    // kill-switch is only as airtight as its least-gated entry point. Cost:
+    // three lines. Deliberate, not oversight.
+    _requireRooms() {
+      if (this.multiAgentChatAvailable) return
+      const err = new Error(MULTI_AGENT_UNAVAILABLE)
+      // A typed code, never message-sniffing: the view has to tell this apart
+      // from a transport failure, which needs different copy.
+      err.code = 'rooms_unavailable'
+      throw err
+    },
+
+    // The capability can vanish BETWEEN the roster load and the confirm (an
+    // entitlement lapsing, an instance restarted into lockdown). A definitive
+    // refusal from the rooms endpoint itself is evidence the substrate is gone,
+    // so lower the flag and let the picker collapse on the same tick. Without
+    // this the gate is correct at load and still dead-ends mid-session.
+    //
+    // 404/403 only. A network error or a 5xx is "could not ask", not "is
+    // absent", and lowering on those would unmount a live room over a blip.
+    //
+    // But the STATUS ALONE IS NOT THE SIGNAL, and reading it as one is a live
+    // bug: on a fully entitled instance the rooms module answers "you cannot
+    // reach that agent" with a 403 and "you are not in that room" with a
+    // uniform 404. Lowering on those turns one denied request into a
+    // session-long false claim about the operator's build — and overwrites the
+    // only message that tells the user what to do.
+    //
+    // The two are cleanly separable by the BODY, because absence and denial are
+    // authored by different layers: a module that is SERVING answers with its
+    // own structured `detail: {code, message}`, while absence is a plain string
+    // — FastAPI's own "Not Found" when the route was never mounted, and the
+    // entitlement gate's one-sentence 403 when it is mounted but unlicensed. A
+    // coded detail therefore PROVES the substrate is present; treat it as an
+    // ordinary refusal and let the caller surface the server's own words.
+    //
+    // Runs on all FIVE room calls, for the same reason `_requireRooms` does —
+    // and here it is not redundant. `refreshThreads()` is event-driven, not
+    // periodic, so a capability that lapses while a room is OPEN is only ever
+    // observed by the room's own calls: without this the 3s poll swallows its
+    // 404 (`load()` only reports on a full load), sending shows the generic
+    // "That message was not delivered.", and the state never converges — the
+    // gate is correct at load and the room is a dead end for the rest of the
+    // session. With it, the poll lowers the flag, `<PortalRoom>` unmounts, and
+    // the room route's honest refusal takes the stage. That is AC #4 holding
+    // THROUGH a transition, and it is only safe because of the discriminator
+    // above: `/api/rooms/:id` answers a uniform coded 404 for a room the caller
+    // is not in, and reading THAT as absence would let a stale room link switch
+    // an entitled workspace to single-select.
+    _noteRoomsRefusal(err) {
+      const status = err?.response?.status
+      if (status !== 404 && status !== 403) return err
+      const detail = err?.response?.data?.detail
+      if (detail && typeof detail === 'object' && detail.code) return err
+      this.multiAgentChatAvailable = false
+      err.code = 'rooms_unavailable'
+      err.message = MULTI_AGENT_UNAVAILABLE
+      return err
+    },
+
     async createRoom(agentNames, name) {
-      const { data } = await axios.post(
-        '/api/rooms',
-        { name: name || 'New chat', agents: agentNames },
-        { headers: this.authHeader }
-      )
-      return data
+      this._requireRooms()
+      try {
+        const { data } = await axios.post(
+          '/api/rooms',
+          { name: name || 'New chat', agents: agentNames },
+          { headers: this.authHeader }
+        )
+        return data
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
     },
 
     async fetchRooms() {
-      const { data } = await axios.get('/api/rooms', { headers: this.authHeader })
-      return (data.rooms || []).map((r) => ({ ...r, is_room: true }))
+      // Returns [] rather than throwing: this one is called on every sidebar
+      // refresh and its caller already treats "no rooms" as normal. Returning
+      // early removes a guaranteed-4xx round-trip per refresh.
+      if (!this.multiAgentChatAvailable) return []
+      try {
+        const { data } = await axios.get('/api/rooms', { headers: this.authHeader })
+        return (data.rooms || []).map((r) => ({ ...r, is_room: true }))
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
     },
 
     // `since` is the seq cursor: 0 loads the whole transcript, a later value
     // fetches only what the client has not seen.
     async fetchRoom(roomId, since = 0) {
-      const { data } = await axios.get(`/api/rooms/${roomId}`, {
-        headers: this.authHeader, params: { since },
-      })
-      return data
+      this._requireRooms()
+      try {
+        const { data } = await axios.get(`/api/rooms/${roomId}`, {
+          headers: this.authHeader, params: { since },
+        })
+        return data
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
     },
 
     async postRoomMessage(roomId, content) {
-      const { data } = await axios.post(
-        `/api/rooms/${roomId}/messages`, { content },
-        { headers: this.authHeader }
-      )
-      return data   // {room_id, seq, mentions, woke}
+      this._requireRooms()
+      try {
+        const { data } = await axios.post(
+          `/api/rooms/${roomId}/messages`, { content },
+          { headers: this.authHeader }
+        )
+        return data   // {room_id, seq, mentions, woke}
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
     },
 
     async addRoomParticipant(roomId, agentName) {
-      const { data } = await axios.post(
-        `/api/rooms/${roomId}/participants`, { agent_name: agentName, role: 'member' },
-        { headers: this.authHeader }
-      )
-      return data
+      this._requireRooms()
+      try {
+        const { data } = await axios.post(
+          `/api/rooms/${roomId}/participants`, { agent_name: agentName, role: 'member' },
+          { headers: this.authHeader }
+        )
+        return data
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
     },
 
     // The client's conversation threads with an agent (most-recent first) — the
@@ -436,6 +564,19 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // (ent#380) — shipped at sign-in so the new-chat screen renders with
         // zero extra fetches.
         this.agents = data.agents || []
+        // #2128 — a SUCCESSFUL roster is the only thing that may RAISE this
+        // flag, and strict `=== true` is what makes an older backend that omits
+        // the field (or a proxy that returns the string "false", or an HTML
+        // error body) read as absent rather than truthy.
+        //
+        // Deliberately NOT pre-reset at the top of this action, unlike the
+        // sibling `unavailable` above. That one resets to the OPTIMISTIC value
+        // so a stale 404 cannot paint over a roster that loaded fine; copying
+        // its shape here would invert its meaning — pessimistic mid-flight, so
+        // every background refetch would unmount a live room and flash a
+        // refusal at an entitled client before taking it back.
+        this.multiAgentChatAvailable = data.multi_agent_chat_available === true
+        this.rosterLoaded = true
       } catch (err) {
         // Two DIFFERENT failures, kept distinct — neither may swallow the other.
         //
@@ -458,6 +599,18 @@ export const useClientPortalStore = defineStore('clientPortal', {
           ? 'The workspace is not available on this instance.'
           : (err.response?.data?.detail || 'Failed to load your agents.')
         this.agents = []
+        // #2128: the attempt reached a verdict — the room route may stop
+        // showing its neutral placeholder and render the honest failure copy.
+        // `multiAgentChatAvailable` is deliberately left ALONE: a failed
+        // request is not evidence the capability went away.
+        //
+        // Assigned here rather than in `finally`, which runs AFTER this whole
+        // block — and CONDITIONALLY, because the 401 branch above already
+        // signed the session out. A bare `= true` in either place re-sets the
+        // flag the sign-out just cleared, and the field stops meaning "a
+        // verdict was reached for this session" and starts meaning "some
+        // attempt finished at some point".
+        this.rosterLoaded = this.isClientSignedIn
       } finally {
         this.loading = false
       }

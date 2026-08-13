@@ -202,6 +202,54 @@ def portal_exchange(email: str | None) -> str | None:
     return create_portal_session_token(email)
 
 
+# #2128 — the rooms substrate that backs a multi-agent Workspace chat is served
+# by a private module that a community build simply does not have. The picker
+# offered multi-select regardless, so picking two agents dead-ended in a 404.
+#
+# The signal has to reach a PORTAL principal (an external client on an email-OTP
+# session, with no platform account), and that principal cannot read
+# `/api/settings/feature-flags` — it is `get_current_user`-gated. So the roster
+# carries the bit: one field on a payload the shell already awaits first.
+_ROOMS_FEATURE_ID = "shared_sessions"
+
+
+def _multi_agent_chat_available() -> bool:
+    """Is the rooms substrate that backs a multi-agent Workspace chat present?
+
+    Reads the entitlement registry rather than probing the route table: a module
+    that claims its id and then fails to mount has that claim withdrawn (ent#196),
+    so the registry already answers "mounted AND serving".
+
+    The import is deliberately function-local. The singleton is swapped in place
+    by the supported test seam, and a module-scope `from ... import` would freeze
+    the boot-time instance and silently bypass it — the same form
+    `dependencies.py` and `routers/settings.py` use, pinned by a static guard in
+    `tests/unit/test_926_version_endpoint.py`.
+
+    Fail-CLOSED. A read that cannot answer must not advertise the capability —
+    promising an affordance that cannot work is the bug being fixed, so the error
+    direction has to be "offer less", never "offer more".
+    """
+    try:
+        from services.entitlement_service import entitlement_service
+        # bool() so the return matches the annotation for ANY implementation of
+        # the registry. A non-bool falsy value (None from a partial stub) is a
+        # ValidationError on the response model's bool field, i.e. a 500 raised
+        # OUTSIDE this try — the cast makes it fail closed instead.
+        #
+        # It is NOT a defence against a leaked test double: a MagicMock is
+        # truthy, and pydantic coerces one to True anyway, so cast or not the
+        # field would read *available*. What actually catches that is the
+        # module-identity assertion in the test file, which fails loudly rather
+        # than going green on a lie (measured, #2128).
+        return bool(entitlement_service.is_entitled(_ROOMS_FEATURE_ID))
+    except Exception:  # noqa: BLE001 — a roster must never 500 over a capability bit
+        logger.warning(
+            "[#2128] rooms capability read failed; reporting unavailable", exc_info=True
+        )
+        return False
+
+
 async def get_roster(email: str | None, include_owned: bool = False) -> PortalRoster:
     """The caller's "My Agents" roster — every agent shared with ``email``, plus
     (``include_owned``) the agents they OWN.
@@ -224,6 +272,9 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     """
     from services import tts_service
     tts_ready = tts_service.is_available()  # global key check, once per roster load
+    # #2128: an instance-level capability, resolved once per roster load like
+    # `tts_ready` above — not a per-agent one, so it rides on the roster itself.
+    multi_agent_chat = _multi_agent_chat_available()
 
     rows = db.get_shared_roster(email or "")
     if include_owned:
@@ -263,7 +314,11 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
         if isinstance(b, tuple):
             card.description, card.playbooks = b
 
-    return PortalRoster(client_email=(email or None), agents=cards)
+    return PortalRoster(
+        client_email=(email or None),
+        agents=cards,
+        multi_agent_chat_available=multi_agent_chat,
+    )
 
 
 def _humanize_playbook(name: str) -> str:
@@ -1058,7 +1113,15 @@ def _inflight_exec_key(execution_id: str) -> str:
     return f"portal_inflight_exec:{execution_id}"
 
 
-def mark_turn_inflight(session_id: str, execution_id: str, ttl_seconds: int = 3600) -> None:
+# The marker describes a turn in progress, so its TTL is the turn's own bound
+# plus slack — not an hour. The client now waits as long as the marker says a
+# turn is running, so an over-long TTL is a spinner that outlives the work: a
+# backend restart mid-turn would leave the composer disabled for the remainder.
+PORTAL_INFLIGHT_TTL_SECONDS = 300 + 60
+
+
+def mark_turn_inflight(session_id: str, execution_id: str,
+                       ttl_seconds: int = PORTAL_INFLIGHT_TTL_SECONDS) -> None:
     """Record that ``session_id`` has a turn running, and WHICH one.
 
     The value is the execution id, not a bare flag: a client that reloads has
@@ -1077,17 +1140,44 @@ def mark_turn_inflight(session_id: str, execution_id: str, ttl_seconds: int = 36
 
 
 def clear_turn_inflight(session_id: str, execution_id: str | None = None) -> None:
-    """Turn is done. Best-effort — the TTL is the backstop."""
+    """This turn is done. Best-effort — the TTL is the backstop.
+
+    Compare-and-delete on the session marker: a second turn on the same thread
+    OVERWRITES it, so an unconditional delete lets a turn that finished (or
+    fast-failed on the resume lock) wipe the marker of one still running. The
+    watching client then sees "nothing in flight", gives up, and offers a Retry
+    that dispatches and bills the turn a second time — the exact double-spend
+    the marker exists to prevent.
+
+    The per-execution key is always safe to delete: it names only this turn.
+    """
     try:
         from redis_breaker_util import get_breaker_redis
         client = get_breaker_redis()
-        if client is not None:
-            if execution_id is None:
-                value = client.get(_inflight_key(session_id))
-                execution_id = value.decode() if isinstance(value, bytes) else value
+        if client is None:
+            return
+        current = client.get(_inflight_key(session_id))
+        current = current.decode() if isinstance(current, bytes) else current
+
+        if execution_id is None:
+            # No id given: clear whatever this session currently names. The
+            # reverse key has to be resolved from the session marker here —
+            # skipping it leaves the SSE proxy reporting a finished turn as
+            # still in flight until the TTL expires.
+            if current:
+                client.delete(_inflight_exec_key(current))
             client.delete(_inflight_key(session_id))
-            if execution_id:
-                client.delete(_inflight_exec_key(execution_id))
+            return
+
+        if current == execution_id:
+            client.delete(_inflight_key(session_id))
+        elif current:
+            logger.info(
+                "portal: leaving inflight marker for session %s — it now names %s, not %s",
+                session_id, current, execution_id,
+            )
+        # Always safe: this key names only the turn being cleared.
+        client.delete(_inflight_exec_key(execution_id))
     except Exception as e:  # noqa: BLE001
         logger.warning("portal inflight DEL failed for %s: %s", session_id, e)
 

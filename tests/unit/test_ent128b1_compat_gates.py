@@ -1,4 +1,10 @@
-"""ent#128 PR-B — K-001 / K-002 read narrower than they audit.
+"""ent#128 PR-B — K-001 / T-015 read narrower than they audit.
+
+#2137 note: this file was written when **K-002** was a second id for the same
+gate — `c_k002` was literally `return c_t015(snap)`. K-002 is now retired and
+T-015 is the sole survivor, so every assertion below that used to be made twice
+is made once, against the check that actually holds the logic. The ent#128
+guarantee is unchanged; only the duplicate id is gone.
 
 Two HARD compatibility gates were two expressions of one root cause: a reader
 narrower than the mechanism it audits.
@@ -8,7 +14,7 @@ narrower than the mechanism it audits.
     (the engines are a `str.replace` and an `env_val[2:-1]` slice — no charset at
     all), so a correctly documented lowercase variable was invisible and the gate
     HARD-failed a correct template.
-  * **K-002 / T-015** compared those same references against
+  * **T-015** (and the then-duplicate K-002) compared those references against
     `set(credentials.keys())` — the *section* names (`mcp_servers`, `env_file`),
     not the variables. So the structured, documented form
     (`credentials.mcp_servers.<s>.env_vars`) satisfied nothing and HARD-failed,
@@ -25,8 +31,8 @@ false):
 
   | transition                            | cause                              |
   |---------------------------------------|------------------------------------|
-  | `fail → pass` K-001/K-002/T-015       | the intended fix                   |
-  | `pass → fail` K-002 on `${env_file}`  | deliberate — a closed false negative |
+  | `fail → pass` K-001/T-015             | the intended fix                   |
+  | `pass → fail` T-015 on `${env_file}`  | deliberate — a closed false negative |
   | `pass → fail` K-003 (SOFT)            | collateral, correct, release-noted |
   | `pass → pass` S-010                   | verified: blocklist is uppercase-exact |
   | `fail/pass → skipped`                 | MUST NOT HAPPEN — that is the bug  |
@@ -251,7 +257,7 @@ def test_k003_now_fails_a_lowercase_only_comment_free_env_example():
 
     from services.compatibility import spec
 
-    assert spec.effective_severity(next(c for c in spec.CHECKS if c.id == "K-003")) == "soft"
+    assert spec.effective_severity(next(c for c in spec.CHECKS if c.id == "K-003")) == "info"
 
 
 def test_k003_passes_once_the_lowercase_vars_are_commented():
@@ -301,7 +307,7 @@ def test_s010_still_flags_an_uppercase_generic_name():
 
 
 # ===========================================================================
-# Tests 1-4 — K-002 / T-015 (HARD): read the DECLARATION, not the section names
+# Tests 1-4 — T-015 (HARD): read the DECLARATION, not the section names
 # ===========================================================================
 #
 # STRIPE_API_KEY, not GEMINI_API_KEY: the latter is in
@@ -311,7 +317,7 @@ def test_s010_still_flags_an_uppercase_generic_name():
 _TEMPLATE_HEAD = "name: fixture\nresources:\n  cpu: '2'\n  memory: '4g'\n"
 
 
-def test_k002_accepts_the_structured_mcp_servers_declaration():
+def test_t015_accepts_the_structured_mcp_servers_declaration():
     """`credentials.mcp_servers.<s>.env_vars` is THE documented form.
 
     It declares variables one level deeper than `set(creds.keys())` ever looked,
@@ -323,23 +329,23 @@ def test_k002_accepts_the_structured_mcp_servers_declaration():
         template_yaml=_TEMPLATE_HEAD
         + "credentials:\n  mcp_servers:\n    stripe:\n      env_vars: [STRIPE_API_KEY]\n",
     )
-    for check_id in ("T-015", "K-002"):
+    for check_id in ("T-015",):
         status, _msg, detail = _run(check_id, snap)
         assert status == "pass", f"{check_id} still fails a declared var: {detail}"
 
 
-def test_k002_accepts_the_env_file_declaration():
+def test_t015_accepts_the_env_file_declaration():
     """The other declaration site. Must fail on baseline."""
     snap = _snap(
         mcp_template=_mcp_template(vault="VAULT_BASE_PATH"),
         template_yaml=_TEMPLATE_HEAD + "credentials:\n  env_file: [VAULT_BASE_PATH]\n",
     )
-    for check_id in ("T-015", "K-002"):
+    for check_id in ("T-015",):
         status, _msg, detail = _run(check_id, snap)
         assert status == "pass", f"{check_id} still fails a declared var: {detail}"
 
 
-def test_k002_still_fails_a_genuinely_undeclared_variable():
+def test_t015_still_fails_a_genuinely_undeclared_variable():
     """Widening `listed` must not disarm the gate."""
     snap = _snap(
         mcp_template=_mcp_template(stripe="STRIPE_API_KEY", other="HEYGEN_API_KEY"),
@@ -351,7 +357,7 @@ def test_k002_still_fails_a_genuinely_undeclared_variable():
     assert detail["missing"] == ["HEYGEN_API_KEY"]
 
 
-def test_k002_keeps_tolerating_the_flat_legacy_mapping():
+def test_t015_keeps_tolerating_the_flat_legacy_mapping():
     """`credentials: {STRIPE_API_KEY: '...'}` is legitimate and must keep passing.
 
     This is what the section-name subtraction must NOT break: only the three known
@@ -366,7 +372,7 @@ def test_k002_keeps_tolerating_the_flat_legacy_mapping():
 
 
 @pytest.mark.parametrize("section", ["env_file", "mcp_servers", "config_files"])
-def test_k002_no_longer_passes_a_reference_to_a_section_name(section):
+def test_t015_no_longer_passes_a_reference_to_a_section_name(section):
     """A deliberate `pass → fail`: a closed false negative, release-noted.
 
     `listed` was `set(creds.keys())` — "whichever section names this template
@@ -390,9 +396,11 @@ def test_k002_no_longer_passes_a_reference_to_a_section_name(section):
 #
 # W1: `run_static` caught `Exception` → `skipped`, and `_counts` counted only
 # `status == "fail"`, so a raise inside a HARD check DROPPED `hard_count` and
-# could flip `overall_status` from `issues` to `compatible`. `c_k002` delegates to
-# `c_t015`, so ONE raise took both HARD gates dark together — indistinguishable
-# from a clean pass. Four lines of untrusted YAML were the whole trigger.
+# could flip `overall_status` from `issues` to `compatible`. (At the time `c_k002`
+# delegated to `c_t015`, so ONE raise took both HARD gates dark together —
+# indistinguishable from a clean pass; K-002 was retired in #2137, but the
+# fail-closed behaviour proved here is T-015's own.) Four lines of untrusted
+# YAML were the whole trigger.
 
 _HOSTILE_DECLARATIONS = [
     pytest.param("  mcp_servers:\n    s:\n      env_vars:\n        - {K: v}\n", id="element-mapping"),
@@ -414,7 +422,7 @@ def test_hostile_declaration_still_hard_fails_and_never_skips(declaration):
         mcp_template=_mcp_template(stripe="STRIPE_SECRET_KEY"),
         template_yaml=_TEMPLATE_HEAD + "credentials:\n" + declaration,
     )
-    for check_id in ("T-015", "K-002"):
+    for check_id in ("T-015",):
         status, _msg, detail = _run(check_id, snap)
         assert status == "fail", f"{check_id} went dark on a hostile declaration"
         assert detail.get("skip_reason") != "check_error"
@@ -479,7 +487,7 @@ def test_overall_status_cannot_flip_to_compatible_on_a_hostile_declaration():
     )
     from services.compatibility.static_checks import run_static
 
-    ids = ["T-015", "K-002"]
+    ids = ["T-015"]
     results = run_static(snap, ids)
     checks = [
         _check_dict(next(c for c in spec.CHECKS if c.id == cid), *results[cid])

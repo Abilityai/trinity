@@ -774,7 +774,7 @@ Lookup keys: S-01/E-02/L-03 shipped via #653; S-02/E-01/E-05/B-01 (Phase 2) and 
 ### Agent Compatibility Validation (#668)
 
 Advisory, non-blocking server-side validation of a **running** agent's workspace
-against ~100 best-practice checks (11 categories) — surfaced in the Agent Detail
+against 88 best-practice checks (12 categories, #2137) — surfaced in the Agent Detail
 Overview tab (`components/CompatibilityPanel.vue`, reusing the "needs attention"
 idiom), via `GET /api/agents/{name}/compatibility`, and the MCP tool
 `get_agent_compatibility_report`. The canonical check list is
@@ -786,7 +786,7 @@ Package `services/compatibility/` mirrors the deterministic `canary/` library (`
 - **Collector**: ONE `docker exec` runs a base64-injected `python3` script walking a FIXED path allowlist → ONE JSON snapshot (per-file `{exists,size,binary,truncated,content}`, 256 KB/file + 2 MB/total caps); secret-bearing files (`.env`, `.mcp.json`) are **existence-only**. Backend `json.loads` once → `unavailable` on any failure (never 500); a stopped container → degraded report from the last persisted result.
 - **Checks**: pure `(snapshot)→[Check]` functions. `[STATIC]` deterministic (always, free); `[AI]` LLM-judged (Claude Haiku, batched by category, tool-use structured output, **iterate-expected**, fail-open on no-key/error). **AI severity capped at SOFT** — HARD reserved for STATIC. Claude-only checks skipped for non-Claude runtimes (#1187). Secret values never echoed; AI payloads redacted.
 - **Persistence** (`agent_compatibility_results`, latest-snapshot-per-agent, upsert): STATIC recomputes live; persisted AI verdicts merge in so findings show on every Overview load without re-spending tokens (`?include_ai=true` / "Re-run" forces fresh AI; requirements §41). Cascade/rename via `AGENT_REFS`.
-- **Auto-fix** (`POST .../compatibility/fix`, owner/admin): the 10 gitignore checks; reuses `git_service._GITIGNORE_PATTERNS`; per-agent Redis lock (`compat_fix:{name}`); atomic base64 write-back; G-001 removes a blanket `.claude/` line by exact-line match. **No auto-commit** — uncommitted until next git sync. Creates no execution.
+- **Auto-fix** (`POST .../compatibility/fix`, owner/admin): the 9 gitignore checks (G-002 retired in #2137); reuses `git_service._GITIGNORE_PATTERNS`; per-agent Redis lock (`compat_fix:{name}`); atomic base64 write-back; G-001 removes a blanket `.claude/` line by exact-line match. **No auto-commit** — uncommitted until next git sync. Creates no execution.
 - **T-018 + the fail-open class (ent#89).** `T-018` (soft, static) reports the `schedules:` block's **structure**, sharing the ent#89 reader with the materializer so the report cannot drift from what creation does; **cron stays A-002's** (two checks disagreeing on one field is worse than either). It is the one check that **fails closed**: `run_static` converts a raise into `skipped` and `_counts` counts only `fail`, so a raising *soft* check drops `soft_count` 1→0 and — since `overall` is a bare `> 0` test — flips `issues → compatible` exactly when its finding was the only failure, then `_report_from_persisted` replays that from `checks_json` on every stopped-agent read. `detail` carries `type(e).__name__` only (it is persisted and UI-rendered). Two live instances fixed with it: **`c_p006`** (a HARD check) iterated `schedules` with no `isinstance(..., list)` guard unlike its four siblings, so `schedules: 5` silently vanished from `hard_count`; and **`_valid_cron`** (A-002) was a per-field regex wrong in *both* directions — it rejected `0 9 * * MON` and accepted `99 99 * * *` — now delegating to `schedule_validation.validate_cron_expression`, the scheduler's own parser. `run_static`'s swallow now logs (it was silent for all ~100 checks); converting it to `fail` platform-wide is a measured follow-up, not this change.
 
 ### MCP Exposure — Dedicated Dynamic Tools (#846)
@@ -1296,10 +1296,11 @@ allow-list ∩ `user_invocable` — the same policy the MCP connector advertises
 outright; an agent exposing none falls back to its template-declared `use_cases`
 ("What You Can Ask"), sanitized and capped (6 × 200 chars). Clicking a hint **pre-fills
 the composer, never auto-sends** (`PortalBriefing.vue` → `prefill`). The future curated
-exposable-skills config (ent#178) slots into this same seam. Chats are strictly
-single-agent (the picker starts a new chat), so hints scope to the active agent by
-construction. ent#380 also fixed the briefing's metadata read — #138 called a
-nonexistent agent `/info` route, so descriptions were silently always `None`.
+exposable-skills config (ent#178) slots into this same seam. A chat holds one agent —
+or, where the capability below is present, several — and the picker starts a new chat
+either way, so hints scope to the active agent by construction. ent#380 also fixed the
+briefing's metadata read — #138 called a nonexistent agent `/info` route, so descriptions
+were silently always `None`.
 
 **Briefing hint grid is bounded (#2101):** with no connector allow-list configured every
 `user_invocable` skill becomes a "Things you can ask" card, so the hint set is belted
@@ -1309,6 +1310,37 @@ described-cards-first via `portalUtils.planHintDisplay`, the rest behind a count
 in-place "Show all N" toggle — deliberately **no nested scroll region**: the chat pane
 stays the single scroll axis, and the toggle counts the shipped list, never claiming the
 agent's full skill set). Hint *curation* stays the connector allow-list (ent#178 later).
+
+**The roster payload is *the* portal capability channel (#2128).** A portal principal
+cannot read `GET /api/settings/feature-flags` — that endpoint is `get_current_user`-gated
+and the frontend store behind it returns `[]` for any caller without a platform JWT, i.e.
+for **every** external client, including on an instance where the capability is present.
+So any UI gate on this surface takes its signal from `PortalRoster`, which
+`get_portal_principal` already serves to both principal kinds and `Portal.vue::bootstrap()`
+already awaits first — one field, no new route, no new auth surface, no extra round-trip
+(`voice_available` is the per-agent precedent). Reach for this before adding a second
+channel: the platform entitlement store is structurally unavailable here.
+`multi_agent_chat_available` is the first such field — resolved once per roster load from
+the entitlement registry, **fail-closed** (an unreadable registry reports the capability
+absent, because promising an affordance that cannot work is the bug it fixes), and named
+for the *capability* rather than the module or the edition, since this payload is served
+to an operator's customer. When it is false the picker is single-select, all five room
+store actions refuse before issuing a request, and `/workspace/r/:roomId` renders an
+honest refusal instead of mounting the room; a 404/403 from any of the five self-heals the
+flag mid-session, so a capability that lapses between roster load and confirm — or while a
+room is open, which nothing else converges, since the sidebar refresh is event-driven — is
+observed by the next room call rather than dead-ending. **The status alone is not the
+signal**: a serving module authors its own refusals as a structured `detail: {code, …}`
+(*you cannot reach that agent* → 403, *you are not in that room* → uniform 404), while
+absence is a plain string — the framework's own "Not Found" for an unmounted route, the
+entitlement gate's sentence for mounted-but-unlicensed. Only the string form lowers the
+flag; a coded refusal is passed through so the server's own words reach the user, because
+reading one denied request as absence would turn it into a session-long false claim about
+the operator's build. The frontend gate is **UX, not
+containment** — a portal token legitimately reaches the room endpoints where they exist,
+and the real boundary is the serving module's own roster-scoped access plus
+membership-scoped uniform 404s. Room data is untouched by the flag and reappears intact
+if the capability returns.
 
 ### Enterprise Modules (#847)
 

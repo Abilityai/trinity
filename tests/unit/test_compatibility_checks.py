@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from services.compatibility import spec
+from services.compatibility import static_checks
 from services.compatibility.static_checks import run_static, STATIC_CHECKS
 from services.compatibility import fixes
 from services.compatibility import ai_checks
@@ -106,7 +107,23 @@ class TestSpecConsistency:
         assert len(ids) == len(set(ids)), "duplicate check ids in spec.CHECKS"
 
     def test_catalog_size(self):
-        assert len(spec.CHECKS) == 101, f"expected 101 checks, found {len(spec.CHECKS)}"
+        # #2137: 101 -> 88. 17 retired (dead-field, legacy-layout, duplicate)
+        # + 4 DP checks implemented. Retired ids are never reissued.
+        assert len(spec.CHECKS) == 88, f"expected 88 checks, found {len(spec.CHECKS)}"
+
+    def test_retired_ids_are_never_reissued(self):
+        """#2137: persisted `checks_json` rows predate the retirement.
+
+        Reusing a retired id would silently re-interpret an old stored verdict
+        as a verdict about a different check.
+        """
+        retired = {
+            "F-008", "F-012", "F-013", "T-012", "T-016", "T-017", "C-009",
+            "K-002", "K-005", "G-002", "G-003", "G-004", "G-005", "D-006",
+            "I-003", "I-004", "I-005", "DP-005",
+        }
+        clash = retired & set(spec.ALL_IDS)
+        assert not clash, f"retired ids reissued: {sorted(clash)}"
 
     def test_severity_and_type_valid(self):
         for c in spec.CHECKS:
@@ -145,11 +162,39 @@ class TestSpecDocSync:
     def test_ids_match_doc(self):
         doc = Path(__file__).resolve().parents[2] / "docs" / "agent-validation-spec.md"
         text = doc.read_text(encoding="utf-8")
-        doc_ids = set(re.findall(r"^\|\s*([A-Z]-\d{3})\s*\|", text, flags=re.MULTILINE))
+        # #2137: was `[A-Z]-\d{3}` — a SINGLE letter. The doc's two-letter
+        # `DP-001`..`DP-005` never matched, so five checks sat documented,
+        # indexed, and entirely unimplemented while this test reported the two
+        # files in sync. The anti-drift guarantee did not hold for any
+        # two-letter category.
+        doc_ids = set(re.findall(r"^\|\s*([A-Z]{1,2}-\d{3})\s*\|", text, flags=re.MULTILINE))
         spec_ids = set(spec.ALL_IDS)
         assert doc_ids == spec_ids, (
             f"spec.py and docs/agent-validation-spec.md diverge: "
             f"in_doc_only={sorted(doc_ids - spec_ids)} in_spec_only={sorted(spec_ids - doc_ids)}"
+        )
+
+    def test_severities_match_doc(self):
+        """#2137: the id SET matching is not enough.
+
+        Every severity change has to land in both files, and an id-only test
+        passes happily while the doc claims HARD for a check the catalog now
+        emits as INFO — which is the column an operator actually reads.
+        """
+        doc = Path(__file__).resolve().parents[2] / "docs" / "agent-validation-spec.md"
+        text = doc.read_text(encoding="utf-8")
+        rows = re.findall(
+            r"^\|\s*([A-Z]{1,2}-\d{3})\s*\|\s*(HARD|SOFT|INFO)\s*\|",
+            text, flags=re.MULTILINE,
+        )
+        mismatched = {
+            cid: (sev.lower(), spec.BY_ID[cid].severity)
+            for cid, sev in rows
+            if cid in spec.BY_ID and sev.lower() != spec.BY_ID[cid].severity
+        }
+        assert not mismatched, (
+            "doc Severity column disagrees with spec.py (doc, spec): "
+            f"{mismatched}"
         )
 
 
@@ -719,3 +764,334 @@ class TestRunStaticLogsItsSwallow:
         assert (detail or {}).get("check_error") == "kaboom"
         assert any("T-001" in r.message or "T-001" in str(r.args)
                    for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# #2137 — catalog alignment with what the platform implements and the
+# `create-agent` marketplace wizards actually generate.
+# ---------------------------------------------------------------------------
+
+_WIZARD_SKILL = """\
+---
+name: weekly-report
+description: Produce the weekly pipeline report. Use when the user asks for a weekly summary.
+---
+
+# Weekly Report
+
+1. Pull the pipeline.
+2. Summarize movement.
+3. Write the report.
+"""
+
+# The layout `plugins/create-agent/skills/custom/SKILL.md` documents verbatim:
+# skills under `.claude/skills/<name>/SKILL.md`, never `.claude/commands/`.
+_WIZARD_TEMPLATE = """\
+name: acme-scout
+display_name: Acme Scout
+description: |
+  Acme Scout tracks competitor movement for the Acme product team.
+  It sweeps public sources weekly and reports material changes.
+resources:
+  cpu: "2"
+  memory: 2g
+schedules:
+  - name: Weekly competitor sweep
+    cron: "0 9 * * 1"
+    message: "Sweep tracked competitors for changes — pricing, product, messaging — and report anything material."
+"""
+
+_WIZARD_GITIGNORE = "\n".join([
+    ".env", ".env.*", ".mcp.json", ".claude/projects/", ".trinity/",
+    ".claude/statsig/", ".claude/todos/", ".claude/debug/", ".claude/sessions/",
+    ".claude/shell-snapshots/", "content/", "*.pem", "*.key", "credentials.json",
+]) + "\n"
+
+
+def wizard_snapshot():
+    """An agent exactly as a `create-agent` wizard scaffolds it.
+
+    Skills live at `.claude/skills/<name>/SKILL.md` with NO `.claude/commands/`,
+    and schedule messages are prose. Before #2137 this shape drew a fistful of
+    findings the author could not act on.
+    """
+    return {
+        "schema": 1,
+        "root": "/home/developer",
+        "files": {
+            "template.yaml": _f(_WIZARD_TEMPLATE),
+            "CLAUDE.md": _f("# Acme Scout\n\nYou track competitors.\n\n## Workflow\n1. Sweep\n2. Report\n"),
+            ".gitignore": _f(_WIZARD_GITIGNORE),
+            ".env.example": _f("# Acme API key\nACME_API_KEY=your-key-here\n"),
+            ".mcp.json.template": _f('{"mcpServers": {}}'),
+            "README.md": _f("# Acme Scout\n"),
+            "ARCHITECTURE.md": _f("# Architecture\n"),
+            "dashboard.yaml": _f("widgets:\n  - type: text\n    content: ok\n"),
+        },
+        "dirs": {
+            ".claude/commands": None,          # the wizards never create it
+            ".claude/skills": ["weekly-report"],
+            ".claude/agents": None,
+            "schemas": None,
+        },
+        "skills": {".claude/skills/weekly-report/SKILL.md": _f(_WIZARD_SKILL)},
+        "hit_total_cap": False,
+    }
+
+
+class TestWizardAgentIsClean:
+    """The headline regression: a freshly-scaffolded agent has nothing to fix."""
+
+    def _static_results(self, snap):
+        static_ids = [c.id for c in spec.CHECKS if c.type == "static"]
+        return run_static(snap, static_ids)
+
+    def test_no_hard_findings(self):
+        res = self._static_results(wizard_snapshot())
+        hard = [
+            cid for cid, r in res.items()
+            if r[0] == "fail" and spec.BY_ID[cid].severity == "hard"
+        ]
+        assert hard == [], f"wizard-scaffolded agent has HARD findings: {hard}"
+
+    def test_no_soft_findings(self):
+        """SOFT means 'the author should act'. A wizard agent gives them nothing."""
+        res = self._static_results(wizard_snapshot())
+        soft = [
+            (cid, res[cid][1]) for cid in res
+            if res[cid][0] == "fail" and spec.BY_ID[cid].severity == "soft"
+        ]
+        assert soft == [], f"wizard-scaffolded agent has unactionable SOFT findings: {soft}"
+
+    def test_no_check_errors(self):
+        """`run_static` captures a raise as a FAIL carrying `check_error`."""
+        res = self._static_results(wizard_snapshot())
+        errored = [cid for cid, r in res.items() if (r[2] or {}).get("check_error")]
+        assert errored == [], f"checks raised on the wizard fixture: {errored}"
+
+
+class TestSlashCommandAnywhere:
+    """#2137: `_slash_command` anchored at position 0, so the marketplace's own
+    `"Run /skill"` schedules resolved to nothing and P-006 was inert."""
+
+    def test_matches_mid_message(self):
+        assert static_checks._slash_command("Run /pipeline-tick") == "pipeline-tick"
+        assert static_checks._slash_command("Run /weekly-report and post it") == "weekly-report"
+        assert static_checks._slash_command("  /leading") == "leading"
+
+    def test_still_matches_at_position_zero(self):
+        assert static_checks._slash_command("/report now") == "report"
+
+    def test_prose_has_no_command(self):
+        assert static_checks._slash_command("Summarize yesterday's activity.") is None
+
+    def test_paths_and_urls_are_not_commands(self):
+        """X-007 turns a resolved name into a SOFT finding, so a path read as a
+        command manufactures the exact unactionable failure #2137 removes."""
+        assert static_checks._slash_command("Read reports/daily and summarize") is None
+        assert static_checks._slash_command("Fetch https://example.com/status") is None
+        # Absolute paths: a command is ONE segment; these are not.
+        assert static_checks._slash_command("Open /etc/passwd") is None
+        assert static_checks._slash_command("Check /var/log/app.log for errors") is None
+
+    def test_a_command_after_a_path_is_still_found(self):
+        assert static_checks._slash_command(
+            "Read /var/log/app.log then run /weekly-report"
+        ) == "weekly-report"
+
+    def test_p006_now_fires_on_a_run_slash_schedule(self):
+        """The HARD guard that had never fired."""
+        snap = wizard_snapshot()
+        snap["files"]["template.yaml"] = _f(_WIZARD_TEMPLATE.replace(
+            'message: "Sweep tracked competitors for changes — pricing, product, messaging — and report anything material."',
+            'message: "Run /weekly-report and post the summary"',
+        ))
+        snap["skills"][".claude/skills/weekly-report/SKILL.md"] = _f(
+            _WIZARD_SKILL.replace("2. Summarize movement.", "2. Ask the user which region to cover.")
+        )
+        r = _run_one("P-006", snap)
+        assert r[0] == "fail", r
+        assert "approval gate" in r[1]
+
+    def test_x007_resolves_a_skill_directory(self):
+        """Before #2137 `_command_names` globbed only `.claude/commands/`."""
+        snap = wizard_snapshot()
+        snap["files"]["template.yaml"] = _f(_WIZARD_TEMPLATE.replace(
+            'message: "Sweep tracked competitors for changes — pricing, product, messaging — and report anything material."',
+            'message: "Run /weekly-report and post the summary"',
+        ))
+        assert _run_one("X-007", snap)[0] == "pass"
+
+    def test_x007_still_fails_on_a_genuinely_missing_target(self):
+        snap = wizard_snapshot()
+        snap["files"]["template.yaml"] = _f(_WIZARD_TEMPLATE.replace(
+            'message: "Sweep tracked competitors for changes — pricing, product, messaging — and report anything material."',
+            'message: "Run /does-not-exist"',
+        ))
+        r = _run_one("X-007", snap)
+        assert r[0] == "fail"
+        assert r[2]["missing"] == ["does-not-exist"]
+
+    def test_command_names_resolves_both_layouts(self):
+        snap = wizard_snapshot()
+        snap["skills"][".claude/commands/legacy.md"] = _f("# Legacy\n")
+        snap["dirs"][".claude/commands"] = ["legacy.md"]
+        assert set(static_checks._command_names(snap)) >= {"weekly-report", "legacy"}
+
+
+class TestP006AutomationOptOut:
+    """A skill that gates BY DESIGN is a decision, not a defect."""
+
+    def _snap_with(self, frontmatter_extra, body_line):
+        snap = wizard_snapshot()
+        snap["files"]["template.yaml"] = _f(_WIZARD_TEMPLATE.replace(
+            'message: "Sweep tracked competitors for changes — pricing, product, messaging — and report anything material."',
+            'message: "Run /weekly-report"',
+        ))
+        skill = _WIZARD_SKILL.replace(
+            "description: Produce the weekly pipeline report. Use when the user asks for a weekly summary.",
+            "description: Produce the weekly pipeline report. Use when the user asks for a weekly summary."
+            + frontmatter_extra,
+        ).replace("2. Summarize movement.", body_line)
+        snap["skills"][".claude/skills/weekly-report/SKILL.md"] = _f(skill)
+        return snap
+
+    def test_gated_skill_is_not_a_hard_failure(self):
+        snap = self._snap_with("\nautomation: gated", "2. Ask the user which region to cover.")
+        r = _run_one("P-006", snap)
+        assert r[0] == "pass", r
+        assert r[2]["declared_gated"][0]["mode"] == "gated"
+
+    def test_manual_skill_is_not_a_hard_failure(self):
+        snap = self._snap_with("\nautomation: manual", "2. Wait for the user to confirm.")
+        assert _run_one("P-006", snap)[0] == "pass"
+
+    def test_explicit_autonomous_is_still_held_to_the_rule(self):
+        snap = self._snap_with("\nautomation: autonomous", "2. Ask the user which region to cover.")
+        assert _run_one("P-006", snap)[0] == "fail"
+
+    def test_absent_frontmatter_key_is_still_held_to_the_rule(self):
+        snap = self._snap_with("", "2. Ask the user which region to cover.")
+        assert _run_one("P-006", snap)[0] == "fail"
+
+    def test_the_word_in_prose_does_not_flip_the_check_off(self):
+        """Parsed from frontmatter, never grepped from the body."""
+        snap = self._snap_with("", "2. Ask the user which region to cover (automation: gated).")
+        assert _run_one("P-006", snap)[0] == "fail"
+
+
+class TestP004ScopedToSkillMd:
+    def test_companion_reference_file_is_not_flagged(self):
+        """P-009 tells authors to create these; P-004 used to flag them."""
+        snap = wizard_snapshot()
+        snap["skills"][".claude/skills/weekly-report/reference.md"] = _f("x\n" * 900)
+        assert _run_one("P-004", snap)[0] == "pass"
+
+    def test_oversized_skill_md_still_fails(self):
+        snap = wizard_snapshot()
+        snap["skills"][".claude/skills/weekly-report/SKILL.md"] = _f("x\n" * 900)
+        r = _run_one("P-004", snap)
+        assert r[0] == "fail"
+        assert r[2]["files"] == [".claude/skills/weekly-report/SKILL.md"]
+
+
+class TestA001AcceptsSlashAnywhere:
+    def test_run_slash_message_passes(self):
+        snap = wizard_snapshot()
+        snap["files"]["template.yaml"] = _f(_WIZARD_TEMPLATE.replace(
+            'message: "Sweep tracked competitors for changes — pricing, product, messaging — and report anything material."',
+            'message: "Run /weekly-report and post the summary"',
+        ))
+        assert _run_one("A-001", snap)[0] == "pass"
+
+    def test_prose_message_is_info_not_soft(self):
+        assert spec.BY_ID["A-001"].severity == "info"
+        assert _run_one("A-001", wizard_snapshot())[0] == "fail"
+
+
+class TestF004Conditional:
+    def test_no_env_example_is_fine_without_credentials(self):
+        snap = wizard_snapshot()
+        del snap["files"][".env.example"]
+        assert _run_one("F-004", snap)[0] == "pass"
+
+    def test_missing_env_example_still_fails_when_credentials_declared(self):
+        snap = wizard_snapshot()
+        del snap["files"][".env.example"]
+        snap["files"][".mcp.json.template"] = _f(
+            '{"mcpServers": {"acme": {"env": {"ACME_API_KEY": "${ACME_API_KEY}"}}}}'
+        )
+        assert _run_one("F-004", snap)[0] == "fail"
+
+
+class TestRuntimeDataPathChecks:
+    """DP-001..DP-004 — documented since #1169, implemented in #2137."""
+
+    def _snap(self, data_paths_yaml):
+        snap = wizard_snapshot()
+        snap["files"]["template.yaml"] = _f(_WIZARD_TEMPLATE + data_paths_yaml)
+        return snap
+
+    def test_absent_data_paths_passes_every_dp_check(self):
+        snap = wizard_snapshot()
+        for cid in ("DP-001", "DP-002", "DP-003", "DP-004"):
+            assert _run_one(cid, snap)[0] == "pass", cid
+
+    def test_dp001_accepts_entries_under_the_data_root(self):
+        snap = self._snap('data_paths:\n  - "data/*.sqlite"\n  - "data/exports/*.csv"\n')
+        assert _run_one("DP-001", snap)[0] == "pass"
+
+    def test_dp001_rejects_a_path_outside_the_data_root(self):
+        """`data/export` archives `/home/developer/data` and nothing else, so a
+        plain relative entry is as unsnapshotted as `../escape`."""
+        snap = self._snap('data_paths:\n  - "outputs/*.csv"\n')
+        r = _run_one("DP-001", snap)
+        assert r[0] == "fail"
+        assert r[2]["entries"][0]["reason"] == "outside_data_root"
+
+    def test_dp001_accepts_the_bare_data_root(self):
+        snap = self._snap('data_paths:\n  - "data"\n')
+        assert _run_one("DP-001", snap)[0] == "pass"
+
+    def test_dp001_rejects_absolute_and_traversal(self):
+        for bad in ("/etc/passwd", "../escape", "~/secrets"):
+            snap = self._snap(f'data_paths:\n  - "{bad}"\n')
+            r = _run_one("DP-001", snap)
+            assert r[0] == "fail", bad
+            assert r[2]["entries"][0]["path"] == bad
+
+    def test_dp001_rejects_what_the_materializer_would_drop(self):
+        """Shares `git_service._is_safe_data_path` with the executor."""
+        snap = self._snap('data_paths:\n  - "data/$(whoami).db"\n')
+        r = _run_one("DP-001", snap)
+        assert r[0] == "fail"
+        assert r[2]["entries"][0]["reason"] == "shell_metacharacters"
+
+    def test_dp001_reports_a_non_list_block(self):
+        snap = self._snap("data_paths: 5\n")
+        r = _run_one("DP-001", snap)
+        assert r[0] == "fail"
+        assert r[2]["found_type"] == "int"
+
+    def test_dp002_requires_the_data_root_ignored(self):
+        snap = self._snap('data_paths:\n  - "data/*.sqlite"\n')
+        assert _run_one("DP-002", snap)[0] == "fail"
+        snap["files"][".gitignore"] = _f(_WIZARD_GITIGNORE + "data/\n")
+        assert _run_one("DP-002", snap)[0] == "pass"
+
+    def test_dp003_flags_overlap_with_managed_paths(self):
+        snap = self._snap('data_paths:\n  - ".trinity/state.json"\n')
+        assert _run_one("DP-003", snap)[0] == "fail"
+
+    def test_dp003_flags_overlap_with_persistent_state(self):
+        snap = self._snap('persistent_state:\n  - "data/keep.db"\ndata_paths:\n  - "data/keep.db"\n')
+        r = _run_one("DP-003", snap)
+        assert r[0] == "fail"
+        assert r[2]["entries"][0]["conflicts_with"] == "persistent_state"
+
+    def test_dp004_is_info_and_reports_a_property(self):
+        assert spec.BY_ID["DP-004"].severity == "info"
+        snap = self._snap('data_paths:\n  - "data/*.sqlite"\n')
+        assert _run_one("DP-004", snap)[0] == "fail"
+
+
