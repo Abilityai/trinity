@@ -321,8 +321,10 @@ const addable = computed(() => {
 // this issue does not specify. Stated as a scope limitation (AC#9).
 //
 // Recruiting a NEW agent stays with the explicit "+ Add agent" control, which is
-// the honest place for it — that spends money on another agent, and a mention
-// cannot do it anyway.
+// the honest place for it — that spends money on another agent, and the probe
+// above saw a non-participant mention wake nobody. Whether it recruits by some
+// other path is OPEN, not settled here (requirements §5.12 records an
+// engine-side newcomer-join from ent#361).
 
 const mentionSource = computed(() => roomMentionSource(agentParticipants.value, props.roster))
 
