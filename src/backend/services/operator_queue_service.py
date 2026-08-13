@@ -123,10 +123,10 @@ OPERATOR_ALERT_MAX_PENDING_PER_TYPE = int(
 _BUDGETED_ALERT_TYPES = frozenset({"skill_not_found"})
 
 # Shape guard for the episode alert's `last_triggered_by` triage field: a
-# platform trigger enum only (`schedule`, `agent`, `a2a`, ...) — NEVER
-# agent-controlled free text (G-04: the episode alert is durable
-# operator-visible state).
-_TRIGGERED_BY_RE = re.compile(r"[a-z_]{1,32}")
+# platform trigger enum only — NEVER agent-controlled free text (G-04: the
+# episode alert is durable operator-visible state). Digits included because
+# the real enum carries them (`a2a`).
+_TRIGGERED_BY_RE = re.compile(r"[a-z0-9_]{1,32}")
 
 # Valid priority values — an agent-supplied unknown collapses to "medium".
 _VALID_PRIORITIES = {"critical", "high", "medium", "low"}
