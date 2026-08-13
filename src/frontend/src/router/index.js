@@ -254,6 +254,15 @@ export const routes = [
     component: () => import('../views/Portal.vue'),
     meta: { title: 'Workspace', hideHelpWidget: true }
   },
+  {
+    // ent#360: an agent is a destination, so it gets a URL. Deliberately NOT
+    // `/workspace/:name` — that would collide with any future literal segment
+    // and make every unknown path resolve to an agent page.
+    path: '/workspace/a/:agentName',
+    name: 'WorkspaceAgent',
+    component: () => import('../views/Portal.vue'),
+    meta: { title: 'Workspace', hideHelpWidget: true }
+  },
   // ent#357 legacy paths. Function form so query AND hash survive the hop —
   // these URLs were handed to real clients by email, and a client landing on a
   // dead link has no way to report it. `/portal/c/:sessionId` keeps the thread.

@@ -401,7 +401,9 @@ const notFound = ref(false)  // #1914: the agent 404'd (missing OR inaccessible 
 const activeTab = ref('overview')  // #1107: Overview is the default landing tab
 // Tabs reachable via ?tab= deep-link (Timeline / EXEC-023 navigation).
 // Single source — referenced in onMounted + onActivated (#1107: dedupe + overview).
-const DEEP_LINK_TABS = ['overview', 'tasks', 'chat', 'reports', 'dashboard', 'logs', 'files', 'schedules', 'credentials', 'skills', 'sharing', 'permissions', 'git', 'folders', 'settings', 'info']
+// #2153: resolved against every id the page can render (see ALL_TAB_IDS, which
+// the tab builder derives), not a hand-maintained subset. The old list omitted
+// a2a, loops, playbooks, access and nevermined, so those links died silently.
 // Legacy ?tab= ids that moved/renamed — keep old deep-links working (#1108).
 // ent#358: `session` is no longer an alias — it REDIRECTS (see below). The
 // surface it named lives in the Workspace now, so resolving it to a local tab
@@ -411,8 +413,12 @@ const TAB_ALIASES = { guardrails: 'settings' }
 // Resolve a ?tab= value to a live tab id (applying aliases), or null if unknown.
 function resolveDeepLinkTab(requested) {
   const resolved = TAB_ALIASES[requested] || requested
-  return DEEP_LINK_TABS.includes(resolved) ? resolved : null
+  return ALL_TAB_IDS.includes(resolved) ? resolved : null
 }
+
+// What the deep link selected, so visibility can be reconciled once the agent
+// loads. Null once reconciled or once the user has moved.
+let deepLinkedTab = null
 // Apply the ?tab= deep-link landing. Called from BOTH onMounted AND onActivated:
 // AgentDetail is KeepAlive-cached (App.vue), so the common path — open agent
 // (caches it), click into an execution, "Continue as Chat" back — hits
@@ -421,10 +427,36 @@ function resolveDeepLinkTab(requested) {
 // two hooks can't drift again.
 //
 function applyDeepLinkRouting() {
-  if (route.query.tab) {
-    const resolvedTab = resolveDeepLinkTab(route.query.tab)
-    if (resolvedTab) activeTab.value = resolvedTab
+  if (!route.query.tab) return
+  const resolvedTab = resolveDeepLinkTab(route.query.tab)
+  if (!resolvedTab) return
+  // `brain` is the one id that NAVIGATES when selected (a watcher pushes
+  // /agents/:name/brain). Applying it before the agent loads would bounce a
+  // caller off the page and back when the capability turns out to be absent, so
+  // it waits for the reconcile below, where the answer is known.
+  if (resolvedTab === 'brain') { deepLinkedTab = resolvedTab; return }
+  activeTab.value = resolvedTab
+  deepLinkedTab = resolvedTab
+}
+
+// Once the agent has loaded, drop a deep link to a tab this viewer cannot see.
+//
+// The guard is the whole point: #2130 was a late write to `activeTab` yanking
+// users off a tab they had clicked. So this only acts while `activeTab` is still
+// exactly what the deep link set — the moment the user moves, the intent is
+// theirs and this stops having an opinion. It also runs once and clears.
+function reconcileDeepLinkVisibility() {
+  const requested = deepLinkedTab
+  if (!requested) return
+  deepLinkedTab = null
+  const visible = visibleTabs.value.some((t) => t.id === requested)
+  if (visible) {
+    // The deferred `brain` case: apply it now that capability is known.
+    if (requested === 'brain' && activeTab.value !== 'brain') activeTab.value = 'brain'
+    return
   }
+  // Not visible to this viewer — fall back, but never over a later choice.
+  if (activeTab.value === requested) activeTab.value = 'overview'
 }
 
 // ent#358: a `?tab=session` link (or any older session deep link) asked for the
@@ -800,8 +832,20 @@ const {
 
 // Computed tabs based on agent permissions and system agent status
 // Tab order optimized for workflow: primary actions first, configuration/reference last
-const visibleTabs = computed(() => {
-  const isSystem = agent.value?.is_system
+// #2153: a PURE builder, so "which tabs exist" has exactly one definition.
+//
+// `?tab=` used to resolve against a hand-maintained `DEEP_LINK_TABS` list that
+// omitted a2a, loops, playbooks, access and nevermined — real tabs whose deep
+// links silently landed on Overview. Two sources of truth for the same fact,
+// and only one of them was updated when a tab was added.
+//
+// Taking the flags as arguments lets the deep-link resolver ask the same
+// function for the SUPERSET (every flag permissive) without a second list, so a
+// tab added below is deep-linkable the moment it appears.
+function buildTabs({
+  isSystem = false, hasDashboardFlag = false, brainOrbVisible = false,
+  canShare = false, a2aVisible = false, gitSync = false,
+} = {}) {
 
   // Primary tabs - most frequently used. Overview leads (#1107).
   const tabs = [
@@ -815,13 +859,13 @@ const visibleTabs = computed(() => {
   // The Chat tab keeps stateless per-turn chat and links across.
 
   // Dashboard tab - only show if agent has a dashboard.yaml file (insert after Tasks)
-  if (hasDashboard.value) {
+  if (hasDashboardFlag) {
     tabs.push({ id: 'dashboard', label: 'Dashboard' })
   }
 
   // Brain Orb tab (#58) — platform flag AND per-agent capability. Selecting it
   // navigates to the dedicated /agents/:name/brain route (handled by a watcher).
-  if (sessionsStore.brainOrbAvailable && hasBrainOrb.value) {
+  if (brainOrbVisible) {
     tabs.push({ id: 'brain', label: 'Brain' })
   }
 
@@ -835,7 +879,7 @@ const visibleTabs = computed(() => {
   )
 
   // Access control tabs - hide for system agent (system agent has full access)
-  if (agent.value?.can_share && !isSystem) {
+  if (canShare && !isSystem) {
     tabs.push({ id: 'access', label: 'Access' })  // #17 operators (Trinity users)
     tabs.push({ id: 'sharing', label: 'Sharing' })
     tabs.push({ id: 'permissions', label: 'Permissions' })
@@ -843,12 +887,12 @@ const visibleTabs = computed(() => {
 
   // A2A tab (trinity-enterprise#158) — owner-only, non-system, and only when the
   // enterprise A2A module is entitled (never a blank tab in OSS/unentitled).
-  if (sessionsStore.a2aAvailable && agent.value?.can_share && !isSystem) {
+  if (a2aVisible && canShare && !isSystem) {
     tabs.push({ id: 'a2a', label: 'A2A' })
   }
 
   // Git and Files tabs together
-  if (hasGitSync.value) {
+  if (gitSync) {
     tabs.push({ id: 'git', label: 'Git' })
   }
   // DEPRECATED: Terminal tab hidden for all users (candidate for removal)
@@ -856,7 +900,7 @@ const visibleTabs = computed(() => {
   tabs.push({ id: 'files', label: 'Files' })
 
   // Folders - hide for system agent
-  if (agent.value?.can_share && !isSystem) {
+  if (canShare && !isSystem) {
     tabs.push({ id: 'folders', label: 'Folders' })
   }
 
@@ -865,12 +909,12 @@ const visibleTabs = computed(() => {
   // assignment stayed REST/MCP-only, so the #182/#183 machinery had no product
   // surface at all. Owner/admin and non-system, matching the other management
   // tabs; OverflowTabs absorbs the extra entry.
-  if (agent.value?.can_share && !isSystem) {
+  if (canShare && !isSystem) {
     tabs.push({ id: 'skills', label: 'Skills' })
   }
 
   // Settings - owner-only (#1108); sectioned config home, Guardrails is section #1
-  if (agent.value?.can_share && !isSystem) {
+  if (canShare && !isSystem) {
     tabs.push({ id: 'settings', label: 'Settings' })
   }
 
@@ -878,7 +922,25 @@ const visibleTabs = computed(() => {
   tabs.push({ id: 'info', label: 'Info' })
 
   return tabs
-})
+}
+
+const visibleTabs = computed(() => buildTabs({
+  isSystem: agent.value?.is_system,
+  hasDashboardFlag: hasDashboard.value,
+  brainOrbVisible: sessionsStore.brainOrbAvailable && hasBrainOrb.value,
+  canShare: agent.value?.can_share,
+  a2aVisible: sessionsStore.a2aAvailable,
+  gitSync: hasGitSync.value,
+}))
+
+// Every id the page can ever render, derived from the builder above rather than
+// restated. This is what a `?tab=` value is resolved against BEFORE the agent
+// loads (#2130 requires the landing to apply before the first await, so nothing
+// permission-dependent is known yet); visibility is reconciled once it does.
+const ALL_TAB_IDS = buildTabs({
+  isSystem: false, hasDashboardFlag: true, brainOrbVisible: true,
+  canShare: true, a2aVisible: true, gitSync: true,
+}).map((t) => t.id)
 
 // Load agent
 //
@@ -1294,6 +1356,9 @@ onMounted(async () => {
     loadTokenStats(),
     ...(agent.value?.status === 'running' ? [checkDashboardExists(), checkBrainOrbCapability()] : [])
   ])
+  // #2153: only now is it known which tabs this viewer can see. Drops a deep
+  // link to one they cannot — and does nothing if they have already clicked.
+  reconcileDeepLinkVisibility()
   startEmotionCycling()
   startAllPolling()
 })
@@ -1324,6 +1389,9 @@ onActivated(async () => {
     await checkDashboardExists()
     await checkBrainOrbCapability()
   }
+  // #2153: same reconcile as onMounted — this hook is the KeepAlive path, and
+  // handling it in one hook only is the #1672 bug class.
+  reconcileDeepLinkVisibility()
 
   // DEPRECATED: Terminal tab hidden (candidate for removal)
   // if (activeTab.value === 'terminal') {

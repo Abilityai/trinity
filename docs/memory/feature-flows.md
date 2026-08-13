@@ -342,6 +342,7 @@
 | Session Tab | [session-tab.md](feature-flows/session-tab.md) | The `--resume` engine — each turn reattaches to the same Claude memory (SESSION_TAB_2026-04). Its Agent Detail surface retired in ent#358; the engine and endpoints are live |
 | Workspace absorbs Session | [workspace-absorbs-session.md](feature-flows/workspace-absorbs-session.md) | ent#358 — one continuous-conversation surface, with the continuity parity that had to land before the other could be removed |
 | Workspace sidebar IA | [workspace-sidebar-ia.md](feature-flows/workspace-sidebar-ia.md) | ent#359 — agents block on top, starred chats, per-agent unread badges; why the per-viewer state could not be a column on the chat row |
+| Workspace agent page | [workspace-agent-page.md](feature-flows/workspace-agent-page.md) | ent#360 — an agent becomes a destination; what the page deliberately does NOT carry, and why that is enforced by projection rather than by template |
 | Web Terminal | [web-terminal.md](feature-flows/web-terminal.md) | Browser-based terminal for System Agent |
 | Self-Execute | [self-execute.md](feature-flows/self-execute.md) | Agent background task during chat (SELF-EXEC-001) |
 

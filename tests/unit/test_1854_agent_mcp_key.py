@@ -530,7 +530,11 @@ def test_07c_env_overrides_are_applied_last(monkeypatch):
     body = src[start:end]
 
     override_at = body.rindex("env_overrides")
-    handoff_at = body.index("return await _provision_folders_and_run_agent_container")
+    # #2092 moved the handoff from `return await ...` to an assignment (the
+    # resulting container is needed to restore run state). Anchor on the CALL,
+    # which is what "the handoff" means — the ordering property this test exists
+    # for is unchanged.
+    handoff_at = body.index("await _provision_folders_and_run_agent_container(")
     copy_at = body.index('old_config.get("Env", [])')
 
     assert copy_at < override_at < handoff_at, (

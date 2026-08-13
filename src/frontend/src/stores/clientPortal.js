@@ -355,6 +355,32 @@ export const useClientPortalStore = defineStore('clientPortal', {
       }
     },
 
+    // ent#360 — the agent page. One call for the whole page: it is one screen,
+    // and fetching header/stats/asks/work separately renders it in pieces.
+    async fetchAgentPage(agentName, window = '7d') {
+      const { data } = await axios.get(
+        `/api/enterprise/client-portal/agents/${agentName}/page`,
+        { headers: this.authHeader, params: { window } },
+      )
+      return data
+    },
+
+    async fetchAgentReports(agentName) {
+      const { data } = await axios.get(
+        `/api/enterprise/client-portal/agents/${agentName}/reports`,
+        { headers: this.authHeader },
+      )
+      return data.reports || []
+    },
+
+    async fetchAgentReport(agentName, reportId) {
+      const { data } = await axios.get(
+        `/api/enterprise/client-portal/agents/${agentName}/reports/${encodeURIComponent(reportId)}`,
+        { headers: this.authHeader },
+      )
+      return data
+    },
+
     // ent#359 — per-viewer star + unread state, for BOTH chat kinds in one call.
     // Threads and rooms come from different endpoints (and different repos) but
     // sort into a single sidebar list, so their view state has to arrive

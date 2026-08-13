@@ -231,32 +231,31 @@ def _load_lifecycle():
     sys.modules[f"{pkg_name}.helpers"] = helpers_mod
     sys.modules[f"{pkg_name}.read_only"] = read_only_mod
     sys.modules[f"{pkg_name}.file_sharing"] = file_sharing_mod
-    sys.modules["services.agent_service"] = pkg
-    sys.modules["services.agent_service.helpers"] = helpers_mod
-    sys.modules["services.agent_service.read_only"] = read_only_mod
-    sys.modules["services.agent_service.file_sharing"] = file_sharing_mod
 
     if _BACKEND not in sys.path:
         sys.path.insert(0, _BACKEND)
 
-    _snapshot: dict[str, object] = {name: sys.modules.get(name) for name in _SYS_MOCKS}
-    sys.modules.update(_SYS_MOCKS)
+    # #2140: the `services.agent_service*` slots are needed only while
+    # lifecycle.py executes (line 27 imports from them absolutely) and used to be
+    # left populated deliberately. That deliberate choice is what broke
+    # `claude_only` filtering everywhere downstream —
+    # `services/compatibility/spec.py` resolves `is_claude_runtime` from that
+    # module lazily, so the stub answered for the rest of the session.
+    from conftest import stubbed_modules
 
-    spec = importlib.util.spec_from_file_location(
-        f"{pkg_name}.lifecycle",
-        os.path.join(_BACKEND, "services", "agent_service", "lifecycle.py"),
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    # Restore the real modules (or evict our Mock if the slot was empty) so
-    # we don't pollute downstream tests. The ``services.agent_service`` slot
-    # is deliberately left populated — see docstring above.
-    for name, original in _snapshot.items():
-        if original is not None:
-            sys.modules[name] = original  # type: ignore[assignment]
-        else:
-            sys.modules.pop(name, None)
+    agent_service_aliases = {
+        "services.agent_service": pkg,
+        "services.agent_service.helpers": helpers_mod,
+        "services.agent_service.read_only": read_only_mod,
+        "services.agent_service.file_sharing": file_sharing_mod,
+    }
+    with stubbed_modules({**_SYS_MOCKS, **agent_service_aliases}):
+        spec = importlib.util.spec_from_file_location(
+            f"{pkg_name}.lifecycle",
+            os.path.join(_BACKEND, "services", "agent_service", "lifecycle.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
     return mod
 
 

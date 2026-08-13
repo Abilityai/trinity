@@ -15,6 +15,7 @@ import { describe, it, expect } from 'vitest'
 import {
   partitionStarred, unreadByAgent, totalUnread, rowAgents, groupThreadsByDate,
   normalizeRoomRow, shouldMarkTurnRead, mentionedAgents,
+  REPLY_MAX_WAIT_MS_FALLBACK, PORTAL_ATTEMPT_CEILING_S, PORTAL_TURN_TIMEOUT_S,
 } from '../../src/components/portal/portalUtils'
 
 const iso = (d) => new Date(d).toISOString()
@@ -212,5 +213,24 @@ describe('ent#361 — @mention from a 1:1 becomes a group chat', () => {
     expect(mentionedAgents('', roster)).toEqual([])
     expect(mentionedAgents('@recon', undefined)).toEqual([])
     expect(mentionedAgents(null, roster)).toEqual([])
+  })
+})
+
+describe('#2133 — the client fallback budget', () => {
+  // The first version of these tests asserted literals declared inside the test
+  // and imported nothing from the component, so changing the real constant left
+  // them green — exactly the drift they claimed to catch. They read the real
+  // exports now.
+  it('covers two attempts, each of which can exceed the turn timeout', () => {
+    // One attempt is NOT bounded by `timeout_seconds`: dispatch adds HTTP slack
+    // and the #678 reader-race retry adds a whole second call on top.
+    expect(PORTAL_ATTEMPT_CEILING_S).toBeGreaterThan(PORTAL_TURN_TIMEOUT_S)
+    expect(REPLY_MAX_WAIT_MS_FALLBACK)
+      .toBeGreaterThanOrEqual(2 * PORTAL_ATTEMPT_CEILING_S * 1000)
+  })
+
+  it('matches the server bound, which test_2133 pins on the other side', () => {
+    // Server: 2 * (300 + 10 + 300) + 60. If either side moves alone, this fails.
+    expect(REPLY_MAX_WAIT_MS_FALLBACK).toBe((2 * (300 + 10 + 300) + 60) * 1000)
   })
 })

@@ -45,9 +45,26 @@ function scriptOf(source) {
   return m[1]
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
     .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
-    .replace(/`(?:\\.|\$\{[^}]*\}|[^`\\])*`/g, '``')
-    .replace(/'(?:\\.|[^'\\])*'/g, "''")
-    .replace(/"(?:\\.|[^"\\])*"/g, '""')
+    // ONE alternation, not three passes. Stripping single-quoted strings before
+    // double-quoted ones means an apostrophe inside "we've" opens a phantom
+    // string that swallows the rest of the file, and every identifier after it
+    // reads as undefined. Leftmost-match wins here, so whichever quote opens
+    // first consumes the others.
+    .replace(
+      // Each branch is UNAMBIGUOUS: `\\.` starts with a backslash and the class
+      // excludes one, so no input can be matched two ways. An earlier version
+      // also carried `\$\{[^}]*\}` for template placeholders — but `[^`\\]`
+      // already consumes those character by character, so the two overlapped and
+      // the alternation backtracked exponentially (CodeQL js/redos, high). It
+      // reads only our own source files, so it was never exploitable; it was
+      // still a real defect. It was NOT free, though: that branch is what made a
+      // NESTED template literal strip as one unit, so `` `a ${x ? `y` : 'z'} b` ``
+      // now strips as two matches and can leave a fragment exposed. Accepted:
+      // this is a heuristic over our own source, a false 'calls undefined' is
+      // loud and fixable, and no non-backtracking regex handles nesting.
+      /`(?:\\.|[^`\\])*`|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g,
+      '""',
+    )
 }
 
 function definedNames(script) {

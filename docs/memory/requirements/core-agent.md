@@ -403,7 +403,49 @@
   content rather than a chat) is abilityai/trinity-enterprise#360.
 - **Flow**: `docs/memory/feature-flows/workspace-sidebar-ia.md`
 
-### 5.11 Workspace multi-agent chats — @mention escalates a 1:1
+### 5.11 Workspace agent page
+- **Status**: ✅ Implemented (2026-08-13)
+- **Requirement ID**: WORKSPACE_AGENT_PAGE
+- **GitHub Issue**: abilityai/trinity-enterprise#360
+- **Description**: Each agent gets a page in the Workspace — identity, health,
+  recent work, reports, files, what it can do, and the place where the agent
+  surfaces what it needs from the user. A roster row opens it; **Start a chat**
+  is an explicit button there.
+- **It reports; it does not configure.** No schedules, no skill editing, no
+  logs, no costs. Model and plan are not shown at all — the AC permits them
+  "informational and visibility-gated", and the cheapest way to satisfy a gate
+  is to not open the door. Building agents stays operator-side.
+- **The viewer may be an external client.** The same page serves a portal-token
+  client and a platform user, so exclusions are enforced by **projection in the
+  service**, never by filtering in the template: a field that never leaves the
+  service cannot be surfaced by a later UI edit. Three that matter —
+  `recent_work` drops `message`/`cost`/`model_used`/`source_user_email`; `asks`
+  admits only agent-authored `approval`/`question` items (never platform
+  `alert`s) and never their `context` (free-form agent JSON, a known
+  credential-leak surface); report reads are agent-scoped, since report ids are
+  global and the roster gate only proves the caller may reach *this* agent.
+- **Key Features**:
+  - Header: avatar, name, description, health, last active
+  - Stats strip: activity chart, tasks in window, completed rate, first-try rate
+  - Tabs: Overview · Reports · Files · What it can do · Activity
+  - Overview leads with **open asks**, then recent work, then this user's chats
+  - Everything DB-sourced, so a **stopped** agent renders degraded, not empty:
+    health `unknown` (monitoring is default-OFF, so "unhealthy" would be a lie),
+    empty sections, and a failing data source degrades that section only
+  - Endpoints: `GET /agents/{name}/page?window=`, `.../reports`,
+    `.../reports/{id}` under the client-portal prefix, all roster-gated
+- **Not met**: the AC's **rating tally**. There is no rating, thumbs or feedback
+  mechanism anywhere in Trinity, so it has no data source and was omitted rather
+  than invented — a number a user reads as "how well is this agent doing" has to
+  come from something real. The **first-try rate** beside it IS real: successes
+  with `retry_count` 0, distinct from the success rate (which counts a
+  retried-then-succeeded execution as a success).
+- **Supersedes**: ent#359's interim roster-click behaviour (a row with unread
+  opened the unread chat). The page resolves that properly — its Overview lists
+  the chats the agent belongs to, unread counts included.
+- **Flow**: `docs/memory/feature-flows/workspace-agent-page.md`
+
+### 5.12 Workspace multi-agent chats — @mention escalates a 1:1
 - **Status**: ✅ Implemented (2026-08-13)
 - **Requirement ID**: WORKSPACE_MENTION_TO_GROUP
 - **GitHub Issue**: abilityai/trinity-enterprise#361

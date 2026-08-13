@@ -1006,7 +1006,7 @@ async def portal_chat(agent_name: str, message: str, email: str,
             triggered_by="public",      # external-caller path; "Public" analytics bucket
             on_resume_failure=_on_resume_failure,
             source_user_email=email,
-            timeout_seconds=300,
+            timeout_seconds=PORTAL_TURN_TIMEOUT_SECONDS,
             images=images or None,      # referenced inbox images as vision input (#78)
             system_prompt=system_prompt,
             execution_id=execution_id,  # ent#286: pre-created row, so the client can already be watching
@@ -1113,11 +1113,37 @@ def _inflight_exec_key(execution_id: str) -> str:
     return f"portal_inflight_exec:{execution_id}"
 
 
-# The marker describes a turn in progress, so its TTL is the turn's own bound
-# plus slack — not an hour. The client now waits as long as the marker says a
-# turn is running, so an over-long TTL is a spinner that outlives the work: a
-# backend restart mid-turn would leave the composer disabled for the remainder.
-PORTAL_INFLIGHT_TTL_SECONDS = 300 + 60
+# The bound on ONE portal turn (the `timeout_seconds` passed to the turn below).
+PORTAL_TURN_TIMEOUT_SECONDS = 300
+
+# The bound on a turn's whole LIFE, which is what the marker and the client must
+# be sized against — #2133.
+#
+# `run_resumable_turn` can run the turn TWICE: a resume whose JSONL is gone
+# fails, and the cold retry re-runs the WHOLE thing. So the worst legitimate
+# case is two full timeouts, not one. Sizing either bound at a single timeout
+# reintroduces exactly what #2120 fixed — the marker expires, the client is told
+# "nothing is running", and a live, already-billed turn is declared not
+# delivered — and it does so precisely on the cold-retry path that fix existed
+# for.
+#
+# Still nowhere near the old hour: an hour-long marker is a spinner that
+# outlives the work, so a backend restart mid-turn would leave the composer
+# disabled for the rest of it.
+# What ONE attempt can actually cost, which is not `timeout_seconds`:
+#   + 10   `execute_task` dispatches with `timeout_seconds + 10` (HTTP slack)
+#   + 300  the #678 reader-race auto-retry runs a SECOND http call, capped at
+#          `_AUTO_RETRY_MAX_TIMEOUT_S`, ON TOP of whatever attempt 1 burned
+#          (unlike the SUB-003 retry, which is capped to the remaining budget)
+PORTAL_ATTEMPT_CEILING_SECONDS = PORTAL_TURN_TIMEOUT_SECONDS + 10 + 300
+
+# ...and the turn can run TWO attempts, because a resume whose JSONL is gone
+# re-runs the whole thing cold. Sizing the marker at one attempt — or at two bare
+# timeouts, as this first did — expires it while the turn is live, and the client
+# then offers a Retry for work already billed. `tests/unit/test_2133_*` pins this
+# against the real constants so a change to either drifts loudly.
+PORTAL_MAX_TURN_SECONDS = 2 * PORTAL_ATTEMPT_CEILING_SECONDS + 60
+PORTAL_INFLIGHT_TTL_SECONDS = PORTAL_MAX_TURN_SECONDS
 
 
 def mark_turn_inflight(session_id: str, execution_id: str,
@@ -1367,7 +1393,15 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
     _INFLIGHT_TURNS.add(task)
     task.add_done_callback(_INFLIGHT_TURNS.discard)
 
-    return {"execution_id": execution_id, "session_id": session_id}
+    # #2133: the client must not invent its own ceiling. It waits on the marker,
+    # and the marker's life is decided here — so the budget travels with the
+    # dispatch rather than being duplicated as a frontend constant that silently
+    # drifts the next time this timeout changes.
+    return {
+        "execution_id": execution_id,
+        "session_id": session_id,
+        "wait_budget_seconds": PORTAL_MAX_TURN_SECONDS,
+    }
 
 
 def execution_belongs_to_caller(execution_id: str, agent_name: str, email: str) -> bool:

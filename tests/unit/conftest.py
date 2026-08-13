@@ -3,6 +3,7 @@ Unit test conftest — overrides the parent conftest's autouse fixtures.
 
 These tests run without a backend connection (no Docker, no API).
 """
+import contextlib
 import importlib.util
 import os
 import sys
