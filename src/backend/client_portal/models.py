@@ -132,6 +132,10 @@ class PortalTurnStarted(BaseModel):
     """
     execution_id: str
     session_id: Optional[str] = None
+    # #2133: how long the client may wait before concluding it has lost track of
+    # the turn. Sent by the server because the server owns the timeout; a
+    # frontend constant would drift the next time it changes.
+    wait_budget_seconds: Optional[int] = None
 
 
 class PortalSessionSummary(BaseModel):

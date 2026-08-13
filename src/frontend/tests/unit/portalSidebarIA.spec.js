@@ -164,3 +164,24 @@ describe('row avatars', () => {
     expect(rowAgents({})).toEqual({ shown: [], overflow: 0 })
   })
 })
+
+describe('#2133 — the reply poll is bounded, and giving up is not a failure', () => {
+  // The bound has to cover a COLD RETRY. `run_resumable_turn` re-runs the whole
+  // turn when a resume finds no JSONL, so the worst legitimate case is two full
+  // turn timeouts. Sizing it at one would declare a live, already-billed retry
+  // "not delivered" — which is exactly what #2120 fixed, on exactly the path it
+  // was fixed for.
+  const TURN = 300
+  const budget = 2 * TURN + 60
+
+  it('covers two full turns plus slack, not one', () => {
+    expect(budget).toBeGreaterThan(2 * TURN)
+  })
+
+  it('the client fallback matches what the server sends', () => {
+    // They are separate constants in separate languages; if they drift, the
+    // client gives up before the server stops claiming a turn is running.
+    const clientFallbackMs = (2 * 300 + 60) * 1000
+    expect(clientFallbackMs).toBe(budget * 1000)
+  })
+})

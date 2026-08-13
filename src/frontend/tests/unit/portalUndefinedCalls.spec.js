@@ -45,9 +45,15 @@ function scriptOf(source) {
   return m[1]
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
     .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
-    .replace(/`(?:\\.|\$\{[^}]*\}|[^`\\])*`/g, '``')
-    .replace(/'(?:\\.|[^'\\])*'/g, "''")
-    .replace(/"(?:\\.|[^"\\])*"/g, '""')
+    // ONE alternation, not three passes. Stripping single-quoted strings before
+    // double-quoted ones means an apostrophe inside "we've" opens a phantom
+    // string that swallows the rest of the file, and every identifier after it
+    // reads as undefined. Leftmost-match wins here, so whichever quote opens
+    // first consumes the others.
+    .replace(
+      /`(?:\\.|\$\{[^}]*\}|[^`\\])*`|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g,
+      '""',
+    )
 }
 
 function definedNames(script) {

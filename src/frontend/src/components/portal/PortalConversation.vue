@@ -91,7 +91,7 @@
               class="text-xs text-status-danger-700 dark:text-status-danger-300 text-right max-w-[32ch]"
             >{{ m.error }}</p>
             <button
-              v-if="m.failed"
+              v-if="m.failed && m.retryable !== false"
               class="text-xs text-status-danger-600 dark:text-status-danger-400 hover:underline inline-flex items-center gap-1"
               @click="retry(i)"
             >
@@ -403,7 +403,16 @@ async function deliver(text) {
         streaming.value = false
         liveActivity.value = []
       }
-      data = await awaitPersistedReply(started.session_id || currentSessionId.value, baseline)
+      data = await awaitPersistedReply(
+        started.session_id || currentSessionId.value, baseline, started.wait_budget_seconds,
+      )
+      if (data?.lost) {
+        // #2133: we ran out of budget while the marker still claimed a turn.
+        // That turn probably RAN and was billed — we merely lost sight of it.
+        // So this is reported without a Retry: re-sending is the one action
+        // guaranteed to be wrong.
+        return { lost: true, error: "Still no reply — we've lost track of this turn. It may still finish; check the conversation shortly." }
+      }
       if (!data) {
         // The server reports nothing running and no new reply — a genuine
         // no-answer. Report it; never re-send, the turn was already billed.
@@ -471,22 +480,54 @@ function onStreamEvent(evt) {
 // first poll — the answer to the wrong question, while a second turn ran unseen.
 const REPLY_POLL_MS = 700
 const REPLY_IDLE_GIVE_UP = 8      // ~5.6s of the server saying "nothing running"
-// An absolute ceiling on top of the server's answer. The marker is TTL-bounded
-// server-side, but a stuck or unreachable marker must not leave the composer
-// disabled forever — this caps the spinner at a little beyond the longest turn.
-const REPLY_MAX_WAIT_MS = 6 * 60 * 1000
 
-async function awaitPersistedReply(sessionId, baselineAssistants) {
+// #2133: the absolute ceiling, for when the marker is ORPHANED rather than
+// merely slow — a hard backend kill skips the `finally` that clears it, and
+// `except Exception` does not catch `CancelledError`.
+//
+// The server sends the budget with the 202 (`wait_budget_seconds`) because the
+// server owns the turn timeout. This constant is only the fallback for an older
+// backend, and it is sized the same way: TWO full turns, because a failed
+// `--resume` re-runs the whole thing cold. A ceiling of one turn would declare a
+// live, already-billed cold retry "not delivered" — exactly what #2120 fixed,
+// on exactly the path it was fixed for.
+const REPLY_MAX_WAIT_MS_FALLBACK = (2 * 300 + 60) * 1000
+
+// Polling every 700ms for ten minutes is ~850 history reads per tab. The reply
+// almost always lands in the first seconds, so the fast interval is what
+// matters; after that, widen. Same total wait, an order of magnitude fewer
+// requests on the long tail.
+const REPLY_POLL_STEPS = [
+  { afterMs: 30_000, everyMs: 2_000 },
+  { afterMs: 120_000, everyMs: 5_000 },
+  { afterMs: 300_000, everyMs: 15_000 },
+]
+
+function replyPollInterval(elapsedMs) {
+  let every = REPLY_POLL_MS
+  for (const step of REPLY_POLL_STEPS) if (elapsedMs >= step.afterMs) every = step.everyMs
+  return every
+}
+
+async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds) {
   let idlePolls = 0
-  const deadline = Date.now() + REPLY_MAX_WAIT_MS
+  const startedAt = Date.now()
+  const budgetMs = Number(budgetSeconds) > 0
+    ? Number(budgetSeconds) * 1000
+    : REPLY_MAX_WAIT_MS_FALLBACK
+  const deadline = startedAt + budgetMs
+  const wait = () => new Promise((r) => setTimeout(r, replyPollInterval(Date.now() - startedAt)))
+
   for (;;) {
-    if (Date.now() > deadline) return null
+    // `lost` — NOT a failure. The turn may well have run and been billed; we
+    // simply stopped being able to see it. The caller must not offer a Retry.
+    if (Date.now() > deadline) return { lost: true }
     let data
     try {
       data = await store.fetchHistory(props.agent.name, sessionId || null)
     } catch {
       // A hiccup reading history is not evidence the turn failed.
-      await new Promise((r) => setTimeout(r, REPLY_POLL_MS))
+      await wait()
       continue
     }
     const assistants = (data.messages || []).filter((m) => m.role === 'assistant')
@@ -497,7 +538,7 @@ async function awaitPersistedReply(sessionId, baselineAssistants) {
     // Still running server-side? Then keep waiting, however long it takes.
     if (data.inFlightExecutionId) { idlePolls = 0 }
     else if (++idlePolls >= REPLY_IDLE_GIVE_UP) return null
-    await new Promise((r) => setTimeout(r, REPLY_POLL_MS))
+    await wait()
   }
 }
 
@@ -518,13 +559,17 @@ async function persistedAssistantCount(sessionId) {
 // Vue only proxies it when you read `messages.value[i]`. Mutating the local
 // variable you pushed writes past the proxy: the value changes, nothing
 // re-renders, and the failure is invisible.
-function markFailed(index, content, error) {
+function markFailed(index, content, error, { retryable = true } = {}) {
   const row = messages.value[index]
   // The array can be replaced under us (thread switch, history reload). Only
   // mark the row if it is still the message we sent.
   if (!row || row.role !== 'user' || row.content !== content) return
   row.failed = true
   row.error = error || null
+  // #2133: a turn we merely lost sight of is NOT offered a Retry. Re-sending
+  // a turn that already ran is the double-billing this whole path exists to
+  // prevent, so the distinction lives on the row rather than in the copy.
+  row.retryable = retryable
 }
 
 async function send() {
@@ -535,7 +580,7 @@ async function send() {
   autoGrow()
   await scrollDown()
   const res = await deliver(text)
-  if (res !== true) markFailed(index, text, res?.error)
+  if (res !== true) markFailed(index, text, res?.error, { retryable: !res?.lost })
 }
 
 async function retry(i) {
@@ -545,7 +590,7 @@ async function retry(i) {
   msg.failed = false
   msg.error = null
   const res = await deliver(content)
-  if (res !== true) markFailed(i, content, res?.error)
+  if (res !== true) markFailed(i, content, res?.error, { retryable: !res?.lost })
 }
 
 // ---- Voice: speak replies (TTS) + dictate (STT) — carried over from #78 -------
