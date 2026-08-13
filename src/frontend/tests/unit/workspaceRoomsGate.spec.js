@@ -212,9 +212,16 @@ describe('#2128 structure guards', () => {
     const src = portalSource()
     const roomAt = src.indexOf('<PortalRoom')
     expect(roomAt, '<PortalRoom is gone').toBeGreaterThan(-1)
-    const vIfAt = src.indexOf('v-if=', roomAt)
-    expect(vIfAt, '<PortalRoom has no v-if').toBeGreaterThan(-1)
-    const vIf = src.slice(vIfAt, src.indexOf('\n', vIfAt))
+
+    // Scoped to PortalRoom's OWN element, and accepting `v-else-if` as well as
+    // `v-if` (ent#360 put the agent page ahead of it in the chain, so the room
+    // is no longer the first branch). Both matter: an unscoped `indexOf('v-if=')`
+    // walks past a `v-else-if` — the string does not contain `v-if=` — into the
+    // NEXT branch's `v-if`, which reports a missing gate that is in fact present.
+    const element = src.slice(roomAt, src.indexOf('/>', roomAt))
+    const condAt = element.search(/v-(?:else-)?if=/)
+    expect(condAt, '<PortalRoom has no v-if / v-else-if').toBeGreaterThan(-1)
+    const vIf = element.slice(condAt, element.indexOf('\n', condAt))
     expect(
       vIf,
       'PortalRoom must not mount when rooms are unavailable — its onMounted ' +

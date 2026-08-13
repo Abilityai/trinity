@@ -72,6 +72,7 @@
           :search-results="searchResults"
           @new-chat="newChat"
           @new-chat-with-agent="newChatWithAgent"
+          @open-agent="openAgentPage"
           @open-thread="openThread"
           @toggle-star="toggleStar"
           @sign-out="onSignOut"
@@ -92,6 +93,7 @@
             :search-results="searchResults"
             @new-chat="() => { mobileNav = false; newChat() }"
             @new-chat-with-agent="(n) => { mobileNav = false; newChatWithAgent(n) }"
+            @open-agent="(n) => { mobileNav = false; openAgentPage(n) }"
             @open-thread="(t) => { mobileNav = false; openThread(t) }"
             @toggle-star="toggleStar"
             @sign-out="onSignOut"
@@ -104,8 +106,20 @@
         <!-- ent#361: a room takes the stage when the URL names one. The
              single-agent conversation is untouched below — different
              substrate, different component, no shared state. -->
+        <!-- ent#360: an agent is a destination with its own URL. Takes the
+             stage ahead of room/chat, since a route can only name one. -->
+        <PortalAgentPage
+          v-if="activeAgentPageName"
+          :key="activeAgentPageName"
+          :agent-name="activeAgentPageName"
+          :threads="threads"
+          @start-chat="onStartChatFromPage"
+          @open-thread="openThread"
+          @open-menu="mobileNav = true"
+        />
+
         <PortalRoom
-          v-if="activeRoomIdFromRoute && store.multiAgentChatAvailable"
+          v-else-if="activeRoomIdFromRoute && store.multiAgentChatAvailable"
           :key="activeRoomIdFromRoute"
           :room-id="activeRoomIdFromRoute"
           :roster="store.agents"
@@ -170,6 +184,7 @@
           @sessions-changed="onConversationTurnDone"
           @open-files="filesOpen = true"
           @open-menu="mobileNav = true"
+          @escalate-to-room="onEscalateToRoom"
           @toggle-star="toggleStar"
         >
           <template #empty>
@@ -192,7 +207,7 @@
           </p>
         </div>
 
-        <div v-else-if="!activeRoomIdFromRoute" :class="STAGE_WRAP">
+        <div v-else-if="!activeRoomIdFromRoute && !activeAgentPageName" :class="STAGE_WRAP">
           <svg :class="STAGE_ICON" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
           <template v-if="store.unavailable">
             <p :class="STAGE_TITLE">{{ WORKSPACE_UNAVAILABLE_TITLE }}</p>
@@ -255,6 +270,7 @@ import PortalFilesPanel from '@/components/portal/PortalFilesPanel.vue'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
+import PortalAgentPage from '@/components/portal/PortalAgentPage.vue'
 import { resolveAgentLanding, shouldMarkTurnRead } from '@/components/portal/portalUtils'
 
 const store = useClientPortalStore()
@@ -324,6 +340,8 @@ const convGen = ref(0)                // bumps on explicit thread switches → r
 const activeSessionId = computed(() => route.params.sessionId || null)
 // ent#361: `/workspace/r/:roomId` is the multi-agent chat.
 const activeRoomIdFromRoute = computed(() => route.params.roomId || null)
+// ent#360: `/workspace/a/:agentName`.
+const activeAgentPageName = computed(() => route.params.agentName || null)
 const activeAgent = computed(() => {
   // Never substitute a different agent for one the caller asked for by name.
   if (unreachableAgent.value) return null
@@ -400,6 +418,43 @@ async function onPickerConfirm(agentNames) {
 
 const pickerError = ref(null)
 
+// ent#361: a 1:1 became a group discussion. Create the room with both agents,
+// carry the message that caused it, and move the user there.
+//
+// The message is posted AFTER navigation rather than before: posting first and
+// then navigating leaves the user staring at the old thread while the agents
+// they just summoned reply somewhere they cannot see. If the post fails the
+// room still exists and they are in it, which retyping recovers — whereas a
+// created-but-unreachable room does not.
+const escalating = ref(false)
+
+async function onEscalateToRoom({ agents, message } = {}) {
+  if (escalating.value || !agents?.length) return
+  escalating.value = true
+  try {
+    const room = await store.createRoom(agents, `Chat with ${agents.join(', ')}`)
+    const roomId = room.id || room.room_id
+    await refreshThreads()
+    openRoom(roomId)
+    if (message) {
+      try {
+        await store.postRoomMessage(roomId, message)
+      } catch { /* the room is open in front of them; retyping recovers */ }
+    }
+  } catch (err) {
+    // Escalation failed, so the user is still in the 1:1 with an emptied
+    // composer. Give the text back rather than losing what they typed.
+    prefill.value = ''
+    await nextTick()
+    prefill.value = message || ''
+    pickerError.value = err?.response?.data?.detail?.message
+      || err?.response?.data?.detail
+      || 'Could not start a group chat with those agents.'
+  } finally {
+    escalating.value = false
+  }
+}
+
 // #2128 — shared by the room-route refusal branch and the no-room empty state
 // below it, which are the same four states rendered in the same file. Local
 // consts, not a module: both consumers live here, and a component extraction
@@ -443,6 +498,25 @@ function openRoom(roomId) {
   convGen.value++
   router.push(`/workspace/r/${roomId}`)
 }
+// ent#360 AC #1: a roster row opens the agent's PAGE. Starting a chat is an
+// explicit act there — which also resolves the tension ent#359 left behind,
+// where a row carrying an unread badge opened the unread chat instead. The
+// count still shows on the row; the page's Overview lists the chats it belongs
+// to, so the conversation is one click further, not lost.
+function openAgentPage(name) {
+  if (!name) return
+  unreachableAgent.value = null
+  pendingSession.value = null
+  activeRoomId.value = null
+  router.push(`/workspace/a/${encodeURIComponent(name)}`)
+}
+
+// "Start a chat" from the page, optionally seeded by a capability card.
+function onStartChatFromPage(name, starter) {
+  newChatWithAgent(name)
+  if (starter) usePlaybook(starter)
+}
+
 function newChatWithAgent(name) {
   unreachableAgent.value = null
   activeAgentName.value = name
