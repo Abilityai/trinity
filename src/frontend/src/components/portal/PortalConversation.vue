@@ -200,7 +200,7 @@ import { renderMarkdown } from '@/utils/markdown'
 import { agentDisplayName } from '@/utils/agentName'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
-import { deliveryFailureReason } from './portalUtils'
+import { deliveryFailureReason, mentionedAgents } from './portalUtils'
 
 const props = defineProps({
   agent: { type: Object, required: true },      // {name, owner, avatar_url, description, playbooks, voice_available}
@@ -211,7 +211,7 @@ const props = defineProps({
   // holds the per-viewer chat state), rendered here.
   starred: { type: Boolean, default: false },
 })
-const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star'])
+const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room'])
 
 const store = useClientPortalStore()
 const messages = ref([])
@@ -530,6 +530,25 @@ function markFailed(index, content, error) {
 async function send() {
   const text = input.value.trim()
   if (!text || sending.value) return
+
+  // ent#361: @mentioning another agent from a 1:1 makes this a group discussion.
+  // Handled BEFORE the message is appended: the conversation moves to a room, so
+  // leaving a copy of it in this thread would show the user their message in two
+  // places and only one of them would ever get a reply.
+  //
+  // Gated on the rooms capability for the same reason the picker is (#2128) —
+  // without it there is nowhere to escalate TO, and an @mention has to keep
+  // working as ordinary text.
+  if (store.multiAgentChatAvailable) {
+    const others = mentionedAgents(text, props.roster, { exclude: [props.agent.name] })
+    if (others.length) {
+      input.value = ''
+      autoGrow()
+      emit('escalate-to-room', { agents: [props.agent.name, ...others], message: text })
+      return
+    }
+  }
+
   const index = messages.value.push({ role: 'user', content: text, failed: false, error: null }) - 1
   input.value = ''
   autoGrow()

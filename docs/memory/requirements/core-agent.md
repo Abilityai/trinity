@@ -403,6 +403,43 @@
   content rather than a chat) is abilityai/trinity-enterprise#360.
 - **Flow**: `docs/memory/feature-flows/workspace-sidebar-ia.md`
 
+### 5.11 Workspace multi-agent chats — @mention escalates a 1:1
+- **Status**: ✅ Implemented (2026-08-13)
+- **Requirement ID**: WORKSPACE_MENTION_TO_GROUP
+- **GitHub Issue**: abilityai/trinity-enterprise#361
+- **Description**: @mentioning another agent turns a conversation into a group
+  discussion — from a **1:1** (which creates a room containing both agents and
+  carries the message into it) and from **inside a room** (which adds the
+  mentioned agent as a participant).
+- **The AC was a feature request wearing a regression guard.** ent#361 AC#4 asks
+  that "@mention of a non-participant *still works* and adds them (existing path
+  preserved)", and its Context says a chat could already become multi-agent that
+  way. Neither was true: `resolve_mentions` matched only names already in the
+  room and documented that a mention "can never reach outside", and the portal
+  had no mention handling at all. There was nothing to preserve.
+- **Two halves, deliberately in different layers**:
+  - **In-room** is engine-side (`shared_sessions.post_message` →
+    `_join_mentioned_newcomers`), because agent replies flow through the engine
+    and membership is its concern.
+  - **1:1 → room** is a UI act: the Workspace resolves the mention against the
+    roster it already holds and uses the existing `POST /api/rooms` +
+    `POST /api/rooms/{id}/messages`. OSS must not import the private module, and
+    routing it through the rooms API keeps `create_room`'s per-agent ACL as the
+    single enforcement point rather than adding a second one.
+- **Safety properties** (both halves): an @name that is not an agent the caller
+  can reach stays **plain text and is never an error** — a "no such agent" reply
+  would answer, for any string typed, whether an agent by that name exists;
+  **only a human** may recruit (an agent that could pull agents into a room is a
+  spend amplifier and a prompt-injection lever); the participant cap is
+  re-checked per addition; a closed room admits nobody.
+- **Mirrored pattern**: the Workspace regex mirrors the engine's `_MENTION_RE`
+  so a handle that looks like a mention in the composer is one to the engine.
+  Pinned on the Workspace side by tests; drift would build a room around a name
+  the engine then renders as text.
+- **Gating**: escalation is gated on the same rooms capability as the picker
+  (#2128) — without it there is nowhere to escalate to, so an @mention stays
+  ordinary text.
+
 ---
 
 ## 6. Activity Monitoring

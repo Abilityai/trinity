@@ -170,6 +170,7 @@
           @sessions-changed="onConversationTurnDone"
           @open-files="filesOpen = true"
           @open-menu="mobileNav = true"
+          @escalate-to-room="onEscalateToRoom"
           @toggle-star="toggleStar"
         >
           <template #empty>
@@ -399,6 +400,43 @@ async function onPickerConfirm(agentNames) {
 }
 
 const pickerError = ref(null)
+
+// ent#361: a 1:1 became a group discussion. Create the room with both agents,
+// carry the message that caused it, and move the user there.
+//
+// The message is posted AFTER navigation rather than before: posting first and
+// then navigating leaves the user staring at the old thread while the agents
+// they just summoned reply somewhere they cannot see. If the post fails the
+// room still exists and they are in it, which retyping recovers — whereas a
+// created-but-unreachable room does not.
+const escalating = ref(false)
+
+async function onEscalateToRoom({ agents, message } = {}) {
+  if (escalating.value || !agents?.length) return
+  escalating.value = true
+  try {
+    const room = await store.createRoom(agents, `Chat with ${agents.join(', ')}`)
+    const roomId = room.id || room.room_id
+    await refreshThreads()
+    openRoom(roomId)
+    if (message) {
+      try {
+        await store.postRoomMessage(roomId, message)
+      } catch { /* the room is open in front of them; retyping recovers */ }
+    }
+  } catch (err) {
+    // Escalation failed, so the user is still in the 1:1 with an emptied
+    // composer. Give the text back rather than losing what they typed.
+    prefill.value = ''
+    await nextTick()
+    prefill.value = message || ''
+    pickerError.value = err?.response?.data?.detail?.message
+      || err?.response?.data?.detail
+      || 'Could not start a group chat with those agents.'
+  } finally {
+    escalating.value = false
+  }
+}
 
 // #2128 — shared by the room-route refusal branch and the no-room empty state
 // below it, which are the same four states rendered in the same file. Local
