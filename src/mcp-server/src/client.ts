@@ -2664,4 +2664,76 @@ export class TrinityClient {
   }
   // a2a_exposed is surfaced natively on GET /api/agents (ent#157), so list_agents
   // / get_agent carry it without a separate fetch — no client merge needed.
+
+  // ==========================================================================
+  // A2A runtime — OUTBOUND calls (abilityai/trinity#736)
+  //
+  // Distinct from the ent#160 control plane above in two ways that matter:
+  //  - these hit OSS routes on /api/agents, NOT the entitlement-gated
+  //    /api/enterprise/a2a/*. The epic's ruling is "Outbound = OSS", so a
+  //    404 here means the kill switch is off or the build predates the
+  //    feature — never "not licensed".
+  //  - they carry their own AbortController. `request()` uses a bare `fetch`
+  //    with no signal, and nginx is `proxy_read_timeout 86400`, so without one
+  //    the MCP client's own 30-60s gateway timeout fires first: the agent sees
+  //    `fetch failed` while the credentialed outbound call completes anyway.
+  //    The side effect happened and, because `task_id` only comes back on
+  //    success, the agent would hold no handle to poll. Aborting on OUR side
+  //    first lets us return a structured receipt instead (the #914 shape).
+  // ==========================================================================
+
+  /** Bound below the MCP client's gateway abort so WE give up first (see above). */
+  private a2aTimeoutMs(): number {
+    // `||` not `??`: a set-but-empty env var must coalesce to the default.
+    // `Number('')` is 0, which would abort every call instantly (the #1076 class).
+    return Number(process.env.MCP_A2A_TIMEOUT_MS || 40000);
+  }
+
+  private async a2aFetch(path: string, body: unknown): Promise<unknown> {
+    if (!this.token) {
+      throw new Error("Not authenticated. Call authenticate() first or setToken().");
+    }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.a2aTimeoutMs());
+    try {
+      const response = await fetch(`${this.baseUrl}${path}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new ApiError(response.status, await response.text(), response.headers);
+      }
+      return await response.json();
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  /** Task an external A2A agent through a PRE-REGISTERED endpoint (#736). */
+  async callA2AAgent(
+    name: string,
+    body: {
+      endpoint: string;
+      message: string;
+      dedup_label: string;
+      context_id?: string;
+      task_id?: string;
+      execution_id?: string;
+    },
+  ): Promise<unknown> {
+    return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/a2a/call`, body);
+  }
+
+  /** Poll a remote A2A task by id on the same registered endpoint (#736). */
+  async getA2ATask(
+    name: string,
+    body: { endpoint: string; task_id: string },
+  ): Promise<unknown> {
+    return this.a2aFetch(`/api/agents/${encodeURIComponent(name)}/a2a/task`, body);
+  }
 }

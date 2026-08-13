@@ -264,6 +264,11 @@ def _row_to_card(r: dict, tts_ready: bool) -> PortalAgentCard:
     )
     return PortalAgentCard(
         name=name,
+        # #2159: NULL display_label means "render the slug" (ent#181), so it is
+        # passed through as None and resolved at the render site rather than
+        # coalesced here — the two would then disagree about what an unset label
+        # means.
+        display_label=r.get("display_label"),
         owner=r.get("owner"),
         avatar_url=avatar_url,
         shared_at=r.get("shared_at"),

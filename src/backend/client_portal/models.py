@@ -42,6 +42,10 @@ class PortalPlaybook(BaseModel):
 class PortalAgentCard(BaseModel):
     """One agent on the client's "My Agents" roster."""
     name: str
+    # #2159: the human-facing name the dashboard tiles render (ent#181/#1640).
+    # Optional so an older payload degrades to slug-only rendering rather than
+    # failing validation — the frontend falls back to `name`.
+    display_label: Optional[str] = None
     owner: Optional[str] = None
     avatar_url: Optional[str] = None
     shared_at: Optional[str] = None

@@ -43,9 +43,10 @@ EMAIL = "alice@example.com"
 FLEET = [f"agent-{i}" for i in range(12)]
 
 
-def _rows(names):
+def _rows(names, **extra):
     return [{"agent_name": n, "owner": "alice", "avatar_updated_at": None,
-             "is_default_avatar": 1, "tts_voice_id": None, "shared_at": None}
+             "is_default_avatar": 1, "tts_voice_id": None, "shared_at": None,
+             **extra}
             for n in names]
 
 
@@ -120,6 +121,43 @@ def test_owned_agents_are_reachable_only_for_a_platform_session(svc, monkeypatch
 
     assert asyncio.run(s.get_agent_card(EMAIL, "mine", include_owned=False)) is None
     assert asyncio.run(s.get_agent_card(EMAIL, "mine", include_owned=True)) is not None
+
+
+def test_every_row_field_survives_the_extraction(svc, monkeypatch):
+    """Field-level, not just "same helper" (#2159 × #2160).
+
+    These two PRs collided on exactly this block: #2159 added
+    `display_label=r.get("display_label")` to the inline card construction, and
+    #2160 replaced that whole construction with `_row_to_card`. Git reports a
+    conflict, and the naive resolution — take the refactor — drops the field
+    silently. Nothing else would notice: the payload field is Optional so it
+    still validates, and the frontend falls back to the slug, so the only
+    symptom is #2159's bug quietly returning as every row rendering its slug
+    again.
+
+    The identity test below pins that both paths call one helper; it cannot
+    catch a field missing from that helper. This pins the field.
+    """
+    s, _ = svc
+    labelled = _rows(["agent-3"], display_label="Due Diligence")
+    monkeypatch.setattr(s.db, "get_shared_roster", lambda e: labelled)
+
+    page_card = asyncio.run(s.get_agent_card(EMAIL, "agent-3"))
+    roster_card = asyncio.run(s.get_roster(EMAIL)).agents[0]
+
+    assert page_card.display_label == "Due Diligence"
+    assert roster_card.display_label == "Due Diligence"
+
+
+def test_an_unset_label_stays_none_rather_than_being_coalesced(svc):
+    """NULL means "render the slug" and that decision belongs to the render site
+    (ent#181). Coalescing to the slug here would make the two ends disagree
+    about what unset means — the thing #2159 deliberately avoided."""
+    s, _ = svc
+
+    card = asyncio.run(s.get_agent_card(EMAIL, "agent-3"))
+
+    assert card.display_label is None
 
 
 def test_the_card_is_built_by_the_same_helper_as_the_roster():

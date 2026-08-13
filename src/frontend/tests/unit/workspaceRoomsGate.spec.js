@@ -249,9 +249,21 @@ describe('#2128 structure guards', () => {
     }
   })
 
-  it('F24 every exit from the stage tests roomId, not sessionId alone', () => {
+  it('F24 every exit from the stage leaves ANY specific route, not just a session', () => {
     // The refusal must not be a room the user cannot leave. Each of these
     // navigated only on `sessionId`, so from /workspace/r/:id nothing moved.
+    //
+    // Originally asserted the literal `route.params.roomId`. That enumeration
+    // was itself the bug one route later: ent#360 added
+    // `/workspace/a/:agentName` and none of these three navigated from it, so
+    // the page kept rendering and the controls looked dead — the same failure
+    // this test exists for, with a different param missing from the list.
+    //
+    // So the assertion is now the route-SHAPE check, required of all three. It
+    // deliberately does NOT accept the old param spelling as an alternative:
+    // that enumeration is the defect, and a guard that still passes on it can
+    // only catch the params someone already thought of. A fourth Workspace
+    // route must not be able to re-break these.
     const src = portalSource()
     for (const fn of ['startBlankChat', 'newChatWithAgent', 'onSignOut']) {
       const at = src.indexOf(`function ${fn}(`)
@@ -259,9 +271,13 @@ describe('#2128 structure guards', () => {
       const body = src.slice(at, src.indexOf('\n}', at))
       expect(
         body,
-        `${fn} navigates only on sessionId — from a room URL it changes nothing, ` +
-        `leaving the user parked on the refusal with no way out`
-      ).toContain('route.params.roomId')
+        `${fn} enumerates route params — from a room URL (or an agent-page ` +
+        `URL) it changes nothing, leaving the user parked with no way out`
+      ).toMatch(/route\.path\s*!==\s*'\/workspace'/)
+      expect(
+        body,
+        `${fn} still enumerates route params alongside the shape check`
+      ).not.toMatch(/route\.params\.(sessionId|roomId|agentName)/)
     }
   })
 })

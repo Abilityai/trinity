@@ -67,6 +67,7 @@
           :current-session-id="activeSessionId"
           :current-room-id="activeRoomIdFromRoute"
           :is-platform-session="store.isPlatformSession"
+          :loading-roster="store.loading && !store.rosterLoaded"
           v-model:search="search"
           :searching="searching"
           :search-results="searchResults"
@@ -88,6 +89,7 @@
             :current-session-id="activeSessionId"
             :current-room-id="activeRoomIdFromRoute"
             :is-platform-session="store.isPlatformSession"
+            :loading-roster="store.loading && !store.rosterLoaded"
             v-model:search="search"
             :searching="searching"
             :search-results="searchResults"
@@ -375,10 +377,14 @@ function leaveRoomRoute() {
   router.push('/workspace')
 }
 
+// Leave ANY specific route, not an enumerated list of params — rationale in
+// newChatWithAgent below. Identical bug here: from /workspace/a/:agentName the
+// blank-chat control set state and navigated nowhere, so the agent page kept
+// rendering and the button looked just as dead.
 function startBlankChat() {
   unreachableAgent.value = null
   pendingSession.value = null; prefill.value = ''; convGen.value++
-  if (route.params.sessionId || route.params.roomId) router.push('/workspace')
+  if (route.path !== '/workspace') router.push('/workspace')
 }
 
 async function onPickerConfirm(agentNames) {
@@ -521,10 +527,19 @@ function newChatWithAgent(name) {
   unreachableAgent.value = null
   activeAgentName.value = name
   pendingSession.value = null; prefill.value = ''; convGen.value++
-  // #2128: `roomId` too — see leaveRoomRoute above. Without it, picking one
-  // agent from the picker while parked on a room URL leaves the room route (and
-  // so the refusal) on screen, and the chat the user asked for never appears.
-  if (route.params.sessionId || route.params.roomId) router.push('/workspace')
+  // Leave ANY specific route, not an enumerated list of params.
+  //
+  // This condition has now been wrong twice for the same reason. #2128 added
+  // `roomId` after picking an agent while parked on a room URL left the room on
+  // screen; ent#360 then added `/workspace/a/:agentName` and did not extend the
+  // list, so "Start a chat" on the agent page set the state and navigated
+  // nowhere — the page kept rendering (it is the first branch of the stage
+  // chain) and the chat never appeared.
+  //
+  // Every specific Workspace route is `/workspace/<something>`, so asking
+  // whether we are on the bare one answers the actual question and cannot go
+  // stale when a fourth route is added.
+  if (route.path !== '/workspace') router.push('/workspace')
 }
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
 function openThread(t) {
@@ -718,8 +733,9 @@ function onSignOut() {
   store.signOut()
   threads.value = []; activeAgentName.value = null; pendingSession.value = null
   step.value = 'email'; email.value = ''; code.value = ''
-  // #2128: `roomId` too — otherwise a sign-out from a room URL carries that
-  // room id into the next session's address bar.
-  if (route.params.sessionId || route.params.roomId) router.push('/workspace')
+  // Leave ANY specific route (rationale in newChatWithAgent) — otherwise a
+  // sign-out from a room or agent-page URL carries that id into the next
+  // session's address bar.
+  if (route.path !== '/workspace') router.push('/workspace')
 }
 </script>
