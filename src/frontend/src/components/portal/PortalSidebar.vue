@@ -172,7 +172,7 @@ const props = defineProps({
   searchResults: { type: Array, default: () => [] },
 })
 const emit = defineEmits([
-  'new-chat', 'new-chat-with-agent', 'open-thread', 'toggle-star',
+  'new-chat', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star',
   'update:search', 'sign-out',
 ])
 
@@ -193,29 +193,22 @@ const isActive = (t) => (t.is_room
   ? t.id === props.currentRoomId
   : (t.id || t.session_id) === props.currentSessionId)
 
-// ent#359: clicking an agent that is waiting on you opens the conversation it
-// is waiting in, rather than a blank one. A badge that says "2 replies" next to
-// a control that starts an empty chat is a contradiction — the count is the
-// reason you clicked. With nothing unread the row keeps its old behaviour.
+// ent#360 AC #1: a roster row opens the agent's PAGE. It is a destination now —
+// somewhere to see what it has been doing, what it is waiting on you for, and
+// what it can do — so starting a chat is an explicit act taken there.
 //
-// (Opening an agent's own PAGE is ent#360; this is not a substitute for it.)
-function latestUnreadFor(name) {
-  return props.threads.find((t) => {
-    if (!(Number(t?.unread) > 0)) return false
-    const names = Array.isArray(t.agent_names) && t.agent_names.length
-      ? t.agent_names : [t.agent_name]
-    return names.includes(name)
-  }) || null
-}
+// This supersedes ent#359's interim behaviour (a row with unread opened the
+// unread chat). That existed because a badge next to a control that opened a
+// BLANK chat was a contradiction; the page resolves it properly, since its
+// Overview lists the chats this agent belongs to, unread count included.
 function onAgentClick(name) {
-  const unread = latestUnreadFor(name)
-  if (unread) emit('open-thread', unread)
-  else emit('new-chat-with-agent', name)
+  emit('open-agent', name)
 }
 function agentRowTitle(name) {
   const n = waitingFor(name)
-  if (!n) return `New chat with ${name}`
-  return `${n} unread ${n === 1 ? 'reply' : 'replies'} — open the latest`
+  return n
+    ? `${name} — ${n} unread ${n === 1 ? 'reply' : 'replies'}`
+    : `Open ${name}`
 }
 
 // ent#186: history + search rows show the conversation's agent avatar instead of

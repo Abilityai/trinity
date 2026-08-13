@@ -153,6 +153,93 @@ class PortalSessions(BaseModel):
     sessions: list[PortalSessionSummary]
 
 
+class PortalAgentAsk(BaseModel):
+    """One thing the agent is waiting on a person for (ent#360).
+
+    Agent-authored `approval`/`question` items only. `context` is deliberately
+    absent — free-form agent JSON, and a known credential-leak surface.
+    """
+    id: str
+    type: str
+    priority: Optional[str] = None
+    title: Optional[str] = None
+    question: Optional[str] = None
+    options: Optional[list] = None
+    created_at: Optional[str] = None
+
+
+class PortalAgentWork(BaseModel):
+    """One execution, shape only. No message, response, cost or model — the
+    viewer may be an external client, and AC #7 excludes costs outright."""
+    id: Optional[str] = None
+    status: Optional[str] = None
+    triggered_by: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    duration_ms: Optional[int] = None
+
+
+class PortalFirstTry(BaseModel):
+    """Successes that needed no retry, over the window. `rate` is None with no
+    terminal executions — a fresh agent has no first-try rate, and 0% would read
+    as "it fails every time"."""
+    terminal: int = 0
+    first_try: int = 0
+    rate: Optional[float] = None
+
+
+class PortalAgentStats(BaseModel):
+    window: str
+    window_hours: int
+    total_executions: int = 0
+    success_rate: Optional[float] = None
+    first_try: PortalFirstTry = Field(default_factory=PortalFirstTry)
+    timeline: list = Field(default_factory=list)
+    by_type: list = Field(default_factory=list)
+    unavailable: bool = False
+
+
+class PortalAgentHealth(BaseModel):
+    status: str = "unknown"
+    checked_at: Optional[str] = None
+
+
+class PortalAgentHeader(BaseModel):
+    name: str
+    description: Optional[str] = None
+    avatar_url: Optional[str] = None
+    owner: Optional[str] = None
+    health: PortalAgentHealth = Field(default_factory=PortalAgentHealth)
+    last_active: Optional[str] = None
+
+
+class PortalAgentPage(BaseModel):
+    """The Workspace agent page (ent#360) — one call, because the page is one
+    screen and five round trips would render it in pieces."""
+    agent_name: str
+    header: PortalAgentHeader
+    capabilities: list[PortalPlaybook] = Field(default_factory=list)
+    stats: PortalAgentStats
+    asks: list[PortalAgentAsk] = Field(default_factory=list)
+    recent_work: list[PortalAgentWork] = Field(default_factory=list)
+
+
+class PortalAgentReport(BaseModel):
+    """Report metadata for the agent page's Reports tab (#918 surface reused)."""
+    id: str
+    report_type: Optional[str] = None
+    title: Optional[str] = None
+    display_hint: Optional[str] = None
+    period_start: Optional[str] = None
+    period_end: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class PortalAgentReports(BaseModel):
+    agent_name: str
+    reports: list[PortalAgentReport] = Field(default_factory=list)
+
+
 class PortalChatStateEntry(BaseModel):
     """One chat's per-viewer state (ent#359). ``kind`` is ``thread`` (a portal
     session) or ``room`` (a multi-agent room) — two independent id spaces, so
