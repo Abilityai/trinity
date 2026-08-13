@@ -7,7 +7,7 @@
       starred
         ? 'text-amber-500'
         : revealOnHover
-          ? 'text-gray-300 dark:text-gray-600 opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-amber-500'
+          ? 'text-gray-300 dark:text-gray-600 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 hover:text-amber-500'
           : 'text-gray-400 hover:text-amber-500',
     ]"
     :title="starred ? 'Unstar this chat' : 'Star this chat'"
@@ -39,6 +39,11 @@
  * outline star on every row is noise. It applies only when NOT starred — a star
  * that is set is state, and state that appears only on hover is state the user
  * cannot see.
+ *
+ * And it applies only from `sm:` up. There is no hover on a touch screen, so
+ * hiding the control behind one would have left mobile users able to UNstar
+ * (that star is always drawn) but never to star — the feature reachable in
+ * exactly one direction. Below `sm` the outline star is simply always visible.
  */
 defineProps({
   starred: { type: Boolean, default: false },
