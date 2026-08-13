@@ -229,6 +229,7 @@ import {
   buildMentionToken,
   clampActiveIndex,
   detectTypeaheadTrigger,
+  dismissAfterInsert,
   filterAgentCandidates,
   filterPlaybookCandidates,
   isSuppressed,
@@ -538,6 +539,12 @@ function acceptActive(index) {
   const { value, caret } = applyTypeaheadInsert(input.value, t, insert)
   input.value = value
   closeTypeahead()
+  // A pick that lands mid-sentence leaves the caret inside the token it just
+  // inserted, and the setSelectionRange() below fires a `select` that would
+  // re-detect it — the popup reopening on top of its own successful choice.
+  // Suppress exactly that token; editing it back re-arms.
+  const settled = dismissAfterInsert(value, caret)
+  if (settled) dismissed.value = settled
   nextTick(() => {
     const el = textarea.value
     // focus() BEFORE setSelectionRange(): Safari resets and scrolls the

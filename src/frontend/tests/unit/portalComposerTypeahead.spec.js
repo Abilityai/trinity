@@ -44,6 +44,7 @@ import {
   resolveComposerKey,
   nextDismissState,
   isSuppressed,
+  dismissAfterInsert,
   nextActiveIndex,
   clampActiveIndex,
   mentionedAgents,
@@ -498,6 +499,47 @@ describe('Esc dismissal', () => {
   })
 })
 
+describe('a pick settles the token it inserted', () => {
+  // The splice only appends its separator when the next character is not
+  // already whitespace, so a mid-sentence pick leaves the caret INSIDE the
+  // freshly inserted token. That is not hypothetical: the accept moves the
+  // caret with setSelectionRange(), which fires a `select` event, which is
+  // bound to the same recompute as a click — so without a sentinel the popup
+  // reopens on top of its own successful choice, listing what was just picked.
+  const pick = (text, caret, name) => {
+    const trigger = detectTypeaheadTrigger(text, caret)
+    return applyTypeaheadInsert(text, trigger, buildMentionToken(name))
+  }
+
+  it.each([
+    ['Hello @bo there', 9],
+    ['@ x', 1],
+  ])('mid-sentence (%s) leaves the caret inside the inserted token', (text, caret) => {
+    const { value, caret: c } = pick(text, caret, 'alice')
+    // The bug this guards: a recompute here finds a trigger again.
+    const reopened = detectTypeaheadTrigger(value, c)
+    expect(reopened, value).not.toBeNull()
+    expect(reopened.query).toBe('alice')
+    // …which the accept suppresses, so the popup stays shut.
+    expect(isSuppressed(dismissAfterInsert(value, c), reopened)).toBe(true)
+  })
+
+  it('needs no sentinel when the splice appended a separator', () => {
+    const { value, caret } = pick('Ask @al', 7, 'alice')
+    expect(value).toBe('Ask @alice ')
+    expect(detectTypeaheadTrigger(value, caret)).toBeNull()
+    // Nothing to suppress — and returning null leaves any earlier sentinel alone.
+    expect(dismissAfterInsert(value, caret)).toBeNull()
+  })
+
+  it('re-arms as soon as the settled token is edited back', () => {
+    const { value, caret } = pick('Hello @bo there', 9, 'alice')
+    const settled = dismissAfterInsert(value, caret)
+    // Backspacing into the name is the user asking for the list again.
+    expect(isSuppressed(settled, detectTypeaheadTrigger('Hello @alic there', 11))).toBe(false)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // 11. Roving selection
 // ---------------------------------------------------------------------------
@@ -562,16 +604,18 @@ describe('starterFor', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 13. The room wake-set — verified against the running engine
+// 13. The room wake-set — established by observing the running server
 // ---------------------------------------------------------------------------
 describe('roomMentionSource', () => {
-  // Observed on a live instance (room_b30d6afc16d94d07, participants
-  // acme-scout + acme-scribe):
+  // The rooms engine is a private submodule that is not checked out here, so the
+  // evidence is what the server answered, not what its source says. Observed on
+  // a live instance (room_b30d6afc16d94d07, participants acme-scout +
+  // acme-scribe):
   //   POST @acme-scout   → {"mentions":["acme-scout"],"woke":["acme-scout"]}
   //   POST @cornelius    → {"mentions":[],"woke":[]}
-  // The engine's resolve_mentions keeps only agent participants that have not
-  // left; nothing outside the room is recruited. Offering the roster here would
-  // manufacture a silent no-op.
+  // A participant wakes; a non-participant wakes nobody on that turn. That is
+  // what makes the participants the right candidate set — offering the roster
+  // would list names with no evidence that picking one does anything.
   const roster = [
     { name: 'acme-scout', display_label: 'Data Scout' },
     { name: 'cornelius', display_label: 'Cornelius' },
@@ -631,6 +675,10 @@ describe('PortalConversation wiring', () => {
     expect(convSource()).toMatch(/detectTypeaheadTrigger\(\s*el\.value/)
   })
 
+  it('settles the token a pick inserted, so the popup cannot reopen over its own choice', () => {
+    expect(convSource()).toMatch(/dismissAfterInsert\(value, caret\)[\s\S]{0,80}dismissed\.value/)
+  })
+
   it('anchors the popup without collapsing the flex field', () => {
     const src = convSource()
     expect(src).toContain('relative flex-1 min-w-0')
@@ -656,6 +704,10 @@ describe('PortalRoom wiring', () => {
     expect(src).not.toContain('@keydown.enter.exact.prevent')
     expect(src).toContain('resolveComposerKey')
     expect(src).toContain('PortalTypeahead')
+  })
+
+  it('settles the token a pick inserted, exactly as the 1:1 composer does', () => {
+    expect(roomSource()).toMatch(/dismissAfterInsert\(value, caret\)[\s\S]{0,80}dismissed\.value/)
   })
 
   it('does NOT offer a / typeahead — a room has no active-agent subject', () => {

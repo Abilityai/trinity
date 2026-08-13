@@ -203,6 +203,7 @@ import {
   buildMentionToken,
   clampActiveIndex,
   detectTypeaheadTrigger,
+  dismissAfterInsert,
   filterAgentCandidates,
   isSuppressed,
   nextActiveIndex,
@@ -308,10 +309,12 @@ const addable = computed(() => {
 // candidate list is the AGENT PARTICIPANTS, never the roster, and that is not an
 // assumption: posting `@<participant>` to a live instance answered
 // {"mentions":["acme-scout"],"woke":["acme-scout"]} while `@<non-participant>`
-// answered {"mentions":[],"woke":[]}. The engine's `resolve_mentions` keeps only
-// agent participants that have not left, and nothing outside the room is
-// recruited — so offering the roster would manufacture a silent no-op, the same
-// class as offering a slug the grammar cannot carry.
+// answered {"mentions":[],"woke":[]}. Participants demonstrably wake; a
+// non-participant demonstrably wakes nobody on that turn — so offering the
+// roster would put names in front of the user with no evidence that choosing
+// one does anything, the same class of silent no-op as offering a slug the
+// grammar cannot carry. See roomMentionSource() in portalUtils.js for what this
+// deliberately does not claim about recruiting.
 //
 // There is deliberately NO `/` typeahead: a room has N participants and no
 // active agent, so "whose playbooks?" has no answer without inventing a picker
@@ -423,6 +426,11 @@ function acceptActive(index) {
   const { value, caret } = applyTypeaheadInsert(input.value, t, buildMentionToken(row.name))
   input.value = value
   closeTypeahead()
+  // See PortalConversation: a mid-sentence pick leaves the caret inside the
+  // token, and setSelectionRange() fires a `select` that would reopen the popup
+  // over its own successful choice.
+  const settled = dismissAfterInsert(value, caret)
+  if (settled) dismissed.value = settled
   nextTick(() => {
     const el = textarea.value
     if (el) { el.focus(); el.setSelectionRange(caret, caret) }

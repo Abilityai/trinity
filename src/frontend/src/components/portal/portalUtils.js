@@ -606,13 +606,25 @@ export function boundCandidates(list, limit = TYPEAHEAD_LIMIT) {
 /**
  * The room's `@` wake-set.
  *
- * VERIFIED against the running engine, not assumed: posting `@<participant>`
- * answered `{"mentions":["acme-scout"],"woke":["acme-scout"]}`, while
- * `@<non-participant>` answered `{"mentions":[],"woke":[]}`. The engine's
- * `resolve_mentions` keeps only `kind == "agent" and not left_at`, so an @name
- * outside the room is left as plain text and nothing is recruited. Offering the
- * full roster here would therefore manufacture a silent no-op — the same class
- * as listing an un-mentionable slug.
+ * Established by OBSERVING the running server, not by reading the engine: the
+ * rooms module is a private submodule that is not even checked out here, so the
+ * only trustworthy evidence is what `POST /api/rooms/{id}/messages` answers.
+ * Posting `@<participant>` returned `{"mentions":["acme-scout"],"woke":["acme-scout"]}`;
+ * posting `@<non-participant>` returned `{"mentions":[],"woke":[]}`.
+ *
+ * So a participant mention demonstrably wakes, and a non-participant mention
+ * demonstrably wakes nobody on that turn — which is all this list needs, and
+ * exactly why it is the participants. Offering the roster would put names in
+ * front of the user with no evidence that choosing one does anything, the same
+ * class of silent no-op as listing an un-mentionable slug.
+ *
+ * What is deliberately NOT claimed: that a non-participant mention has no effect
+ * at all. requirements §5.12 records an engine-side newcomer-join path from
+ * ent#361, and two empty response fields do not disprove it — a join would show
+ * up as a participant change, which was not observed either way. If that path is
+ * live, this list is narrower than the engine allows; recruiting then stays with
+ * the explicit "+ Add agent" control, which is the honest home for an action
+ * that spends money on another agent.
  *
  * Participants arrive as bare identities; the roster is joined in only to
  * recover display labels, so a participant the caller cannot see in their
@@ -688,6 +700,32 @@ export function isSuppressed(dismissed, trigger) {
   if (!dismissed || !trigger) return false
   if (dismissed.kind !== trigger.kind || dismissed.start !== trigger.start) return false
   return String(trigger.query ?? '').startsWith(String(dismissed.query ?? ''))
+}
+
+/**
+ * The sentinel an ACCEPT has to arm — and why accepting needs one at all.
+ *
+ * The splice only appends its separator when the character after the replaced
+ * token is not already whitespace, so accepting mid-sentence leaves the caret
+ * INSIDE the token that was just inserted: `Hello @bo| there` becomes
+ * `Hello @alice| there`. Any recompute at that caret therefore re-detects the
+ * very token the user just finished choosing — and one is guaranteed to happen,
+ * because `setSelectionRange()` fires a `select` event whenever it moves the
+ * caret, which is exactly what the accept does on `nextTick`. The popup would
+ * reopen by itself, listing the agent that was just picked.
+ *
+ * Nothing is destroyed by that (the roving index is cleared, so Enter still
+ * sends) but the panel visibly comes back over the composer having been
+ * dismissed by a successful choice, which is the one outcome a pick must not
+ * produce. Suppressing the resulting token is the honest statement: it has been
+ * chosen, so stop offering it. Editing it back re-arms, exactly as after Esc,
+ * because `isSuppressed` only holds while the query still EXTENDS the sentinel.
+ *
+ * Returns `null` when the caret landed past a separator (the common
+ * end-of-message case), where nothing needs suppressing.
+ */
+export function dismissAfterInsert(value, caret) {
+  return nextDismissState(detectTypeaheadTrigger(value, caret))
 }
 
 // Roving selection. `-1` means "nothing chosen", which is the state Enter reads
