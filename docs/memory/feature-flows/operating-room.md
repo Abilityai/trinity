@@ -409,6 +409,9 @@ Two independent bounds plus field hygiene, applied in-order per new `pending` re
 | `get_operator_queue_stats(**kwargs)` | `get_stats()` | 1982-1983 |
 | `get_operator_queue_responded_for_agent(agent_name)` | `get_responded_items_for_agent()` | 1985-1986 |
 | `operator_queue_item_exists(item_id)` | `item_exists()` | 1988-1989 |
+| `count_operator_queue_pending_for_agent(agent_name, item_type=None)` (#1632; `item_type` #1677) | `count_pending_for_agent()` | — |
+
+The `item_type` pass-through (#1677) is load-bearing: the budget helper swallows every exception, so a facade that dropped the kwarg would silently void the whole budget — pinned by `test_1677_operator_alert_budget.py`'s real-facade test.
 
 ---
 
