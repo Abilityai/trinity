@@ -14,7 +14,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   partitionStarred, unreadByAgent, totalUnread, rowAgents, groupThreadsByDate,
-  normalizeRoomRow, shouldMarkTurnRead,
+  normalizeRoomRow, shouldMarkTurnRead, mentionedAgents,
   REPLY_MAX_WAIT_MS_FALLBACK, PORTAL_ATTEMPT_CEILING_S, PORTAL_TURN_TIMEOUT_S,
 } from '../../src/components/portal/portalUtils'
 
@@ -163,6 +163,56 @@ describe('row avatars', () => {
 
   it('returns nothing rather than [undefined] for a chat with no agent', () => {
     expect(rowAgents({})).toEqual({ shown: [], overflow: 0 })
+  })
+})
+
+describe('ent#361 — @mention from a 1:1 becomes a group chat', () => {
+  const roster = [{ name: 'scribe' }, { name: 'recon' }, { name: 'ws-scout' }]
+
+  it('resolves a mentioned agent that is on the roster', () => {
+    expect(mentionedAgents('can @recon check this?', roster)).toEqual(['recon'])
+  })
+
+  it('leaves an @name that is not a rostered agent as plain text', () => {
+    // The safety property: reporting "no such agent" would answer, for any
+    // string the user types, whether an agent by that name exists.
+    expect(mentionedAgents('email @nobody about it', roster)).toEqual([])
+  })
+
+  it('excludes the agent you are already talking to', () => {
+    // Otherwise a 1:1 with scribe escalates to a "group" of one.
+    expect(mentionedAgents('@scribe and @recon', roster, { exclude: ['scribe'] }))
+      .toEqual(['recon'])
+  })
+
+  it('dedupes a name mentioned twice', () => {
+    expect(mentionedAgents('@recon then @recon again', roster)).toEqual(['recon'])
+  })
+
+  it('collects several agents in one message, in order', () => {
+    expect(mentionedAgents('@ws-scout and @recon please', roster))
+      .toEqual(['ws-scout', 'recon'])
+  })
+
+  it('matches the rooms engine on names with hyphens and digits', () => {
+    // The pattern mirrors the engine's `_MENTION_RE`; a name it accepts and we
+    // reject would build a room around a handle the engine renders as text.
+    expect(mentionedAgents('@ws-scout', roster)).toEqual(['ws-scout'])
+    expect(mentionedAgents('@1recon', [{ name: '1recon' }])).toEqual(['1recon'])
+  })
+
+  it('does not treat an email address as a mention of its domain', () => {
+    expect(mentionedAgents('mail me at me@recon.com', [{ name: 'recon' }]))
+      .toEqual(['recon'])
+    // Documented consequence, not an accident: the engine's regex matches the
+    // same way, so both sides agree — which is the property that matters more
+    // than either being clever on its own.
+  })
+
+  it('tolerates empty input and a missing roster', () => {
+    expect(mentionedAgents('', roster)).toEqual([])
+    expect(mentionedAgents('@recon', undefined)).toEqual([])
+    expect(mentionedAgents(null, roster)).toEqual([])
   })
 })
 
