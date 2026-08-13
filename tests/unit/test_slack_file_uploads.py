@@ -36,7 +36,7 @@ def format_file_size(size_bytes):
 
 def is_unsupported_mime(mimetype):
     """Reproduces the UNSUPPORTED_MIMES check in _handle_file_uploads."""
-    UNSUPPORTED_MIMES = {"application/pdf", "application/zip", "application/x-tar",
+    UNSUPPORTED_MIMES = {"application/pdf", "application/x-tar",
                          "application/gzip", "application/x-rar-compressed"}
     return any(mimetype.startswith(m) if m.endswith("/") else mimetype == m
                for m in UNSUPPORTED_MIMES) or mimetype.startswith("video/") or mimetype.startswith("audio/")
@@ -122,8 +122,10 @@ class TestFileTypeRouting:
     def test_pdf_unsupported(self):
         assert is_unsupported_mime("application/pdf")
 
+    def test_zip_supported(self):
+        assert not is_unsupported_mime("application/zip")
+
     def test_archives_unsupported(self):
-        assert is_unsupported_mime("application/zip")
         assert is_unsupported_mime("application/x-tar")
         assert is_unsupported_mime("application/gzip")
 

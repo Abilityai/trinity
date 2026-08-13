@@ -43,7 +43,7 @@ WEB_MAX_TOTAL_IMAGE_SIZE = 10 * 1024 * 1024      # 10 MB total images
 WEB_MAX_FILES = 3
 
 UNSUPPORTED_MIMES = {
-    "application/pdf", "application/zip", "application/x-tar",
+    "application/pdf", "application/x-tar",
     "application/gzip", "application/x-rar-compressed",
     "video/", "audio/",
 }
@@ -180,7 +180,7 @@ async def process_file_uploads(
             used_names.add(safe_name)
             descriptions.append(
                 f"{safe_name} — unsupported format ({mimetype}). "
-                f"Text, CSV, JSON, and image files are supported."
+                f"Text, CSV, JSON, ZIP, and image files are supported."
             )
             continue
 
