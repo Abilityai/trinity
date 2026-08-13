@@ -613,29 +613,41 @@ def test_both_routes_404_when_the_kill_switch_is_off(client, monkeypatch):
     ).status_code == 404
 
 
+def _settings_singleton():
+    """The exact object `is_outbound_enabled` consults, resolved the exact way
+    the resolver resolves it — an attribute read off the LIVE
+    `sys.modules["services.settings_service"]` entry.
+
+    NOT `import services.settings_service as ss`: that form binds the parent
+    package's `settings_service` ATTRIBUTE, which diverges from the sys.modules
+    entry once an unhygienic test elsewhere pops + re-imports the module and a
+    conftest baseline restore puts the ENTRY back without touching the package
+    attr (the #1898 pollution class). The patch then lands on an object the
+    resolver never reads, the env leg decides, and the stored-row test fails
+    seed-dependently in CI while passing in isolation.
+    """
+    import importlib
+
+    return importlib.import_module("services.settings_service").settings_service
+
+
 def test_the_kill_switch_defaults_off(monkeypatch):
     """Default OFF is the whole point: this is the platform's first
     backend-executed, credentialed, agent-triggerable outbound fetcher."""
-    import services.settings_service as ss
-
-    monkeypatch.setattr(ss.settings_service, "get_setting", lambda key: None)
+    monkeypatch.setattr(_settings_singleton(), "get_setting", lambda key: None)
     monkeypatch.delenv("A2A_OUTBOUND_ENABLED", raising=False)
     assert _REAL_IS_ENABLED() is False
 
 
 def test_the_env_leg_opts_in(monkeypatch):
-    import services.settings_service as ss
-
-    monkeypatch.setattr(ss.settings_service, "get_setting", lambda key: None)
+    monkeypatch.setattr(_settings_singleton(), "get_setting", lambda key: None)
     monkeypatch.setenv("A2A_OUTBOUND_ENABLED", "true")
     assert _REAL_IS_ENABLED() is True
 
 
 def test_a_stored_row_overrides_the_env_in_both_directions(monkeypatch):
-    import services.settings_service as ss
-
     monkeypatch.setenv("A2A_OUTBOUND_ENABLED", "true")
-    monkeypatch.setattr(ss.settings_service, "get_setting", lambda key: "false")
+    monkeypatch.setattr(_settings_singleton(), "get_setting", lambda key: "false")
     assert _REAL_IS_ENABLED() is False
 
 
