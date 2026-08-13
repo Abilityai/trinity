@@ -119,7 +119,8 @@
   - `ChannelAdapter.download_file()` — each channel implements own download auth
   - Images (`image/*`): base64 inline in prompt (Claude vision, 5MB/image, 10MB total)
   - Text files: copied to `/home/developer/uploads/{session_id}/`, `Read` tool added
-  - Unsupported formats (PDF, ZIP, video, audio) rejected with user-friendly message
+  - Unsupported formats (PDF, tar, gzip, rar, video, audio) rejected with user-friendly message
+  - ZIP allowed (2026-08, PR #2152): lands in the per-session uploads dir un-extracted; the platform does NOT unpack it, so zip-slip/decompression-bomb exposure is deferred to the agent container (isolated, per-file size cap still enforced)
   - Filename sanitization (path traversal, hidden files, special chars)
   - File upload rate limit: 5 files/min per user
   - Per-session upload dirs cleaned after execution

@@ -1,7 +1,9 @@
 """
 Unit tests for Slack file upload handling (#222).
 
-Pure logic tests — no backend imports, no mocking, no pydantic.
+Mostly pure logic tests (no backend imports); the MIME gate is the exception —
+it imports the real UNSUPPORTED_MIMES from services.upload_service so the test
+can't drift from the deny-list it verifies.
 
 Module: src/backend/adapters/message_router.py, slack_adapter.py
 Issue: https://github.com/abilityai/trinity/issues/222
@@ -9,6 +11,46 @@ Issue: https://github.com/abilityai/trinity/issues/222
 
 import os
 import re
+import sys
+import types
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+_BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
+
+
+def _install_stubs():
+    """Stub heavyweight deps so upload_service imports without DB/Docker.
+
+    Mirrors test_web_file_upload.py; setdefault keeps the two files compatible
+    in the same pytest session regardless of collection order.
+    """
+    if "services.upload_service" in sys.modules:
+        return
+
+    _aud = types.ModuleType("services.platform_audit_service")
+
+    class _AuditEventType:
+        EXECUTION = "execution"
+        AUTHENTICATION = "authentication"
+
+    _mock_svc = MagicMock()
+    _mock_svc.log = AsyncMock()
+    _aud.platform_audit_service = _mock_svc
+    _aud.AuditEventType = _AuditEventType
+    sys.modules.setdefault("services.platform_audit_service", _aud)
+
+    _du = types.ModuleType("services.docker_utils")
+    _du.container_put_archive = AsyncMock(return_value=True)
+    _du.container_exec_run = AsyncMock(return_value=(0, b""))
+    sys.modules.setdefault("services.docker_utils", _du)
+
+
+_install_stubs()
+
+from services.upload_service import UNSUPPORTED_MIMES  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -35,11 +77,9 @@ def format_file_size(size_bytes):
 
 
 def is_unsupported_mime(mimetype):
-    """Reproduces the UNSUPPORTED_MIMES check in _handle_file_uploads."""
-    UNSUPPORTED_MIMES = {"application/pdf", "application/x-tar",
-                         "application/gzip", "application/x-rar-compressed"}
+    """Applies the real UNSUPPORTED_MIMES set with upload_service's matching rule."""
     return any(mimetype.startswith(m) if m.endswith("/") else mimetype == m
-               for m in UNSUPPORTED_MIMES) or mimetype.startswith("video/") or mimetype.startswith("audio/")
+               for m in UNSUPPORTED_MIMES)
 
 
 def extract_files(event):
