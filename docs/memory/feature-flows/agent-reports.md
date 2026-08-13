@@ -89,8 +89,10 @@ calling agent.
 - **Renderers** `components/reports/` — `ReportRenderer.vue` picks by `display_hint` →
   `report_type` prefix → fallback, validating payload shape and falling back on mismatch
   (Codex #10). Typed renderers: `ReportTable`, `ReportKpiTiles`, `ReportMarkdown`
-  (DOMPurify via `utils/markdown.js`), `ReportTimeline`; fallback `ReportSummary` (#2162),
-  with `ReportJson` retained behind its disclosure.
+  (DOMPurify via `utils/markdown.js`), `ReportTimeline`. The fallback is a **prop**, not a
+  fixture (#2162): `fallbackComponent` defaults to `ReportJson`, which is what both operator
+  panels still render, and only the client-facing Workspace passes `ReportSummary` — there is
+  no disclosure behind it, because a raw payload must be unreachable on that surface.
 - **Panels — THREE consumers, not two** (#2162) — `ReportsPanel.vue` (Agent Detail "Reports"
   tab), `ReportsPanelFleet.vue` (Operations → Reports tab; agent/type/time/search filters +
   KPI tiles from `GET /api/reports/stats`), and the **Workspace agent page's Reports tab**

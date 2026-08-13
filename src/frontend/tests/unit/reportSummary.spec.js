@@ -149,12 +149,25 @@ describe('redactSecrets', () => {
     expect(out).toBe('key=[redacted] end')
   })
 
-  it('redacts BEFORE truncating, so a long value cannot leak a fragment', () => {
-    // Secret sits past the truncation point: truncate-then-redact would cut the
-    // token mid-way and leave a recognisable head on screen.
+  it('redacts a value whose secret straddles the truncation point', () => {
     const padding = 'a'.repeat(MAX_VALUE_CHARS - 10)
     const { entries } = summarizePayload({ note: `${padding} ghp_LEAKEDTAILVALUE1234` })
     expect(entries[0].value).not.toContain('LEAKEDTAIL')
+  })
+
+  it('redacts BEFORE truncating — proven with a pattern that needs a minimum tail', () => {
+    // The `ghp_` case above passes under EITHER order and therefore pins
+    // nothing: `\bghp_[A-Za-z0-9]+` needs one character after the prefix, so
+    // the head that survives a cut still matches and is still replaced. (Broken
+    // deliberately during review to check; it stayed green.)
+    //
+    // `\bAKIA[A-Z0-9]{4}` needs FOUR, so cutting the token mid-way leaves a
+    // head the pattern no longer recognises — the residue that truncate-first
+    // ships to the screen. `AKIAIO` here carries two characters of a real AWS
+    // key id, which is the whole difference between the two orders.
+    const padding = 'a'.repeat(MAX_VALUE_CHARS - 7)
+    const { entries } = summarizePayload({ note: `${padding} AKIAIOSFODNN7EXAMPLE` })
+    expect(entries[0].value).not.toContain('AKIA')
   })
 
   it('redacts every occurrence, not only the first', () => {

@@ -668,7 +668,7 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
 - **Fleet access**: `GET /api/reports` + `GET /api/reports/stats` filter via
   `accessible_agent_names` + `_narrow_to_agent` (admin = all). Renderers (`components/reports/`)
   pick by `display_hint` → `report_type` prefix → fallback, with a shape check per hint.
-- **Three renderer surfaces, one fallback** (#2162): Agent Detail, the Operations fleet tab,
+- **Three renderer surfaces, a per-surface fallback** (#2162): Agent Detail, the Operations fleet tab,
   and the **Workspace agent page** all mount the same `ReportRenderer`. The third was added
   after it shipped `JSON.stringify(payload)` to external clients — a disclosure defect
   (`payload` is free-form agent JSON of the class `client_portal/agent_page.py` refuses to
