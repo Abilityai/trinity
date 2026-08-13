@@ -49,7 +49,7 @@ The same controls are available as MCP tools, so you can expose and configure ag
 | `set_agent_a2a_exposure` | Toggle A2A exposure on/off |
 | `get_agent_a2a_card` | Fetch the served Agent Card JSON |
 | `set_a2a_inbound_allowlist` | Add/remove inbound identities |
-| `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint` | Manage the outbound endpoint registry |
+| `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint` | Manage the **per-agent** outbound endpoint list (see the note under *Outbound endpoints* for which list `call_a2a_agent` resolves against) |
 
 Exposure and credential operations are **owner/admin and human-only** — an agent-scoped key can't flip its own exposure. Reads use the standard agent-access gate.
 
@@ -130,7 +130,107 @@ By default, any caller authenticated as an owner/shared identity for the agent m
 
 ## Outbound endpoints
 
-Register the external A2A endpoints your agent is allowed to call (name + URL + optional credential). Credentials are stored **encrypted and never shown again** — the UI only indicates whether an endpoint has one (`🔒 credentialed`). This registry feeds the agent's outbound A2A calls.
+Register the external A2A endpoints your agent is allowed to call (name + URL + optional credential). Credentials are stored **encrypted and never shown again** — the UI only indicates whether an endpoint has one (`🔒 credentialed`).
+
+> **Which list does `call_a2a_agent` actually read?** Trinity resolves an outbound target through a provider seam, and in this build the resolver is the **platform-wide** list you manage in [Part 3](#register-an-endpoint-admin-human-only) — not this per-agent panel. If you register a target here and your agent answers `endpoint_not_found`, that is why: register it in Part 3. The per-agent panel becomes the resolver on a build that registers a provider for it, in which case it takes precedence.
+
+---
+
+## Part 3 — Call an external A2A agent (outbound)
+
+Your agents can task *other* people's A2A agents — a Google ADK agent, a LangChain or Bedrock agent, or another Trinity instance — and get the answer back inside a single tool call.
+
+### Turn it on (admin, once)
+
+Outbound calls are **off by default**. Enable them either way:
+
+```bash
+# .env, then restart
+A2A_OUTBOUND_ENABLED=true
+```
+
+…or flip it at runtime with no restart (the stored setting wins over the environment variable):
+
+```bash
+curl -X PUT http://localhost:8000/api/settings/a2a_outbound_enabled \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"value": "true"}'
+```
+
+`GET /api/settings/feature-flags` reports `a2a_outbound_available` so you can confirm it took.
+
+### Register an endpoint (admin, human-only)
+
+An agent **cannot supply a URL**. It picks a target by *name* from a list an administrator registered:
+
+```bash
+curl -X PUT http://localhost:8000/api/settings/a2a-endpoints \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{
+        "name": "research-partner",
+        "url": "https://partner.example.com/a2a/researcher",
+        "credentials": "their-api-token"
+      }'
+```
+
+```bash
+# List them (credentials are never returned — only whether one is set)
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/settings/a2a-endpoints
+
+# Remove one
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/api/settings/a2a-endpoints/research-partner
+```
+
+The URL must be **HTTPS** and must resolve to a public address; Trinity refuses anything pointing inside your network. It re-checks this on **every call**, not just at registration, so a hostname that later resolves somewhere internal stops working rather than being trusted because it was once accepted.
+
+> **⚠ Registering an endpoint is a trust decision, not a configuration step.**
+> Trinity removes the literal credential from anything the remote sends back. It **cannot** stop a remote that base64-encodes, splits or otherwise transforms it — and an agent under prompt injection can be talked into asking for exactly that. **Registering an endpoint grants that endpoint the ability to exfiltrate its own credential.** Register peers you would trust with the token you are handing them.
+
+### Call it (from an agent)
+
+```
+call_a2a_agent(
+  agent_name  = "my-agent",
+  endpoint    = "research-partner",     # the NAME you registered, not a URL
+  message     = "Summarise the latest findings on X",
+  dedup_label = "research-step-1"
+)
+```
+
+`dedup_label` is **required**, and it must differ for each distinct question you ask in one turn. Calls are deduplicated on the endpoint and the conversation — never on the message text — so reusing a label returns the *earlier* answer instead of asking the new question.
+
+If the remote replies with `state: "working"` or `"submitted"`, it is still thinking. Poll it:
+
+```
+get_a2a_task(agent_name="my-agent", endpoint="research-partner", task_id="<task_id from the call>")
+```
+
+### What comes back
+
+| Field | Meaning |
+|---|---|
+| `state` | `completed`, `working`, `submitted`, `failed`, `canceled`, … |
+| `text` | The remote's answer (capped at 32 KB, truncation marked) |
+| `task_id` / `context_id` | Handles for polling or continuing the conversation |
+| `protocol_version` | The A2A dialect negotiated from the remote's card |
+
+### Trinity → Trinity
+
+Register the remote instance's agent endpoint (`https://their-trinity.example.com/a2a/their-agent`) with a **Trinity MCP API key from that instance** as the credential. Both sides speak A2A v0.3, so it works with no extra configuration.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `outbound_disabled` (404) | `A2A_OUTBOUND_ENABLED` is off |
+| `endpoint_not_found` (404) | No endpoint registered under that name — check spelling, or ask an admin |
+| `endpoint_not_https` (400) | The registered URL is `http://`. Re-register it as `https://` — Trinity refuses rather than silently upgrading, so a credential never travels in clear |
+| `endpoint_private_address` (400) | The hostname resolves inside your network |
+| `card_origin_mismatch` (502) | The remote's agent card points somewhere other than the registered host. Trinity refuses: a card cannot redirect a credentialed call |
+| `timeout` (504) | The remote took too long. If it accepted a task, poll with `get_a2a_task` |
+| 409 | The same labelled call is already in flight — use a distinct `dedup_label` |
+| 429 | Too many outbound calls (per-agent or fleet-wide) |
 
 ---
 
@@ -141,6 +241,9 @@ Register the external A2A endpoints your agent is allowed to call (name + URL + 
 - **The front door must reach it** — external clients hit your public URL, not the backend port directly. Trinity proxies `/a2a/` to the backend (nginx in production, the dev proxy locally). Set `PUBLIC_CHAT_URL` so the card's published `url` is reachable from outside your network.
 - **Stopped agents** still serve a card (from container labels); tasking a stopped/unreachable agent returns a structured JSON-RPC error, never a 5xx.
 - **Every inbound task is audit-logged** (`source=a2a`, with the caller identity).
+- **Outbound is off by default too**, and an agent can only reach endpoints an administrator registered by name — it can never supply a URL of its own, so a prompt injection cannot aim Trinity at an address of the attacker's choosing.
+- **An agent may only call as itself.** Sharing an agent lets someone reach it; it does not let one agent spend another agent's registered endpoint credential.
+- **Outbound calls are audit-logged** with the endpoint name and the remote **host** — never the full URL, the message, or the credential.
 
 ---
 
@@ -152,6 +255,17 @@ Register the external A2A endpoints your agent is allowed to call (name + URL + 
 |--------|------|------|---------|
 | GET | `/a2a/{agent}/.well-known/agent-card.json` | none | Discovery card |
 | POST | `/a2a/{agent}` | Bearer MCP key | JSON-RPC task endpoint |
+
+### Outbound routes (calling out, #736)
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| POST | `/api/agents/{agent}/a2a/call` | Bearer (owner/shared; an agent key only as itself) | Task a registered external A2A agent |
+| POST | `/api/agents/{agent}/a2a/task` | same | Poll a remote task by id |
+| GET/PUT | `/api/settings/a2a-endpoints` | admin, human-only | List / register endpoints |
+| DELETE | `/api/settings/a2a-endpoints/{name}` | admin, human-only | Remove an endpoint |
+
+All four return `404` while `A2A_OUTBOUND_ENABLED` is off.
 
 ### JSON-RPC methods
 

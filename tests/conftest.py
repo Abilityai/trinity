@@ -291,6 +291,14 @@ _SYS_MODULES_INVARIANT_KEYS = (
     "services.settings_service",
     "services.task_execution_service",
     "services.validation_service",
+    # #736: the outbound A2A target resolver is FAIL-CLOSED, and a stubbed
+    # `sys.modules` entry silently inverts that INSIDE the suite that proves it
+    # closed — a `MagicMock` module's `resolve_endpoint()` returns a truthy mock
+    # whose `.url` is also a mock, i.e. a resolved endpoint out of thin air. The
+    # module's own `isinstance(ResolvedEndpoint)` check is the real defence;
+    # this baseline pin is the belt, so a cross-file stub cannot leave a later
+    # test asserting fail-closed against a mock that fails open.
+    "services.a2a_outbound",
     # Dependencies / adapters: stubbed by various adapter unit tests.
     "dependencies",
     "adapters",
