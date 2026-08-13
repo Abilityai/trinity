@@ -336,3 +336,375 @@ export const PORTAL_BUCKET_LABELS = {
   'Channels': 'Messaging',
   'Public': 'Public link',
 }
+
+// ---------------------------------------------------------------------------
+// ent#392 — composer typeahead: `/` for the agent's playbooks, `@` for agents.
+//
+// Both invocation syntaxes already worked and neither was discoverable: a
+// client had to know the exact slug, and a near-miss parses as plain text with
+// no feedback. Everything below is PURE and exported, because this project has
+// no component-mount harness (`vitest` runs `environment: 'node'`) — so any
+// decision left inside the component is a decision no test can reach. The
+// components are dispatchers over these functions.
+//
+// OSS-core by decision (ent#392): deliberately ungated — no
+// `requires_entitlement`, logic stays in the OSS tree. Recorded explicitly
+// because CLAUDE.md's default for an enterprise-tracker feature is gated unless
+// ruled otherwise, so the ruling must never be inferred later from the mere
+// fact that it merged (the ent#326 / ent#384 discipline).
+// ---------------------------------------------------------------------------
+
+// The longest token the typeahead will look back over. This FLOORS the backward
+// scan rather than merely capping the result: an unfloored scan walks the whole
+// composer on every keystroke, and a pasted 100 KB blob then costs O(n) per key.
+export const MAX_TYPEAHEAD_QUERY = 64
+
+// Rows drawn at once. The `/` source is already belted to 24 server-side
+// (`_bound_briefing_hints`, #2101), so this is layout, not safety.
+export const TYPEAHEAD_LIMIT = 8
+
+// "Preceded by a non-WORD char" — deliberately NOT "preceded by whitespace".
+// A whitespace-only rule cannot fire in CJK (你好@rec), after an emoji, or after
+// punctuation ((@bob, "@bob), while the non-word rule still closes every AC#6
+// case: `50/50` (prev '0'), `and/or` (prev 'd'), `user@example.com` (prev 'r').
+const WORD_CHAR_RE = /[A-Za-z0-9_]/
+const WS_RE = /\s/
+
+// Keys that move the caret without producing an input event. While the popup is
+// open they close it and pass through: the alternative is accepting against
+// bounds computed for a caret that has since moved.
+const CARET_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'])
+
+/**
+ * Find the trigger token the caret is sitting in.
+ *
+ * → `null` | `{ kind: '/' | '@', start, end, query }`, where `[start, end)` is
+ * the whole token — `start` from a backward scan, `end` from a FORWARD one.
+ *
+ * The forward scan is load-bearing. Without it the splice ends at the caret, so
+ * accepting *alice* with the caret parked at `@bo|b` leaves `@alice b` — a
+ * dangling tail that turns a correct mention into two wrong words.
+ *
+ * The trigger rule is deliberately STRICTER than `MENTION_RE`, which is
+ * unanchored and therefore parses `user@example.com` as `@example`. Being
+ * stricter is safe in the only direction that matters: the popup can never open
+ * on something the parser would not see, so it can never offer a token that
+ * silently degrades to plain text.
+ *
+ * `caretEnd` defaults to `caret`; a non-collapsed selection yields no trigger
+ * (the user is selecting, not composing a token).
+ */
+export function detectTypeaheadTrigger(text, caret, caretEnd) {
+  const s = String(text ?? '')
+  const clamp = (n, fallback) => {
+    const v = Number.isFinite(n) ? Math.trunc(n) : fallback
+    return Math.min(Math.max(v, 0), s.length)
+  }
+  const c = clamp(caret, s.length)
+  if (caretEnd !== undefined && caretEnd !== null && clamp(caretEnd, c) !== c) return null
+
+  const floor = Math.max(0, c - MAX_TYPEAHEAD_QUERY - 1)
+  let start = -1
+  let kind = null
+  for (let i = c - 1; i >= floor; i--) {
+    const ch = s[i]
+    if (WS_RE.test(ch)) return null                       // token boundary crossed
+    if (ch !== '/' && ch !== '@') continue
+    if (i === 0 || !WORD_CHAR_RE.test(s[i - 1])) { start = i; kind = ch; break }
+    // A trigger char mid-word is not a trigger, but the scan CONTINUES past it:
+    // that is what turns `see /etc/hosts` into a query of `etc/hosts`, which the
+    // next rule then rejects. Returning null here instead would leave the same
+    // input matching prose playbook titles through a shorter query.
+  }
+  if (start < 0) return null
+
+  const query = s.slice(start + 1, c)
+  // A query carrying a second trigger char is not a token anyone is naming.
+  // (`@@bo` and `/@rec` do NOT hit this: the backward scan finds the INNERMOST
+  // trigger, so their query is clean.)
+  if (query.includes('/') || query.includes('@')) return null
+
+  let end = c
+  while (end < s.length && !WS_RE.test(s[end])) end++
+  return { kind, start, end, query }
+}
+
+/**
+ * Splice a chosen insert over the whole trigger token.
+ *
+ * Pure, DOM-free, and it takes no live caret — the trigger already carries its
+ * own bounds, so this cannot splice against a caret that moved.
+ *
+ * The separator is decided HERE, never baked into the token. Baking a trailing
+ * space into `@name` produced `Hello @alice  there` and turned `@| x` into
+ * `@recon  x`; dropping it produced `@reconx`, which resolves to nothing and
+ * degrades to plain text — the exact AC#4 failure this feature exists to close.
+ */
+export function applyTypeaheadInsert(text, trigger, insert, { separator = ' ' } = {}) {
+  const s = String(text ?? '')
+  if (!trigger || !Number.isInteger(trigger.start) || !Number.isInteger(trigger.end)) {
+    return { value: s, caret: s.length }
+  }
+  const start = Math.min(Math.max(trigger.start, 0), s.length)
+  const end = Math.min(Math.max(trigger.end, start), s.length)
+  const body = String(insert ?? '')
+  const nextChar = s.slice(end, end + 1)
+  const spliced = body + (separator && !(nextChar && WS_RE.test(nextChar)) ? separator : '')
+  return { value: s.slice(0, start) + spliced + s.slice(end), caret: start + spliced.length }
+}
+
+// The mention token, and ONLY the token — see the separator rule above.
+export function buildMentionToken(name) { return `@${name}` }
+
+/**
+ * Can this agent be reached by an @mention at all?
+ *
+ * DERIVED from the real parser, never re-typed. Agent slugs are minted by
+ * `sanitize_agent_name`, whose alphabet is `[a-zA-Z0-9_.-]` with NO length cap,
+ * while the mention grammar allows no dot and stops at 100 characters. So
+ * `data.scout` is a perfectly ordinary agent that `MENTION_RE` reads as `@data`
+ * — a token that resolves to nothing and stays plain text. Nothing offers those
+ * names today, so the failure is invisible; a typeahead that listed them would
+ * MANUFACTURE it and make it look like a product bug.
+ *
+ * Asking `mentionedAgents` itself (rather than writing a second regex twelve
+ * lines from the first) is the point: this file's own header says drift in this
+ * grammar is its own bug class, and a hand-copied predicate is drift waiting to
+ * happen. It also rejects names containing `@` or whitespace, which a
+ * hand-written copy would have handled only by luck.
+ *
+ * (`MENTION_RE` carries /g. `matchAll` clones the regex, so `lastIndex` is never
+ * advanced — but never call `.test()`/`.exec()` on it from new code.)
+ */
+export function isMentionable(name) {
+  const n = String(name ?? '')
+  if (!n) return false
+  return mentionedAgents(buildMentionToken(n), [{ name: n }]).length === 1
+}
+
+// The `/` fallback rule, lifted out of PortalBriefing.vue so the card and the
+// typeahead cannot diverge on what a hint inserts. Null-safe: the typeahead can
+// reach it with a row from a roster that refreshed underneath it.
+export function starterFor(p) {
+  return String(p?.starter_prompt ?? '').trim() || String(p?.title ?? '')
+}
+
+// Empty-state copy. Exported so a test pins WHICH condition selects which line,
+// and phrased so it never claims what the client cannot observe: `_agent_briefing`
+// returns `[]` for a stopped or slow agent exactly as it does for one with no
+// playbooks, and the roster is fetched once at mount. "This agent has no
+// playbooks exposed" would therefore be a false claim about operator
+// configuration for the ordinary state of an idle fleet.
+export const EMPTY_REASON_NO_PLAYBOOKS = 'No playbooks are available for this agent right now.'
+export const EMPTY_REASON_NO_PEERS = 'No other agents are shared with you.'
+export const EMPTY_REASON_NO_MENTIONABLE_PEERS =
+  "The other agents shared with you can't be @mentioned — their names aren't valid mention handles."
+export const EMPTY_REASON_NO_ROOM_PEERS = 'No other agents are in this conversation yet.'
+
+function rank(haystack, query) {
+  const h = String(haystack ?? '').toLowerCase()
+  const q = String(query ?? '').toLowerCase()
+  if (!q) return 0
+  if (!h) return -1
+  if (h.startsWith(q)) return 0
+  // Word-start prefix: hint titles are PROSE up to 200 chars, not slugs, so a
+  // bare substring rule makes a one-character query match nearly everything.
+  for (let i = 1; i < h.length; i++) {
+    if (!WORD_CHAR_RE.test(h[i - 1]) && h.startsWith(q, i)) return 1
+  }
+  return -1
+}
+
+// Stable rank-then-original-order. `Array.prototype.sort` is stable in every
+// engine we target, but the index tiebreak makes that explicit rather than
+// assumed.
+function rankedBy(list, score) {
+  return list
+    .map((item, i) => ({ item, i, r: score(item) }))
+    .filter((e) => e.r >= 0)
+    .sort((a, b) => (a.r - b.r) || (a.i - b.i))
+    .map((e) => e.item)
+}
+
+/**
+ * `/` candidates.
+ *
+ * Returns a RECORD, not a bare array, because the popup has two different empty
+ * states and the component must not re-derive which one it is: a source with no
+ * playbooks shows one honest line, a query that matches nothing CLOSES the popup
+ * (AC#6 — the user is writing "50/50", not picking).
+ */
+export function filterPlaybookCandidates(playbooks, query) {
+  const source = (Array.isArray(playbooks) ? playbooks : [])
+    .filter((p) => p && String(p.title ?? '').trim())
+  const q = String(query ?? '')
+  return {
+    items: q ? rankedBy(source, (p) => rank(p.title, q)) : source.slice(),
+    sourceCount: source.length,
+  }
+}
+
+/**
+ * `@` candidates.
+ *
+ * `enabled` is the #2128 capability gate, and it lives HERE rather than in the
+ * component so it is tested rather than grepped: without a rooms substrate an
+ * @mention is deliberately ordinary text, so offering a picker for it is a
+ * dead-end affordance.
+ *
+ * Matching is case-insensitive on the slug AND the display label (AC#3 — the
+ * roster shows labels, the parser keys on slugs), and unlike the playbook rule
+ * it accepts a plain SUBSTRING. That divergence is deliberate: agent names are
+ * short identifiers, frequently sharing a deployment prefix (`acme-scout`,
+ * `acme-scribe`), so a strict prefix rule would fail the obvious query.
+ */
+export function filterAgentCandidates(roster, query, {
+  exclude = [],
+  requireMentionable = true,
+  enabled = true,
+} = {}) {
+  if (!enabled) return { items: [], enabled: false, peerCount: 0, mentionableCount: 0 }
+  const skip = new Set((Array.isArray(exclude) ? exclude : []).filter(Boolean))
+  const peers = (Array.isArray(roster) ? roster : [])
+    .filter((a) => a && a.name && !skip.has(a.name))
+  const reachable = requireMentionable ? peers.filter((a) => isMentionable(a.name)) : peers
+  const q = String(query ?? '').toLowerCase()
+  const items = q
+    ? rankedBy(reachable, (a) => {
+      const slug = String(a.name).toLowerCase()
+      const label = String(a.display_label || a.name).toLowerCase()
+      const r = Math.min(...[rank(slug, q), rank(label, q)].map((n) => (n < 0 ? 99 : n)))
+      if (r < 99) return r
+      return (slug.includes(q) || label.includes(q)) ? 2 : -1
+    })
+    : reachable.slice()
+  return { items, enabled: true, peerCount: peers.length, mentionableCount: reachable.length }
+}
+
+/**
+ * Which honest line the popup shows when the source itself is empty.
+ *
+ * "No peers" and "peers exist but none is mentionable" are DIFFERENT statements
+ * and neither may be told in place of the other — the second one is the P-3
+ * class made visible instead of silent.
+ */
+export function typeaheadEmptyMessage(kind, result, { scope = 'roster' } = {}) {
+  if (kind === '/') return EMPTY_REASON_NO_PLAYBOOKS
+  if (!result || result.enabled === false) return null
+  if (result.peerCount > 0 && result.mentionableCount === 0) return EMPTY_REASON_NO_MENTIONABLE_PEERS
+  return scope === 'room' ? EMPTY_REASON_NO_ROOM_PEERS : EMPTY_REASON_NO_PEERS
+}
+
+// Bounded window + honest overflow count — the `planHintDisplay` house pattern
+// (principle 28: unbounded data is contained, and the total is stated).
+export function boundCandidates(list, limit = TYPEAHEAD_LIMIT) {
+  const all = Array.isArray(list) ? list : []
+  const n = Number.isInteger(limit) && limit > 0 ? limit : TYPEAHEAD_LIMIT
+  return { visible: all.slice(0, n), overflow: Math.max(0, all.length - n) }
+}
+
+/**
+ * The room's `@` wake-set.
+ *
+ * VERIFIED against the running engine, not assumed: posting `@<participant>`
+ * answered `{"mentions":["acme-scout"],"woke":["acme-scout"]}`, while
+ * `@<non-participant>` answered `{"mentions":[],"woke":[]}`. The engine's
+ * `resolve_mentions` keeps only `kind == "agent" and not left_at`, so an @name
+ * outside the room is left as plain text and nothing is recruited. Offering the
+ * full roster here would therefore manufacture a silent no-op — the same class
+ * as listing an un-mentionable slug.
+ *
+ * Participants arrive as bare identities; the roster is joined in only to
+ * recover display labels, so a participant the caller cannot see in their
+ * roster still appears (it is in the room, so it is wakeable).
+ */
+export function roomMentionSource(participantNames, roster) {
+  const byName = new Map(
+    (Array.isArray(roster) ? roster : []).filter((a) => a && a.name).map((a) => [a.name, a]),
+  )
+  return (Array.isArray(participantNames) ? participantNames : [])
+    .filter(Boolean)
+    .map((n) => byName.get(n) || { name: n })
+}
+
+/**
+ * The composer keymap, as data.
+ *
+ * A truth table rather than a substring assertion, and it fixes one thing the
+ * current binding gets wrong: `@keydown.enter.exact` has no IME guard, so an IME
+ * user's candidate-commit Enter sends the message mid-word.
+ *
+ * NO IMPLICIT SELECTION. `activeIndex` starts at -1 and a plain Enter accepts
+ * ONLY with an explicit selection; otherwise it sends. The harm is asymmetric:
+ * an accidental accept destroys typed work (a popup that merely happens to be
+ * open — a paste, or prose like "check /status of the deploy" — would splice up
+ * to 500 characters over the message), while an accidental send is the thing the
+ * user was reaching for anyway. Tab still accepts the top row, and nobody
+ * presses Tab to send.
+ */
+export function resolveComposerKey({
+  key, shiftKey = false, ctrlKey = false, metaKey = false, altKey = false,
+  isComposing = false, keyCode = 0,
+  open = false, hasActive = false, hasCandidates = false,
+} = {}) {
+  if (isComposing || keyCode === 229) return 'pass'
+  // A faithful reproduction of Vue's `.exact`: any modifier falls through
+  // unprevented and inserts a newline, exactly as today.
+  const plainEnter = key === 'Enter' && !shiftKey && !ctrlKey && !metaKey && !altKey
+
+  if (open) {
+    if (key === 'Escape') return 'dismiss'
+    if (key === 'ArrowDown') return hasCandidates ? 'move-down' : 'close'
+    if (key === 'ArrowUp') return hasCandidates ? 'move-up' : 'close'
+    if (key === 'Tab' && !shiftKey) return hasCandidates ? 'accept' : 'pass'
+    if (plainEnter && hasCandidates && hasActive) return 'accept'
+    if (CARET_KEYS.has(key)) return 'close'
+  }
+  if (plainEnter) return 'send'
+  return 'pass'
+}
+
+/**
+ * Esc dismissal, as state rather than a boolean.
+ *
+ * ONLY Esc arms it. A click-outside, a capability change or an agent switch
+ * closes WITHOUT arming — otherwise "type `@`, click away to read a message,
+ * click back, type `b`" stays suppressed until the user deletes the `@`.
+ *
+ * Suppression then holds while the user is still editing the token they
+ * dismissed: same kind, same start, and a query that EXTENDS the dismissed one.
+ * Strict query equality was rejected because it un-dismisses on the very next
+ * keystroke (Esc has to mean "stop offering this"); keying on `start` alone was
+ * rejected because it is wrong in both directions — text inserted before the
+ * token shifts `start` and re-opens, while a full retype at the same offset
+ * stays suppressed forever.
+ */
+export function nextDismissState(trigger) {
+  if (!trigger) return null
+  return { kind: trigger.kind, start: trigger.start, query: trigger.query }
+}
+
+export function isSuppressed(dismissed, trigger) {
+  if (!dismissed || !trigger) return false
+  if (dismissed.kind !== trigger.kind || dismissed.start !== trigger.start) return false
+  return String(trigger.query ?? '').startsWith(String(dismissed.query ?? ''))
+}
+
+// Roving selection. `-1` means "nothing chosen", which is the state Enter reads
+// (see resolveComposerKey), so it must survive an empty list.
+export function nextActiveIndex(current, delta, length) {
+  const n = Number.isInteger(length) ? length : 0
+  if (n <= 0) return -1
+  const cur = Number.isInteger(current) ? current : -1
+  if (cur < 0) return delta > 0 ? 0 : n - 1
+  return ((cur + delta) % n + n) % n
+}
+
+// A stale index is dropped, not clamped to a neighbour: after a roster refresh
+// under an open popup, "the row that is now at index 5" is not the row the user
+// chose, and inserting it is how `@undefined` (or the wrong agent) ships.
+export function clampActiveIndex(current, length) {
+  const n = Number.isInteger(length) ? length : 0
+  if (n <= 0) return -1
+  return Number.isInteger(current) && current >= 0 && current < n ? current : -1
+}
