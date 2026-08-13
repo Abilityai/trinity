@@ -339,6 +339,18 @@ GEMINI_TRANSCRIPTION_MODEL = os.getenv("GEMINI_TRANSCRIPTION_MODEL") or "gemini-
 # also requires a per-agent voip_bindings row to function. `voip_available`
 # in GET /api/settings/feature-flags is `VOIP_ENABLED and bool(GEMINI_API_KEY)`.
 VOIP_ENABLED = os.getenv("VOIP_ENABLED", "false").lower() == "true"
+# Outbound A2A calls (#736) — a Trinity agent tasking an EXTERNAL A2A agent.
+# RUNTIME-RESOLVED like the Brain Orb flags, deliberately: no import-time
+# constant here, so a stale module value can never shadow an admin toggle, and —
+# more importantly — a compose file that forgets to forward the variable cannot
+# make the feature unreachable. Resolution lives in
+# `services/a2a_outbound_service.is_outbound_enabled()`: system_settings row →
+# A2A_OUTBOUND_ENABLED env opt-in → default OFF. Default OFF because this is the
+# platform's first backend-executed, credentialed, agent-triggerable outbound
+# fetcher, and every comparable surface (DISPATCH_ASYNC, CANARY_ENABLED,
+# VOIP_ENABLED, MCP_INLINE_AUTH_ENABLED, BRAIN_ORB_*) ships default-OFF.
+# Both routes 404 when off; `a2a_outbound_available` reports it in
+# GET /api/settings/feature-flags.
 # Brain Orb flags (trinity-enterprise#58/#60/#61) are RUNTIME-RESOLVED as of #85
 # — no import-time constants here, so a stale module value can never shadow an
 # admin toggle. Resolution lives in services/settings_service.py
