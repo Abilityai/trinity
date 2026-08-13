@@ -467,7 +467,9 @@ export const useClientPortalStore = defineStore('clientPortal', {
         this.reportsLoaded = true
       } catch {
         if (gen !== this._reportsGeneration) return
-        this.reportsError = "Couldn't load this agent's reports."
+        // Paired with `LoadFailed`'s title ("Couldn't load reports"), so this
+        // says what to DO rather than restating what happened (contract #25).
+        this.reportsError = 'The request failed. Check your connection and try again.'
       }
     },
 
@@ -508,8 +510,14 @@ export const useClientPortalStore = defineStore('clientPortal', {
           ...this.reportErrors, [reportId]: 'Could not load this report.',
         }
       } finally {
-        const { [reportId]: _done, ...stillInFlight } = this._reportInFlight
-        this._reportInFlight = stillInFlight
+        // Generation-guarded like every other write: a reset already emptied
+        // this map, so clearing "our" key afterwards would clear a NEW request's
+        // marker instead and let a duplicate through — the guard leaking through
+        // its own bookkeeping.
+        if (gen === this._reportsGeneration) {
+          const { [reportId]: _done, ...stillInFlight } = this._reportInFlight
+          this._reportInFlight = stillInFlight
+        }
       }
     },
 
@@ -556,8 +564,14 @@ export const useClientPortalStore = defineStore('clientPortal', {
           ...this.reportErrors, [reportId]: 'Could not load more rows.',
         }
       } finally {
-        const { [reportId]: _done, ...stillInFlight } = this._reportInFlight
-        this._reportInFlight = stillInFlight
+        // Generation-guarded like every other write: a reset already emptied
+        // this map, so clearing "our" key afterwards would clear a NEW request's
+        // marker instead and let a duplicate through — the guard leaking through
+        // its own bookkeeping.
+        if (gen === this._reportsGeneration) {
+          const { [reportId]: _done, ...stillInFlight } = this._reportInFlight
+          this._reportInFlight = stillInFlight
+        }
       }
     },
 

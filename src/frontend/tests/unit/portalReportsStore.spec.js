@@ -353,3 +353,37 @@ describe('in-flight and cache guards', () => {
     expect(store.reportErrors).toEqual({})
   })
 })
+
+// ---------------------------------------------------------------------------
+// 6. The guard's own bookkeeping
+// ---------------------------------------------------------------------------
+
+describe('in-flight bookkeeping is itself generation-guarded', () => {
+  it('a late finally does not clear a NEW request\'s in-flight marker', async () => {
+    // The subtle one: `resetAgentReports` empties `_reportInFlight`, so an
+    // unguarded `finally` from the OLD request would delete the key a new
+    // request just wrote — letting a duplicate through the very guard that
+    // exists to prevent it.
+    const stale = deferred()
+    axios.get.mockReturnValueOnce(stale.promise)
+    const first = store.loadAgentReport('alpha', 'r1')
+
+    store.resetAgentReports('beta')
+
+    const fresh = deferred()
+    axios.get.mockReturnValueOnce(fresh.promise)
+    const second = store.loadAgentReport('beta', 'r1')
+
+    // Agent A's request settles now, after B's is already in flight.
+    stale.resolve({ data: { payload: { markdown: 'alpha' } } })
+    await first
+
+    // A third expand must still be refused — B's marker has to have survived.
+    const third = store.loadAgentReport('beta', 'r1')
+    fresh.resolve({ data: { payload: { markdown: 'beta' } } })
+    await Promise.all([second, third])
+
+    expect(axios.get).toHaveBeenCalledTimes(2)
+    expect(store.reportPayloads.r1).toEqual({ markdown: 'beta' })
+  })
+})
