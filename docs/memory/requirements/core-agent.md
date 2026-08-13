@@ -396,7 +396,11 @@
   `PUT|DELETE .../chat-state/{kind}/{id}/star`, `POST .../chat-state/{kind}/{id}/read`.
   No roster gate (every row is keyed by the caller's own email) and no existence
   check on the id — a 404 for an unknown chat would be an enumeration oracle
-  (invariant #8); a per-viewer row cap bounds the write instead.
+  (invariant #8); two per-viewer caps bound the write instead. A total-row cap
+  (abuse) and a separate **starred**-row cap: read cursors accrue from ordinary
+  use, so a single cap would be spent by activity the user cannot undo, making
+  the 409's "unstar some first" advice false. Unstarring a chat that carries no
+  read cursor deletes its row.
 - **Known gap**: rooms report `unread: 0`. A room keeps its own seq cursor, and
   reconciling the two cursor models is follow-up work; stars work for both kinds.
 - **Not this issue**: opening an agent's own **page** (a destination with its own

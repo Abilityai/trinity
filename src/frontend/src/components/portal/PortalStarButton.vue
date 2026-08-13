@@ -14,6 +14,7 @@
     :aria-label="starred ? 'Unstar this chat' : 'Star this chat'"
     :aria-pressed="starred"
     @click.stop="$emit('toggle')"
+    @keydown.stop
   >
     <svg
       :class="dense ? 'w-4 h-4' : 'w-5 h-5'"
@@ -34,6 +35,12 @@
  * AC #4 asks for star/unstar from BOTH the header and the row, which is exactly
  * the setup where an inline copy per site drifts: three icons, three hover
  * rules, three `aria-pressed` states to keep honest.
+ *
+ * `@keydown.stop` matters as much as `@click.stop`: the sidebar row is a
+ * `role="button"` div with `@keydown.enter.prevent`/`@keydown.space.prevent`,
+ * and a keydown from this button bubbles into it — the row would preventDefault
+ * the button's own activation and open the chat instead, leaving the star
+ * reachable by mouse only. The focus styling below assumes keyboard use works.
  *
  * `revealOnHover` is for the dense sidebar row, where a permanently visible
  * outline star on every row is noise. It applies only when NOT starred — a star
