@@ -71,20 +71,17 @@ vi.mock('axios', () => {
 })
 
 import axios from 'axios'
+import { stripComments } from './helpers/stripComments'
 import { applyAgentSelection, collapseSelection } from '@/components/portal/portalUtils'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE } from '@/stores/clientPortal'
 
 const PORTAL = fileURLToPath(new URL('../../src/views/Portal.vue', import.meta.url))
 const PICKER = fileURLToPath(new URL('../../src/components/portal/PortalAgentPicker.vue', import.meta.url))
 
-/** Strip HTML/JS comments so prose about the rule isn't scanned as code. */
-function stripComments(code) {
-  return code
-    .replace(/<!--[\s\S]*?-->/g, '')      // Vue template comments
-    .replace(/\/\*[\s\S]*?\*\//g, '')     // JS block comments
-    .replace(/^[ \t]*\/\/.*$/gm, '')      // whole-line // comments
-    .replace(/([^:])\/\/.*$/gm, '$1')     // trailing // comments (keep URLs)
-}
+// Comment stripping moved to a shared helper (#2161) rather than gaining a
+// third copy. The shared version loops the block-comment passes to a fixpoint —
+// one pass can leave a bare `<!--` behind, and residue is scanned as if it were
+// code, which fails a guard on the prose describing the rule it enforces.
 
 const portalSource = () => stripComments(readFileSync(PORTAL, 'utf8'))
 const pickerSource = () => stripComments(readFileSync(PICKER, 'utf8'))

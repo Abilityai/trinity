@@ -31,6 +31,8 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 
+import { stripComments } from './helpers/stripComments'
+
 import {
   shouldEscapeStage,
   PORTAL_BUCKET_LABELS,
@@ -46,15 +48,9 @@ const PORTAL = fileURLToPath(new URL('../../src/views/Portal.vue', import.meta.u
 const PAGE = fileURLToPath(new URL('../../src/components/portal/PortalAgentPage.vue', import.meta.url))
 const CHART = fileURLToPath(new URL('../../src/components/StackedBarChart.vue', import.meta.url))
 
-/** Strip HTML/JS comments so prose about the rule isn't scanned as code. */
-function stripComments(code) {
-  return code
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/^[ \t]*\/\/.*$/gm, '')
-    .replace(/([^:])\/\/.*$/gm, '$1')
-}
-
+// Comments are stripped so prose about a rule isn't scanned as code. Shared,
+// because this was about to become its third copy — and the shared version
+// loops the block passes to a fixpoint, which the copies did not.
 const portalSource = () => stripComments(readFileSync(PORTAL, 'utf8'))
 const pageSource = () => stripComments(readFileSync(PAGE, 'utf8'))
 const chartSource = () => stripComments(readFileSync(CHART, 'utf8'))
