@@ -2919,9 +2919,15 @@ class DatabaseManager:
         # #1631: agent-scoped — item_id is the agent's request_id, not the uuid.
         return self._operator_queue_ops.item_exists(agent_name, item_id)
 
-    def count_operator_queue_pending_for_agent(self, agent_name):
+    def count_operator_queue_pending_for_agent(self, agent_name, item_type=None):
         # #1632: DB-measured per-agent pending depth — the primary ingestion cap.
-        return self._operator_queue_ops.count_pending_for_agent(agent_name)
+        # #1677: optional item_type = the per-(agent, type) platform-alert
+        # budget read. The pass-through is load-bearing — a missed delegation
+        # plus the helper's swallow voids the budget while monkeypatched tests
+        # stay green (pinned by test_1677's real-facade test).
+        return self._operator_queue_ops.count_pending_for_agent(
+            agent_name, item_type=item_type
+        )
 
     # =========================================================================
     # Agent Event Subscriptions (delegated to db/event_subscriptions.py) - EVT-001

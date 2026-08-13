@@ -277,6 +277,12 @@ _UNRESOLVED_COMMAND_RE = re.compile(
     r"^\s*unknown (?:slash )?command:\s*(/\S+)", re.IGNORECASE
 )
 
+# #1677: the offending command is agent-RESPONSE-derived (`/\S+` — unbounded)
+# and is echoed into durable operator state (queue item + notification).
+# Truncate every echo: a >16 KiB command would otherwise trip the DB question
+# belt (ValueError) and let the agent suppress its own alert.
+_COMMAND_DISPLAY_MAX = 200
+
 
 def detect_unresolved_slash_command(
     message: Optional[str], response: Optional[str]
@@ -314,13 +320,34 @@ async def _alert_skill_not_found(
     recurring schedule doesn't flood the queue between operator responses.
     Never raises — a failed alert must not turn the (already-FAILED) terminal
     write into an exception.
+
+    #1677: this emitter is agent-INFLUENCEABLE — distinct unknown commands
+    defeat the per-command dedup — so the queue item is created through
+    ``operator_queue_service.create_bounded_alert`` (per-(agent, type)
+    pending-depth budget). Order is pinned **dedup → budget → both creates**:
+    a benign repeat of an already-pending command at cap must stay a silent
+    no-op, never a false "compromised" episode alert. A ``False`` return
+    suppresses the paired notification too — a notification must never
+    outlive its queue item.
     """
     try:
+        # Lazy import — the budget seam lives with the rest of the
+        # operator-queue ingestion policy (cycle-free; rare path).
+        from services.operator_queue_service import (
+            _truncate_with_marker,
+            create_bounded_alert,
+        )
+
+        # #1677: truncate the agent-derived command for EVERY surface it is
+        # echoed into (question, context, notification, log line).
+        command_display = _truncate_with_marker(command, _COMMAND_DISPLAY_MAX)
+
         existing = db.list_operator_queue_items(
             status="pending", type="skill_not_found", agent_name=agent_name
         )
         already = any(
-            (it.get("context") or {}).get("command") == command for it in existing
+            (it.get("context") or {}).get("command") == command_display
+            for it in existing
         )
         if already:
             return
@@ -328,10 +355,10 @@ async def _alert_skill_not_found(
         now = utc_now_iso()
         title = "Scheduled command references a missing skill"
         question = (
-            f"{agent_name}'s scheduled command '{command}' did not resolve to an "
+            f"{agent_name}'s scheduled command '{command_display}' did not resolve to an "
             f"installed skill — the run no-opped ('Unknown command'). The agent's "
             f"scheduled function is not executing. Install the skill "
-            f"(.claude/skills/{command.lstrip('/').split()[0]}/SKILL.md) or fix the "
+            f"(.claude/skills/{command_display.lstrip('/').split()[0]}/SKILL.md) or fix the "
             f"schedule's command."
         )
         item = {
@@ -343,13 +370,19 @@ async def _alert_skill_not_found(
             "title": title,
             "question": question,
             "context": {
-                "command": command,
+                "command": command_display,
                 "triggered_by": triggered_by,
                 "execution_id": execution_id or "",
             },
             "created_at": now,
         }
-        db.create_operator_queue_item(agent_name, item)
+        created = await create_bounded_alert(agent_name, item)
+        if not created:
+            # #1677: at-cap or fail-closed — the queue item was suppressed, so
+            # the notification below is suppressed WITH it. The
+            # FAILED/SKILL_NOT_FOUND execution row remains the primary
+            # observability surface.
+            return
 
         try:
             from db_models import NotificationCreate
@@ -362,7 +395,10 @@ async def _alert_skill_not_found(
                     message=question,
                     priority="high",
                     category="error",
-                    metadata={"command": command, "execution_id": execution_id or ""},
+                    metadata={
+                        "command": command_display,
+                        "execution_id": execution_id or "",
+                    },
                 ),
             )
         except Exception:  # noqa: BLE001 — notification is a secondary surface
@@ -370,7 +406,7 @@ async def _alert_skill_not_found(
 
         logger.warning(
             "[#1410] skill_not_found alert raised for %s: command=%s execution=%s",
-            agent_name, command, execution_id,
+            agent_name, command_display, execution_id,
         )
     except Exception:  # noqa: BLE001 — alerting must never break the terminal write
         logger.exception("[#1410] failed to raise skill_not_found alert for %s", agent_name)

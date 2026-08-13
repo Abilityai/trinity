@@ -163,6 +163,17 @@ class OperatorQueueOperations:
         # `.get(...)` used to raise AttributeError here and hot-loop the sync.
         context = item.get("context")
         context_execution_id = context.get("execution_id") if isinstance(context, dict) else None
+        # #1677 (fold): belt the derived COLUMN value like the id above — a
+        # non-str or over-_DB_BELT_ID_MAX execution_id becomes None, never a
+        # truncation (a truncated id matches nothing while feigning validity).
+        # The context JSON blob keeps its own 64 KiB cap; only the column is
+        # belted. `""` passes unchanged (existing callers send
+        # `execution_id or ""`).
+        if context_execution_id is not None and (
+            not isinstance(context_execution_id, str)
+            or len(context_execution_id) > _DB_BELT_ID_MAX
+        ):
+            context_execution_id = None
 
         # #1631: the agent's id served both the platform's global row handle AND
         # the agent's private correlation key — so two agents choosing the same
@@ -729,19 +740,28 @@ class OperatorQueueOperations:
         with get_engine().connect() as conn:
             return conn.execute(stmt).first() is not None
 
-    def count_pending_for_agent(self, agent_name: str) -> int:
+    def count_pending_for_agent(
+        self, agent_name: str, item_type: Optional[str] = None
+    ) -> int:
         """#1632: count an agent's currently-pending operator-queue rows.
 
         The primary, Redis-independent depth bound for the ingestion cap: the
         sync service admits new agent items only while this count (plus what it
         has admitted this cycle) stays under OPERATOR_QUEUE_MAX_PENDING_PER_AGENT.
         Dialect-agnostic (SQLite + PostgreSQL, #300).
+
+        #1677: the optional ``item_type`` narrows the count to one type — the
+        per-(agent, type) budget read for agent-influenceable platform alert
+        emitters (``operator_queue_service.create_bounded_alert``). ``None``
+        keeps the #1632 all-types semantics unchanged. Query-only change — no
+        schema change, so no migration on either track.
         """
-        stmt = select(func.count()).where(
-            and_(
-                operator_queue.c.agent_name == agent_name,
-                operator_queue.c.status == "pending",
-            )
-        )
+        conds = [
+            operator_queue.c.agent_name == agent_name,
+            operator_queue.c.status == "pending",
+        ]
+        if item_type is not None:
+            conds.append(operator_queue.c.type == item_type)
+        stmt = select(func.count()).where(and_(*conds))
         with get_engine().connect() as conn:
             return int(conn.execute(stmt).scalar() or 0)
