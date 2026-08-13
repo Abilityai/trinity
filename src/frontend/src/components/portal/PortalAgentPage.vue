@@ -190,8 +190,27 @@
       </template>
 
       <!-- ---------------------------- REPORTS ----------------------------- -->
+      <!-- #2162: reports render through the SHARED components/reports/ set, the
+           same dispatch Agent Detail uses. This dumped JSON.stringify(payload)
+           at external clients — a disclosure defect, not only an ugly one: the
+           payload is free-form agent JSON of the same class as an ask's
+           `context`, which this page refuses to expose at all. A typed renderer
+           reads only the keys its hint declares, so this narrows what crosses.
+           `:allow-raw="false"` is the one place this surface diverges from the
+           operator ones: no raw payload is reachable behind the fallback. -->
       <template v-else-if="tab === 'reports'">
-        <p v-if="!reports.length" class="text-sm text-gray-400">This agent hasn't published any reports.</p>
+        <div v-if="!reportsLoaded && !reportsError" class="space-y-2" aria-busy="true">
+          <div v-for="row in 3" :key="row" class="animate-pulse h-14 rounded-xl bg-gray-100 dark:bg-gray-800/60"></div>
+          <span class="sr-only">Loading this agent's reports…</span>
+        </div>
+        <LoadFailed
+          v-else-if="reportsError"
+          dense
+          title="Couldn't load reports"
+          :message="reportsError"
+          @retry="loadReports"
+        />
+        <p v-else-if="!reports.length" class="text-sm text-gray-500 dark:text-gray-400">This agent hasn't published any reports.</p>
         <div v-for="r in reports" :key="r.id" class="mb-2 rounded-xl border border-gray-200 dark:border-gray-800">
           <button class="w-full px-3.5 py-3 flex items-center gap-3 text-left" @click="toggleReport(r.id)">
             <span class="min-w-0 flex-1">
@@ -201,8 +220,28 @@
             <svg class="w-4 h-4 text-gray-400 shrink-0 transition" :class="{ 'rotate-180': openReport === r.id }" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
           </button>
           <div v-if="openReport === r.id" class="px-3.5 pb-3 border-t border-gray-100 dark:border-gray-800">
-            <p v-if="!reportPayloads[r.id]" class="pt-3 text-xs text-gray-400">Loading…</p>
-            <pre v-else class="pt-3 text-xs overflow-x-auto whitespace-pre-wrap break-words">{{ pretty(reportPayloads[r.id]) }}</pre>
+            <InlineError
+              v-if="reportErrors[r.id]"
+              class="mt-3"
+              :message="reportErrors[r.id]"
+              retryable
+              @retry="retryReport(r.id)"
+              @dismiss="dismissReportError(r.id)"
+            />
+            <div v-else-if="!reportPayloads[r.id]" class="pt-3 space-y-2" aria-busy="true">
+              <div v-for="row in 2" :key="row" class="animate-pulse h-8 rounded-lg bg-gray-100 dark:bg-gray-800/60"></div>
+              <span class="sr-only">Loading this report…</span>
+            </div>
+            <div v-else class="pt-3">
+              <ReportRenderer
+                :report-type="r.report_type"
+                :display-hint="r.display_hint"
+                :payload="reportPayloads[r.id]"
+                :meta="reportRowMeta[r.id]"
+                :load-more="reportRowMeta[r.id] ? () => loadMoreRows(r.id) : null"
+                :allow-raw="false"
+              />
+            </div>
           </div>
         </div>
       </template>
@@ -282,6 +321,9 @@ import { ref, computed, watch, onMounted } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { BUCKET_COLORS, bucketsForChart, hasChartActivity } from '@/utils/executionBuckets'
 import StackedBarChart from '@/components/StackedBarChart.vue'
+import InlineError from '@/components/InlineError.vue'
+import LoadFailed from '@/components/LoadFailed.vue'
+import ReportRenderer from '@/components/reports/ReportRenderer.vue'
 import PortalAvatar from './PortalAvatar.vue'
 import { PORTAL_BUCKET_LABELS } from './portalUtils'
 
@@ -321,9 +363,25 @@ const timeWindow = ref('7d')
 const page = ref(null)
 const loading = ref(false)
 const error = ref(null)
-const reports = ref([])
+// Only the "which card is open" bit is local (#2162). Everything else about
+// reports — the list, its loaded/failed flags, per-report payloads, row meta,
+// per-report errors — lives in the store (design contract #21), which is also
+// what makes the agent-switch race testable: a reset there invalidates requests
+// already in flight, which clearing a ref here cannot do.
 const openReport = ref(null)
-const reportPayloads = ref({})
+// The store is a singleton and outlives this component, so a fresh MOUNT for a
+// different agent would otherwise read the previous one's reports as "already
+// loaded" and never refetch — the props watcher below only fires on a change
+// within one instance, not on a remount. Every read is therefore gated on the
+// state actually belonging to the agent on screen; the store's generation
+// counter covers the in-flight half, this covers the at-rest half.
+const reportsMine = computed(() => store.reportsAgent === props.agentName)
+const reports = computed(() => (reportsMine.value ? store.reports : []))
+const reportsLoaded = computed(() => reportsMine.value && store.reportsLoaded)
+const reportsError = computed(() => (reportsMine.value ? store.reportsError : null))
+const reportPayloads = computed(() => (reportsMine.value ? store.reportPayloads : {}))
+const reportRowMeta = computed(() => (reportsMine.value ? store.reportRowMeta : {}))
+const reportErrors = computed(() => (reportsMine.value ? store.reportErrors : {}))
 const documents = ref([])
 const uploads = ref([])
 
@@ -387,8 +445,11 @@ async function load() {
 // Files are separate surfaces that most visits never look at.
 watch(tab, async (t) => {
   try {
-    if (t === 'reports' && !reports.value.length) {
-      reports.value = await store.fetchAgentReports(props.agentName)
+    // Gated on the LOADED FLAG, not on list length: an agent with genuinely
+    // zero reports would otherwise refetch on every entry to the tab, and a
+    // failed fetch would look identical to an empty one (contract #15).
+    if (t === 'reports' && !reportsLoaded.value) {
+      await loadReports()
     } else if (t === 'files' && !documents.value.length && !uploads.value.length) {
       const [d, u] = await Promise.all([
         store.fetchDocuments(props.agentName).catch(() => []),
@@ -406,8 +467,11 @@ watch(tab, async (t) => {
 watch(() => props.agentName, () => {
   pageCache.clear()   // #2160: keyed by name, but never serve one agent's page for another
   page.value = null
-  reports.value = []
-  reportPayloads.value = {}
+  // #2162: the store owns report state AND the generation counter, so this also
+  // invalidates any report request already in flight for the previous agent —
+  // the half a plain ref-clear cannot do, and the reason `reportsLoaded` is safe
+  // to add at all (it would otherwise make a transient wrong-render permanent).
+  store.resetAgentReports(props.agentName)
   openReport.value = null
   documents.value = []
   uploads.value = []
@@ -418,20 +482,32 @@ watch(() => props.agentName, () => {
 watch(timeWindow, load)
 onMounted(load)
 
+function loadReports() {
+  return store.loadAgentReports(props.agentName)
+}
+
 async function toggleReport(id) {
   if (openReport.value === id) { openReport.value = null; return }
   openReport.value = id
-  if (reportPayloads.value[id]) return
-  try {
-    const r = await store.fetchAgentReport(props.agentName, id)
-    reportPayloads.value = { ...reportPayloads.value, [id]: r?.payload ?? {} }
-  } catch {
-    reportPayloads.value = { ...reportPayloads.value, [id]: { error: 'Could not load this report.' } }
-  }
+  // The store owns the already-loaded / already-in-flight guards, so a rapid
+  // expand-collapse-expand cannot fire duplicate requests — which matters here
+  // because each one re-reads the whole blob server-side.
+  await store.loadAgentReport(props.agentName, id)
+}
+
+function retryReport(id) {
+  return store.loadAgentReport(props.agentName, id)
+}
+
+function dismissReportError(id) {
+  store.clearReportError(id)
+}
+
+function loadMoreRows(id) {
+  return store.loadMoreReportRows(props.agentName, id)
 }
 
 const pct = (v) => (v === null || v === undefined ? '—' : `${Math.round(v * 100)}%`)
-const pretty = (v) => { try { return JSON.stringify(v, null, 2) } catch { return String(v) } }
 const size = (b) => (b === null || b === undefined ? '' : b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`)
 const duration = (ms) => (!ms ? '' : ms < 1000 ? `${ms}ms` : ms < 60000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms / 60000)}m`)
 
