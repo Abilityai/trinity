@@ -195,11 +195,21 @@ column that cap does not bind below ~1656px.
 332px — where the 30-day x-axis (one truncating 9px label per day) reads as
 nothing and a nine-bucket legend wraps three to five lines. At 1280px the column
 is ~460px. A layout that technically satisfies "two columns" while making the
-left one unreadable fails the purpose. **Known residual:** the 30-day x-axis
-still truncates in a half-width column (measured 5/6 shown ticks at 1280, 3/6 at
-1600); 7d and 14d are clean. The fix is width-responsive tick density inside
-`StackedBarChart.vue`, which the operator Overview also consumes — out of scope
-here, deliberately.
+left one unreadable fails the purpose.
+
+**Known residual, accepted:** the 30-day window's x-axis is ellipsis-clipped in a
+half-width column. Measured over a 1280→2000 sweep (Chromium, macOS system
+font — glyph widths are platform-dependent, so treat the band, not the counts, as
+the finding): all six ticks clipped at 1280–1320, four at 1360–1520, one at
+1600–1640, **none from ~1680 up**. It is bounded on the other side too — below
+1280 the row stacks and the chart is full width, which is *wider* than the
+pre-#2169 `max-w-2xl` cap, so it is clean there as well. So the affected band is
+roughly **1280–1680 on the 30-day window only**: 7d (the default) and 14d measure
+zero clipped ticks at every width, and the clipping is ellipsis-marked rather
+than silently wrong — the bars, the legend totals, and the hover tooltip's full
+date are all unaffected. The fix is width-responsive tick density inside
+`StackedBarChart.vue::showLabel`, which the operator Overview also consumes —
+out of scope here, deliberately.
 
 **Moving asks below reverses #2161's DOM-order decision**, on instruction. The
 residual is bounded rather than a priority inversion: the header carrying the

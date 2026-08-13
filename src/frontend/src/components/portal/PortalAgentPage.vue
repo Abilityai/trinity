@@ -123,7 +123,14 @@
              and a 24px gap, so at 1024px each column is 332px — where the 30d
              x-axis (one truncating 9px label per day) reads as nothing and the
              nine-bucket legend wraps three to five lines. At 1280px the column
-             is ~460px and both are legible. Below `xl` it stacks. -->
+             is ~460px, which the legend needs and gets. Below `xl` it stacks.
+
+             `xl` reduces the x-axis residual rather than removing it: on the 30d
+             window the ticks stay ellipsis-clipped from 1280 to about 1680, and
+             are clean above that AND below 1280, where the row stacks and the
+             chart runs full width. 7d (the default) and 14d are clean at every
+             width. Accepted, not overlooked — the fix is width-responsive tick
+             density in StackedBarChart, which the operator Overview shares. -->
         <div class="mb-6 grid gap-6 xl:grid-cols-2">
           <!-- Activity, in the same visual language as the operator Overview
                (#1107): bounded, stacked by what triggered the work, both themes.
