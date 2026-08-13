@@ -41,6 +41,16 @@ wheels/
 .installed.cfg
 *.egg
 
+# The setuptools block above ends with a BARE `parts/`, which git applies at
+# every depth — so it also swallows `src/frontend/src/components/tiles/parts/`,
+# where the grid's presentational tile sub-components live (ent#100). The
+# directory is re-included first: git cannot re-include a file whose PARENT
+# directory is excluded, so `!.../parts/*.vue` alone would silently do nothing.
+# Symptom if this is ever removed: a component that builds locally, is missing
+# from the commit, and fails the frontend build in CI.
+!src/frontend/src/components/tiles/parts/
+!src/frontend/src/components/tiles/parts/**
+
 # uv lockfile (repo uses pyproject.toml for pytest only; empty lockfile is noise)
 uv.lock
 

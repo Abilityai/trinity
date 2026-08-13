@@ -31,11 +31,32 @@ import { fileURLToPath } from 'node:url'
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src')
 
-/** Components that render inside the grid lattice and inherit its cascade. */
-const TILE_COMPONENTS = [
-  'components/InfoTile.vue',
-  'components/tiles/FleetSummaryTile.vue',
-]
+/**
+ * Components that render inside the grid lattice and inherit its cascade.
+ *
+ * AUTO-DISCOVERED (ent#100), not hand-listed. It was a two-entry constant, so a
+ * new tile was unguarded until someone remembered to add it — and epic #94
+ * queues eight of them, each a fresh chance to consume a token nobody defined
+ * and fail silently in exactly one theme. A guard whose scope is a hand-written
+ * file list validates the fix, not the codebase. The sibling
+ * `gridTileLinks.spec.js` already auto-discovers; this matches it, and walks
+ * recursively so presentational sub-components under `tiles/parts/` — which
+ * carry real tile chrome — are covered too.
+ */
+function tileComponents() {
+  const dir = join(SRC, 'components/tiles')
+  const walk = (d) =>
+    readdirSync(d).flatMap((n) => {
+      const full = join(d, n)
+      return statSync(full).isDirectory() ? walk(full) : [full]
+    })
+  return [
+    'components/InfoTile.vue',
+    ...walk(dir).filter((f) => f.endsWith('.vue')).map((f) => relative(SRC, f)),
+  ].sort()
+}
+
+const TILE_COMPONENTS = tileComponents()
 
 /** The two blocks in FleetGrid.vue that establish the cascade. */
 const LIGHT_SELECTOR = '.fleet-canvas {'
@@ -77,6 +98,15 @@ function tokensInBlock(selector) {
 }
 
 describe('grid tile design tokens (ent#325)', () => {
+  it('discovered the tile components it is meant to police', () => {
+    // A guard that reads nothing certifies nothing: if the walk broke, the
+    // `it.each` below would iterate an empty list and the whole suite would
+    // pass without checking a single file.
+    expect(TILE_COMPONENTS.length).toBeGreaterThanOrEqual(3)
+    expect(TILE_COMPONENTS).toContain('components/InfoTile.vue')
+    expect(TILE_COMPONENTS).toContain('components/tiles/parts/TileRowList.vue')
+  })
+
   it.each(TILE_COMPONENTS)('%s consumes only tokens that exist', (relPath) => {
     const defined = definedTokens()
     const undefinedTokens = [...new Set(consumedTokens(relPath))]
