@@ -72,17 +72,44 @@
         <section class="mt-2 rounded-xl bg-white dark:bg-gray-900 ring-1 ring-gray-200 dark:ring-gray-800 p-1.5">
           <div class="px-1.5 pt-1 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Agents</div>
 
+          <!-- #2159: the roster load is the first thing that happens after
+               sign-in and it is not instant on a large fleet. Without this the
+               block renders empty and the page reads as hung, not loading. Three
+               skeleton rows: enough to say "rows are coming", not so many that a
+               small roster jumps when they are replaced. -->
+          <div v-if="loadingRoster && !roster.length" class="px-2 py-1.5" aria-busy="true">
+            <div v-for="i in 3" :key="i" class="flex items-center gap-2.5 py-2 animate-pulse">
+              <div class="w-[26px] h-[26px] rounded-full bg-gray-200 dark:bg-gray-800 shrink-0"></div>
+              <div class="min-w-0 flex-1 space-y-1.5">
+                <div class="h-3 w-1/2 rounded bg-gray-200 dark:bg-gray-800"></div>
+                <div class="h-2.5 w-1/3 rounded bg-gray-100 dark:bg-gray-800/60"></div>
+              </div>
+            </div>
+            <span class="sr-only">Loading your agents…</span>
+          </div>
+
           <button
-            v-for="a in roster"
+            v-for="a in shownAgents"
             :key="a.name"
             class="w-full flex items-center gap-2.5 rounded-lg px-2 py-2 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
-            :title="agentRowTitle(a.name)"
+            :title="agentRowTitle(a)"
             @click="onAgentClick(a.name)"
           >
             <PortalAvatar :name="a.name" :avatar-url="a.avatar_url" :size="26" />
             <span class="min-w-0 text-left flex-1">
-              <span class="block text-sm truncate">{{ a.name }}</span>
-              <span v-if="a.description" class="block text-xs text-gray-400 truncate">{{ a.description }}</span>
+              <!-- #2159: the human-facing name leads; the slug is the subtitle.
+                   The description was here and is not identity — two agents can
+                   share one, and it pushed the only unique handle off the row.
+
+                   The subtitle asks whether the title ALREADY is the slug, not
+                   whether `display_label` is truthy. Those disagree on a
+                   whitespace-only label, which `agentLabel` treats as unset:
+                   the title falls back to the slug while a raw-truthiness test
+                   still renders the subtitle, printing the slug twice. One
+                   decision, read twice — the same rule the server/client split
+                   above follows. -->
+              <span class="block text-sm truncate">{{ agentLabel(a) }}</span>
+              <span v-if="agentLabel(a) !== a.name" class="block text-xs text-gray-400 truncate font-mono">{{ a.name }}</span>
             </span>
             <span
               v-if="waitingFor(a.name)"
@@ -90,10 +117,21 @@
             >{{ waitingFor(a.name) > 99 ? '99+' : waitingFor(a.name) }}</span>
           </button>
 
+          <!-- #2159: ONE persistent button, never two v-if-alternated ones —
+               alternating drops keyboard focus on collapse (the #2101 lesson).
+               Expands in place; the chat pane stays the single scroll axis. -->
+          <button
+            v-if="roster.length > AGENT_COLLAPSE_LIMIT"
+            type="button"
+            class="w-full text-left px-2 py-1.5 text-xs text-action-primary-600 dark:text-action-primary-400 hover:underline"
+            :aria-expanded="agentsExpanded"
+            @click="agentsExpanded = !agentsExpanded"
+          >{{ agentsExpanded ? 'Show fewer' : `Show all (${roster.length})` }}</button>
+
           <!-- ent#357/#359 AC: an empty roster keeps a next action. Which one
                depends on who is looking — a platform user can go make an agent,
                an external client can only ask whoever invited them. -->
-          <div v-if="!roster.length" class="px-2 py-3 text-xs text-gray-500 dark:text-gray-400">
+          <div v-if="!roster.length && !loadingRoster" class="px-2 py-3 text-xs text-gray-500 dark:text-gray-400">
             <template v-if="isPlatformSession">
               No agents yet.
               <a href="/" class="text-action-primary-600 hover:underline">Create one →</a>
@@ -153,7 +191,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
 import ChatRow from './PortalChatRow.vue'
 import {
@@ -167,6 +205,8 @@ const props = defineProps({
   currentSessionId: { type: String, default: null },
   currentRoomId: { type: String, default: null },
   isPlatformSession: { type: Boolean, default: false },
+  // #2159: distinguishes "still loading" from "loaded, and you have none".
+  loadingRoster: { type: Boolean, default: false },
   search: { type: String, default: '' },
   searching: { type: Boolean, default: false },
   searchResults: { type: Array, default: () => [] },
@@ -204,12 +244,28 @@ const isActive = (t) => (t.is_room
 function onAgentClick(name) {
   emit('open-agent', name)
 }
-function agentRowTitle(name) {
-  const n = waitingFor(name)
+// #2159: the human-facing name, falling back to the slug when unset. NULL
+// display_label means "render the slug" (ent#181), so the fallback lives here
+// rather than being coalesced server-side — otherwise the two ends would
+// disagree about what an unset label means.
+const agentLabel = (a) => (a.display_label || '').trim() || a.name
+
+function agentRowTitle(a) {
+  const n = waitingFor(a.name)
+  const label = agentLabel(a)
+  const who = label === a.name ? label : `${label} (${a.name})`
   return n
-    ? `${name} — ${n} unread ${n === 1 ? 'reply' : 'replies'}`
-    : `Open ${name}`
+    ? `${who} — ${n} unread ${n === 1 ? 'reply' : 'replies'}`
+    : `Open ${who}`
 }
+
+// #2159: a long fleet made the agents block the whole sidebar, pushing chats
+// below the fold. Top 5, expandable in place.
+const AGENT_COLLAPSE_LIMIT = 5
+const agentsExpanded = ref(false)
+const shownAgents = computed(() => (
+  agentsExpanded.value ? props.roster : props.roster.slice(0, AGENT_COLLAPSE_LIMIT)
+))
 
 // ent#186: history + search rows show the conversation's agent avatar instead of
 // a bare color dot. The URL is resolved from the roster already loaded at sign-in
