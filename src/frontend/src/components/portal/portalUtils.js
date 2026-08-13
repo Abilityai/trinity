@@ -83,6 +83,19 @@ export function shouldMarkTurnRead(completedSessionId, openSessionId) {
   return !!completedSessionId && completedSessionId === openSessionId
 }
 
+// #2133: how long the client may wait for a reply before concluding it has lost
+// track of the turn. The server sends this on the 202 (`wait_budget_seconds`)
+// because the server owns the turn timeout; this is only the fallback for an
+// older backend, and it must be sized the same way — TWO attempts, each of which
+// can exceed `timeout_seconds` (the dispatch adds HTTP slack and the #678
+// reader-race retry adds a whole second call on top).
+//
+// Exported so a test can assert it against the server's value instead of
+// re-declaring the arithmetic and passing vacuously.
+export const PORTAL_TURN_TIMEOUT_S = 300
+export const PORTAL_ATTEMPT_CEILING_S = PORTAL_TURN_TIMEOUT_S + 10 + 300
+export const REPLY_MAX_WAIT_MS_FALLBACK = (2 * PORTAL_ATTEMPT_CEILING_S + 60) * 1000
+
 // Normalise a room onto the thread shape the sidebar renders, so one list
 // component handles both kinds.
 //
