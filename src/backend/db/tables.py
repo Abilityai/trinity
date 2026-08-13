@@ -485,6 +485,21 @@ enterprise_portal_messages = Table(
     Column("created_at", Text),
 )
 
+# ent#359 — per-user star + read cursor for a Workspace chat of either kind
+# (`thread` = enterprise_portal_sessions, `room` = the enterprise shared_sessions
+# room). Separate from the chat row because a room is shared between users and a
+# star is not; see db/schema.py for the full rationale.
+enterprise_portal_chat_state = Table(
+    "enterprise_portal_chat_state",
+    metadata,
+    Column("client_email", Text, primary_key=True),
+    Column("chat_kind", Text, primary_key=True),
+    Column("chat_id", Text, primary_key=True),
+    Column("starred_at", Text),
+    Column("last_read_at", Text),
+    Column("updated_at", Text),
+)
+
 enterprise_client_blocks = Table(
     "enterprise_client_blocks",
     metadata,

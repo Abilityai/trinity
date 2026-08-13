@@ -33,6 +33,92 @@ export function groupThreadsByDate(threads) {
     .filter((g) => g.threads.length)
 }
 
+// ent#359: starred chats are LIFTED OUT of the date groups, not merely copied
+// above them. Showing a chat twice — once pinned, once in "Today" — makes the
+// list lie about how many conversations there are, and clicking either row goes
+// to the same place, so the duplicate carries no information.
+export function partitionStarred(threads) {
+  const list = Array.isArray(threads) ? threads : []
+  return {
+    starred: list.filter((t) => t && t.starred),
+    rest: list.filter((t) => !(t && t.starred)),
+  }
+}
+
+// ent#359: per-agent "waiting on you" counts for the agents block, summed from
+// the unread counts already attached to each chat.
+//
+// A room contributes to every agent in it, because there is no single agent the
+// conversation is "with" — if three agents are in a room you are behind on, all
+// three rows should say so. Rooms report `unread: 0` today (the backend counts
+// threads only), so this is the shape being right ahead of the data.
+export function unreadByAgent(threads) {
+  const out = {}
+  for (const t of Array.isArray(threads) ? threads : []) {
+    const n = Number(t?.unread) || 0
+    if (n <= 0) continue
+    const names = Array.isArray(t.agent_names) && t.agent_names.length
+      ? t.agent_names
+      : (t.agent_name ? [t.agent_name] : [])
+    for (const name of names) out[name] = (out[name] || 0) + n
+  }
+  return out
+}
+
+export function totalUnread(threads) {
+  return (Array.isArray(threads) ? threads : [])
+    .reduce((sum, t) => sum + (Number(t?.unread) || 0), 0)
+}
+
+// ent#359: whether a turn that just finished should clear its unread badge.
+//
+// Only when the user is still looking at that thread. The conversation's send
+// is an async closure that outlives its component, so the "turn done" event
+// fires even after the user navigated away mid-turn — which is the main way a
+// reply legitimately arrives unseen. Marking read unconditionally cleared
+// exactly the badge the feature exists to show, making it near-unreachable in
+// normal use (open a chat, and it is marked read; stay, and it is marked read;
+// leave, and it was marked read anyway).
+export function shouldMarkTurnRead(completedSessionId, openSessionId) {
+  return !!completedSessionId && completedSessionId === openSessionId
+}
+
+// Normalise a room onto the thread shape the sidebar renders, so one list
+// component handles both kinds.
+//
+// The `agents` / `participants` split is the interesting part, and it shipped
+// wrong once: the rooms LIST returns `agents` (identities of the agent
+// participants still in the room), while `participants` — objects with
+// `kind`/`identity` — is the DETAIL shape. Reading only the detail shape here
+// produced an empty list for EVERY room, so a room row drew no avatars at all,
+// and the unit test did not catch it because it mocked the response with the
+// field production does not send. Both shapes are accepted, and both are
+// pinned in portalSidebarIA.spec.js.
+export function normalizeRoomRow(r) {
+  const fromList = Array.isArray(r?.agents) ? r.agents : null
+  const fromDetail = (r?.participants || [])
+    .filter((p) => p && p.kind === 'agent')
+    .map((p) => p.identity)
+  return {
+    ...r,
+    title: r?.name,
+    last_message_at: r?.last_message_at || r?.created_at,
+    agent_names: fromList && fromList.length ? fromList : fromDetail,
+  }
+}
+
+// The avatars to show on one chat row: every participant for a room, the single
+// agent for a thread. Capped — a room with eight agents must not push the title
+// out of the row.
+export const ROW_AVATAR_LIMIT = 3
+
+export function rowAgents(t, limit = ROW_AVATAR_LIMIT) {
+  const names = Array.isArray(t?.agent_names) && t.agent_names.length
+    ? t.agent_names
+    : (t?.agent_name ? [t.agent_name] : [])
+  return { shown: names.slice(0, limit), overflow: Math.max(0, names.length - limit) }
+}
+
 export function shortDate(iso) {
   try { return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) }
   catch { return '' }

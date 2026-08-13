@@ -58,6 +58,7 @@ from .models import (
     PortalSearchResults,
     PortalSession,
     PortalSessions,
+    PortalChatState,
     PortalSessionSummary,
     PortalTtsRequest,
     PortalTurnStarted,
@@ -471,6 +472,55 @@ def portal_search(q: str = "", limit: int = 30, principal: PortalPrincipal = Dep
     # No agent gate here: search is scoped to the caller's own portal rows by
     # email, so there is no roster decision to mirror.
     return service.search_chats(principal.email, q, limit=min(max(limit, 1), 50))
+
+
+# --- Per-user chat state: stars + unread (ent#359) ----------------------------
+#
+# No roster gate on any of the three. Every row is keyed by the caller's own
+# email, so these read and write exactly one tenant's state and there is no agent
+# to authorize against. Neither writer checks that the chat exists, deliberately:
+# a 404 for an unknown id would turn `star` into an existence oracle over every
+# chat id in the install (OSS invariant #8). The service's row cap is what bounds
+# writing junk ids instead.
+
+@router.get("/chat-state", response_model=PortalChatState)
+def portal_chat_state(principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Star + unread state for the signed-in viewer's chats, both kinds."""
+    return service.get_chat_state(principal.email)
+
+
+@router.put("/chat-state/{chat_kind}/{chat_id}/star", status_code=204)
+def portal_star_chat(chat_kind: str, chat_id: str,
+                     principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Pin a chat above the sidebar's date groups, for this viewer only."""
+    try:
+        service.set_chat_star(principal.email, chat_kind, chat_id, True)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    return Response(status_code=204)
+
+
+@router.delete("/chat-state/{chat_kind}/{chat_id}/star", status_code=204)
+def portal_unstar_chat(chat_kind: str, chat_id: str,
+                       principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Unpin a chat. Keeps the row — it still carries the read cursor."""
+    try:
+        service.set_chat_star(principal.email, chat_kind, chat_id, False)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    return Response(status_code=204)
+
+
+@router.post("/chat-state/{chat_kind}/{chat_id}/read", status_code=204)
+def portal_mark_chat_read(chat_kind: str, chat_id: str,
+                          principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Advance this viewer's read cursor — clears the chat's unread count and
+    its share of the agent row's badge."""
+    try:
+        service.mark_chat_read(principal.email, chat_kind, chat_id)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    return Response(status_code=204)
 
 
 @router.post("/agents/{agent_name}/chat", response_model=PortalChatResponse)

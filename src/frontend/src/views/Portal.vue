@@ -65,12 +65,15 @@
           :threads="threads"
           :client-email="store.clientEmail"
           :current-session-id="activeSessionId"
+          :current-room-id="activeRoomIdFromRoute"
+          :is-platform-session="store.isPlatformSession"
           v-model:search="search"
           :searching="searching"
           :search-results="searchResults"
           @new-chat="newChat"
           @new-chat-with-agent="newChatWithAgent"
           @open-thread="openThread"
+          @toggle-star="toggleStar"
           @sign-out="onSignOut"
         />
       </div>
@@ -82,12 +85,15 @@
             :threads="threads"
             :client-email="store.clientEmail"
             :current-session-id="activeSessionId"
+            :current-room-id="activeRoomIdFromRoute"
+            :is-platform-session="store.isPlatformSession"
             v-model:search="search"
             :searching="searching"
             :search-results="searchResults"
             @new-chat="() => { mobileNav = false; newChat() }"
             @new-chat-with-agent="(n) => { mobileNav = false; newChatWithAgent(n) }"
             @open-thread="(t) => { mobileNav = false; openThread(t) }"
+            @toggle-star="toggleStar"
             @sign-out="onSignOut"
           />
         </div>
@@ -103,8 +109,10 @@
           :key="activeRoomIdFromRoute"
           :room-id="activeRoomIdFromRoute"
           :roster="store.agents"
+          :starred="isStarred('room', activeRoomIdFromRoute)"
           @open-menu="mobileNav = true"
           @rooms-changed="refreshThreads"
+          @toggle-star="toggleStar"
         />
 
         <!-- #2128: the URL names a room this instance cannot open. This branch
@@ -156,11 +164,13 @@
           :roster="store.agents"
           :session-id="pendingSession"
           :prefill="prefill"
+          :starred="isStarred('thread', activeSessionId || pendingSession)"
           @switch-agent="switchAgent"
           @session-adopted="onSessionAdopted"
-          @sessions-changed="refreshThreads"
+          @sessions-changed="onConversationTurnDone"
           @open-files="filesOpen = true"
           @open-menu="mobileNav = true"
+          @toggle-star="toggleStar"
         >
           <template #empty>
             <PortalBriefing :agent="activeAgent" @use-playbook="usePlaybook" />
@@ -245,7 +255,7 @@ import PortalFilesPanel from '@/components/portal/PortalFilesPanel.vue'
 import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
-import { resolveAgentLanding } from '@/components/portal/portalUtils'
+import { resolveAgentLanding, shouldMarkTurnRead } from '@/components/portal/portalUtils'
 
 const store = useClientPortalStore()
 const route = useRoute()
@@ -427,6 +437,7 @@ const STAGE_ACTION = 'mt-3 text-sm text-action-primary-600 hover:underline'
 function openRoom(roomId) {
   if (!roomId) return
   unreachableAgent.value = null
+  markRead('room', roomId)
   activeRoomId.value = roomId
   pendingSession.value = null
   convGen.value++
@@ -447,6 +458,7 @@ function openThread(t) {
   // ent#361: a room row in the merged sidebar opens the room, not a thread.
   if (t.is_room) { openRoom(t.id); return }
   const sid = t.id || t.session_id
+  markRead('thread', sid)
   activeAgentName.value = t.agent_name || activeAgentName.value
   pendingSession.value = sid; prefill.value = ''; convGen.value++
   search.value = ''
@@ -455,12 +467,88 @@ function openThread(t) {
 function onSessionAdopted(id) {
   pendingSession.value = id
   if (route.params.sessionId !== id) router.replace(`/workspace/c/${id}`)
+  // A thread you are actively talking in is by definition read. This is also
+  // what gives a brand-new thread its read cursor, so the very next reply the
+  // user does NOT see is the first thing that badges.
+  markRead('thread', id)
   refreshThreads()
 }
 function usePlaybook(text) { prefill.value = ''; nextTick(() => { prefill.value = text }) }
 
+// ent#359 — per-viewer star + unread state, merged onto the thread list.
+//
+// Kept out of `fetchAllSessions` on purpose: that call fans out over the roster
+// and degrades per agent, while this is one call for the whole viewer. Merging
+// here means a chat-state failure costs the stars and badges, never the list.
+const chatState = ref({})
+const chatKey = (t) => `${t.is_room ? 'room' : 'thread'}:${t.id || t.session_id}`
+
+const isStarred = (kind, id) => !!(id && chatState.value[`${kind}:${id}`]?.starred)
+
+function decorate(list) {
+  return list.map((t) => {
+    const s = chatState.value[chatKey(t)]
+    return { ...t, starred: !!s?.starred, unread: Number(s?.unread) || 0 }
+  })
+}
+
 async function refreshThreads() {
-  threads.value = await store.fetchAllSessions()
+  const [list, state] = await Promise.all([
+    store.fetchAllSessions(),
+    store.fetchChatState().catch(() => chatState.value),
+  ])
+  chatState.value = state || {}
+  threads.value = decorate(list)
+}
+
+// A turn finishing in the conversation the user is LOOKING AT is read by
+// definition. Without this, the reply the user just watched arrive would land
+// after the read cursor set at dispatch and badge the chat they are sitting in
+// — a notification for something they are actively reading.
+function onConversationTurnDone(sessionId) {
+  // Only if the user is STILL in that thread. The conversation's send is an
+  // async closure that outlives the component, so this fires even when they
+  // have navigated away mid-turn — which is the main way a reply legitimately
+  // arrives unseen. Marking read unconditionally cleared exactly the badge the
+  // feature exists to show, and made it near-unreachable in normal use.
+  const open = activeSessionId.value || pendingSession.value
+  if (shouldMarkTurnRead(sessionId, open)) markRead('thread', sessionId)
+  return refreshThreads()
+}
+
+// Optimistic: a star is a personal bookmark, and waiting on a round trip to
+// redraw it makes the control feel broken. Reverted in place on failure so the
+// list never claims a star the server rejected.
+async function toggleStar(t) {
+  const key = chatKey(t)
+  const next = !t.starred
+  const before = chatState.value[key]
+  chatState.value = {
+    ...chatState.value,
+    [key]: { ...(before || { kind: t.is_room ? 'room' : 'thread', id: t.id }), starred: next },
+  }
+  threads.value = decorate(threads.value)
+  try {
+    await store.setChatStar(t.is_room ? 'room' : 'thread', t.id || t.session_id, next)
+  } catch {
+    const reverted = { ...chatState.value }
+    if (before) reverted[key] = before
+    else delete reverted[key]
+    chatState.value = reverted
+    threads.value = decorate(threads.value)
+  }
+}
+
+// Opening a chat is what "reading" it means here. Clear the badge locally first
+// so the count does not linger for a round trip, then persist.
+function markRead(kind, id) {
+  if (!id) return
+  const key = `${kind}:${id}`
+  if (chatState.value[key]?.unread) {
+    chatState.value = { ...chatState.value, [key]: { ...chatState.value[key], unread: 0 } }
+    threads.value = decorate(threads.value)
+  }
+  store.markChatRead(kind, id)
 }
 
 // ---- Cross-chat search (sidebar) ----------------------------------------------

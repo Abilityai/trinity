@@ -2055,3 +2055,87 @@ def get_agent_client_roster(agent_name: str) -> list[dict]:
             ),
         })
     return out
+
+
+# --- Per-user chat state: stars + unread (ent#359) ----------------------------
+
+# A chat id is a hex/urlsafe token in both id spaces. The bound exists because
+# neither writer validates that the chat exists (see below), so the id is
+# attacker-chosen text that lands in a primary key.
+MAX_CHAT_ID_LEN = 128
+
+
+def _validate_chat_ref(chat_kind: str, chat_id: str) -> tuple[str, str]:
+    kind = (chat_kind or "").strip().lower()
+    if kind not in db.CHAT_KINDS:
+        raise ClientPortalError(400, "Unknown chat kind")
+    cid = (chat_id or "").strip()
+    if not cid or len(cid) > MAX_CHAT_ID_LEN:
+        raise ClientPortalError(400, "Invalid chat id")
+    return kind, cid
+
+
+def _would_create_row_past_cap(email: str, kind: str, cid: str) -> bool:
+    """True when this write would ADD a row and the caller is already at the
+    ceiling. Updating a row the caller already owns is always allowed — capping
+    that would freeze an existing chat's star and read cursor, punishing the
+    user for state they legitimately accumulated."""
+    if db.chat_state_row_exists(email, kind, cid):
+        return False
+    return db.count_chat_state_rows(email) >= db.MAX_CHAT_STATE_ROWS
+
+
+def get_chat_state(email: str) -> dict:
+    """Star + unread state for every chat the caller has state for.
+
+    Unread is computed for threads only; a room carries its own seq cursor and
+    is reported as starred-or-not with `unread = 0`.
+    """
+    rows = db.get_chat_state(email)
+    unread = db.count_unread_by_session(email)
+    seen = set()
+    chats = []
+    for r in rows:
+        kind, cid = r.get("chat_kind"), r.get("chat_id")
+        if not kind or not cid:
+            continue
+        seen.add((kind, cid))
+        chats.append({
+            "kind": kind,
+            "id": cid,
+            "starred": bool(r.get("starred_at")),
+            "unread": unread.get(cid, 0) if kind == "thread" else 0,
+        })
+    # A thread can have unread messages without a state row only if the cursor
+    # was cleared out from under us; carry it anyway rather than losing a count.
+    for sid, n in unread.items():
+        if ("thread", sid) not in seen:
+            chats.append({"kind": "thread", "id": sid, "starred": False, "unread": n})
+    return {"chats": chats}
+
+
+def set_chat_star(email: str, chat_kind: str, chat_id: str, starred: bool) -> None:
+    """Star / unstar one chat for the calling viewer.
+
+    Deliberately does NOT verify that the chat exists. The write lands in a row
+    keyed by the caller's own email, so an unknown or someone else's id gains
+    them nothing — while a 404 for "no such chat" would be an existence oracle
+    over every chat id in the install (OSS invariant #8). The row cap is what
+    bounds the write instead.
+    """
+    kind, cid = _validate_chat_ref(chat_kind, chat_id)
+    if _would_create_row_past_cap(email, kind, cid):
+        raise ClientPortalError(409, "Too many saved chats — unstar some first")
+    db.set_chat_star(email, kind, cid, starred, utc_now_iso())
+
+
+def mark_chat_read(email: str, chat_kind: str, chat_id: str) -> None:
+    """Advance the caller's read cursor on one chat. Same non-validation and
+    same cap as `set_chat_star`."""
+    kind, cid = _validate_chat_ref(chat_kind, chat_id)
+    if _would_create_row_past_cap(email, kind, cid):
+        # Silently no-op rather than erroring: a read marker is incidental to
+        # what the user asked for (opening a chat), and failing the open because
+        # a bookkeeping table is full would be absurd.
+        return
+    db.mark_chat_read(email, kind, cid, utc_now_iso())

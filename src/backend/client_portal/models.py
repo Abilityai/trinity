@@ -149,6 +149,26 @@ class PortalSessions(BaseModel):
     sessions: list[PortalSessionSummary]
 
 
+class PortalChatStateEntry(BaseModel):
+    """One chat's per-viewer state (ent#359). ``kind`` is ``thread`` (a portal
+    session) or ``room`` (a multi-agent room) — two independent id spaces, so
+    both fields are needed to address a chat."""
+    kind: str
+    id: str
+    starred: bool = False
+    unread: int = 0
+
+
+class PortalChatState(BaseModel):
+    """The signed-in viewer's star + unread state across every chat (ent#359).
+
+    One call rather than a field on each list: threads and rooms are served by
+    different endpoints (and live in different repos), and the sidebar has to
+    order them together.
+    """
+    chats: list[PortalChatStateEntry] = []
+
+
 class PortalSearchResult(BaseModel):
     """One matching conversation from a cross-chat search."""
     agent_name: str

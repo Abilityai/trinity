@@ -1,9 +1,16 @@
 <template>
   <aside class="flex flex-col h-full w-72 bg-gray-50 dark:bg-gray-950 border-r border-gray-200 dark:border-gray-800">
-    <!-- Brand -->
+    <!-- Brand. ent#359: the aggregate "waiting on you" count lives here, because
+         the agents block now occupies the top of the scroll region and would
+         otherwise scroll a fleet-wide signal out of view. -->
     <div class="shrink-0 flex items-center gap-2 px-4 h-14 border-b border-gray-200 dark:border-gray-800">
       <svg class="w-6 h-6 text-action-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
       <span class="font-semibold">Workspace</span>
+      <span
+        v-if="totalWaiting"
+        class="ml-auto shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-600 text-white text-[11px] font-semibold flex items-center justify-center"
+        :title="`${totalWaiting} ${totalWaiting === 1 ? 'reply' : 'replies'} you haven't read`"
+      >{{ totalWaiting > 99 ? '99+' : totalWaiting }}</span>
     </div>
 
     <div class="p-3 space-y-2">
@@ -57,39 +64,73 @@
       </div>
 
       <template v-else>
-        <!-- Agents -->
-        <div class="px-2 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Agents</div>
-        <button
-          v-for="a in roster"
-          :key="a.name"
-          class="w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 hover:bg-white dark:hover:bg-gray-900 transition"
-          :title="`New chat with ${a.name}`"
-          @click="$emit('new-chat-with-agent', a.name)"
-        >
-          <PortalAvatar :name="a.name" :avatar-url="a.avatar_url" :size="26" />
-          <span class="min-w-0 text-left">
-            <span class="block text-sm truncate">{{ a.name }}</span>
-            <span v-if="a.description" class="block text-xs text-gray-400 truncate">{{ a.description }}</span>
-          </span>
-        </button>
+        <!-- ============================ AGENTS ============================ -->
+        <!-- ent#359: its own surface, not just a labelled run of rows. An agent
+             is a destination now; a chat is a record of visiting one. Giving the
+             two the same visual weight is what made the old sidebar read as one
+             undifferentiated list. -->
+        <section class="mt-2 rounded-xl bg-white dark:bg-gray-900 ring-1 ring-gray-200 dark:ring-gray-800 p-1.5">
+          <div class="px-1.5 pt-1 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Agents</div>
 
-        <!-- Unified, date-grouped history across all agents -->
-        <div v-for="g in grouped" :key="g.label" class="mt-3">
-          <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">{{ g.label }}</div>
           <button
-            v-for="t in g.threads"
-            :key="t.id"
-            class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-left hover:bg-white dark:hover:bg-gray-900 transition"
-            :class="t.id === currentSessionId ? 'bg-white dark:bg-gray-900 ring-1 ring-gray-200 dark:ring-gray-800' : ''"
-            @click="$emit('open-thread', t)"
+            v-for="a in roster"
+            :key="a.name"
+            class="w-full flex items-center gap-2.5 rounded-lg px-2 py-2 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
+            :title="agentRowTitle(a.name)"
+            @click="onAgentClick(a.name)"
           >
-            <PortalAvatar :name="t.agent_name" :avatar-url="avatarFor(t.agent_name)" :size="22" />
-            <span class="text-sm truncate flex-1">{{ threadTitle(t) }}</span>
+            <PortalAvatar :name="a.name" :avatar-url="a.avatar_url" :size="26" />
+            <span class="min-w-0 text-left flex-1">
+              <span class="block text-sm truncate">{{ a.name }}</span>
+              <span v-if="a.description" class="block text-xs text-gray-400 truncate">{{ a.description }}</span>
+            </span>
+            <span
+              v-if="waitingFor(a.name)"
+              class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-600 text-white text-[11px] font-semibold flex items-center justify-center"
+            >{{ waitingFor(a.name) > 99 ? '99+' : waitingFor(a.name) }}</span>
           </button>
+
+          <!-- ent#357/#359 AC: an empty roster keeps a next action. Which one
+               depends on who is looking — a platform user can go make an agent,
+               an external client can only ask whoever invited them. -->
+          <div v-if="!roster.length" class="px-2 py-3 text-xs text-gray-500 dark:text-gray-400">
+            <template v-if="isPlatformSession">
+              No agents yet.
+              <a href="/" class="text-action-primary-600 hover:underline">Create one →</a>
+            </template>
+            <template v-else>
+              No agents shared with you yet — ask whoever invited you to share one.
+            </template>
+          </div>
+        </section>
+
+        <!-- ============================ CHATS ============================= -->
+        <!-- Starred first, and LIFTED OUT of the date groups below (a starred
+             chat appears exactly once — see partitionStarred). -->
+        <div v-if="starred.length" class="mt-3">
+          <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Starred</div>
+          <ChatRow
+            v-for="t in starred"
+            :key="rowKey(t)"
+            :thread="t"
+            :active="isActive(t)"
+            :avatar-for="avatarFor"
+            @open="$emit('open-thread', t)"
+            @toggle-star="$emit('toggle-star', t)"
+          />
         </div>
 
-        <div v-if="!roster.length && !threads.length" class="px-2 py-8 text-center text-xs text-gray-400">
-          No agents shared with you yet.
+        <div v-for="g in grouped" :key="g.label" class="mt-3">
+          <div class="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">{{ g.label }}</div>
+          <ChatRow
+            v-for="t in g.threads"
+            :key="rowKey(t)"
+            :thread="t"
+            :active="isActive(t)"
+            :avatar-for="avatarFor"
+            @open="$emit('open-thread', t)"
+            @toggle-star="$emit('toggle-star', t)"
+          />
         </div>
       </template>
     </div>
@@ -114,21 +155,68 @@
 <script setup>
 import { computed } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
-import { groupThreadsByDate, threadTitle } from './portalUtils'
+import ChatRow from './PortalChatRow.vue'
+import {
+  groupThreadsByDate, partitionStarred, unreadByAgent, totalUnread,
+} from './portalUtils'
 
 const props = defineProps({
   roster: { type: Array, default: () => [] },
-  threads: { type: Array, default: () => [] },     // merged, agent-tagged
+  threads: { type: Array, default: () => [] },     // merged, agent-tagged, star/unread-tagged
   clientEmail: { type: String, default: '' },
   currentSessionId: { type: String, default: null },
+  currentRoomId: { type: String, default: null },
+  isPlatformSession: { type: Boolean, default: false },
   search: { type: String, default: '' },
   searching: { type: Boolean, default: false },
   searchResults: { type: Array, default: () => [] },
 })
-defineEmits(['new-chat', 'new-chat-with-agent', 'open-thread', 'update:search', 'sign-out'])
+const emit = defineEmits([
+  'new-chat', 'new-chat-with-agent', 'open-thread', 'toggle-star',
+  'update:search', 'sign-out',
+])
 
 const isSearching = computed(() => (props.search || '').trim().length >= 2)
-const grouped = computed(() => groupThreadsByDate(props.threads))
+
+const split = computed(() => partitionStarred(props.threads))
+const starred = computed(() => split.value.starred)
+const grouped = computed(() => groupThreadsByDate(split.value.rest))
+
+const waiting = computed(() => unreadByAgent(props.threads))
+const waitingFor = (name) => waiting.value[name] || 0
+const totalWaiting = computed(() => totalUnread(props.threads))
+
+// A row key has to include the kind: thread ids and room ids are independent
+// spaces, so two chats of different kinds could collide on a bare id.
+const rowKey = (t) => `${t.is_room ? 'room' : 'thread'}:${t.id || t.session_id}`
+const isActive = (t) => (t.is_room
+  ? t.id === props.currentRoomId
+  : (t.id || t.session_id) === props.currentSessionId)
+
+// ent#359: clicking an agent that is waiting on you opens the conversation it
+// is waiting in, rather than a blank one. A badge that says "2 replies" next to
+// a control that starts an empty chat is a contradiction — the count is the
+// reason you clicked. With nothing unread the row keeps its old behaviour.
+//
+// (Opening an agent's own PAGE is ent#360; this is not a substitute for it.)
+function latestUnreadFor(name) {
+  return props.threads.find((t) => {
+    if (!(Number(t?.unread) > 0)) return false
+    const names = Array.isArray(t.agent_names) && t.agent_names.length
+      ? t.agent_names : [t.agent_name]
+    return names.includes(name)
+  }) || null
+}
+function onAgentClick(name) {
+  const unread = latestUnreadFor(name)
+  if (unread) emit('open-thread', unread)
+  else emit('new-chat-with-agent', name)
+}
+function agentRowTitle(name) {
+  const n = waitingFor(name)
+  if (!n) return `New chat with ${name}`
+  return `${n} unread ${n === 1 ? 'reply' : 'replies'} — open the latest`
+}
 
 // ent#186: history + search rows show the conversation's agent avatar instead of
 // a bare color dot. The URL is resolved from the roster already loaded at sign-in

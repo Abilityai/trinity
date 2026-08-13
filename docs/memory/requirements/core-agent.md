@@ -354,6 +354,55 @@
   abilityai/trinity-enterprise#286 and is **not** a prerequisite of this change.
 - **Flow**: `docs/memory/feature-flows/session-tab.md`
 
+### 5.10 Workspace sidebar IA — agents block, starred chats, unread badges
+- **Status**: ✅ Implemented (2026-08-12)
+- **Requirement ID**: WORKSPACE_SIDEBAR_IA
+- **GitHub Issue**: abilityai/trinity-enterprise#359
+- **Description**: The sidebar is restructured around what an agent now is. The
+  roster moves to the top of the scroll region as its own surface, and chats
+  follow with starred ones pinned above the date groups.
+- **Why the roster gets its own surface**: once the Workspace became the only
+  continuous-conversation surface (5.9), an agent stopped being an entry in a
+  new-chat menu and became a destination. Rendering roster and chat history with
+  identical visual weight is what made the old sidebar read as one
+  undifferentiated list.
+- **Key Features**:
+  - Agents block renders **first**, on its own surface (card + ring); each row
+    carries avatar, name, description, and a count badge when that agent has
+    replies the viewer has not read
+  - The aggregate "waiting on you" count sits on the **wordmark**, since the
+    agents block now occupies the top of a scrolling region
+  - Starred chats are **lifted out of** the date groups, not copied above them —
+    a starred chat appears exactly once
+  - Star / unstar from the chat row **and** from the chat header (1:1 and room)
+  - A multi-agent chat row shows every participant's avatar (capped at 3 + a
+    "+N" chip), so a room is visually distinct from a 1:1
+  - Clicking an agent that is waiting on you opens the conversation it is
+    waiting in; with nothing unread it starts a new chat as before
+  - Search still replaces both lists while active; an empty roster still ends in
+    a next action (create an agent / ask whoever invited you)
+- **Per-viewer state**: `enterprise_portal_chat_state`
+  `(client_email, chat_kind, chat_id) → starred_at, last_read_at`. Deliberately
+  **not** a column on the chat row: a room is shared between participants, so a
+  star stored there would be one person's bookmark rendered in everyone else's
+  sidebar, and rooms live in the private submodule while threads do not. The
+  caller's email is the primary-key prefix, so the row **is** the tenant scope.
+- **Unread is defined relative to a cursor**: a thread with no `last_read_at`
+  reports nothing unread rather than reporting its whole history. Treating
+  "never read" as "all unread" would have badged every historical conversation
+  in every install the day this shipped. A cursor is written the first time the
+  viewer opens or sends in a thread.
+- **Endpoints**: `GET /api/enterprise/client-portal/chat-state`,
+  `PUT|DELETE .../chat-state/{kind}/{id}/star`, `POST .../chat-state/{kind}/{id}/read`.
+  No roster gate (every row is keyed by the caller's own email) and no existence
+  check on the id — a 404 for an unknown chat would be an enumeration oracle
+  (invariant #8); a per-viewer row cap bounds the write instead.
+- **Known gap**: rooms report `unread: 0`. A room keeps its own seq cursor, and
+  reconciling the two cursor models is follow-up work; stars work for both kinds.
+- **Not this issue**: opening an agent's own **page** (a destination with its own
+  content rather than a chat) is abilityai/trinity-enterprise#360.
+- **Flow**: `docs/memory/feature-flows/workspace-sidebar-ia.md`
+
 ---
 
 ## 6. Activity Monitoring

@@ -8,6 +8,7 @@
  * ent#356 moved the module into OSS core, so it ships in every build.
  */
 import { defineStore } from 'pinia'
+import { normalizeRoomRow } from '@/components/portal/portalUtils'
 import axios from 'axios'
 import { useAuthStore } from './auth'
 
@@ -354,6 +355,44 @@ export const useClientPortalStore = defineStore('clientPortal', {
       }
     },
 
+    // ent#359 — per-viewer star + unread state, for BOTH chat kinds in one call.
+    // Threads and rooms come from different endpoints (and different repos) but
+    // sort into a single sidebar list, so their view state has to arrive
+    // together or the list would reshuffle as the second response landed.
+    //
+    // Keyed `${kind}:${id}`: the two id spaces are independent, so an id alone
+    // is not a key.
+    async fetchChatState() {
+      const { data } = await axios.get('/api/enterprise/client-portal/chat-state', {
+        headers: this.authHeader,
+      })
+      const out = {}
+      for (const c of data.chats || []) {
+        if (c && c.kind && c.id) out[`${c.kind}:${c.id}`] = c
+      }
+      return out
+    },
+
+    async setChatStar(kind, chatId, starred) {
+      const url = `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/star`
+      const cfg = { headers: this.authHeader }
+      if (starred) await axios.put(url, null, cfg)
+      else await axios.delete(url, cfg)
+    },
+
+    // Fire-and-forget by design: a failed read marker leaves a stale badge,
+    // which is not worth interrupting navigation over, and the next state fetch
+    // corrects it.
+    async markChatRead(kind, chatId) {
+      try {
+        await axios.post(
+          `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/read`,
+          null,
+          { headers: this.authHeader },
+        )
+      } catch { /* stale badge only */ }
+    },
+
     // `since` is the seq cursor: 0 loads the whole transcript, a later value
     // fetches only what the client has not seen.
     async fetchRoom(roomId, since = 0) {
@@ -527,16 +566,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       let rooms = []
       try { rooms = await this.fetchRooms() } catch { rooms = [] }
 
-      const merged = lists.flat().concat(rooms.map((r) => ({
-        ...r,
-        // Normalised onto the thread shape the sidebar already renders, so one
-        // list component handles both kinds.
-        title: r.name,
-        last_message_at: r.last_message_at || r.created_at,
-        agent_names: (r.participants || [])
-          .filter((p) => p.kind === 'agent')
-          .map((p) => p.identity),
-      })))
+      const merged = lists.flat().concat(rooms.map(normalizeRoomRow))
       merged.sort((x, y) => {
         const tx = x.last_message_at || x.created_at || ''
         const ty = y.last_message_at || y.created_at || ''

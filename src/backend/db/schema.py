@@ -552,6 +552,27 @@ TABLES = {
         )
     """,
 
+    # ent#359 — per-user chat state for the Workspace sidebar: which chats the
+    # user starred, and how far they have read.
+    #
+    # A separate table rather than columns on the chat row, for two reasons. A
+    # room (`shared_sessions`) is shared between several users, so a star stored
+    # on the room row would be one user's star imposed on everyone in it. And
+    # rooms live in the enterprise submodule, so a per-kind column would put half
+    # of one feature in each repo. Keyed by the caller's own email, so the row IS
+    # the per-user scope — there is nothing to filter on read.
+    "enterprise_portal_chat_state": """
+        CREATE TABLE IF NOT EXISTS enterprise_portal_chat_state (
+            client_email TEXT NOT NULL,
+            chat_kind TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            starred_at TEXT,
+            last_read_at TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (client_email, chat_kind, chat_id)
+        )
+    """,
+
     "enterprise_client_blocks": """
         CREATE TABLE IF NOT EXISTS enterprise_client_blocks (
             email TEXT PRIMARY KEY,
