@@ -739,6 +739,54 @@ schedules:
   `docs/memory/feature-flows/scheduling.md`,
   `docs/memory/feature-flows/agent-compatibility-validation.md`
 
+### 10.17 Client-Side Cron Validation (#925)
+- **Status**: ✅ Implemented (2026-08-13)
+- **GitHub Issue**: #925
+- **Description**: The schedule form validated cron expressions only at save time — the backend's
+  400 was the first feedback — and a stored-invalid row (legacy croniter-era data, or rows created
+  before a validator tightening) sat in the list indistinguishable from a healthy one. The frontend
+  now pre-validates as the user types (design-system p17) and marks invalid stored rows.
+- **Requirement — mirror contract, not a second grammar**: the client validator
+  (`src/frontend/src/utils/cronValidation.js`, pure leaf, **zero npm deps**) is a hand-rolled
+  mirror of the backend's exact acceptance grammar —
+  `services/schedule_validation.py::validate_cron_expression` = strict 5-field split +
+  `_dow_to_apscheduler` translation (ported verbatim, branch order included) + APScheduler 3.11
+  field rules (`AllExpression`/`RangeExpression`/name-range prefix expressions, step-span rule,
+  Python-truthiness `last or MAX` fallback — deliberately `||` not `??` in JS). Cron libs
+  (`cron-parser`, `cronstrue`) were rejected: they implement a foreign grammar with ≥8 proven
+  verdict disagreements (`@daily`, 6-field, dow `0-6`, `last`, `7/2`, `L`/`#`, step-span,
+  `5/2`). This is the learnings.md #1472 lesson ("validate with the parser that registers")
+  applied one level up: the client validates with a pinned mirror of that parser.
+- **Drift alarm — shared fixture asserted by both suites**: the grammar contract is
+  `tests/fixtures/cron-grammar-cases.json` (~110 rows, **generated from a probe against the live
+  backend validator, never hand-typed**). `tests/unit/test_925_cron_grammar_fixture.py` re-proves
+  every row against `validate_cron_expression` in the backend CI env (an APScheduler bump that
+  changes the grammar fails there loudly); `src/frontend/tests/unit/cronValidation.spec.js`
+  asserts the client mirror agrees row-for-row. Quirk rows (prefix-matched names `MON/999` /
+  `jan/0` / `lastx`, comma-translation asymmetry `0-6,1` vs `0-6`, falsy-zero `0-0/2`) are
+  pinned and must NOT be "fixed" — parity outranks tidiness.
+- **Fail-open posture**: the validator is total (`String(expr ?? '')`) and a top-level catch
+  returns `{valid: true}` + `console.error` — an internal port bug must not brick the panel or
+  block saves. The backend 400 remains the enforcement authority; client validation is UX only.
+- **Form gating**: inline error in a reserved-footprint slot (the format-hint line doubles as the
+  error slot — no modal jump, p4/p6); submit disabled **only when non-empty AND invalid** — an
+  empty cron keeps the native `required` bubble path; while **editing**, an invalid (incl.
+  empty/whitespace) stored cron shows its error unconditionally so the disabled Update button is
+  never unexplained; while creating, errors appear only after first blur (no mid-typing flash).
+- **List surface**: each stored row with an invalid `cron_expression` renders a warning triangle
+  inside its cron chip, tooltip + aria-label exactly `Invalid cron expression` (shape + hue,
+  p24). Presets are sourced from the exported `CRON_PRESETS` so "presets never warn" is tested
+  against the shipped list.
+- **Documented divergence (client-stricter only)**: the client accepts ASCII digits only where
+  Python's `int()`/`\d` also accept Unicode digits / `+` signs / underscores — rejecting e.g.
+  `٥ * * * *` that the server accepts. Direction is client-stricter on absurd input; the
+  damaging direction (client-invalid/server-valid false warnings on real input) is guarded by
+  the quirk rows. The fixture marks such rows `divergence: "client-stricter"`.
+- **Out of scope**: no backend runtime change (400 contract byte-preserved); no server-side
+  migration/repair of stored invalid rows; no client timezone validation (the form select is a
+  fixed known-good list; cron field validity is timezone-independent).
+- **Flow**: `docs/memory/feature-flows/scheduling.md` (§ Client-side cron validation)
+
 ---
 
 ## 34. Agent-Defined Pipelines (#919)

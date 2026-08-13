@@ -693,6 +693,32 @@ Broadcast via dedicated scheduler -> Redis pub/sub -> backend WebSocket relay fo
 - `0 */6 * * *` - Every 6 hours
 - `*/30 * * * *` - Every 30 minutes
 
+### Client-side cron validation (#925)
+
+The schedule form pre-validates the cron expression as the user types, and the list marks
+stored-invalid rows — the backend 400 is no longer the first feedback (design-system p17).
+
+- **Validator**: `src/frontend/src/utils/cronValidation.js` — a pure, zero-dependency mirror of
+  the backend's exact grammar (`services/schedule_validation.py::validate_cron_expression`:
+  5-field split + verbatim `_dow_to_apscheduler` port + APScheduler 3.11 field rules, including
+  the prefix-matched name expressions, the step-span rule, and the Python-truthiness
+  `last or MAX` fallback). Total + fail-open: an internal error returns `{valid: true}` so a
+  port bug can never brick the panel; the server 400 stays the authority.
+- **Form gating** (`SchedulesPanel.vue`): `shouldShowCronError` (pure, exported) — while
+  creating, the inline error appears only after first blur and only for non-empty input; while
+  editing, an invalid stored cron (incl. empty) shows unconditionally. The format-hint line is
+  the reserved error slot (no modal jump). Submit is disabled only when the cron is
+  **non-empty AND invalid** — empty keeps the native `required` bubble. Presets come from the
+  exported `CRON_PRESETS` and are fixture-proven valid.
+- **Row icon**: `computeCronValidityMap(schedules)` → warning triangle inside the cron chip for
+  invalid rows, tooltip/aria-label exactly `Invalid cron expression`.
+- **Drift alarm**: both suites assert the shared probe-generated fixture
+  `tests/fixtures/cron-grammar-cases.json` — `tests/unit/test_925_cron_grammar_fixture.py`
+  against the live backend validator (fires on an APScheduler grammar change),
+  `src/frontend/tests/unit/cronValidation.spec.js` against the client mirror. Quirk rows
+  (`MON/999`, `jan/0`, `lastx`, `0-6,1` vs `0-6`, falsy-zero `0-0/2`) are pinned verbatim and
+  must not be "fixed" — parity outranks tidiness.
+
 ---
 
 ## Dependencies
