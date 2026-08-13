@@ -132,20 +132,33 @@ def _load_lifecycle():
     read_only_mod = Mock(inject_read_only_hooks=AsyncMock(return_value={"success": True}))
     file_sharing_mod = Mock(check_public_folder_mount_matches=Mock(return_value=True))
 
-    # Names that downstream tests import from `services.agent_service`. Adding
-    # them here prevents this stub package — which persists for the rest of
-    # the pytest session — from breaking later tests with ImportError.
-    pkg.get_accessible_agents = Mock(return_value=[])
-    pkg.get_agent_owner_id = Mock(return_value=1)
-    pkg.list_agents_data = Mock(return_value=[])
-
+    # Private, uniquely-named slots: `lifecycle.py`'s RELATIVE imports
+    # (`from .helpers import ...`) resolve against these, and the name cannot
+    # collide with anything else in the session.
     sys.modules[f"{pkg_name}.helpers"] = helpers_mod
     sys.modules[f"{pkg_name}.read_only"] = read_only_mod
     sys.modules[f"{pkg_name}.file_sharing"] = file_sharing_mod
-    sys.modules["services.agent_service"] = pkg
-    sys.modules["services.agent_service.helpers"] = helpers_mod
-    sys.modules["services.agent_service.read_only"] = read_only_mod
-    sys.modules["services.agent_service.file_sharing"] = file_sharing_mod
+
+    # The REAL names, needed only while `lifecycle.py` executes: line 27 is an
+    # absolute `from services.agent_service.helpers import validate_base_image`,
+    # so the relative slots above are not enough to load it.
+    #
+    # #2140: these used to be installed permanently, and that broke a property
+    # two files away. `services/compatibility/spec.py::applies_to_runtime`
+    # lazily imports `is_claude_runtime` from this exact module, so any test
+    # running after this one lost `claude_only` filtering — surfacing as
+    # `test_codex_runtime_omits_claude_only_checks` failing, i.e. a fake #1187
+    # multi-runtime regression. `pytest-randomly` made it a latent flake rather
+    # than a deterministic failure, which is worse: it fires only when file
+    # order happens to put this one first.
+    #
+    # They are now snapshotted and restored with the rest, below.
+    agent_service_aliases = {
+        "services.agent_service": pkg,
+        "services.agent_service.helpers": helpers_mod,
+        "services.agent_service.read_only": read_only_mod,
+        "services.agent_service.file_sharing": file_sharing_mod,
+    }
 
     # Add backend dir to path so credential_encryption (a non-package
     # module) imports succeed inside lifecycle.
@@ -166,10 +179,11 @@ def _load_lifecycle():
     # (test_voice_auth needs real FastAPI; test_file_upload needs the real
     # services.docker_service / services.docker_utils so its workspace-
     # delivery code paths await coroutines instead of plain Mocks).
+    _to_install = {**_SYS_MOCKS, **agent_service_aliases}
     _snapshot: dict[str, object] = {
-        name: sys.modules.get(name) for name in _SYS_MOCKS.keys()
+        name: sys.modules.get(name) for name in _to_install
     }
-    sys.modules.update(_SYS_MOCKS)
+    sys.modules.update(_to_install)
 
     spec = importlib.util.spec_from_file_location(
         f"{pkg_name}.lifecycle",
@@ -371,3 +385,42 @@ def test_encryption_not_configured_returns_skipped():
 
     assert result["status"] == "skipped"
     assert result["reason"] == "encryption_not_configured"
+
+
+# ── #2140: the stubs must not outlive this module's import ───────────────
+
+
+def test_the_agent_service_stubs_did_not_leak_into_sys_modules():
+    """This file loads `lifecycle.py` by hand, which needs
+    `services.agent_service.helpers` in `sys.modules` while it executes. Those
+    slots used to be left installed for the whole session.
+
+    That is not a tidiness point. `services/compatibility/spec.py`:
+
+        def applies_to_runtime(check, runtime):
+            if not check.claude_only:
+                return True
+            from services.agent_service.helpers import is_claude_runtime
+
+    resolves that import LAZILY, so it picks up whatever is in `sys.modules` at
+    call time. With the stub still installed, every test running after this one
+    silently lost `claude_only` filtering, and
+    `test_codex_runtime_omits_claude_only_checks` failed — reading as a real
+    #1187 multi-runtime regression rather than as pollution from two files away.
+
+    `pytest-randomly` is what made it a flake instead of a permanent failure:
+    it fires only when file order puts this module first. So the assertion has
+    to live HERE, where it is deterministic, rather than in a test that hopes to
+    be scheduled afterwards.
+    """
+    for name in (
+        "services.agent_service",
+        "services.agent_service.helpers",
+        "services.agent_service.read_only",
+        "services.agent_service.file_sharing",
+    ):
+        leaked = sys.modules.get(name)
+        assert not isinstance(leaked, (Mock, MagicMock)), (
+            f"{name} is still a test double after this module finished importing. "
+            "Restore it alongside the other stubs in `_load_lifecycle` — see #2140."
+        )
