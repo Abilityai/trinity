@@ -429,11 +429,14 @@
   credential-leak surface); report reads are agent-scoped, since report ids are
   global and the roster gate only proves the caller may reach *this* agent.
 - **One field crosses deliberately (#2161)**: a row's **schedule name**. Without
-  it every scheduled row rendered the identical three words. It is an operator's
-  short label, never the schedule's `message` — that is a prompt, and prompts are
-  what this page exists not to show. Resolved by one bounded query into an
-  `id → name` map built from *this* agent's schedules, so a foreign id misses by
-  construction; a failing read costs the labels, not the rows.
+  it every scheduled row rendered the identical three words. It is a short label,
+  never the schedule's `message` — that is a prompt, and prompts are what this
+  page exists not to show. Resolved by one **projected** query (`SELECT id, name`
+  — the prompt is never loaded, so the exclusion is structural rather than a
+  review invariant) into a map built from *this* agent's schedules, so a foreign
+  id misses by construction; a failing read costs the labels, not the rows. It is
+  **not assumed to be human-written** — schedule creation is `AuthorizedAgent`, so
+  an agent-scoped key can author it — and is therefore capped and escaped.
 - **Key Features**:
   - Header: avatar, name, description, health, last active
   - Stats strip: tasks in window, completed rate, first-try rate, window selector

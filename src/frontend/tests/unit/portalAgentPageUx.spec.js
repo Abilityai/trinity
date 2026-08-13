@@ -92,6 +92,25 @@ describe('shouldEscapeStage', () => {
     expect(shouldEscapeStage('')).toBe(false)
     expect(shouldEscapeStage(undefined)).toBe(false)
   })
+
+  // A stage can be named by the query as well as the path, and that half is
+  // what leaks ACROSS sessions: `?agent=` is re-read by the next bootstrap(),
+  // so signing out at /workspace?agent=X shows the NEXT person to sign in on
+  // this browser "You don't have access to X".
+  it('escapes a stage named by the query at the workspace root', () => {
+    expect(shouldEscapeStage('/workspace', { agent: 'acme-billing' })).toBe(true)
+    expect(shouldEscapeStage('/workspace', { new: '1' })).toBe(true)
+  })
+
+  it('ignores an empty or absent query', () => {
+    expect(shouldEscapeStage('/workspace', {})).toBe(false)
+    expect(shouldEscapeStage('/workspace', { agent: '' })).toBe(false)
+    expect(shouldEscapeStage('/workspace', undefined)).toBe(false)
+  })
+
+  it('still escapes a path stage regardless of the query', () => {
+    expect(shouldEscapeStage('/workspace/a/scribe', {})).toBe(true)
+  })
 })
 
 describe('Portal.vue wiring', () => {
@@ -103,6 +122,12 @@ describe('Portal.vue wiring', () => {
     // next session's address bar.
     expect(src).toMatch(/function newChatWithAgent[\s\S]*?escapeStage\(\)/)
     expect(src).toMatch(/function onSignOut[\s\S]*?escapeStage\(\)/)
+  })
+
+  it('passes the query to the escape, not just the path', () => {
+    // Dropping the second argument silently reinstates the cross-session
+    // `?agent=` leak while every path test still passes.
+    expect(portalSource()).toMatch(/shouldEscapeStage\(route\.path,\s*route\.query\)/)
   })
 
   it('has no hand-rolled param-enumerating escape left', () => {

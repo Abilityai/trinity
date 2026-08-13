@@ -301,11 +301,22 @@ export function collapseSelection(selected, { multi = false } = {}) {
 // So the question is inverted, and it fails CLOSED: anything that is not the
 // bare workspace root is a stage that must be left. A fourth stage route needs
 // no edit here, and cannot silently re-break the button.
+// A stage can also be named by the QUERY, not just the path. `?agent=` is the
+// ent#358 landing spot and `?new=` forces a fresh thread; both are read at
+// `bootstrap()`, which runs again after a sign-in. So a lingering `?agent=X`
+// is not cosmetic: signing out at `/workspace?agent=X` and handing the browser
+// to the next person makes THEIR first screen "You don't have access to X" —
+// the previous session's agent name, surfaced to someone who never asked for
+// it. That is the same class the path guard exists to close, so it belongs in
+// the same predicate rather than in a second one somebody has to remember.
+export const STAGE_QUERY_KEYS = ['agent', 'new']
+
 export const WORKSPACE_ROOT = '/workspace'
 
-export function shouldEscapeStage(path) {
-  if (!path) return false                      // no route yet — nothing to leave
-  return path.replace(/\/+$/, '') !== WORKSPACE_ROOT
+export function shouldEscapeStage(path, query) {
+  if (path && path.replace(/\/+$/, '') !== WORKSPACE_ROOT) return true
+  if (!query) return false
+  return STAGE_QUERY_KEYS.some((k) => query[k] !== undefined && query[k] !== null && query[k] !== '')
 }
 
 // #2161 — client-facing names for the activity chart's trigger buckets.

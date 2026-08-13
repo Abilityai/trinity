@@ -176,9 +176,11 @@ class PortalAgentWork(BaseModel):
     """One execution: shape, plus the name of the schedule behind it.
 
     No message, response, cost or model — the viewer may be an external client,
-    and AC #7 excludes costs outright. `schedule_name` (#2161) is the one
-    operator-authored string that crosses deliberately: a short label, never the
-    schedule's own `message`, which is a prompt.
+    and AC #7 excludes costs outright. `schedule_name` (#2161) is the one label
+    that crosses deliberately: never the schedule's own `message`, which is a
+    prompt. It is truncated at the service, and treated as untrusted — a
+    schedule can be created by an agent-scoped key, so its name is not
+    necessarily human-written.
     """
     id: Optional[str] = None
     status: Optional[str] = None

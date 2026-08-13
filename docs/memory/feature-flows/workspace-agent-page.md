@@ -114,16 +114,29 @@ prompt text on this surface at all. The cost is honest and bounded: rows that ar
 not schedule-backed (chat, loop, reminder) still carry only trigger, duration and
 time, so **AC #3 is met for scheduled rows only**.
 
-`schedule_name` is nonetheless the first operator-authored free text this page
-sends to a client, so it is deliberately narrow: `_schedule_names` maps `id →
-name` and reads nothing else off the `Schedule` model. Gating it on
-`principal.is_platform` is one line away if an operator ever objects.
+**It is not "operator-authored", and calling it that was the comfortable
+mistake.** `POST /api/agents/{name}/schedules` is `AuthorizedAgent` and the MCP
+`create_agent_schedule` tool exists, so an agent-scoped key — hence a
+prompt-injected agent — can write the text that renders on a client's page. So it
+is treated as untrusted content: capped at `MAX_SCHEDULE_NAME_CHARS` (80) in the
+service, escaped by Vue interpolation on render. The same is already true of
+`asks` (`title` and `question` are agent-authored), so this is the established
+boundary rather than a new one — but it is why the name is bounded rather than
+trusted. Gating it on `principal.is_platform` is one line away if an operator
+ever objects.
 
-Three properties of the lookup, each load-bearing:
+Four properties of the lookup, each load-bearing:
 
-* **One query per page.** The map is built once from `db.list_agent_schedules`,
-  never `get_schedule` per row — that is an N+1 whose only symptom is latency, so
-  the test asserts the *call count*, not the output.
+* **The prompt is never loaded at all.** `db.get_agent_schedule_names` is a
+  projected `SELECT id, name`, not a `.name` read off `list_agent_schedules`,
+  which returns whole `Schedule` models carrying `message` and
+  `validation_prompt`. Loading those and declining to return them would make
+  this module's own principle — *a field that never leaves the service cannot be
+  leaked by a later edit* — a review invariant; not loading them makes it
+  structural. One `{s.id: s}` refactor is all it would otherwise take, so a test
+  pins that the prompt-carrying accessor is not called.
+* **One query per page**, never `get_schedule` per row — that is an N+1 whose
+  only symptom is latency, so the test asserts the *call count*, not the output.
 * **Agent scoping is free.** Because the map holds only this agent's schedules, a
   foreign or stale `schedule_id` simply misses. There is no ownership check to
   forget.
@@ -197,10 +210,19 @@ is written once and goes stale every time a stage route is added: #2128 found
 `roomId` missing from guards written when `sessionId` was the only stage route,
 and ent#360 then added `/workspace/a/:agentName` without revisiting them.
 
-So the question is inverted rather than extended. `shouldEscapeStage(path)` in
-`portalUtils.js` asks about route **shape** — anything that is not the workspace
-root is a stage that must be left — and therefore **fails closed**: a fourth
-stage route needs no edit here and cannot silently re-break the button.
+So the question is inverted rather than extended. `shouldEscapeStage(path,
+query)` in `portalUtils.js` asks about route **shape** — anything that is not the
+bare workspace root is a stage that must be left — and therefore **fails
+closed**: a fourth stage route needs no edit here and cannot silently re-break
+the button.
+
+The **query** is half of that shape, and it is the half that leaks across
+sessions. `?agent=` is the ent#358 landing spot and is re-read by `bootstrap()`,
+which runs again after a sign-in — so signing out at `/workspace?agent=X` and
+handing the browser on makes the *next* person's first screen "You don't have
+access to X". That predates #2161 (the param enumeration missed it too), but it
+is the same class the guard exists to close, so it lives in the same predicate
+rather than a second one somebody has to remember.
 
 Two live call sites, both fixed: `newChatWithAgent` and `onSignOut` (which
 carried a room id, and then an agent name, into the next session's address bar).
