@@ -8,6 +8,7 @@
  * ent#356 moved the module into OSS core, so it ships in every build.
  */
 import { defineStore } from 'pinia'
+import { normalizeRoomRow } from '@/components/portal/portalUtils'
 import axios from 'axios'
 import { useAuthStore } from './auth'
 
@@ -437,16 +438,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       let rooms = []
       try { rooms = await this.fetchRooms() } catch { rooms = [] }
 
-      const merged = lists.flat().concat(rooms.map((r) => ({
-        ...r,
-        // Normalised onto the thread shape the sidebar already renders, so one
-        // list component handles both kinds.
-        title: r.name,
-        last_message_at: r.last_message_at || r.created_at,
-        agent_names: (r.participants || [])
-          .filter((p) => p.kind === 'agent')
-          .map((p) => p.identity),
-      })))
+      const merged = lists.flat().concat(rooms.map(normalizeRoomRow))
       merged.sort((x, y) => {
         const tx = x.last_message_at || x.created_at || ''
         const ty = y.last_message_at || y.created_at || ''

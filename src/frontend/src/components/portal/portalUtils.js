@@ -70,6 +70,30 @@ export function totalUnread(threads) {
     .reduce((sum, t) => sum + (Number(t?.unread) || 0), 0)
 }
 
+// Normalise a room onto the thread shape the sidebar renders, so one list
+// component handles both kinds.
+//
+// The `agents` / `participants` split is the interesting part, and it shipped
+// wrong once: the rooms LIST returns `agents` (identities of the agent
+// participants still in the room), while `participants` — objects with
+// `kind`/`identity` — is the DETAIL shape. Reading only the detail shape here
+// produced an empty list for EVERY room, so a room row drew no avatars at all,
+// and the unit test did not catch it because it mocked the response with the
+// field production does not send. Both shapes are accepted, and both are
+// pinned in portalSidebarIA.spec.js.
+export function normalizeRoomRow(r) {
+  const fromList = Array.isArray(r?.agents) ? r.agents : null
+  const fromDetail = (r?.participants || [])
+    .filter((p) => p && p.kind === 'agent')
+    .map((p) => p.identity)
+  return {
+    ...r,
+    title: r?.name,
+    last_message_at: r?.last_message_at || r?.created_at,
+    agent_names: fromList && fromList.length ? fromList : fromDetail,
+  }
+}
+
 // The avatars to show on one chat row: every participant for a room, the single
 // agent for a thread. Capped — a room with eight agents must not push the title
 // out of the row.

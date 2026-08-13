@@ -14,6 +14,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   partitionStarred, unreadByAgent, totalUnread, rowAgents, groupThreadsByDate,
+  normalizeRoomRow,
 } from '../../src/components/portal/portalUtils'
 
 const iso = (d) => new Date(d).toISOString()
@@ -74,6 +75,44 @@ describe('per-agent "waiting on you" counts', () => {
     expect(totalUnread([
       { unread: 2 }, { unread: 0 }, { unread: 5 }, {},
     ])).toBe(7)
+  })
+})
+
+describe('normalising a room onto the thread shape', () => {
+  // This shipped wrong once and no test caught it, because the test mocked the
+  // response with the field production does not send. `GET /api/rooms` returns
+  // `agents`; `participants` is the DETAIL shape from `GET /api/rooms/{id}`.
+  it('reads agent identities from the LIST shape (`agents`)', () => {
+    expect(normalizeRoomRow({ id: 'r1', name: 'QA', agents: ['a', 'b'] }).agent_names)
+      .toEqual(['a', 'b'])
+  })
+
+  it('still reads the DETAIL shape (`participants`)', () => {
+    expect(normalizeRoomRow({
+      id: 'r1',
+      participants: [
+        { kind: 'agent', identity: 'a' },
+        { kind: 'user', identity: 'me@example.com' },
+        { kind: 'agent', identity: 'b' },
+      ],
+    }).agent_names).toEqual(['a', 'b'])
+  })
+
+  it('gives a room with neither shape an empty list, not undefined', () => {
+    expect(normalizeRoomRow({ id: 'r1' }).agent_names).toEqual([])
+  })
+
+  it('maps name → title and falls back to created_at for sorting', () => {
+    const row = normalizeRoomRow({ id: 'r1', name: 'QA', created_at: '2026-01-01T00:00:00Z' })
+    expect(row.title).toBe('QA')
+    expect(row.last_message_at).toBe('2026-01-01T00:00:00Z')
+  })
+
+  it('prefers a real last_message_at over created_at', () => {
+    const row = normalizeRoomRow({
+      id: 'r1', created_at: '2026-01-01T00:00:00Z', last_message_at: '2026-02-02T00:00:00Z',
+    })
+    expect(row.last_message_at).toBe('2026-02-02T00:00:00Z')
   })
 })
 
