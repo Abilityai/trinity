@@ -269,7 +269,14 @@ async function reattach(executionId) {
   try {
     await store.streamPortalExecution(props.agent.name, executionId, onStreamEvent)
     const data = await awaitPersistedReply(currentSessionId.value, baseline)
-    if (data?.response) messages.value.push({ role: 'assistant', content: data.response })
+    if (data?.response) {
+      messages.value.push({ role: 'assistant', content: data.response })
+      // A reattached reply is still a reply the user just watched land, so it
+      // has to announce itself like `deliver()` does. Without this the thread
+      // keeps its server-side unread count and the sidebar badges the
+      // conversation on screen.
+      emit('sessions-changed', currentSessionId.value)
+    }
   } catch { /* the reply lands in history on the next load */ }
   finally {
     sending.value = false

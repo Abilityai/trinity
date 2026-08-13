@@ -2127,24 +2127,22 @@ def get_chat_state(email: str) -> dict:
     """
     rows = db.get_chat_state(email)
     unread = db.count_unread_by_session(email)
-    seen = set()
     chats = []
     for r in rows:
         kind, cid = r.get("chat_kind"), r.get("chat_id")
         if not kind or not cid:
             continue
-        seen.add((kind, cid))
         chats.append({
             "kind": kind,
             "id": cid,
             "starred": bool(r.get("starred_at")),
             "unread": unread.get(cid, 0) if kind == "thread" else 0,
         })
-    # A thread can have unread messages without a state row only if the cursor
-    # was cleared out from under us; carry it anyway rather than losing a count.
-    for sid, n in unread.items():
-        if ("thread", sid) not in seen:
-            chats.append({"kind": "thread", "id": sid, "starred": False, "unread": n})
+    # No fallback for "unread without a state row": `count_unread_by_session`
+    # INNER JOINs the state table and requires `last_read_at IS NOT NULL`, so
+    # every session it can return already has a row `get_chat_state` yielded.
+    # The loop that used to be here could never append, and a safety net that
+    # cannot fire is worse than none — it reads as protection that exists.
     return {"chats": chats}
 
 
@@ -2158,8 +2156,14 @@ def set_chat_star(email: str, chat_kind: str, chat_id: str, starred: bool) -> No
     bounds the write instead.
     """
     kind, cid = _validate_chat_ref(chat_kind, chat_id)
-    if _would_create_row_past_cap(email, kind, cid):
-        raise ClientPortalError(409, "Too many saved chats — unstar some first")
+    if starred:
+        # Counts STARRED rows, so unstarring is genuinely the way back under it.
+        # A total-row cap here would be unreachable-by-recovery: read cursors
+        # accumulate from ordinary use and unstar cannot remove them.
+        if db.count_starred_rows(email) >= db.MAX_STARRED_CHATS:
+            raise ClientPortalError(409, "Too many saved chats — unstar some first")
+        if _would_create_row_past_cap(email, kind, cid):
+            raise ClientPortalError(409, "Too much saved chat state — open fewer new chats")
     db.set_chat_star(email, kind, cid, starred, utc_now_iso())
 
 

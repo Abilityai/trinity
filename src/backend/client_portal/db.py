@@ -511,11 +511,21 @@ def list_agent_share_emails(agent_name: str) -> list[str]:
 
 CHAT_KINDS = ("thread", "room")
 
-# A ceiling on rows one user can create. `star` and `read` both write a row, and
-# neither validates that the chat exists (see the router: a 404 for an unknown id
-# would be an enumeration oracle). Without a cap, that is an unbounded write
-# primitive for anyone holding a portal session.
+# Two ceilings, because one number cannot do both jobs.
+#
+# MAX_CHAT_STATE_ROWS bounds ABUSE: `star` and `read` both write a row and
+# neither validates that the chat exists (a 404 for an unknown id would be an
+# enumeration oracle), so without it a portal session is an unbounded write
+# primitive.
+#
+# MAX_STARRED_CHATS bounds the STARRED set, and it is the one a real user can
+# reach. It has to be separate: read cursors accumulate from ordinary use (one
+# per chat ever opened, rooms included), so a single total-row cap would be
+# consumed by activity the user cannot undo — every star click 409ing forever
+# with "unstar some first" while unstarring frees nothing. Counting only starred
+# rows makes that advice true.
 MAX_CHAT_STATE_ROWS = 1000
+MAX_STARRED_CHATS = 200
 
 
 def get_chat_state(client_email: str) -> list[dict]:
@@ -586,10 +596,53 @@ def _upsert_chat_state(client_email: str, chat_kind: str, chat_id: str,
 
 def set_chat_star(client_email: str, chat_kind: str, chat_id: str,
                   starred: bool, now: str) -> None:
-    """Star or unstar one chat for one user. Unstar keeps the row — it still
-    carries the read cursor, and dropping it would mark the chat unread again."""
+    """Star or unstar one chat for one user.
+
+    Unstar keeps the row when it still carries a read cursor — dropping that
+    would mark the chat unread again — but DELETES it when there is nothing
+    left to remember. Without that, a row could only ever be created: the star
+    cap below counts starred rows, but the table itself would grow forever from
+    ids that were starred once and unstarred.
+    """
+    if not starred and not _has_read_cursor(client_email, chat_kind, chat_id):
+        delete_chat_state(client_email, chat_kind, chat_id)
+        return
     _upsert_chat_state(client_email, chat_kind, chat_id, now,
                        starred_at=now if starred else None)
+
+
+def _has_read_cursor(client_email: str, chat_kind: str, chat_id: str) -> bool:
+    stmt = text(
+        "SELECT 1 FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND chat_kind = :kind AND chat_id = :id "
+        "  AND last_read_at IS NOT NULL"
+    )
+    with get_engine().connect() as conn:
+        return conn.execute(stmt, {
+            "email": (client_email or "").lower(), "kind": chat_kind, "id": chat_id,
+        }).first() is not None
+
+
+def delete_chat_state(client_email: str, chat_kind: str, chat_id: str) -> None:
+    stmt = text(
+        "DELETE FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND chat_kind = :kind AND chat_id = :id"
+    )
+    with get_engine().begin() as conn:
+        conn.execute(stmt, {
+            "email": (client_email or "").lower(), "kind": chat_kind, "id": chat_id,
+        })
+
+
+def count_starred_rows(client_email: str) -> int:
+    """Starred rows only — what the star cap counts, so unstarring is genuinely
+    the way back under it."""
+    stmt = text(
+        "SELECT COUNT(*) FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND starred_at IS NOT NULL"
+    )
+    with get_engine().connect() as conn:
+        return int(conn.execute(stmt, {"email": (client_email or "").lower()}).scalar() or 0)
 
 
 def mark_chat_read(client_email: str, chat_kind: str, chat_id: str, now: str) -> None:

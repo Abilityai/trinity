@@ -124,10 +124,16 @@ destination with its own content, not a shortcut to a conversation).
 - **No existence check on `chat_id`, on purpose.** A 404 for an unknown chat
   would answer "does chat X exist?" for every id in the install (invariant #8).
   The write lands in the caller's own namespace, so an unknown id gains them
-  nothing — a per-viewer row cap (`MAX_CHAT_STATE_ROWS`) bounds the write
-  instead of validation. The cap applies only to writes that **create** a row:
-  capping updates would freeze a user at the ceiling out of unstarring, which is
-  the only action that gets them back under it.
+  nothing — per-viewer caps bound the write instead of validation.
+
+  **Two caps, because one number cannot do both jobs.** `MAX_CHAT_STATE_ROWS`
+  (1000) bounds abuse: any row, star or read cursor. `MAX_STARRED_CHATS` (200)
+  bounds the starred set and is the only one a real user reaches. They have to
+  be separate — a read cursor is written for every chat ever opened, so a single
+  total cap gets consumed by ordinary use, and then every star returns
+  *"unstar some first"* while unstarring frees nothing, forever. Counting only
+  starred rows makes that advice true, and unstarring a chat with no read cursor
+  deletes its row outright so the table cannot only ever grow.
 
 ## Tests
 

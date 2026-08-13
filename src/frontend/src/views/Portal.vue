@@ -544,8 +544,7 @@ function onSessionAdopted(id) {
   // A thread you are actively talking in is by definition read. This is also
   // what gives a brand-new thread its read cursor, so the very next reply the
   // user does NOT see is the first thing that badges.
-  markRead('thread', id)
-  refreshThreads()
+  markRead('thread', id).then(refreshThreads)
 }
 function usePlaybook(text) { prefill.value = ''; nextTick(() => { prefill.value = text }) }
 
@@ -586,8 +585,10 @@ function onConversationTurnDone(sessionId) {
   // arrives unseen. Marking read unconditionally cleared exactly the badge the
   // feature exists to show, and made it near-unreachable in normal use.
   const open = activeSessionId.value || pendingSession.value
-  if (shouldMarkTurnRead(sessionId, open)) markRead('thread', sessionId)
-  return refreshThreads()
+  return (shouldMarkTurnRead(sessionId, open)
+    ? markRead('thread', sessionId)
+    : Promise.resolve()
+  ).then(refreshThreads)
 }
 
 // Optimistic: a star is a personal bookmark, and waiting on a round trip to
@@ -615,14 +616,18 @@ async function toggleStar(t) {
 
 // Opening a chat is what "reading" it means here. Clear the badge locally first
 // so the count does not linger for a round trip, then persist.
+// Returns the write promise. Callers that refresh afterwards MUST await it:
+// `GET /chat-state` racing the cursor UPSERT overwrites the optimistic zero
+// with a stale count, and the badge comes back on the conversation the user is
+// reading — possibly for minutes, until the next refresh.
 function markRead(kind, id) {
-  if (!id) return
+  if (!id) return Promise.resolve()
   const key = `${kind}:${id}`
   if (chatState.value[key]?.unread) {
     chatState.value = { ...chatState.value, [key]: { ...chatState.value[key], unread: 0 } }
     threads.value = decorate(threads.value)
   }
-  store.markChatRead(kind, id)
+  return store.markChatRead(kind, id)
 }
 
 // ---- Cross-chat search (sidebar) ----------------------------------------------
@@ -649,6 +654,10 @@ watch([() => route.params.sessionId, () => threads.value.length], () => {
   if (pendingSession.value === sid && activeAgentName.value) return
   const known = threads.value.find((t) => (t.id || t.session_id) === sid)
   if (known) { activeAgentName.value = known.agent_name; pendingSession.value = sid; convGen.value++ }
+  // Opening by ROUTE is an open. Back/forward, a bookmark and a reload all land
+  // here rather than in `openThread`, and it is the commonest way in — without
+  // this the sidebar badges the conversation on screen, through every reload.
+  markRead('thread', sid)
 })
 
 // ent#358: `/workspace?agent=<name>` opens that agent's conversation directly —
@@ -696,6 +705,7 @@ async function bootstrap() {
     if (known) { activeAgentName.value = known.agent_name; pendingSession.value = sid }
     else pendingSession.value = sid   // let the conversation resolve/load it
     convGen.value++
+    markRead('thread', sid)           // a deep-linked open is still an open
     return
   }
   resolveAgentQuery()
