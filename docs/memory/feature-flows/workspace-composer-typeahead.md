@@ -3,7 +3,7 @@
 > **Status**: ✅ Implemented (2026-08-13)
 > **Issue**: abilityai/trinity-enterprise#392
 > **Requirement**: `docs/memory/requirements/core-agent.md` §5.13
-> **Related**: [workspace-agent-page.md](workspace-agent-page.md), [workspace-absorbs-session.md](workspace-absorbs-session.md), [workspace-sidebar-ia.md](workspace-sidebar-ia.md)
+> **Related**: `docs/memory/requirements/core-agent.md` §5.12 (ent#361 — the @mention grammar this round-trips through; it has no flow doc of its own), [workspace-agent-page.md](workspace-agent-page.md) (the other ent#380 briefing consumer), [workspace-absorbs-session.md](workspace-absorbs-session.md) (why this is the only composer left)
 
 ## Overview
 
