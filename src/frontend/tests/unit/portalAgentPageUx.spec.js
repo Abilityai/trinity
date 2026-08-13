@@ -1,7 +1,15 @@
 /**
- * #2161 — Workspace agent page UX repairs.
+ * #2161 / #2169 — Workspace agent page UX repairs.
  *
- * Two of the four defects are load-bearing enough to pin, and they fail in
+ * #2169 amended the containment block below rather than deleting from it. Two
+ * of its guards pinned rules that #2169 deliberately reverses — asks first in
+ * DOM order, and a two-column grid conditional on `asks.length` — and a deleted
+ * guard leaves no record that a rule was retired on purpose. They now assert the
+ * replacement rule and name the old one as the defect, the same way #2161 itself
+ * rewrote `workspaceRoomsGate.spec.js` F24. The chart guards and the
+ * scroll-region guard are untouched and must keep passing.
+ *
+ * Two of the four #2161 defects are load-bearing enough to pin, and they fail in
  * opposite ways:
  *
  *   1. **"Start a chat" did nothing.** Not a broken handler — the handler ran
@@ -233,9 +241,21 @@ describe('Overview containment', () => {
     expect(src).not.toMatch(/id:\s*'asks'/)
   })
 
-  it('puts asks first in DOM order so the mobile stack keeps the priority', () => {
+  it('orders the Overview activity → recent work → asks', () => {
+    // Reverses #2161's "asks first in DOM order so the mobile stack keeps the
+    // priority" (#2169). The reversal is deliberate and instructed, not a
+    // regression, and it is pinned rather than deleted so a later reader can
+    // see the rule was retired on purpose — the precedent is #2161 itself
+    // rewriting workspaceRoomsGate F24. The mobile residual is bounded: the
+    // ask-count badge lives in the header, outside the page scroller.
     const src = pageSource()
-    expect(src.indexOf('Waiting on you')).toBeLessThan(src.indexOf('>Recent work<'))
+    // Presence first. `indexOf` returns -1 for a deleted marker, and -1 is less
+    // than everything, so an ordering assertion alone passes on deletion.
+    expect(src).toContain('Activity · last')
+    expect(src).toContain('>Recent work<')
+    expect(src).toContain('Waiting on you')
+    expect(src.indexOf('Activity · last')).toBeLessThan(src.indexOf('>Recent work<'))
+    expect(src.indexOf('>Recent work<')).toBeLessThan(src.indexOf('Waiting on you'))
   })
 
   it('does not nest a scroll region inside the page scroller', () => {
@@ -255,9 +275,68 @@ describe('Overview containment', () => {
     expect(src).toMatch(/asks\.value\.length >= ASKS_CAP \? `\$\{ASKS_CAP\}\+`/)
   })
 
-  it('does not leave recent work at half width when there are no asks', () => {
-    // The asks column is v-if'd away when empty, so an unconditional two-column
-    // grid strands recent work in the left half with dead space beside it.
-    expect(pageSource()).toMatch(/'lg:grid-cols-2':\s*asks\.length/)
+  it('keeps the top row two columns whether or not there are asks', () => {
+    // The #2169 defect, inverted. The column count used to be bound to
+    // `asks.length`, so the page changed shape when a transient operator-queue
+    // item opened or closed. Both directions are asserted: the negative alone
+    // passes if the grid is deleted outright, and a looser positive says
+    // nothing about the two classes living on the SAME element.
+    const src = pageSource()
+    expect(src).not.toMatch(/grid-cols-2'?\s*:\s*asks\.length/)
+    expect(src).toMatch(/class="[^"]*\bgrid\b[^"]*\bxl:grid-cols-2\b[^"]*"/)
+  })
+
+  it('puts asks outside the top row, not in it as a third column', () => {
+    // Every other guard here is satisfied by an asks section left INSIDE the
+    // grid as a third child — half width, under the chart — so AC #3 could fail
+    // with a green suite. What separates the two layouts is whether the row's
+    // <div> has CLOSED by the time the asks section opens, and a bare
+    // `slice(grid, asks)).toContain('</div>')` does not answer that: the chart's
+    // own bordered card closes inside the row. So match the row's opening tag to
+    // its close by depth.
+    const src = pageSource()
+    const overview = src.indexOf("tab === 'overview'")
+    expect(overview).toBeGreaterThan(-1)
+
+    const gridClass = src.indexOf('xl:grid-cols-2', overview)
+    expect(gridClass).toBeGreaterThan(-1)
+    const gridOpen = src.lastIndexOf('<div', gridClass)
+    expect(gridOpen).toBeGreaterThan(overview)
+
+    let depth = 0
+    let i = gridOpen
+    let gridClose = -1
+    while (i < src.length) {
+      const open = src.indexOf('<div', i)
+      const close = src.indexOf('</div>', i)
+      if (close === -1) break
+      if (open !== -1 && open < close) { depth += 1; i = open + 4; continue }
+      depth -= 1
+      if (depth === 0) { gridClose = close; break }
+      i = close + 6
+    }
+    expect(gridClose).toBeGreaterThan(-1)
+
+    const asksAt = src.indexOf('Waiting on you')
+    expect(asksAt).toBeGreaterThan(gridClose)
+  })
+
+  it('lets the activity chart fill its column', () => {
+    // The chart carried `max-w-2xl` when it sat alone above a full-width row.
+    // Inside a half-width column that cap is dead weight below ~1656px, and the
+    // section it capped is now one of two equal columns.
+    const src = pageSource()
+    expect(src).toContain('Activity · last')
+    expect(src).not.toMatch(/max-w-2xl/)
+  })
+
+  it('does not advertise an asks section for an agent with nothing waiting', () => {
+    expect(pageSource()).toMatch(/<section v-if="asks\.length"/)
+  })
+
+  it('shapes the loading skeleton like the row it precedes', () => {
+    // Layout stability (contract principles #4/#6): a one-column skeleton in
+    // front of a two-column row reflows the page on every load.
+    expect(pageSource()).toMatch(/loading && !page"[^>]*class="[^"]*\bgrid\b[^"]*\bxl:grid-cols-2\b/)
   })
 })
