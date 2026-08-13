@@ -268,6 +268,36 @@ class TestEpisodeAlert:
         asyncio.run(create_bounded_alert("b", _skill_item(agent="b")))
         assert len(_budget_alerts(db)) == 2  # distinct agents, distinct episodes
 
+    def test_cooldown_knob_zero_never_raises(self, monkeypatch):
+        # Review fix: cooldown=0 (the natural "no cooldown" spelling) used to
+        # ZeroDivisionError in the bucket computation on the at-cap path —
+        # breaking create_bounded_alert's documented never-raises contract.
+        # It must degrade to a 1s bucket (alert-every-episode, matching the
+        # flood alert's behavior at 0), never a raise.
+        db = _budget_db(monkeypatch, pending=_CAP)
+        monkeypatch.setattr(oqs, "OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS", 0)
+        monkeypatch.setattr(oqs.time, "time", lambda: 1000.0)
+        ok = asyncio.run(create_bounded_alert("a", _skill_item()))  # must not raise
+        assert ok is False
+        (alert,) = _budget_alerts(db)
+        assert alert["id"] == "alert-budget-a-skill_not_found-b1000"  # // max(1, 0)
+
+    def test_episode_helper_raise_swallowed_refusal_stands(self, monkeypatch, caplog):
+        # The never-raises contract is structural, not incidental: even if the
+        # episode helper itself raises, the at-cap refusal (False) stands and
+        # nothing propagates to the caller.
+        db = _budget_db(monkeypatch, pending=_CAP)
+
+        async def _boom(*a, **k):
+            raise RuntimeError("episode helper broke")
+
+        monkeypatch.setattr(oqs, "_maybe_emit_alert_budget_episode", _boom)
+        with caplog.at_level(logging.ERROR, logger="services.operator_queue_service"):
+            ok = asyncio.run(create_bounded_alert("a", _skill_item()))
+        assert ok is False
+        db.create_operator_queue_item.assert_not_called()  # item stays refused
+        assert any("[#1677 budget]" in r.message for r in caplog.records)
+
 
 # ---------------------------------------------------------------------------
 # 3. _alert_skill_not_found integration (dedup → budget → both creates)

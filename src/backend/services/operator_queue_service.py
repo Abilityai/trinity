@@ -329,7 +329,21 @@ async def create_bounded_alert(agent_name: str, item: dict) -> bool:
         last_triggered_by = (
             context.get("triggered_by") if isinstance(context, dict) else None
         )
-        await _maybe_emit_alert_budget_episode(agent_name, item_type, last_triggered_by)
+        # Guarded so the four-outcome never-raises contract holds structurally:
+        # the episode alert is a secondary signal over an already-refused item,
+        # and a raise here (review fix: the cooldown-knob=0 ZeroDivisionError
+        # in the bucket computation was one such path) must never leak into a
+        # caller that trusts the docstring.
+        try:
+            await _maybe_emit_alert_budget_episode(
+                agent_name, item_type, last_triggered_by
+            )
+        except Exception as e:
+            logger.error(
+                "[#1677 budget] episode-alert emit raised for %s/%s (%s) — "
+                "swallowed (the refusal itself stands)",
+                agent_name, item_type, e,
+            )
         return False
 
     # NO `await` between the count read above and this create — the
@@ -376,7 +390,10 @@ async def _maybe_emit_alert_budget_episode(
     # the window instead of retrying on every refusal (#1632 shape).
     _alert_budget_cooldown[key] = now
 
-    bucket = int(time.time() // OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS)
+    # max(1, …): the cooldown knob at 0 (the natural "no cooldown" spelling)
+    # must degrade to a 1s bucket — matching the flood alert's alert-every-
+    # episode behavior at 0 — never a ZeroDivisionError on the at-cap path.
+    bucket = int(time.time() // max(1, OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS))
     now_iso = utc_now_iso()
     title = f"Agent '{agent_name}' exceeded its '{item_type}' alert budget"
     # No `held` count (untruthful at a first-trip emit — true volume lives in
