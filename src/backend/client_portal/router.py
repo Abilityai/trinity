@@ -548,11 +548,13 @@ async def portal_agent_page(
     _require_roster(agent_name, email, principal.is_platform)
     if window not in agent_page.WINDOWS:
         raise HTTPException(status_code=422, detail="Unknown window")
-    # The roster is the source of identity + "what it can do": the briefing is
-    # already resolved there (#138/ent#380), so the page projects it rather than
-    # building a second, divergent notion of an agent's capabilities.
-    roster = await service.get_roster(email, include_owned=principal.is_platform)
-    card = next((a for a in roster.agents if a.name == agent_name), None)
+    # #2160: ONE card, not the whole roster. This projected the roster's card so
+    # the page and the sidebar could not disagree about an agent's capabilities —
+    # correct, but it built every card and fanned `_agent_briefing` across the
+    # whole fleet to use one, making the page's load time depend on the slowest
+    # agent in it. `get_agent_card` keeps the shared builder and does one.
+    card = await service.get_agent_card(email, agent_name,
+                                        include_owned=principal.is_platform)
     return agent_page.build_page(
         email, agent_name, card.model_dump() if card else None, window=window,
     )

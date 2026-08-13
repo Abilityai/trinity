@@ -250,6 +250,75 @@ def _multi_agent_chat_available() -> bool:
         return False
 
 
+def _row_to_card(r: dict, tts_ready: bool) -> PortalAgentCard:
+    """One roster row → one card. Shared by the roster and the single-agent
+    lookup (#2160) so the two cannot disagree about how a card is built."""
+    name = r["agent_name"]
+    updated = r.get("avatar_updated_at")
+    # Only agents with a generated (non-default) avatar get an image URL;
+    # the UI renders an initials tile otherwise.
+    avatar_url = (
+        f"/api/agents/{name}/avatar?v={updated}"
+        if updated and not r.get("is_default_avatar")
+        else None
+    )
+    return PortalAgentCard(
+        name=name,
+        # #2159: NULL display_label means "render the slug" (ent#181), so it is
+        # passed through as None and resolved at the render site rather than
+        # coalesced here — the two would then disagree about what an unset label
+        # means.
+        display_label=r.get("display_label"),
+        owner=r.get("owner"),
+        avatar_url=avatar_url,
+        shared_at=r.get("shared_at"),
+        # Portal voice mode (#78): available when the platform ElevenLabs key
+        # is set AND this agent has a configured voice (reuses the channel voice).
+        voice_available=bool(tts_ready and r.get("tts_voice_id")),
+    )
+
+
+def _roster_rows(email: str | None, include_owned: bool) -> list[dict]:
+    """The union the roster is built from — shared rows, plus owned rows for a
+    platform session (ent#357). Extracted so the single-agent lookup resolves
+    membership by exactly the same rule."""
+    rows = db.get_shared_roster(email or "")
+    if include_owned:
+        seen = {r["agent_name"] for r in rows}
+        rows = rows + [r for r in db.get_owned_roster(email or "") if r["agent_name"] not in seen]
+        rows.sort(key=lambda r: r["agent_name"])
+    return rows
+
+
+async def get_agent_card(email: str | None, agent_name: str,
+                         include_owned: bool = False) -> PortalAgentCard | None:
+    """ONE card, for the agent page (#2160).
+
+    The page needs identity (avatar, owner) and "what it can do" (the briefing).
+    ent#360 got both by calling `get_roster` and picking one card out of it —
+    which builds every card, and worse, fans `_agent_briefing` across the WHOLE
+    fleet: a Docker lookup plus up to two agent HTTP calls each, awaited with
+    `gather`. Opening one agent's page therefore cost N briefings and inherited
+    the roster's floor (#2163): its load time was bounded by the slowest agent in
+    the fleet, not by the agent being opened. One wedged agent meant a five-second
+    page for an unrelated one.
+
+    Returns None when the agent is not on this caller's roster; the caller has
+    already gated on that, so None means "vanished between the two reads".
+    """
+    from services import tts_service
+
+    row = next((r for r in _roster_rows(email, include_owned)
+                if r["agent_name"] == agent_name), None)
+    if row is None:
+        return None
+    card = _row_to_card(row, tts_service.is_available())
+    briefing = await _agent_briefing(agent_name)   # exactly one, not N
+    if isinstance(briefing, tuple):
+        card.description, card.playbooks = briefing
+    return card
+
+
 async def get_roster(email: str | None, include_owned: bool = False) -> PortalRoster:
     """The caller's "My Agents" roster — every agent shared with ``email``, plus
     (``include_owned``) the agents they OWN.
@@ -276,39 +345,11 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     # `tts_ready` above — not a per-agent one, so it rides on the roster itself.
     multi_agent_chat = _multi_agent_chat_available()
 
-    rows = db.get_shared_roster(email or "")
-    if include_owned:
-        # Union by agent_name, shared rows winning: an agent that is BOTH owned
-        # and (somehow) shared must appear once, and the shared row carries the
-        # sharing metadata this roster was built around.
-        seen = {r["agent_name"] for r in rows}
-        rows = rows + [r for r in db.get_owned_roster(email or "") if r["agent_name"] not in seen]
-        rows.sort(key=lambda r: r["agent_name"])
-    cards = []
-    for r in rows:
-        name = r["agent_name"]
-        updated = r.get("avatar_updated_at")
-        # Only agents with a generated (non-default) avatar get an image URL;
-        # the UI renders an initials tile otherwise.
-        avatar_url = (
-            f"/api/agents/{name}/avatar?v={updated}"
-            if updated and not r.get("is_default_avatar")
-            else None
-        )
-        cards.append(PortalAgentCard(
-            name=name,
-            # #2159: NULL display_label means "render the slug" (ent#181), so it
-            # is passed through as None and resolved at the render site rather
-            # than coalesced here — the two would then disagree about what an
-            # unset label means.
-            display_label=r.get("display_label"),
-            owner=r.get("owner"),
-            avatar_url=avatar_url,
-            shared_at=r.get("shared_at"),
-            # Portal voice mode (#78): available when the platform ElevenLabs key
-            # is set AND this agent has a configured voice (reuses the channel voice).
-            voice_available=bool(tts_ready and r.get("tts_voice_id")),
-        ))
+    # Union by agent_name, shared rows winning: an agent that is BOTH owned and
+    # (somehow) shared must appear once, and the shared row carries the sharing
+    # metadata this roster was built around.
+    rows = _roster_rows(email, include_owned)
+    cards = [_row_to_card(r, tts_ready) for r in rows]
 
     # #138 briefing enrichment — parallel + fail-soft (see _agent_briefing).
     import asyncio
