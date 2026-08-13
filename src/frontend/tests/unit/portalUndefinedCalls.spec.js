@@ -57,7 +57,11 @@ function scriptOf(source) {
       // already consumes those character by character, so the two overlapped and
       // the alternation backtracked exponentially (CodeQL js/redos, high). It
       // reads only our own source files, so it was never exploitable; it was
-      // still a real defect and the branch bought nothing.
+      // still a real defect. It was NOT free, though: that branch is what made a
+      // NESTED template literal strip as one unit, so `` `a ${x ? `y` : 'z'} b` ``
+      // now strips as two matches and can leave a fragment exposed. Accepted:
+      // this is a heuristic over our own source, a false 'calls undefined' is
+      // loud and fixable, and no non-backtracking regex handles nesting.
       /`(?:\\.|[^`\\])*`|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g,
       '""',
     )

@@ -1130,7 +1130,19 @@ PORTAL_TURN_TIMEOUT_SECONDS = 300
 # Still nowhere near the old hour: an hour-long marker is a spinner that
 # outlives the work, so a backend restart mid-turn would leave the composer
 # disabled for the rest of it.
-PORTAL_MAX_TURN_SECONDS = 2 * PORTAL_TURN_TIMEOUT_SECONDS + 60
+# What ONE attempt can actually cost, which is not `timeout_seconds`:
+#   + 10   `execute_task` dispatches with `timeout_seconds + 10` (HTTP slack)
+#   + 300  the #678 reader-race auto-retry runs a SECOND http call, capped at
+#          `_AUTO_RETRY_MAX_TIMEOUT_S`, ON TOP of whatever attempt 1 burned
+#          (unlike the SUB-003 retry, which is capped to the remaining budget)
+PORTAL_ATTEMPT_CEILING_SECONDS = PORTAL_TURN_TIMEOUT_SECONDS + 10 + 300
+
+# ...and the turn can run TWO attempts, because a resume whose JSONL is gone
+# re-runs the whole thing cold. Sizing the marker at one attempt — or at two bare
+# timeouts, as this first did — expires it while the turn is live, and the client
+# then offers a Retry for work already billed. `tests/unit/test_2133_*` pins this
+# against the real constants so a change to either drifts loudly.
+PORTAL_MAX_TURN_SECONDS = 2 * PORTAL_ATTEMPT_CEILING_SECONDS + 60
 PORTAL_INFLIGHT_TTL_SECONDS = PORTAL_MAX_TURN_SECONDS
 
 

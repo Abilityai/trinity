@@ -200,7 +200,7 @@ import { renderMarkdown } from '@/utils/markdown'
 import { agentDisplayName } from '@/utils/agentName'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
-import { deliveryFailureReason } from './portalUtils'
+import { deliveryFailureReason, REPLY_MAX_WAIT_MS_FALLBACK } from './portalUtils'
 
 const props = defineProps({
   agent: { type: Object, required: true },      // {name, owner, avatar_url, description, playbooks, voice_available}
@@ -385,6 +385,9 @@ async function deliver(text) {
     }
 
     if (started) {
+      // Stamp the dispatch instant: the server's marker TTL starts here, so the
+      // client's ceiling must too (see awaitPersistedReply).
+      const dispatchedAt = Date.now()
       if (started.session_id && currentSessionId.value !== started.session_id) {
         // Adopt the thread NOW rather than at the end, so a refresh mid-turn
         // reattaches to it instead of opening a second conversation.
@@ -404,7 +407,8 @@ async function deliver(text) {
         liveActivity.value = []
       }
       data = await awaitPersistedReply(
-        started.session_id || currentSessionId.value, baseline, started.wait_budget_seconds,
+        started.session_id || currentSessionId.value, baseline,
+        started.wait_budget_seconds, dispatchedAt,
       )
       if (data?.lost) {
         // #2133: we ran out of budget while the marker still claimed a turn.
@@ -479,7 +483,10 @@ function onStreamEvent(evt) {
 // the local list instead let a retry return the PREVIOUS turn's reply on its
 // first poll — the answer to the wrong question, while a second turn ran unseen.
 const REPLY_POLL_MS = 700
-const REPLY_IDLE_GIVE_UP = 8      // ~5.6s of the server saying "nothing running"
+// Time-based, NOT poll-count-based. With the backoff below, 8 polls is up to
+// 8 x 15s = 120s late in a turn — so a count silently stretched this debounce
+// into two minutes of spinner before the no-answer message appeared.
+const REPLY_IDLE_GIVE_UP_MS = 6_000
 
 // #2133: the absolute ceiling, for when the marker is ORPHANED rather than
 // merely slow — a hard backend kill skips the `finally` that clears it, and
@@ -491,7 +498,7 @@ const REPLY_IDLE_GIVE_UP = 8      // ~5.6s of the server saying "nothing running
 // `--resume` re-runs the whole thing cold. A ceiling of one turn would declare a
 // live, already-billed cold retry "not delivered" — exactly what #2120 fixed,
 // on exactly the path it was fixed for.
-const REPLY_MAX_WAIT_MS_FALLBACK = (2 * 300 + 60) * 1000
+// (imported from portalUtils so a test can compare it to the server's value)
 
 // Polling every 700ms for ten minutes is ~850 history reads per tab. The reply
 // almost always lands in the first seconds, so the fast interval is what
@@ -509,9 +516,16 @@ function replyPollInterval(elapsedMs) {
   return every
 }
 
-async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds) {
-  let idlePolls = 0
-  const startedAt = Date.now()
+async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds,
+                                   dispatchedAtMs) {
+  let idleSince = null
+  // Measured from DISPATCH, not from when this function was reached. The
+  // server's marker TTL starts ticking at dispatch, so a client clock that
+  // starts after the stream breaks (which can be minutes later, on exactly the
+  // orphaned-marker path this ceiling exists for) would outlive the marker —
+  // and the marker's disappearance would be read as "nothing running" instead
+  // of tripping the ceiling. The two clocks now share an origin.
+  const startedAt = dispatchedAtMs || Date.now()
   const budgetMs = Number(budgetSeconds) > 0
     ? Number(budgetSeconds) * 1000
     : REPLY_MAX_WAIT_MS_FALLBACK
@@ -536,8 +550,15 @@ async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds)
       return { response: last.content, cost: last.cost, session_id: data.sessionId || sessionId }
     }
     // Still running server-side? Then keep waiting, however long it takes.
-    if (data.inFlightExecutionId) { idlePolls = 0 }
-    else if (++idlePolls >= REPLY_IDLE_GIVE_UP) return null
+    if (data.inFlightExecutionId) { idleSince = null }
+    else {
+      if (idleSince === null) idleSince = Date.now()
+      // The server has said "nothing running" for long enough. NOT retryable:
+      // the turn may well have run and been billed — notably when Redis is down,
+      // `mark_turn_inflight` no-ops and this branch is reached on the very first
+      // poll of a perfectly healthy turn.
+      else if (Date.now() - idleSince >= REPLY_IDLE_GIVE_UP_MS) return { lost: true, idle: true }
+    }
     await wait()
   }
 }

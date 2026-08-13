@@ -15,6 +15,7 @@ import { describe, it, expect } from 'vitest'
 import {
   partitionStarred, unreadByAgent, totalUnread, rowAgents, groupThreadsByDate,
   normalizeRoomRow, shouldMarkTurnRead,
+  REPLY_MAX_WAIT_MS_FALLBACK, PORTAL_ATTEMPT_CEILING_S, PORTAL_TURN_TIMEOUT_S,
 } from '../../src/components/portal/portalUtils'
 
 const iso = (d) => new Date(d).toISOString()
@@ -165,23 +166,21 @@ describe('row avatars', () => {
   })
 })
 
-describe('#2133 — the reply poll is bounded, and giving up is not a failure', () => {
-  // The bound has to cover a COLD RETRY. `run_resumable_turn` re-runs the whole
-  // turn when a resume finds no JSONL, so the worst legitimate case is two full
-  // turn timeouts. Sizing it at one would declare a live, already-billed retry
-  // "not delivered" — which is exactly what #2120 fixed, on exactly the path it
-  // was fixed for.
-  const TURN = 300
-  const budget = 2 * TURN + 60
-
-  it('covers two full turns plus slack, not one', () => {
-    expect(budget).toBeGreaterThan(2 * TURN)
+describe('#2133 — the client fallback budget', () => {
+  // The first version of these tests asserted literals declared inside the test
+  // and imported nothing from the component, so changing the real constant left
+  // them green — exactly the drift they claimed to catch. They read the real
+  // exports now.
+  it('covers two attempts, each of which can exceed the turn timeout', () => {
+    // One attempt is NOT bounded by `timeout_seconds`: dispatch adds HTTP slack
+    // and the #678 reader-race retry adds a whole second call on top.
+    expect(PORTAL_ATTEMPT_CEILING_S).toBeGreaterThan(PORTAL_TURN_TIMEOUT_S)
+    expect(REPLY_MAX_WAIT_MS_FALLBACK)
+      .toBeGreaterThanOrEqual(2 * PORTAL_ATTEMPT_CEILING_S * 1000)
   })
 
-  it('the client fallback matches what the server sends', () => {
-    // They are separate constants in separate languages; if they drift, the
-    // client gives up before the server stops claiming a turn is running.
-    const clientFallbackMs = (2 * 300 + 60) * 1000
-    expect(clientFallbackMs).toBe(budget * 1000)
+  it('matches the server bound, which test_2133 pins on the other side', () => {
+    // Server: 2 * (300 + 10 + 300) + 60. If either side moves alone, this fails.
+    expect(REPLY_MAX_WAIT_MS_FALLBACK).toBe((2 * (300 + 10 + 300) + 60) * 1000)
   })
 })

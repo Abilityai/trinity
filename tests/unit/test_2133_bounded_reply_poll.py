@@ -46,6 +46,24 @@ def test_the_bound_covers_two_full_turns():
     assert svc.PORTAL_MAX_TURN_SECONDS > 2 * svc.PORTAL_TURN_TIMEOUT_SECONDS
 
 
+def test_one_attempt_is_not_bounded_by_timeout_seconds():
+    """The first version of this fix assumed it was, and was therefore still too
+    small. `execute_task` dispatches with `timeout_seconds + 10`, and the #678
+    reader-race auto-retry adds a whole second HTTP call on top of whatever
+    attempt 1 already burned — capped at `_AUTO_RETRY_MAX_TIMEOUT_S`, not at the
+    remaining budget.
+
+    Read from the REAL constants, so raising either one fails here rather than
+    silently shrinking the marker below a live turn.
+    """
+    from client_portal import service as svc
+    from services import task_execution_service as tes
+
+    worst_attempt = svc.PORTAL_TURN_TIMEOUT_SECONDS + 10 + tes._AUTO_RETRY_MAX_TIMEOUT_S
+    assert svc.PORTAL_ATTEMPT_CEILING_SECONDS >= worst_attempt
+    assert svc.PORTAL_MAX_TURN_SECONDS >= 2 * worst_attempt
+
+
 def test_the_marker_ttl_is_that_bound():
     """The client waits for as long as the marker claims a turn is running, so a
     TTL shorter than the bound cuts off a live turn no matter what the client
