@@ -54,7 +54,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
-import { planHintDisplay } from './portalUtils'
+import { planHintDisplay, starterFor } from './portalUtils'
 
 const props = defineProps({
   agent: { type: Object, required: true },
@@ -70,9 +70,8 @@ const playbooks = computed(() => props.agent.playbooks || [])
 const expanded = ref(false)
 const hintPlan = computed(() => planHintDisplay(playbooks.value, expanded.value))
 
-// Playbooks usually take an argument — pre-fill the composer with the starter
-// (never auto-run). Fall back to the title so a card always does something.
-function starterFor(p) {
-  return (p.starter_prompt || '').trim() || (p.title || '')
-}
+// `starterFor` (starter_prompt → else title, never auto-run) moved to
+// portalUtils.js in ent#392: the `/` typeahead inserts the same thing this card
+// does, and two copies of that rule would let a hint and its typeahead row
+// prefill different text.
 </script>
