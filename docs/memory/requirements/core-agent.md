@@ -564,13 +564,20 @@
   operator configuration for the ordinary state of an idle fleet. "No peers" and
   "peers exist but none is mentionable" are separate statements.
 - **Scope**: `/` and `@` in the 1:1 composer; **`@` in the room composer**,
-  scoped to the room's **agent participants** — verified against the running
-  engine, not assumed (`resolve_mentions` keeps only agent participants that
-  have not left; a non-participant `@name` is neither recognised nor recruited),
-  because offering the roster there would manufacture a silent no-op. **`/` in a
-  room is deferred**: a room has N participants and no active agent, so "whose
-  playbooks?" has no answer without inventing a picker this issue does not
-  specify. Recruiting a new agent stays with the explicit "+ Add agent" control.
+  scoped to the room's **agent participants**. That scope was established by
+  *observing the running server*, not by reading the private rooms engine:
+  `POST /api/rooms/{id}/messages` answered `woke: ["<participant>"]` for a
+  participant mention and `woke: []` for a non-participant one, so the list
+  offers only names a pick is known to wake — offering the roster would put
+  names in front of the user with no evidence that choosing one does anything.
+  It is deliberately **not** claimed that a non-participant mention has no
+  effect: §5.12 records an engine-side newcomer-join path from ent#361, and two
+  empty response fields do not disprove it. If that path is live, this list is
+  narrower than the engine allows, and recruiting stays with the explicit
+  "+ Add agent" control — the honest home for an action that spends money on
+  another agent. **`/` in a room is deferred**: a room has N participants and no
+  active agent, so "whose playbooks?" has no answer without inventing a picker
+  this issue does not specify.
 - **Flow**: [workspace-composer-typeahead.md](../feature-flows/workspace-composer-typeahead.md)
 
 ---

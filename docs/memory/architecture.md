@@ -1339,10 +1339,14 @@ degrade-to-plain-text this feature exists to close; and **a plain Enter never ac
 without an explicit selection**, since an accidental accept destroys typed work while an
 accidental send is what the user was reaching for. `@` is hidden — popup *and*
 placeholder — without the rooms capability, which it reads from the roster payload per
-the rule below. The **room** composer gets `@` scoped to its **agent participants**
-(the engine's `resolve_mentions` wakes only those; a non-participant mention is neither
-recognised nor recruited, verified against a running instance), while `/`-in-room is
-deferred — a room has no active-agent subject. **No backend change, no new endpoint, no
+the rule below. The **room** composer gets `@` scoped to its **agent participants** —
+established by *observing* the running server rather than reading the private rooms
+engine (`POST /api/rooms/{id}/messages` answered `woke: ["<participant>"]` for a
+participant and `woke: []` for a non-participant), so the list contains only names a
+pick is known to wake; whether a non-participant mention still joins someone by the
+ent#361 engine-side path (§5.12) is deliberately not claimed either way, and recruiting
+stays with the explicit "+ Add agent" control. `/`-in-room is deferred — a room has no
+active-agent subject. **No backend change, no new endpoint, no
 migration. OSS-core by decision (ent#392): deliberately ungated — no
 `requires_entitlement`, logic stays in the OSS tree. Recorded explicitly because
 CLAUDE.md's default for an enterprise-tracker feature is gated unless ruled otherwise, so

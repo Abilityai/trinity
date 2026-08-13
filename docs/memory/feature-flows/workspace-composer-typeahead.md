@@ -132,6 +132,7 @@ happen:
 | caret keys while open | close, key passes | Same reason, from the keyboard |
 | non-collapsed selection | no trigger | The user is selecting, not composing a token |
 | click outside the wrapper | close **without** arming the Esc sentinel | Otherwise "type `@`, click away to read something, click back, keep typing" stays suppressed until the `@` is deleted |
+| an accepted pick | close **and settle** the token it inserted | The splice appends its separator only when the next char is not already whitespace, so a mid-sentence pick leaves the caret *inside* the new token — and `setSelectionRange()` fires a `select`, so the popup would reopen over its own successful choice. Editing the token back re-arms it |
 
 `resetTypeahead()` runs on every **programmatic** write to `input.value` —
 `send()`, the prefill watcher, the thread switch, and both dictation handlers.
@@ -153,8 +154,11 @@ this issue exists to fix — and a room needs it *more* than a 1:1 does, because
 
 But `mentionedAgents` is **never called on the room path** — room mention-waking
 resolves server-side inside `POST /api/rooms/{id}/messages` — so the round-trip
-proof above does not transfer. Two questions had to be settled against the real
-server rather than assumed, using the answer the endpoint already returns
+proof above does not transfer. It also cannot be replaced by reading the engine:
+the rooms module is a private submodule that OSS clones do not check out, so a
+source reading is neither reproducible from this repo nor pinned to the commit
+this branch builds against. The evidence is therefore what the **server
+answered**, using the fields the endpoint already returns
 (`{room_id, seq, mentions, woke}`):
 
 | Probe | Observed |
@@ -162,13 +166,22 @@ server rather than assumed, using the answer the endpoint already returns
 | `@<participant>` | `{"mentions": ["acme-scout"], "woke": ["acme-scout"]}` |
 | `@<non-participant>` | `{"mentions": [], "woke": []}` |
 
-So the grammar matches (a `buildMentionToken()` token is recognised and wakes the
-agent), and the candidate list must be the room's **agent participants**, not the
-roster: the engine's `resolve_mentions` keeps only `kind == "agent"` participants
-that have not left, and nothing outside the room is recruited. Offering the
-roster would manufacture a silent no-op — the same class as offering an
-un-mentionable slug. Recruiting a genuinely new agent stays with the explicit
-"+ Add agent" control, which is honest about spending money on another agent.
+Two things follow, and only two. The grammar matches: a `buildMentionToken()`
+token is recognised and wakes the agent, which is the property the `@` affordance
+depends on. And the candidate list should be the room's **agent participants**,
+because those are the names a pick is *known* to wake — offering the roster would
+put names in front of the user with no evidence that choosing one does anything,
+the same class of silent no-op as offering an un-mentionable slug.
+
+What is deliberately **not** concluded is that a non-participant mention has no
+effect at all. Requirements §5.12 records an engine-side newcomer-join path from
+ent#361 (`_join_mentioned_newcomers`), and two empty response fields do not
+disprove it — a join would surface as a participant change, which the probe did
+not look at. If that path is live, this list is narrower than the engine allows.
+That is an acceptable place to be narrow: recruiting a genuinely new agent stays
+with the explicit "+ Add agent" control, which is honest about spending money on
+another agent, and §5.12's own safety framing ("only a human may recruit") argues
+for keeping recruitment an explicit act rather than a side effect of typing.
 
 `/`-in-room is deferred: a room has N participants and no active agent, so
 "whose playbooks?" has no answer without inventing a two-step picker or per-row
@@ -215,12 +228,12 @@ No network call, no store action, no backend change anywhere on this path.
 
 | Layer | File | Change |
 |---|---|---|
-| Logic | `src/frontend/src/components/portal/portalUtils.js` | +21 pure exports (15 functions, 6 constants) beside `MENTION_RE`; `starterFor` lifted here |
+| Logic | `src/frontend/src/components/portal/portalUtils.js` | +22 pure exports (16 functions, 6 constants) beside `MENTION_RE`; `starterFor` lifted here |
 | UI | `src/frontend/src/components/portal/PortalTypeahead.vue` | **new** — presentational panel, two consumers |
 | UI | `src/frontend/src/components/portal/PortalConversation.vue` | anchored wrapper, dispatcher handlers, placeholder |
 | UI | `src/frontend/src/components/portal/PortalRoom.vue` | `@` over the room's wake-set; textarea ref + doc-click listener |
 | UI | `src/frontend/src/components/portal/PortalBriefing.vue` | imports `starterFor` instead of defining it |
-| Tests | `src/frontend/tests/unit/portalComposerTypeahead.spec.js` | **new** — 105 tests |
+| Tests | `src/frontend/tests/unit/portalComposerTypeahead.spec.js` | **new** — 111 tests |
 
 Backend, store and router are untouched: **no new endpoint, no new table, no
 migration.**
@@ -279,7 +292,7 @@ The one genuine *contract* — the mention grammar — is single-sourced by
 
 ## Tests
 
-`src/frontend/tests/unit/portalComposerTypeahead.spec.js` — 105 tests, node env.
+`src/frontend/tests/unit/portalComposerTypeahead.spec.js` — 111 tests, node env.
 
 | # | Area | What it pins |
 |---|---|---|
@@ -293,20 +306,23 @@ The one genuine *contract* — the mention grammar — is single-sourced by
 | 8 | `typeaheadEmptyMessage` | three distinct statements; room wording; silence without the capability; copy asserts nothing about operator configuration |
 | 9 | `resolveComposerKey` | all 16 Enter modifier combinations (the `.exact` table), open × hasActive × hasCandidates, IME, Tab/Shift+Tab, Escape, caret keys |
 | 10 | dismissal | Esc-then-keep-typing stays closed; retype re-arms; a cleared sentinel re-opens (the session-long-dead-feature guard) |
+| 10b | post-pick settle | a mid-sentence pick leaves a re-detectable trigger at the new caret; `dismissAfterInsert` suppresses exactly it; nothing to settle when a separator was appended; editing the name back re-arms |
 | 11 | active index | wrap both ends; no-op on empty; a stale index is **dropped**, not clamped |
 | 12 | bounds + `starterFor` | at / under / over the limit; honest overflow; null-safe starter |
 | 13 | `roomMentionSource` | participants not roster; label join; junk |
 | 14 | source guards | the `.exact` binding is gone and delegates to the tested keymap; `autoGrow` still on the input path; ≥4 `resetTypeahead()` call sites; `e.target` not the ref; wrapper flex classes; placeholder advertises both triggers; room scopes to participants and has no `/`; briefing imports `starterFor`; popup geometry, `mousedown`, overflow footer, listbox semantics, no new `v-html` |
 
-Four mutations were run against the finished suite to prove the guards can fail:
-baking a space into `buildMentionToken` (8 failures), accepting Enter without an
-explicit selection (1), dropping the mentionable filter (6), and dropping the
-forward scan (3).
+Seven mutations were run against the suite to prove the guards can fail, four at
+implementation and three more at review: baking a space into `buildMentionToken`
+(8 failures), accepting Enter without an explicit selection (1), dropping the
+mentionable filter (6), dropping the forward scan (3), removing the token-boundary
+rule (5 — the AC#6 loop), re-typing `isMentionable` as a hand-copied regex that
+drifted to allow dots (10), and dropping the post-pick settle (1).
 
 Commands:
 
 ```
-cd src/frontend && npx vitest run          # 23 files / 438 tests
+cd src/frontend && npx vitest run          # 23 files / 444 tests
 cd src/frontend && npm run check:tokens
 cd src/frontend && npm run build
 node src/frontend/scripts/scan-raw-colors.mjs src/frontend
@@ -322,12 +338,17 @@ node src/frontend/scripts/scan-raw-colors.mjs src/frontend
   creation, on both sides at once) is cross-repo.
 * A mention typed mid-word (`foo@bar`) still resolves on send — the parser is
   unanchored. The typeahead does not offer it; unchanged ent#361 behaviour.
-* After Esc, the same token cannot be re-opened without editing it back.
+* After Esc — or after a pick that settled the token it inserted — that same
+  token cannot be re-opened without editing it back. Appending to a just-picked
+  name therefore keeps the list shut; backspacing into it brings the list back.
 * No fuzzy matching. Playbook titles match on a word-start prefix (they are prose
   up to 200 chars, so a substring rule makes a one-character query match nearly
   everything); agent names also accept a substring, because they are short
   identifiers that frequently share a deployment prefix.
 * The empty line cannot distinguish "no playbooks configured" from "the agent was
   stopped when the roster was built", so it deliberately says neither.
-* The room `@` list is scoped to current participants; if the engine ever gains
-  mention-driven recruiting, this list has to widen with it.
+* The room `@` list is scoped to current participants — the names a pick is known
+  to wake. If the engine's ent#361 newcomer-join path does recruit on a
+  non-participant mention (not established here; see above), this list is
+  narrower than the engine allows and recruiting is reachable only through
+  "+ Add agent".
