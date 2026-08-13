@@ -148,9 +148,12 @@ function checkItem(item, rawItem, field) {
     // APScheduler's Python-truthiness `(self.last or MAX) - self.first`, where an
     // explicit last of 0 falls back to the field max (probed: `0-0/2` ACCEPT,
     // `5-5/1` REJECT). `??` would reject server-valid crons — see header comment.
+    // Single echo per message (the prefix already quotes the token): every
+    // shape measures ≤ 2 lines at the modal's 400px width, inside the min-h-8
+    // reserved slot — a second echo pushed worst cases to 3 lines (measured).
     const span = (last || field.max) - first
     if (step !== undefined && step > span) {
-      return itemError(rawItem, field, `step ${step} is larger than the range of "${echo(item)}"`)
+      return itemError(rawItem, field, `step ${step} is larger than the range`)
     }
     return null
   }
@@ -172,12 +175,12 @@ function checkItem(item, rawItem, field) {
       // never a fall-through (mirrors the propagating ValueError).
       const firstIdx = names.indexOf(nm[1].toLowerCase())
       if (firstIdx === -1) {
-        return itemError(rawItem, field, `"${echo(nm[1])}" is not a recognized name (use ${names[0]}..${names[names.length - 1]})`)
+        return itemError(rawItem, field, `not a recognized name (use ${names[0]}..${names[names.length - 1]})`)
       }
       if (nm[2] !== undefined) {
         const lastIdx = names.indexOf(nm[2].toLowerCase())
         if (lastIdx === -1) {
-          return itemError(rawItem, field, `"${echo(nm[2])}" is not a recognized name (use ${names[0]}..${names[names.length - 1]})`)
+          return itemError(rawItem, field, `not a recognized name (use ${names[0]}..${names[names.length - 1]})`)
         }
         if (firstIdx > lastIdx) {
           return itemError(rawItem, field, 'range first value is greater than last')
