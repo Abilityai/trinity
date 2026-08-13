@@ -51,7 +51,14 @@ function scriptOf(source) {
     // reads as undefined. Leftmost-match wins here, so whichever quote opens
     // first consumes the others.
     .replace(
-      /`(?:\\.|\$\{[^}]*\}|[^`\\])*`|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g,
+      // Each branch is UNAMBIGUOUS: `\\.` starts with a backslash and the class
+      // excludes one, so no input can be matched two ways. An earlier version
+      // also carried `\$\{[^}]*\}` for template placeholders — but `[^`\\]`
+      // already consumes those character by character, so the two overlapped and
+      // the alternation backtracked exponentially (CodeQL js/redos, high). It
+      // reads only our own source files, so it was never exploitable; it was
+      // still a real defect and the branch bought nothing.
+      /`(?:\\.|[^`\\])*`|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"/g,
       '""',
     )
 }
