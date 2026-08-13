@@ -17,6 +17,12 @@ const props = defineProps({
   buckets: { type: Array, required: true },
   // bucket -> hex color
   colors: { type: Object, required: true },
+  // OPTIONAL bucket -> display label (#2161). Presentation only: entries in
+  // `buckets` are the KEYS used to index `by_type`, so a caller wanting
+  // client-facing wording must translate here and never in the array itself —
+  // a renamed bucket would look up `by_type['Tool call']`, find nothing, and
+  // render an empty chart. Unmapped buckets show their own name.
+  labels: { type: Object, default: () => ({}) },
   height: { type: Number, default: 150 },
 })
 
@@ -49,6 +55,12 @@ function segHeight(d, b) {
 // cached bundle against a newer backend) renders gray, not invisible.
 function colorFor(b) {
   return props.colors[b] || '#94a3b8'
+}
+
+// Display text for a bucket. The bucket name is its own label unless the caller
+// supplied a translation — see the `labels` prop.
+function labelFor(b) {
+  return props.labels[b] || b
 }
 
 function fmtDate(iso) {
@@ -106,7 +118,7 @@ function showLabel(i) {
           <div class="font-semibold mb-1 whitespace-nowrap">{{ fmtDate(d.date) }}</div>
           <div v-for="b in bucketsForDay(d)" :key="b" class="flex items-center justify-between gap-3 whitespace-nowrap">
             <span class="flex items-center">
-              <span class="inline-block w-2 h-2 rounded-sm mr-1.5" :style="{ backgroundColor: colorFor(b) }"></span>{{ b }}
+              <span class="inline-block w-2 h-2 rounded-sm mr-1.5" :style="{ backgroundColor: colorFor(b) }"></span>{{ labelFor(b) }}
             </span>
             <span class="font-mono">{{ d.by_type[b] }}</span>
           </div>
@@ -136,7 +148,7 @@ function showLabel(i) {
         class="inline-flex items-center text-xs text-gray-600 dark:text-gray-300"
       >
         <span class="w-2.5 h-2.5 rounded-sm mr-1" :style="{ backgroundColor: colorFor(b) }"></span>
-        {{ b }}
+        {{ labelFor(b) }}
         <span class="ml-1 font-mono text-gray-400 dark:text-gray-500">{{ bucketTotals[b] }}</span>
       </span>
     </div>

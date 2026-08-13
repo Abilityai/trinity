@@ -428,11 +428,20 @@
   `alert`s) and never their `context` (free-form agent JSON, a known
   credential-leak surface); report reads are agent-scoped, since report ids are
   global and the roster gate only proves the caller may reach *this* agent.
+- **One field crosses deliberately (#2161)**: a row's **schedule name**. Without
+  it every scheduled row rendered the identical three words. It is an operator's
+  short label, never the schedule's `message` — that is a prompt, and prompts are
+  what this page exists not to show. Resolved by one bounded query into an
+  `id → name` map built from *this* agent's schedules, so a foreign id misses by
+  construction; a failing read costs the labels, not the rows.
 - **Key Features**:
   - Header: avatar, name, description, health, last active
-  - Stats strip: activity chart, tasks in window, completed rate, first-try rate
+  - Stats strip: tasks in window, completed rate, first-try rate, window selector
+    (shown only on the tabs the window drives)
   - Tabs: Overview · Reports · Files · What it can do · Activity
-  - Overview leads with **open asks**, then recent work, then this user's chats
+  - Overview: activity chart (the shared `StackedBarChart`, #1107 — bounded, not
+    a full-bleed strip), then **open asks** beside recent work, then this user's
+    chats. Asks stay first in DOM order so the mobile stack keeps the priority
   - Everything DB-sourced, so a **stopped** agent renders degraded, not empty:
     health `unknown` (monitoring is default-OFF, so "unhealthy" would be a lie),
     empty sections, and a failing data source degrades that section only
@@ -444,6 +453,20 @@
   come from something real. The **first-try rate** beside it IS real: successes
   with `retry_count` 0, distinct from the success rate (which counts a
   retried-then-succeeded execution as a success).
+- **Two of #2161's own ACs were deliberately overridden** — recorded so they are
+  not "fixed" back later. Its AC #3 asked for a **message summary** in recent
+  work: rejected, no prompt text reaches this surface; the schedule name answers
+  the same need for schedule-backed rows, and other rows keep trigger/duration/
+  time (AC #3 met for scheduled rows only). Its AC #4 asked for a **dedicated
+  asks tab**: rejected, since an agent reaching you when no chat is open is the
+  page's reason to exist and a tab is somewhere you must go — the defect was that
+  asks were unbounded, so they are contained in place (compact, clamped, first
+  five plus a counted toggle, no nested scroll per #2101).
+- **The stage escape is fail-closed (#2161)**: "Start a chat" did nothing because
+  the guard enumerated route params and `/workspace/a/:agentName` was added after
+  it was written — the third time that list went stale (#2128 was the second).
+  `shouldEscapeStage` tests route *shape*, so a future stage route cannot
+  silently re-break it.
 - **Supersedes**: ent#359's interim roster-click behaviour (a row with unread
   opened the unread chat). The page resolves that properly — its Overview lists
   the chats the agent belongs to, unread counts included.

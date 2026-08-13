@@ -44,18 +44,15 @@
             <div class="text-xs text-gray-500 dark:text-gray-400" title="Succeeded without needing a retry">first try</div>
           </div>
 
-          <!-- Activity chart: CSS bars, no charting dependency for a strip. -->
-          <div class="flex-1 min-w-[140px] flex items-end gap-[3px] h-10" :aria-label="`Activity over the last ${windowLabel}`">
-            <div
-              v-for="d in stats.timeline || []"
-              :key="d.date"
-              class="flex-1 rounded-sm bg-action-primary-500/70 dark:bg-action-primary-500/50 min-h-[2px]"
-              :style="{ height: barHeight(d) }"
-              :title="`${d.date}: ${d.total ?? 0}`"
-            ></div>
-          </div>
+          <!-- The activity chart used to live here as a bespoke full-bleed bar
+               strip. It is now a bounded card on the Overview tab using the same
+               component the operator surface uses (#2161). -->
+          <div class="flex-1"></div>
 
+          <!-- Only shown where it changes something: the window drives the chart
+               and the headline numbers, not the asks or the chat list. -->
           <select
+            v-if="WINDOWED_TABS.includes(tab)"
             v-model="timeWindow"
             class="text-xs rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1"
             aria-label="Time window"
@@ -81,7 +78,7 @@
           @click="tab = t.id"
         >
           {{ t.label }}
-          <span v-if="t.id === 'overview' && asks.length" class="ml-1 px-1.5 rounded-full bg-action-primary-600 text-white text-[10px]">{{ asks.length }}</span>
+          <span v-if="t.id === 'overview' && asks.length" class="ml-1 px-1.5 rounded-full bg-action-primary-600 text-white text-[10px]">{{ asksBadge }}</span>
         </button>
       </nav>
     </header>
@@ -105,41 +102,77 @@
 
       <!-- ---------------------------- OVERVIEW ---------------------------- -->
       <template v-else-if="tab === 'overview'">
-        <!-- AC #5: open asks lead. This is the reason the page exists — it is
-             where the agent can reach the user when no chat is open. -->
-        <section v-if="asks.length" class="mb-6">
-          <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Waiting on you</h2>
-          <div
-            v-for="a in asks"
-            :key="a.id"
-            class="mb-2 rounded-xl border border-amber-300/70 dark:border-amber-700/50 bg-amber-50/60 dark:bg-amber-900/10 px-3.5 py-3"
-          >
-            <div class="text-sm font-medium">{{ a.title || 'The agent needs a decision' }}</div>
-            <p v-if="a.question" class="mt-0.5 text-sm text-gray-600 dark:text-gray-300 whitespace-pre-wrap">{{ a.question }}</p>
-            <div v-if="a.options?.length" class="mt-1.5 flex flex-wrap gap-1.5">
-              <span v-for="o in a.options" :key="o" class="text-xs rounded-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-2 py-0.5">{{ o }}</span>
-            </div>
-            <!-- Answering writes to the operator queue, an operator surface with
-                 its own auth. Rather than render a control that 403s for a
-                 client, the answer path is the conversation. -->
-            <button class="mt-2 text-xs text-action-primary-600 hover:underline" @click="$emit('start-chat', agentName)">
-              Reply in chat →
-            </button>
+        <!-- Activity, in the same visual language as the operator Overview
+             (#1107): bounded, stacked by what triggered the work, both themes.
+             An empty window and an unreadable one are different sentences — a
+             blank chart frame for either would be the dead empty state. -->
+        <section class="mb-6 max-w-2xl">
+          <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">
+            Activity · last {{ windowLabel }}
+          </h2>
+          <div class="rounded-xl border border-gray-200 dark:border-gray-800 px-3.5 py-3">
+            <p v-if="stats.unavailable" class="text-sm text-gray-400">Stats are unavailable right now.</p>
+            <p v-else-if="!hasActivity" class="text-sm text-gray-400">No activity in this window.</p>
+            <StackedBarChart
+              v-else
+              :data="stats.timeline || []"
+              :buckets="chartBuckets"
+              :colors="BUCKET_COLORS"
+              :labels="PORTAL_BUCKET_LABELS"
+              :height="110"
+            />
           </div>
         </section>
 
-        <section class="mb-6">
-          <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Recent work</h2>
-          <p v-if="!recentWork.length" class="text-sm text-gray-400">Nothing yet.</p>
-          <ul v-else class="divide-y divide-gray-100 dark:divide-gray-800">
-            <li v-for="w in recentWork.slice(0, 8)" :key="w.id" class="py-2 flex items-center gap-3 text-sm">
-              <span class="w-2 h-2 rounded-full shrink-0" :class="statusDot(w.status)"></span>
-              <span class="flex-1 truncate text-gray-600 dark:text-gray-300">{{ triggerLabel(w.triggered_by) }}</span>
-              <span class="text-xs text-gray-400 tabular-nums">{{ duration(w.duration_ms) }}</span>
-              <span class="text-xs text-gray-400 shrink-0">{{ relative(w.started_at) }}</span>
-            </li>
-          </ul>
-        </section>
+        <!-- Asks lead — that is the reason the page exists, it is where the
+             agent reaches the user when no chat is open. On a wide screen they
+             sit beside recent work rather than pushing it below the fold; they
+             stay FIRST in DOM order so the mobile stack keeps the priority. -->
+        <div class="mb-6 grid gap-6" :class="{ 'lg:grid-cols-2': asks.length }">
+          <section v-if="asks.length">
+            <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Waiting on you</h2>
+            <div
+              v-for="a in visibleAsks"
+              :key="a.id"
+              class="mb-2 rounded-xl border border-amber-300/70 dark:border-amber-700/50 bg-amber-50/60 dark:bg-amber-900/10 px-3 py-2.5"
+            >
+              <div class="text-sm font-medium">{{ a.title || 'The agent needs a decision' }}</div>
+              <p v-if="a.question" class="mt-0.5 text-xs text-gray-600 dark:text-gray-300 line-clamp-3">{{ a.question }}</p>
+              <div v-if="a.options?.length" class="mt-1.5 flex flex-wrap gap-1">
+                <span v-for="o in a.options" :key="o" class="text-[11px] rounded-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-1.5 py-0.5">{{ o }}</span>
+              </div>
+              <!-- Answering writes to the operator queue, an operator surface
+                   with its own auth. Rather than render a control that 403s for
+                   a client, the answer path is the conversation. -->
+              <button class="mt-1.5 text-xs text-action-primary-600 hover:underline" @click="$emit('start-chat', agentName)">
+                Reply in chat →
+              </button>
+            </div>
+            <!-- In place, not a nested scroll region: this page has one scroll
+                 axis (#2101), and a pane that scrolls inside a page that scrolls
+                 traps the gesture on touch. -->
+            <button
+              v-if="asks.length > ASKS_PREVIEW"
+              class="text-xs text-action-primary-600 hover:underline"
+              @click="allAsks = !allAsks"
+            >
+              {{ allAsks ? 'Show fewer' : `Show all ${asksBadge}` }}
+            </button>
+          </section>
+
+          <section>
+            <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Recent work</h2>
+            <p v-if="!recentWork.length" class="text-sm text-gray-400">Nothing yet.</p>
+            <ul v-else class="divide-y divide-gray-100 dark:divide-gray-800">
+              <li v-for="w in recentWork.slice(0, 8)" :key="w.id" class="py-2 flex items-center gap-3 text-sm">
+                <span class="w-2 h-2 rounded-full shrink-0" :class="statusDot(w.status)"></span>
+                <span class="flex-1 min-w-0 truncate text-gray-600 dark:text-gray-300" :title="workLabel(w)">{{ workLabel(w) }}</span>
+                <span class="text-xs text-gray-400 tabular-nums">{{ duration(w.duration_ms) }}</span>
+                <span class="text-xs text-gray-400 shrink-0">{{ relative(w.started_at) }}</span>
+              </li>
+            </ul>
+          </section>
+        </div>
 
         <section>
           <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Your chats with {{ agentName }}</h2>
@@ -219,7 +252,7 @@
         <ul v-else class="divide-y divide-gray-100 dark:divide-gray-800">
           <li v-for="w in recentWork" :key="w.id" class="py-2.5 flex items-center gap-3 text-sm">
             <span class="w-2 h-2 rounded-full shrink-0" :class="statusDot(w.status)"></span>
-            <span class="flex-1 truncate text-gray-600 dark:text-gray-300">{{ triggerLabel(w.triggered_by) }}</span>
+            <span class="flex-1 min-w-0 truncate text-gray-600 dark:text-gray-300" :title="workLabel(w)">{{ workLabel(w) }}</span>
             <span class="text-xs text-gray-400 tabular-nums">{{ duration(w.duration_ms) }}</span>
             <span class="text-xs text-gray-400 shrink-0">{{ relative(w.started_at) }}</span>
           </li>
@@ -247,7 +280,10 @@
  */
 import { ref, computed, watch, onMounted } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
+import { BUCKET_COLORS, bucketsForChart, hasChartActivity } from '@/utils/executionBuckets'
+import StackedBarChart from '@/components/StackedBarChart.vue'
 import PortalAvatar from './PortalAvatar.vue'
+import { PORTAL_BUCKET_LABELS } from './portalUtils'
 
 const props = defineProps({
   agentName: { type: String, required: true },
@@ -267,6 +303,19 @@ const TABS = [
   { id: 'activity', label: 'Activity' },
 ]
 
+// Tabs the time window actually changes. Reports, Files and the capability list
+// are not windowed, and a selector that redraws nothing is a broken control.
+const WINDOWED_TABS = ['overview', 'activity']
+
+// How many asks show before the toggle. Enough to see there is a queue, few
+// enough that the rest of the Overview stays on screen.
+const ASKS_PREVIEW = 5
+
+// Mirrors `agent_page.MAX_ASKS`. The service truncates there, so a full-length
+// list means "at least this many" — named here rather than inlined so the
+// duplication across the API boundary is visible to whoever changes the cap.
+const ASKS_CAP = 20
+
 const tab = ref('overview')
 const timeWindow = ref('7d')
 const page = ref(null)
@@ -278,8 +327,20 @@ const reportPayloads = ref({})
 const documents = ref([])
 const uploads = ref([])
 
+const allAsks = ref(false)
+
 const stats = computed(() => page.value?.stats || { total_executions: 0, timeline: [] })
 const asks = computed(() => page.value?.asks || [])
+const visibleAsks = computed(() => (allAsks.value ? asks.value : asks.value.slice(0, ASKS_PREVIEW)))
+// The service caps asks at MAX_ASKS, so a full list is a floor, not a count —
+// rendering a bare "20" against 50 pending would be a wrong number, not a
+// rounded one.
+const asksBadge = computed(() => (
+  asks.value.length >= ASKS_CAP ? `${ASKS_CAP}+` : String(asks.value.length)
+))
+
+const chartBuckets = computed(() => bucketsForChart(stats.value))
+const hasActivity = computed(() => hasChartActivity(stats.value))
 const recentWork = computed(() => page.value?.recent_work || [])
 const capabilities = computed(() => page.value?.capabilities || [])
 const chats = computed(() => props.threads.filter(
@@ -350,6 +411,7 @@ watch(() => props.agentName, () => {
   openReport.value = null
   documents.value = []
   uploads.value = []
+  allAsks.value = false
   tab.value = 'overview'
   load()
 })
@@ -368,9 +430,6 @@ async function toggleReport(id) {
   }
 }
 
-const maxBar = computed(() => Math.max(1, ...(stats.value.timeline || []).map((d) => d.total || 0)))
-const barHeight = (d) => `${Math.max(4, Math.round(((d.total || 0) / maxBar.value) * 100))}%`
-
 const pct = (v) => (v === null || v === undefined ? '—' : `${Math.round(v * 100)}%`)
 const pretty = (v) => { try { return JSON.stringify(v, null, 2) } catch { return String(v) } }
 const size = (b) => (b === null || b === undefined ? '' : b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`)
@@ -387,6 +446,17 @@ const triggerLabel = (t) => ({
   loop: 'Loop', reminder: 'Reminder', event: 'Event', voip: 'Phone call',
   voice: 'Voice', mcp: 'Tool call', fan_out: 'Fan-out',
 }[t] || (t ? t.replace(/_/g, ' ') : 'Task'))
+
+// What a row of work actually says. The trigger alone repeats "Scheduled run"
+// down the whole list and tells the reader nothing, so a resolved schedule name
+// is appended when the service could find one (#2161). It is deliberately the
+// only content on this row: the task's message is a prompt, and this page is
+// read by external clients as well as operators.
+const workLabel = (w) => (
+  w.schedule_name
+    ? `${triggerLabel(w.triggered_by)} · ${w.schedule_name}`
+    : triggerLabel(w.triggered_by)
+)
 
 function relative(iso) {
   if (!iso) return ''

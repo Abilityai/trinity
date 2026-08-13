@@ -282,3 +282,46 @@ export function collapseSelection(selected, { multi = false } = {}) {
   if (multi || list.length <= 1) return list
   return [list[list.length - 1]]
 }
+
+// #2161 — the stage escape, as a shape test rather than a param enumeration.
+//
+// `Portal.vue` renders ONE thing on its main stage, chosen by which route param
+// is present: an agent page (`/workspace/a/:agentName`), a room
+// (`/workspace/r/:roomId`), or a conversation (`/workspace/c/:sessionId`). Every
+// handler that wants to hand the stage back to a fresh chat has to leave the
+// current route first, and each one used to ask that question by listing the
+// params it knew about.
+//
+// That list went stale three times. #2128 found `roomId` missing from guards
+// written when `sessionId` was the only stage route; ent#360 then added
+// `/workspace/a/:agentName` and did not revisit them, which is why "Start a
+// chat" on the agent page did nothing at all — the chat was prepared behind a
+// page that never yielded the stage.
+//
+// So the question is inverted, and it fails CLOSED: anything that is not the
+// bare workspace root is a stage that must be left. A fourth stage route needs
+// no edit here, and cannot silently re-break the button.
+export const WORKSPACE_ROOT = '/workspace'
+
+export function shouldEscapeStage(path) {
+  if (!path) return false                      // no route yet — nothing to leave
+  return path.replace(/\/+$/, '') !== WORKSPACE_ROOT
+}
+
+// #2161 — client-facing names for the activity chart's trigger buckets.
+//
+// The bucket names are the backend's internal vocabulary (`_BUCKET_ORDER`), and
+// the agent page already translates that vocabulary everywhere else it shows it
+// (`triggerLabel`: `mcp` → "Tool call"). A legend reading "MCP" beside a row
+// reading "Tool call" is the same fact in two languages on a page an external
+// client may be reading.
+//
+// Presentation ONLY. These are never substituted into the `buckets` array the
+// chart stacks by — those entries are the keys it indexes `by_type` with, so a
+// translated array would find nothing and draw an empty chart.
+export const PORTAL_BUCKET_LABELS = {
+  'Chat/Tasks': 'Chat',
+  'MCP': 'Tool call',
+  'Channels': 'Messaging',
+  'Public': 'Public link',
+}

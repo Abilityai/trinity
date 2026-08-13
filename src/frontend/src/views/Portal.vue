@@ -273,7 +273,7 @@ import PortalCodeInput from '@/components/portal/PortalCodeInput.vue'
 import PortalAgentPicker from '@/components/portal/PortalAgentPicker.vue'
 import PortalRoom from '@/components/portal/PortalRoom.vue'
 import PortalAgentPage from '@/components/portal/PortalAgentPage.vue'
-import { resolveAgentLanding, shouldMarkTurnRead } from '@/components/portal/portalUtils'
+import { resolveAgentLanding, shouldMarkTurnRead, shouldEscapeStage } from '@/components/portal/portalUtils'
 
 const store = useClientPortalStore()
 const route = useRoute()
@@ -377,14 +377,23 @@ function leaveRoomRoute() {
   router.push('/workspace')
 }
 
-// Leave ANY specific route, not an enumerated list of params — rationale in
-// newChatWithAgent below. Identical bug here: from /workspace/a/:agentName the
-// blank-chat control set state and navigated nowhere, so the agent page kept
-// rendering and the button looked just as dead.
-function startBlankChat() {
-  unreachableAgent.value = null
-  pendingSession.value = null; prefill.value = ''; convGen.value++
-  if (route.path !== '/workspace') router.push('/workspace')
+// The one way to hand the stage back. #2158 reached the same conclusion
+// concurrently and inlined `route.path !== '/workspace'` at all three sites;
+// this keeps that rule and moves it behind a name, for two reasons the inline
+// form cannot cover:
+//
+//   * it is a PURE FUNCTION in portalUtils, so it is testable — this project has
+//     no component-mount harness, and an inline closure over `route` can only be
+//     pinned by scanning the source for a spelling;
+//   * the QUERY is part of the stage too. `?agent=` is the ent#358 landing spot,
+//     re-read by `bootstrap()` after every sign-in, so `/workspace?agent=X`
+//     satisfies the path check while still carrying X into the next session.
+//
+// `startBlankChat` used to live here and is deleted rather than converted: ent#361
+// (8e5157f1) renamed it out of the `@new-chat` binding and handed that event to
+// the picker, so it has had ZERO callers since — #2158 converted an orphan.
+function escapeStage() {
+  if (shouldEscapeStage(route.path, route.query)) router.push('/workspace')
 }
 
 async function onPickerConfirm(agentNames) {
@@ -529,17 +538,14 @@ function newChatWithAgent(name) {
   pendingSession.value = null; prefill.value = ''; convGen.value++
   // Leave ANY specific route, not an enumerated list of params.
   //
-  // This condition has now been wrong twice for the same reason. #2128 added
-  // `roomId` after picking an agent while parked on a room URL left the room on
-  // screen; ent#360 then added `/workspace/a/:agentName` and did not extend the
-  // list, so "Start a chat" on the agent page set the state and navigated
-  // nowhere — the page kept rendering (it is the first branch of the stage
-  // chain) and the chat never appeared.
-  //
-  // Every specific Workspace route is `/workspace/<something>`, so asking
-  // whether we are on the bare one answers the actual question and cannot go
-  // stale when a fourth route is added.
-  if (route.path !== '/workspace') router.push('/workspace')
+  // This condition was wrong twice for the same reason. #2128 added `roomId`
+  // after picking an agent while parked on a room URL left the room on screen;
+  // ent#360 then added `/workspace/a/:agentName` and did not extend the list, so
+  // "Start a chat" on the agent page set the state and navigated nowhere — the
+  // page kept rendering (it is the first branch of the stage chain) and the chat
+  // never appeared. #2158 fixed that by asking about route shape; `escapeStage`
+  // keeps that rule, names it, and extends it to the query.
+  escapeStage()
 }
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
 function openThread(t) {
@@ -734,8 +740,10 @@ function onSignOut() {
   threads.value = []; activeAgentName.value = null; pendingSession.value = null
   step.value = 'email'; email.value = ''; code.value = ''
   // Leave ANY specific route (rationale in newChatWithAgent) — otherwise a
-  // sign-out from a room or agent-page URL carries that id into the next
-  // session's address bar.
-  if (route.path !== '/workspace') router.push('/workspace')
+  // sign-out carries that room id (#2128) or agent name into the next session's
+  // address bar. The query matters most here: `?agent=X` survives the path
+  // check and is re-read by the next `bootstrap()`, so the next person to sign
+  // in on this browser lands on "You don't have access to X".
+  escapeStage()
 }
 </script>

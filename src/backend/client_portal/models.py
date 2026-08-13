@@ -173,14 +173,20 @@ class PortalAgentAsk(BaseModel):
 
 
 class PortalAgentWork(BaseModel):
-    """One execution, shape only. No message, response, cost or model — the
-    viewer may be an external client, and AC #7 excludes costs outright."""
+    """One execution: shape, plus the name of the schedule behind it.
+
+    No message, response, cost or model — the viewer may be an external client,
+    and AC #7 excludes costs outright. `schedule_name` (#2161) is the one
+    operator-authored string that crosses deliberately: a short label, never the
+    schedule's own `message`, which is a prompt.
+    """
     id: Optional[str] = None
     status: Optional[str] = None
     triggered_by: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     duration_ms: Optional[int] = None
+    schedule_name: Optional[str] = None
 
 
 class PortalFirstTry(BaseModel):
@@ -200,6 +206,10 @@ class PortalAgentStats(BaseModel):
     first_try: PortalFirstTry = Field(default_factory=PortalFirstTry)
     timeline: list = Field(default_factory=list)
     by_type: list = Field(default_factory=list)
+    # Canonical stack order for the chart, straight from the analytics accessor
+    # (#2161) — so the portal never re-derives an ordering that could drift from
+    # the operator surface's.
+    buckets: list[str] = Field(default_factory=list)
     unavailable: bool = False
 
 

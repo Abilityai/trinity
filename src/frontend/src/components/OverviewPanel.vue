@@ -15,6 +15,7 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import axios from 'axios'
 import { parseUTC } from '@/utils/timestamps'
+import { BUCKET_COLORS } from '@/utils/executionBuckets'
 import { useAuthStore } from '../stores/auth'
 import { useExecutionsStore } from '../stores/executions'
 import StackedBarChart from './StackedBarChart.vue'
@@ -35,26 +36,9 @@ const isRunning = computed(() => props.agent?.status === 'running')
 // plain guidance (only admins can enable the monitoring loop).
 const isAdmin = computed(() => authStore.role === 'admin')
 
-// Shared palette — bucket order must match db `_BUCKET_ORDER` (#1107).
-// An *analogous cool* ramp (indigo → violet → blue → sky → cyan → teal →
-// emerald) led by the indigo `action-primary`. Deliberately no warm hues:
-// mixing amber/rose with green/blue reads as a traffic light. Soft
-// 400-level shades keep it calm on the dark theme; the ramp reads as one
-// cohesive family rather than a categorical rainbow. One deliberate
-// exception (#1150): Loops is a fuchsia accent — it sits stacked between
-// Scheduled (cyan) and Agent-to-agent (teal) and the whole point of the
-// bucket is distinguishing loop bursts from scheduled work.
-const BUCKET_COLORS = {
-  'Chat/Tasks': '#6366f1',     // indigo-500  (action-primary, anchor)
-  'MCP': '#a78bfa',            // violet-400  (accent-purple)
-  'Channels': '#60a5fa',       // blue-400
-  'Public': '#38bdf8',         // sky-400
-  'Scheduled': '#22d3ee',      // cyan-400
-  'Loops': '#e879f9',          // fuchsia-400 (deliberate accent, #1150)
-  'Agent-to-agent': '#2dd4bf', // teal-400
-  'Voice': '#34d399',          // emerald-400
-  'Other': '#94a3b8',          // slate-400
-}
+// Shared palette — bucket order must match db `_BUCKET_ORDER` (#1107). Moved to
+// `utils/executionBuckets.js` when the Workspace agent page became a second
+// consumer (#2161); the ramp's rationale lives there with it.
 
 // Line-chart colors, also from the design-system semantic hues.
 const SUCCESS_COLOR = '#22c55e'  // green-500  (status-success)
