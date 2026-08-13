@@ -15,9 +15,23 @@ and the cheapest way to satisfy a gate is to not open the door.
 chosen with that in mind, because the same page serves a portal-token client and
 a platform user. Three places where that bites:
 
-* `recent_work` is projected down to status/trigger/time/duration. The
-  underlying accessor also returns `message`, `cost`, `model_used` and
-  `source_user_email` — another user's prompt, and two things AC #7 excludes.
+* `recent_work` is projected down to status/trigger/time/duration, plus the
+  **schedule name** (#2161). The underlying accessor also returns `message`,
+  `cost`, `model_used` and `source_user_email` — another user's prompt, and two
+  things AC #7 excludes. The schedule name is the one string that deliberately
+  does cross, because rows reading "Scheduled run" nine times tell the reader
+  nothing; it is a short label, never the schedule's `message` (which is a
+  prompt and is exactly what this page must not show).
+
+  It is **not** guaranteed to be operator-authored, and calling it that would be
+  the comfortable mistake: `POST /api/agents/{name}/schedules` is
+  `AuthorizedAgent` and the MCP `create_agent_schedule` tool exists, so an
+  agent-scoped key — hence a prompt-injected agent — can write the text that
+  renders on a client's page. It is therefore treated as untrusted content and
+  bounded (`MAX_SCHEDULE_NAME_CHARS`); Vue escapes it on render. The same is
+  already true of `asks` (`title`/`question` are agent-authored), so this is the
+  established boundary rather than a new one — but it is the reason the name is
+  capped and the prompt is never loaded at all.
 * `asks` carries only agent-authored `approval`/`question` items, never
   `alert`. Alerts are platform-generated (sync-failing, git-bloat, breaker
   dormancy) and are operations telemetry, not something the agent is asking a
@@ -48,6 +62,16 @@ ASK_TYPES = ("approval", "question")
 MAX_ASKS = 20
 MAX_RECENT_WORK = 20
 MAX_CHATS = 20
+
+# Executions the platform creates outside a cron schedule carry this sentinel
+# instead of a real schedule id (reminders, manual chat turns), so it can never
+# resolve to a name and is not worth a query.
+NO_SCHEDULE_ID = "__manual__"
+
+# `ScheduleCreate.name` carries no length bound, so the row label is capped
+# here rather than trusted. Long enough to tell schedules apart, short enough
+# that one cannot take over the list.
+MAX_SCHEDULE_NAME_CHARS = 80
 
 
 def _health(agent_name: str) -> dict:
@@ -85,7 +109,7 @@ def _stats(agent_name: str, window: str) -> dict:
         logger.warning("agent page: analytics failed for %s: %s", agent_name, e)
         return {
             "window": window, "window_hours": hours, "total_executions": 0,
-            "success_rate": None, "timeline": [], "by_type": [],
+            "success_rate": None, "timeline": [], "by_type": [], "buckets": [],
             "first_try": {"terminal": 0, "first_try": 0, "rate": None},
             "unavailable": True,
         }
@@ -98,6 +122,11 @@ def _stats(agent_name: str, window: str) -> dict:
         # can stack by what triggered the work, as the Overview one does.
         "timeline": a.get("timeline", []),
         "by_type": a.get("by_type", []),
+        # #2161: the accessor already computes the canonical stack order
+        # (`_BUCKET_ORDER` filtered to what is present). Forwarding it keeps that
+        # order in ONE place — deriving it client-side from `by_type` would be
+        # equivalent today and free to diverge tomorrow.
+        "buckets": a.get("buckets", []),
         # AC #3's "first-try rate". Distinct from success_rate above, which
         # counts a retried-then-succeeded execution as a success.
         "first_try": portal_db.first_try_stats(agent_name, hours),
@@ -137,20 +166,67 @@ def _asks(agent_name: str) -> list[dict]:
     return out
 
 
+def _schedule_names(agent_name: str, rows: list[dict]) -> dict:
+    """`schedule_id` → schedule NAME, for the rows that actually carry one (#2161).
+
+    One query for the whole page, never `db.get_schedule` per row: that is an N+1,
+    and it would also throw away the agent scoping this shape gets for free. The
+    map is built from *this* agent's own schedules, so a foreign or stale id
+    simply misses and the row falls back to its trigger label.
+
+    Only `id → name`, and the accessor is a **projected SELECT** rather than
+    `list_agent_schedules`, which returns whole `Schedule` models carrying
+    `message` and `validation_prompt`. Reading those and then choosing not to
+    return them would make this module's stated principle — a field that never
+    leaves the service cannot be leaked by a later edit — a review invariant.
+    Not loading them makes it structural, and it is one edit (`{s.id: s}`, or a
+    `description` for a subtitle) away from mattering.
+
+    The name is **truncated**: `ScheduleCreate.name` has no length bound, and
+    the writer is not necessarily a human (see the note in the module docstring),
+    so an unbounded string reaches a client page otherwise.
+
+    Fails soft: a schedules read that raises costs the labels, never the rows.
+    """
+    wanted = {
+        r.get("schedule_id") for r in rows
+        if r.get("schedule_id") and r.get("schedule_id") != NO_SCHEDULE_ID
+    }
+    if not wanted:
+        return {}
+    try:
+        # Already excludes soft-deleted rows (#834) — a deleted schedule's
+        # historical executions read as a plain trigger label, which is honest.
+        names = db.get_agent_schedule_names(agent_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("agent page: schedule names failed for %s: %s", agent_name, e)
+        return {}
+    return {
+        sid: name[:MAX_SCHEDULE_NAME_CHARS]
+        for sid, name in names.items() if sid in wanted and name
+    }
+
+
 def _recent_work(agent_name: str, limit: int = MAX_RECENT_WORK) -> list[dict]:
-    """What the agent has been doing — shape only, no content.
+    """What the agent has been doing — shape, plus the schedule's name.
 
     The accessor returns `message`, `cost`, `model_used` and `source_user_email`
     among others. A Workspace viewer may be an external client, so the prompt
     text of somebody else's task, the spend, and the model are all projected
     away here rather than filtered in the UI: a field that never leaves the
     service cannot be leaked by a later template change.
+
+    `schedule_name` (#2161) is the deliberate exception, because without it every
+    scheduled row rendered the same three words. It attaches to any row whose id
+    resolves — not only `triggered_by == "schedule"` — since a webhook that fires
+    a schedule *is* running that schedule, and naming it is the point.
     """
     try:
         rows = db.get_agent_executions_summary(agent_name, limit=limit)
     except Exception as e:  # noqa: BLE001
         logger.warning("agent page: executions read failed for %s: %s", agent_name, e)
         return []
+    names = _schedule_names(agent_name, rows)
     return [{
         "id": r.get("id"),
         "status": r.get("status"),
@@ -158,6 +234,7 @@ def _recent_work(agent_name: str, limit: int = MAX_RECENT_WORK) -> list[dict]:
         "started_at": r.get("started_at"),
         "completed_at": r.get("completed_at"),
         "duration_ms": r.get("duration_ms"),
+        "schedule_name": names.get(r.get("schedule_id")),
     } for r in rows]
 
 

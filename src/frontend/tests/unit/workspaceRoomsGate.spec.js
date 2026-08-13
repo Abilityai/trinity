@@ -71,20 +71,17 @@ vi.mock('axios', () => {
 })
 
 import axios from 'axios'
+import { stripComments } from './helpers/stripComments'
 import { applyAgentSelection, collapseSelection } from '@/components/portal/portalUtils'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE } from '@/stores/clientPortal'
 
 const PORTAL = fileURLToPath(new URL('../../src/views/Portal.vue', import.meta.url))
 const PICKER = fileURLToPath(new URL('../../src/components/portal/PortalAgentPicker.vue', import.meta.url))
 
-/** Strip HTML/JS comments so prose about the rule isn't scanned as code. */
-function stripComments(code) {
-  return code
-    .replace(/<!--[\s\S]*?-->/g, '')      // Vue template comments
-    .replace(/\/\*[\s\S]*?\*\//g, '')     // JS block comments
-    .replace(/^[ \t]*\/\/.*$/gm, '')      // whole-line // comments
-    .replace(/([^:])\/\/.*$/gm, '$1')     // trailing // comments (keep URLs)
-}
+// Comment stripping moved to a shared helper (#2161) rather than gaining a
+// third copy. The shared version loops the block-comment passes to a fixpoint —
+// one pass can leave a bare `<!--` behind, and residue is scanned as if it were
+// code, which fails a guard on the prose describing the rule it enforces.
 
 const portalSource = () => stripComments(readFileSync(PORTAL, 'utf8'))
 const pickerSource = () => stripComments(readFileSync(PICKER, 'utf8'))
@@ -249,36 +246,45 @@ describe('#2128 structure guards', () => {
     }
   })
 
-  it('F24 every exit from the stage leaves ANY specific route, not just a session', () => {
-    // The refusal must not be a room the user cannot leave. Each of these
-    // navigated only on `sessionId`, so from /workspace/r/:id nothing moved.
+  it('F24 every exit from the stage leaves ANY stage route, not a listed one', () => {
+    // Originally: each of these must test `route.params.roomId`, not
+    // `sessionId` alone — because from /workspace/r/:id nothing moved and the
+    // refusal became a room the user could not leave.
     //
-    // Originally asserted the literal `route.params.roomId`. That enumeration
-    // was itself the bug one route later: ent#360 added
-    // `/workspace/a/:agentName` and none of these three navigated from it, so
-    // the page kept rendering and the controls looked dead — the same failure
-    // this test exists for, with a different param missing from the list.
+    // That enumeration was itself the bug one route later: ent#360 added
+    // `/workspace/a/:agentName` and none of these navigated from it, so the page
+    // kept rendering and the controls looked dead — the same failure this test
+    // exists for, with a different param missing from the list. #2158 replaced
+    // it with a route-SHAPE check; #2161 moved that behind `escapeStage()` so it
+    // is a testable pure function and covers the query too.
     //
-    // So the assertion is now the route-SHAPE check, required of all three. It
-    // deliberately does NOT accept the old param spelling as an alternative:
-    // that enumeration is the defect, and a guard that still passes on it can
-    // only catch the params someone already thought of. A fourth Workspace
-    // route must not be able to re-break these.
+    // Two assertions, and BOTH are needed. Requiring the shared call keeps the
+    // rule in one place, where the query half lives; forbidding the param
+    // spelling is what stops the enumeration creeping back ALONGSIDE it, which
+    // a call-site check alone would not notice. A guard that still passes on
+    // the enumeration can only catch the params someone already thought of.
+    //
+    // `startBlankChat` is absent from the list because it has had no callers
+    // since ent#361 (8e5157f1) handed `@new-chat` to the picker — it is deleted
+    // rather than converted, so requiring anything of it would fail.
     const src = portalSource()
-    for (const fn of ['startBlankChat', 'newChatWithAgent', 'onSignOut']) {
+    for (const fn of ['newChatWithAgent', 'onSignOut']) {
       const at = src.indexOf(`function ${fn}(`)
       expect(at, `${fn} is gone`).toBeGreaterThan(-1)
       const body = src.slice(at, src.indexOf('\n}', at))
       expect(
         body,
-        `${fn} enumerates route params — from a room URL (or an agent-page ` +
-        `URL) it changes nothing, leaving the user parked with no way out`
-      ).toMatch(/route\.path\s*!==\s*'\/workspace'/)
+        `${fn} must hand back the stage via the shared escape — an inline param ` +
+        `list goes stale the next time a stage route is added, which is how this ` +
+        `bug shipped twice`
+      ).toContain('escapeStage()')
       expect(
         body,
-        `${fn} still enumerates route params alongside the shape check`
+        `${fn} enumerates route params — the spelling that was the defect`
       ).not.toMatch(/route\.params\.(sessionId|roomId|agentName)/)
     }
+    // And the enumeration must not come back anywhere in the file.
+    expect(src).not.toMatch(/route\.params\.sessionId\s*\|\|\s*route\.params\.roomId/)
   })
 })
 

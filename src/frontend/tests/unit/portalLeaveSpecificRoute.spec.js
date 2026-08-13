@@ -18,6 +18,19 @@
  * So this guards the SHAPE of the answer, not one more param name: the check
  * must be about being on the bare route, so a fourth Workspace route cannot
  * reintroduce it.
+ *
+ * #2161 kept that rule and moved it behind `escapeStage()` → the pure
+ * `shouldEscapeStage(path, query)` in portalUtils, for two reasons the inline
+ * form could not cover: it becomes testable by CALLING it (this project has no
+ * component-mount harness, so an inline closure over `route` can only ever be
+ * checked by scanning for a spelling), and it extends to the QUERY —
+ * `/workspace?agent=X` passes the path check while still carrying X into the
+ * next session, and `?agent=` is re-read by `bootstrap()` after every sign-in.
+ *
+ * These assertions therefore moved one level down rather than being relaxed:
+ * the exits must delegate, and the rule itself is asserted where it now lives.
+ * `startBlankChat` left the list because it has had no callers since ent#361
+ * (8e5157f1) handed `@new-chat` to the picker — it is deleted, not converted.
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'fs'
@@ -41,24 +54,38 @@ function fnBody(name) {
 }
 
 describe('leaving a specific Workspace route when starting a chat', () => {
-  // All THREE stage exits, not just the reported one. They carried the same
-  // enumeration, so ent#360 broke all three at once; fixing only the button in
-  // the bug report leaves the blank-chat control equally dead on the agent page
-  // and leaves sign-out carrying the agent id into the next session's URL.
-  const EXITS = ['newChatWithAgent', 'startBlankChat', 'onSignOut']
+  // Both LIVE stage exits, not just the reported one — they carried the same
+  // enumeration, so ent#360 broke them together; fixing only the button in the
+  // bug report leaves sign-out carrying the agent id into the next session's URL.
+  const EXITS = ['newChatWithAgent', 'onSignOut']
 
-  it.each(EXITS)('%s navigates away from any non-bare route', (fn) => {
-    expect(fnBody(fn)).toMatch(/route\.path\s*!==\s*'\/workspace'/)
+  it.each(EXITS)('%s delegates to the shared stage escape', (fn) => {
+    // Delegation IS the property now: the rule (path + query) lives in one
+    // place, so a future stage route or query key is fixed everywhere at once.
+    expect(fnBody(fn)).toMatch(/escapeStage\(\)/)
   })
 
   it.each(EXITS)('%s does NOT enumerate route params — that is what broke twice', (fn) => {
     // `sessionId || roomId` was correct until a third route existed. Naming
-    // params here means the next route silently re-breaks the control.
+    // params here means the next route silently re-breaks the control. Kept
+    // alongside the delegation check: an enumeration could creep back BESIDE
+    // the call, which a delegation-only assertion would not notice.
     expect(fnBody(fn)).not.toMatch(/route\.params\.(sessionId|roomId|agentName)/)
   })
 
-  it.each(EXITS)('%s still pushes to the bare workspace route', (fn) => {
-    expect(fnBody(fn)).toMatch(/router\.push\('\/workspace'\)/)
+  it('the escape still asks about route shape and still pushes the bare route', () => {
+    // The two assertions that used to be made against each exit, now made once
+    // against the single place that answers for all of them.
+    const body = fnBody('escapeStage')
+    expect(body).toMatch(/shouldEscapeStage\(route\.path,\s*route\.query\)/)
+    expect(body).toMatch(/router\.push\('\/workspace'\)/)
+  })
+
+  it('startBlankChat is gone rather than fixed', () => {
+    // ent#361 (8e5157f1) renamed it out of the `@new-chat` binding and gave that
+    // event to the picker, so it has had zero callers since. A dead function
+    // carrying a "fixed" comment reads as live to the next person.
+    expect(source).not.toMatch(/function startBlankChat\(/)
   })
 })
 

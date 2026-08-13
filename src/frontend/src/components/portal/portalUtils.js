@@ -282,3 +282,57 @@ export function collapseSelection(selected, { multi = false } = {}) {
   if (multi || list.length <= 1) return list
   return [list[list.length - 1]]
 }
+
+// #2161 — the stage escape, as a shape test rather than a param enumeration.
+//
+// `Portal.vue` renders ONE thing on its main stage, chosen by which route param
+// is present: an agent page (`/workspace/a/:agentName`), a room
+// (`/workspace/r/:roomId`), or a conversation (`/workspace/c/:sessionId`). Every
+// handler that wants to hand the stage back to a fresh chat has to leave the
+// current route first, and each one used to ask that question by listing the
+// params it knew about.
+//
+// That list went stale three times. #2128 found `roomId` missing from guards
+// written when `sessionId` was the only stage route; ent#360 then added
+// `/workspace/a/:agentName` and did not revisit them, which is why "Start a
+// chat" on the agent page did nothing at all — the chat was prepared behind a
+// page that never yielded the stage.
+//
+// So the question is inverted, and it fails CLOSED: anything that is not the
+// bare workspace root is a stage that must be left. A fourth stage route needs
+// no edit here, and cannot silently re-break the button.
+// A stage can also be named by the QUERY, not just the path. `?agent=` is the
+// ent#358 landing spot and `?new=` forces a fresh thread; both are read at
+// `bootstrap()`, which runs again after a sign-in. So a lingering `?agent=X`
+// is not cosmetic: signing out at `/workspace?agent=X` and handing the browser
+// to the next person makes THEIR first screen "You don't have access to X" —
+// the previous session's agent name, surfaced to someone who never asked for
+// it. That is the same class the path guard exists to close, so it belongs in
+// the same predicate rather than in a second one somebody has to remember.
+export const STAGE_QUERY_KEYS = ['agent', 'new']
+
+export const WORKSPACE_ROOT = '/workspace'
+
+export function shouldEscapeStage(path, query) {
+  if (path && path.replace(/\/+$/, '') !== WORKSPACE_ROOT) return true
+  if (!query) return false
+  return STAGE_QUERY_KEYS.some((k) => query[k] !== undefined && query[k] !== null && query[k] !== '')
+}
+
+// #2161 — client-facing names for the activity chart's trigger buckets.
+//
+// The bucket names are the backend's internal vocabulary (`_BUCKET_ORDER`), and
+// the agent page already translates that vocabulary everywhere else it shows it
+// (`triggerLabel`: `mcp` → "Tool call"). A legend reading "MCP" beside a row
+// reading "Tool call" is the same fact in two languages on a page an external
+// client may be reading.
+//
+// Presentation ONLY. These are never substituted into the `buckets` array the
+// chart stacks by — those entries are the keys it indexes `by_type` with, so a
+// translated array would find nothing and draw an empty chart.
+export const PORTAL_BUCKET_LABELS = {
+  'Chat/Tasks': 'Chat',
+  'MCP': 'Tool call',
+  'Channels': 'Messaging',
+  'Public': 'Public link',
+}

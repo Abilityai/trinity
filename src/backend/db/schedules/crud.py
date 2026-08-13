@@ -229,6 +229,34 @@ class ScheduleCrudMixin:
         with get_engine().connect() as conn:
             return [self._row_to_schedule(row) for row in conn.execute(stmt).mappings()]
 
+    def get_agent_schedule_names(self, agent_name: str) -> Dict[str, str]:
+        """``{schedule_id: name}`` for one agent's live schedules (#2161).
+
+        Deliberately a projected SELECT rather than a `.name` read off
+        `list_agent_schedules`, which returns whole `Schedule` models
+        carrying `message` and `validation_prompt` — the agent's prompts.
+        Its caller is the Workspace agent page, whose viewer may be an
+        external client and whose stated principle is that a field whichi
+        never leaves the service cannot be leaked by a later edit. Loading
+        the prompt and then choosing not to return it makes that a review
+        invariant; not loading it makes it structural.
+
+        Excludes soft-deleted schedules (#834), so an execution that
+        outlives its schedule resolves to nothing rather than a stale name.
+        """
+        stmt = select(agent_schedules.c.id, agent_schedules.c.name).where(
+            and_(
+                agent_schedules.c.agent_name == agent_name,
+                agent_schedules.c.deleted_at.is_(None),
+            )
+        )
+        with get_engine().connect() as conn:
+            return {
+                row["id"]: row["name"]
+                for row in conn.execute(stmt).mappings()
+                if row["id"] and row["name"]
+            }
+
     def find_active_schedules_exceeding_timeout(
         self, agent_name: str, ceiling_seconds: int
     ) -> List[Dict]:

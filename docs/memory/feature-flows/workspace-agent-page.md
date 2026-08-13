@@ -35,6 +35,7 @@ that never leaves the service cannot be surfaced by a later edit.
 | Surface | Underlying accessor also returns | Why it must not ship |
 |---|---|---|
 | `recent_work` | `message`, `cost`, `model_used`, `source_user_email` | `message` is another user's prompt; `cost` and `model_used` are excluded by AC #7 |
+| `recent_work` | — *except* `schedule_name` (#2161) | The one deliberate crossing. See [What crosses, and why it is the name and not the message](#what-crosses-and-why-it-is-the-name-and-not-the-message) |
 | `asks` | `context`, and `alert`-type items | `context` is free-form agent JSON and a known credential-leak surface (canary G-04 exists because secrets turn up there). `alert` items are platform-generated ops telemetry — sync-failing, git-bloat, breaker dormancy — not an agent asking a person anything |
 | report detail | any report in the install | Report ids are global. The roster gate proves only that the caller may reach **this** agent, so without an ownership check the page becomes a reader for every report on the instance. A foreign id returns the same 404 as a missing one, so it is not an existence oracle either (invariant #8) |
 
@@ -48,7 +49,8 @@ GET /api/enterprise/client-portal/agents/{name}/page?window=7d
        ├─ _health ............... last persisted health check
        ├─ _stats ................ db.get_agent_analytics (#1107) + first_try_stats
        ├─ _asks ................. operator queue, filtered + projected
-       └─ _recent_work .......... executions, projected to shape only
+       └─ _recent_work .......... executions, projected to shape
+            └─ _schedule_names .. ONE query, id → name only (#2161)
 ```
 
 One call rather than five, because the page is one screen: fetching header,
@@ -86,6 +88,147 @@ mechanism anywhere in Trinity — no table, no column, no endpoint. It has no da
 source, so it was omitted rather than invented. A number a user reads as "how
 well is this agent doing" has to come from something real.
 
+## The UX repairs (#2161)
+
+The page shipped with four defects, and fixing them forced two of ent#360's own
+acceptance criteria to be revisited rather than implemented. Both overrides are
+recorded here because a later contributor reading only the issue would "fix" them
+back.
+
+### What crosses, and why it is the name and not the message
+
+ent#360 projected `recent_work` down to shape, which was right about `message`
+and left every scheduled row rendering the same three words — "Scheduled run",
+eight times. The issue's AC #3 asked for a **message summary**; the answer is a
+**schedule name**, and the distinction is the whole decision:
+
+* the schedule's `message` is a **prompt**, written to instruct an agent, and is
+  precisely what a page serving external clients must not show;
+* its `name` is a short label an operator wrote to tell schedules apart, which is
+  the same job the row needs done.
+
+A per-viewer variant was considered — showing a viewer their *own* prompts, since
+`source_user_email` identifies them and that leaks nothing cross-user — and
+rejected: it doubles the row's shape by audience, and the product decision was no
+prompt text on this surface at all. The cost is honest and bounded: rows that are
+not schedule-backed (chat, loop, reminder) still carry only trigger, duration and
+time, so **AC #3 is met for scheduled rows only**.
+
+**It is not "operator-authored", and calling it that was the comfortable
+mistake.** `POST /api/agents/{name}/schedules` is `AuthorizedAgent` and the MCP
+`create_agent_schedule` tool exists, so an agent-scoped key — hence a
+prompt-injected agent — can write the text that renders on a client's page. So it
+is treated as untrusted content: capped at `MAX_SCHEDULE_NAME_CHARS` (80) in the
+service, escaped by Vue interpolation on render. The same is already true of
+`asks` (`title` and `question` are agent-authored), so this is the established
+boundary rather than a new one — but it is why the name is bounded rather than
+trusted. Gating it on `principal.is_platform` is one line away if an operator
+ever objects.
+
+Four properties of the lookup, each load-bearing:
+
+* **The prompt is never loaded at all.** `db.get_agent_schedule_names` is a
+  projected `SELECT id, name`, not a `.name` read off `list_agent_schedules`,
+  which returns whole `Schedule` models carrying `message` and
+  `validation_prompt`. Loading those and declining to return them would make
+  this module's own principle — *a field that never leaves the service cannot be
+  leaked by a later edit* — a review invariant; not loading them makes it
+  structural. One `{s.id: s}` refactor is all it would otherwise take, so a test
+  pins that the prompt-carrying accessor is not called.
+* **One query per page**, never `get_schedule` per row — that is an N+1 whose
+  only symptom is latency, so the test asserts the *call count*, not the output.
+* **Agent scoping is free.** Because the map holds only this agent's schedules, a
+  foreign or stale `schedule_id` simply misses. There is no ownership check to
+  forget.
+* **It fails soft.** A schedules read that raises costs the labels, never the
+  rows — the section is the executions; the names are a garnish on them.
+
+Misses are ordinary and are shown as a plain trigger label: the `__manual__`
+sentinel (chat turns, reminders), and soft-deleted schedules, whose executions
+outlive their name by up to 30 days (#834).
+
+The name attaches to **any** row whose id resolves, not only
+`triggered_by == "schedule"`: a webhook that fires a schedule is running that
+schedule, and naming it is the point.
+
+### Asks stay on the Overview — AC #4 overridden
+
+AC #4 asked for a dedicated tab with a count badge. The product decision was to
+keep asks where they are: the page's own reason to exist is that an agent can
+reach you when no chat is open, and a tab is a place you have to *go*. The defect
+was that they were unbounded, not that they were present. So they are contained
+instead — compact cards, the question clamped, the first five with a counted
+"Show all" toggle, and a two-column split beside recent work on wide screens.
+
+Two constraints on that layout:
+
+* **Asks are first in DOM order**, so the mobile stack keeps the priority the
+  page was built around.
+* **No nested scroll region.** #2101 settled this on this surface: the page has
+  one scroll axis, and a pane that scrolls inside a page that scrolls traps the
+  gesture on touch. Containment is first-N-plus-toggle, not `overflow-y-auto`.
+
+The badge reads `20+` at the cap, because `MAX_ASKS` truncates server-side — a
+bare "20" against 50 pending is a wrong number, not a rounded one.
+
+### The chart is the operator surface's chart
+
+The header's bespoke full-bleed CSS bar strip is gone; the Overview opens with a
+bounded card rendering `StackedBarChart.vue`, the same component Agent Detail
+uses (#1107). The payload already carried everything it needs, so this is a
+deletion plus a mount.
+
+Two things moved to make that honest rather than duplicated:
+
+* `BUCKET_COLORS` now lives in `utils/executionBuckets.js`. It had been inline in
+  `OverviewPanel.vue`; a second copy is exactly the shape that drifts, and the
+  *order* is a contract with the backend's `_BUCKET_ORDER`.
+* `_stats` **forwards** the analytics accessor's own `buckets` list rather than
+  letting the portal re-derive one from `by_type`. The two are equivalent today,
+  which is the reason to pick one — not the reason to keep both.
+
+The legend needed client-facing wording ("Tool call", not "MCP") to match the
+`triggerLabel` translation the page already does everywhere else. That is an
+**optional `labels` prop** on the chart, never a rename of the `buckets` array:
+those entries are the keys the chart indexes `by_type` with, so translating them
+in place makes every lookup miss and renders an **empty chart** — a silent
+failure that reads as "this agent did nothing this week".
+
+Empty and unavailable are different sentences ("No activity in this window" vs
+"Stats are unavailable right now"), and the window selector is hidden on the tabs
+it does not drive.
+
+### "Start a chat" did nothing — the third time this shape broke
+
+The button was wired correctly. `newChatWithAgent` prepared the chat and then
+failed to leave the route, so `PortalAgentPage` — which renders **first** in the
+stage chain and is keyed on `route.params.agentName` — kept the stage and the new
+chat was set up invisibly behind it.
+
+The escape test read `route.params.sessionId || route.params.roomId`. That list
+is written once and goes stale every time a stage route is added: #2128 found
+`roomId` missing from guards written when `sessionId` was the only stage route,
+and ent#360 then added `/workspace/a/:agentName` without revisiting them.
+
+So the question is inverted rather than extended. `shouldEscapeStage(path,
+query)` in `portalUtils.js` asks about route **shape** — anything that is not the
+bare workspace root is a stage that must be left — and therefore **fails
+closed**: a fourth stage route needs no edit here and cannot silently re-break
+the button.
+
+The **query** is half of that shape, and it is the half that leaks across
+sessions. `?agent=` is the ent#358 landing spot and is re-read by `bootstrap()`,
+which runs again after a sign-in — so signing out at `/workspace?agent=X` and
+handing the browser on makes the *next* person's first screen "You don't have
+access to X". That predates #2161 (the param enumeration missed it too), but it
+is the same class the guard exists to close, so it lives in the same predicate
+rather than a second one somebody has to remember.
+
+Two live call sites, both fixed: `newChatWithAgent` and `onSignOut` (which
+carried a room id, and then an agent name, into the next session's address bar).
+A third, `startBlankChat`, was **deleted** — it had no callers at all, which
+makes it the plausible-looking fix that would have changed nothing.
+
 ## What this supersedes
 
 ent#359 made a roster row with unread open the *unread chat*, because a badge
@@ -99,13 +242,16 @@ destination" is finally true.
 
 | Layer | File | Change |
 |---|---|---|
-| Service | `client_portal/agent_page.py` | **new** — assembly + every projection |
+| Service | `client_portal/agent_page.py` | **new** — assembly + every projection; `_schedule_names` + forwarded `buckets` (#2161) |
 | DB | `client_portal/db.py` | `first_try_stats` |
 | Router | `client_portal/router.py` | 3 endpoints, roster-gated |
-| Models | `client_portal/models.py` | page / ask / work / stats / report models |
-| UI | `components/portal/PortalAgentPage.vue` | **new** — header, stats strip, 5 tabs |
+| Models | `client_portal/models.py` | page / ask / work / stats / report models; `schedule_name`, `buckets` (#2161) |
+| UI | `components/portal/PortalAgentPage.vue` | **new** — header, stats strip, 5 tabs; chart card + contained asks (#2161) |
 | UI | `components/portal/PortalSidebar.vue` | roster row emits `open-agent` |
-| UI | `views/Portal.vue`, `router/index.js` | `/workspace/a/:agentName` |
+| UI | `components/portal/portalUtils.js` | `shouldEscapeStage`, `PORTAL_BUCKET_LABELS` (#2161) |
+| UI | `components/StackedBarChart.vue` | optional `labels` prop (#2161) |
+| UI | `utils/executionBuckets.js` | **new** — `BUCKET_COLORS` + chart helpers, shared with `OverviewPanel.vue` (#2161) |
+| UI | `views/Portal.vue`, `router/index.js` | `/workspace/a/:agentName`; shared stage escape (#2161) |
 | Store | `stores/clientPortal.js` | `fetchAgentPage`, `fetchAgentReports`, `fetchAgentReport` |
 
 ## Tests
@@ -118,7 +264,29 @@ briefing), and the first-try arithmetic including the NULL-`retry_count` and
 no-terminal-rows cases.
 
 Verified live against the running instance: 37 executions, 89% completed, 33/37
-first try, and `recent_work` carrying exactly the six safe keys.
+first try, and `recent_work` carrying exactly the six safe keys (seven since
+#2161 — the exact-dict assertion is what forced that addition to be argued rather
+than absorbed).
+
+`tests/unit/test_2161_agent_page_ux.py` — the schedule-name seam: it resolves for
+scheduled *and* webhook-fired rows, never reads the schedule's `message`, misses
+harmlessly on the `__manual__` sentinel / soft-deleted / foreign ids, costs
+exactly one query for the whole page, and degrades to unlabelled rows rather than
+no rows. Plus the forwarded `buckets` on both the healthy and unavailable stats
+envelopes.
+
+`src/frontend/tests/unit/portalAgentPageUx.spec.js` — the pure halves and the
+source-structure guards, since this project has no component-mount harness. The
+load-bearing case is `shouldEscapeStage('/workspace/x/whatever')`: it asserts a
+route **nobody has written yet** still escapes, which is the property a
+param-enumerating guard cannot have and the reason this bug shipped twice. Also
+pins that the chart is stacked by untranslated buckets while the labels ride the
+separate prop — the mistake that renders a blank chart.
+
+`src/frontend/tests/unit/workspaceRoomsGate.spec.js` — F24 was **rewritten**, not
+deleted. It used to require each exit function to contain `route.params.roomId`;
+after #2161 that would mandate the enumeration that *was* the defect, so it now
+requires the shared escape and asserts the enumeration is gone.
 
 ## Known Limitations
 
@@ -127,4 +295,6 @@ first try, and `recent_work` carrying exactly the six safe keys.
 | **Asks are read-only** | Answering writes to the operator queue, an operator surface with its own auth. Rather than render a control that 403s for a client, the card offers "Reply in chat →". |
 | **No rating tally** | See above — no data source exists. |
 | **Files tab is a list, not the panel** | It lists documents and uploads; the upload flow stays in the existing files panel. |
+| **Non-scheduled rows still carry no context** (#2161) | `schedule_name` answers for schedule- and webhook-backed work. A chat, loop or reminder row has no equivalent safe label, and its message is a prompt — so those rows keep trigger, duration and time. AC #3 is met for scheduled rows only. |
+| **Ask count saturates at 20** | `MAX_ASKS` truncates server-side, so the badge reads `20+` rather than a true count. |
 | **"What it can do" is the briefing** | A projection of the roster briefing (#138/ent#380). ent#178 (unified exposable-skills config) is the mechanism this becomes a view of; it deliberately does not build a competing one. |
