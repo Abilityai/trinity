@@ -53,6 +53,18 @@ describe('#2159 the row no longer shows the description', () => {
     expect(row).toMatch(/\{\{ a\.name \}\}/)
     expect(row).not.toMatch(/a\.description/)
   })
+
+  it('shows the subtitle only when the title is NOT already the slug', () => {
+    // A raw `v-if="a.display_label"` disagrees with agentLabel on a
+    // whitespace-only label: agentLabel calls it unset and falls back to the
+    // slug, while raw truthiness still renders the subtitle — so the row
+    // prints the slug as both title and subtitle. The condition has to be the
+    // same decision agentLabel makes, not a second one that can drift from it.
+    const block = source.slice(source.indexOf('v-for="a in shownAgents"'))
+    const row = block.slice(0, block.indexOf('</button>'))
+    expect(row).toMatch(/v-if="agentLabel\(a\) !== a\.name"/)
+    expect(row).not.toMatch(/v-if="a\.display_label"/)
+  })
 })
 
 describe('#2159 the roster is bounded and expandable', () => {

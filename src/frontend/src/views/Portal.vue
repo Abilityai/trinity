@@ -89,7 +89,7 @@
             :current-session-id="activeSessionId"
             :current-room-id="activeRoomIdFromRoute"
             :is-platform-session="store.isPlatformSession"
-          :loading-roster="store.loading && !store.rosterLoaded"
+            :loading-roster="store.loading && !store.rosterLoaded"
             v-model:search="search"
             :searching="searching"
             :search-results="searchResults"

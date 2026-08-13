@@ -99,9 +99,17 @@
             <span class="min-w-0 text-left flex-1">
               <!-- #2159: the human-facing name leads; the slug is the subtitle.
                    The description was here and is not identity — two agents can
-                   share one, and it pushed the only unique handle off the row. -->
+                   share one, and it pushed the only unique handle off the row.
+
+                   The subtitle asks whether the title ALREADY is the slug, not
+                   whether `display_label` is truthy. Those disagree on a
+                   whitespace-only label, which `agentLabel` treats as unset:
+                   the title falls back to the slug while a raw-truthiness test
+                   still renders the subtitle, printing the slug twice. One
+                   decision, read twice — the same rule the server/client split
+                   above follows. -->
               <span class="block text-sm truncate">{{ agentLabel(a) }}</span>
-              <span v-if="a.display_label" class="block text-xs text-gray-400 truncate font-mono">{{ a.name }}</span>
+              <span v-if="agentLabel(a) !== a.name" class="block text-xs text-gray-400 truncate font-mono">{{ a.name }}</span>
             </span>
             <span
               v-if="waitingFor(a.name)"
