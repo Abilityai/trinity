@@ -99,13 +99,55 @@
              single-agent conversation is untouched below — different
              substrate, different component, no shared state. -->
         <PortalRoom
-          v-if="activeRoomIdFromRoute"
+          v-if="activeRoomIdFromRoute && store.multiAgentChatAvailable"
           :key="activeRoomIdFromRoute"
           :room-id="activeRoomIdFromRoute"
           :roster="store.agents"
           @open-menu="mobileNav = true"
           @rooms-changed="refreshThreads"
         />
+
+        <!-- #2128: the URL names a room this instance cannot open. This branch
+             must catch EVERY remaining room-URL case, and its position between
+             the two components above and below is load-bearing: falling through
+             to PortalConversation opens a DIFFERENT agent's chat under a room
+             link (activeAgent defaults to the first roster entry), and falling
+             past that lands on the `!activeRoomIdFromRoute` block whose guard is
+             false here — rendering a completely blank <main>.
+
+             Gating the RENDER, not just a watcher, is also what stops
+             PortalRoom::onMounted issuing GET /api/rooms/:id at all.
+
+             Four sub-states, not one: fail-closed is right for the affordance
+             and wrong for the copy that explains it. Only a roster that loaded
+             CLEANLY and reported the capability absent may say "not available
+             on this instance" — saying it during a transient 5xx on an entitled
+             instance would be a false statement about the operator's build, on
+             the one surface whose whole bar is honest status. -->
+        <div v-else-if="activeRoomIdFromRoute" :class="STAGE_WRAP">
+          <svg :class="STAGE_ICON" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
+          <template v-if="!store.rosterLoaded || store.loading">
+            <p :class="STAGE_BODY_LEAD">Opening this conversation…</p>
+          </template>
+          <template v-else-if="store.unavailable">
+            <p :class="STAGE_TITLE">{{ WORKSPACE_UNAVAILABLE_TITLE }}</p>
+            <p :class="STAGE_BODY">
+              It isn't enabled here. Ask an administrator if you expected access.
+            </p>
+          </template>
+          <template v-else-if="store.error">
+            <p :class="STAGE_TITLE">{{ ROSTER_LOAD_FAILED_TITLE }}</p>
+            <p :class="STAGE_BODY">{{ store.error }}</p>
+            <button :class="STAGE_ACTION" @click="store.fetchRoster()">Try again</button>
+          </template>
+          <template v-else>
+            <p :class="STAGE_TITLE">This conversation isn't available on this instance</p>
+            <p :class="STAGE_BODY">
+              Chats with more than one agent aren't enabled here. Start a chat with a single agent instead.
+            </p>
+            <button :class="STAGE_ACTION" @click="leaveRoomRoute">Start a new chat</button>
+          </template>
+        </div>
 
         <PortalConversation
           v-else-if="activeAgent"
@@ -130,43 +172,43 @@
              which reads as "your operator hasn't shared anything" whether the
              module is absent, the roster call failed, or the list is genuinely
              empty — a dead end in two of the three cases. -->
-        <div v-else-if="unreachableAgent" class="flex-1 flex flex-col items-center justify-center text-center px-6">
-          <svg class="w-10 h-10 text-gray-300 dark:text-gray-700 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" /></svg>
-          <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">
+        <div v-else-if="unreachableAgent" :class="STAGE_WRAP">
+          <svg :class="STAGE_ICON" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" /></svg>
+          <p :class="STAGE_TITLE">
             You don't have access to <span class="font-mono">{{ unreachableAgent }}</span>
           </p>
-          <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">
+          <p :class="STAGE_BODY">
             That link points at an agent that isn't shared with you. Pick one from the sidebar, or ask whoever sent the link.
           </p>
         </div>
 
-        <div v-else-if="!activeRoomIdFromRoute" class="flex-1 flex flex-col items-center justify-center text-center px-6">
-          <svg class="w-10 h-10 text-gray-300 dark:text-gray-700 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
+        <div v-else-if="!activeRoomIdFromRoute" :class="STAGE_WRAP">
+          <svg :class="STAGE_ICON" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
           <template v-if="store.unavailable">
-            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">Workspace isn't available on this instance</p>
-            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">
+            <p :class="STAGE_TITLE">{{ WORKSPACE_UNAVAILABLE_TITLE }}</p>
+            <p :class="STAGE_BODY">
               It isn't enabled here. Ask an administrator if you expected access.
             </p>
           </template>
           <template v-else-if="store.error">
-            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">Couldn't load your agents</p>
-            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">{{ store.error }}</p>
-            <button class="mt-3 text-sm text-action-primary-600 hover:underline" @click="store.fetchRoster()">Try again</button>
+            <p :class="STAGE_TITLE">{{ ROSTER_LOAD_FAILED_TITLE }}</p>
+            <p :class="STAGE_BODY">{{ store.error }}</p>
+            <button :class="STAGE_ACTION" @click="store.fetchRoster()">Try again</button>
           </template>
           <!-- ent#357: an empty roster needs a next step, not just a statement.
                The two audiences need different ones: a signed-in user can go
                make an agent, an external client can only ask the person who
                invited them. -->
           <template v-else-if="store.isPlatformSession">
-            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">No agents here yet</p>
-            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">
+            <p :class="STAGE_TITLE">No agents here yet</p>
+            <p :class="STAGE_BODY">
               Agents you own, and agents shared with you, appear here.
             </p>
-            <a href="/" class="mt-3 text-sm text-action-primary-600 hover:underline">Go to your agents</a>
+            <a href="/" :class="STAGE_ACTION">Go to your agents</a>
           </template>
           <template v-else>
-            <p class="text-sm text-gray-700 dark:text-gray-300 font-medium">No agents shared with you yet</p>
-            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs">
+            <p :class="STAGE_TITLE">No agents shared with you yet</p>
+            <p :class="STAGE_BODY">
               Ask whoever invited you to share an agent with
               <span class="font-medium">{{ store.clientEmail || 'your email' }}</span>.
             </p>
@@ -180,6 +222,7 @@
     <PortalAgentPicker
       v-if="pickerOpen"
       :agents="store.agents"
+      :multi="store.multiAgentChatAvailable"
       :busy="pickerBusy"
       :error="pickerError"
       @confirm="onPickerConfirm"
@@ -194,7 +237,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useClientPortalStore } from '@/stores/clientPortal'
+import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE } from '@/stores/clientPortal'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
 import PortalConversation from '@/components/portal/PortalConversation.vue'
 import PortalBriefing from '@/components/portal/PortalBriefing.vue'
@@ -292,10 +335,22 @@ function newChat() {
   pickerOpen.value = true
 }
 
+// #2128 — every exit from the main stage tested ONLY `sessionId`, so on a
+// /workspace/r/:id URL none of them changed the route. That was invisible while
+// the room always rendered; the moment a room URL can resolve to a refusal, it
+// makes that refusal a state the user cannot leave by any control except the
+// one on the refusal itself — a dead end created by the very fix meant to
+// remove one. `roomId` belongs in the same test for the same reason.
+function leaveRoomRoute() {
+  activeRoomId.value = null
+  pendingSession.value = null; prefill.value = ''; convGen.value++
+  router.push('/workspace')
+}
+
 function startBlankChat() {
   unreachableAgent.value = null
   pendingSession.value = null; prefill.value = ''; convGen.value++
-  if (route.params.sessionId) router.push('/workspace')
+  if (route.params.sessionId || route.params.roomId) router.push('/workspace')
 }
 
 async function onPickerConfirm(agentNames) {
@@ -317,15 +372,57 @@ async function onPickerConfirm(agentNames) {
   } catch (err) {
     // Keep the picker open with the reason: closing it would leave the user
     // guessing whether anything happened.
-    pickerError.value = err?.response?.data?.detail?.message
-      || err?.response?.data?.detail
-      || 'Could not start that chat.'
+    // #2128 — the store refuses a room call on an instance with no rooms
+    // substrate, and self-heals the flag on a definitive 404/403 mid-session,
+    // so the picker collapses to single-select on this same tick. A typed code,
+    // never message-sniffing: the generic path below must stay intact, because
+    // a `true` flag does not guarantee success (the client may lack access to
+    // one selected agent) and that reason still has to surface.
+    pickerError.value = err?.code === 'rooms_unavailable'
+      ? (err.message || MULTI_AGENT_UNAVAILABLE)
+      : (err?.response?.data?.detail?.message
+        || err?.response?.data?.detail
+        || 'Could not start that chat.')
   } finally {
     pickerBusy.value = false
   }
 }
 
 const pickerError = ref(null)
+
+// #2128 — shared by the room-route refusal branch and the no-room empty state
+// below it, which are the same four states rendered in the same file. Local
+// consts, not a module: both consumers live here, and a component extraction
+// for two <p> pairs is more abstraction than the duplication costs.
+const WORKSPACE_UNAVAILABLE_TITLE = "Workspace isn't available on this instance"
+const ROSTER_LOAD_FAILED_TITLE = "Couldn't load your agents"
+
+// #2128 — the ink for the three empty/refusal stages, written ONCE.
+//
+// This file renders nine of them (a room URL this instance can't open ×4, an
+// unreachable agent, an empty roster ×4) and every one used to carry its own
+// copy of the same class strings. That is design-system principle 4 —
+// loading/loaded/empty/failed share one footprint — held together by
+// copy-paste, and adding a state grew the file's raw-palette count by four
+// every time (the ratchet in CLAUDE.md §9 says per-file counts may only
+// shrink, and this branch had pushed 40 → 56).
+//
+// Hoisting is the whole remedy available here, and it is worth being precise
+// about why: `gray` has NO semantic token. It is the design system's residual
+// family — the contract's own colour section ends "Everything else is gray"
+// and prescribes these exact shades for the ink ladder — so there is nothing
+// to convert `text-gray-500 dark:text-gray-400` INTO. Repainting body copy in
+// `status-*` or `action-*` would be a defect, not compliance. What can be
+// fixed is the number of PLACES a raw shade is written, which is what makes a
+// future migration tractable, and that drops from twenty-odd to five.
+const STAGE_WRAP = 'flex-1 flex flex-col items-center justify-center text-center px-6'
+const STAGE_ICON = 'w-10 h-10 text-gray-300 dark:text-gray-700 mb-3'
+const STAGE_TITLE = 'text-sm text-gray-700 dark:text-gray-300 font-medium'
+const STAGE_BODY = 'mt-1 text-xs text-gray-500 dark:text-gray-400 max-w-xs'
+// The neutral "still resolving" line stands alone (no title above it), so it
+// carries the body ink without the top margin the paired form needs.
+const STAGE_BODY_LEAD = 'text-sm text-gray-500 dark:text-gray-400'
+const STAGE_ACTION = 'mt-3 text-sm text-action-primary-600 hover:underline'
 
 function openRoom(roomId) {
   if (!roomId) return
@@ -339,7 +436,10 @@ function newChatWithAgent(name) {
   unreachableAgent.value = null
   activeAgentName.value = name
   pendingSession.value = null; prefill.value = ''; convGen.value++
-  if (route.params.sessionId) router.push('/workspace')
+  // #2128: `roomId` too — see leaveRoomRoute above. Without it, picking one
+  // agent from the picker while parked on a room URL leaves the room route (and
+  // so the refusal) on screen, and the chat the user asked for never appears.
+  if (route.params.sessionId || route.params.roomId) router.push('/workspace')
 }
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
 function openThread(t) {
@@ -446,6 +546,8 @@ function onSignOut() {
   store.signOut()
   threads.value = []; activeAgentName.value = null; pendingSession.value = null
   step.value = 'email'; email.value = ''; code.value = ''
-  if (route.params.sessionId) router.push('/workspace')
+  // #2128: `roomId` too — otherwise a sign-out from a room URL carries that
+  // room id into the next session's address bar.
+  if (route.params.sessionId || route.params.roomId) router.push('/workspace')
 }
 </script>

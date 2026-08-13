@@ -202,6 +202,54 @@ def portal_exchange(email: str | None) -> str | None:
     return create_portal_session_token(email)
 
 
+# #2128 — the rooms substrate that backs a multi-agent Workspace chat is served
+# by a private module that a community build simply does not have. The picker
+# offered multi-select regardless, so picking two agents dead-ended in a 404.
+#
+# The signal has to reach a PORTAL principal (an external client on an email-OTP
+# session, with no platform account), and that principal cannot read
+# `/api/settings/feature-flags` — it is `get_current_user`-gated. So the roster
+# carries the bit: one field on a payload the shell already awaits first.
+_ROOMS_FEATURE_ID = "shared_sessions"
+
+
+def _multi_agent_chat_available() -> bool:
+    """Is the rooms substrate that backs a multi-agent Workspace chat present?
+
+    Reads the entitlement registry rather than probing the route table: a module
+    that claims its id and then fails to mount has that claim withdrawn (ent#196),
+    so the registry already answers "mounted AND serving".
+
+    The import is deliberately function-local. The singleton is swapped in place
+    by the supported test seam, and a module-scope `from ... import` would freeze
+    the boot-time instance and silently bypass it — the same form
+    `dependencies.py` and `routers/settings.py` use, pinned by a static guard in
+    `tests/unit/test_926_version_endpoint.py`.
+
+    Fail-CLOSED. A read that cannot answer must not advertise the capability —
+    promising an affordance that cannot work is the bug being fixed, so the error
+    direction has to be "offer less", never "offer more".
+    """
+    try:
+        from services.entitlement_service import entitlement_service
+        # bool() so the return matches the annotation for ANY implementation of
+        # the registry. A non-bool falsy value (None from a partial stub) is a
+        # ValidationError on the response model's bool field, i.e. a 500 raised
+        # OUTSIDE this try — the cast makes it fail closed instead.
+        #
+        # It is NOT a defence against a leaked test double: a MagicMock is
+        # truthy, and pydantic coerces one to True anyway, so cast or not the
+        # field would read *available*. What actually catches that is the
+        # module-identity assertion in the test file, which fails loudly rather
+        # than going green on a lie (measured, #2128).
+        return bool(entitlement_service.is_entitled(_ROOMS_FEATURE_ID))
+    except Exception:  # noqa: BLE001 — a roster must never 500 over a capability bit
+        logger.warning(
+            "[#2128] rooms capability read failed; reporting unavailable", exc_info=True
+        )
+        return False
+
+
 async def get_roster(email: str | None, include_owned: bool = False) -> PortalRoster:
     """The caller's "My Agents" roster — every agent shared with ``email``, plus
     (``include_owned``) the agents they OWN.
@@ -224,6 +272,9 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     """
     from services import tts_service
     tts_ready = tts_service.is_available()  # global key check, once per roster load
+    # #2128: an instance-level capability, resolved once per roster load like
+    # `tts_ready` above — not a per-agent one, so it rides on the roster itself.
+    multi_agent_chat = _multi_agent_chat_available()
 
     rows = db.get_shared_roster(email or "")
     if include_owned:
@@ -263,7 +314,11 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
         if isinstance(b, tuple):
             card.description, card.playbooks = b
 
-    return PortalRoster(client_email=(email or None), agents=cards)
+    return PortalRoster(
+        client_email=(email or None),
+        agents=cards,
+        multi_agent_chat_available=multi_agent_chat,
+    )
 
 
 def _humanize_playbook(name: str) -> str:
