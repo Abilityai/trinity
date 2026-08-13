@@ -32,7 +32,7 @@
       <div class="px-3 sm:px-6 pt-4">
         <div class="flex flex-wrap items-end gap-x-8 gap-y-3">
           <div>
-            <div class="text-xl font-semibold tabular-nums">{{ stats.total_executions }}</div>
+            <div class="text-xl font-semibold tabular-nums" :class="{ 'opacity-40': loading && !page }">{{ loading && !page ? '—' : stats.total_executions }}</div>
             <div class="text-xs text-gray-500 dark:text-gray-400">tasks · last {{ windowLabel }}</div>
           </div>
           <div>
@@ -87,7 +87,20 @@
     </header>
 
     <div class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5">
-      <p v-if="loading && !page" class="text-sm text-gray-400">Loading…</p>
+      <!-- AC4 (#2160): section-shaped skeletons, not one "Loading…" line. The
+           payload arrives in one response, so this is honesty about WHERE
+           content will appear rather than progressive arrival — the header and
+           tabs above are already rendered from the route, so the page never
+           looks blank or hung while this fills in. -->
+      <div v-if="loading && !page" class="space-y-6" aria-busy="true">
+        <div v-for="sec in 2" :key="sec" class="animate-pulse">
+          <div class="h-3 w-32 rounded bg-gray-200 dark:bg-gray-800 mb-3"></div>
+          <div class="space-y-2">
+            <div v-for="row in 3" :key="row" class="h-9 rounded-lg bg-gray-100 dark:bg-gray-800/60"></div>
+          </div>
+        </div>
+        <span class="sr-only">Loading this agent's activity…</span>
+      </div>
       <p v-else-if="error" class="text-sm text-status-danger-600 dark:text-status-danger-400">{{ error }}</p>
 
       <!-- ---------------------------- OVERVIEW ---------------------------- -->
@@ -282,11 +295,24 @@ const healthDot = computed(() => ({
   healthy: 'bg-status-success-500', unhealthy: 'bg-status-danger-500', degraded: 'bg-status-warning-500',
 }[page.value?.header?.health?.status] || 'bg-gray-300 dark:bg-gray-600'))
 
+// AC5 (#2160): `${name}:${window}` cache, the convention `stores/executions.js`
+// already uses. Flipping 7d → 30d → 7d refetched an identical payload every
+// time; the window is a view of a fixed past, so the second look is free.
+// Stale-while-revalidate: a cached page renders instantly AND refreshes behind
+// it, so returning to a tab never shows a spinner over data we already have,
+// and never shows yesterday's numbers either.
+const pageCache = new Map()
+
 async function load() {
-  loading.value = true
+  const key = `${props.agentName}:${timeWindow.value}`
+  const cached = pageCache.get(key)
+  if (cached) page.value = cached
+  loading.value = !cached
   error.value = null
   try {
-    page.value = await store.fetchAgentPage(props.agentName, timeWindow.value)
+    const fresh = await store.fetchAgentPage(props.agentName, timeWindow.value)
+    pageCache.set(key, fresh)
+    page.value = fresh
   } catch (e) {
     error.value = e?.response?.status === 404
       ? "You don't have access to this agent."
@@ -317,6 +343,7 @@ watch(tab, async (t) => {
 // every per-agent cache. Leaving them would show one agent's reports under
 // another's name — the class of bug ent#359's review found twice.
 watch(() => props.agentName, () => {
+  pageCache.clear()   // #2160: keyed by name, but never serve one agent's page for another
   page.value = null
   reports.value = []
   reportPayloads.value = {}
