@@ -17,7 +17,7 @@ from db.tables import (
     system_settings, agent_sharing, agent_ownership, users,
     enterprise_portal_chat_state,
 )
-from utils.helpers import utc_now_iso
+from utils.helpers import iso_cutoff, utc_now_iso
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -676,3 +676,44 @@ def count_unread_by_session(client_email: str) -> dict[str, int]:
     with get_engine().connect() as conn:
         rows = conn.execute(stmt, {"email": (client_email or "").lower()}).mappings()
         return {r["session_id"]: int(r["n"]) for r in rows if r["session_id"]}
+
+
+# --- Agent page: first-try rate (ent#360) ------------------------------------
+
+def first_try_stats(agent_name: str, hours: int) -> dict:
+    """Terminal executions in the window, and how many succeeded on the FIRST
+    attempt (``retry_count`` 0 or NULL).
+
+    Distinct from the success rate the analytics accessor already reports: an
+    execution that failed, was retried and then succeeded counts as a success
+    there, which is the right answer to "does this agent get there in the end"
+    and the wrong answer to "does it get there first time".
+
+    `retry_count` is NULL on rows written before #678, so NULL is read as zero —
+    a pre-#678 success genuinely had no retry.
+
+    Cutoff via `iso_cutoff` rather than SQL `datetime('now', ...)`: the column is
+    an ISO-Z string and the two formats do not compare (Invariant #16).
+    """
+    stmt = text(
+        "SELECT "
+        "  COUNT(*) AS terminal, "
+        "  SUM(CASE WHEN status = 'success' AND COALESCE(retry_count, 0) = 0 "
+        "           THEN 1 ELSE 0 END) AS first_try "
+        "FROM schedule_executions "
+        "WHERE agent_name = :agent AND started_at >= :cutoff "
+        "  AND status IN ('success', 'failed', 'error')"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {
+            "agent": agent_name, "cutoff": iso_cutoff(hours),
+        }).mappings().first()
+    terminal = int((row or {}).get("terminal") or 0)
+    first_try = int((row or {}).get("first_try") or 0)
+    return {
+        "terminal": terminal,
+        "first_try": first_try,
+        # None, not 0.0, with nothing to divide: a fresh agent has no first-try
+        # rate, and rendering 0% would read as "it fails every time".
+        "rate": (first_try / terminal) if terminal else None,
+    }

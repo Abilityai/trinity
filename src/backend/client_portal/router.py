@@ -36,7 +36,7 @@ from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
 
-from . import service
+from . import agent_page, service
 from .models import (
     PortalAuthRequest,
     PortalAuthVerify,
@@ -58,6 +58,8 @@ from .models import (
     PortalSearchResults,
     PortalSession,
     PortalSessions,
+    PortalAgentPage,
+    PortalAgentReports,
     PortalChatState,
     PortalSessionSummary,
     PortalTtsRequest,
@@ -521,6 +523,74 @@ def portal_mark_chat_read(chat_kind: str, chat_id: str,
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return Response(status_code=204)
+
+
+# --- The agent page (ent#360) -------------------------------------------------
+#
+# Roster-gated like every other per-agent route. Read-only by construction:
+# nothing here writes, and the payload carries no schedules, skills, logs, costs
+# or model — AC #7 keeps configuration operator-side, and the viewer may be an
+# external client rather than an operator.
+
+@router.get("/agents/{agent_name}/page", response_model=PortalAgentPage)
+async def portal_agent_page(
+    agent_name: str,
+    window: str = "7d",
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Everything the agent page needs, in one call.
+
+    One request rather than five because the page is one screen: fetching the
+    header, stats, asks and recent work separately renders it in pieces, and a
+    stats call that outruns the header shows numbers above a nameless card.
+    """
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    if window not in agent_page.WINDOWS:
+        raise HTTPException(status_code=422, detail="Unknown window")
+    # The roster is the source of identity + "what it can do": the briefing is
+    # already resolved there (#138/ent#380), so the page projects it rather than
+    # building a second, divergent notion of an agent's capabilities.
+    roster = await service.get_roster(email, include_owned=principal.is_platform)
+    card = next((a for a in roster.agents if a.name == agent_name), None)
+    return agent_page.build_page(
+        email, agent_name, card.model_dump() if card else None, window=window,
+    )
+
+
+@router.get("/agents/{agent_name}/reports", response_model=PortalAgentReports)
+def portal_agent_reports(
+    agent_name: str,
+    limit: int = 20,
+    offset: int = 0,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Report metadata for the page's Reports tab. Payloads are fetched per
+    report on expansion — one is capped at 256 KB and a list of them is not a
+    list view."""
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    return {
+        "agent_name": agent_name,
+        "reports": agent_page.reports(
+            agent_name, limit=min(max(limit, 1), 50), offset=max(offset, 0)
+        ),
+    }
+
+
+@router.get("/agents/{agent_name}/reports/{report_id}")
+def portal_agent_report_detail(
+    agent_name: str,
+    report_id: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """One report's payload. The report must belong to the path agent — a report
+    id from another agent returns the same 404 as one that does not exist, so
+    this is not a cross-agent read oracle."""
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    report = agent_page.report_detail(agent_name, report_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return report
 
 
 @router.post("/agents/{agent_name}/chat", response_model=PortalChatResponse)
