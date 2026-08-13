@@ -71,6 +71,10 @@ def get_shared_roster(email: str) -> list[dict]:
             agent_ownership.c.avatar_updated_at,
             agent_ownership.c.is_default_avatar,
             agent_ownership.c.tts_voice_id,          # portal voice (#78): drives voice_available
+            # #2159: the human-facing name (ent#181/#1640). Selected HERE rather
+            # than resolved per agent — `get_display_label` is one query each,
+            # which would add an N+1 to fix a row that renders the wrong title.
+            agent_ownership.c.display_label,
             users.c.username.label("owner"),
         )
         .select_from(
@@ -122,6 +126,7 @@ def get_owned_roster(email: str) -> list[dict]:
             agent_ownership.c.avatar_updated_at,
             agent_ownership.c.is_default_avatar,
             agent_ownership.c.tts_voice_id,
+            agent_ownership.c.display_label,        # #2159, same rationale as above
             users.c.username.label("owner"),
         )
         .select_from(
