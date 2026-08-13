@@ -222,11 +222,11 @@ def test_starring_an_unknown_chat_succeeds_rather_than_leaking_existence(chat_db
     assert [c["chat_id"] for c in pdb.get_chat_state(ALICE)] == ["no-such-chat"]
 
 
-def test_the_row_cap_stops_new_rows(chat_db, monkeypatch):
+def test_the_star_cap_stops_new_stars(chat_db, monkeypatch):
     from client_portal import db as pdb
     from client_portal import service as svc
 
-    monkeypatch.setattr(pdb, "MAX_CHAT_STATE_ROWS", 2)
+    monkeypatch.setattr(pdb, "MAX_STARRED_CHATS", 2)
     svc.set_chat_star(ALICE, "thread", "t1", True)
     svc.set_chat_star(ALICE, "thread", "t2", True)
 
@@ -235,24 +235,86 @@ def test_the_row_cap_stops_new_rows(chat_db, monkeypatch):
     assert e.value.status_code == 409
 
 
+def test_unstarring_actually_gets_you_back_under_the_cap(chat_db, monkeypatch):
+    """The claim the 409 makes ("unstar some first") has to be TRUE.
+
+    It was not. The cap counted every row, `mark_chat_read` creates one per chat
+    ever opened, and unstar kept the row — so a viewer who had simply used the
+    Workspace long enough hit a permanent 409 with no action that could clear
+    it. The old test asserted only that `starred_at` went NULL and never that a
+    subsequent star succeeded, which is exactly why the false claim survived.
+    """
+    from client_portal import db as pdb
+    from client_portal import service as svc
+
+    monkeypatch.setattr(pdb, "MAX_STARRED_CHATS", 2)
+    svc.set_chat_star(ALICE, "thread", "t1", True)
+    svc.set_chat_star(ALICE, "thread", "t2", True)
+    with pytest.raises(svc.ClientPortalError):
+        svc.set_chat_star(ALICE, "thread", "t3", True)
+
+    svc.set_chat_star(ALICE, "thread", "t1", False)   # the advertised recovery
+
+    svc.set_chat_star(ALICE, "thread", "t3", True)    # ...must now work
+    starred = {r["chat_id"] for r in pdb.get_chat_state(ALICE) if r["starred_at"]}
+    assert starred == {"t2", "t3"}
+
+
+def test_read_cursors_do_not_consume_the_star_cap(chat_db, monkeypatch):
+    """Opening chats is ordinary use and must not spend a budget the user can
+    only free by unstarring."""
+    from client_portal import db as pdb
+    from client_portal import service as svc
+
+    monkeypatch.setattr(pdb, "MAX_STARRED_CHATS", 2)
+    for i in range(10):
+        svc.mark_chat_read(ALICE, "thread", f"opened-{i}")
+
+    svc.set_chat_star(ALICE, "thread", "keep", True)   # must not raise
+    assert any(r["chat_id"] == "keep" and r["starred_at"] for r in pdb.get_chat_state(ALICE))
+
+
+def test_unstarring_a_never_opened_chat_removes_its_row(chat_db):
+    """Nothing left to remember ⇒ no row. Otherwise a star-then-unstar leaves
+    permanent residue and the table only ever grows."""
+    from client_portal import db as pdb
+    from client_portal import service as svc
+
+    svc.set_chat_star(ALICE, "thread", "t1", True)
+    svc.set_chat_star(ALICE, "thread", "t1", False)
+
+    assert pdb.get_chat_state(ALICE) == []
+
+
+def test_unstarring_a_read_chat_keeps_its_cursor(chat_db):
+    """The row survives when it still carries a read cursor — dropping it would
+    mark the whole thread unread again, so unstarring would light up a badge."""
+    from client_portal import db as pdb
+    from client_portal import service as svc
+
+    svc.mark_chat_read(ALICE, "thread", "t1")
+    svc.set_chat_star(ALICE, "thread", "t1", True)
+    svc.set_chat_star(ALICE, "thread", "t1", False)
+
+    row = pdb.get_chat_state(ALICE)[0]
+    assert row["starred_at"] is None and row["last_read_at"] is not None
+
+
 def test_the_cap_never_freezes_a_row_the_user_already_owns(chat_db, monkeypatch):
     """A cap that applied to updates would leave a user at the ceiling unable to
-    unstar (the only action that gets them back under it) or to advance a read
-    cursor they already have — punishing them for state they legitimately
-    accumulated."""
+    advance a read cursor they already have — punishing them for state they
+    legitimately accumulated."""
     from client_portal import db as pdb
     from client_portal import service as svc
 
     monkeypatch.setattr(pdb, "MAX_CHAT_STATE_ROWS", 2)
-    svc.set_chat_star(ALICE, "thread", "t1", True)
-    svc.set_chat_star(ALICE, "thread", "t2", True)
+    svc.mark_chat_read(ALICE, "thread", "t1")
+    svc.mark_chat_read(ALICE, "thread", "t2")
 
     svc.mark_chat_read(ALICE, "thread", "t1")          # update, not insert
-    svc.set_chat_star(ALICE, "thread", "t1", False)    # the way back under the cap
 
     rows = {r["chat_id"]: r for r in pdb.get_chat_state(ALICE)}
     assert rows["t1"]["last_read_at"] is not None
-    assert rows["t1"]["starred_at"] is None
 
 
 def test_mark_read_at_the_cap_is_a_no_op_not_an_error(chat_db, monkeypatch):
