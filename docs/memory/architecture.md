@@ -676,12 +676,15 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   reads only the keys its hint declares. This matters to the CI pin above: `test_1535`
   regexes `payload.X` out of `ReportRenderer.vue`, so a third consumer widens that drift
   guard's blast radius and **`shapeOk` must stay in that file** — extracting it is the
-  natural refactor and it empties the pinned set. The fallback is now `ReportSummary`
-  (bounded, humanised, credential-shaped tokens redacted at value level) with raw JSON behind
-  a collapsed operator-only disclosure; `allow-raw="false"` removes it entirely on the
-  client-facing surface. The prop names the POLICY, not the mechanism, because `json` is a
-  valid agent-chosen `display_hint` — a fallback-override prop or slot would have left an
-  agent able to request a raw dump in front of a client.
+  natural refactor and it empties the pinned set. The fallback is **per-surface**: the default
+  stays `ReportJson`, so both operator surfaces render exactly what they always did, and only the
+  Workspace passes `:fallback-component="ReportSummary"` (bounded, humanised, credential-shaped
+  tokens redacted at value level, no raw payload reachable behind it). AC #2 asks for a client
+  fallback "deliberately stricter than the operator side", so the split IS the design — a global
+  summary would erase it, and a raw dump is a FEATURE when you are debugging an agent's own
+  output. The override deliberately catches an agent-chosen `display_hint: "json"` as well as a
+  shape mismatch, since `json` is a valid enum value and replacing only the mismatch path would
+  leave an agent able to request a dump in front of a client.
 - **Agent read-back** (#1538): `list_reports` / `get_report` MCP tools over the existing
   access-controlled REST endpoints — no new endpoint, no new tenant-boundary logic. The
   MCP layer adds the narrowing the backend cannot do (agent key → owner scope → `{self} ∪

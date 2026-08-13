@@ -106,17 +106,18 @@ calling agent.
 | `kpi` | `{ tiles: Array<{label, value, unit?}> }` |
 | `markdown` | `{ markdown: string }` |
 | `timeline` | `{ events: Array<{ts?, label, detail?}> }` |
-| `json` (or anything malformed) | `ReportSummary` — a bounded, humanised key-value view (#2162) |
+| `json` (or anything malformed) | `ReportJson` by default; the overriding surface's `fallbackComponent` (#2162) |
 
-**The fallback, since #2162.** It was `ReportJson`, a pretty-printed dump. That is fine for
-an operator and unacceptable for an external client, so the shared fallback became a bounded
-summary (≤40 entries with a counted remainder, ~200-char values, depth 1 — a nested value is
-described as "12 items", never serialised) with credential-shaped tokens redacted at **value**
-level, mirroring canary G-04's prefix set. Raw JSON stays one click away inside a collapsed
-disclosure; a surface passing `allow-raw="false"` loses even that. One fallback rather than a
-per-surface one, so a client and an operator looking at the same row never see different
-renderings of it. The prop is named for the POLICY because `json` is a valid agent-chosen
-hint — a fallback-override prop or slot would only have covered the mismatch path.
+**The fallback is per-surface, since #2162.** `ReportJson` — a pretty-printed dump — stays the
+default, and both operator panels keep it: it is the useful answer when you are debugging an
+agent's own output. It is unacceptable for an external client, so `ReportRenderer` takes a
+`fallbackComponent` prop and the Workspace passes `ReportSummary`, a bounded summary (≤40 entries
+with a counted remainder, ~200-char values, depth 1 — a nested value is described as "12 items",
+never serialised) with credential-shaped tokens redacted at **value** level, mirroring canary
+G-04's prefix set, and no raw payload behind it. AC #2 asks for a client fallback "deliberately
+stricter than the operator side", so the split is the design. The override covers an
+agent-chosen `json` hint as well as a shape mismatch — replacing only the mismatch path would
+leave an agent able to request a dump in front of a client.
 
 ## Retention
 `cleanup_service._sweep_retention_772` prunes `agent_reports` older than

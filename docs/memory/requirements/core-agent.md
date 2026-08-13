@@ -444,9 +444,10 @@
   dumping `JSON.stringify(payload)` at an external client, which is the *same* disclosure this
   section already refuses for an ask's `context`: a typed renderer reads only the keys its hint
   declares, so this strictly narrows what crosses. The one deliberate divergence from the
-  operator surfaces is the fallback: an unrecognised payload gets a bounded, humanised key-value
-  summary with credential-shaped tokens redacted, and this surface passes `allow-raw="false"`
-  so no raw payload is reachable behind it. Honest limit — a summary still names every top-level
+  operator surfaces is the fallback: they keep the raw JSON viewer (useful when you are
+  debugging an agent's own output), while this surface passes `:fallback-component` and an
+  unrecognised payload gets a bounded, humanised key-value summary with credential-shaped tokens
+  redacted and no raw payload reachable behind it. Honest limit — a summary still names every top-level
   key; it bounds and humanises the residual rather than removing it. A `table` payload is
   fetched a window at a time (`rows_offset`/`rows_limit`) so a large report never transfers
   whole, and the tab grows by an explicit "Load more" rather than a nested scroll region.

@@ -107,23 +107,27 @@ is how the payload that legitimately crosses is *presented*. The payload itself
 remains agent-authored untrusted content of the same class as `asks.title` and
 the schedule name — bounded and escaped, never trusted.
 
-**The fallback is the one place the three renderer surfaces deliberately differ.**
-The shared set's fallback WAS the raw JSON viewer, so reuse alone could not
-satisfy "never a raw dump to a client". `ReportSummary` replaces it everywhere —
-a bounded key-value view (≤40 entries with a counted remainder, ~200-char values,
-depth 1, so a nested value is described as "12 items" and never serialised) with
-credential-shaped tokens redacted at **value** level. A key-name allow-list was
-rejected twice over: the fallback fires precisely on payloads nobody has seen, so
-an allow-list blanks nearly all of them, and an allowed key's value carries the
-secret anyway (`{"status": "failed: sk-…"}`). Operators keep the raw payload one
-click away inside a collapsed disclosure; this surface passes `allow-raw="false"`
-and it is gone.
+**The fallback is the one place this surface deliberately differs from the
+operator ones.** The shared set's fallback is the raw JSON viewer, so reuse alone
+could not satisfy "never a raw dump to a client" — and AC #2 asks for a fallback
+*"deliberately stricter than the operator side, because the audience is an
+external client"*, i.e. it asks for a SPLIT, not for a stricter default
+everywhere. So `ReportRenderer` gained a `fallbackComponent` override defaulting
+to `ReportJson` — every operator call site passes nothing and renders exactly what
+it always did, because a raw payload is the useful answer when you are debugging
+an agent's own output — and this page passes `ReportSummary`: a bounded key-value
+view (≤40 entries with a counted remainder, ~200-char values, depth 1, so a
+nested value is described as "12 items" and never serialised) with
+credential-shaped tokens redacted at **value** level, and no raw payload
+reachable behind it at all. A key-name allow-list was rejected twice over: the
+fallback fires precisely on payloads nobody has seen, so an allow-list blanks
+nearly all of them, and an allowed key's value carries the secret anyway
+(`{"status": "failed: sk-…"}`).
 
-`allow-raw` is a **policy** name, not a mechanism name, and that is what makes it
-correct: `json` is a valid agent-chosen `display_hint`
-(`src/mcp-server/src/tools/reports.ts`), so a "fallback override" prop or slot
-would have replaced only the *mismatch* path and left an agent able to put a raw
-dump in front of a client by asking for one.
+The override deliberately catches an agent-chosen `display_hint: "json"`
+(`src/mcp-server/src/tools/reports.ts`) as well as a shape mismatch — replacing
+only the *mismatch* path would leave an agent able to put a raw dump in front of
+a client by asking for one.
 
 **Honest residual.** A key-value summary still names every top-level key. It
 bounds and humanises; it does not eliminate the class, and a well-shaped
@@ -342,9 +346,9 @@ destination" is finally true.
 | Store | `stores/clientPortal.js` | `fetchAgentPage`, `fetchAgentReports`, `fetchAgentReport`; the whole Reports orchestration + generation guard (#2162) |
 | Service | `client_portal/agent_page.py` | `_window_rows` + `report_detail(rows_offset, rows_limit)` (#2162) |
 | Router | `client_portal/router.py` | `rows_offset`/`rows_limit` on the existing detail route, rate-limited (#2162) |
-| UI | `components/reports/ReportSummary.vue` | **new** — the shared human-readable fallback, `allow-raw` policy (#2162) |
+| UI | `components/reports/ReportSummary.vue` | **new** — the CLIENT-FACING human-readable fallback; no raw escape hatch (#2162) |
 | UI | `components/reports/reportSummary.js` | **new** — the bounded, redacting summariser (pure) (#2162) |
-| UI | `components/reports/ReportRenderer.vue` | fallback → `ReportSummary`; forwards `allow-raw`; `shapeOk` untouched (#2162) |
+| UI | `components/reports/ReportRenderer.vue` | `fallbackComponent` override, default `ReportJson` (operator unchanged); `shapeOk` untouched (#2162) |
 | UI | `components/reports/{ReportTable,ReportKpiTiles}.vue` | dark ink pair on meta text — AC #4 (#2162) |
 | UI | `components/reports/ReportTimeline.vue` | `bg-blue-500` → `bg-status-info-500` (#2162) |
 | UI | `utils/reportPaging.js` | **new** — the one frontend page-size constant, shared with `stores/reports.js` (#2162) |
@@ -404,7 +408,7 @@ is the only paging signal), and that a failed fetch never lands in the payload m
 
 `src/frontend/tests/unit/portalReportsRendering.spec.js` — the wiring no unit test
 can reach: the tab holds no `<pre>` and no serialiser, mounts the shared
-`ReportRenderer`, passes `:allow-raw="false"`, and adds no second scroll axis.
+`ReportRenderer`, passes `:fallback-component`, and adds no second scroll axis.
 Guards the **mechanism** rather than the spelling — a prop declared and never used
 would pass a call-site scan — and re-asserts the five CI-pinned `payload.X` keys
 are still inside `ReportRenderer.vue`, the file `test_1535` regexes them out of.

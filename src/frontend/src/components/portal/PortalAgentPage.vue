@@ -196,8 +196,10 @@
            payload is free-form agent JSON of the same class as an ask's
            `context`, which this page refuses to expose at all. A typed renderer
            reads only the keys its hint declares, so this narrows what crosses.
-           `:allow-raw="false"` is the one place this surface diverges from the
-           operator ones: no raw payload is reachable behind the fallback. -->
+           `:fallback-component` is the one place this surface diverges from
+           the operator ones: where they show the raw JSON viewer, a client gets
+           a bounded, humanised summary and no raw payload at all (AC #2 asks
+           for a fallback stricter than the operator side, precisely here). -->
       <template v-else-if="tab === 'reports'">
         <div v-if="!reportsLoaded && !reportsError" class="space-y-2" aria-busy="true">
           <div v-for="row in 3" :key="row" class="animate-pulse h-14 rounded-xl bg-gray-100 dark:bg-gray-800/60"></div>
@@ -239,7 +241,7 @@
                 :payload="reportPayloads[r.id]"
                 :meta="reportRowMeta[r.id]"
                 :load-more="reportRowMeta[r.id] ? () => loadMoreRows(r.id) : null"
-                :allow-raw="false"
+                :fallback-component="ReportSummary"
               />
             </div>
           </div>
@@ -324,6 +326,7 @@ import StackedBarChart from '@/components/StackedBarChart.vue'
 import InlineError from '@/components/InlineError.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
 import ReportRenderer from '@/components/reports/ReportRenderer.vue'
+import ReportSummary from '@/components/reports/ReportSummary.vue'
 import PortalAvatar from './PortalAvatar.vue'
 import { PORTAL_BUCKET_LABELS } from './portalUtils'
 

@@ -4,7 +4,7 @@
     :payload="payload"
     :meta="meta"
     :load-more="loadMore"
-    v-bind="summaryProps"
+    v-bind="fallbackProps"
   />
 </template>
 
@@ -14,18 +14,20 @@ import ReportTable from './ReportTable.vue'
 import ReportKpiTiles from './ReportKpiTiles.vue'
 import ReportMarkdown from './ReportMarkdown.vue'
 import ReportTimeline from './ReportTimeline.vue'
-import ReportSummary from './ReportSummary.vue'
+import ReportJson from './ReportJson.vue'
 
 // Picks a renderer by: explicit display_hint -> report_type prefix -> fallback.
 // Each typed renderer requires a minimal payload shape; on mismatch we fall
-// back so a malformed payload degrades instead of throwing (review/Codex #10).
+// back to the JSON viewer so a malformed payload degrades instead of throwing
+// (review/Codex #10).
 //
-// #2162: the fallback is now the human-readable ReportSummary rather than the
-// raw JSON viewer. `json` is a valid agent-chosen display_hint, so the two ways
-// of arriving there are DIFFERENT (a mismatch is a defect; a chosen `json` is
-// not) and the summary is told which it was. Raw JSON is still one click away
-// for operators, inside ReportSummary's disclosure; a surface that must never
-// show a raw payload passes `allow-raw="false"` and the disclosure is gone.
+// #2162: the fallback is OVERRIDABLE per surface, and the operator default is
+// unchanged. A raw JSON dump is a feature when you are debugging an agent's own
+// output and a defect when the reader is that agent's customer — so the
+// Workspace passes `ReportSummary` and every operator call site passes nothing.
+// The override covers an agent-chosen `display_hint: "json"` as well as a shape
+// mismatch, which matters: `json` is a valid value in the MCP tool's enum, so a
+// portal that only replaced the mismatch path would still dump on request.
 const props = defineProps({
   reportType: { type: String, default: '' },
   displayHint: { type: String, default: null },
@@ -35,9 +37,10 @@ const props = defineProps({
   // a null default).
   meta: { type: Object, default: null },
   loadMore: { type: Function, default: null },
-  // Policy, forwarded to the fallback: may this surface disclose the raw
-  // payload at all? Default true keeps every existing call site byte-identical.
-  allowRaw: { type: Boolean, default: true },
+  // Rendered instead of ReportJson wherever the dispatch lands on `json` —
+  // by mismatch OR by the agent asking for it. Null default keeps every
+  // operator call site byte-identical.
+  fallbackComponent: { type: [Object, Function], default: null },
 })
 
 const COMPONENTS = {
@@ -45,7 +48,7 @@ const COMPONENTS = {
   kpi: ReportKpiTiles,
   markdown: ReportMarkdown,
   timeline: ReportTimeline,
-  json: ReportSummary,
+  json: ReportJson,
 }
 
 const VALID_HINTS = Object.keys(COMPONENTS)
@@ -90,14 +93,18 @@ const resolved = computed(() => {
   return { hint, mismatch: false }
 })
 
-const rendererComponent = computed(() => COMPONENTS[resolved.value.hint] || ReportSummary)
+const rendererComponent = computed(() => {
+  if (resolved.value.hint === 'json') return props.fallbackComponent || ReportJson
+  return COMPONENTS[resolved.value.hint] || props.fallbackComponent || ReportJson
+})
 
-// Bound only when the fallback is what renders. Passing these unconditionally
+// Bound only when a custom fallback is what renders. Passing it unconditionally
 // would land `fallback="false"` on a typed renderer's root element as a stray
-// DOM attribute (Vue only drops null/undefined, not false).
-const summaryProps = computed(() => (
-  rendererComponent.value === ReportSummary
-    ? { fallback: resolved.value.mismatch, allowRaw: props.allowRaw }
+// DOM attribute (Vue only drops null/undefined, not false), and ReportJson
+// declares no such prop.
+const fallbackProps = computed(() => (
+  props.fallbackComponent && rendererComponent.value === props.fallbackComponent
+    ? { fallback: resolved.value.mismatch }
     : {}
 ))
 </script>

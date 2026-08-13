@@ -37,35 +37,25 @@
     <p v-if="truncated" class="mt-2 text-xs text-gray-500 dark:text-gray-400">
       +{{ truncated.toLocaleString() }} more {{ truncated === 1 ? 'field' : 'fields' }} not shown
     </p>
-
-    <details v-if="allowRaw" class="mt-3">
-      <summary class="text-xs text-gray-500 dark:text-gray-400 cursor-pointer select-none">
-        Show raw JSON
-      </summary>
-      <div class="mt-2"><ReportJson :payload="payload" /></div>
-    </details>
   </div>
 </template>
 
 <script setup>
 /**
- * The shared fallback for a payload no typed renderer can present (#2162).
+ * The CLIENT-FACING fallback for a payload no typed renderer can present (#2162).
  *
- * It replaces `ReportJson` in that role on EVERY surface, not only the
- * client-facing one. Two fallbacks would mean a client says "this report looks
- * wrong", the operator opens Agent Detail, and the two are looking at different
- * renderings of the same row — and it would leave a component in the shared
- * `components/reports/` directory with exactly one caller, inviting a third
- * variant. Nothing is lost for the operator: the raw payload moves one click
- * away rather than disappearing, and "what is actually in this report?" is now
- * answered before you have to read JSON.
+ * Passed to `ReportRenderer` as `:fallback-component` by the Workspace agent
+ * page, and by nothing else. The operator surfaces keep `ReportJson`, and that
+ * split IS the design rather than an omission — AC #2 asks for a fallback
+ * "deliberately stricter than the operator side, because the audience is an
+ * external client". A raw dump is a FEATURE when you are debugging an agent's
+ * own output and a defect when the reader is that agent's customer.
  *
- * `allow-raw` is a POLICY, not a mechanism: *this surface never shows a raw
- * payload*. Named that way because it must cover two different routes to the
- * same place — a shape mismatch, and an agent that deliberately set
- * `display_hint: "json"` (a valid value in the MCP tool's enum). A "fallback
- * override" prop or slot would only have covered the first, silently leaving the
- * second able to put a raw dump in front of an external client.
+ * So there is deliberately no raw-payload escape hatch in here, and adding one
+ * would re-open the bug: the override covers an agent-chosen
+ * `display_hint: "json"` as well as a shape mismatch (`json` is a valid value in
+ * the MCP tool's enum), so a disclosure would hand the client the dump by either
+ * route.
  *
  * All the logic lives in `reportSummary.js`; this file is a dumb renderer,
  * because there is no component-mount harness here and logic written inline
@@ -73,7 +63,6 @@
  */
 import { computed } from 'vue'
 
-import ReportJson from './ReportJson.vue'
 import { summarizePayload } from './reportSummary'
 
 const props = defineProps({
@@ -82,8 +71,6 @@ const props = defineProps({
   // caption only — a deliberate `json` report is not malformed and must not be
   // labelled as such.
   fallback: { type: Boolean, default: false },
-  // Operator default. The Workspace passes false.
-  allowRaw: { type: Boolean, default: true },
 })
 
 const summary = computed(() => summarizePayload(props.payload))

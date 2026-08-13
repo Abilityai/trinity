@@ -317,18 +317,20 @@ endpoint — reports flow agent → MCP → backend.
   `display_hint`, then `report_type` prefix; each validates payload shape and falls back on
   mismatch. List shows metadata; full payload lazy-loads on expand.
 
-  **The fallback is a human-readable summary, not a raw dump (#2162).** It was the JSON viewer,
-  which is defensible for an operator and never for an external client: `payload` is free-form
-  agent-authored JSON of the same class as an ask's `context`, which the Workspace refuses to
-  expose at all (a known credential-leak surface, canary G-04). The shared fallback is now a
-  bounded, humanised key-value summary (≤40 entries, truncated values, depth 1, credential-shaped
-  tokens redacted), with raw JSON one click away behind a collapsed disclosure. **The one place
-  the three surfaces deliberately differ** is that disclosure: the Workspace passes
-  `allow-raw="false"` and therefore never shows a raw payload — the policy is named on the
-  component, so it covers both a shape mismatch and an agent that explicitly asked for
-  `display_hint: "json"`. A typed renderer reads only the keys its hint declares, so routing a
-  client through the shared set **strictly reduces** what is exposed; the summary bounds and
-  humanises the residual rather than eliminating it (a boundary-side scrub is the general fix).
+  **The fallback is per-surface, and the client-facing one is stricter (#2162).** The shared
+  default stays the JSON viewer: an operator reading a malformed report is debugging an agent's
+  own output, where the raw payload is the useful answer. For an external client it is not —
+  `payload` is free-form agent-authored JSON of the same class as an ask's `context`, which the
+  Workspace refuses to expose at all (a known credential-leak surface, canary G-04). So
+  `ReportRenderer` takes a `fallbackComponent` override (default `ReportJson`, so every operator
+  call site is untouched) and the Workspace passes `ReportSummary`: a bounded, humanised key-value
+  view (≤40 entries, truncated values, depth 1, credential-shaped tokens redacted) with **no raw
+  payload reachable behind it at all**. The override covers an agent-chosen
+  `display_hint: "json"` as well as a shape mismatch — `json` is a valid value in the MCP tool's
+  enum, so replacing only the mismatch path would leave an agent able to dump on request. A typed
+  renderer reads only the keys its hint declares, so routing a client through the shared set
+  **strictly reduces** what is exposed; the summary bounds and humanises the residual rather than
+  eliminating it (a boundary-side scrub is the general fix).
 
   **Enumerating the surfaces here is load-bearing**: FR-5 said "two" while a third shipped a raw
   dump to clients for two releases, which is how #2162 happened. A fourth consumer belongs in

@@ -15,10 +15,10 @@
  * wiring no unit test can reach: which component the tab mounts, which props it
  * passes, and that the CI-pinned dispatch keys stayed where the pin reads them.
  *
- * Guards check the MECHANISM, not the spelling. Asserting that `:allow-raw`
- * appears at a call site would pass just as happily against a prop that is
- * declared and never used, and the whole point of that prop is that a raw
- * payload is unreachable on this surface.
+ * Guards check the MECHANISM, not the spelling. Asserting that
+ * `:fallback-component` appears at a call site would pass just as happily
+ * against a prop that is declared and never used, and the whole point of that
+ * prop is that a raw payload is unreachable on this surface.
  *
  * Comments are stripped before every scan — a comment explaining what must not
  * be written necessarily contains the offending string.
@@ -76,8 +76,11 @@ describe('the Reports tab', () => {
     }
   })
 
-  it('forbids the raw-payload disclosure on this surface', () => {
-    expect(reportsBlock()).toContain(':allow-raw="false"')
+  it('overrides the fallback so a client never gets a raw payload', () => {
+    // AC #2: stricter than the operator side, deliberately. The operator
+    // surfaces pass nothing here and keep the JSON viewer.
+    expect(reportsBlock()).toContain(':fallback-component="ReportSummary"')
+    expect(src(PAGE)).toContain("from '@/components/reports/ReportSummary.vue'")
   })
 
   it('passes paging handles only when the server actually windowed', () => {
@@ -124,25 +127,27 @@ describe('the Reports tab', () => {
 // ---------------------------------------------------------------------------
 
 describe('ReportRenderer', () => {
-  it('dispatches the fallback to ReportSummary, not to the JSON viewer', () => {
+  it('keeps the JSON viewer as the DEFAULT fallback (operator unchanged)', () => {
+    // The operator surfaces are debugging an agent's own output, where a raw
+    // dump is a feature. AC #2 makes the portal stricter than them, not all
+    // three stricter together — a global summary erases the split it asks for.
     const renderer = src(RENDERER)
-    // The MAP is what decides; a mere import would prove nothing.
-    expect(renderer).toMatch(/json:\s*ReportSummary/)
-    // …and the defensive default has to agree with it, or a hint outside the
-    // map silently reopens the raw dump.
-    expect(renderer).toMatch(/COMPONENTS\[[^\]]+\]\s*\|\|\s*ReportSummary/)
+    expect(renderer).toMatch(/json:\s*ReportJson/)
+    expect(renderer).toMatch(/fallbackComponent:\s*\{[^}]*default:\s*null/)
   })
 
-  it('actually forwards allowRaw rather than only declaring it', () => {
+  it('actually renders the override rather than only declaring the prop', () => {
     const renderer = src(RENDERER)
-    expect(renderer).toMatch(/allowRaw:\s*\{\s*type:\s*Boolean/)
-    // Consumed in the binding that reaches the fallback.
-    expect(renderer).toMatch(/allowRaw:\s*props\.allowRaw/)
-    expect(renderer).toContain('v-bind="summaryProps"')
+    // Consumed in the dispatch itself — a declared-but-unused prop would pass a
+    // call-site scan while the client still got a raw dump.
+    expect(renderer).toMatch(/props\.fallbackComponent \|\| ReportJson/)
+    expect(renderer).toContain('v-bind="fallbackProps"')
   })
 
-  it('defaults allowRaw to true, so operator call sites are unchanged', () => {
-    expect(src(RENDERER)).toMatch(/allowRaw:\s*\{\s*type:\s*Boolean,\s*default:\s*true\s*\}/)
+  it('does not import the client-facing summary into the shared renderer', () => {
+    // It arrives as a prop from the one surface that wants it; importing it
+    // here is how a "portal-only" component quietly becomes global again.
+    expect(src(RENDERER)).not.toContain('ReportSummary.vue')
   })
 
   it('tells the fallback whether it was reached by shape MISMATCH', () => {
@@ -150,6 +155,13 @@ describe('ReportRenderer', () => {
     // "the agent asked for this" must not read the same to a reader.
     expect(src(RENDERER)).toMatch(/mismatch:\s*true/)
     expect(src(RENDERER)).toMatch(/fallback:\s*resolved\.value\.mismatch/)
+  })
+
+  it('routes an agent-chosen `json` hint through the override too', () => {
+    // Not only the mismatch path: `display_hint: "json"` is a valid value in the
+    // MCP tool's enum, so an override that covered only mismatches would let an
+    // agent put a raw dump in front of a client by asking for one.
+    expect(src(RENDERER)).toMatch(/hint === 'json'\) return props\.fallbackComponent/)
   })
 
   it('still reads all five CI-pinned payload keys IN THIS FILE', () => {
@@ -184,6 +196,15 @@ const NONGRAY_RE = new RegExp(`\\b(?:${NONGRAY_FAMILIES.join('|')})-(?:50|\\d{3}
 const HEX_RE = /#[0-9a-fA-F]{3,8}\b/g
 
 describe('token discipline', () => {
+  it('ReportSummary.vue exposes no raw-payload escape hatch', () => {
+    // Portal-only, so there is nothing to disclose behind. A `<details>Show raw
+    // JSON</details>` here would hand the client the dump this issue removes.
+    const content = src(SUMMARY)
+    expect(content).not.toContain('ReportJson.vue')
+    expect(content).not.toContain('<details')
+    expect(content).not.toContain('JSON.stringify')
+  })
+
   it.each([
     ['ReportSummary.vue', SUMMARY],
     ['ReportRenderer.vue', RENDERER],
