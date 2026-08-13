@@ -217,9 +217,13 @@
                   <span>tasks</span>
                   <span class="text-gray-300 dark:text-gray-500">·</span>
                   <span :class="getSuccessRateClass(row.executionStats.successRate)" class="font-medium">{{ Math.round(row.executionStats.successRate || 0) }}%</span>
-                  <template v-if="row.executionStats.totalCost > 0">
+                  <template v-if="shouldShowMeteredCost(row.usage) && row.executionStats.totalCost > 0">
+                    <span class="text-gray-300 dark:text-gray-400">·</span>
+                    <span class="font-medium" title="Anthropic API · metered">{{ formatCostCompact(row.executionStats.totalCost) }}</span>
+                  </template>
+                  <template v-else-if="row.usage?.billing_mode === 'subscription'">
                     <span class="text-gray-300 dark:text-gray-500">·</span>
-                    <span class="font-medium">{{ formatCostCompact(row.executionStats.totalCost) }}</span>
+                    <span class="font-medium" :title="usageDetail(row.usage)">{{ dashboardUsageText(row.usage) }}</span>
                   </template>
                 </template>
                 <template v-else>
@@ -399,6 +403,11 @@
 <script setup>
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { formatCostCompact } from '../composables/useFormatters'
+import {
+  dashboardUsageText,
+  shouldShowMeteredCost,
+  usageDetail,
+} from '../utils/usagePresentation'
 import { useRouter } from 'vue-router'
 import { useAgentsStore } from '../stores/agents'
 import { agentNameTooltip, agentDisplayName, hasDistinctLabel } from '../utils/agentName'
@@ -787,6 +796,7 @@ const agentRows = computed(() => {
       contextPercent: ctxStats.contextPercent || 0,
       activityState: ctxStats.activityState || (agent.status === 'running' ? 'idle' : 'offline'),
       executionStats: execStats,
+      usage: agent.usage || null,
       slotStats: slotData
     }
   })

@@ -298,6 +298,9 @@ class MetadataMixin:
                 COALESCE(ao.autonomy_enabled, 0) as autonomy_enabled,
                 COALESCE(ao.read_only_mode, 0) as read_only_enabled,
                 COALESCE(ao.use_platform_api_key, 1) as use_platform_api_key,
+                ao.subscription_id,
+                sc.name as subscription_name,
+                sc.subscription_type,
                 COALESCE(ao.mcp_exposed, 0) as mcp_exposed,
                 COALESCE(ao.a2a_exposed, 0) as a2a_exposed,
                 ao.memory_limit,
@@ -311,6 +314,7 @@ class MetadataMixin:
                 END as is_shared_with_user
             FROM agent_ownership ao
             LEFT JOIN users u ON ao.owner_id = u.id
+            LEFT JOIN subscription_credentials sc ON sc.id = ao.subscription_id
             LEFT JOIN agent_git_config gc ON gc.agent_name = ao.agent_name
             LEFT JOIN agent_sharing s ON s.agent_name = ao.agent_name
                 AND LOWER(s.shared_with_email) = LOWER(:user_email)
@@ -330,6 +334,15 @@ class MetadataMixin:
                     "autonomy_enabled": bool(row["autonomy_enabled"]),
                     "read_only_enabled": bool(row["read_only_enabled"]),
                     "use_platform_api_key": bool(row["use_platform_api_key"]),
+                    "subscription": (
+                        {
+                            "id": row["subscription_id"],
+                            "name": row["subscription_name"],
+                            "subscription_type": row["subscription_type"],
+                        }
+                        if row["subscription_id"] and row["subscription_name"]
+                        else None
+                    ),
                     "mcp_exposed": bool(row["mcp_exposed"]),
                     "a2a_exposed": bool(row["a2a_exposed"]),
                     "memory_limit": row["memory_limit"],

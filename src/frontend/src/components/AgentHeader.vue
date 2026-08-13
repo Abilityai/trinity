@@ -165,7 +165,7 @@
               Shared by {{ agent.owner }}
             </span>
             <!-- Auth method badge / subscription switcher -->
-            <div v-if="authStatus" class="relative inline-flex items-center">
+            <div v-if="authStatus && resolvedUsage" class="relative inline-flex items-center">
               <span
                 class="px-2 py-0.5 text-xs font-medium rounded-full flex items-center gap-0.5"
                 :class="authStatus.auth_mode === 'subscription'
@@ -173,18 +173,10 @@
                   : authStatus.auth_mode === 'api_key'
                     ? 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'
                     : 'bg-status-danger-100 dark:bg-status-danger-900/50 text-status-danger-600 dark:text-status-danger-400'"
-                :title="authStatus.auth_mode === 'subscription'
-                  ? `Using subscription: ${authStatus.subscription_name}`
-                  : authStatus.auth_mode === 'api_key'
-                    ? 'Using platform API key'
-                    : 'No auth configured'"
+                :title="usageDetail(resolvedUsage)"
               >
                 <span v-if="subscriptionChanging" class="inline-block w-2 h-2 border border-current border-t-transparent rounded-full animate-spin mr-0.5"></span>
-                {{ authStatus.auth_mode === 'subscription'
-                  ? authStatus.subscription_name
-                  : authStatus.auth_mode === 'api_key'
-                    ? 'API Key'
-                    : 'No Auth' }}
+                {{ usageBadgeLabel(resolvedUsage) }}
                 <svg v-if="subscriptions !== null && agent.can_share" class="w-2.5 h-2.5 ml-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
                 </svg>
@@ -371,54 +363,57 @@
       </div>
     </div>
 
-    <!-- TOKEN USAGE ROW: 7-day sparkline + today vs average trend -->
+    <!-- AUTH-AWARE USAGE ROW: subscriptions are allowance-oriented; APIs are metered. -->
     <div
-      v-if="tokenStats && (tokenStats.lifetime_executions > 0)"
+      v-if="resolvedUsage?.billing_mode === 'subscription' || (tokenStats && tokenStats.lifetime_executions > 0)"
       class="px-4 py-2 border-t border-gray-100 dark:border-gray-700 flex items-center space-x-4 text-xs"
     >
-      <!-- 7-day cost sparkline -->
-      <div class="flex items-center space-x-1.5">
-        <span class="text-gray-400 dark:text-gray-500">7d</span>
-        <SparklineChart
-          :data="tokenCostSparkline"
-          color="#f59e0b"
-          :y-max="tokenCostSparklineMax"
-          :width="56"
-          :height="16"
-        />
-      </div>
-      <!-- Today's cost -->
-      <div class="flex items-center space-x-1">
-        <span class="text-gray-400 dark:text-gray-500">Today</span>
-        <span class="font-mono text-gray-700 dark:text-gray-300">{{ formatCost(tokenStats.cost_24h) }}</span>
-      </div>
-      <!-- Trend vs 7d average -->
-      <div v-if="tokenStats.avg_daily_cost > 0" class="flex items-center space-x-1">
-        <span
-          :class="trendClass"
-          class="flex items-center space-x-0.5 font-mono"
-          :title="`7d avg: ${formatCost(tokenStats.avg_daily_cost)}/day`"
+      <template v-if="resolvedUsage?.billing_mode === 'subscription'">
+        <div class="flex items-center space-x-2 min-w-0" :title="usageDetail(resolvedUsage)">
+          <span class="text-gray-400 dark:text-gray-500">Subscription allowance</span>
+          <span class="font-medium text-state-autonomous-700 dark:text-state-autonomous-300 truncate">
+            {{ dashboardUsageText(resolvedUsage) }}
+          </span>
+        </div>
+        <div
+          v-if="resolvedUsage.utilization?.status === 'available'"
+          class="flex-1 max-w-48 h-1.5 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden"
         >
-          <!-- Arrow icon -->
-          <svg v-if="tokenStats.trend_cost_pct > 5" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 15l7-7 7 7" />
-          </svg>
-          <svg v-else-if="tokenStats.trend_cost_pct < -5" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7" />
-          </svg>
-          <svg v-else class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14" />
-          </svg>
-          <span>{{ formatTrendPct(tokenStats.trend_cost_pct) }} vs avg</span>
-        </span>
-      </div>
-      <!-- Lifetime cost -->
-      <div class="ml-auto flex items-center space-x-1 text-gray-400 dark:text-gray-500">
-        <span>Lifetime</span>
-        <span class="font-mono text-gray-600 dark:text-gray-400">{{ formatCost(tokenStats.lifetime_cost) }}</span>
-        <span class="text-gray-300 dark:text-gray-600">·</span>
-        <span class="font-mono">{{ tokenStats.lifetime_executions }} runs</span>
-      </div>
+          <div
+            class="h-full bg-state-autonomous-500 rounded-full"
+            :style="{ width: `${resolvedUsage.utilization.percent}%` }"
+          ></div>
+        </div>
+        <span class="ml-auto text-gray-400 dark:text-gray-500">{{ usageDetail(resolvedUsage) }}</span>
+      </template>
+      <template v-else-if="shouldShowMeteredCost(resolvedUsage)">
+        <span class="font-medium text-gray-500 dark:text-gray-400">Anthropic API · metered</span>
+        <div class="flex items-center space-x-1.5">
+          <span class="text-gray-400 dark:text-gray-500">7d</span>
+          <SparklineChart
+            :data="tokenCostSparkline"
+            color="#f59e0b"
+            :y-max="tokenCostSparklineMax"
+            :width="56"
+            :height="16"
+          />
+        </div>
+        <div class="flex items-center space-x-1">
+          <span class="text-gray-400 dark:text-gray-500">Today</span>
+          <span class="font-mono text-gray-700 dark:text-gray-300">{{ formatCost(tokenStats.cost_24h) }}</span>
+        </div>
+        <div v-if="tokenStats.avg_daily_cost > 0" class="flex items-center space-x-1">
+          <span :class="trendClass" class="font-mono" :title="`7d avg: ${formatCost(tokenStats.avg_daily_cost)}/day`">
+            {{ formatTrendPct(tokenStats.trend_cost_pct) }} vs avg
+          </span>
+        </div>
+        <div class="ml-auto flex items-center space-x-1 text-gray-400 dark:text-gray-500">
+          <span>Lifetime</span>
+          <span class="font-mono text-gray-600 dark:text-gray-400">{{ formatCost(tokenStats.lifetime_cost) }}</span>
+          <span class="text-gray-300 dark:text-gray-600">·</span>
+          <span class="font-mono">{{ tokenStats.lifetime_executions }} runs</span>
+        </div>
+      </template>
     </div>
 
     <!-- ROW 3: Git Controls (only when hasGitSync) -->
@@ -516,6 +511,12 @@ import { useRouter } from 'vue-router'
 import AgentAvatar from './AgentAvatar.vue'
 import RuntimeBadge from './RuntimeBadge.vue'
 import { agentDisplayName, hasDistinctLabel } from '../utils/agentName'
+import {
+  dashboardUsageText,
+  shouldShowMeteredCost,
+  usageBadgeLabel,
+  usageDetail,
+} from '../utils/usagePresentation'
 import SparklineChart from './SparklineChart.vue'
 import RunningStateToggle from './RunningStateToggle.vue'
 import AutonomyToggle from './AutonomyToggle.vue'
@@ -658,6 +659,8 @@ const props = defineProps({
     default: false
   }
 })
+
+const resolvedUsage = computed(() => props.authStatus?.usage || props.agent?.usage || null)
 
 const emit = defineEmits([
   'toggle',

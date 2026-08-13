@@ -1,20 +1,20 @@
 # Feature: Subscription Usage Tracking
 
 ## Overview
-Per-subscription rolling token and cost usage across two time windows (5h and 7d), covering both chat messages and scheduled task executions.
+Per-subscription non-billing activity across two rolling windows (5h and 7d), covering both chat messages and scheduled task executions. Allowance utilization is a separate provider-backed signal: if Trinity cannot obtain a reliable percentage/window/reset, the API and UI return an explicit unavailable state instead of substituting token totals or Claude Code's dollar estimate.
 
 ## User Story
-As a platform admin, I want to see aggregate token usage per Claude Max/Pro subscription so that I can understand load distribution across shared subscriptions and detect overuse.
+As a platform admin, I want to see which named Claude subscription funds each agent and its provider-backed allowance utilization when available, without mistaking an estimated dollar value for subscription spend.
 
 ## Entry Points
 - **API**: `GET /api/subscriptions/{subscription_id}/usage`
-- No direct UI entry point — intended for admin inspection and future dashboard integration. Accepts subscription UUID or name as the path parameter.
+- **UI**: agent header, Dashboard timeline/grid/list, and Settings subscription table. Accepts subscription UUID or name as the API path parameter.
 
 ## Backend Layer
 
 ### Endpoint
-- `src/backend/routers/subscriptions.py:118` - `get_subscription_usage()`
-  - Admin-only (`require_admin`)
+- `src/backend/routers/subscriptions.py` - `get_subscription_usage()`
+  - Admin-only (`assert_admin` after authentication)
   - Resolves path param by UUID first, falls back to name lookup
   - Returns `SubscriptionUsage` Pydantic model
 
@@ -26,17 +26,27 @@ Authorization: Bearer <admin_token>
 Response shape:
 ```json
 {
+  "billing_mode": "subscription",
+  "provider": "anthropic",
   "subscription_id": "<uuid>",
+  "subscription_name": "studio-max",
+  "subscription_type": "max",
+  "utilization": {
+    "status": "unavailable",
+    "percent": null,
+    "window": null,
+    "resets_at": null,
+    "last_updated_at": null,
+    "reason": "provider_signal_unavailable"
+  },
   "window_5h": {
     "input_tokens": 12000,
     "output_tokens": 4500,
-    "cost_usd": 0.18,
     "message_count": 37
   },
   "window_7d": {
     "input_tokens": 210000,
     "output_tokens": 75000,
-    "cost_usd": 3.12,
     "message_count": 512
   },
   "agents": ["agent-a", "agent-b"]
@@ -47,11 +57,14 @@ Response shape:
 1. Try `db.get_subscription(subscription_id)` by UUID
 2. If not found, try `db.get_subscription_by_name(subscription_id)`
 3. If still not found, raise 404
-4. Call `db.get_subscription_usage(subscription.id)` with the resolved UUID
+4. Call `db.get_subscription_usage(...)` with the resolved UUID and public subscription identity
 
 ### Business Logic
 - `agents` field reflects **current** assignments from `agent_ownership`, not historical data
 - Usage windows query historical records via the snapshotted `subscription_id` column — correct even when agents switch subscriptions between queries
+
+### Provider Signal Limitation
+Claude setup-token authentication currently gives Trinity no reliable allowance counter. An `available` utilization state requires an authenticated provider signal that supplies, at minimum, percentage consumed, the named allowance window, observation time, and reset time when defined. Local token totals, rate-limit errors, and Claude Code dollar estimates are not valid substitutes; until that signal exists Trinity returns `provider_signal_unavailable`.
 
 ## Data Layer
 
@@ -83,7 +96,6 @@ Two windows computed by `_query_window(cutoff)`:
 SELECT
     COALESCE(SUM(context_used), 0)   AS input_tokens,
     COALESCE(SUM(output_tokens), 0)  AS output_tokens,
-    COALESCE(SUM(cost), 0.0)         AS cost_usd,
     COUNT(*)                          AS message_count
 FROM chat_messages
 WHERE subscription_id = ?
@@ -95,7 +107,6 @@ WHERE subscription_id = ?
 ```sql
 SELECT
     COALESCE(SUM(context_used), 0) AS input_tokens,
-    COALESCE(SUM(cost), 0.0)       AS cost_usd,
     COUNT(*)                        AS exec_count
 FROM schedule_executions
 WHERE subscription_id = ?
@@ -106,8 +117,8 @@ WHERE subscription_id = ?
 Totals are summed: `input_tokens = chat.input_tokens + exec.input_tokens`, `message_count = chat.message_count + exec.exec_count`.
 
 ### Pydantic Models
-- `src/backend/db_models.py:672` - `SubscriptionUsageWindow` (input_tokens, output_tokens, cost_usd, message_count)
-- `src/backend/db_models.py:680` - `SubscriptionUsage` (subscription_id, window_5h, window_7d, agents)
+- `src/backend/db_models.py` - `SubscriptionUsageWindow` (input_tokens, output_tokens, message_count)
+- `src/backend/db_models.py` - discriminated agent usage models plus `SubscriptionUsage` (identity, utilization, activity windows, agents)
 
 ## Subscription ID Snapshot Strategy
 

@@ -137,7 +137,7 @@
             <!-- Tasks Tab Content (#1500: fullscreen flex-fill like Chat; padding
                  lives on TasksPanel's scroll root so content scrolls under it) -->
             <div v-if="activeTab === 'tasks'" class="flex-1 min-h-0 flex flex-col overflow-hidden">
-              <TasksPanel :agent-name="agent.name" :agent-status="agent.status" :highlight-execution-id="route.query.execution" :initial-message="taskPrefillMessage" @create-schedule="handleCreateSchedule" />
+              <TasksPanel :agent-name="agent.name" :agent-status="agent.status" :usage="authStatus?.usage || agent.usage" :highlight-execution-id="route.query.execution" :initial-message="taskPrefillMessage" @create-schedule="handleCreateSchedule" />
             </div>
 
             <!-- Chat Tab Content.

@@ -12,6 +12,7 @@ from .helpers import (
     get_latest_version,
     check_shared_folder_mounts_match,
     check_api_key_env_matches,
+    is_claude_runtime,
     validate_base_image,
 )
 from .lifecycle import (
@@ -97,6 +98,7 @@ __all__ = [
     "get_latest_version",
     "check_shared_folder_mounts_match",
     "check_api_key_env_matches",
+    "is_claude_runtime",
     "validate_base_image",
     # Lifecycle
     "inject_assigned_credentials",

@@ -78,9 +78,19 @@
           {{ successRate }}%
         </p>
       </div>
-      <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2">
-        <p class="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-wide">Total Cost</p>
-        <p class="text-base font-semibold text-gray-900 dark:text-white font-mono">{{ formatCostCompact(totalCost) }}</p>
+      <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2" :title="usageDetail(usage)">
+        <template v-if="shouldShowMeteredCost(usage)">
+          <p class="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-wide">API Cost · Metered</p>
+          <p class="text-base font-semibold text-gray-900 dark:text-white font-mono">{{ formatCostCompact(totalCost) }}</p>
+        </template>
+        <template v-else-if="usage?.billing_mode === 'subscription'">
+          <p class="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-wide">Subscription Allowance</p>
+          <p class="text-base font-semibold text-gray-900 dark:text-white">{{ dashboardUsageText(usage) }}</p>
+        </template>
+        <template v-else>
+          <p class="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-wide">Usage</p>
+          <p class="text-base font-semibold text-gray-500 dark:text-gray-400">Not configured</p>
+        </template>
       </div>
       <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2">
         <p class="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-wide">Avg Duration</p>
@@ -256,7 +266,7 @@
               <div class="flex items-center space-x-4 mt-2 text-xs text-gray-500 dark:text-gray-400">
                 <span v-if="task.model_used" class="font-mono bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded">{{ task.model_used }}</span>
                 <span v-if="task.duration_ms" class="font-mono">{{ formatDuration(task.duration_ms) }}</span>
-                <span v-if="task.cost" class="font-mono">{{ formatCost(task.cost) }}</span>
+                <span v-if="shouldShowMeteredCost(usage) && task.cost" class="font-mono" title="Anthropic API · metered">{{ formatCost(task.cost) }}</span>
                 <div v-if="task.context_used && task.context_max" class="flex items-center space-x-1">
                   <div class="w-16 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
                     <div
@@ -548,6 +558,11 @@ import { formatCost, formatCostCompact } from '../composables/useFormatters'
 import ModelSelector from './ModelSelector.vue'
 import LoadFailed from './LoadFailed.vue'
 import { apiErrorMessage } from '../utils/apiError'
+import {
+  dashboardUsageText,
+  shouldShowMeteredCost,
+  usageDetail,
+} from '../utils/usagePresentation'
 
 // Template ref for highlighted task element
 const highlightedTaskRef = ref(null)
@@ -560,6 +575,10 @@ const props = defineProps({
   agentStatus: {
     type: String,
     default: 'stopped'
+  },
+  usage: {
+    type: Object,
+    default: null
   },
   highlightExecutionId: {
     type: String,

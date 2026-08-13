@@ -228,6 +228,8 @@ def get_accessible_agents(current_user: User) -> list:
     all_metadata = db.get_all_agent_metadata(user_email)
 
     accessible_agents = []
+    from services.subscription_service import build_agent_usage_presentation
+
     for agent in all_agents:
         agent_dict = agent.dict() if hasattr(agent, 'dict') else dict(agent)
         agent_name = agent_dict.get("name")
@@ -250,6 +252,14 @@ def get_accessible_agents(current_user: User) -> list:
             agent_dict["github_repo"] = None
             agent_dict["memory_limit"] = None
             agent_dict["cpu_limit"] = None
+            agent_dict["usage"] = (
+                build_agent_usage_presentation(
+                    subscription=None,
+                    has_api_key=False,
+                ).model_dump(mode="json")
+                if is_claude_runtime(agent_dict.get("runtime"))
+                else None
+            )
             accessible_agents.append(agent_dict)
             continue
 
@@ -274,6 +284,14 @@ def get_accessible_agents(current_user: User) -> list:
         agent_dict["cpu_limit"] = metadata.get("cpu_limit")
         agent_dict["mcp_exposed"] = metadata.get("mcp_exposed", False)  # #846
         agent_dict["a2a_exposed"] = metadata.get("a2a_exposed", False)  # ent#157
+        agent_dict["usage"] = (
+            build_agent_usage_presentation(
+                subscription=metadata.get("subscription"),
+                has_api_key=metadata.get("use_platform_api_key", False),
+            ).model_dump(mode="json")
+            if is_claude_runtime(agent_dict.get("runtime"))
+            else None
+        )
 
         # Avatar URL (AVATAR-001)
         avatar_updated_at = metadata.get("avatar_updated_at")

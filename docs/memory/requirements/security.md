@@ -166,11 +166,15 @@
 - **Requirement ID**: SUB-004
 - **Extends**: SUB-002
 - **Priority**: MEDIUM
-- **Description**: Track token usage (input, output, cost) per subscription across all agents, enabling admins to see how much each subscription is being consumed. Snapshots subscription_id at execution time so usage history survives SUB-003 auto-switches.
+- **Description**: Track non-billing activity per subscription across all agents while presenting Claude subscription usage as an allowance percentage/window only when backed by a reliable provider signal. Snapshot `subscription_id` at execution time so activity history survives SUB-003 auto-switches. Claude Code's recorded dollar estimate is not subscription spend and must not appear on subscription-backed agent, dashboard, Settings, or subscription-usage surfaces.
 - **Key Features**:
   - `subscription_id` column added to `task_executions` and `chat_sessions` tables (nullable, safe migration)
-  - Admin-only `/api/subscriptions/{name}/usage` endpoint with dual-window aggregation (24h + 7d)
-  - Per-agent breakdown of input/output tokens, execution count, and estimated cost
+  - Discriminated `subscription` / `api` / `unconfigured` usage presentation on agent auth and fleet payloads
+  - Subscription identity always includes provider, named subscription, and plan where known
+  - Subscription utilization includes percent, allowance window, reset, and last-updated metadata when provider-backed; otherwise every unknown field is null with `provider_signal_unavailable`
+  - API-key usage is explicitly `Anthropic API · metered` and retains USD cost semantics
+  - Admin-only `/api/subscriptions/{name}/usage` endpoint with 5h + 7d non-billing activity windows and the same honest utilization state
+  - Per-subscription input/output tokens and execution/message count; no dollar estimate on subscription usage
   - Snapshot strategy: subscription_id captured at execution time, not looked up retroactively
 - **Database**: `subscription_id` columns on `task_executions`, `chat_sessions`
 - **Files**:
@@ -178,7 +182,8 @@
   - `src/backend/routers/subscriptions.py` - Usage endpoint
   - `src/backend/routers/chat.py` - Subscription ID capture at execution time
   - `src/backend/db/chat.py` - Session creation with subscription_id
-  - `src/frontend/src/views/Settings.vue` - Usage display (if applicable)
+  - `src/frontend/src/utils/usagePresentation.js` - Shared subscription/API presentation policy
+  - `src/frontend/src/views/Settings.vue` and dashboard/agent header components - Usage display
 
 ### 20.6 Credential Rotation via Hot-Reload, not Container Recreate (#1089)
 - **Status**: ✅ Implemented (2026-06-13)

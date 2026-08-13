@@ -52,6 +52,7 @@ from services.platform_audit_service import (
 from services.agent_service import (
     # Helpers - re-exported for external modules
     get_accessible_agents,
+    is_claude_runtime,
     # Lifecycle
     start_agent_internal,
     # CRUD
@@ -406,6 +407,15 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
     agent_dict["autonomy_enabled"] = db.get_autonomy_enabled(agent_name)
     read_only_data = db.get_read_only_mode(agent_name)
     agent_dict["read_only_enabled"] = read_only_data["enabled"]
+    from services.subscription_service import build_agent_usage_presentation
+    agent_dict["usage"] = (
+        build_agent_usage_presentation(
+            subscription=db.get_agent_subscription(agent_name),
+            has_api_key=db.get_use_platform_api_key(agent_name) or False,
+        ).model_dump(mode="json")
+        if is_claude_runtime(agent_dict.get("runtime"))
+        else None
+    )
 
     # Avatar URL (AVATAR-001)
     identity = db.get_avatar_identity(agent_name)

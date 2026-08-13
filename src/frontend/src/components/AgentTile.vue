@@ -131,7 +131,14 @@
       </span>
       <span v-if="hasTasks" class="t-stats">
         <b>{{ stats.taskCount }}</b> tasks <span class="dim">·</span>
-        <b>{{ formatCostCompact(stats.totalCost || 0) }}</b> <span class="dim">·</span>
+        <template v-if="shouldShowMeteredCost(agent.usage)">
+          <b title="Anthropic API · metered">{{ formatCostCompact(stats.totalCost || 0) }}</b>
+          <span class="dim">·</span>
+        </template>
+        <b v-else-if="agent.usage?.billing_mode === 'subscription'" :title="usageDetail(agent.usage)">
+          {{ dashboardUsageText(agent.usage) }}
+        </b>
+        <span v-if="agent.usage?.billing_mode === 'subscription'" class="dim">·</span>
         {{ lastExecutionDisplay }}
       </span>
       <span v-else class="t-stats empty">No tasks (24h)</span>
@@ -176,6 +183,11 @@
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { formatCostCompact } from '../composables/useFormatters'
+import {
+  dashboardUsageText,
+  shouldShowMeteredCost,
+  usageDetail,
+} from '../utils/usagePresentation'
 import AgentAvatar from './AgentAvatar.vue'
 import RuntimeBadge from './RuntimeBadge.vue'
 import { agentDisplayName, agentNameTooltip } from '../utils/agentName'
@@ -331,6 +343,19 @@ const chips = computed(() => {
       title: runnerStatus.value.enabled
         ? `${runnerStatus.value.grant_count} grant(s) across ${runnerStatus.value.exposed_skill_count} skill(s)`
         : 'The skill runner exists but skill execution is turned off',
+    })
+  }
+  if (props.agent.usage?.billing_mode === 'subscription') {
+    out.push({
+      kind: 'calm',
+      text: dashboardUsageText(props.agent.usage),
+      title: usageDetail(props.agent.usage),
+    })
+  } else if (props.agent.usage?.billing_mode === 'api') {
+    out.push({
+      kind: 'calm',
+      text: 'API · metered',
+      title: usageDetail(props.agent.usage),
     })
   }
   // Calm facts after problems. The system agent gets these too — an empty

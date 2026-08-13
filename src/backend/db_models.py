@@ -7,7 +7,7 @@ For API request/response models, see models.py.
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Optional, List
+from typing import Annotated, Any, Dict, Literal, Optional, List, Union
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -886,9 +886,80 @@ class SubscriptionCredential(BaseModel):
     agent_count: int = 0  # Number of agents using this subscription
 
 
+class ClaudeSubscriptionIdentity(BaseModel):
+    """Public identity for the subscription funding a Claude agent."""
+
+    id: str
+    name: str
+    plan: Optional[str] = None
+
+
+class SubscriptionUtilizationAvailable(BaseModel):
+    """A provider-backed allowance signal with enough context to interpret it."""
+
+    status: Literal["available"] = "available"
+    percent: float = Field(ge=0, le=100)
+    window: str
+    resets_at: Optional[str] = None
+    last_updated_at: str
+
+
+class SubscriptionUtilizationUnavailable(BaseModel):
+    """Honest state when Trinity has no reliable allowance counter."""
+
+    status: Literal["unavailable"] = "unavailable"
+    percent: None = None
+    window: None = None
+    resets_at: None = None
+    last_updated_at: None = None
+    reason: Literal["provider_signal_unavailable"] = "provider_signal_unavailable"
+
+
+SubscriptionUtilization = Annotated[
+    Union[SubscriptionUtilizationAvailable, SubscriptionUtilizationUnavailable],
+    Field(discriminator="status"),
+]
+
+
+class SubscriptionUsagePresentation(BaseModel):
+    """Allowance-oriented usage for Claude Max/Pro subscription auth."""
+
+    billing_mode: Literal["subscription"] = "subscription"
+    provider: Literal["anthropic"] = "anthropic"
+    subscription: ClaudeSubscriptionIdentity
+    utilization: SubscriptionUtilization
+
+
+class ApiMeteredUsagePresentation(BaseModel):
+    """Cost-oriented usage descriptor for Anthropic API-key auth."""
+
+    billing_mode: Literal["api"] = "api"
+    provider: Literal["anthropic"] = "anthropic"
+    metering: Literal["metered"] = "metered"
+    cost_currency: Literal["USD"] = "USD"
+
+
+class UnconfiguredUsagePresentation(BaseModel):
+    """No Claude billing identity is configured for the agent."""
+
+    billing_mode: Literal["unconfigured"] = "unconfigured"
+    provider: Literal["anthropic"] = "anthropic"
+
+
+AgentUsagePresentation = Annotated[
+    Union[
+        SubscriptionUsagePresentation,
+        ApiMeteredUsagePresentation,
+        UnconfiguredUsagePresentation,
+    ],
+    Field(discriminator="billing_mode"),
+]
+
+
 class SubscriptionWithAgents(SubscriptionCredential):
     """Subscription with list of assigned agents."""
     agents: List[str] = []
+    usage: Optional[SubscriptionUsagePresentation] = None
 
 
 class AgentAuthStatus(BaseModel):
@@ -898,19 +969,24 @@ class AgentAuthStatus(BaseModel):
     subscription_name: Optional[str] = None
     subscription_id: Optional[str] = None
     has_api_key: bool = False
+    usage: Optional[AgentUsagePresentation] = None
 
 
 class SubscriptionUsageWindow(BaseModel):
-    """Usage totals for a rolling time window. (SUB-004)"""
+    """Non-billing activity totals for a subscription window. (SUB-004)"""
     input_tokens: int = 0
     output_tokens: int = 0
-    cost_usd: float = 0.0
     message_count: int = 0
 
 
 class SubscriptionUsage(BaseModel):
-    """Per-subscription usage across rolling time windows. (SUB-004)"""
+    """Allowance-oriented subscription usage plus non-billing activity."""
+    billing_mode: Literal["subscription"] = "subscription"
+    provider: Literal["anthropic"] = "anthropic"
     subscription_id: str
+    subscription_name: str
+    subscription_type: Optional[str] = None
+    utilization: SubscriptionUtilization
     window_5h: SubscriptionUsageWindow
     window_7d: SubscriptionUsageWindow
     agents: List[str] = []  # agents currently assigned to this subscription

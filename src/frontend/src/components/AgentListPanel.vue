@@ -562,9 +562,13 @@
             <div class="flex items-center text-[11px] text-gray-500 dark:text-gray-400 gap-x-1.5 whitespace-nowrap">
               <template v-if="hasExecutionStats(agent.name)">
                 <span class="font-medium text-gray-700 dark:text-gray-300">{{ getExecutionStats(agent.name).taskCount }} tasks</span>
-                <template v-if="getExecutionStats(agent.name).totalCost > 0">
+                <template v-if="shouldShowMeteredCost(agent.usage) && getExecutionStats(agent.name).totalCost > 0">
                   <span class="text-gray-300 dark:text-gray-600">·</span>
-                  <span class="font-medium text-gray-700 dark:text-gray-300">{{ formatCostCompact(getExecutionStats(agent.name).totalCost) }}</span>
+                  <span class="font-medium text-gray-700 dark:text-gray-300" title="Anthropic API · metered">{{ formatCostCompact(getExecutionStats(agent.name).totalCost) }}</span>
+                </template>
+                <template v-else-if="agent.usage?.billing_mode === 'subscription'">
+                  <span class="text-gray-300 dark:text-gray-600">·</span>
+                  <span class="font-medium text-gray-700 dark:text-gray-300" :title="usageDetail(agent.usage)">{{ dashboardUsageText(agent.usage) }}</span>
                 </template>
               </template>
               <span v-else class="text-gray-400 dark:text-gray-500">--</span>
@@ -702,6 +706,11 @@ import CapacityMeter from './CapacityMeter.vue'
 import { ServerIcon } from '@heroicons/vue/24/outline'
 import axios from 'axios'
 import { syncHealthColor, syncHealthLabel as syncHealthLabelFn } from '../utils/syncHealth'
+import {
+  dashboardUsageText,
+  shouldShowMeteredCost,
+  usageDetail,
+} from '../utils/usagePresentation'
 
 const props = defineProps({
   // The chassis-visible fleet (networkStore.visibleAgents — server-side tag

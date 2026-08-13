@@ -27,7 +27,13 @@ from .tables import (
     schedule_executions,
     users,
 )
-from db_models import SubscriptionCredential, SubscriptionUsage, SubscriptionUsageWindow, SubscriptionWithAgents
+from db_models import (
+    SubscriptionCredential,
+    SubscriptionUsage,
+    SubscriptionUsageWindow,
+    SubscriptionUtilizationUnavailable,
+    SubscriptionWithAgents,
+)
 from utils.helpers import iso_cutoff, utc_now_iso
 
 
@@ -699,7 +705,13 @@ class SubscriptionOperations:
     # Usage Tracking (SUB-004: Per-subscription usage windows)
     # =========================================================================
 
-    def get_subscription_usage(self, subscription_id: str) -> SubscriptionUsage:
+    def get_subscription_usage(
+        self,
+        subscription_id: str,
+        *,
+        subscription_name: str,
+        subscription_type: Optional[str] = None,
+    ) -> SubscriptionUsage:
         """
         Return rolling usage totals for a subscription across two time windows:
         - window_5h: last 5 hours
@@ -725,7 +737,6 @@ class SubscriptionOperations:
                     select(
                         func.coalesce(func.sum(chat_messages.c.context_used), 0).label("input_tokens"),
                         func.coalesce(func.sum(chat_messages.c.output_tokens), 0).label("output_tokens"),
-                        func.coalesce(func.sum(chat_messages.c.cost), 0.0).label("cost_usd"),
                         func.count().label("message_count"),
                     ).where(
                         and_(
@@ -740,7 +751,6 @@ class SubscriptionOperations:
                 exec_row = conn.execute(
                     select(
                         func.coalesce(func.sum(schedule_executions.c.context_used), 0).label("input_tokens"),
-                        func.coalesce(func.sum(schedule_executions.c.cost), 0.0).label("cost_usd"),
                         func.count().label("exec_count"),
                     ).where(
                         and_(
@@ -754,7 +764,6 @@ class SubscriptionOperations:
                 return SubscriptionUsageWindow(
                     input_tokens=int(chat_row["input_tokens"] or 0) + int(exec_row["input_tokens"] or 0),
                     output_tokens=int(chat_row["output_tokens"] or 0),
-                    cost_usd=float(chat_row["cost_usd"] or 0.0) + float(exec_row["cost_usd"] or 0.0),
                     message_count=int(chat_row["message_count"] or 0) + int(exec_row["exec_count"] or 0),
                 )
 
@@ -774,6 +783,9 @@ class SubscriptionOperations:
 
         return SubscriptionUsage(
             subscription_id=subscription_id,
+            subscription_name=subscription_name,
+            subscription_type=subscription_type,
+            utilization=SubscriptionUtilizationUnavailable(),
             window_5h=window_5h,
             window_7d=window_7d,
             agents=agents,

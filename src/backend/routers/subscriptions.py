@@ -24,6 +24,7 @@ from db_models import (
     SubscriptionWithAgents,
     AgentAuthStatus,
 )
+from services.subscription_service import build_agent_usage_presentation
 
 router = APIRouter(prefix="/api/subscriptions", tags=["subscriptions"])
 logger = logging.getLogger(__name__)
@@ -135,8 +136,20 @@ async def list_subscriptions(
     that owner's subscriptions, which are the only ones it can assign anyway.
     """
     if current_user.role == "admin" and not getattr(current_user, "agent_name", None):
-        return db.list_subscriptions_with_agents()
-    return db.list_subscriptions_with_agents(owner_id=current_user.id)
+        subscriptions = db.list_subscriptions_with_agents()
+    else:
+        subscriptions = db.list_subscriptions_with_agents(owner_id=current_user.id)
+
+    return [
+        SubscriptionWithAgents(
+            **subscription.model_dump(exclude={"usage"}),
+            usage=build_agent_usage_presentation(
+                subscription=subscription,
+                has_api_key=False,
+            ),
+        )
+        for subscription in subscriptions
+    ]
 
 
 @router.get("/{subscription_id}/usage", response_model=SubscriptionUsage)
@@ -147,9 +160,8 @@ async def get_subscription_usage(
     """
     Get rolling usage statistics for a subscription (SUB-004).
 
-    Returns token and cost aggregates across two rolling windows (the docstring
-    said "Admin-only" while the gate has always been `get_current_user` — noted
-    while auditing this module for ent#293):
+    Returns non-billing activity aggregates across two rolling windows. The
+    authenticated caller is then restricted by the explicit admin assertion:
     - window_5h: last 5 hours
     - window_7d: last 7 days
 
@@ -166,7 +178,11 @@ async def get_subscription_usage(
         raise HTTPException(status_code=404, detail="Subscription not found")
 
     try:
-        return db.get_subscription_usage(subscription.id)
+        return db.get_subscription_usage(
+            subscription.id,
+            subscription_name=subscription.name,
+            subscription_type=subscription.subscription_type,
+        )
     except Exception as e:
         logger.error(f"Failed to get usage for subscription {subscription_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve usage data")
@@ -197,7 +213,11 @@ async def get_subscription(
 
     return SubscriptionWithAgents(
         **subscription.model_dump(),
-        agents=agents
+        agents=agents,
+        usage=build_agent_usage_presentation(
+            subscription=subscription,
+            has_api_key=False,
+        ),
     )
 
 

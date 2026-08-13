@@ -9,12 +9,53 @@ No file injection is needed — the token is part of the container environment.
 """
 
 import logging
-from typing import Optional
+from collections.abc import Mapping
+from typing import Any, Optional
 
 from database import db
-from db_models import AgentAuthStatus
+from services.agent_service import is_claude_runtime
+from services.docker_service import get_agent_runtime
+from db_models import (
+    AgentAuthStatus,
+    AgentUsagePresentation,
+    ApiMeteredUsagePresentation,
+    ClaudeSubscriptionIdentity,
+    SubscriptionUsagePresentation,
+    SubscriptionUtilizationUnavailable,
+    UnconfiguredUsagePresentation,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _subscription_value(subscription: Any, key: str) -> Any:
+    if isinstance(subscription, Mapping):
+        return subscription.get(key)
+    return getattr(subscription, key, None)
+
+
+def build_agent_usage_presentation(
+    *, subscription: Optional[Any], has_api_key: bool
+) -> AgentUsagePresentation:
+    """Build the billing-mode discriminator consumed by every agent UI.
+
+    Trinity has no provider-backed Claude allowance counter today. Subscription
+    auth therefore returns an explicit unavailable state, with every percentage,
+    window, reset, and freshness field null. Estimated Claude Code dollar values
+    must never be used as a substitute for that missing signal.
+    """
+    if subscription is not None:
+        return SubscriptionUsagePresentation(
+            subscription=ClaudeSubscriptionIdentity(
+                id=_subscription_value(subscription, "id"),
+                name=_subscription_value(subscription, "name"),
+                plan=_subscription_value(subscription, "subscription_type"),
+            ),
+            utilization=SubscriptionUtilizationUnavailable(),
+        )
+    if has_api_key:
+        return ApiMeteredUsagePresentation()
+    return UnconfiguredUsagePresentation()
 
 
 async def get_agent_auth_mode(agent_name: str) -> AgentAuthStatus:
@@ -53,4 +94,12 @@ async def get_agent_auth_mode(agent_name: str) -> AgentAuthStatus:
         subscription_name=subscription.name if subscription else None,
         subscription_id=subscription.id if subscription else None,
         has_api_key=has_api_key,
+        usage=(
+            build_agent_usage_presentation(
+                subscription=subscription,
+                has_api_key=has_api_key,
+            )
+            if is_claude_runtime(get_agent_runtime(agent_name))
+            else None
+        ),
     )

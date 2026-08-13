@@ -2384,9 +2384,19 @@ class DatabaseManager:
     def select_best_alternative_subscription(self, current_subscription_id: str):
         return self._subscription_ops.select_best_alternative_subscription(current_subscription_id)
 
-    def get_subscription_usage(self, subscription_id: str):
+    def get_subscription_usage(
+        self,
+        subscription_id: str,
+        *,
+        subscription_name: str,
+        subscription_type: str | None = None,
+    ):
         """Return rolling usage totals for a subscription (SUB-004)."""
-        return self._subscription_ops.get_subscription_usage(subscription_id)
+        return self._subscription_ops.get_subscription_usage(
+            subscription_id,
+            subscription_name=subscription_name,
+            subscription_type=subscription_type,
+        )
 
     # =========================================================================
     # Agent Monitoring (delegated to db/monitoring.py) - MON-001

@@ -1263,6 +1263,9 @@
                           Type
                         </th>
                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                          Allowance usage
+                        </th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                           Agents
                         </th>
                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
@@ -1275,12 +1278,12 @@
                     </thead>
                     <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                       <tr v-if="loadingSubscriptions">
-                        <td colspan="5" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
+                        <td colspan="6" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
                           <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-action-primary-600 mx-auto"></div>
                         </td>
                       </tr>
                       <tr v-else-if="subscriptions.length === 0">
-                        <td colspan="5" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
+                        <td colspan="6" class="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
                           No subscriptions registered. Add one above using your Claude credentials.
                         </td>
                       </tr>
@@ -1300,6 +1303,9 @@
                               {{ sub.subscription_type === 'max' ? 'Max' : sub.subscription_type === 'pro' ? 'Pro' : sub.subscription_type }}
                             </span>
                             <span v-else class="text-sm text-gray-500 dark:text-gray-400">—</span>
+                          </td>
+                          <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600 dark:text-gray-300">
+                            <span :title="usageDetail(sub.usage)">{{ dashboardUsageText(sub.usage) }}</span>
                           </td>
                           <td class="px-6 py-4 whitespace-nowrap">
                             <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200">
@@ -1321,7 +1327,7 @@
                         </tr>
                         <!-- Expanded Details Row -->
                         <tr v-if="expandedSubscriptions.has(sub.id)" class="bg-gray-50 dark:bg-gray-700/50">
-                          <td colspan="5" class="px-6 py-4">
+                          <td colspan="6" class="px-6 py-4">
                             <div class="text-sm">
                               <div class="mb-2 text-gray-600 dark:text-gray-400">
                                 <strong>Owner:</strong> {{ sub.owner_email || 'Unknown' }}
@@ -2364,6 +2370,7 @@ import { agentDisplayName, agentOptionLabel } from '../utils/agentName'
 import { useSettingsStore } from '../stores/settings'
 import { useSessionsStore } from '../stores/sessions'
 import { apiErrorMessage } from '../utils/apiError'
+import { dashboardUsageText, usageDetail } from '../utils/usagePresentation'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'

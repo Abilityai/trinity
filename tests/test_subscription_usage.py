@@ -21,8 +21,11 @@ from testkit.assertions import (
 
 VALID_TOKEN = "sk-ant-oat01-test-sub-usage-token-12345"
 
-USAGE_WINDOW_FIELDS = ["input_tokens", "output_tokens", "cost_usd", "message_count"]
-USAGE_FIELDS = ["subscription_id", "window_5h", "window_7d", "agents"]
+USAGE_WINDOW_FIELDS = ["input_tokens", "output_tokens", "message_count"]
+USAGE_FIELDS = [
+    "billing_mode", "provider", "subscription_id", "subscription_name",
+    "subscription_type", "utilization", "window_5h", "window_7d", "agents",
+]
 
 
 # =============================================================================
@@ -60,6 +63,11 @@ class TestSubscriptionUsage:
         assert_status(response, 200)
         data = assert_json_response(response)
         assert_has_fields(data, USAGE_FIELDS)
+        assert data["billing_mode"] == "subscription"
+        assert data["provider"] == "anthropic"
+        assert data["subscription_name"] == self.subscription["name"]
+        assert data["utilization"]["status"] == "unavailable"
+        assert data["utilization"]["percent"] is None
 
     @pytest.mark.smoke
     def test_usage_window_fields(self, api_client: TrinityApiClient):
@@ -82,7 +90,7 @@ class TestSubscriptionUsage:
             window = data[window_key]
             assert window["input_tokens"] == 0, f"{window_key}.input_tokens should be 0"
             assert window["output_tokens"] == 0, f"{window_key}.output_tokens should be 0"
-            assert window["cost_usd"] == 0.0, f"{window_key}.cost_usd should be 0"
+            assert "cost_usd" not in window, f"{window_key} must not expose subscription dollars"
             assert window["message_count"] == 0, f"{window_key}.message_count should be 0"
 
     @pytest.mark.smoke
