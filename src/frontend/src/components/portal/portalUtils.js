@@ -83,6 +83,36 @@ export function shouldMarkTurnRead(completedSessionId, openSessionId) {
   return !!completedSessionId && completedSessionId === openSessionId
 }
 
+// ent#361: @mentioning another agent from a 1:1 turns it into a group chat.
+//
+// The pattern MIRRORS the rooms engine's `_MENTION_RE`
+// (`@([A-Za-z0-9][A-Za-z0-9_-]{0,99})`) so that what looks like a mention here
+// is what the engine will treat as one there. If the two drift, a user gets a
+// room built around a handle the engine then renders as plain text.
+//
+// Resolution is against the CALLER'S ROSTER, and that is the whole safety
+// story: an @name that is not an agent shared with this user stays plain text,
+// exactly as it does in a room. It is not an error and must never be reported
+// as one — telling someone "no such agent" would answer, for any string they
+// care to type, whether an agent by that name exists on the instance.
+const MENTION_RE = /@([A-Za-z0-9][A-Za-z0-9_-]{0,99})/g
+
+export function mentionedAgents(content, roster, { exclude = [] } = {}) {
+  const names = new Set(
+    (Array.isArray(roster) ? roster : []).map((a) => a && a.name).filter(Boolean),
+  )
+  const skip = new Set(exclude.filter(Boolean))
+  const out = []
+  const seen = new Set()
+  for (const m of String(content || '').matchAll(MENTION_RE)) {
+    const name = m[1]
+    if (!names.has(name) || skip.has(name) || seen.has(name)) continue
+    seen.add(name)
+    out.push(name)
+  }
+  return out
+}
+
 // Normalise a room onto the thread shape the sidebar renders, so one list
 // component handles both kinds.
 //
