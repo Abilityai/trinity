@@ -375,10 +375,14 @@ function leaveRoomRoute() {
   router.push('/workspace')
 }
 
+// Leave ANY specific route, not an enumerated list of params — rationale in
+// newChatWithAgent below. Identical bug here: from /workspace/a/:agentName the
+// blank-chat control set state and navigated nowhere, so the agent page kept
+// rendering and the button looked just as dead.
 function startBlankChat() {
   unreachableAgent.value = null
   pendingSession.value = null; prefill.value = ''; convGen.value++
-  if (route.params.sessionId || route.params.roomId) router.push('/workspace')
+  if (route.path !== '/workspace') router.push('/workspace')
 }
 
 async function onPickerConfirm(agentNames) {
@@ -727,8 +731,9 @@ function onSignOut() {
   store.signOut()
   threads.value = []; activeAgentName.value = null; pendingSession.value = null
   step.value = 'email'; email.value = ''; code.value = ''
-  // #2128: `roomId` too — otherwise a sign-out from a room URL carries that
-  // room id into the next session's address bar.
-  if (route.params.sessionId || route.params.roomId) router.push('/workspace')
+  // Leave ANY specific route (rationale in newChatWithAgent) — otherwise a
+  // sign-out from a room or agent-page URL carries that id into the next
+  // session's address bar.
+  if (route.path !== '/workspace') router.push('/workspace')
 }
 </script>

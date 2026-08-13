@@ -255,23 +255,29 @@ describe('#2128 structure guards', () => {
     //
     // Originally asserted the literal `route.params.roomId`. That enumeration
     // was itself the bug one route later: ent#360 added
-    // `/workspace/a/:agentName` and "Start a chat" on the agent page navigated
-    // nowhere, so the page kept rendering and the button looked dead — the same
-    // failure this test exists for, with a different param missing from the
-    // list. So it now accepts EITHER the param check or the route-shape check
-    // that supersedes it, and what is asserted is that the exit works from a
-    // non-bare route at all.
+    // `/workspace/a/:agentName` and none of these three navigated from it, so
+    // the page kept rendering and the controls looked dead — the same failure
+    // this test exists for, with a different param missing from the list.
+    //
+    // So the assertion is now the route-SHAPE check, required of all three. It
+    // deliberately does NOT accept the old param spelling as an alternative:
+    // that enumeration is the defect, and a guard that still passes on it can
+    // only catch the params someone already thought of. A fourth Workspace
+    // route must not be able to re-break these.
     const src = portalSource()
     for (const fn of ['startBlankChat', 'newChatWithAgent', 'onSignOut']) {
       const at = src.indexOf(`function ${fn}(`)
       expect(at, `${fn} is gone`).toBeGreaterThan(-1)
       const body = src.slice(at, src.indexOf('\n}', at))
-      const leavesAnyRoute = /route\.path\s*!==\s*'\/workspace'/.test(body)
       expect(
-        leavesAnyRoute || body.includes('route.params.roomId'),
-        `${fn} navigates only on sessionId — from a room URL (or an agent-page ` +
+        body,
+        `${fn} enumerates route params — from a room URL (or an agent-page ` +
         `URL) it changes nothing, leaving the user parked with no way out`
-      ).toBe(true)
+      ).toMatch(/route\.path\s*!==\s*'\/workspace'/)
+      expect(
+        body,
+        `${fn} still enumerates route params alongside the shape check`
+      ).not.toMatch(/route\.params\.(sessionId|roomId|agentName)/)
     }
   })
 })

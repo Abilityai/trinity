@@ -41,21 +41,24 @@ function fnBody(name) {
 }
 
 describe('leaving a specific Workspace route when starting a chat', () => {
-  const body = fnBody('newChatWithAgent')
+  // All THREE stage exits, not just the reported one. They carried the same
+  // enumeration, so ent#360 broke all three at once; fixing only the button in
+  // the bug report leaves the blank-chat control equally dead on the agent page
+  // and leaves sign-out carrying the agent id into the next session's URL.
+  const EXITS = ['newChatWithAgent', 'startBlankChat', 'onSignOut']
 
-  it('navigates away from any non-bare route', () => {
-    expect(body).toMatch(/route\.path\s*!==\s*'\/workspace'/)
+  it.each(EXITS)('%s navigates away from any non-bare route', (fn) => {
+    expect(fnBody(fn)).toMatch(/route\.path\s*!==\s*'\/workspace'/)
   })
 
-  it('does NOT enumerate route params — that is what broke twice', () => {
+  it.each(EXITS)('%s does NOT enumerate route params — that is what broke twice', (fn) => {
     // `sessionId || roomId` was correct until a third route existed. Naming
-    // params here means the next route silently re-breaks the button.
-    expect(body).not.toMatch(/route\.params\.sessionId\s*\|\|/)
-    expect(body).not.toMatch(/route\.params\.agentName/)
+    // params here means the next route silently re-breaks the control.
+    expect(fnBody(fn)).not.toMatch(/route\.params\.(sessionId|roomId|agentName)/)
   })
 
-  it('still pushes to the bare workspace route', () => {
-    expect(body).toMatch(/router\.push\('\/workspace'\)/)
+  it.each(EXITS)('%s still pushes to the bare workspace route', (fn) => {
+    expect(fnBody(fn)).toMatch(/router\.push\('\/workspace'\)/)
   })
 })
 
