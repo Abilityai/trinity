@@ -521,10 +521,19 @@ function newChatWithAgent(name) {
   unreachableAgent.value = null
   activeAgentName.value = name
   pendingSession.value = null; prefill.value = ''; convGen.value++
-  // #2128: `roomId` too — see leaveRoomRoute above. Without it, picking one
-  // agent from the picker while parked on a room URL leaves the room route (and
-  // so the refusal) on screen, and the chat the user asked for never appears.
-  if (route.params.sessionId || route.params.roomId) router.push('/workspace')
+  // Leave ANY specific route, not an enumerated list of params.
+  //
+  // This condition has now been wrong twice for the same reason. #2128 added
+  // `roomId` after picking an agent while parked on a room URL left the room on
+  // screen; ent#360 then added `/workspace/a/:agentName` and did not extend the
+  // list, so "Start a chat" on the agent page set the state and navigated
+  // nowhere — the page kept rendering (it is the first branch of the stage
+  // chain) and the chat never appeared.
+  //
+  // Every specific Workspace route is `/workspace/<something>`, so asking
+  // whether we are on the bare one answers the actual question and cannot go
+  // stale when a fourth route is added.
+  if (route.path !== '/workspace') router.push('/workspace')
 }
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
 function openThread(t) {
