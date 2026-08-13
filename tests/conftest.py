@@ -770,3 +770,57 @@ def cleanup_after_test(api_client: TrinityApiClient, resource_tracker: ResourceT
     yield
     if not request.config.getoption("--skip-cleanup"):
         resource_tracker.cleanup(api_client)
+
+
+# --- #2140: module stubs that cannot outlive the load they exist for ---------
+import contextlib as _contextlib
+
+
+@_contextlib.contextmanager
+def stubbed_modules(mapping):
+    """Install `mapping` into `sys.modules` for a block, then restore and verify.
+
+    Three unit files hand-load `services/agent_service/lifecycle.py`, which needs
+    the REAL `services.agent_service*` names present while it executes — line 27
+    is an absolute `from services.agent_service.helpers import validate_base_image`,
+    so the relative slots those files register are not enough. All three used to
+    install them PERMANENTLY.
+
+    That is not a tidiness point. `services/compatibility/spec.py`:
+
+        def applies_to_runtime(check, runtime):
+            if not check.claude_only:
+                return True
+            from services.agent_service.helpers import is_claude_runtime
+
+    resolves that import LAZILY, so it picks up whatever is in `sys.modules` at
+    call time. Every test running afterwards silently lost `claude_only`
+    filtering and `test_codex_runtime_omits_claude_only_checks` failed —
+    presenting as a real #1187 multi-runtime regression rather than as pollution
+    from another file. `pytest-randomly` made it a latent flake, not a constant.
+
+    Shared rather than inlined BECAUSE it was inlined: the first fix repaired
+    one copy and left two others producing the identical symptom.
+
+    The exit assertion uses IDENTITY, not `isinstance(..., Mock)`: the package
+    stub is a real `types.ModuleType` from `module_from_spec`, so a type check
+    waves through a re-leak of `services.agent_service` itself — the leak
+    `test_1310_auth_consolidation.py` documents as aborting its own collection.
+    A leak therefore fails at IMPORT, in the file that caused it, naming it.
+    """
+    snapshot = {name: sys.modules.get(name) for name in mapping}
+    sys.modules.update(mapping)
+    try:
+        yield
+    finally:
+        for name, original in snapshot.items():
+            if original is not None:
+                sys.modules[name] = original
+            else:
+                sys.modules.pop(name, None)
+        leaked = [name for name, stub in mapping.items() if sys.modules.get(name) is stub]
+        assert not leaked, (
+            f"module stubs outlived the load that needed them: {leaked}. "
+            "They are resolved lazily by services/compatibility/spec.py, so this "
+            "breaks claude_only filtering in whatever test runs next — see #2140."
+        )

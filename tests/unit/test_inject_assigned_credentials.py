@@ -179,25 +179,19 @@ def _load_lifecycle():
     # (test_voice_auth needs real FastAPI; test_file_upload needs the real
     # services.docker_service / services.docker_utils so its workspace-
     # delivery code paths await coroutines instead of plain Mocks).
-    _to_install = {**_SYS_MOCKS, **agent_service_aliases}
-    _snapshot: dict[str, object] = {
-        name: sys.modules.get(name) for name in _to_install
-    }
-    sys.modules.update(_to_install)
+    # #2140: everything installed here is scoped to the load. `stubbed_modules`
+    # restores each slot and ASSERTS the restore happened, so a leak fails at
+    # import — in this file, naming this file — rather than as a mystery failure
+    # in whatever runs next.
+    from conftest import stubbed_modules
 
-    spec = importlib.util.spec_from_file_location(
-        f"{pkg_name}.lifecycle",
-        os.path.join(_BACKEND, "services", "agent_service", "lifecycle.py"),
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
-    # Restore the real modules (or evict our Mock if the slot was empty).
-    for name, original in _snapshot.items():
-        if original is not None:
-            sys.modules[name] = original  # type: ignore[assignment]
-        else:
-            sys.modules.pop(name, None)
+    with stubbed_modules({**_SYS_MOCKS, **agent_service_aliases}):
+        spec = importlib.util.spec_from_file_location(
+            f"{pkg_name}.lifecycle",
+            os.path.join(_BACKEND, "services", "agent_service", "lifecycle.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
     return mod
 
 
@@ -213,7 +207,7 @@ def _run(coro):
 
 
 @pytest.fixture(autouse=True)
-def _reset():
+def _reset(monkeypatch):
     _mock_db.reset_mock()
     # Default: not a subscription agent.
     _mock_db.get_agent_subscription_id.return_value = None
@@ -224,7 +218,12 @@ def _reset():
     # the real DB instead of our mock — and our subscription-mode short-circuit
     # silently misses. Re-stamp the slot for every test so the lazy import
     # resolves to _mock_db regardless of what other files did to sys.modules.
-    sys.modules["database"] = _SYS_MOCKS["database"]
+    # #2140 (review): via monkeypatch, so the slot is RESTORED after each test.
+    # A bare assignment here re-stamped a Mock `database` permanently — same leak
+    # class as the agent_service stubs, and not covered by the helper because it
+    # happens per-test rather than during the load. Any later test lazily doing
+    # `from database import db` got this file's configured return values.
+    monkeypatch.setitem(sys.modules, "database", _SYS_MOCKS["database"])
 
 
 # ── Subscription-mode short-circuit (#612) ───────────────────────────────
@@ -385,42 +384,3 @@ def test_encryption_not_configured_returns_skipped():
 
     assert result["status"] == "skipped"
     assert result["reason"] == "encryption_not_configured"
-
-
-# ── #2140: the stubs must not outlive this module's import ───────────────
-
-
-def test_the_agent_service_stubs_did_not_leak_into_sys_modules():
-    """This file loads `lifecycle.py` by hand, which needs
-    `services.agent_service.helpers` in `sys.modules` while it executes. Those
-    slots used to be left installed for the whole session.
-
-    That is not a tidiness point. `services/compatibility/spec.py`:
-
-        def applies_to_runtime(check, runtime):
-            if not check.claude_only:
-                return True
-            from services.agent_service.helpers import is_claude_runtime
-
-    resolves that import LAZILY, so it picks up whatever is in `sys.modules` at
-    call time. With the stub still installed, every test running after this one
-    silently lost `claude_only` filtering, and
-    `test_codex_runtime_omits_claude_only_checks` failed — reading as a real
-    #1187 multi-runtime regression rather than as pollution from two files away.
-
-    `pytest-randomly` is what made it a flake instead of a permanent failure:
-    it fires only when file order puts this module first. So the assertion has
-    to live HERE, where it is deterministic, rather than in a test that hopes to
-    be scheduled afterwards.
-    """
-    for name in (
-        "services.agent_service",
-        "services.agent_service.helpers",
-        "services.agent_service.read_only",
-        "services.agent_service.file_sharing",
-    ):
-        leaked = sys.modules.get(name)
-        assert not isinstance(leaked, (Mock, MagicMock)), (
-            f"{name} is still a test double after this module finished importing. "
-            "Restore it alongside the other stubs in `_load_lifecycle` — see #2140."
-        )
