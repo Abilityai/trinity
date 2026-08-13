@@ -22,7 +22,7 @@ from services.docker_service import (
 )
 from services.docker_utils import (
     container_stop, container_remove, container_start, container_reload,
-    volume_get, volume_create, containers_run, image_get
+    volume_get, volume_create, containers_run, image_get, container_stop
 )
 from services.agent_service.helpers import validate_base_image
 from services.agent_runtime_state import clear_agent_breakers
@@ -772,13 +772,44 @@ async def recreate_container_with_updated_config(
     *,
     full_capabilities: Optional[bool] = None,
     env_overrides: Optional[dict] = None,
+    require_running: bool = True,
+    preserve_run_state: bool = False,
 ):
     """
     Recreate an agent container with updated configuration.
     Handles shared folder mounts and API key settings.
     Preserves the agent's workspace volume and other configuration.
 
+    **This function STARTS the replacement container.** That was true before
+    #2092 too, but only the call sites knew it: each in-tree caller pre-checked
+    `container.status == "running"` and refused otherwise, while this function
+    captured no run state, offered no way to preserve it, and said nothing about
+    the precondition — which documented `env_overrides` at length.
+
+    Recreating a deliberately-stopped agent therefore started it, silently and
+    with no log line saying the run state had changed. Out-of-tree ops tooling
+    doing a base-image adoption wave hit exactly that: two agents stopped eight
+    days earlier came back up. Note what did NOT contain it — `autonomy_enabled
+    = 0` gates cron fires and reminders (#1806) but not human-initiated inbound
+    chat, so a channel binding and a public link became reachable again. No
+    traffic arrived; the containment was luck.
+
     Args:
+        require_running: refuse (ValueError) unless ``old_container`` is
+            running. Default True, which is what every existing caller already
+            enforces for itself — so this changes no behaviour and converts the
+            silent start into a loud error for the next caller. Pass False to
+            recreate a stopped agent deliberately.
+        preserve_run_state: leave the replacement STOPPED when the original was
+            stopped. What a base-image adoption wave actually wants, and awkward
+            to do from outside: the caller would have to read the state before,
+            then stop the container after it is already up and its agent server
+            has begun booting — racing its own recreate. Here the stop is issued
+            immediately after the handoff. The replacement is still created via
+            ``containers_run`` and so boots briefly before being stopped; that is
+            visible in the container's log, and is the honest cost of not
+            duplicating the (heavily conditioned) creation call.
+
         env_overrides: #1854 — env vars to force onto the replacement,
             applied LAST (immediately before the container handoff), so they win
             over every derived rule in between. The caller owns the value; this
@@ -804,6 +835,18 @@ async def recreate_container_with_updated_config(
             satisfies (infinite recreate loop — the hazard this module already
             documents for the guardrails/PAT matchers).
     """
+    # #2092: the precondition, enforced rather than assumed. Read BEFORE any
+    # work, so a refusal costs nothing and cannot half-recreate.
+    was_running = getattr(old_container, "status", None) == "running"
+    if require_running and not was_running:
+        raise ValueError(
+            f"recreate_container_with_updated_config would START agent "
+            f"{agent_name!r}, whose container is "
+            f"{getattr(old_container, 'status', 'unknown')!r}. Pass "
+            f"require_running=False to do that deliberately, and "
+            f"preserve_run_state=True to leave it stopped afterwards (#2092)."
+        )
+
     # Extract configuration from old container
     old_config = old_container.attrs.get("Config", {})
     old_host_config = old_container.attrs.get("HostConfig", {})
@@ -1061,7 +1104,7 @@ async def recreate_container_with_updated_config(
         env_vars.update({str(k): str(v) for k, v in env_overrides.items() if k})
 
     try:
-        return await _provision_folders_and_run_agent_container(
+        new_container = await _provision_folders_and_run_agent_container(
             agent_name,
             image=image,
             env_vars=env_vars,
@@ -1073,6 +1116,11 @@ async def recreate_container_with_updated_config(
             full_capabilities=full_capabilities,
             restart_policy=restart_policy,
         )
+        # #2092: put the run state back. Here, NOT in the shared provisioning
+        # helper — that one also serves agent creation, where "the original was
+        # stopped" is meaningless and stopping the result would be wrong.
+        await _restore_stopped_state(agent_name, new_container, preserve_run_state, was_running)
+        return new_container
     except docker.errors.APIError as e:
         # #1809: 409 name-conflict — a concurrent start won the recreate race
         # and already ran the replacement. Adopt the winner's container instead
@@ -1086,6 +1134,34 @@ async def recreate_container_with_updated_config(
                 )
                 return existing
         raise
+
+
+async def _restore_stopped_state(agent_name, container, preserve_run_state, was_running):
+    """Stop a freshly recreated container when the original was stopped (#2092).
+
+    A recreate that changes whether an agent is running is exactly the event
+    that used to be silent, so both outcomes are logged.
+
+    A failed stop does NOT fail the recreate: the replacement exists and is
+    healthy, and failing here leaves the caller worse off than the outcome they
+    asked to avoid. But it logs at ERROR, because the agent is now running
+    against an explicit request that it not be.
+    """
+    if not (preserve_run_state and not was_running):
+        return
+    try:
+        await container_stop(container)
+        logger.info(
+            "Recreated container for agent %s and stopped it again "
+            "(preserve_run_state: it was not running before)",
+            agent_name,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            "Recreated container for agent %s but could NOT stop it again "
+            "(preserve_run_state): %s. The agent is running.",
+            agent_name, e,
+        )
 
 
 async def _provision_folders_and_run_agent_container(
