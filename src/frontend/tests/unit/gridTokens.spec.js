@@ -25,6 +25,7 @@
  * nobody defined — failing silently in exactly one theme.
  */
 import { describe, it, expect } from 'vitest'
+import { DEPT_SLOT_COUNT } from '@/utils/gridOrg'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -58,6 +59,28 @@ function tileComponents() {
 
 const TILE_COMPONENTS = tileComponents()
 
+/**
+ * Everything that CONSUMES the grid cascade — which is not the same set as the
+ * tiles, and that gap is why this guard shipped green over three dead tokens.
+ *
+ * `FleetGrid.vue` is here even though it DEFINES the cascade: it also reads it,
+ * in its own chrome (`.gv-tilesctl`, `.gv-tilesmenu`, the legend). ent#325's
+ * token sweep renamed `--gv-fg` -> `--gv-text` and `--gv-tile-border` ->
+ * `--gv-border` in the tile components and left BOTH stale names live in the
+ * definer, where a tiles-only sweep structurally could not see them: four dead
+ * references, three of them in the Tiles menu, one a separator whose
+ * permanently-live `rgba(0,0,0,.08)` fallback is invisible on the dark panel.
+ * Policing only the consumers you expect is how the second half of a rename
+ * survives its own fix.
+ *
+ * `AgentTile.vue` is the lattice's other occupant, on the same reasoning.
+ */
+const CASCADE_CONSUMERS = [
+  ...TILE_COMPONENTS,
+  'components/FleetGrid.vue',
+  'components/AgentTile.vue',
+].sort()
+
 /** The two blocks in FleetGrid.vue that establish the cascade. */
 const LIGHT_SELECTOR = '.fleet-canvas {'
 const DARK_SELECTOR = ':root.dark .fleet-canvas {'
@@ -80,21 +103,44 @@ function definedTokens() {
   return found
 }
 
-/** `--gv-x` names read via var() in one file. */
+/**
+ * `--gv-x` names read via var() in one file.
+ *
+ * A capture ending in `-` is the HEAD of an interpolated name — AgentTile's
+ * `var(--gv-dept-${dept.slot})`, whose full name only exists at runtime. It is
+ * a real reference, so it is not silently dropped: the families are guarded by
+ * their own test below instead of being matched against the defined set.
+ */
 function consumedTokens(relPath) {
   const text = readFileSync(join(SRC, relPath), 'utf8')
-  return [...text.matchAll(/var\((--gv-[a-z0-9-]+)/g)].map((m) => m[1])
+  return [...text.matchAll(/var\((--gv-[a-z0-9-]+)/g)]
+    .map((m) => m[1])
+    .filter((t) => !t.endsWith('-'))
 }
 
-/** Token names declared inside one `{ … }` block of FleetGrid.vue. */
+/**
+ * Token names declared inside the block(s) with this selector in FleetGrid.vue.
+ *
+ * EVERY such block, not the first: the file opens a second `.fleet-canvas` /
+ * `:root.dark .fleet-canvas` pair further down for the org-overlay palette
+ * (`--gv-wire`, `--gv-dept-0..7`), and a first-match-only read left that whole
+ * pair unguarded — a dept slot defined in one theme would have passed.
+ */
 function tokensInBlock(selector) {
   const text = readFileSync(join(SRC, 'components/FleetGrid.vue'), 'utf8')
-  const start = text.indexOf(`\n${selector}`)
-  expect(start, `cascade block "${selector}" not found in FleetGrid.vue`).toBeGreaterThan(-1)
-  const end = text.indexOf('\n}', start)
-  return new Set(
-    [...text.slice(start, end).matchAll(/^\s*(--gv-[a-z0-9-]+)\s*:/gm)].map((m) => m[1]),
-  )
+  const found = new Set()
+  let blocks = 0
+  let from = 0
+  for (;;) {
+    const start = text.indexOf(`\n${selector}`, from)
+    if (start === -1) break
+    blocks++
+    const end = text.indexOf('\n}', start)
+    for (const m of text.slice(start, end).matchAll(/^\s*(--gv-[a-z0-9-]+)\s*:/gm)) found.add(m[1])
+    from = end
+  }
+  expect(blocks, `cascade block "${selector}" not found in FleetGrid.vue`).toBeGreaterThan(0)
+  return found
 }
 
 describe('grid tile design tokens (ent#325)', () => {
@@ -107,7 +153,13 @@ describe('grid tile design tokens (ent#325)', () => {
     expect(TILE_COMPONENTS).toContain('components/tiles/parts/TileRowList.vue')
   })
 
-  it.each(TILE_COMPONENTS)('%s consumes only tokens that exist', (relPath) => {
+  it('discovered the cascade consumers beyond the tiles', () => {
+    // The tiles-only set is what let a rename survive in the definer itself.
+    expect(CASCADE_CONSUMERS).toContain('components/FleetGrid.vue')
+    expect(CASCADE_CONSUMERS).toContain('components/AgentTile.vue')
+  })
+
+  it.each(CASCADE_CONSUMERS)('%s consumes only tokens that exist', (relPath) => {
     const defined = definedTokens()
     const undefinedTokens = [...new Set(consumedTokens(relPath))]
       .filter((t) => !defined.has(t))
@@ -127,7 +179,7 @@ describe('grid tile design tokens (ent#325)', () => {
     const light = tokensInBlock(LIGHT_SELECTOR)
     const dark = tokensInBlock(DARK_SELECTOR)
 
-    const consumed = new Set(TILE_COMPONENTS.flatMap(consumedTokens))
+    const consumed = new Set(CASCADE_CONSUMERS.flatMap(consumedTokens))
     const oneThemeOnly = [...consumed]
       .filter((t) => light.has(t) !== dark.has(t))
       .map((t) => `${t} (${light.has(t) ? 'light only' : 'dark only'})`)
@@ -138,6 +190,21 @@ describe('grid tile design tokens (ent#325)', () => {
       'these tokens are defined in one theme block only — they resolve in that ' +
         'theme and fall back in the other',
     ).toEqual([])
+  })
+
+  it('defines every department palette slot in BOTH themes', () => {
+    // AgentTile builds this name at runtime, so the sweep above cannot resolve
+    // it. gridOrg hashes a department name into DEPT_SLOT_COUNT slots, so every
+    // one must exist in both blocks or some departments lose their ribbon
+    // colour in exactly one theme — and which ones depends on a string hash.
+    const light = tokensInBlock(LIGHT_SELECTOR)
+    const dark = tokensInBlock(DARK_SELECTOR)
+    const missing = []
+    for (let i = 0; i < DEPT_SLOT_COUNT; i++) {
+      if (!light.has(`--gv-dept-${i}`)) missing.push(`--gv-dept-${i} (light)`)
+      if (!dark.has(`--gv-dept-${i}`)) missing.push(`--gv-dept-${i} (dark)`)
+    }
+    expect(missing).toEqual([])
   })
 
   it('the light and dark blocks declare the same token set', () => {
