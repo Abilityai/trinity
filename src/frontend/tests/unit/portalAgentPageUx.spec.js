@@ -63,6 +63,18 @@ const portalSource = () => stripComments(readFileSync(PORTAL, 'utf8'))
 const pageSource = () => stripComments(readFileSync(PAGE, 'utf8'))
 const chartSource = () => stripComments(readFileSync(CHART, 'utf8'))
 
+// The Overview tab's template block only. Every `<template v-else-if="tab ===
+// '...'">` sibling — and the tab-agnostic loading skeleton above them all —
+// lives in the same file, so a file-wide match answers a question about the
+// wrong markup: the skeleton and the Overview row deliberately carry the same
+// grid classes, which is exactly why one cannot stand in for the other.
+const overviewBlock = (src) => {
+  const start = src.indexOf("tab === 'overview'")
+  expect(start).toBeGreaterThan(-1)
+  const end = src.indexOf("tab === '", start + 1)
+  return src.slice(start, end === -1 ? undefined : end)
+}
+
 // ---------------------------------------------------------------------------
 // 1. The stage escape
 // ---------------------------------------------------------------------------
@@ -281,9 +293,17 @@ describe('Overview containment', () => {
     // item opened or closed. Both directions are asserted: the negative alone
     // passes if the grid is deleted outright, and a looser positive says
     // nothing about the two classes living on the SAME element.
+    //
+    // The positive is scoped to the Overview block, and that scoping is the
+    // whole assertion. A file-wide match is satisfied by the LOADING SKELETON,
+    // which this same change gave the identical `grid gap-6 xl:grid-cols-2`
+    // string — so with the row's grid deleted outright, or its two classes
+    // split across two elements, the negative passed vacuously and the positive
+    // passed on the skeleton, and the headline AC failed with a green suite.
+    // Verified by planting both violations (learnings L2).
     const src = pageSource()
     expect(src).not.toMatch(/grid-cols-2'?\s*:\s*asks\.length/)
-    expect(src).toMatch(/class="[^"]*\bgrid\b[^"]*\bxl:grid-cols-2\b[^"]*"/)
+    expect(overviewBlock(src)).toMatch(/class="[^"]*\bgrid\b[^"]*\bxl:grid-cols-2\b[^"]*"/)
   })
 
   it('puts asks outside the top row, not in it as a third column', () => {
