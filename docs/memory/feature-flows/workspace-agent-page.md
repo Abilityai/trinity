@@ -158,25 +158,114 @@ keep asks where they are: the page's own reason to exist is that an agent can
 reach you when no chat is open, and a tab is a place you have to *go*. The defect
 was that they were unbounded, not that they were present. So they are contained
 instead — compact cards, the question clamped, the first five with a counted
-"Show all" toggle, and a two-column split beside recent work on wide screens.
+"Show all" toggle.
 
 Two constraints on that layout:
 
-* **Asks are first in DOM order**, so the mobile stack keeps the priority the
-  page was built around.
+* ~~**Asks are first in DOM order**, so the mobile stack keeps the priority the
+  page was built around.~~ **Superseded by #2169** — see below. Asks now sit
+  below the top row on every breakpoint, which on a narrow viewport puts them
+  third.
 * **No nested scroll region.** #2101 settled this on this surface: the page has
   one scroll axis, and a pane that scrolls inside a page that scrolls traps the
   gesture on touch. Containment is first-N-plus-toggle, not `overflow-y-auto`.
+  **Still true after #2169** — the section moved, its containment did not change.
 
 The badge reads `20+` at the cap, because `MAX_ASKS` truncates server-side — a
 bare "20" against 50 pending is a wrong number, not a rounded one.
+
+### The Overview row is unconditional, and asks moved below it (#2169)
+
+#2161 put asks and recent work in a grid whose column count was **bound to
+`asks.length`** (`:class="{ 'lg:grid-cols-2': asks.length }"`), with the chart
+alone above in a `max-w-2xl` section. That made the page's shape a function of
+its data: an agent with nothing waiting collapsed to one column, so the layout
+changed whenever a transient operator-queue item opened or closed.
+
+The top row is now **unconditional** and its occupants are the chart (left) and
+recent work (right); asks sit **below it at full width**, still only when there
+are any and still with no empty-state placeholder — an agent with nothing
+waiting must not advertise the section. Nothing has to collapse, because both
+row occupants already own an empty state ("No activity in this window." /
+"Nothing yet."). The chart's `max-w-2xl` went with the move: inside a half-width
+column that cap does not bind below ~1656px.
+
+**The split is `xl`, not `lg`, and that is arithmetic.** The Workspace holds a
+288px sidebar plus page padding and the 24px gap, so at 1024px each column is
+332px — where the 30-day x-axis (one truncating 9px label per day) reads as
+nothing and a nine-bucket legend wraps three to five lines. At 1280px the column
+is ~460px. A layout that technically satisfies "two columns" while making the
+left one unreadable fails the purpose.
+
+**Known residual, accepted:** the 30-day window's x-axis is ellipsis-clipped in a
+half-width column. Measured over a 1280→2000 sweep (Chromium, macOS system
+font — glyph widths are platform-dependent, so treat the band, not the counts, as
+the finding): all six ticks clipped at 1280–1320, four at 1360–1520, one at
+1600–1640, **none from ~1680 up**. It is bounded on the other side too — below
+1280 the row stacks and the chart is full width, which is *wider* than the
+pre-#2169 `max-w-2xl` cap, so it is clean there as well. So the affected band is
+roughly **1280–1680 on the 30-day window only**: 7d (the default) and 14d measure
+zero clipped ticks at every width, and the clipping is ellipsis-marked rather
+than silently wrong — the bars, the legend totals, and the hover tooltip's full
+date are all unaffected. The fix is width-responsive tick density inside
+`StackedBarChart.vue::showLabel`, which the operator Overview also consumes —
+out of scope here, deliberately.
+
+**Moving asks below reverses #2161's DOM-order decision**, on instruction. The
+residual is bounded rather than a priority inversion: the header carrying the
+Overview tab's ask-count badge is `shrink-0` and sits **outside** the page
+scroller, so a narrow viewport shows the count at every scroll position; only the
+ask text moves below the fold. If it needs reversing, the costed alternative is
+~3 lines — keep the asks section first in DOM inside the same grid with
+`xl:col-span-2 xl:order-last` — which reads identically on desktop and keeps asks
+first on mobile, at the price of a DOM/visual order split.
+
+The **loading skeleton** gained the same `xl` split. It was one column in front
+of what is now a two-column row, so every load ended in a reflow — and the
+no-asks agent this issue is about is exactly the case where skeleton and loaded
+state used to agree. Measured after the change: skeleton blocks and loaded
+sections land on identical boxes (x 312/876, y 198, w 540).
+
+### The avatar has an edge (#2169)
+
+`PortalAvatar` was a bare `rounded-full` span, so an image avatar with light
+edges bled into the sidebar and chat surfaces. It now carries
+`border border-gray-300 dark:border-gray-700` — the contract's `border-strong`
+pair, one line in the one shared component, reaching all fourteen call sites.
+
+Three things settled by measurement rather than preference:
+
+* **`border`, not `ring-inset`.** An inset ring paints below child content and
+  the `<img>` is exactly the padding box, so it is invisible on precisely the
+  image avatars this fixes — the edge would show on initials avatars only.
+* **`border`, not an outer ring.** `PortalChatRow` already passes
+  `ring-2 ring-gray-50 dark:ring-gray-950` into this component as the
+  stacked-avatar separator, and all Tailwind rings share `--tw-ring-*` and one
+  `box-shadow`. Border and ring are independent properties and compose; verified
+  at 5× magnification that the separator gap survives.
+* **`border-strong`, not `border`.** The reported case is the light theme:
+  `gray-200` against the sidebar's `gray-50` ground measures 1.19:1, an arc too
+  faint to see at 26px. `gray-300` is 1.41:1.
+
+`box-sizing: border-box` means the outer footprint is unchanged — measured exact
+at all nine sizes in use (16, 18, 20, 22, 26, 28, 30, 52, 64) — and the image
+insets 1px per side rather than clipping. The `+N` overflow chip in
+`PortalChatRow` is hand-rolled rather than a `PortalAvatar`, so it carries the
+same recipe explicitly; without it a four-agent row draws three hairlined circles
+and one bare blob.
+
+Geometry is the one thing this project's unit tests structurally cannot see (no
+layout engine, no mount harness — the ent#245 class), so it is pinned by
+`e2e/portal-agent-page-overview.spec.js` (`@interactive`) and verified in the
+browser in both themes.
 
 ### The chart is the operator surface's chart
 
 The header's bespoke full-bleed CSS bar strip is gone; the Overview opens with a
 bounded card rendering `StackedBarChart.vue`, the same component Agent Detail
 uses (#1107). The payload already carried everything it needs, so this is a
-deletion plus a mount.
+deletion plus a mount. (#2169 moved that card into the left half of the top row
+and dropped its width cap; the component and its props are unchanged.)
 
 Two things moved to make that honest rather than duplicated:
 
@@ -246,7 +335,9 @@ destination" is finally true.
 | DB | `client_portal/db.py` | `first_try_stats` |
 | Router | `client_portal/router.py` | 3 endpoints, roster-gated |
 | Models | `client_portal/models.py` | page / ask / work / stats / report models; `schedule_name`, `buckets` (#2161) |
-| UI | `components/portal/PortalAgentPage.vue` | **new** — header, stats strip, 5 tabs; chart card + contained asks (#2161) |
+| UI | `components/portal/PortalAgentPage.vue` | **new** — header, stats strip, 5 tabs; chart card + contained asks (#2161); unconditional `xl` 50/50 top row, asks below it, two-column skeleton (#2169) |
+| UI | `components/portal/PortalAvatar.vue` | 1px `border-strong` edge, both themes (#2169) |
+| UI | `components/portal/PortalChatRow.vue` | same edge on the hand-rolled `+N` overflow chip (#2169) |
 | UI | `components/portal/PortalSidebar.vue` | roster row emits `open-agent` |
 | UI | `components/portal/portalUtils.js` | `shouldEscapeStage`, `PORTAL_BUCKET_LABELS` (#2161) |
 | UI | `components/StackedBarChart.vue` | optional `labels` prop (#2161) |

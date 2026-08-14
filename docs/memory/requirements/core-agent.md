@@ -442,9 +442,26 @@
   - Stats strip: tasks in window, completed rate, first-try rate, window selector
     (shown only on the tabs the window drives)
   - Tabs: Overview · Reports · Files · What it can do · Activity
-  - Overview: activity chart (the shared `StackedBarChart`, #1107 — bounded, not
-    a full-bleed strip), then **open asks** beside recent work, then this user's
-    chats. Asks stay first in DOM order so the mobile stack keeps the priority
+  - Overview: an **unconditional 50/50 top row** — the activity chart (the shared
+    `StackedBarChart`, #1107 — bounded, not a full-bleed strip) on the left,
+    recent work on the right — then **open asks** full width below it, then this
+    user's chats. The row splits at `xl`, not `lg`, and stacks below that: with
+    the Workspace's 288px sidebar a 1024px viewport leaves each column 332px,
+    where a 30-day x-axis truncates to nothing (#2169). The column count is
+    independent of the data — both occupants own an empty state, so the split
+    never collapses; keying it off `asks.length` was the #2169 defect
+  - **#2161's "asks stay first in DOM order so the mobile stack keeps the
+    priority" is superseded by #2169**, deliberately and on instruction:
+    below `xl` asks are now third. Recorded rather than dropped, because the
+    rationale was real. The residual is bounded — the Overview tab's ask-count
+    badge sits in the header, outside the page scroller, so a narrow viewport
+    still shows the count at every scroll position; only the ask text moves
+    below the fold. What #2161 decided about the asks *card* is untouched:
+    they stay on the Overview (not a tab), contained in place, no nested scroll
+  - `PortalAvatar` carries a 1px `border-strong` edge in both themes (#2169), so
+    an image avatar with light edges does not bleed into the surface behind it.
+    One shared component, fourteen call sites; `box-sizing: border-box` keeps
+    every outer footprint unchanged
   - Everything DB-sourced, so a **stopped** agent renders degraded, not empty:
     health `unknown` (monitoring is default-OFF, so "unhealthy" would be a lie),
     empty sections, and a failing data source degrades that section only

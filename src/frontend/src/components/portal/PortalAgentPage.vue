@@ -88,8 +88,16 @@
            payload arrives in one response, so this is honesty about WHERE
            content will appear rather than progressive arrival — the header and
            tabs above are already rendered from the route, so the page never
-           looks blank or hung while this fills in. -->
-      <div v-if="loading && !page" class="space-y-6" aria-busy="true">
+           looks blank or hung while this fills in.
+
+           The two blocks sit side by side at `xl`, mirroring the Overview's top
+           row (#2169). A one-column skeleton in front of a two-column row means
+           every load ends in a reflow — and the agent this issue is about, the
+           one with no asks, is exactly the case where skeleton and loaded state
+           used to agree. `grid gap-6` also supplies the row gap `space-y-6` did
+           when stacked. `tab` is 'overview' on first paint, which is the only
+           moment this renders. -->
+      <div v-if="loading && !page" class="grid gap-6 xl:grid-cols-2" aria-busy="true">
         <div v-for="sec in 2" :key="sec" class="animate-pulse">
           <div class="h-3 w-32 rounded bg-gray-200 dark:bg-gray-800 mb-3"></div>
           <div class="space-y-2">
@@ -102,62 +110,48 @@
 
       <!-- ---------------------------- OVERVIEW ---------------------------- -->
       <template v-else-if="tab === 'overview'">
-        <!-- Activity, in the same visual language as the operator Overview
-             (#1107): bounded, stacked by what triggered the work, both themes.
-             An empty window and an unreadable one are different sentences — a
-             blank chart frame for either would be the dead empty state. -->
-        <section class="mb-6 max-w-2xl">
-          <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">
-            Activity · last {{ windowLabel }}
-          </h2>
-          <div class="rounded-xl border border-gray-200 dark:border-gray-800 px-3.5 py-3">
-            <p v-if="stats.unavailable" class="text-sm text-gray-400">Stats are unavailable right now.</p>
-            <p v-else-if="!hasActivity" class="text-sm text-gray-400">No activity in this window.</p>
-            <StackedBarChart
-              v-else
-              :data="stats.timeline || []"
-              :buckets="chartBuckets"
-              :colors="BUCKET_COLORS"
-              :labels="PORTAL_BUCKET_LABELS"
-              :height="110"
-            />
-          </div>
-        </section>
+        <!-- The top row is unconditional (#2169). It used to key its column
+             count off the ask count, so an agent with nothing waiting collapsed
+             to one column and the page changed shape whenever a transient
+             operator-queue item opened or closed — a layout that reports the
+             data instead of holding still for it. Both occupants own an empty
+             state ("No activity in this window." / "Nothing yet."), so the split
+             never has to collapse: structure is stable, only content varies.
 
-        <!-- Asks lead — that is the reason the page exists, it is where the
-             agent reaches the user when no chat is open. On a wide screen they
-             sit beside recent work rather than pushing it below the fold; they
-             stay FIRST in DOM order so the mobile stack keeps the priority. -->
-        <div class="mb-6 grid gap-6" :class="{ 'lg:grid-cols-2': asks.length }">
-          <section v-if="asks.length">
-            <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Waiting on you</h2>
-            <div
-              v-for="a in visibleAsks"
-              :key="a.id"
-              class="mb-2 rounded-xl border border-amber-300/70 dark:border-amber-700/50 bg-amber-50/60 dark:bg-amber-900/10 px-3 py-2.5"
-            >
-              <div class="text-sm font-medium">{{ a.title || 'The agent needs a decision' }}</div>
-              <p v-if="a.question" class="mt-0.5 text-xs text-gray-600 dark:text-gray-300 line-clamp-3">{{ a.question }}</p>
-              <div v-if="a.options?.length" class="mt-1.5 flex flex-wrap gap-1">
-                <span v-for="o in a.options" :key="o" class="text-[11px] rounded-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-1.5 py-0.5">{{ o }}</span>
-              </div>
-              <!-- Answering writes to the operator queue, an operator surface
-                   with its own auth. Rather than render a control that 403s for
-                   a client, the answer path is the conversation. -->
-              <button class="mt-1.5 text-xs text-action-primary-600 hover:underline" @click="$emit('start-chat', agentName)">
-                Reply in chat →
-              </button>
+             Two columns at `xl`, not `lg`, and that is arithmetic rather than
+             taste. The Workspace keeps a 288px sidebar plus 24px page padding
+             and a 24px gap, so at 1024px each column is 332px — where the 30d
+             x-axis (one truncating 9px label per day) reads as nothing and the
+             nine-bucket legend wraps three to five lines. At 1280px the column
+             is ~460px, which the legend needs and gets. Below `xl` it stacks.
+
+             `xl` reduces the x-axis residual rather than removing it: on the 30d
+             window the ticks stay ellipsis-clipped from 1280 to about 1680, and
+             are clean above that AND below 1280, where the row stacks and the
+             chart runs full width. 7d (the default) and 14d are clean at every
+             width. Accepted, not overlooked — the fix is width-responsive tick
+             density in StackedBarChart, which the operator Overview shares. -->
+        <div class="mb-6 grid gap-6 xl:grid-cols-2">
+          <!-- Activity, in the same visual language as the operator Overview
+               (#1107): bounded, stacked by what triggered the work, both themes.
+               An empty window and an unreadable one are different sentences — a
+               blank chart frame for either would be the dead empty state. -->
+          <section>
+            <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">
+              Activity · last {{ windowLabel }}
+            </h2>
+            <div class="rounded-xl border border-gray-200 dark:border-gray-800 px-3.5 py-3">
+              <p v-if="stats.unavailable" class="text-sm text-gray-400">Stats are unavailable right now.</p>
+              <p v-else-if="!hasActivity" class="text-sm text-gray-400">No activity in this window.</p>
+              <StackedBarChart
+                v-else
+                :data="stats.timeline || []"
+                :buckets="chartBuckets"
+                :colors="BUCKET_COLORS"
+                :labels="PORTAL_BUCKET_LABELS"
+                :height="110"
+              />
             </div>
-            <!-- In place, not a nested scroll region: this page has one scroll
-                 axis (#2101), and a pane that scrolls inside a page that scrolls
-                 traps the gesture on touch. -->
-            <button
-              v-if="asks.length > ASKS_PREVIEW"
-              class="text-xs text-action-primary-600 hover:underline"
-              @click="allAsks = !allAsks"
-            >
-              {{ allAsks ? 'Show fewer' : `Show all ${asksBadge}` }}
-            </button>
           </section>
 
           <section>
@@ -173,6 +167,51 @@
             </ul>
           </section>
         </div>
+
+        <!-- Asks sit BELOW that row, full width, and only when there are any
+             (#2169). No empty state: an agent with nothing waiting must not
+             advertise the section.
+
+             This supersedes #2161's "asks are first in DOM order so the mobile
+             stack keeps the priority" — deliberately, on instruction, not by
+             oversight. The residual is bounded: the Overview tab's ask-count
+             badge lives in the header, which is `shrink-0` and sits OUTSIDE the
+             page scroller, so a narrow viewport still shows the count at every
+             scroll position; only the ask text moves below the fold.
+
+             Everything #2161 built into the card survives: compact cards, a
+             clamped question, the first five plus a counted toggle, and no
+             nested scroll region (#2101) — this page has one scroll axis. -->
+        <section v-if="asks.length" class="mb-6">
+          <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Waiting on you</h2>
+          <div
+            v-for="a in visibleAsks"
+            :key="a.id"
+            class="mb-2 rounded-xl border border-amber-300/70 dark:border-amber-700/50 bg-amber-50/60 dark:bg-amber-900/10 px-3 py-2.5"
+          >
+            <div class="text-sm font-medium">{{ a.title || 'The agent needs a decision' }}</div>
+            <p v-if="a.question" class="mt-0.5 text-xs text-gray-600 dark:text-gray-300 line-clamp-3">{{ a.question }}</p>
+            <div v-if="a.options?.length" class="mt-1.5 flex flex-wrap gap-1">
+              <span v-for="o in a.options" :key="o" class="text-[11px] rounded-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-1.5 py-0.5">{{ o }}</span>
+            </div>
+            <!-- Answering writes to the operator queue, an operator surface
+                 with its own auth. Rather than render a control that 403s for
+                 a client, the answer path is the conversation. -->
+            <button class="mt-1.5 text-xs text-action-primary-600 hover:underline" @click="$emit('start-chat', agentName)">
+              Reply in chat →
+            </button>
+          </div>
+          <!-- In place, not a nested scroll region: this page has one scroll
+               axis (#2101), and a pane that scrolls inside a page that scrolls
+               traps the gesture on touch. -->
+          <button
+            v-if="asks.length > ASKS_PREVIEW"
+            class="text-xs text-action-primary-600 hover:underline"
+            @click="allAsks = !allAsks"
+          >
+            {{ allAsks ? 'Show fewer' : `Show all ${asksBadge}` }}
+          </button>
+        </section>
 
         <section>
           <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Your chats with {{ agentName }}</h2>
