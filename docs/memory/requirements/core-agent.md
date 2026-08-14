@@ -529,6 +529,74 @@
   (#2128) — without it there is nowhere to escalate to, so an @mention stays
   ordinary text.
 
+### 5.13 Workspace composer typeahead — `/` playbooks, `@` agents
+- **Status**: ✅ Implemented (2026-08-13)
+- **Requirement ID**: WORKSPACE_COMPOSER_TYPEAHEAD
+- **GitHub Issue**: abilityai/trinity-enterprise#392
+- **Description**: The composer's two invocation syntaxes become discoverable.
+  Typing `/` at a token boundary opens a bounded list of the active agent's
+  `playbooks[]` (title + description) and selecting one **splices its
+  `starter_prompt` into the composer without sending** — the §5.11 briefing-card
+  prefill contract, now reachable after turn 1, where the cards are gone.
+  Typing `@` opens a bounded list of reachable agents, filtered on **slug and
+  display label** (the roster shows labels; the parser keys on slugs), and
+  selecting one inserts a token `mentionedAgents()` resolves (§5.12).
+- **OSS-core by decision (ent#392): deliberately ungated** — no
+  `requires_entitlement`, logic stays in the OSS tree. Recorded explicitly
+  because CLAUDE.md's default for an enterprise-tracker feature is *gated unless
+  ruled otherwise*, so the ruling must never be inferred later from the mere
+  fact that it merged (the ent#326 / ent#384 discipline). Rationale: it extends
+  a surface that is already OSS-core (the Workspace, ent#356) over data the
+  client already holds — no new endpoint, no new table, no migration.
+- **The trigger rule is deliberately STRICTER than the parser.** §5.12's
+  `MENTION_RE` is unanchored, so `user@example.com` *parses* as `@example`; the
+  typeahead only fires on a trigger char at a token start (preceded by a
+  **non-word** char — not merely whitespace, or it cannot fire after CJK, an
+  emoji or punctuation). Asymmetric in the only safe direction: the popup can
+  never open on something the parser would not see, so `50/50`, `and/or` and an
+  email address are left alone, and no offered token can fail to resolve.
+- **Un-mentionable slugs are excluded, so a selected mention can never degrade
+  to plain text** (the AC's central property). `sanitize_agent_name` keeps `.`
+  and imposes no length cap, while the mention grammar allows neither — so
+  `data.scout` is an ordinary agent whose mention resolves to nothing. Nothing
+  offers such names today, which is why the failure is invisible; a list that
+  included them would *manufacture* it. The predicate is **derived by asking
+  `mentionedAgents` itself**, never a second copy of the grammar.
+- **No implicit selection.** The roving index starts at "nothing chosen", and a
+  plain Enter accepts **only** with an explicit selection — otherwise it sends.
+  Tab accepts the top row. The harm is asymmetric: an accidental accept destroys
+  typed work (a popup that merely happens to be open — a paste, or prose like
+  "check /status of the deploy" — would splice up to 500 characters over the
+  message), while an accidental send is what the user was reaching for. Esc
+  dismisses and keeps the popup shut while the same token is still being typed.
+- **`@` is hidden without the rooms capability** (#2128) — in the popup *and* in
+  the placeholder, since a placeholder promising a capability the build lacks is
+  the same dead end in text form. The placeholder is the only part of this that
+  reaches a user who does not already know the feature exists.
+- **Honest empty state.** A source with nothing in it shows one line; a query
+  that matches nothing **closes** the popup. The copy never claims what the
+  client cannot observe: `_agent_briefing` returns `[]` for a stopped or slow
+  agent exactly as it does for one with no playbooks, and the roster is fetched
+  once at mount — so "no playbooks exposed" would be a false claim about
+  operator configuration for the ordinary state of an idle fleet. "No peers" and
+  "peers exist but none is mentionable" are separate statements.
+- **Scope**: `/` and `@` in the 1:1 composer; **`@` in the room composer**,
+  scoped to the room's **agent participants**. That scope was established by
+  *observing the running server*, not by reading the private rooms engine:
+  `POST /api/rooms/{id}/messages` answered `woke: ["<participant>"]` for a
+  participant mention and `woke: []` for a non-participant one, so the list
+  offers only names a pick is known to wake — offering the roster would put
+  names in front of the user with no evidence that choosing one does anything.
+  It is deliberately **not** claimed that a non-participant mention has no
+  effect: §5.12 records an engine-side newcomer-join path from ent#361, and two
+  empty response fields do not disprove it. If that path is live, this list is
+  narrower than the engine allows, and recruiting stays with the explicit
+  "+ Add agent" control — the honest home for an action that spends money on
+  another agent. **`/` in a room is deferred**: a room has N participants and no
+  active agent, so "whose playbooks?" has no answer without inventing a picker
+  this issue does not specify.
+- **Flow**: [workspace-composer-typeahead.md](../feature-flows/workspace-composer-typeahead.md)
+
 ---
 
 ## 6. Activity Monitoring

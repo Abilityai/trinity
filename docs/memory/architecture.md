@@ -1320,6 +1320,39 @@ in-place "Show all N" toggle — deliberately **no nested scroll region**: the c
 stays the single scroll axis, and the toggle counts the shipped list, never claiming the
 agent's full skill set). Hint *curation* stays the connector allow-list (ent#178 later).
 
+**Composer typeahead — `/` playbooks, `@` agents (ent#392).** The same briefing payload
+now also feeds a composer typeahead, which is what makes it reachable after turn 1 (the
+hint cards render on the empty-chat screen only). `/` lists the active agent's
+`playbooks[]` and splices the `starter_prompt` in **without sending** — the ent#138
+prefill contract; `@` lists reachable agents and inserts a token `mentionedAgents()`
+resolves (ent#361). All decidable logic is pure and exported from
+`components/portal/portalUtils.js` (`vitest` runs `environment: 'node'` with no
+component-mount harness, so a decision inside a component is one no test can reach); the
+components are dispatchers over it and `PortalTypeahead.vue` is presentational. Three
+properties are load-bearing rather than stylistic: the **trigger rule is stricter than
+the parser** (`MENTION_RE` is unanchored, so `user@example.com` parses as `@example` —
+the popup must never open on something the parser would not see); **un-mentionable slugs
+are excluded**, the predicate *derived* by asking `mentionedAgents` rather than copying
+the grammar, because `sanitize_agent_name` keeps `.` and caps nothing while the grammar
+allows neither, so listing `data.scout` would manufacture the silent
+degrade-to-plain-text this feature exists to close; and **a plain Enter never accepts
+without an explicit selection**, since an accidental accept destroys typed work while an
+accidental send is what the user was reaching for. `@` is hidden — popup *and*
+placeholder — without the rooms capability, which it reads from the roster payload per
+the rule below. The **room** composer gets `@` scoped to its **agent participants** —
+established by *observing* the running server rather than reading the private rooms
+engine (`POST /api/rooms/{id}/messages` answered `woke: ["<participant>"]` for a
+participant and `woke: []` for a non-participant), so the list contains only names a
+pick is known to wake; whether a non-participant mention still joins someone by the
+ent#361 engine-side path (§5.12) is deliberately not claimed either way, and recruiting
+stays with the explicit "+ Add agent" control. `/`-in-room is deferred — a room has no
+active-agent subject. **No backend change, no new endpoint, no
+migration. OSS-core by decision (ent#392): deliberately ungated — no
+`requires_entitlement`, logic stays in the OSS tree. Recorded explicitly because
+CLAUDE.md's default for an enterprise-tracker feature is gated unless ruled otherwise, so
+the ruling must never be inferred later from the mere fact that it merged.** See
+[workspace-composer-typeahead.md](feature-flows/workspace-composer-typeahead.md).
+
 **The roster payload is *the* portal capability channel (#2128).** A portal principal
 cannot read `GET /api/settings/feature-flags` — that endpoint is `get_current_user`-gated
 and the frontend store behind it returns `[]` for any caller without a platform JWT, i.e.
