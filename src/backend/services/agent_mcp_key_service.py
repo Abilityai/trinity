@@ -792,12 +792,11 @@ async def _recreate_with_env(agent_name: str, container, env_overrides: Dict[str
     """
     from services.agent_service.lifecycle import recreate_container_with_updated_config
 
-    # #2186: explicit, for the same reason as the other two call sites. The
-    # caller gates on `status == "running"` (a stopped agent takes the DB-only
-    # path), so the precondition holds — but it now says so here.
+    # #2186 re-confirmed: the caller gates on `status == "running"` (a stopped
+    # agent takes the DB-only path), so the `require_running=True` default is
+    # correct here and stays implicit.
     await recreate_container_with_updated_config(
-        agent_name, container, "system", env_overrides=env_overrides,
-        require_running=True,
+        agent_name, container, "system", env_overrides=env_overrides
     )
     return get_agent_container(agent_name)
 

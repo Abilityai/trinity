@@ -218,21 +218,28 @@ def _call_sites():
     return sites
 
 
-def test_every_call_site_states_its_run_state_intent():
-    """The guard's own failure mode was a precondition three callers each had to
-    remember; #2186 is what happens when one does not. A call site that omits
-    `require_running` is taking a default that means "refuse a stopped
-    container" — which is right for two of the three and was a P0 for the third,
-    so make the choice visible rather than inherited.
+def test_the_call_sites_are_the_three_this_fix_audited():
+    """A NEW call site is the way this bug comes back: `require_running`'s
+    default means "refuse a stopped container", which is right for the two
+    running-only callers and was a P0 for the third.
+
+    This pins the audited set rather than demanding every site pass the flag.
+    Requiring it everywhere was tried and reverted — three in-tree test doubles
+    stub this helper with a fixed 3-arg signature, so the stricter rule forces
+    churn in tests that are not wrong, and a P0 hotfix is the wrong place for it.
+    Deriving the flag from the observed run state (the issue's own follow-up) is
+    the real class fix; until then, a new call site fails here and its author has
+    to decide deliberately.
     """
-    missing = [
-        f"{p.relative_to(_BACKEND)}:{line}"
-        for p, line, kwargs in _call_sites()
-        if "require_running" not in kwargs
-    ]
-    assert missing == [], (
-        "these call sites inherit `require_running`'s default instead of stating "
-        f"their intent (#2186): {missing}"
+    audited = {
+        "services/agent_service/lifecycle.py",       # starts stopped containers
+        "services/agent_service/repo_binding.py",    # running-only (gated)
+        "services/agent_mcp_key_service.py",         # running-only (gated)
+    }
+    found = {str(p.relative_to(_BACKEND)) for p, _, _ in _call_sites()}
+    assert found == audited, (
+        "the set of callers changed (#2186). A new caller must decide whether it "
+        f"recreates a STOPPED container and pass `require_running` if so: {found ^ audited}"
     )
 
 
