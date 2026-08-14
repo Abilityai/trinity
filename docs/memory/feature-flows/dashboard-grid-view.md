@@ -154,7 +154,7 @@ primitive across further surfaces (Overview trend charts included) is
 trinity-enterprise#253's charter.
 4. **A slow or failed per-agent fetch degrades that one tile only.**
 
-## Info tiles (widget chassis ent#325 · first data tile ent#100)
+## Info tiles (widget chassis ent#325 · data tiles ent#100, ent#96)
 
 A **second occupant type** shares the lattice with agent tiles under `widget:<id>`
 keys in the same layout map, so drag / swap / tidy / keyboard / culling apply with
@@ -184,6 +184,41 @@ catalog entry declares `wantsTick: true`.
   ent#94 queues eight tiles and most render no clock.
 - `InfoTile` sets `inheritAttrs: false`, so a prop a tile does not declare cannot
   fall through onto `<article>` as a literal DOM attribute.
+
+### Executions (ent#96) — the tile that needed a second dimension
+
+```
+components/tiles/ExecutionsTile.vue          (default-on, wantsTick: false)
+  ├─ components/InfoTile.vue                 shell
+  └─ utils/executionsTile.js                 PURE: stack order, columns, legend, headline, state
+```
+
+| Tile element | Source |
+|---|---|
+| 24 hourly columns, stacked by trigger | `GET /api/executions/timeline?group_by=hour&hours=24&split=trigger` |
+| Stack + legend order | the SAME response's `trigger_order` (backend `_BUCKET_ORDER`) |
+| Headline (runs · ok% · failed) | summed from the same buckets — never a second query |
+| Live running / queued chips | `GET /api/executions/stats?hours=24` (those two fields are live, not windowed) |
+
+**Why `split` rather than N calls.** The chart's axis is hours and its stack is
+triggers; `/timeline` grouped one dimension at a time, so the tile would have
+needed one request per bucket name — and then a column whose segments came from
+ten responses could disagree with its own total. The endpoint folds the second
+dimension server-side and **re-sums each bucket's totals from the split rows**,
+so that disagreement is unrepresentable. Gap-filled hours carry `by_trigger: {}`,
+never a missing key, so the renderer never has to tell "no runs" from "no field".
+
+**Why failures are a rail, not a segment.** AC2 asks for failures to be visible
+and never hidden inside totals. As a stack segment, "Failed" would have to be
+subtracted from its trigger's segment to keep the column equal to runs — which
+silently redefines every other segment as "runs that succeeded". The rail sits
+below the stack on its own scale: the column still totals runs, failures are
+visible, and the hover breakdown still names which trigger failed.
+
+**Order comes from the server.** A bucket present in the data but missing from
+`trigger_order` is appended rather than dropped — otherwise it would count toward
+a column total while missing from its stack, which is the same "the chart does not
+add up to itself" failure in the other direction.
 
 ### Recent failures (ent#100) — data sources (all existing)
 
