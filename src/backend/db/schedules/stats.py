@@ -484,6 +484,7 @@ class ScheduleStatsMixin:
         agent_names: Optional[List[str]],  # None = admin (no agent filter)
         group_by: str,
         hours: int,
+        split: Optional[str] = None,
     ) -> List[Dict]:
         """Bucketed fleet execution rollups — the time-series sibling of
         :meth:`get_fleet_execution_stats` (ent#326).
@@ -500,6 +501,13 @@ class ScheduleStatsMixin:
             ``Other`` catch-all, so a newly-added trigger type never silently
             vanishes from a chart.
           * ``agent`` — per agent_name.
+
+        `split="trigger"` adds a SECOND dimension to a time grouping: each hour
+        (or day) additionally carries its own trigger breakdown, so a stacked
+        chart is one request rather than one per bucket name (ent#96). It is
+        only meaningful over a time axis — the router refuses it for
+        `trigger`/`agent`, where it would mean "group by trigger, then by
+        trigger".
 
         Per bucket: execution count, failure count, cost sum, context-token sum.
 
@@ -548,8 +556,16 @@ class ScheduleStatsMixin:
         else:  # pragma: no cover - the router validates first
             raise ValueError(f"unsupported group_by: {group_by}")
 
+        # ent#96: the split is a second GROUP BY column, not a second query.
+        # `triggered_by` is folded to its user-facing bucket in Python (see
+        # `_fold_split_buckets`) for the same reason `group_by=trigger` is: the
+        # `Other` catch-all is a Python map, and a CASE would drop the guarantee
+        # that a newly-added trigger shows up rather than vanishing.
+        split_select = ", triggered_by AS split_key" if split == "trigger" else ""
+        split_group = ", triggered_by" if split == "trigger" else ""
+
         sql = f"""
-            SELECT {key_sql} AS bucket,
+            SELECT {key_sql} AS bucket{split_select},
                    COUNT(*) AS total,
                    SUM(CASE WHEN status IN ('failed', 'error') THEN 1 ELSE 0 END) AS failed,
                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success,
@@ -557,14 +573,15 @@ class ScheduleStatsMixin:
                    SUM(COALESCE(context_used, 0)) AS context_used
             FROM schedule_executions
             WHERE {" AND ".join(where)}
-            GROUP BY {key_sql}
+            GROUP BY {key_sql}{split_group}
         """
 
         with get_engine().connect() as conn:
             rows = conn.execute(text(sql), bind).mappings().all()
 
-        return [
-            {
+        out = []
+        for r in rows:
+            row = {
                 "bucket": r["bucket"],
                 "total": int(r["total"] or 0),
                 "failed": int(r["failed"] or 0),
@@ -572,11 +589,25 @@ class ScheduleStatsMixin:
                 "cost": round(float(r["cost"] or 0.0), 6),
                 "context_used": int(r["context_used"] or 0),
             }
-            for r in rows
-        ]
+            if split == "trigger":
+                row["split_key"] = r["split_key"]
+            out.append(row)
+        return out
+
+    def trigger_bucket_order(self) -> List[str]:
+        """The stack/legend order for trigger buckets (ent#96).
+
+        Exposed through the facade so a caller — the timeline route, and any
+        future tile — reads the SAME `_BUCKET_ORDER` the folding uses instead
+        of holding its own copy. A second list is how a chart and its legend
+        come to disagree about where `Other` sits (the #1107 lesson this
+        module's `_fold_trigger_buckets` already records).
+        """
+        return list(_BUCKET_ORDER)
 
     def shape_execution_timeline(
-        self, rows: List[Dict], *, group_by: str, hours: int
+        self, rows: List[Dict], *, group_by: str, hours: int,
+        split: Optional[str] = None,
     ) -> List[Dict]:
         """Post-SQL shaping for :meth:`get_fleet_execution_timeline` (ent#326).
 
@@ -584,7 +615,9 @@ class ScheduleStatsMixin:
         same `DatabaseManager` facade as the query it shapes, rather than the
         router importing a private db symbol directly.
         """
-        return _shape_execution_timeline(rows, group_by=group_by, hours=hours)
+        return _shape_execution_timeline(
+            rows, group_by=group_by, hours=hours, split=split
+        )
 
 
 def _empty_bucket(key: str) -> Dict:
@@ -652,8 +685,35 @@ def _gap_fill(rows: List[Dict], *, group_by: str, hours: int) -> List[Dict]:
     return out
 
 
+def _fold_split_buckets(rows: List[Dict]) -> List[Dict]:
+    """Collapse `(time bucket, raw trigger)` rows into one row per time bucket
+    carrying a `by_trigger` breakdown (ent#96).
+
+    The totals are re-summed from the split rows rather than queried twice, so
+    the stack can never disagree with the column it sits in — the failure mode
+    a second query invites, and the reason AC1 asks for one grouping shared by
+    tile, legend and Overview.
+
+    Trigger labels come from `_bucket_for_trigger`, i.e. the SAME `Other`
+    catch-all `group_by=trigger` uses. Per label we keep `total` AND `failed`:
+    a stacked chart that showed only totals would hide failures inside them,
+    which this tile exists not to do.
+    """
+    folded: Dict = {}
+    for row in rows:
+        key = row["bucket"]
+        target = folded.setdefault(key, _empty_bucket(key))
+        target.setdefault("by_trigger", {})
+        _accumulate(target, row)
+        label = _bucket_for_trigger(row.get("split_key"))
+        entry = target["by_trigger"].setdefault(label, {"total": 0, "failed": 0})
+        entry["total"] += row["total"]
+        entry["failed"] += row["failed"]
+    return list(folded.values())
+
+
 def _shape_execution_timeline(
-    rows: List[Dict], *, group_by: str, hours: int
+    rows: List[Dict], *, group_by: str, hours: int, split: Optional[str] = None
 ) -> List[Dict]:
     """Post-SQL shaping for :meth:`get_fleet_execution_timeline` (ent#326).
 
@@ -664,8 +724,18 @@ def _shape_execution_timeline(
     with a literal fallback and sorted alphabetically, which put `Other` in
     the middle of a chart the Overview page renders `Other`-last.
     """
+    if split == "trigger":
+        # Fold the second dimension away FIRST, then gap-fill: the axis has to
+        # be built from one row per interval, and a gap-filled empty bucket
+        # carries an empty breakdown rather than a missing key, so a chart never
+        # has to distinguish "no runs" from "no field".
+        rows = _fold_split_buckets(rows)
     if group_by == "trigger":
         return _fold_trigger_buckets(rows)
     if group_by in ("hour", "day"):
-        return _gap_fill(rows, group_by=group_by, hours=hours)
+        filled = _gap_fill(rows, group_by=group_by, hours=hours)
+        if split == "trigger":
+            for row in filled:
+                row.setdefault("by_trigger", {})
+        return filled
     return rows

@@ -41,6 +41,13 @@ _TRIGGER_BUCKETS = {
     "schedule": "Scheduled", "webhook": "Scheduled",
     "loop": "Loops",  # #1150: first-class bucket so loop bursts don't read as cron load
     "reminder": "Reminders",  # #1296: agent self-direction, not operator cron
+    # ent#220: a room turn is an agent woken by an @mention in a shared room.
+    # It was unmapped, so every one landed in `Other` — the catch-all that is
+    # supposed to mean "a trigger nobody has classified yet", quietly turned
+    # into "rooms". A first-class bucket for the same reason Loops and
+    # Reminders got one: room traffic is a distinct spend shape (one human
+    # message can bill N agent turns) and reading it as unclassified hides that.
+    "room": "Rooms",
     "agent": "Agent-to-agent", "fan_out": "Agent-to-agent",
     "self_task": "Agent-to-agent", "a2a": "Agent-to-agent",  # ent#157 inbound A2A tasks
     "voip": "Voice", "voice": "Voice",
@@ -50,7 +57,7 @@ _TRIGGER_BUCKETS = {
 # Stack / legend order; "Other" last so unmapped triggers are visible.
 _BUCKET_ORDER = [
     "Chat/Tasks", "MCP", "Channels", "Public",
-    "Scheduled", "Loops", "Reminders", "Agent-to-agent", "Voice", "Other",
+    "Scheduled", "Loops", "Reminders", "Rooms", "Agent-to-agent", "Voice", "Other",
 ]
 
 

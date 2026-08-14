@@ -36,8 +36,8 @@ _spec = importlib.util.spec_from_file_location(
     os.path.join(_backend_path, "utils", "url_validation.py"),
 )
 _mod = importlib.util.module_from_spec(_spec)
-_STUBBED = ["backend_url_validation_ent397"]
-_PRE_STUB = {name: sys.modules.get(name) for name in _STUBBED}
+_STUBBED_MODULE_NAMES = ["backend_url_validation_ent397"]
+_PRE_STUB = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
 sys.modules["backend_url_validation_ent397"] = _mod
 _spec.loader.exec_module(_mod)
 
