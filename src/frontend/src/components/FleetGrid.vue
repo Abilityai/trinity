@@ -997,6 +997,18 @@ onBeforeUnmount(() => {
   --gv-bk-sched: #6366f1;
   --gv-bk-man: #14b8a6;
   --gv-bk-ext: #ec4899;
+  /* ent#96 — the rest of the #1107 trigger vocabulary. AgentTile collapses the
+     ten buckets to three because a 60px sparkline cannot carry ten; the fleet
+     executions tile stacks all ten, so each needs its own hue in BOTH themes
+     (gridTokens.spec.js). Named for the bucket, not the hue, so a palette
+     change is one edit here rather than a rename across every consumer. */
+  --gv-bk-mcp: #0ea5e9;
+  --gv-bk-public: #f59e0b;
+  --gv-bk-loops: #8b5cf6;
+  --gv-bk-reminders: #d946ef;
+  --gv-bk-a2a: #0891b2;
+  --gv-bk-voice: #f97316;
+  --gv-bk-other: #94a3b8;
   --gv-dots: rgba(17, 24, 39, 0.12);
   /* ent#325 info-tile chassis. Defined in BOTH blocks: a token defined in one
      theme only is the same bug the tiles shipped with — a live fallback that
@@ -1081,6 +1093,15 @@ onBeforeUnmount(() => {
   --gv-bk-sched: #818cf8;
   --gv-bk-man: #2dd4bf;
   --gv-bk-ext: #f472b6;
+  /* ent#96 — dark half of the trigger vocabulary, lifted for contrast against
+     the dark card exactly as the three above are. */
+  --gv-bk-mcp: #38bdf8;
+  --gv-bk-public: #fbbf24;
+  --gv-bk-loops: #a78bfa;
+  --gv-bk-reminders: #e879f9;
+  --gv-bk-a2a: #22d3ee;
+  --gv-bk-voice: #fb923c;
+  --gv-bk-other: #cbd5e1;
   --gv-dots: rgba(249, 250, 251, 0.08);
   /* ent#325 info-tile chassis — dark half. The peg inverts (light chip on the
      dark card) so it reads as a raised marker in both themes rather than

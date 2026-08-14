@@ -281,7 +281,9 @@ def test_non_admin_scope_is_passed_to_the_db(router_mod, monkeypatch):
 
     seen = {}
 
-    def _capture(agent_names, group_by, hours):
+    # `split` (ent#96) is an optional second dimension the route now forwards;
+    # the stub mirrors the db signature, and this test is about SCOPE.
+    def _capture(agent_names, group_by, hours, split=None):
         seen["names"] = agent_names
         return []
 
@@ -301,7 +303,9 @@ def test_admin_scope_is_none_meaning_no_filter(router_mod, monkeypatch):
     seen = {}
     monkeypatch.setattr(
         router_mod.db, "get_fleet_execution_timeline",
-        lambda agent_names, group_by, hours: seen.setdefault("names", agent_names) or [],
+        lambda agent_names, group_by, hours, split=None: (
+            seen.setdefault("names", agent_names) or []
+        ),
     )
     monkeypatch.setattr(router_mod, "accessible_agent_names", lambda u: None)
     monkeypatch.setattr(router_mod, "narrow_to_agent", lambda names, a: names)

@@ -1352,6 +1352,17 @@ class FleetExecutionStats(BaseModel):
     deleted_agent_cost: float = 0.0
 
 
+class ExecutionTimelineSplit(BaseModel):
+    """One trigger's share of a time bucket (ent#96).
+
+    `failed` rides alongside `total` deliberately: a stack drawn from totals
+    alone hides failures inside the columns, which is exactly what the tile
+    reading this must not do.
+    """
+    total: int
+    failed: int
+
+
 class ExecutionTimelineBucket(BaseModel):
     """One bucket of `GET /api/executions/timeline` (ent#326)."""
     bucket: str
@@ -1365,6 +1376,10 @@ class ExecutionTimelineBucket(BaseModel):
     # the field is named for the quantity it actually holds. A tile labelling
     # this as tokens would be exactly the mislabel ent#326 warns against.
     context_used: int
+    # ent#96: present only for `split=trigger`, and then on EVERY bucket —
+    # a gap-filled empty hour carries `{}`, so a chart never has to tell
+    # "no runs" apart from "field missing".
+    by_trigger: Optional[Dict[str, ExecutionTimelineSplit]] = None
 
 
 class ExecutionTimeline(BaseModel):
@@ -1378,6 +1393,15 @@ class ExecutionTimeline(BaseModel):
     hours: int
     gap_filled: bool
     buckets: List[ExecutionTimelineBucket]
+    # ent#96: echoed back so a caller can tell a split response from a plain
+    # one without inspecting the buckets.
+    split: Optional[str] = None
+    # The stack/legend order for `by_trigger`, served by the backend so the
+    # tile, its legend and the #1107 Overview chart cannot order the same
+    # buckets differently. Includes every catalog bucket, not only the ones
+    # present in this window, so the colours a reader learns stay put as
+    # traffic comes and goes.
+    trigger_order: Optional[List[str]] = None
 
 
 class EvaluationCreate(BaseModel):
