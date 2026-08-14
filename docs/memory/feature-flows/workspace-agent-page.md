@@ -88,6 +88,97 @@ mechanism anywhere in Trinity — no table, no column, no endpoint. It has no da
 source, so it was omitted rather than invented. A number a user reads as "how
 well is this agent doing" has to come from something real.
 
+## The Reports tab (#2162)
+
+The tab shipped `<pre>{{ JSON.stringify(payload, null, 2) }}</pre>`. Read beside
+this document's own thesis, that is not a cosmetic gap: the section above refuses
+to expose an ask's `context` at all because free-form agent JSON has been a
+credential-leak surface (canary G-04) — and `agent_reports.payload` is the *same
+category*, filed by the same agents, and was being dumped key-for-key to an
+external client. Routing it through the shared `components/reports/` renderer set
+**narrows** what crosses, because a typed renderer reads only the keys its hint
+declares (`tiles`, `columns`+`rows`, `markdown`, `events`) and never the rest of
+the payload.
+
+**Rendering is presentation, and this does not move the exclusion boundary.**
+Everything the page must not show is still dropped in `client_portal/agent_page.py`
+before the payload exists; nothing is filtered in the Vue component. What changed
+is how the payload that legitimately crosses is *presented*. The payload itself
+remains agent-authored untrusted content of the same class as `asks.title` and
+the schedule name — bounded and escaped, never trusted.
+
+**The fallback is the one place this surface deliberately differs from the
+operator ones.** The shared set's fallback is the raw JSON viewer, so reuse alone
+could not satisfy "never a raw dump to a client" — and AC #2 asks for a fallback
+*"deliberately stricter than the operator side, because the audience is an
+external client"*, i.e. it asks for a SPLIT, not for a stricter default
+everywhere. So `ReportRenderer` gained a `fallbackComponent` override defaulting
+to `ReportJson` — every operator call site passes nothing and renders exactly what
+it always did, because a raw payload is the useful answer when you are debugging
+an agent's own output — and this page passes `ReportSummary`: a bounded key-value
+view (≤40 entries with a counted remainder, ~200-char values, depth 1, so a
+nested value is described as "12 items" and never serialised) with
+credential-shaped tokens redacted at **value** level, and no raw payload
+reachable behind it at all. A key-name allow-list was rejected twice over: the
+fallback fires precisely on payloads nobody has seen, so an allow-list blanks
+nearly all of them, and an allowed key's value carries the secret anyway
+(`{"status": "failed: sk-…"}`).
+
+The override deliberately catches an agent-chosen `display_hint: "json"`
+(`src/mcp-server/src/tools/reports.ts`) as well as a shape mismatch — replacing
+only the *mismatch* path would leave an agent able to put a raw dump in front of
+a client by asking for one.
+
+**Honest residual.** A key-value summary still names every top-level key. It
+bounds and humanises; it does not eliminate the class, and a well-shaped
+`markdown` or `table` report still renders its values as authored. The general
+fix is a G-04-style scrub at the portal read boundary — a security change to a
+shipping read path, which deserves its own review rather than riding a UI fix.
+
+**Row windowing without a second route.** AC #3 wants #1537's windowed-rows
+pattern, and the operator reader `GET /api/reports/{id}/rows` is
+`Depends(get_current_user)` — which a portal principal (a verified email with no
+`users` row) structurally cannot satisfy, the same fact #2128 hit with
+feature-flags. Rather than clone it onto a client-facing prefix, the **existing**
+detail route took two optional params:
+
+```
+GET .../agents/{name}/reports/{id}?rows_offset=&rows_limit=
+   tabular payload  -> payload {columns, rows: window} + row_meta {total, offset, limit}
+   anything else    -> payload whole, no row_meta        (rows_limit ignored)
+```
+
+The **server** decides tabularity from the real payload, so the client never
+predicts a shape from an agent-authored `display_hint` that can disagree with what
+was filed — which deletes the 400-and-recover branch a client-side prediction
+would need. `rows_limit` absent is byte-identical to before. No new route means no
+second gate and no second copy of the 404-uniformity contract: a foreign report id
+and a missing one stay indistinguishable through the windowed path too.
+
+**Read amplification is real and mitigated, not hidden.** The slice happens in
+Python after the whole (≤5 MiB) blob is read out of the column, so paging
+*multiplies* reads — the route that exists to cut transfer raises them. Acceptable
+behind an operator JWT; on a prefix a client can loop it is an amplification
+primitive, so the route is rate-limited per (client, agent) after the roster gate.
+A report whose total fits one page costs exactly **one** request and shows no
+footer, so only genuinely large tables page at all.
+
+**Bounded by rows, not by a nested scroll region.** The page has one scroll axis
+(#2101, and the asks list above made the same call); a 100-row window plus
+`ReportTable`'s stated total and an explicit "Load more" satisfies "contained with
+a stated total" without a second scroll axis.
+
+**The store owns the state, and every await is generation-guarded.** A reset
+cannot cancel a promise already in flight, so the `reportsLoaded` flag that
+contract #15 requires (an empty state must gate on a *succeeded* fetch, never on
+list length) would otherwise have turned a transient wrong-render into a permanent
+one: switch agents mid-fetch, the old agent's list lands in the cleared state, and
+the new agent is marked loaded-with-the-wrong-data for the life of the mount.
+Every report request captures a generation counter before its first await and
+discards its result if a reset bumped it. The component additionally gates each
+read on the state belonging to the agent on screen — the store is a singleton that
+outlives it, and a fresh **mount** for a different agent fires no props watcher.
+
 ## The UX repairs (#2161)
 
 The page shipped with four defects, and fixing them forced two of ent#360's own
@@ -343,7 +434,15 @@ destination" is finally true.
 | UI | `components/StackedBarChart.vue` | optional `labels` prop (#2161) |
 | UI | `utils/executionBuckets.js` | **new** — `BUCKET_COLORS` + chart helpers, shared with `OverviewPanel.vue` (#2161) |
 | UI | `views/Portal.vue`, `router/index.js` | `/workspace/a/:agentName`; shared stage escape (#2161) |
-| Store | `stores/clientPortal.js` | `fetchAgentPage`, `fetchAgentReports`, `fetchAgentReport` |
+| Store | `stores/clientPortal.js` | `fetchAgentPage`, `fetchAgentReports`, `fetchAgentReport`; the whole Reports orchestration + generation guard (#2162) |
+| Service | `client_portal/agent_page.py` | `_window_rows` + `report_detail(rows_offset, rows_limit)` (#2162) |
+| Router | `client_portal/router.py` | `rows_offset`/`rows_limit` on the existing detail route, rate-limited (#2162) |
+| UI | `components/reports/ReportSummary.vue` | **new** — the CLIENT-FACING human-readable fallback; no raw escape hatch (#2162) |
+| UI | `components/reports/reportSummary.js` | **new** — the bounded, redacting summariser (pure) (#2162) |
+| UI | `components/reports/ReportRenderer.vue` | `fallbackComponent` override, default `ReportJson` (operator unchanged); `shapeOk` untouched (#2162) |
+| UI | `components/reports/{ReportTable,ReportKpiTiles}.vue` | dark ink pair on meta text — AC #4 (#2162) |
+| UI | `components/reports/ReportTimeline.vue` | `bg-blue-500` → `bg-status-info-500` (#2162) |
+| UI | `utils/reportPaging.js` | **new** — the one frontend page-size constant, shared with `stores/reports.js` (#2162) |
 
 ## Tests
 
@@ -373,6 +472,37 @@ route **nobody has written yet** still escapes, which is the property a
 param-enumerating guard cannot have and the reason this bug shipped twice. Also
 pins that the chart is stacked by untranslated buckets while the labels ride the
 separate prop — the mistake that renders a blank chart.
+
+`tests/unit/test_2162_portal_report_window.py` — the row window: `rows_limit`
+absent returns today's payload unchanged, a tabular payload windows with a TRUE
+total, a non-tabular one comes back whole with no `row_meta` (never a 400), the
+offset/limit clamps, and the inherited gate — foreign and missing ids stay
+indistinguishable 404s through the windowed path. Plus the route wiring: both
+params optional, bounded by the shared `REPORT_ROWS_PAGE_MAX`, rate-limited
+*after* the roster gate, and resolvable by FastAPI under postponed annotations.
+
+`src/frontend/tests/unit/reportSummary.spec.js` — the fallback summariser. The
+two that define it are negatives: no output path ever serialises the payload
+(behaviourally, and by scanning the module source), and a credential-shaped token
+is redacted **at value level** — as a whole value, embedded mid-string under an
+innocuous key, and past the truncation point. Redaction runs before both
+truncation and key humanisation; the humanisation ordering was caught by its own
+test, since rewriting `_` to a space destroys the very shape every pattern keys
+on.
+
+`src/frontend/tests/unit/portalReportsStore.spec.js` — the store contract against
+a mocked axios (`fleetGridFailuresFetch.spec.js` shape). The agent-switch race is
+the one that matters: agent A's list, failure, payload and load-more page each
+resolve *after* a switch to B and must all be discarded, with B left NOT marked
+loaded. Plus the load-more terminal guard, windowed-vs-whole (`row_meta` present
+is the only paging signal), and that a failed fetch never lands in the payload map.
+
+`src/frontend/tests/unit/portalReportsRendering.spec.js` — the wiring no unit test
+can reach: the tab holds no `<pre>` and no serialiser, mounts the shared
+`ReportRenderer`, passes `:fallback-component`, and adds no second scroll axis.
+Guards the **mechanism** rather than the spelling — a prop declared and never used
+would pass a call-site scan — and re-asserts the five CI-pinned `payload.X` keys
+are still inside `ReportRenderer.vue`, the file `test_1535` regexes them out of.
 
 `src/frontend/tests/unit/workspaceRoomsGate.spec.js` — F24 was **rewritten**, not
 deleted. It used to require each exit function to contain `route.params.roomId`;

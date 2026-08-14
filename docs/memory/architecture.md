@@ -650,7 +650,13 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   (`offset`/`limit`, true `total`); the UI fetches tabular reports through it, so expanding
   a 1.2 MB report transfers ~8 KB. Storage stays a single TEXT blob — no migration — and
   the slice is Python-side, so it bounds the response, not the read; off-row storage waits
-  on a payload distribution that justifies it.
+  on a payload distribution that justifies it. The **portal** detail route carries the same
+  window as two optional query params (`rows_offset`/`rows_limit`, #2162) rather than a second
+  route: `/rows` is `Depends(get_current_user)`, which a portal principal cannot satisfy, and
+  a clone on a client-facing prefix would need its own copy of the uniform-404 contract. There
+  the *server* decides tabularity from the real payload (a non-tabular one returns whole with
+  no `row_meta`, never a 400), and because paging re-reads the blob per request it is
+  rate-limited per (client, agent).
 - **Export** (#1536): `GET /api/reports/{id}/export?format=xlsx|pdf` →
   `services/report_export.py` (pure builders, lazily-imported `openpyxl`/`reportlab`, both
   pure-Python wheels). Shape mismatch degrades to a sensible sheet or JSON rather than
@@ -661,7 +667,24 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
   `GET /api/reports/{id}` returns the full payload, lazy-loaded when a card expands.
 - **Fleet access**: `GET /api/reports` + `GET /api/reports/stats` filter via
   `accessible_agent_names` + `_narrow_to_agent` (admin = all). Renderers (`components/reports/`)
-  pick by `display_hint` → `report_type` prefix → JSON, with shape-validation fallback to JSON.
+  pick by `display_hint` → `report_type` prefix → fallback, with a shape check per hint.
+- **Three renderer surfaces, a per-surface fallback** (#2162): Agent Detail, the Operations fleet tab,
+  and the **Workspace agent page** all mount the same `ReportRenderer`. The third was added
+  after it shipped `JSON.stringify(payload)` to external clients — a disclosure defect
+  (`payload` is free-form agent JSON of the class `client_portal/agent_page.py` refuses to
+  expose for an ask's `context`, canary G-04), which a typed renderer narrows because it
+  reads only the keys its hint declares. This matters to the CI pin above: `test_1535`
+  regexes `payload.X` out of `ReportRenderer.vue`, so a third consumer widens that drift
+  guard's blast radius and **`shapeOk` must stay in that file** — extracting it is the
+  natural refactor and it empties the pinned set. The fallback is **per-surface**: the default
+  stays `ReportJson`, so both operator surfaces render exactly what they always did, and only the
+  Workspace passes `:fallback-component="ReportSummary"` (bounded, humanised, credential-shaped
+  tokens redacted at value level, no raw payload reachable behind it). AC #2 asks for a client
+  fallback "deliberately stricter than the operator side", so the split IS the design — a global
+  summary would erase it, and a raw dump is a FEATURE when you are debugging an agent's own
+  output. The override deliberately catches an agent-chosen `display_hint: "json"` as well as a
+  shape mismatch, since `json` is a valid enum value and replacing only the mismatch path would
+  leave an agent able to request a dump in front of a client.
 - **Agent read-back** (#1538): `list_reports` / `get_report` MCP tools over the existing
   access-controlled REST endpoints — no new endpoint, no new tenant-boundary logic. The
   MCP layer adds the narrowing the backend cannot do (agent key → owner scope → `{self} ∪

@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+from typing import Optional
 
 import httpx
 from fastapi import (
@@ -30,8 +31,7 @@ from dependencies import (
     reject_agent_principal,
     require_admin,
 )
-from models import User
-
+from models import REPORT_ROWS_PAGE_MAX, User
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
@@ -568,8 +568,8 @@ def portal_agent_reports(
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """Report metadata for the page's Reports tab. Payloads are fetched per
-    report on expansion — one is capped at 256 KB and a list of them is not a
-    list view."""
+    report on expansion — one is capped at 5 MiB (`REPORT_PAYLOAD_MAX_BYTES`,
+    raised from 256 KB in #1537) and a list of them is not a list view."""
     _require_roster(agent_name, principal.email, principal.is_platform)
     return {
         "agent_name": agent_name,
@@ -583,13 +583,39 @@ def portal_agent_reports(
 def portal_agent_report_detail(
     agent_name: str,
     report_id: str,
+    rows_offset: int = Query(0, ge=0),
+    rows_limit: Optional[int] = Query(None, ge=1, le=REPORT_ROWS_PAGE_MAX),
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """One report's payload. The report must belong to the path agent — a report
     id from another agent returns the same 404 as one that does not exist, so
-    this is not a cross-agent read oracle."""
-    _require_roster(agent_name, principal.email, principal.is_platform)
-    report = agent_page.report_detail(agent_name, report_id)
+    this is not a cross-agent read oracle.
+
+    `rows_offset`/`rows_limit` (#2162) window a **tabular** payload's rows, so a
+    large table is not shipped whole to a client — #1537's pattern, without
+    #1537's route: the operator row reader is JWT-gated and a portal principal
+    cannot reach it, and a second route here would need a second copy of the
+    uniform-404 contract above. Both params are optional and default to today's
+    behaviour; a non-tabular payload with `rows_limit` set comes back whole with
+    no `row_meta` rather than a 400, because the server holds the payload and the
+    client should not have to guess its shape from an agent-authored hint.
+
+    Bounds come from `models.REPORT_ROWS_PAGE_MAX`, the same constant the
+    operator reader uses — imported, never re-typed, so the two page sizes cannot
+    drift apart with each side's tests pinning its own version.
+    """
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import rate_limiter
+
+    # Paging re-reads and re-parses the whole (≤5 MiB) blob per request, so the
+    # route that exists to cut TRANSFER raises READS — fine behind an operator
+    # JWT, an amplification primitive on a prefix a client can loop. Keyed after
+    # the roster gate so an unreachable agent can never mint limiter keys.
+    rate_limiter.enforce(f"portal_report_detail:{email}:{agent_name}", 60, 60)
+    report = agent_page.report_detail(
+        agent_name, report_id, rows_offset=rows_offset, rows_limit=rows_limit,
+    )
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     return report

@@ -11,6 +11,11 @@ import { defineStore } from 'pinia'
 import { normalizeRoomRow } from '@/components/portal/portalUtils'
 import axios from 'axios'
 import { useAuthStore } from './auth'
+// #2162: the page size for a windowed report read. A dependency-free leaf
+// shared with the operator reports store — never re-typed here, since the
+// backend already owns REPORT_ROWS_PAGE_DEFAULT and a third hand-written copy
+// is the shape that drifts while each side's tests pin its own version.
+import { REPORT_ROWS_PAGE as ROWS_PAGE } from '@/utils/reportPaging'
 
 const PORTAL_TOKEN_KEY = 'trinity.portalToken'
 // Mirrors `SESSION_ROTATION_HEADER` in client_portal/portal_auth.py (ent#375).
@@ -107,6 +112,27 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // without it a hard-loaded /workspace/r/:id would flash a refusal it then
     // takes back on an entitled instance.
     rosterLoaded: false,
+
+    // --- Reports tab (#2162) ---
+    // Which agent the report state below belongs to, and a monotonic counter
+    // every report request captures before its first await. A reset bumps it,
+    // so a response that arrives after an agent switch is discarded instead of
+    // landing under the new agent's name.
+    reportsAgent: null,
+    _reportsGeneration: 0,
+    reports: [],
+    // Set ONLY by a fetch that succeeded — the empty state reads it, and
+    // "loaded" must never mean "failed and returned nothing" (contract #15).
+    reportsLoaded: false,
+    reportsError: null,
+    reportPayloads: {},
+    // id -> {total, loaded}; present only for a payload the server actually
+    // windowed, so a bounded document never renders a paging footer.
+    reportRowMeta: {},
+    // id -> message. Deliberately NOT stored inside reportPayloads: an error
+    // object there would be handed to the renderer and presented as a report.
+    reportErrors: {},
+    _reportInFlight: {},
   }),
 
   getters: {
@@ -373,12 +399,180 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data.reports || []
     },
 
-    async fetchAgentReport(agentName, reportId) {
+    // #2162: `rowsLimit` windows a TABULAR payload server-side. Sent on every
+    // expand — the server decides whether the payload actually has a row axis,
+    // so the client never predicts the shape from an agent-authored
+    // `display_hint` that can disagree with what was filed. A non-tabular
+    // payload simply comes back whole with no `row_meta`.
+    async fetchAgentReport(agentName, reportId, { rowsOffset, rowsLimit } = {}) {
+      const params = {}
+      if (rowsLimit !== undefined && rowsLimit !== null) {
+        params.rows_limit = rowsLimit
+        params.rows_offset = rowsOffset || 0
+      }
       const { data } = await axios.get(
         `/api/enterprise/client-portal/agents/${agentName}/reports/${encodeURIComponent(reportId)}`,
-        { headers: this.authHeader },
+        { headers: this.authHeader, params },
       )
       return data
+    },
+
+    // --- Reports tab orchestration (#2162) --------------------------------
+    //
+    // Lives in the store, not the component (design contract #21: loading flags
+    // belong to stores). That is not only tidiness — it is what makes the three
+    // riskiest paths here testable at all, since this project has no
+    // component-mount harness but does unit-test store fetchers against a
+    // mocked axios.
+    //
+    // EVERY await is generation-guarded. Clearing refs on agent switch cannot
+    // cancel a promise already in flight, so without this:
+    //
+    //   on agent A, open Reports   → fetch starts
+    //   click agent B              → state cleared
+    //   A's fetch resolves         → writes A's reports into the cleared state
+    //   open Reports on B          → "already loaded" → no refetch
+    //                              → A's reports render under B's name
+    //
+    // …which is the ent#359 class of bug, and adding a `reportsLoaded` flag
+    // makes it PERMANENT rather than self-correcting: B stays marked
+    // loaded-with-A's-data for the life of the mount. The flag and the guard
+    // have to ship together.
+
+    /** Drop all report state and invalidate every in-flight report request. */
+    resetAgentReports(agentName = null) {
+      this._reportsGeneration += 1
+      this.reportsAgent = agentName
+      this.reports = []
+      this.reportsLoaded = false
+      this.reportsError = null
+      this.reportPayloads = {}
+      this.reportRowMeta = {}
+      this.reportErrors = {}
+      this._reportInFlight = {}
+    },
+
+    async loadAgentReports(agentName) {
+      // Self-correcting: a caller that loads for a different agent without
+      // resetting first gets the reset anyway, rather than merging two agents.
+      if (this.reportsAgent !== agentName) this.resetAgentReports(agentName)
+      const gen = this._reportsGeneration
+      this.reportsError = null
+      try {
+        const rows = await this.fetchAgentReports(agentName)
+        if (gen !== this._reportsGeneration) return
+        this.reports = rows
+        // Only a SUCCEEDED fetch may set this: the empty state gates on it, and
+        // an empty list after a failure is the wrong sentence (contract #15).
+        this.reportsLoaded = true
+      } catch {
+        if (gen !== this._reportsGeneration) return
+        // Paired with `LoadFailed`'s title ("Couldn't load reports"), so this
+        // says what to DO rather than restating what happened (contract #25).
+        this.reportsError = 'The request failed. Check your connection and try again.'
+      }
+    },
+
+    async loadAgentReport(agentName, reportId) {
+      if (this.reportPayloads[reportId] || this._reportInFlight[reportId]) return
+      const gen = this._reportsGeneration
+      this._reportInFlight = { ...this._reportInFlight, [reportId]: true }
+      // Clear a previous failure up front, so a retry that succeeds does not
+      // leave the error banner sitting under a rendered report.
+      const { [reportId]: _dropped, ...remainingErrors } = this.reportErrors
+      this.reportErrors = remainingErrors
+      try {
+        const data = await this.fetchAgentReport(agentName, reportId, {
+          rowsOffset: 0, rowsLimit: ROWS_PAGE,
+        })
+        if (gen !== this._reportsGeneration) return
+        const payload = data?.payload ?? {}
+        this.reportPayloads = { ...this.reportPayloads, [reportId]: payload }
+        // `row_meta` present ⇒ the server windowed a real table. Absent ⇒ a
+        // bounded document, and no paging footer must render for it.
+        const meta = data?.row_meta
+        if (meta && Array.isArray(payload.rows)) {
+          this.reportRowMeta = {
+            ...this.reportRowMeta,
+            [reportId]: { total: meta.total, loaded: payload.rows.length },
+          }
+        }
+      } catch {
+        if (gen !== this._reportsGeneration) return
+        // Deliberately NOT written into reportPayloads: a `{error: …}` object
+        // there would be handed to the renderer and presented AS a report.
+        //
+        // Retryable regardless of status: the read swallows a DB fault into the
+        // same 404 a missing report gets (invariant #8), so the client cannot
+        // tell a transient failure from a gone report — and stranding someone on
+        // a transient one is the worse of the two mistakes.
+        this.reportErrors = {
+          ...this.reportErrors, [reportId]: 'Could not load this report.',
+        }
+      } finally {
+        // Generation-guarded like every other write: a reset already emptied
+        // this map, so clearing "our" key afterwards would clear a NEW request's
+        // marker instead and let a duplicate through — the guard leaking through
+        // its own bookkeeping.
+        if (gen === this._reportsGeneration) {
+          const { [reportId]: _done, ...stillInFlight } = this._reportInFlight
+          this._reportInFlight = stillInFlight
+        }
+      }
+    },
+
+    /** Dismiss one report's error banner without retrying (contract #18). */
+    clearReportError(reportId) {
+      if (!this.reportErrors[reportId]) return
+      const { [reportId]: _dropped, ...rest } = this.reportErrors
+      this.reportErrors = rest
+    },
+
+    async loadMoreReportRows(agentName, reportId) {
+      const meta = this.reportRowMeta[reportId]
+      const current = this.reportPayloads[reportId]
+      // Terminal guard. Without it a click at loaded === total appends [],
+      // `loaded` never moves, and ReportTable's `meta.total > rows.length`
+      // never goes false — a permanently visible, permanently inert button.
+      if (!meta || !current || meta.loaded >= meta.total) return
+      if (this._reportInFlight[reportId]) return
+      const gen = this._reportsGeneration
+      this._reportInFlight = { ...this._reportInFlight, [reportId]: true }
+      try {
+        const data = await this.fetchAgentReport(agentName, reportId, {
+          rowsOffset: meta.loaded, rowsLimit: ROWS_PAGE,
+        })
+        if (gen !== this._reportsGeneration) return
+        const next = data?.payload?.rows
+        const nextMeta = data?.row_meta
+        if (!Array.isArray(next) || !nextMeta) return
+        // Re-read through the store rather than trusting the `current` captured
+        // before the await — the same reason the operator store captures it.
+        const held = this.reportPayloads[reportId]
+        if (!held || !Array.isArray(held.rows)) return
+        const merged = [...held.rows, ...next]
+        this.reportPayloads = {
+          ...this.reportPayloads, [reportId]: { ...held, rows: merged },
+        }
+        this.reportRowMeta = {
+          ...this.reportRowMeta,
+          [reportId]: { total: nextMeta.total, loaded: merged.length },
+        }
+      } catch {
+        if (gen !== this._reportsGeneration) return
+        this.reportErrors = {
+          ...this.reportErrors, [reportId]: 'Could not load more rows.',
+        }
+      } finally {
+        // Generation-guarded like every other write: a reset already emptied
+        // this map, so clearing "our" key afterwards would clear a NEW request's
+        // marker instead and let a duplicate through — the guard leaking through
+        // its own bookkeeping.
+        if (gen === this._reportsGeneration) {
+          const { [reportId]: _done, ...stillInFlight } = this._reportInFlight
+          this._reportInFlight = stillInFlight
+        }
+      }
     },
 
     // ent#359 — per-viewer star + unread state, for BOTH chat kinds in one call.
