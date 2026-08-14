@@ -1532,6 +1532,15 @@ def _build_base_env(config: AgentConfig) -> dict:
     if _stall_limit:
         env_vars['AGENT_TOOL_STALL_LIMIT_S'] = _stall_limit
 
+    # #2127: operator-configurable headless early-finalize idle ceiling. Same
+    # propagation idiom as the stall limit above — unset leaves the agent-side
+    # default (300s). This is the documented escape hatch for the known bound
+    # that agents with an execution timeout under the ceiling lose #970's early
+    # finalize, so it has to actually be settable end to end.
+    _idle_finalize = (os.getenv('AGENT_IDLE_FINALIZE_S') or '').strip()
+    if _idle_finalize:
+        env_vars['AGENT_IDLE_FINALIZE_S'] = _idle_finalize
+
     # GUARD-001: per-agent guardrails overrides (empty by default; baseline
     # is always applied inside the container).
     _guardrails = db.get_guardrails_config(config.name)

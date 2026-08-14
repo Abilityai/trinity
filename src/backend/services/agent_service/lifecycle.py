@@ -958,6 +958,15 @@ async def recreate_container_with_updated_config(
     else:
         env_vars.pop('AGENT_TOOL_STALL_LIMIT_S', None)
 
+    # #2127: same set-or-clear treatment for the early-finalize idle ceiling —
+    # this dict is seeded from the OLD container, so an unset backend env must
+    # POP the stale baked value rather than leave it (the #1809/ent#109 rule).
+    _idle_finalize = (os.getenv('AGENT_IDLE_FINALIZE_S') or '').strip()
+    if _idle_finalize:
+        env_vars['AGENT_IDLE_FINALIZE_S'] = _idle_finalize
+    else:
+        env_vars.pop('AGENT_IDLE_FINALIZE_S', None)
+
     # #1159: refresh the per-agent auth token. Deterministic from agent_name, so
     # this re-derives under the CURRENT name — the load-bearing part of the
     # rename fix (a renamed container otherwise keeps derive(old_name) and 401s
@@ -1650,6 +1659,12 @@ def _apply_persisted_auth_env(agent_name: str, env_vars: dict, runtime: str) -> 
     _stall_limit = (os.getenv("AGENT_TOOL_STALL_LIMIT_S") or "").strip()
     if _stall_limit:
         env_vars["AGENT_TOOL_STALL_LIMIT_S"] = _stall_limit
+
+    # #2127: early-finalize idle ceiling (rebuild-from-nothing path — no old
+    # container to inherit a stale value from, so set-only mirrors the sibling).
+    _idle_finalize = (os.getenv("AGENT_IDLE_FINALIZE_S") or "").strip()
+    if _idle_finalize:
+        env_vars["AGENT_IDLE_FINALIZE_S"] = _idle_finalize
 
     # #1159: per-agent in-container auth token (fail-closed: raises if secret unset).
     env_vars["TRINITY_AGENT_AUTH_TOKEN"] = derive_agent_token(agent_name)
