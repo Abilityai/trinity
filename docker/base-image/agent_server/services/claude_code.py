@@ -308,7 +308,17 @@ async def execute_claude_code(prompt: str, stream: bool = False, model: Optional
             text=True,
             bufsize=1,  # Line buffered
             start_new_session=True,
-            env=build_execution_env({EXECUTION_TAG_NAME: execution_id}),
+            env=build_execution_env({
+                EXECUTION_TAG_NAME: execution_id,
+                # #2127: same ceiling as the headless path. The chat path has no
+                # early-finalize to gate (it plainly waits for the process), so
+                # it never had the #2127 kill — but it spawns the same CLI, which
+                # stops waiting for background subagents after its own 10-minute
+                # default and finalizes with the fan-out unfinished. Applying the
+                # ceiling to only the reported path is the recurring
+                # one-of-two-call-sites escape (#686, #1264).
+                "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": str(int(timeout_seconds * 1000)),
+            }),
         )
         # Issue #407: capture pgid now — after wait() reaps the parent,
         # the pid is gone and we lose the ability to signal the group.
