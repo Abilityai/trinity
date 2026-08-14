@@ -183,6 +183,26 @@ def _store_endpoint_records(records: List[Dict[str, Any]]) -> None:
     db.set_setting(A2A_ENDPOINTS_SETTING, envelope)
 
 
+def _record_matches_ref(record: Dict[str, Any], wanted: str, lowered: str) -> bool:
+    """Does `record` answer to this reference? Ids match exactly, names case-insensitively.
+
+    THE one predicate for "this reference means this record" (#2174). Resolve and
+    remove used to spell it separately, and the two spellings did not agree:
+    resolve stopped at the FIRST match, remove filtered out EVERY match. Nothing
+    enforces uniqueness ACROSS the id and name namespaces — ids are visible in the
+    admin GET and naming one endpoint after another's id is a permitted operation
+    — so a single-target DELETE could destroy two endpoints, and their
+    AES-256-GCM credentials, while reporting one success.
+
+    `wanted` is the stripped reference and `lowered` its casefold; both are passed
+    in rather than derived here so a caller scanning a list computes them once.
+    """
+    return (
+        str(record.get("id") or "") == wanted
+        or str(record.get("name") or "").lower() == lowered
+    )
+
+
 def _public_record(record: Dict[str, Any]) -> Dict[str, Any]:
     """The read shape: metadata plus whether a credential exists, never its value."""
     return {
@@ -210,7 +230,9 @@ class SystemSettingsEndpointProvider:
         for record in _load_endpoint_records():
             rid = str(record.get("id") or "")
             rname = str(record.get("name") or "")
-            if rid == wanted or rname.lower() == lowered:
+            # First match wins; `remove_endpoint` deletes by the same predicate in
+            # the same order, so what a ref resolves to is what it deletes (#2174).
+            if _record_matches_ref(record, wanted, lowered):
                 url = str(record.get("url") or "")
                 if not url:
                     return None
@@ -380,6 +402,19 @@ def upsert_endpoint(
             _store_endpoint_records(records)
             return _public_record(record)
 
+    # #2174, at the source: a NEW endpoint may not take the id of an existing one
+    # as its name. Ids are visible in the admin GET, so this was reachable by an
+    # ordinary create, and it makes one ref mean two records for every later
+    # resolve and delete. Checked only on the create path — an already-stored
+    # collision must stay editable and removable, or the guard would strand the
+    # operator in exactly the state it exists to prevent.
+    for record in records:
+        if str(record.get("id") or "").lower() == lowered:
+            raise EndpointValidationError(
+                "That name is already the id of another registered endpoint; "
+                "pick a different name."
+            )
+
     if len(records) >= MAX_ENDPOINTS:
         raise EndpointValidationError(
             f"Too many registered A2A endpoints (max {MAX_ENDPOINTS})"
@@ -397,18 +432,36 @@ def upsert_endpoint(
 
 
 def remove_endpoint(ref: str) -> bool:
-    """Remove one endpoint by id or name. `False` when nothing matched."""
+    """Remove **exactly one** endpoint by id or name. `False` when nothing matched.
+
+    #2174: this filtered out every record matching the ref on EITHER id or name.
+    Since nothing enforces uniqueness across those two namespaces — and an
+    operator can read ids from the admin GET and legally name an endpoint after
+    one — a single-target `DELETE /api/settings/a2a-endpoints/{ref}` could
+    destroy two endpoints at once, taking a partner credential the operator may
+    have no other copy of, and still return one `True`. The follow-on symptom
+    misdirects too: the collaterally-deleted endpoint's next call fails
+    `endpoint_not_found`, which reads as a registration problem.
+
+    Deletion is **first-match-wins**, deliberately the same rule and the same
+    order as `resolve_endpoint` (both via `_record_matches_ref`), so a ref always
+    deletes precisely what it resolves to. In the collision case that means the
+    record registered EARLIER wins — in the reported repro the id-owning
+    endpoint, which is the one the operator was naming.
+
+    A refuse-if-ambiguous shape was the alternative. Rejected: it strands the
+    operator in a state they can reach but cannot leave, since there is no rename
+    path — and it leaves the destructive default in place for every already-stored
+    collision, which is the case actually at risk.
+    """
     wanted = (ref or "").strip()
     if not wanted:
         return False
     lowered = wanted.lower()
     records = _load_endpoint_records()
-    keep = [
-        r for r in records
-        if str(r.get("id") or "") != wanted
-        and str(r.get("name") or "").lower() != lowered
-    ]
-    if len(keep) == len(records):
-        return False
-    _store_endpoint_records(keep)
-    return True
+    for index, record in enumerate(records):
+        if _record_matches_ref(record, wanted, lowered):
+            del records[index]
+            _store_endpoint_records(records)
+            return True
+    return False
