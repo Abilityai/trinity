@@ -33,6 +33,9 @@ import uuid
 from datetime import datetime, timezone
 
 from utils.helpers import utc_now_iso
+# #2157: the surface stamp written onto every portal execution — see
+# `config.PORTAL_SOURCE_CHANNEL` for why it exists and why it is not a channel.
+from config import PORTAL_SOURCE_CHANNEL
 
 from . import db
 from .models import (
@@ -250,9 +253,21 @@ def _multi_agent_chat_available() -> bool:
         return False
 
 
-def _row_to_card(r: dict, tts_ready: bool) -> PortalAgentCard:
+def _default_voice_id() -> str | None:
+    """The platform default ElevenLabs voice (#2157), or None. Fail-soft: a
+    settings miss just means "no fallback voice", never a broken roster."""
+    try:
+        from services.settings_service import settings_service
+        return settings_service.get_default_voice_id()
+    except Exception:  # noqa: BLE001 — a roster must never 500 over a voice id
+        logger.warning("[#2157] default voice lookup failed", exc_info=True)
+        return None
+
+
+def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None) -> PortalAgentCard:
     """One roster row → one card. Shared by the roster and the single-agent
     lookup (#2160) so the two cannot disagree about how a card is built."""
+    from services import tts_service
     name = r["agent_name"]
     updated = r.get("avatar_updated_at")
     # Only agents with a generated (non-default) avatar get an image URL;
@@ -272,9 +287,20 @@ def _row_to_card(r: dict, tts_ready: bool) -> PortalAgentCard:
         owner=r.get("owner"),
         avatar_url=avatar_url,
         shared_at=r.get("shared_at"),
-        # Portal voice mode (#78): available when the platform ElevenLabs key
-        # is set AND this agent has a configured voice (reuses the channel voice).
-        voice_available=bool(tts_ready and r.get("tts_voice_id")),
+        # Portal voice mode (#78): the client's speaker control renders only when
+        # narration would actually work. #2157 made this the SAME rule the channel
+        # path uses — platform key AND the agent-level voice enable AND an
+        # effective voice (its own, else the platform default). Before, it read
+        # `tts_voice_id` alone, which both hid the control from every agent riding
+        # the platform default voice and ignored an operator who turned voice off.
+        voice_available=bool(
+            tts_ready
+            and tts_service.resolve_voice_from_config(
+                enabled=bool(r.get("tts_voice_replies_enabled")),
+                voice_id=r.get("tts_voice_id"),
+                default_voice_id=default_voice_id,
+            )
+        ),
     )
 
 
@@ -312,7 +338,7 @@ async def get_agent_card(email: str | None, agent_name: str,
                 if r["agent_name"] == agent_name), None)
     if row is None:
         return None
-    card = _row_to_card(row, tts_service.is_available())
+    card = _row_to_card(row, tts_service.is_available(), _default_voice_id())
     briefing = await _agent_briefing(agent_name)   # exactly one, not N
     if isinstance(briefing, tuple):
         card.description, card.playbooks = briefing
@@ -341,6 +367,9 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     """
     from services import tts_service
     tts_ready = tts_service.is_available()  # global key check, once per roster load
+    # #2157: the platform default voice is likewise instance-level — read once,
+    # not once per card, so adding the fallback costs the roster no extra query.
+    default_voice = _default_voice_id()
     # #2128: an instance-level capability, resolved once per roster load like
     # `tts_ready` above — not a per-agent one, so it rides on the roster itself.
     multi_agent_chat = _multi_agent_chat_available()
@@ -349,7 +378,7 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     # (somehow) shared must appear once, and the shared row carries the sharing
     # metadata this roster was built around.
     rows = _roster_rows(email, include_owned)
-    cards = [_row_to_card(r, tts_ready) for r in rows]
+    cards = [_row_to_card(r, tts_ready, default_voice) for r in rows]
 
     # #138 briefing enrichment — parallel + fail-soft (see _agent_briefing).
     import asyncio
@@ -532,7 +561,11 @@ async def synthesize_portal_tts(agent_name: str, email: str, text: str,
         raise ClientPortalError(400, "Nothing to speak")
     if not tts_service.is_available():
         raise ClientPortalError(404, "Voice is not available")
-    voice_id = db.get_agent_tts_voice_id(agent_name)
+    # #2157: one gate for both surfaces — the agent-level enable plus its own
+    # voice else the platform default. This endpoint used to read `tts_voice_id`
+    # directly, so it spoke for an agent whose operator had turned voice off and
+    # stayed mute for one riding the platform default.
+    voice_id = tts_service.resolve_voice_id(agent_name)
     if not voice_id:
         raise ClientPortalError(404, "This agent has no voice configured")
 
@@ -845,16 +878,23 @@ def _format_history_context(history: list[dict]) -> str:
 def _build_portal_system_prompt(agent_name: str, email: str) -> str | None:
     """Compose the caller system-prompt fragment for a portal turn (ent#212):
     the client's MEM-001 per-user memory block + the #1205 public-channel
-    instructions, via the SAME helper the channel router uses.
+    instructions, via the SAME helper the channel router uses, plus the #2157
+    narrated-surface fragment.
 
     Fail-soft, mirroring the router: any lookup failure degrades to just the
     memory block (or None) so a chat is never blocked on personalization. A
     client with no memory row yields a no-op (no prompt bloat). Memory is keyed
     ``UNIQUE(agent_name, user_email)``, so it is sender-scoped by construction —
     two clients of one agent never see each other's memory (#903 discipline).
+
+    #2157: the narration fragment is appended LAST and set here by the platform
+    from the surface the turn actually arrived on — never asserted by the caller,
+    and never reachable from the channel path, which keeps a channel turn
+    byte-identical.
     """
     from database import db as core_db
     from services.platform_prompt_service import (
+        build_narrated_surface_prompt,
         build_public_channel_caller_prompt,
         format_user_memory_block,
     )
@@ -866,10 +906,14 @@ def _build_portal_system_prompt(agent_name: str, email: str) -> str | None:
     except Exception as e:  # noqa: BLE001 — never block a portal turn on memory
         logger.warning("portal memory fetch failed for %s/%s: %s", agent_name, email, e)
     try:
-        return build_public_channel_caller_prompt(agent_name, memory_block)
+        composed = build_public_channel_caller_prompt(agent_name, memory_block)
     except Exception as e:  # noqa: BLE001 — degrade to the bare memory block
         logger.warning("portal caller-prompt compose failed for %s: %s", agent_name, e)
-        return memory_block
+        composed = memory_block
+
+    narration = build_narrated_surface_prompt(agent_name)   # None when narration is off
+    parts = [p for p in (composed, narration) if p and p.strip()]
+    return "\n\n".join(parts) if parts else None
 
 
 async def portal_chat(agent_name: str, message: str, email: str,
@@ -1050,6 +1094,7 @@ async def portal_chat(agent_name: str, message: str, email: str,
             cold_message=cold_message,
             cached_uuid=cached_uuid,
             triggered_by="public",      # external-caller path; "Public" analytics bucket
+            source_channel=PORTAL_SOURCE_CHANNEL,   # #2157: which public surface this is
             on_resume_failure=_on_resume_failure,
             source_user_email=email,
             timeout_seconds=PORTAL_TURN_TIMEOUT_SECONDS,
@@ -1407,6 +1452,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
         triggered_by="public",
         source_user_email=email,
         subscription_id=subscription_id,
+        # ent#286 pre-creates the row, so the stamp has to be here too — this is
+        # the row `portal_chat` then runs into (#2157).
+        source_channel=PORTAL_SOURCE_CHANNEL,
     )
     execution_id = execution.id if execution else None
     if not execution_id:

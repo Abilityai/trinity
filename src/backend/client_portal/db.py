@@ -42,18 +42,6 @@ def set_setting(key: str, value: str, now: str) -> None:
         conn.execute(stmt)
 
 
-def get_agent_tts_voice_id(agent_name: str) -> Optional[str]:
-    """The agent's configured ElevenLabs voice id (``agent_ownership.tts_voice_id``),
-    or None. Drives portal voice mode (#78) — reuses the same per-agent voice the
-    channel adapters speak with."""
-    stmt = select(agent_ownership.c.tts_voice_id).where(
-        agent_ownership.c.agent_name == agent_name
-    )
-    with get_engine().connect() as conn:
-        row = conn.execute(stmt).first()
-        return row[0] if row and row[0] else None
-
-
 def get_shared_roster(email: str) -> list[dict]:
     """Every agent shared with ``email`` — the client's "My Agents" roster.
 
@@ -71,6 +59,9 @@ def get_shared_roster(email: str) -> list[dict]:
             agent_ownership.c.avatar_updated_at,
             agent_ownership.c.is_default_avatar,
             agent_ownership.c.tts_voice_id,          # portal voice (#78): drives voice_available
+            # #2157: the agent-level voice enable, so the speaker control obeys the
+            # same gate the channel path does instead of a voice id alone.
+            agent_ownership.c.tts_voice_replies_enabled,
             # #2159: the human-facing name (ent#181/#1640). Selected HERE rather
             # than resolved per agent — `get_display_label` is one query each,
             # which would add an N+1 to fix a row that renders the wrong title.
@@ -126,6 +117,7 @@ def get_owned_roster(email: str) -> list[dict]:
             agent_ownership.c.avatar_updated_at,
             agent_ownership.c.is_default_avatar,
             agent_ownership.c.tts_voice_id,
+            agent_ownership.c.tts_voice_replies_enabled,   # #2157
             agent_ownership.c.display_label,        # #2159, same rationale as above
             users.c.username.label("owner"),
         )

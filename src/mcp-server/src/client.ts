@@ -1637,6 +1637,10 @@ export class TrinityClient {
     delivered: boolean;
     channel?: string;
     reason?: string;
+    /** #2157: plain-language explanation of a refusal, for surfaces where the
+     *  machine `reason` alone leads an agent to a wrong conclusion (the portal
+     *  narrates the agent's text, so "no voice note here" ≠ "no voice here"). */
+    guidance?: string;
   }> {
     return this.request(
       "POST",

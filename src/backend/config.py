@@ -94,6 +94,16 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 10080  # 7 days (was 30 minutes)
 PORTAL_SESSION_IDLE_DAYS_DEFAULT = 7      # no requests for this long -> sign in again
 PORTAL_SESSION_ABSOLUTE_DAYS_DEFAULT = 30  # hard ceiling from first sign-in
 
+# #2157: the `schedule_executions.source_channel` stamp identifying a Workspace
+# turn. `triggered_by="public"` is shared with public links and x402 chat, so it
+# cannot answer "did this turn arrive from the Workspace?" — and that answer
+# decides what `send_voice_reply` tells an agent that tries to speak there. It is
+# NOT a messaging channel: portal rows carry no `source_channel_chat_id`, so every
+# channel consumer (the completion-report resolver map, `voice_reply_service`'s
+# supported set) already ignores it. It lives here so the writer (client_portal)
+# and the reader (routers/agents) share one spelling without importing each other.
+PORTAL_SOURCE_CHANNEL = "portal"
+
 # Bounds enforced on READ, so a bad row cannot widen the window (#506).
 PORTAL_SESSION_MIN_IDLE_MINUTES = 15
 PORTAL_SESSION_MAX_ABSOLUTE_DAYS = 90
