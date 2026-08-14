@@ -504,6 +504,27 @@ remove are by id-or-name, so for a colliding string the update edits the record
 *named* that and the delete reaches the id-owning one first. Both are documented;
 neither is destructive.
 
+#### FR-4a — Port normalisation happens once (ent#398)
+The port of an endpoint authority is read by validation, by connection pinning and
+by the card's origin comparison. Each spelled its own normalisation, and they
+disagreed on `:0`: the validator coalesced it to the scheme default
+(`parsed.port or 443` — `0` is falsy), `_pinned_url` dropped it and therefore
+connected to 443, and `_same_origin` compared it literally as port 0. A `:0`
+endpoint validated, would have connected correctly, and was then permanently
+refused `card_origin_mismatch` against any card declaring the ordinary form —
+fail-closed, but permanently broken with a reason code pointing at the wrong thing.
+
+All three now consume `utils.url_validation.effective_port(port, scheme)`: `0` and
+absent both mean the scheme default (port 0 is not a connectable destination, and
+browsers refuse `:0` rather than dialing it), an explicit port is preserved, and an
+unknown scheme yields `None` for the caller to interpret. The default-port
+equivalence FR-2 relies on — Trinity's own card emits no explicit port, so
+`https://h` and `https://h:443` must be one origin — is preserved and pinned by
+test. `_pinned_url` now omits a port equal to the scheme default rather than
+spelling it out (same destination, consistent with that equivalence); the `Host`
+header still reflects what the operator typed, which is the one place an explicit
+`:443` is observable to a peer.
+
 #### FR-6 — `message/send` only; no SSE; no fake `stream` parameter
 Filed AC4 (stream token chunks back to the calling agent over SSE) is
 **rejected**: an MCP tool call is one request and one response — a FastMCP
