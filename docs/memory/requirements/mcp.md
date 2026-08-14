@@ -478,6 +478,32 @@ grants that endpoint the ability to exfiltrate its own credential.** This is
 stated on the settings surface and in the user doc, because it reframes
 registration as what it actually is — a trust decision about a peer.
 
+#### FR-5a — A reference deletes exactly what it resolves (#2174)
+An endpoint reference is an id **or** a name, and nothing enforces uniqueness
+*across* those two namespaces: ids are visible in the admin `GET`, so naming one
+endpoint after another's id is an ordinary, permitted operation. `remove_endpoint`
+filtered out **every** record matching on either field, so one single-target
+`DELETE /api/settings/a2a-endpoints/{ref}` could destroy two endpoints — taking a
+partner credential the operator may hold no other copy of — while the route
+returned one success and the collaterally-deleted endpoint's next call failed
+`endpoint_not_found`, which reads as a registration problem rather than a deletion.
+
+Resolution and deletion therefore share ONE predicate and are both
+**first-match-wins**: a ref deletes precisely the record it resolves to, and the
+delete removes at most one record per call. Refusing an ambiguous ref was the
+alternative and is rejected — with no rename path it strands the operator in a
+state they can reach and cannot leave, and it leaves the destructive behaviour in
+place for every collision already stored.
+
+Additionally, a **new** endpoint may not take an existing endpoint's id as its
+name (422), which stops the collision at the source. The guard is create-path only:
+an already-stored collision stays editable and removable, or it would strand the
+operator in exactly the state it exists to prevent. Note the deliberate asymmetry —
+`upsert_endpoint` is update-**by-name** (its shipped contract), while resolve and
+remove are by id-or-name, so for a colliding string the update edits the record
+*named* that and the delete reaches the id-owning one first. Both are documented;
+neither is destructive.
+
 #### FR-6 — `message/send` only; no SSE; no fake `stream` parameter
 Filed AC4 (stream token chunks back to the calling agent over SSE) is
 **rejected**: an MCP tool call is one request and one response — a FastMCP
