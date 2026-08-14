@@ -348,6 +348,25 @@ _REGISTRY_URL_MAX_LEN = 2048
 #: One definition, consulted by every validator in this module that resolves a
 #: host, so a future range (the CGNAT clause was the last one) is added once.
 def _is_internal_address(ip: "ipaddress._BaseAddress") -> bool:
+    # The v4 view of `ip`: itself when it IS v4, its payload when it is the
+    # IPv4-MAPPED form `::ffff:a.b.c.d`, else None. The CGNAT clause below must
+    # ask THIS, never `ip.version == 4` (ent#393): `::ffff:100.64.0.1` reports
+    # version 6, so a version gate never reaches it — and the stdlib answers
+    # False to all six predicates above for it, which is the exact gap the
+    # clause exists to close. Every OTHER internal range survives its mapped
+    # form for free, because CPython's `is_private`/`is_reserved`/... delegate
+    # through `ipv4_mapped` before consulting their IPv6 tables; CGNAT is the
+    # one range whose refusal is Trinity's own code, so it is the one that has
+    # to do the delegation itself.
+    #
+    # Mapped is the ONLY embedding needing this. The other v4-in-v6 shapes are
+    # refused wholesale by prefix regardless of the address they carry —
+    # `::/8` (IPv4-compatible RFC 4291, IPv4-translated RFC 2765), `64:ff9b::/96`
+    # + `64:ff9b:1::/48` (NAT64), `2002::/16` (6to4), `2001::/32` (Teredo) — and
+    # none of them populates `ipv4_mapped`. Pinned by
+    # `test_736_a2a_outbound_edges.py::test_C1_ipv6_transition_forms_*`, because
+    # that refusal is the interpreter's, not ours (the #1891 class).
+    v4 = ip if ip.version == 4 else ip.ipv4_mapped
     return (
         ip.is_private
         or ip.is_loopback
@@ -355,7 +374,7 @@ def _is_internal_address(ip: "ipaddress._BaseAddress") -> bool:
         or ip.is_link_local
         or ip.is_multicast
         or ip.is_unspecified
-        or (ip.version == 4 and ip in _SHARED_ADDRESS_SPACE)
+        or (v4 is not None and v4 in _SHARED_ADDRESS_SPACE)
     )
 
 
