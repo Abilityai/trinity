@@ -372,8 +372,41 @@ class ValidatedPublicUrl:
 
     url: str
     hostname: str          # IDNA A-label, lowercased, trailing dot stripped
-    port: int              # explicit port, else the scheme default (443)
+    port: int              # `effective_port` of the authority — never 0, never None
     addresses: Tuple[str, ...]
+
+
+#: The port a scheme addresses when the authority names none.
+SCHEME_DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
+def effective_port(port: Optional[int], scheme: str) -> Optional[int]:
+    """The port a URL actually addresses. `None` when the scheme has no default.
+
+    ONE normalisation for a field that had three (ent#398). Along a single call
+    path, `:0` used to mean three different things: the validator coalesced it to
+    443 (`parsed.port or 443` — `0` is falsy), `_pinned_url` dropped it and
+    therefore connected to 443, and `_same_origin` compared it literally as port
+    0. So a `:0` endpoint validated, would have connected correctly, and was then
+    permanently refused `card_origin_mismatch` against any card declaring the
+    ordinary form — fail-closed, but permanently broken with a reason code that
+    points at the wrong thing.
+
+    Three independent normalisations of one field is the actual hazard: today
+    they disagree harmlessly, and it is an edit to any one of them that turns
+    that into something else. Validation, connection pinning and origin
+    comparison now all consume this.
+
+    `0` is treated as "no port given", matching the validator's shipped
+    behaviour (and browsers, which refuse `:0` outright rather than dialing it):
+    port 0 is not a connectable destination, so the alternative reading — dial
+    port 0 — is not a reading anyone wants. An unknown scheme yields `None`; the
+    caller decides what that means, because "no default port" is not the same
+    answer for a comparison as it is for a connection.
+    """
+    if port:
+        return port
+    return SCHEME_DEFAULT_PORTS.get((scheme or "").lower())
 
 
 def canonical_host(hostname: str) -> Optional[str]:
@@ -489,7 +522,10 @@ def _validate_public_https_url(
         raise ValueError(f"{label} must have a valid hostname")
 
     try:
-        port = parsed.port or 443
+        # ent#398: the ONE normalisation, shared with `_pinned_url` and
+        # `_same_origin`. The scheme is https by construction here (checked
+        # above), so the default is never absent.
+        port = effective_port(parsed.port, parsed.scheme) or 443
     except ValueError:
         # urlparse raises on a non-numeric / out-of-range port only when `.port`
         # is read, so this is the first place a junk authority surfaces.

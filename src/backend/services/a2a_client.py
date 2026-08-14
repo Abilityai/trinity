@@ -79,8 +79,10 @@ from utils.credential_sanitizer import (
 )
 from utils.url_validation import (
     A2AEndpointUrlError,
+    SCHEME_DEFAULT_PORTS,
     ValidatedPublicUrl,
     canonical_host as _canonical_host,
+    effective_port,
     validate_a2a_endpoint_url,
 )
 
@@ -210,7 +212,14 @@ def _pinned_url(url: str, address: str) -> str:
     """
     parts = urlsplit(url)
     host = f"[{address}]" if ":" in address else address
-    netloc = f"{host}:{parts.port}" if parts.port else host
+    # ent#398: through the shared normalisation, so the port this connects to is
+    # the same one the validator approved and `_same_origin` compares. A port
+    # equal to the scheme default is omitted rather than spelled out — same
+    # destination, and it keeps the pinned URL in the form the default-port
+    # equivalence rule below is written against.
+    port = effective_port(parts.port, parts.scheme)
+    default = SCHEME_DEFAULT_PORTS.get((parts.scheme or "").lower())
+    netloc = host if (port is None or port == default) else f"{host}:{port}"
     return urlunsplit((parts.scheme, netloc, parts.path or "/", parts.query, ""))
 
 
@@ -257,11 +266,17 @@ def _same_origin(a: str, b: str) -> bool:
         if not scheme or not host:
             return None
         try:
-            port = p.port
+            # ent#398: the same normalisation the validator and the pinned URL
+            # use. Spelling it a third time here is how `:0` came to mean port 0
+            # on this side and 443 on the other two — the registered endpoint
+            # validated, would have connected, and was refused card_origin_mismatch
+            # forever. `-1` stands for "unknown scheme, no default": it makes two
+            # such URLs comparable to each other without ever matching a real port.
+            port = effective_port(p.port, scheme)
         except ValueError:
             return None
         if port is None:
-            port = 443 if scheme == "https" else 80 if scheme == "http" else -1
+            port = -1
         return (scheme, host, port)
 
     ka, kb = _key(a), _key(b)
