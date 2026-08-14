@@ -14,6 +14,7 @@
 import { registerWidget } from '@/utils/gridWidgets'
 import FleetSummaryTile from './FleetSummaryTile.vue'
 import RecentFailuresTile from './RecentFailuresTile.vue'
+import ExecutionsTile from './ExecutionsTile.vue'
 
 registerWidget({
   id: 'fleet-summary',
@@ -33,5 +34,17 @@ registerWidget({
   defaultOn: true,
   // Its age column is recomputed off the Grid's shared 1s tick, so it opts in.
   wantsTick: true,
+  cells: { w: 1, h: 1 },
+})
+
+registerWidget({
+  id: 'executions',
+  title: 'Executions',
+  component: ExecutionsTile,
+  adminOnly: false,
+  defaultOn: true,
+  // No clock on its face — the chart is a 24h window refreshed by the store's
+  // batch poll, so it does not opt into the 1s tick.
+  wantsTick: false,
   cells: { w: 1, h: 1 },
 })
