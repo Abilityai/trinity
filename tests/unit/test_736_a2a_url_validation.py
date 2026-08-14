@@ -170,6 +170,13 @@ def test_http_is_refused_rather_than_upgraded(resolves):
         ("fc00::1", "IPv6 unique-local"),
         ("::ffff:127.0.0.1", "IPv4-mapped loopback"),
         ("::ffff:10.0.0.1", "IPv4-mapped private"),
+        # ent#393: CGNAT is the one range the stdlib does NOT refuse for us, so
+        # it is the one whose mapped form had to be handled in
+        # `_is_internal_address` itself. The rows above pass because CPython
+        # delegates `is_private`/`is_loopback` through `ipv4_mapped`; these pass
+        # only because Trinity's own clause now resolves the same v4 view.
+        ("::ffff:100.64.0.1", "IPv4-mapped CGNAT / RFC 6598"),
+        ("::ffff:100.127.255.254", "IPv4-mapped CGNAT, upper half"),
     ],
 )
 def test_internal_destinations_are_refused(resolves, address, what):

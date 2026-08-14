@@ -525,6 +525,27 @@ spelling it out (same destination, consistent with that equivalence); the `Host`
 header still reflects what the operator typed, which is the one place an explicit
 `:443` is observable to a peer.
 
+#### FR-4b — Origin comparison normalises IP literals (ent#399)
+`_same_origin` compared `urlsplit().hostname` textually and its docstring claimed
+otherwise ("IPv6 bracket forms compared after normalisation"). `canonical_host`
+leaves a literal untouched — `idna.encode` rejects it and the ASCII fallback
+returns it verbatim — so `[2606:4700:4700::1111]` and
+`[2606:4700:4700:0:0:0:0:1111]`, one address written two ways, were refused
+`card_origin_mismatch`. Fail-closed, but an IPv6-literal endpoint was unusable
+whenever the peer's card and the registration spelled the address differently,
+which they have no reason to agree on. The docstring asserting a property the code
+lacked is the other half of the defect: it is what the next reader builds on.
+
+`utils.url_validation.canonical_origin_host` is now the origin key: an IP literal
+is parsed through `ipaddress` and compared in canonical form, a name still goes
+through `canonical_host` (UTS-46 IDNA, SV-7), and anything neither path can
+canonicalise falls back to the existing textual comparison so an unusual host stays
+comparable to itself. A **scope id is part of the key** (`fe80::1%eth0` ≠
+`fe80::1%eth1`), and the ambiguous IPv4 spellings (leading zeros, integer forms)
+are *refused* by `ipaddress` rather than folded, so the normalisation can never
+equate two addresses a resolver would treat differently. The card stays a hint: a
+card declaring a different address, port or scheme is still refused.
+
 #### FR-6 — `message/send` only; no SSE; no fake `stream` parameter
 Filed AC4 (stream token chunks back to the calling agent over SSE) is
 **rejected**: an MCP tool call is one request and one response — a FastMCP

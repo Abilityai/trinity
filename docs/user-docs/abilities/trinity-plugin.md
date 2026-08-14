@@ -1,6 +1,8 @@
 # trinity Plugin
 
-Connect, deploy, operate, and sync agents on the Trinity platform. Six skills covering the complete lifecycle — from first connection to running remote loops and provisioning new instances.
+Connect, deploy, operate, and sync agents on the Trinity platform. Seven skills covering the complete lifecycle — from a guided first journey through connection, deployment, remote loops, and instance provisioning.
+
+> 🧭 **New to Trinity? Start with `/trinity:start-here`** — a guided, resumable walkthrough that takes you from "what is Trinity?" to your first agent running on your own instance. [Jump to the section](#the-guided-journey-trinitystart-here).
 
 > 📺 **Watch:** [Build Autonomous Loops for Your AI Agents](https://youtu.be/q3YvFYtuhec) *(Jun 2026)* · [all videos](../videos.md)
 
@@ -14,12 +16,39 @@ Connect, deploy, operate, and sync agents on the Trinity platform. Six skills co
 
 | Skill | Description |
 |-------|-------------|
+| `/trinity:start-here` | **New here?** Guided, resumable journey: what Trinity is → get an instance → connect → first agent alive |
 | `/trinity:connect` | One-time: authenticate and configure the MCP connection |
 | `/trinity:onboard` | Per-agent: compatibility check, file creation, deploy |
 | `/trinity:sync` | Ongoing: sync changes between local and the running remote agent |
 | `/trinity:loop` | Run a remote agent task in a sequential, bounded loop — fire once, disconnect, check back |
 | `/trinity:create-dashboard` | Generate an agent-specific `/update-dashboard` skill that keeps `dashboard.yaml` current |
 | `/trinity:deploy-new-instance` | Deploy a Trinity instance on any server and scaffold an ops agent to manage it |
+
+## The Guided Journey: `/trinity:start-here`
+
+```bash
+/plugin marketplace add abilityai/abilities
+/plugin install trinity@abilityai
+/trinity:start-here
+```
+
+One command that concierges a newcomer through the whole path — it sequences the skills below rather than replacing them, so you never have to know which one comes next:
+
+| Stage | What happens |
+|-------|--------------|
+| **Orient** | What Trinity is, in plain terms, plus the current release |
+| **Choose your door** | Just looking · build my first agent · I already have agents · set up my instance |
+| **Get an instance** | Hands off to `/trinity:deploy-new-instance` (cloud, your server, or local Docker) — or takes the URL you already have |
+| **Connect + verify** | Hands off to `/trinity:connect`, then runs a live smoke test: fleet visible, instance healthy, docs assistant online |
+| **First agent alive** | Deploys via `/trinity:onboard` (or picks an existing agent) and exchanges a real message with it |
+
+Three things worth knowing:
+
+- **Nothing is deployed until you choose it.** The "just looking" door asks for no credentials and creates nothing.
+- **It resumes.** Progress is saved in `~/.trinity/start-here.json`, so quitting — or the Claude Code restart needed to load the MCP server — picks up exactly where you stopped. Run `/trinity:start-here reset` to start over.
+- **Answers come from live documentation, not a script.** Questions are answered from these docs at run time — through the public [Trinity Docs Q&A](../getting-started/help.md) before you have an instance, and through your instance's own `ask_trinity` tool afterward.
+
+Already know what you want? The individual skills below work standalone, in any order.
 
 ## How It Works
 

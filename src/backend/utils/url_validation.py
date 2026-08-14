@@ -348,6 +348,25 @@ _REGISTRY_URL_MAX_LEN = 2048
 #: One definition, consulted by every validator in this module that resolves a
 #: host, so a future range (the CGNAT clause was the last one) is added once.
 def _is_internal_address(ip: "ipaddress._BaseAddress") -> bool:
+    # The v4 view of `ip`: itself when it IS v4, its payload when it is the
+    # IPv4-MAPPED form `::ffff:a.b.c.d`, else None. The CGNAT clause below must
+    # ask THIS, never `ip.version == 4` (ent#393): `::ffff:100.64.0.1` reports
+    # version 6, so a version gate never reaches it — and the stdlib answers
+    # False to all six predicates above for it, which is the exact gap the
+    # clause exists to close. Every OTHER internal range survives its mapped
+    # form for free, because CPython's `is_private`/`is_reserved`/... delegate
+    # through `ipv4_mapped` before consulting their IPv6 tables; CGNAT is the
+    # one range whose refusal is Trinity's own code, so it is the one that has
+    # to do the delegation itself.
+    #
+    # Mapped is the ONLY embedding needing this. The other v4-in-v6 shapes are
+    # refused wholesale by prefix regardless of the address they carry —
+    # `::/8` (IPv4-compatible RFC 4291, IPv4-translated RFC 2765), `64:ff9b::/96`
+    # + `64:ff9b:1::/48` (NAT64), `2002::/16` (6to4), `2001::/32` (Teredo) — and
+    # none of them populates `ipv4_mapped`. Pinned by
+    # `test_736_a2a_outbound_edges.py::test_C1_ipv6_transition_forms_*`, because
+    # that refusal is the interpreter's, not ours (the #1891 class).
+    v4 = ip if ip.version == 4 else ip.ipv4_mapped
     return (
         ip.is_private
         or ip.is_loopback
@@ -355,7 +374,7 @@ def _is_internal_address(ip: "ipaddress._BaseAddress") -> bool:
         or ip.is_link_local
         or ip.is_multicast
         or ip.is_unspecified
-        or (ip.version == 4 and ip in _SHARED_ADDRESS_SPACE)
+        or (v4 is not None and v4 in _SHARED_ADDRESS_SPACE)
     )
 
 
@@ -455,6 +474,41 @@ def canonical_host(hostname: str) -> Optional[str]:
 
 #: Private alias retained so existing readers of the old name keep working.
 _canonical_host = canonical_host
+
+
+def canonical_origin_host(hostname: str) -> Optional[str]:
+    """A host as an ORIGIN key — IP literals canonicalised, names via `canonical_host`.
+
+    `canonical_host` deliberately leaves an IP literal alone: `idna.encode`
+    rejects it and the ASCII fallback returns it verbatim. That is correct for
+    its own job (the name handed to the resolver) and wrong for comparing two
+    origins, where `2606:4700:4700::1111` and `2606:4700:4700:0:0:0:0:1111` are
+    one address written two ways (ent#399). Comparing those textually refused a
+    registered IPv6-literal endpoint against its own peer's card — fail-closed,
+    but permanently, over a spelling the two sides have no reason to agree on.
+
+    IPv4 literals normalise through the same call for free. This cannot equate
+    two addresses a resolver would treat differently: `ipaddress` REFUSES the
+    ambiguous spellings (leading zeros, integer and octal forms) rather than
+    folding them, so those fall through to the textual path unchanged.
+
+    A **scope id is part of the key**: `fe80::1%eth0` and `fe80::1%eth1` are
+    different destinations, and `ipaddress` preserves the zone, so they stay
+    distinct. Brackets never reach here — `urlsplit().hostname` strips them —
+    but a bracketed value is handled anyway, so a caller reading a raw authority
+    cannot silently fall through to a textual comparison.
+
+    Returns None only where `canonical_host` does (an unusable name).
+    """
+    host = (hostname or "").strip().lower()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if host:
+        try:
+            return str(ipaddress.ip_address(host))
+        except ValueError:
+            pass
+    return canonical_host(hostname)
 
 
 def _validate_public_https_url(
