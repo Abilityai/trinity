@@ -402,19 +402,6 @@ def upsert_endpoint(
             _store_endpoint_records(records)
             return _public_record(record)
 
-    # #2174, at the source: a NEW endpoint may not take the id of an existing one
-    # as its name. Ids are visible in the admin GET, so this was reachable by an
-    # ordinary create, and it makes one ref mean two records for every later
-    # resolve and delete. Checked only on the create path — an already-stored
-    # collision must stay editable and removable, or the guard would strand the
-    # operator in exactly the state it exists to prevent.
-    for record in records:
-        if str(record.get("id") or "").lower() == lowered:
-            raise EndpointValidationError(
-                "That name is already the id of another registered endpoint; "
-                "pick a different name."
-            )
-
     if len(records) >= MAX_ENDPOINTS:
         raise EndpointValidationError(
             f"Too many registered A2A endpoints (max {MAX_ENDPOINTS})"

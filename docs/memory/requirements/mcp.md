@@ -495,10 +495,11 @@ alternative and is rejected — with no rename path it strands the operator in a
 state they can reach and cannot leave, and it leaves the destructive behaviour in
 place for every collision already stored.
 
-Additionally, a **new** endpoint may not take an existing endpoint's id as its
-name (422), which stops the collision at the source. The guard is create-path only:
-an already-stored collision stays editable and removable, or it would strand the
-operator in exactly the state it exists to prevent. Note the deliberate asymmetry —
+Creating the collision stays permitted, deliberately: rejecting a name that
+matches an existing id was prototyped and dropped, because it invalidates the
+`/edge-cases` repro this fix is pinned by and, being a create-time guard, does
+nothing for a collision already stored — which is the case actually at risk.
+Filed separately if it is wanted. Note also the deliberate asymmetry that remains:
 `upsert_endpoint` is update-**by-name** (its shipped contract), while resolve and
 remove are by id-or-name, so for a colliding string the update edits the record
 *named* that and the delete reaches the id-owning one first. Both are documented;

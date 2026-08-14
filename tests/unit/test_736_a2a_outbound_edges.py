@@ -927,18 +927,6 @@ def test_G3_the_cap_bounds_creation_but_never_an_update(store):
 # --------------------------------------------------------------------------- #
 # G7 — FINDING F4: remove_endpoint deletes every match, across two namespaces
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG (finding F4): `remove_endpoint(ref)` filters out EVERY record whose "
-        "id or name matches, so when one endpoint has been named after another's "
-        "id — legal, since nothing enforces uniqueness across the two namespaces "
-        "and ids are visible in the admin GET — a single-target DELETE silently "
-        "destroys two endpoints and their encrypted credentials while the route "
-        "documents 'Remove one' and returns a single True. "
-        "Tracked as ent#395. See /edge-cases report 2026-08-13."
-    ),
-)
 def test_G7_removing_one_endpoint_removes_exactly_one_endpoint(store):
     alpha = store.upsert_endpoint("alpha", PEER_URL, "alpha-secret")
     store.upsert_endpoint("beta", PEER_URL, "beta-secret")
