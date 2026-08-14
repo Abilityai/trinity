@@ -81,7 +81,7 @@ from utils.url_validation import (
     A2AEndpointUrlError,
     SCHEME_DEFAULT_PORTS,
     ValidatedPublicUrl,
-    canonical_host as _canonical_host,
+    canonical_origin_host,
     effective_port,
     validate_a2a_endpoint_url,
 )
@@ -242,8 +242,18 @@ def _same_origin(a: str, b: str) -> bool:
         make Trinity unreachable by its own rule, breaking #738 federation;
       * case-insensitive host and trailing-dot stripping — `Host.` and `host`
         resolve identically;
-      * IPv6 bracket forms compared after normalisation;
-      * **the SAME host canonicalisation the validator used** (`_canonical_host`,
+      * **IP literals compared as addresses, not as text** (ent#399). This clause
+        used to read "IPv6 bracket forms compared after normalisation" and was
+        false: `canonical_host` leaves a literal untouched (idna rejects it, the
+        ASCII fallback passes it through), so `[2606:4700:4700::1111]` and
+        `[2606:4700:4700:0:0:0:0:1111]` — one address, two spellings — were
+        refused as cross-origin. A docstring asserting a property the code does
+        not have is worse than the gap: it is what the next reader builds on.
+        `canonical_origin_host` parses a literal through `ipaddress` and compares
+        the canonical form, keeping the scope id, so `fe80::1%eth0` and
+        `fe80::1%eth1` stay the different destinations they are;
+      * **the SAME host canonicalisation the validator used** (`canonical_host`,
+        reached through `canonical_origin_host`,
         UTS-46 nontransitional IDNA). The registered URL keeps whatever form the
         operator typed while `ValidatedPublicUrl.hostname` holds the A-label, and
         a peer's card declares whichever form its own server emits — usually the
@@ -262,7 +272,10 @@ def _same_origin(a: str, b: str) -> bool:
             raw_host = p.hostname or ""
         except ValueError:
             return None
-        host = _canonical_host(raw_host) or raw_host.lower().rstrip(".")
+        # ent#399: literals as addresses, names as before. The textual fallback
+        # stays for a host neither path can canonicalise, so an unusual name is
+        # still comparable to itself rather than becoming un-callable.
+        host = canonical_origin_host(raw_host) or raw_host.lower().rstrip(".")
         if not scheme or not host:
             return None
         try:

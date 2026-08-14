@@ -17,7 +17,7 @@ that the taxonomy's null/optional row exists to separate, the IPv6 transition
 prefixes an attacker reaches for once the plain IPv4-mapped form is blocked, and
 the cross-namespace collisions in the endpoint store.
 
-The sweep found six defects. Three remain strict-``xfail`` (F1, F3, F5b): they
+The sweep found six defects. Two remain strict-``xfail`` (F3, F5b): they
 are real, recorded rather than patched, because this file's job is to find them
 and fixing product code is a separate decision. ``strict=True`` matters — each
 one turns into a FAILURE the moment the defect is fixed, so the fix cannot land
@@ -28,15 +28,16 @@ Each names its matrix row, its finding id and its tracker issue; see
 +---------+--------+--------------------------------------------------+--------+
 | finding | issue  | one-line                                         | state  |
 +=========+========+==================================================+========+
-| F1      | ent#399| ``_same_origin`` compares IPv6 literals textually | xfail  |
+| F1      | ent#399| ``_same_origin`` compares IPv6 literals textually | FIXED  |
 | F2      | ent#398| port ``:0`` normalised three ways in one path    | FIXED  |
 | F3      | ent#397| refusal ``reason`` reverse-engineered from prose | xfail  |
 | F4      | ent#395| ``remove_endpoint`` can delete two endpoints     | FIXED  |
 | F5b     | ent#396| a whitespace-only credential clears the secret   | xfail  |
 +---------+--------+--------------------------------------------------+--------+
 
-**F2 and F4 were fixed while this sweep was open**, which is why their markers
-are gone rather than pending. F2 landed in #2180 (one shared ``effective_port``
+**F1, F2 and F4 were fixed while this sweep was open**, which is why their
+markers are gone rather than pending. F1 landed in #2181 (``canonical_origin_host``
+compares IP literals as addresses); its E6 test now asserts the property directly. F2 landed in #2180 (one shared ``effective_port``
 consumed by validation, connection pinning and origin comparison); its D7 test
 now asserts the three agreeing. F4 landed in #2177 (first-match-wins delete,
 shared with ``resolve_endpoint``); that PR's own regression suite — including
@@ -664,18 +665,6 @@ def test_E5_the_sub_budgets_still_fit_inside_the_total_deadline():
 # --------------------------------------------------------------------------- #
 # E6 — FINDING F1: _same_origin does not normalise IPv6 literals
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG (finding F1): `_same_origin`'s docstring claims 'IPv6 bracket forms "
-        "compared after normalisation', but it compares `urlsplit().hostname` "
-        "textually — `canonical_host` leaves an IPv6 literal untouched (idna "
-        "rejects it, the ASCII fallback passes it through). A registered "
-        "IPv6-literal endpoint whose peer card declares the same address in "
-        "expanded form is refused `card_origin_mismatch`. Fail-closed. "
-        "Tracked as ent#399. See /edge-cases report 2026-08-13."
-    ),
-)
 def test_E6_ipv6_literal_origins_compare_equal_across_spellings():
     compressed = "https://[2606:4700:4700::1111]/a2a"
     expanded = "https://[2606:4700:4700:0:0:0:0:1111]/a2a"
