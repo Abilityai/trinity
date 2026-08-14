@@ -546,6 +546,27 @@ are *refused* by `ipaddress` rather than folded, so the normalisation can never
 equate two addresses a resolver would treat differently. The card stays a hint: a
 card declaring a different address, port or scheme is still refused.
 
+#### FR-3a — A refusal's reason is set where it is raised (ent#397)
+`validate_a2a_endpoint_url` reconstructed its machine-readable `reason` by
+substring-matching its own human message — the fragility `A2AEndpointUrlError`'s
+docstring warns about. The DNS-failure message interpolates the hostname and
+`canonical_host` passes hosts containing spaces, so a host spelled
+`an internal address.example` that merely failed to resolve was reported
+`endpoint_private_address`. No bypass (both refusals carry the same HTTP status),
+but the operator is told the opposite of what happened and a consumer branching
+on `reason` branches wrongly.
+
+`_validate_public_https_url` now raises `PublicUrlRefusal(kind, message)` at each
+of its refusal sites (`invalid` / `not_https` / `credentials` / `private_address`
+/ `dns_failure`), and the A2A wrapper maps kind → reason through one table. The
+message is free to be reworded; the code is not free to change meaning.
+`PublicUrlRefusal` subclasses `ValueError`, so the template-registry validator —
+which lets it propagate — is unchanged in type and text. A `ValueError` raised
+without a kind still becomes `endpoint_invalid`: honest about not knowing, rather
+than guessing from prose. Messages still never echo a resolved address (the
+topology-oracle property), and the DNS message still names the host the operator
+typed, which is the point of interpolating it.
+
 #### FR-6 — `message/send` only; no SSE; no fake `stream` parameter
 Filed AC4 (stream token chunks back to the calling agent over SSE) is
 **rejected**: an MCP tool call is one request and one response — a FastMCP
