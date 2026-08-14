@@ -872,7 +872,21 @@ const canRecord = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.
 const micMode = SpeechRec ? 'speech' : (canRecord ? 'record' : null)
 const sttSupported = micMode !== null
 const ttsEnabled = computed(() => !!props.agent.voice_available)
-const voiceMode = ref(false)
+
+// #2157: the speaker choice sticks per client+agent instead of resetting to off
+// on every page load. Narration was already hard to find — an agent that had
+// just told the client this surface was "text-only" was the only hint it existed
+// — and re-muting it every reload taught clients it had not really worked.
+const voiceModeKey = computed(() => `trinity.portal.voiceMode.${props.agent?.name || ''}`)
+function loadVoiceMode() {
+  try { return localStorage.getItem(voiceModeKey.value) === '1' } catch { return false }
+}
+const voiceMode = ref(loadVoiceMode())
+watch(voiceMode, (on) => {
+  try { localStorage.setItem(voiceModeKey.value, on ? '1' : '0') } catch { /* private mode: session-only */ }
+})
+// Switching agents adopts that agent's own remembered choice.
+watch(() => props.agent?.name, () => { stopSpeaking(); voiceMode.value = loadVoiceMode() })
 const speaking = ref(false)
 const listening = ref(false)
 const transcribing = ref(false)
