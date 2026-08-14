@@ -457,6 +457,41 @@ def canonical_host(hostname: str) -> Optional[str]:
 _canonical_host = canonical_host
 
 
+def canonical_origin_host(hostname: str) -> Optional[str]:
+    """A host as an ORIGIN key — IP literals canonicalised, names via `canonical_host`.
+
+    `canonical_host` deliberately leaves an IP literal alone: `idna.encode`
+    rejects it and the ASCII fallback returns it verbatim. That is correct for
+    its own job (the name handed to the resolver) and wrong for comparing two
+    origins, where `2606:4700:4700::1111` and `2606:4700:4700:0:0:0:0:1111` are
+    one address written two ways (ent#399). Comparing those textually refused a
+    registered IPv6-literal endpoint against its own peer's card — fail-closed,
+    but permanently, over a spelling the two sides have no reason to agree on.
+
+    IPv4 literals normalise through the same call for free. This cannot equate
+    two addresses a resolver would treat differently: `ipaddress` REFUSES the
+    ambiguous spellings (leading zeros, integer and octal forms) rather than
+    folding them, so those fall through to the textual path unchanged.
+
+    A **scope id is part of the key**: `fe80::1%eth0` and `fe80::1%eth1` are
+    different destinations, and `ipaddress` preserves the zone, so they stay
+    distinct. Brackets never reach here — `urlsplit().hostname` strips them —
+    but a bracketed value is handled anyway, so a caller reading a raw authority
+    cannot silently fall through to a textual comparison.
+
+    Returns None only where `canonical_host` does (an unusable name).
+    """
+    host = (hostname or "").strip().lower()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if host:
+        try:
+            return str(ipaddress.ip_address(host))
+        except ValueError:
+            pass
+    return canonical_host(hostname)
+
+
 def _validate_public_https_url(
     url: str,
     *,
