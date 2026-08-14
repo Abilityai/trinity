@@ -54,13 +54,30 @@ from db_harness import db_backend, run as _hrun  # noqa: E402,F401
 
 _DB_MODULES = ("db.connection", "db.schedules", "db.activities", "database")
 
+# ---------------------------------------------------------------------------
+# sys.modules hygiene (#762 lint). The `ops` fixture must evict `db.*` so
+# `from db.schedules import ...` re-imports against the harness-bound engine —
+# and `monkeypatch.delitem` records NO undo for a key that was absent on entry,
+# so the freshly imported, harness-bound module would stay resident for later
+# files. That is strictly worse isolation than the explicit pop it would
+# replace. Snapshot/restore covers both the present- and absent-on-entry cases,
+# which is the leak the lint actually guards against.
+# Precedent: tests/unit/test_1771c_schedules_analytics_edges.py.
+# ---------------------------------------------------------------------------
+_STUBBED_MODULE_NAMES = [*_DB_MODULES]
+
 AGENT = "corbin"
 SCHEDULE = "sched-2193"
 
 
 @pytest.fixture(autouse=True)
 def _restore_sys_modules():
-    saved = {name: sys.modules.get(name) for name in _DB_MODULES}
+    """Snapshot the evicted modules before each test and restore after.
+
+    Purely a teardown-time guarantee: the snapshot is taken before the test
+    body, so no in-test behaviour (and no assertion) changes.
+    """
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
     try:
         yield
     finally:
