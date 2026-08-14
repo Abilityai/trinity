@@ -437,19 +437,52 @@
   id misses by construction; a failing read costs the labels, not the rows. It is
   **not assumed to be human-written** — schedule creation is `AuthorizedAgent`, so
   an agent-scoped key can author it — and is therefore capped and escaped.
+- **Reports are rendered, never dumped (#2162)**: the Reports tab drives the shared
+  `components/reports/` renderer set (`display_hint` → `report_type` prefix → shape check),
+  the same dispatch Agent Detail uses — reused, not forked, because those renderer keys are
+  CI-pinned as the canonical contract (`test_1535_report_prompt_guidance.py`). It shipped
+  dumping `JSON.stringify(payload)` at an external client, which is the *same* disclosure this
+  section already refuses for an ask's `context`: a typed renderer reads only the keys its hint
+  declares, so this strictly narrows what crosses. The one deliberate divergence from the
+  operator surfaces is the fallback: they keep the raw JSON viewer (useful when you are
+  debugging an agent's own output), while this surface passes `:fallback-component` and an
+  unrecognised payload gets a bounded, humanised key-value summary with credential-shaped tokens
+  redacted and no raw payload reachable behind it. Honest limit — a summary still names every top-level
+  key; it bounds and humanises the residual rather than removing it. A `table` payload is
+  fetched a window at a time (`rows_offset`/`rows_limit`) so a large report never transfers
+  whole, and the tab grows by an explicit "Load more" rather than a nested scroll region.
 - **Key Features**:
   - Header: avatar, name, description, health, last active
   - Stats strip: tasks in window, completed rate, first-try rate, window selector
     (shown only on the tabs the window drives)
   - Tabs: Overview · Reports · Files · What it can do · Activity
-  - Overview: activity chart (the shared `StackedBarChart`, #1107 — bounded, not
-    a full-bleed strip), then **open asks** beside recent work, then this user's
-    chats. Asks stay first in DOM order so the mobile stack keeps the priority
+  - Overview: an **unconditional 50/50 top row** — the activity chart (the shared
+    `StackedBarChart`, #1107 — bounded, not a full-bleed strip) on the left,
+    recent work on the right — then **open asks** full width below it, then this
+    user's chats. The row splits at `xl`, not `lg`, and stacks below that: with
+    the Workspace's 288px sidebar a 1024px viewport leaves each column 332px,
+    where a 30-day x-axis truncates to nothing (#2169). The column count is
+    independent of the data — both occupants own an empty state, so the split
+    never collapses; keying it off `asks.length` was the #2169 defect
+  - **#2161's "asks stay first in DOM order so the mobile stack keeps the
+    priority" is superseded by #2169**, deliberately and on instruction:
+    below `xl` asks are now third. Recorded rather than dropped, because the
+    rationale was real. The residual is bounded — the Overview tab's ask-count
+    badge sits in the header, outside the page scroller, so a narrow viewport
+    still shows the count at every scroll position; only the ask text moves
+    below the fold. What #2161 decided about the asks *card* is untouched:
+    they stay on the Overview (not a tab), contained in place, no nested scroll
+  - `PortalAvatar` carries a 1px `border-strong` edge in both themes (#2169), so
+    an image avatar with light edges does not bleed into the surface behind it.
+    One shared component, fourteen call sites; `box-sizing: border-box` keeps
+    every outer footprint unchanged
   - Everything DB-sourced, so a **stopped** agent renders degraded, not empty:
     health `unknown` (monitoring is default-OFF, so "unhealthy" would be a lie),
     empty sections, and a failing data source degrades that section only
   - Endpoints: `GET /agents/{name}/page?window=`, `.../reports`,
-    `.../reports/{id}` under the client-portal prefix, all roster-gated
+    `.../reports/{id}` (optional `rows_offset`/`rows_limit` window a tabular payload,
+    #2162 — two query params on the existing route, not a second route) under the
+    client-portal prefix, all roster-gated
 - **Not met**: the AC's **rating tally**. There is no rating, thumbs or feedback
   mechanism anywhere in Trinity, so it has no data source and was omitted rather
   than invented — a number a user reads as "how well is this agent doing" has to
@@ -511,6 +544,74 @@
 - **Gating**: escalation is gated on the same rooms capability as the picker
   (#2128) — without it there is nowhere to escalate to, so an @mention stays
   ordinary text.
+
+### 5.13 Workspace composer typeahead — `/` playbooks, `@` agents
+- **Status**: ✅ Implemented (2026-08-13)
+- **Requirement ID**: WORKSPACE_COMPOSER_TYPEAHEAD
+- **GitHub Issue**: abilityai/trinity-enterprise#392
+- **Description**: The composer's two invocation syntaxes become discoverable.
+  Typing `/` at a token boundary opens a bounded list of the active agent's
+  `playbooks[]` (title + description) and selecting one **splices its
+  `starter_prompt` into the composer without sending** — the §5.11 briefing-card
+  prefill contract, now reachable after turn 1, where the cards are gone.
+  Typing `@` opens a bounded list of reachable agents, filtered on **slug and
+  display label** (the roster shows labels; the parser keys on slugs), and
+  selecting one inserts a token `mentionedAgents()` resolves (§5.12).
+- **OSS-core by decision (ent#392): deliberately ungated** — no
+  `requires_entitlement`, logic stays in the OSS tree. Recorded explicitly
+  because CLAUDE.md's default for an enterprise-tracker feature is *gated unless
+  ruled otherwise*, so the ruling must never be inferred later from the mere
+  fact that it merged (the ent#326 / ent#384 discipline). Rationale: it extends
+  a surface that is already OSS-core (the Workspace, ent#356) over data the
+  client already holds — no new endpoint, no new table, no migration.
+- **The trigger rule is deliberately STRICTER than the parser.** §5.12's
+  `MENTION_RE` is unanchored, so `user@example.com` *parses* as `@example`; the
+  typeahead only fires on a trigger char at a token start (preceded by a
+  **non-word** char — not merely whitespace, or it cannot fire after CJK, an
+  emoji or punctuation). Asymmetric in the only safe direction: the popup can
+  never open on something the parser would not see, so `50/50`, `and/or` and an
+  email address are left alone, and no offered token can fail to resolve.
+- **Un-mentionable slugs are excluded, so a selected mention can never degrade
+  to plain text** (the AC's central property). `sanitize_agent_name` keeps `.`
+  and imposes no length cap, while the mention grammar allows neither — so
+  `data.scout` is an ordinary agent whose mention resolves to nothing. Nothing
+  offers such names today, which is why the failure is invisible; a list that
+  included them would *manufacture* it. The predicate is **derived by asking
+  `mentionedAgents` itself**, never a second copy of the grammar.
+- **No implicit selection.** The roving index starts at "nothing chosen", and a
+  plain Enter accepts **only** with an explicit selection — otherwise it sends.
+  Tab accepts the top row. The harm is asymmetric: an accidental accept destroys
+  typed work (a popup that merely happens to be open — a paste, or prose like
+  "check /status of the deploy" — would splice up to 500 characters over the
+  message), while an accidental send is what the user was reaching for. Esc
+  dismisses and keeps the popup shut while the same token is still being typed.
+- **`@` is hidden without the rooms capability** (#2128) — in the popup *and* in
+  the placeholder, since a placeholder promising a capability the build lacks is
+  the same dead end in text form. The placeholder is the only part of this that
+  reaches a user who does not already know the feature exists.
+- **Honest empty state.** A source with nothing in it shows one line; a query
+  that matches nothing **closes** the popup. The copy never claims what the
+  client cannot observe: `_agent_briefing` returns `[]` for a stopped or slow
+  agent exactly as it does for one with no playbooks, and the roster is fetched
+  once at mount — so "no playbooks exposed" would be a false claim about
+  operator configuration for the ordinary state of an idle fleet. "No peers" and
+  "peers exist but none is mentionable" are separate statements.
+- **Scope**: `/` and `@` in the 1:1 composer; **`@` in the room composer**,
+  scoped to the room's **agent participants**. That scope was established by
+  *observing the running server*, not by reading the private rooms engine:
+  `POST /api/rooms/{id}/messages` answered `woke: ["<participant>"]` for a
+  participant mention and `woke: []` for a non-participant one, so the list
+  offers only names a pick is known to wake — offering the roster would put
+  names in front of the user with no evidence that choosing one does anything.
+  It is deliberately **not** claimed that a non-participant mention has no
+  effect: §5.12 records an engine-side newcomer-join path from ent#361, and two
+  empty response fields do not disprove it. If that path is live, this list is
+  narrower than the engine allows, and recruiting stays with the explicit
+  "+ Add agent" control — the honest home for an action that spends money on
+  another agent. **`/` in a room is deferred**: a room has N participants and no
+  active agent, so "whose playbooks?" has no answer without inventing a picker
+  this issue does not specify.
+- **Flow**: [workspace-composer-typeahead.md](../feature-flows/workspace-composer-typeahead.md)
 
 ---
 

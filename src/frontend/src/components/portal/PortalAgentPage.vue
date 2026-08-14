@@ -88,8 +88,16 @@
            payload arrives in one response, so this is honesty about WHERE
            content will appear rather than progressive arrival — the header and
            tabs above are already rendered from the route, so the page never
-           looks blank or hung while this fills in. -->
-      <div v-if="loading && !page" class="space-y-6" aria-busy="true">
+           looks blank or hung while this fills in.
+
+           The two blocks sit side by side at `xl`, mirroring the Overview's top
+           row (#2169). A one-column skeleton in front of a two-column row means
+           every load ends in a reflow — and the agent this issue is about, the
+           one with no asks, is exactly the case where skeleton and loaded state
+           used to agree. `grid gap-6` also supplies the row gap `space-y-6` did
+           when stacked. `tab` is 'overview' on first paint, which is the only
+           moment this renders. -->
+      <div v-if="loading && !page" class="grid gap-6 xl:grid-cols-2" aria-busy="true">
         <div v-for="sec in 2" :key="sec" class="animate-pulse">
           <div class="h-3 w-32 rounded bg-gray-200 dark:bg-gray-800 mb-3"></div>
           <div class="space-y-2">
@@ -102,62 +110,48 @@
 
       <!-- ---------------------------- OVERVIEW ---------------------------- -->
       <template v-else-if="tab === 'overview'">
-        <!-- Activity, in the same visual language as the operator Overview
-             (#1107): bounded, stacked by what triggered the work, both themes.
-             An empty window and an unreadable one are different sentences — a
-             blank chart frame for either would be the dead empty state. -->
-        <section class="mb-6 max-w-2xl">
-          <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">
-            Activity · last {{ windowLabel }}
-          </h2>
-          <div class="rounded-xl border border-gray-200 dark:border-gray-800 px-3.5 py-3">
-            <p v-if="stats.unavailable" class="text-sm text-gray-400">Stats are unavailable right now.</p>
-            <p v-else-if="!hasActivity" class="text-sm text-gray-400">No activity in this window.</p>
-            <StackedBarChart
-              v-else
-              :data="stats.timeline || []"
-              :buckets="chartBuckets"
-              :colors="BUCKET_COLORS"
-              :labels="PORTAL_BUCKET_LABELS"
-              :height="110"
-            />
-          </div>
-        </section>
+        <!-- The top row is unconditional (#2169). It used to key its column
+             count off the ask count, so an agent with nothing waiting collapsed
+             to one column and the page changed shape whenever a transient
+             operator-queue item opened or closed — a layout that reports the
+             data instead of holding still for it. Both occupants own an empty
+             state ("No activity in this window." / "Nothing yet."), so the split
+             never has to collapse: structure is stable, only content varies.
 
-        <!-- Asks lead — that is the reason the page exists, it is where the
-             agent reaches the user when no chat is open. On a wide screen they
-             sit beside recent work rather than pushing it below the fold; they
-             stay FIRST in DOM order so the mobile stack keeps the priority. -->
-        <div class="mb-6 grid gap-6" :class="{ 'lg:grid-cols-2': asks.length }">
-          <section v-if="asks.length">
-            <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Waiting on you</h2>
-            <div
-              v-for="a in visibleAsks"
-              :key="a.id"
-              class="mb-2 rounded-xl border border-amber-300/70 dark:border-amber-700/50 bg-amber-50/60 dark:bg-amber-900/10 px-3 py-2.5"
-            >
-              <div class="text-sm font-medium">{{ a.title || 'The agent needs a decision' }}</div>
-              <p v-if="a.question" class="mt-0.5 text-xs text-gray-600 dark:text-gray-300 line-clamp-3">{{ a.question }}</p>
-              <div v-if="a.options?.length" class="mt-1.5 flex flex-wrap gap-1">
-                <span v-for="o in a.options" :key="o" class="text-[11px] rounded-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-1.5 py-0.5">{{ o }}</span>
-              </div>
-              <!-- Answering writes to the operator queue, an operator surface
-                   with its own auth. Rather than render a control that 403s for
-                   a client, the answer path is the conversation. -->
-              <button class="mt-1.5 text-xs text-action-primary-600 hover:underline" @click="$emit('start-chat', agentName)">
-                Reply in chat →
-              </button>
+             Two columns at `xl`, not `lg`, and that is arithmetic rather than
+             taste. The Workspace keeps a 288px sidebar plus 24px page padding
+             and a 24px gap, so at 1024px each column is 332px — where the 30d
+             x-axis (one truncating 9px label per day) reads as nothing and the
+             nine-bucket legend wraps three to five lines. At 1280px the column
+             is ~460px, which the legend needs and gets. Below `xl` it stacks.
+
+             `xl` reduces the x-axis residual rather than removing it: on the 30d
+             window the ticks stay ellipsis-clipped from 1280 to about 1680, and
+             are clean above that AND below 1280, where the row stacks and the
+             chart runs full width. 7d (the default) and 14d are clean at every
+             width. Accepted, not overlooked — the fix is width-responsive tick
+             density in StackedBarChart, which the operator Overview shares. -->
+        <div class="mb-6 grid gap-6 xl:grid-cols-2">
+          <!-- Activity, in the same visual language as the operator Overview
+               (#1107): bounded, stacked by what triggered the work, both themes.
+               An empty window and an unreadable one are different sentences — a
+               blank chart frame for either would be the dead empty state. -->
+          <section>
+            <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">
+              Activity · last {{ windowLabel }}
+            </h2>
+            <div class="rounded-xl border border-gray-200 dark:border-gray-800 px-3.5 py-3">
+              <p v-if="stats.unavailable" class="text-sm text-gray-400">Stats are unavailable right now.</p>
+              <p v-else-if="!hasActivity" class="text-sm text-gray-400">No activity in this window.</p>
+              <StackedBarChart
+                v-else
+                :data="stats.timeline || []"
+                :buckets="chartBuckets"
+                :colors="BUCKET_COLORS"
+                :labels="PORTAL_BUCKET_LABELS"
+                :height="110"
+              />
             </div>
-            <!-- In place, not a nested scroll region: this page has one scroll
-                 axis (#2101), and a pane that scrolls inside a page that scrolls
-                 traps the gesture on touch. -->
-            <button
-              v-if="asks.length > ASKS_PREVIEW"
-              class="text-xs text-action-primary-600 hover:underline"
-              @click="allAsks = !allAsks"
-            >
-              {{ allAsks ? 'Show fewer' : `Show all ${asksBadge}` }}
-            </button>
           </section>
 
           <section>
@@ -173,6 +167,51 @@
             </ul>
           </section>
         </div>
+
+        <!-- Asks sit BELOW that row, full width, and only when there are any
+             (#2169). No empty state: an agent with nothing waiting must not
+             advertise the section.
+
+             This supersedes #2161's "asks are first in DOM order so the mobile
+             stack keeps the priority" — deliberately, on instruction, not by
+             oversight. The residual is bounded: the Overview tab's ask-count
+             badge lives in the header, which is `shrink-0` and sits OUTSIDE the
+             page scroller, so a narrow viewport still shows the count at every
+             scroll position; only the ask text moves below the fold.
+
+             Everything #2161 built into the card survives: compact cards, a
+             clamped question, the first five plus a counted toggle, and no
+             nested scroll region (#2101) — this page has one scroll axis. -->
+        <section v-if="asks.length" class="mb-6">
+          <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Waiting on you</h2>
+          <div
+            v-for="a in visibleAsks"
+            :key="a.id"
+            class="mb-2 rounded-xl border border-amber-300/70 dark:border-amber-700/50 bg-amber-50/60 dark:bg-amber-900/10 px-3 py-2.5"
+          >
+            <div class="text-sm font-medium">{{ a.title || 'The agent needs a decision' }}</div>
+            <p v-if="a.question" class="mt-0.5 text-xs text-gray-600 dark:text-gray-300 line-clamp-3">{{ a.question }}</p>
+            <div v-if="a.options?.length" class="mt-1.5 flex flex-wrap gap-1">
+              <span v-for="o in a.options" :key="o" class="text-[11px] rounded-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-1.5 py-0.5">{{ o }}</span>
+            </div>
+            <!-- Answering writes to the operator queue, an operator surface
+                 with its own auth. Rather than render a control that 403s for
+                 a client, the answer path is the conversation. -->
+            <button class="mt-1.5 text-xs text-action-primary-600 hover:underline" @click="$emit('start-chat', agentName)">
+              Reply in chat →
+            </button>
+          </div>
+          <!-- In place, not a nested scroll region: this page has one scroll
+               axis (#2101), and a pane that scrolls inside a page that scrolls
+               traps the gesture on touch. -->
+          <button
+            v-if="asks.length > ASKS_PREVIEW"
+            class="text-xs text-action-primary-600 hover:underline"
+            @click="allAsks = !allAsks"
+          >
+            {{ allAsks ? 'Show fewer' : `Show all ${asksBadge}` }}
+          </button>
+        </section>
 
         <section>
           <h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-2">Your chats with {{ agentName }}</h2>
@@ -190,8 +229,29 @@
       </template>
 
       <!-- ---------------------------- REPORTS ----------------------------- -->
+      <!-- #2162: reports render through the SHARED components/reports/ set, the
+           same dispatch Agent Detail uses. This dumped JSON.stringify(payload)
+           at external clients — a disclosure defect, not only an ugly one: the
+           payload is free-form agent JSON of the same class as an ask's
+           `context`, which this page refuses to expose at all. A typed renderer
+           reads only the keys its hint declares, so this narrows what crosses.
+           `:fallback-component` is the one place this surface diverges from
+           the operator ones: where they show the raw JSON viewer, a client gets
+           a bounded, humanised summary and no raw payload at all (AC #2 asks
+           for a fallback stricter than the operator side, precisely here). -->
       <template v-else-if="tab === 'reports'">
-        <p v-if="!reports.length" class="text-sm text-gray-400">This agent hasn't published any reports.</p>
+        <div v-if="!reportsLoaded && !reportsError" class="space-y-2" aria-busy="true">
+          <div v-for="row in 3" :key="row" class="animate-pulse h-14 rounded-xl bg-gray-100 dark:bg-gray-800/60"></div>
+          <span class="sr-only">Loading this agent's reports…</span>
+        </div>
+        <LoadFailed
+          v-else-if="reportsError"
+          dense
+          title="Couldn't load reports"
+          :message="reportsError"
+          @retry="loadReports"
+        />
+        <p v-else-if="!reports.length" class="text-sm text-gray-500 dark:text-gray-400">This agent hasn't published any reports.</p>
         <div v-for="r in reports" :key="r.id" class="mb-2 rounded-xl border border-gray-200 dark:border-gray-800">
           <button class="w-full px-3.5 py-3 flex items-center gap-3 text-left" @click="toggleReport(r.id)">
             <span class="min-w-0 flex-1">
@@ -201,8 +261,28 @@
             <svg class="w-4 h-4 text-gray-400 shrink-0 transition" :class="{ 'rotate-180': openReport === r.id }" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
           </button>
           <div v-if="openReport === r.id" class="px-3.5 pb-3 border-t border-gray-100 dark:border-gray-800">
-            <p v-if="!reportPayloads[r.id]" class="pt-3 text-xs text-gray-400">Loading…</p>
-            <pre v-else class="pt-3 text-xs overflow-x-auto whitespace-pre-wrap break-words">{{ pretty(reportPayloads[r.id]) }}</pre>
+            <InlineError
+              v-if="reportErrors[r.id]"
+              class="mt-3"
+              :message="reportErrors[r.id]"
+              retryable
+              @retry="retryReport(r.id)"
+              @dismiss="dismissReportError(r.id)"
+            />
+            <div v-else-if="!reportPayloads[r.id]" class="pt-3 space-y-2" aria-busy="true">
+              <div v-for="row in 2" :key="row" class="animate-pulse h-8 rounded-lg bg-gray-100 dark:bg-gray-800/60"></div>
+              <span class="sr-only">Loading this report…</span>
+            </div>
+            <div v-else class="pt-3">
+              <ReportRenderer
+                :report-type="r.report_type"
+                :display-hint="r.display_hint"
+                :payload="reportPayloads[r.id]"
+                :meta="reportRowMeta[r.id]"
+                :load-more="reportRowMeta[r.id] ? () => loadMoreRows(r.id) : null"
+                :fallback-component="ReportSummary"
+              />
+            </div>
           </div>
         </div>
       </template>
@@ -282,6 +362,10 @@ import { ref, computed, watch, onMounted } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { BUCKET_COLORS, bucketsForChart, hasChartActivity } from '@/utils/executionBuckets'
 import StackedBarChart from '@/components/StackedBarChart.vue'
+import InlineError from '@/components/InlineError.vue'
+import LoadFailed from '@/components/LoadFailed.vue'
+import ReportRenderer from '@/components/reports/ReportRenderer.vue'
+import ReportSummary from '@/components/reports/ReportSummary.vue'
 import PortalAvatar from './PortalAvatar.vue'
 import { PORTAL_BUCKET_LABELS } from './portalUtils'
 
@@ -321,9 +405,25 @@ const timeWindow = ref('7d')
 const page = ref(null)
 const loading = ref(false)
 const error = ref(null)
-const reports = ref([])
+// Only the "which card is open" bit is local (#2162). Everything else about
+// reports — the list, its loaded/failed flags, per-report payloads, row meta,
+// per-report errors — lives in the store (design contract #21), which is also
+// what makes the agent-switch race testable: a reset there invalidates requests
+// already in flight, which clearing a ref here cannot do.
 const openReport = ref(null)
-const reportPayloads = ref({})
+// The store is a singleton and outlives this component, so a fresh MOUNT for a
+// different agent would otherwise read the previous one's reports as "already
+// loaded" and never refetch — the props watcher below only fires on a change
+// within one instance, not on a remount. Every read is therefore gated on the
+// state actually belonging to the agent on screen; the store's generation
+// counter covers the in-flight half, this covers the at-rest half.
+const reportsMine = computed(() => store.reportsAgent === props.agentName)
+const reports = computed(() => (reportsMine.value ? store.reports : []))
+const reportsLoaded = computed(() => reportsMine.value && store.reportsLoaded)
+const reportsError = computed(() => (reportsMine.value ? store.reportsError : null))
+const reportPayloads = computed(() => (reportsMine.value ? store.reportPayloads : {}))
+const reportRowMeta = computed(() => (reportsMine.value ? store.reportRowMeta : {}))
+const reportErrors = computed(() => (reportsMine.value ? store.reportErrors : {}))
 const documents = ref([])
 const uploads = ref([])
 
@@ -387,8 +487,11 @@ async function load() {
 // Files are separate surfaces that most visits never look at.
 watch(tab, async (t) => {
   try {
-    if (t === 'reports' && !reports.value.length) {
-      reports.value = await store.fetchAgentReports(props.agentName)
+    // Gated on the LOADED FLAG, not on list length: an agent with genuinely
+    // zero reports would otherwise refetch on every entry to the tab, and a
+    // failed fetch would look identical to an empty one (contract #15).
+    if (t === 'reports' && !reportsLoaded.value) {
+      await loadReports()
     } else if (t === 'files' && !documents.value.length && !uploads.value.length) {
       const [d, u] = await Promise.all([
         store.fetchDocuments(props.agentName).catch(() => []),
@@ -406,8 +509,11 @@ watch(tab, async (t) => {
 watch(() => props.agentName, () => {
   pageCache.clear()   // #2160: keyed by name, but never serve one agent's page for another
   page.value = null
-  reports.value = []
-  reportPayloads.value = {}
+  // #2162: the store owns report state AND the generation counter, so this also
+  // invalidates any report request already in flight for the previous agent —
+  // the half a plain ref-clear cannot do, and the reason `reportsLoaded` is safe
+  // to add at all (it would otherwise make a transient wrong-render permanent).
+  store.resetAgentReports(props.agentName)
   openReport.value = null
   documents.value = []
   uploads.value = []
@@ -418,20 +524,32 @@ watch(() => props.agentName, () => {
 watch(timeWindow, load)
 onMounted(load)
 
+function loadReports() {
+  return store.loadAgentReports(props.agentName)
+}
+
 async function toggleReport(id) {
   if (openReport.value === id) { openReport.value = null; return }
   openReport.value = id
-  if (reportPayloads.value[id]) return
-  try {
-    const r = await store.fetchAgentReport(props.agentName, id)
-    reportPayloads.value = { ...reportPayloads.value, [id]: r?.payload ?? {} }
-  } catch {
-    reportPayloads.value = { ...reportPayloads.value, [id]: { error: 'Could not load this report.' } }
-  }
+  // The store owns the already-loaded / already-in-flight guards, so a rapid
+  // expand-collapse-expand cannot fire duplicate requests — which matters here
+  // because each one re-reads the whole blob server-side.
+  await store.loadAgentReport(props.agentName, id)
+}
+
+function retryReport(id) {
+  return store.loadAgentReport(props.agentName, id)
+}
+
+function dismissReportError(id) {
+  store.clearReportError(id)
+}
+
+function loadMoreRows(id) {
+  return store.loadMoreReportRows(props.agentName, id)
 }
 
 const pct = (v) => (v === null || v === undefined ? '—' : `${Math.round(v * 100)}%`)
-const pretty = (v) => { try { return JSON.stringify(v, null, 2) } catch { return String(v) } }
 const size = (b) => (b === null || b === undefined ? '' : b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`)
 const duration = (ms) => (!ms ? '' : ms < 1000 ? `${ms}ms` : ms < 60000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms / 60000)}m`)
 

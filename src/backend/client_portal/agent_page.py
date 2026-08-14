@@ -46,6 +46,7 @@ import logging
 from typing import Optional
 
 from database import db
+from models import REPORT_ROWS_PAGE_MAX
 
 from . import db as portal_db
 
@@ -242,7 +243,8 @@ def reports(agent_name: str, limit: int = 20, offset: int = 0) -> list[dict]:
     """Metadata for the Reports tab (payload fetched separately when expanded).
 
     Reuses the existing report surface (#918) exactly as the Technical Notes
-    ask. Metadata only: a payload is up to 256 KB and belongs on expansion.
+    ask. Metadata only: a payload is up to 5 MiB (`REPORT_PAYLOAD_MAX_BYTES`,
+    raised from 256 KB in #1537) and belongs on expansion.
     """
     try:
         rows = db.get_reports_for_agent(agent_name, limit=limit, offset=offset)
@@ -303,13 +305,70 @@ def _last_active(agent_name: str) -> Optional[str]:
     return rows[0].get("started_at") if rows else None
 
 
-def report_detail(agent_name: str, report_id: str) -> Optional[dict]:
+def _window_rows(payload, offset: int, limit: int):
+    """Slice a tabular payload's `rows`, or leave it alone (#2162).
+
+    Returns `(payload, row_meta)` — `row_meta` is None whenever no window was
+    applied, which is how the caller (and, downstream, the renderer's footer)
+    tells a windowed table from a whole document.
+
+    **The server decides tabularity, from the real payload.** `display_hint` is
+    agent-authored and can disagree with what was actually filed, so a client
+    that predicted the shape would need a 400 and a recovery re-fetch for the
+    disagreement. Answering "here it is whole, and no, that wasn't a table"
+    removes that branch: one request, always. Every other display_hint is a
+    bounded document (a KPI tile set, a markdown body) with no row axis to
+    slice, so there is nothing to answer 400 about.
+
+    Subtractive on `rows` only: sibling keys are returned exactly as filed, the
+    same as the unwindowed path. The copy is shallow so the source row is never
+    truncated in place.
+    """
+    if not isinstance(payload, dict):
+        return payload, None
+    columns = payload.get("columns")
+    rows = payload.get("rows")
+    if not isinstance(columns, list) or not isinstance(rows, list):
+        return payload, None
+
+    # A negative offset would silently serve rows counted from the END under an
+    # honest-looking total; an unbounded limit would defeat the point of the
+    # window. The route validates both (422), but the clamp is what actually
+    # bounds the response and must not depend on one caller doing so.
+    offset = max(0, int(offset))
+    limit = max(1, min(int(limit), REPORT_ROWS_PAGE_MAX))
+
+    windowed = dict(payload)
+    windowed["rows"] = rows[offset:offset + limit]
+    # `total` is the TRUE row count, not the window — it is what "Showing 100 of
+    # 12,431" reads, and a windowed total would hide the rest behind a footer
+    # that never appears.
+    return windowed, {"total": len(rows), "offset": offset, "limit": limit}
+
+
+def report_detail(agent_name: str, report_id: str, *,
+                  rows_offset: int = 0,
+                  rows_limit: Optional[int] = None) -> Optional[dict]:
     """One report's full payload, scoped to the agent whose page is open.
 
     The agent check is the point: report ids are global, and without it any
     rostered agent's page would read any report in the install. A foreign id
     returns None → the router's 404, identical to a nonexistent one, so this
     cannot be used to test whether a report exists (invariant #8).
+
+    `rows_limit` (#2162) windows a tabular payload's rows, so a large table is
+    never shipped whole to a client — the #1537 pattern, reached here through
+    two optional params rather than a second route. The operator row reader is
+    `Depends(get_current_user)`, which a portal principal (a verified email with
+    no `users` row) structurally cannot satisfy; cloning it on a client-facing
+    prefix would mean a second hand-written gate beside the one above, and that
+    is how a 404-uniformity contract drifts. Absent `rows_limit`, this returns
+    byte-for-byte what it returned before the parameter existed.
+
+    Honest limit, same as the operator route's: the slice happens in Python
+    after the whole blob is read out of the column, so this bounds the RESPONSE,
+    not the read — and therefore paging MULTIPLIES reads. That is why the route
+    rate-limits (a client can loop it; an operator on a JWT is a different risk).
     """
     try:
         row = db.get_report(report_id)
@@ -318,14 +377,26 @@ def report_detail(agent_name: str, report_id: str) -> Optional[dict]:
         return None
     if not row or row.get("agent_name") != agent_name:
         return None
-    return {
+
+    payload = row.get("payload")
+    row_meta = None
+    if rows_limit is not None:
+        payload, row_meta = _window_rows(payload, rows_offset, rows_limit)
+
+    detail = {
         "id": row.get("id"),
         "agent_name": row.get("agent_name"),
         "report_type": row.get("report_type"),
         "title": row.get("title"),
         "display_hint": row.get("display_hint"),
-        "payload": row.get("payload"),
+        "payload": payload,
         "period_start": row.get("period_start"),
         "period_end": row.get("period_end"),
         "created_at": row.get("created_at"),
     }
+    # Present ONLY when a window was actually applied: the client keys "is this
+    # paged?" off its presence, so an always-present key with null fields would
+    # make every bounded document render a Load-more footer it can never satisfy.
+    if row_meta is not None:
+        detail["row_meta"] = row_meta
+    return detail
