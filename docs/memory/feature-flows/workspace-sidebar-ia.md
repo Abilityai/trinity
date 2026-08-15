@@ -84,6 +84,28 @@ A room credits its unread to **every** agent in it — there is no single agent 
 room is "with", so if three agents share a room you are behind on, all three
 rows should say so. (Rooms report 0 today; see Known Limitations.)
 
+### 3b. Availability on the agent row (#2196)
+
+Each roster card carries `availability` (`ready`/`stopped`/`unavailable`/
+`unknown`). The row renders a chip for the two non-ready states via the pure
+`portalUtils.availabilityChip()` — one rule, shared with the agent page and (in
+PR 2) the picker and the `@`-typeahead, so four surfaces cannot drift on it.
+
+Three decisions worth keeping:
+
+* **Label, do not disable.** Disabling the row would relocate the dead state
+  rather than remove it: a client whose agents are all *stopped* — a routine
+  resource-saving posture — would get an entirely inert Workspace. The chip sets
+  the expectation and the server's 502 stays the honest refusal.
+* **No re-sorting.** Ordering by availability would make rows jump as agents
+  start and stop; the design system's layout-stability rule forbids that, and the
+  top-5 fold is #2159's design.
+* **Reserve the chip's footprint**, so a row does not reflow when an agent's
+  state changes between refreshes.
+
+`agentRowTitle()` carries the same reason in the row's `title`, so the state is
+reachable without relying on colour.
+
 ### 4. Starred chats are lifted, not copied
 
 `partitionStarred()` splits the list before `groupThreadsByDate()` ever sees it,
