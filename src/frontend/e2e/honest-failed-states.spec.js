@@ -1,4 +1,9 @@
 import { test, expect, request } from '@playwright/test'
+import {
+  agentExists,
+  missingAgentReason,
+  tokenFromStorageState,
+} from './helpers/agent-probe.js'
 
 /**
  * Honest loading / empty / failed states (#1926, design-system p15 + p25).
@@ -74,13 +79,10 @@ test.describe('notifications — failed fetch is not "No events yet" (#1926)', (
 
 test.describe('task history — failed fetch is not "No tasks yet" (#1926)', () => {
   test.beforeEach(async ({ page, baseURL }) => {
-    const api = await request.newContext({ baseURL })
-    const ok = await api
-      .get(`/api/agents/${TEST_AGENT}`)
-      .then((r) => r.ok())
-      .catch(() => false)
-    await api.dispose()
-    test.skip(!ok, `TEST_AGENT '${TEST_AGENT}' not found on this stack`)
+    test.skip(
+      !(await agentExists(TEST_AGENT, { baseURL })),
+      missingAgentReason(TEST_AGENT, 'TEST_AGENT')
+    )
   })
 
   test('renders the failed state and keeps the card footprint', async ({ page }) => {
@@ -98,7 +100,14 @@ test.describe('task history — failed fetch is not "No tasks yet" (#1926)', () 
 
 test.describe('schedule toggle — a failed verb is visible, not console-only (#1926)', () => {
   test.beforeEach(async ({ page, baseURL }) => {
-    const api = await request.newContext({ baseURL })
+    // Authenticated: /schedules is behind auth, so an anonymous context 401s,
+    // yields [] and skips claiming "no schedules" — a FALSE diagnosis of a real
+    // auth failure. Same class as the agent probe (#2199).
+    const token = tokenFromStorageState()
+    const api = await request.newContext({
+      baseURL,
+      extraHTTPHeaders: token ? { Authorization: `Bearer ${token}` } : {},
+    })
     const schedules = await api
       .get(`/api/agents/${TEST_AGENT}/schedules`)
       .then((r) => (r.ok() ? r.json() : []))
