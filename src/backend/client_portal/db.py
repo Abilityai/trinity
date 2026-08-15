@@ -20,6 +20,10 @@ from db.tables import (
 from utils.helpers import iso_cutoff, utc_now_iso
 
 
+# Max agents per SQL statement — see `list_portal_sessions_for_agents` (#2198).
+_AGENT_CHUNK = 500
+
+
 def get_setting(key: str, default: str = "") -> str:
     """Read an OSS ``system_settings`` value."""
     stmt = select(system_settings.c.value).where(system_settings.c.key == key)
@@ -206,6 +210,71 @@ def list_portal_sessions(agent_name: str, client_email: str) -> list[dict]:
         return [dict(r) for r in conn.execute(stmt, {
             "agent": agent_name, "email": (client_email or "").lower(),
         }).mappings()]
+
+
+def list_portal_sessions_for_agents(client_email: str, agent_names: list[str]) -> list[dict]:
+    """Every thread this client has with ANY of ``agent_names``, most-recently-active
+    first — the batch form of :func:`list_portal_sessions` (#2198).
+
+    The Workspace sidebar renders one merged, cross-agent, recency-sorted list, so
+    it previously issued N of those calls (one per rostered agent) on bootstrap AND
+    on every thread open and every completed turn.
+
+    Three deliberate differences from the single-agent query:
+
+    * ``agent_name`` is SELECTed. The per-agent query omits it because the caller
+      already knows it; a flat batch list has to carry it per row.
+    * ``client_email = :email`` with the lowercasing done PYTHON-side at the bind,
+      as ``list_portal_sessions`` does — not ``lower(s.client_email) = :email``
+      like ``search_portal_sessions``, which puts a function on the column and is
+      non-sargable.
+    * ``ORDER BY ... , id DESC``. The tiebreaker is inert today (no LIMIT, and the
+      caller re-sorts) but makes the boundary row deterministic the moment anyone
+      adds one.
+
+    ``agent_name IN (:agents)`` is BOTH the tenant scope and the index path: the
+    only index on this table is ``(agent_name, client_email, last_message_at)``, so
+    this resolves as one index seek per agent with both leading columns on
+    equality — the same plan each of today's N separate queries already gets,
+    executed once instead of N times over HTTP. Deliberately NO ``LIMIT``: today's
+    per-agent query is unbounded and runs N times, so the batch's row volume is
+    already what crosses the wire, and adding a cap would be a new behaviour that
+    collides with the starred-chat pinning guarantee (requirements §5.10).
+    """
+    if not agent_names:
+        # An expanding bindparam raises on an empty list, and there is nothing to
+        # ask anyway. Same guard as `search_portal_sessions`.
+        return []
+    stmt = text(
+        "SELECT id, agent_name, title, created_at, last_message_at, message_count "
+        "FROM enterprise_portal_sessions "
+        "WHERE client_email = :email AND agent_name IN :agents "
+        "ORDER BY COALESCE(last_message_at, created_at) DESC, id DESC"
+    ).bindparams(bindparam("agents", expanding=True))
+
+    email = (client_email or "").lower()
+    rows: list[dict] = []
+    with get_engine().connect() as conn:
+        # Chunked because an expanding bindparam emits ONE placeholder per agent
+        # and SQLITE_MAX_VARIABLE_NUMBER is 999 on SQLite < 3.32. A platform
+        # principal with include_owned=True on a large fleet would otherwise turn
+        # today's always-working N single-agent queries into a hard 500 — on the
+        # Workspace bootstrap path.
+        for i in range(0, len(agent_names), _AGENT_CHUNK):
+            chunk = list(agent_names[i:i + _AGENT_CHUNK])
+            rows.extend(dict(r) for r in conn.execute(
+                stmt, {"email": email, "agents": chunk}
+            ).mappings())
+
+    if len(agent_names) > _AGENT_CHUNK:
+        # Each chunk is sorted independently, so concatenating them is NOT
+        # globally ordered — a recent thread from the last chunk would sit below
+        # an old one from the first. Re-sort on exactly the SQL key so the
+        # docstring's ordering contract holds for every roster size. Only
+        # reachable past the chunk threshold, so the common path pays nothing.
+        rows.sort(key=lambda r: (r.get("last_message_at") or r.get("created_at") or "",
+                                 r.get("id") or ""), reverse=True)
+    return rows
 
 
 def get_portal_session(session_id: str, agent_name: str, client_email: str) -> Optional[dict]:
