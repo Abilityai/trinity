@@ -392,7 +392,10 @@
   "never read" as "all unread" would have badged every historical conversation
   in every install the day this shipped. A cursor is written the first time the
   viewer opens or sends in a thread.
-- **Endpoints**: `GET /api/enterprise/client-portal/chat-state`,
+- **Endpoints**: `GET /api/enterprise/client-portal/sessions` (#2198 — the whole
+  sidebar list in ONE viewer-scoped call, replacing one per-agent call per rostered
+  agent; roster-scoped by the same set the per-agent gate enforces, no cap and no
+  `total`, rate-limited per viewer), `GET /api/enterprise/client-portal/chat-state`,
   `PUT|DELETE .../chat-state/{kind}/{id}/star`, `POST .../chat-state/{kind}/{id}/read`.
   No roster gate (every row is keyed by the caller's own email) and no existence
   check on the id — a 404 for an unknown chat would be an enumeration oracle

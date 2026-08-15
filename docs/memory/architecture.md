@@ -1307,6 +1307,25 @@ through `client_portal/portal_auth.py::get_portal_principal`, which returns
 `(email, is_platform)`; the roster is every agent shared with that email, plus — for a
 platform session only — the agents they own.
 
+**The sidebar's thread list is one viewer-scoped call (#2198).**
+`GET /api/enterprise/client-portal/sessions` returns every thread the caller has across
+every agent on their roster. It replaced a literal N+1: the sidebar renders a merged,
+cross-agent, recency-sorted list, so it asked the per-agent route once per rostered
+agent — from six `refreshThreads()` call sites including every thread open and every
+completed turn — and each of those re-resolved the roster before reading the session
+table. The batch's tenant scope IS the roster: `agent_name IN (…)` populated from
+`service.roster_agent_names(email, include_owned)`, the same set `agent_on_roster`
+enforces, extracted so the two cannot drift (filtering on `client_email` alone would
+re-surface threads for an un-shared agent). No agent parameter, so it is strictly less
+enumerable than the route it replaces (Invariant #8); no schema change and no new index
+(the existing `(agent_name, client_email, last_message_at)` gives it the same plan each
+per-agent query already got); rate-limited per viewer, since it is no longer even
+incidentally throttled by a browser connection cap. The one real trade is failure
+granularity — one unreadable agent used to degrade alone, and the read is now
+all-or-nothing — which is why the store returns its **last good list** on failure rather
+than blanking, and `refreshThreads` catches both halves: an uncaught rejection there
+aborts `bootstrap()` before `resolveAgentQuery()` and breaks Workspace deep-link landing.
+
 It was an entitled module and returned 404 in community builds; ent#356 moved it into
 OSS core (adoption: this is the main surface a non-operator uses to work with agents).
 The `/api/enterprise/client-portal` prefix and the `enterprise_portal_sessions` /
