@@ -102,17 +102,31 @@ test.describe('schedule toggle — a failed verb is visible, not console-only (#
   test.beforeEach(async ({ page, baseURL }) => {
     // Authenticated: /schedules is behind auth, so an anonymous context 401s,
     // yields [] and skips claiming "no schedules" — a FALSE diagnosis of a real
-    // auth failure. Same class as the agent probe (#2199).
+    // auth failure. Same class as the agent probe (#2199), and the same
+    // contract: only definitive answers skip — a 404 (agent absent) or a real
+    // empty list. A 401/5xx/transport error is a broken probe and must FAIL.
     const token = tokenFromStorageState()
     const api = await request.newContext({
       baseURL,
       extraHTTPHeaders: token ? { Authorization: `Bearer ${token}` } : {},
     })
-    const schedules = await api
-      .get(`/api/agents/${TEST_AGENT}/schedules`)
-      .then((r) => (r.ok() ? r.json() : []))
-      .catch(() => [])
-    await api.dispose()
+    let schedules
+    try {
+      const resp = await api.get(`/api/agents/${TEST_AGENT}/schedules`)
+      if (resp.status() === 404) {
+        // Definitive: the agent itself is absent (uniform Invariant #8 shape).
+        test.skip(true, missingAgentReason(TEST_AGENT, 'TEST_AGENT'))
+      }
+      if (!resp.ok()) {
+        throw new Error(
+          `schedules probe for '${TEST_AGENT}' broke: HTTP ${resp.status()} — ` +
+            `auth/stack fault, not "no schedules"; refusing to skip (#2199)`
+        )
+      }
+      schedules = await resp.json()
+    } finally {
+      await api.dispose()
+    }
     test.skip(
       !Array.isArray(schedules) || schedules.length === 0,
       `TEST_AGENT '${TEST_AGENT}' has no schedules to toggle`

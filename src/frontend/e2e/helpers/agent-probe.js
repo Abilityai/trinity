@@ -13,13 +13,23 @@ import fs from 'fs'
  * confidence, and it is strictly worse than a red test.
  *
  * This is not hypothetical — it is the live defect in
- * `circuit-breaker-badge.spec.js` and `honest-failed-states.spec.js`, both of
- * which probe unauthenticated against a default of `trinity-system` (an agent
- * that ALWAYS exists), so their 401 is unconditional.
+ * `circuit-breaker-badge.spec.js` (left in place deliberately — see the Known
+ * gap note in e2e/README.md), and was the defect in
+ * `honest-failed-states.spec.js` until #2199 fixed it: both probed
+ * unauthenticated against a default of `trinity-system` (an agent that ALWAYS
+ * exists), so their 401 was unconditional.
  *
  * One shared helper exists precisely so that anti-pattern cannot be
  * re-derived independently in each spec. Consume this; do not hand-roll a
  * probe.
+ *
+ * ⚠️ A BROKEN PROBE IS LOUD, NEVER A SKIP. ⚠️
+ * Only a definitive 404 — the platform's uniform "no such agent" answer
+ * (Invariant #8) — reads as "fixture absent". A 401/403 (no/stale token: the
+ * setup project didn't run, or the backend restarted mid-run and invalidated
+ * the JWT), a 5xx, or a transport error mean the PROBE broke, not that the
+ * agent is missing — so `agentExists` THROWS, failing the test with the real
+ * diagnosis instead of skipping under a false "agent not found" reason.
  *
  * SCOPE: existence only. It deliberately does NOT check that the agent is
  * running or on a particular runtime — reporting a *present but unsuitable*
@@ -50,7 +60,9 @@ export function tokenFromStorageState() {
       .find((i) => i.name === 'token')?.value
   } catch {
     // No storageState yet (setup didn't run). Returning undefined makes the
-    // probe 401 and the caller skip — the correct degraded state.
+    // probe go out unauthenticated and 401 — which `agentExists` reports as a
+    // LOUD failure, not a skip (the file being absent is an environment fault,
+    // not evidence the fixture agent is missing).
     return undefined
   }
 }
@@ -58,13 +70,21 @@ export function tokenFromStorageState() {
 /**
  * Does this agent exist on the stack under test?
  *
+ * `false` means exactly one thing: the stack answered a definitive 404
+ * ("no such agent", the uniform Invariant #8 shape). Every other failure —
+ * 401/403 (probe unauthenticated: setup didn't run, or the JWT died with a
+ * backend restart), 5xx, or a transport error — THROWS, because collapsing it
+ * into `false` would make the caller skip under a false "agent not found"
+ * reason: the `circuit-breaker-badge` defect wearing a new hat.
+ *
  * @param {string} name      agent name to probe
  * @param {object} opts
  * @param {string} opts.baseURL  Playwright `baseURL` fixture
  * @param {string} [opts.token]  bearer token; falls back to the storageState
  *                               harvest when omitted (specs that already mint
  *                               their own admin token should pass it in)
- * @returns {Promise<boolean>}
+ * @returns {Promise<boolean>} true = exists; false = definitive 404
+ * @throws when the probe itself broke — the test must FAIL, not skip
  */
 export async function agentExists(name, { baseURL, token } = {}) {
   const bearer = token || tokenFromStorageState()
@@ -72,12 +92,29 @@ export async function agentExists(name, { baseURL, token } = {}) {
     baseURL,
     extraHTTPHeaders: bearer ? { Authorization: `Bearer ${bearer}` } : {},
   })
-  const ok = await api
-    .get(`/api/agents/${name}`)
-    .then((r) => r.ok())
-    .catch(() => false)
-  await api.dispose()
-  return ok
+  try {
+    let resp
+    try {
+      resp = await api.get(`/api/agents/${name}`)
+    } catch (err) {
+      throw new Error(
+        `agent probe for '${name}' could not reach the stack at ${baseURL}: ` +
+          `${err.message} — a broken probe must fail loudly, never skip (#2199)`
+      )
+    }
+    if (resp.ok()) return true
+    if (resp.status() === 404) return false
+    throw new Error(
+      `agent probe for '${name}' broke: HTTP ${resp.status()} from ` +
+        `GET /api/agents/${name}` +
+        (bearer
+          ? ''
+          : ' (no bearer token — did the setup project write e2e/.auth/admin.json?)') +
+        ` — auth/stack fault, not a missing fixture; refusing to skip (#2199)`
+    )
+  } finally {
+    await api.dispose()
+  }
 }
 
 /**

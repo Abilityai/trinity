@@ -92,7 +92,11 @@ Some specs need a real agent on the stack. Each reads an env var with a
 and the probe must be authenticated.** `GET /api/agents/{name}` is behind
 `AuthorizedAgent` and Trinity's JWT lives in localStorage, not a cookie, so an
 unauthenticated probe 401s and the test skips on *every* run: silent false
-confidence, which is worse than a red test. Use the shared
+confidence, which is worse than a red test. The inverse holds too: **only a
+definitive 404 reads as "fixture absent"** — a 401/403 (setup didn't run, JWT
+died with a backend restart), a 5xx, or a transport error means the *probe*
+broke, and `agentExists` throws so the test fails with the real diagnosis
+instead of skipping under a false "agent not found". Use the shared
 `e2e/helpers/agent-probe.js` — do not hand-roll a probe.
 
 > **Known gap:** `circuit-breaker-badge.spec.js` still carries the legacy
