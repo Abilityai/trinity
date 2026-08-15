@@ -1325,6 +1325,14 @@ granularity — one unreadable agent used to degrade alone, and the read is now
 all-or-nothing — which is why the store returns its **last good list** on failure rather
 than blanking, and `refreshThreads` catches both halves: an uncaught rejection there
 aborts `bootstrap()` before `resolveAgentQuery()` and breaks Workspace deep-link landing.
+Shipping it also closed the hole it would have amplified: `get_portal_principal`'s
+platform branch now runs `reject_agent_principal`, so an agent-scoped MCP key — which
+resolves to its owner carrying the owner's role — can no longer traverse the Workspace
+as `is_platform=True` (it could previously read the owner's threads with agents the
+calling agent holds no `agent_permissions` edge to, and this route would have made that
+one call). User-scoped keys, `scope='system'` and portal session tokens are unaffected;
+there is no legitimate agent caller of this surface (no MCP tool targets it, no agent
+image calls it).
 
 It was an entitled module and returned 404 in community builds; ent#356 moved it into
 OSS core (adoption: this is the main surface a non-operator uses to work with agents).

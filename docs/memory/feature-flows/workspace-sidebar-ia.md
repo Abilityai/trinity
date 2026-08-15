@@ -94,6 +94,17 @@ the hottest authenticated read in the Workspace and is no longer even
 incidentally throttled by the browser's per-host connection cap (and in
 production, behind cloudflared/HTTP-2, there is no such cap at all).
 
+**Human-only for platform principals (#2198 E7).** `get_portal_principal`'s
+platform branch now runs `reject_agent_principal`: an agent-scoped MCP key
+resolves to its owner *carrying the owner's role* (the ent#293/#297 trap), so
+before this any agent's injected `TRINITY_MCP_API_KEY` reached every portal
+route as the owner — a REST path around the MCP layer's agent-to-agent
+permission matrix — and the batch route would have turned "N calls against N
+discovered names" into one call returning the owner's whole thread index.
+Enforced at the dependency so every current and future portal route inherits
+it; user-scoped keys, `scope='system'` and portal session tokens pass exactly
+as before.
+
 *Behaviour change worth naming:* one unreadable agent used to degrade alone;
 with one query the read is all-or-nothing. Acceptable — a single indexed read,
 not N agent round-trips — but it is a real change in failure granularity.

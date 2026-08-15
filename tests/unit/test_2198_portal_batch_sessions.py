@@ -250,3 +250,83 @@ def test_an_empty_roster_short_circuits_before_any_query(monkeypatch):
     monkeypatch.setattr(svc.db, "list_portal_sessions_for_agents", _boom)
 
     assert svc.list_all_sessions(ALICE, include_owned=False) == {"sessions": []}
+
+
+# ---------------------------------------------------------------------------
+# The principal boundary (#2198 / plan §12.5 E7)
+# ---------------------------------------------------------------------------
+#
+# `get_portal_principal`'s platform branch resolves the caller through
+# `get_current_user`, which accepts MCP keys — and an agent-scoped key resolves
+# to its OWNER carrying the owner's role (the ent#293/#297 trap). Before #2198
+# that meant any agent's injected TRINITY_MCP_API_KEY reached the portal as
+# `is_platform=True` for its owner: a REST path around the MCP layer's
+# agent-to-agent permission matrix, and the new batch route turned "N calls
+# against N discovered names" into one call returning the owner's whole thread
+# index. The fix is at the DEPENDENCY, so every portal route inherits it.
+
+from types import SimpleNamespace  # noqa: E402
+
+
+class _FakeUser(SimpleNamespace):
+    pass
+
+
+def _wire_principal(monkeypatch, *, agent_name=None, mcp_scope=None,
+                    email="Owner@Example.com"):
+    from client_portal import portal_auth as pa
+    from client_portal import db as portal_db
+    import database
+
+    monkeypatch.setattr(pa, "decode_portal_session", lambda t: None)
+    monkeypatch.setattr(portal_db, "is_client_blocked", lambda e: False)
+    monkeypatch.setattr(database.db, "get_user_by_username",
+                        lambda u: {"email": email})
+
+    async def fake_get_current_user(request, token):
+        return _FakeUser(username="owner", agent_name=agent_name,
+                         mcp_scope=mcp_scope)
+
+    monkeypatch.setattr(pa, "get_current_user", fake_get_current_user)
+    return pa
+
+
+@pytest.mark.asyncio
+async def test_an_agent_scoped_key_is_rejected_at_the_portal_boundary(monkeypatch):
+    """E7: an agent's injected key must never traverse the Workspace as its
+    owner. 403 from the dependency, before any roster or session read."""
+    from fastapi import HTTPException
+
+    pa = _wire_principal(monkeypatch, agent_name="acme-sage", mcp_scope="agent")
+    with pytest.raises(HTTPException) as exc:
+        await pa.get_portal_principal(SimpleNamespace(), SimpleNamespace(headers={}),
+                                      token="trinity_mcp_x")
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_a_users_own_key_and_a_jwt_still_pass_as_platform(monkeypatch):
+    """The portal is a USE surface: a user scripting their own Workspace with
+    their own user-scoped key stays legitimate, as does a plain JWT.
+    `User.agent_name` is set only for scope='agent', so both pass."""
+    pa = _wire_principal(monkeypatch, agent_name=None, mcp_scope="user")
+    principal = await pa.get_portal_principal(
+        SimpleNamespace(), SimpleNamespace(headers={}), token="trinity_mcp_y")
+    assert principal.is_platform is True
+    assert principal.email == "owner@example.com"
+
+
+@pytest.mark.asyncio
+async def test_a_portal_session_token_is_untouched_by_the_agent_fence(monkeypatch):
+    """The rejection sits on the PLATFORM branch only — an external client's
+    portal session token never resolves through get_current_user."""
+    from client_portal import portal_auth as pa
+    from client_portal import db as portal_db
+
+    monkeypatch.setattr(pa, "decode_portal_session", lambda t: "client@example.com")
+    monkeypatch.setattr(portal_db, "is_client_blocked", lambda e: False)
+    monkeypatch.setattr(pa, "portal_session_needs_rotation", lambda t: False)
+
+    principal = await pa.get_portal_principal(
+        SimpleNamespace(), SimpleNamespace(headers={}), token="portal-token")
+    assert principal == ("client@example.com", False)
