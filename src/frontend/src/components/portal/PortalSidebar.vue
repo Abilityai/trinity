@@ -111,6 +111,19 @@
               <span class="block text-sm truncate">{{ agentLabel(a) }}</span>
               <span v-if="agentLabel(a) !== a.name" class="block text-xs text-gray-400 truncate font-mono">{{ a.name }}</span>
             </span>
+            <!-- #2196: the agent can't currently run. LABEL, never disable —
+                 disabling would relocate the dead state rather than remove it,
+                 since a client whose agents are all stopped (a routine
+                 resource-saving posture) would get an entirely inert Workspace.
+                 The chip sets the expectation; the server's 502 is the honest
+                 refusal. Nothing is rendered for `ready` or `unknown`.
+
+                 The slot's footprint is RESERVED (`min-w`, on the row always) so
+                 a row does not reflow when an agent starts or stops between
+                 refreshes — the same reason the roster is not re-sorted by this. -->
+            <span class="shrink-0 min-w-[4.5rem] flex justify-end">
+              <BaseBadge v-if="chipFor(a)" :variant="chipFor(a).variant">{{ chipFor(a).label }}</BaseBadge>
+            </span>
             <span
               v-if="waitingFor(a.name)"
               class="shrink-0 min-w-[1.25rem] px-1.5 h-5 rounded-full bg-action-primary-600 text-white text-[11px] font-semibold flex items-center justify-center"
@@ -194,8 +207,9 @@
 import { computed, ref } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
 import ChatRow from './PortalChatRow.vue'
+import BaseBadge from '@/components/base/BaseBadge.vue'
 import {
-  groupThreadsByDate, partitionStarred, unreadByAgent, totalUnread,
+  groupThreadsByDate, partitionStarred, unreadByAgent, totalUnread, availabilityChip,
 } from './portalUtils'
 
 const props = defineProps({
@@ -250,13 +264,23 @@ function onAgentClick(name) {
 // disagree about what an unset label means.
 const agentLabel = (a) => (a.display_label || '').trim() || a.name
 
+// #2196: one rule, from portalUtils, shared with the agent page (and, next,
+// the picker and the @-typeahead). `detailed` is the platform-session flag: an
+// operator looking at their own fleet sees stopped-vs-no-container, an external
+// client sees one label for both — the two differ only in whether the operator
+// deleted or lost the agent, and neither is actionable for a client.
+const chipFor = (a) => availabilityChip(a, { detailed: props.isPlatformSession })
+
 function agentRowTitle(a) {
   const n = waitingFor(a.name)
   const label = agentLabel(a)
   const who = label === a.name ? label : `${label} (${a.name})`
-  return n
+  const base = n
     ? `${who} — ${n} unread ${n === 1 ? 'reply' : 'replies'}`
     : `Open ${who}`
+  // The state must be reachable without relying on colour.
+  const chip = chipFor(a)
+  return chip ? `${base} — ${chip.title}` : base
 }
 
 // #2159: a long fleet made the agents block the whole sidebar, pushing chats
