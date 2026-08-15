@@ -29,6 +29,15 @@
  * (no dep, no script, no workflow), so that is filed as a follow-up rather than
  * bolted onto a P2 bug fix.
  *
+ * Known parser blind spots (regex scanner, no string tokenizer — verified by
+ * probe at review, #2200): an UNBALANCED `}` inside a string literal in a hook
+ * body silently truncates the scanned body (false PASS past it), and a `//`
+ * inside a string mangles the rest of that line (false PASS for a listener
+ * after it on the same line). Both are silent-direction misses; neither shape
+ * exists in the tree today, and the Dashboard-specific test below is the
+ * belt for the file this guard was minted for. The word `addEventListener` or
+ * `await` inside a string false-FAILS instead — loud and fixable, accepted.
+ *
  * There is no component-mount harness in this project (no @vue/test-utils), and
  * the defect is one of lifecycle ORDERING rather than of any pure function, so
  * this is a source-structure guard — the same shape as `agentDetailDeepLink.spec.js`
