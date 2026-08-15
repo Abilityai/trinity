@@ -52,13 +52,67 @@ test('@interactive create agent end-to-end', async ({ page }) => { ... })
 
 ## CI
 
-CI runs e2e only on PRs **labeled `ui`** — add the label to any frontend PR
-that should be exercised end-to-end. The workflow lives at
-`.github/workflows/frontend-e2e.yml` and stands up the full Trinity stack
-before running tests (~5 min total).
+The workflow lives at `.github/workflows/frontend-e2e.yml` and stands up the
+full Trinity stack before running tests (~5 min total). Since #1526 the `ui`
+label is **no longer the gate** — the suite runs on:
 
-To make e2e a required check on a PR, add the `ui` label and wait for the
-workflow to complete.
+1. **Nightly** on `dev` (07:00 UTC) — a red night opens/updates a tracking issue.
+2. **Any PR touching `src/frontend/**`** — automatically, via the `changes` job.
+3. **The `ui` label** — still a manual opt-in on NON-frontend PRs, or to force a run.
+4. **`workflow_dispatch`** — on demand.
+
+Two things follow, and both matter when you are judging whether a change is
+covered:
+
+- **CI runs `npm run test:e2e:smoke` only.** `@visual` and `@interactive`
+  specs never run there, so a green CI says nothing about them.
+- **The workflow is advisory, not a required merge gate** (an explicit decision
+  in #1526 — promoting it needs a flake budget first, #596). `dev`'s required
+  checks are `Analyze (python)`, `Analyze (javascript-typescript)`,
+  `schema-parity`, and `verify-non-root`.
+
+So a claim about the **full** suite has to be evidenced by a local run against
+a live stack, not by a CI badge.
+
+## Fixture agents
+
+Some specs need a real agent on the stack. Each reads an env var with a
+`testfix` default — an agent that does **not** exist on a typical instance:
+
+| Spec | Env var | Needs |
+|---|---|---|
+| `loops-panel` | `LOOPS_TEST_AGENT` | exists, running, **Claude runtime** |
+| `continue-as-chat` | `SESSION_TEST_AGENT` | exists, running, **Claude runtime** |
+| `workspace-absorbs-session` (`@interactive` only) | `SESSION_TEST_AGENT` | exists |
+| `portal-agent-page-overview` | `PORTAL_TEST_AGENT` | exists, visible to admin |
+| `timeline-cancelled-bar`, `honest-failed-states` | `TEST_AGENT` | exists |
+| `circuit-breaker-badge` | `TEST_AGENT` | exists |
+
+**The contract (#2199): a missing fixture reads as SKIPPED, never broken —
+and the probe must be authenticated.** `GET /api/agents/{name}` is behind
+`AuthorizedAgent` and Trinity's JWT lives in localStorage, not a cookie, so an
+unauthenticated probe 401s and the test skips on *every* run: silent false
+confidence, which is worse than a red test. Use the shared
+`e2e/helpers/agent-probe.js` — do not hand-roll a probe.
+
+> **Known gap:** `circuit-breaker-badge.spec.js` still carries the legacy
+> unauthenticated probe, so both its tests skip on every run. It was left as-is
+> deliberately: with an authenticated probe its `@smoke` test **fails** (the
+> `circuit-open-badge` element never appears, though the `data-testid` is still
+> present in `AgentHeader.vue`), which looks like a product defect. Un-skipping
+> it would turn the nightly signal red for a cause that belongs in its own
+> issue. Convert it to an explicit `test.skip(true, 'blocked by #NNNN')` once
+> that issue exists.
+
+The probe checks **existence only**. If a spec needs the agent running or on a
+particular runtime, say so in the spec header: reporting a *present but
+unsuitable* fixture as "absent" would be a false diagnosis.
+
+```bash
+# point the fixture-dependent specs at a real agent
+LOOPS_TEST_AGENT=my-agent SESSION_TEST_AGENT=my-agent PORTAL_TEST_AGENT=my-agent \
+  ADMIN_PASSWORD=<pw> npm run test:e2e
+```
 
 ## Adding tests
 
