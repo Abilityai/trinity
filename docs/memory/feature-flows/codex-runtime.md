@@ -5,7 +5,7 @@
 A Trinity **harness IS an `AgentRuntime`** — the pluggable execution engine inside
 the agent container. **Codex** is the third runtime, alongside Claude Code
 (default) and Gemini CLI. An agent runs on Codex when its template declares
-`runtime: { type: codex, model: gpt-5.1-codex }`; the backend creates the
+`runtime: { type: codex, model: gpt-5.6-sol }`; the backend creates the
 container with `AGENT_RUNTIME=codex`, and `codex_runtime.py` implements the ABC.
 
 The hard part is **not** wiring a new CLI — it's achieving full parity with
@@ -67,6 +67,66 @@ Because `session_tab_resume=False`, the backend gates the Session-tab cached-UUI
 `--resume` turn off (one constant `RUNTIMES_WITHOUT_SESSION_TAB_RESUME` in
 `sessions.py` → stateless turn) and the frontend hides the Session tab. The Chat
 tab (with continuity) stays.
+
+## Cost estimation (#1187, corrected #2207)
+
+`cost_reporting="estimated"` means the number `calculate_codex_cost()` computes
+**is** the number Trinity records — Codex reports no cost of its own. It flows to
+`schedule_executions.cost`, agent analytics, cost-threshold alerts, and the loop
+budget `max_cost_usd` (#1155). Because a budget is a **spend control**, an
+understated rate is a control bypass, not a cosmetic metric error: #2207 found
+the table stranded on the gpt-5.1 generation, so every newer model prefix-matched
+`gpt-5` at $1.25/$10 — 3.6x under for `gpt-5.6-sol`, **21x under for
+`gpt-5.5-pro`**. Rates therefore fail toward **over**-reporting.
+
+Three properties, each load-bearing:
+
+- **Rates are per 1,000,000 tokens**, stated exactly as OpenAI publishes them, so
+  `CODEX_PRICING` diffs against the rate card by eye. The bug being fixed was a
+  stale transcription; per-1K forced arithmetic on every audit.
+- **The prefix match is boundary-aware.** A prefix matches only when the
+  remainder starts with `-` (a variant/date suffix: `gpt-5.2-codex` → `gpt-5.2`),
+  never `.` (a new generation: `gpt-5.7-sol` → `default`). A bare `startswith`
+  makes every entry a catch-all for future models and silently routes them to the
+  oldest, cheapest rate — the same defect, pre-armed for the next release.
+  Deliberately **asymmetric** with `model_context._FAMILY_PREFIX_WINDOWS`, whose
+  bare `startswith` is correct because there the fall-through picks the *smallest
+  window*, which over-reports usage. Same mechanism, opposite risk.
+- **`default` is the flagship rate, not the cheapest.** An unpinned agent reaches
+  it on every turn: `_CodexParseState.model` is the caller-supplied value and
+  `thread.started` carries only a thread id, so Trinity never learns the model the
+  CLI actually resolved. Since that default *is* `gpt-5.6-sol`, pricing the
+  unknown case at sol's rate is the accurate answer, not a pessimistic one.
+
+**Long-context tier**: prompts over `LONG_CONTEXT_THRESHOLD_TOKENS` (272K input)
+bill the whole request at 2x input / 1.5x output, applied only for models that
+publish such a tier. Note 272K is a *price break*, **not** a window — the 5.6
+family's window is 1,050,000 (`CODEX_EXTENDED_CONTEXT_WINDOW`). Conflating the
+two is what made the context gauge read ~3.9x too full on every 5.6 turn.
+
+**Cache writes are priced**, because Codex reports them. A live gpt-5.6-sol turn
+on codex-cli 0.147.0 emits `cache_write_input_tokens` alongside
+`cached_input_tokens`, and it is a **subset of `input_tokens`** — the same trap
+as `reasoning_output_tokens` ⊂ `output_tokens`. Input therefore splits three
+ways, each at its own rate:
+
+```
+plain = input_tokens - cached_input_tokens - cache_write_input_tokens
+```
+
+Writes carry a 1.25x surcharge on gpt-5.4+. On the measured turn 11,395 of 11,398
+input tokens were writes, so ignoring them under-reports that turn by ~20% (and
+the pre-#2207 table under-reported it by **5.0x**). Both subset counters are
+clamped before use: they arrive from an external process, and an oversubscribed
+payload must never produce a negative plain remainder, which would silently
+*reduce* the bill.
+
+**Deliberately unpriced** (documented, not guessed): **fast mode** (~2x) is
+genuinely unobservable — nothing in the event stream distinguishes it.
+`gpt-5.3-codex` / `gpt-5.3-codex-spark` remain reachable with an API key but
+OpenAI publishes no rate for them, so they resolve to `default` (over-reporting)
+rather than carrying an unsourceable number. **Never add a rate that is not on
+the card.**
 
 ## MCP
 

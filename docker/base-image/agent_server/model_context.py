@@ -40,7 +40,8 @@ the copy is literally identical.
 Canonical model windows (keep this comment as the bump-anchor):
     https://platform.claude.com/docs/en/about-claude/models/overview
     https://code.claude.com/docs/en/model-config  (extended-context / [1m])
-Last synced: 2026-07-08 (#1521)
+    https://developers.openai.com/api/docs/pricing   (GPT-5.x windows)
+Last synced: 2026-08-15 (#2207 — GPT-5.6 family windows)
 """
 from __future__ import annotations
 
@@ -56,8 +57,23 @@ DEFAULT_CONTEXT_WINDOW = 200_000
 # runtimes (Gemini).
 EXTENDED_CONTEXT_WINDOW = 1_000_000
 
-# OpenAI Codex single window.
+# OpenAI Codex — legacy families (gpt-5, gpt-5.1, bare "codex"). Their real
+# window IS 272K, so this is exact for them, not a floor.
+#
+# NOTE (#2207): 272K is ALSO OpenAI's long-context PRICE break for the newer
+# families, which is why it looked like a universal ceiling. It is not — see
+# CODEX_EXTENDED_CONTEXT_WINDOW. The pricing-side constant lives in
+# codex_runtime.CODEX_PRICING/LONG_CONTEXT_THRESHOLD_TOKENS; do not collapse the
+# two, they answer different questions and will diverge on the next release.
 CODEX_CONTEXT_WINDOW = 272_000
+
+# OpenAI GPT-5.6 family (sol / terra / luna) — verified 1,050,000 context window
+# for all three (922K max input + 128K max output). Verified against the live
+# model pages 2026-08-15, so this is a KNOWN value, not a capability guess: the
+# DESIGN INVARIANT above forbids optimistic guessing, not documented facts.
+# gpt-5.5 / gpt-5.4 deliberately stay on the 272K floor — their windows were not
+# verified, and under-reporting capacity is the safe direction.
+CODEX_EXTENDED_CONTEXT_WINDOW = 1_050_000
 
 # Marker Claude Code uses to request the 1M extended-context beta. Case-folded
 # before the check so ``[1M]`` matches too.
@@ -67,10 +83,21 @@ _EXTENDED_MARKER = "[1m]"
 # most specific first). These encode the guaranteed-safe floor per family, NOT
 # the capability ceiling for Claude. A match SUPPRESSES the unknown-model warning
 # (the id is recognized, just resolved to its floor); a miss warns.
+#
+# DELIBERATE ASYMMETRY with codex_runtime._resolve_pricing (#2207) — do not
+# "unify" them. That function had to make its prefix match boundary-aware,
+# because there falling through to an older, broader entry picks the CHEAPEST
+# rate and silently under-bills. Here the same fall-through picks the SMALLEST
+# window, which over-reports "% context used" — the safe direction this module's
+# DESIGN INVARIANT asks for. Identical mechanism, opposite risk: a future
+# ``gpt-5.7-x`` landing on ``gpt-5`` → 272K is correct behaviour here and a bug
+# there.
 _FAMILY_PREFIX_WINDOWS: tuple[tuple[str, int], ...] = (
     # Non-Claude runtimes — plan-independent native windows.
     ("gemini", EXTENDED_CONTEXT_WINDOW),
-    ("gpt-5", CODEX_CONTEXT_WINDOW),   # OpenAI Codex (e.g. gpt-5.1-codex)
+    # gpt-5.6 BEFORE gpt-5 — first match wins, so the specific family must lead.
+    ("gpt-5.6", CODEX_EXTENDED_CONTEXT_WINDOW),  # sol / terra / luna (#2207)
+    ("gpt-5", CODEX_CONTEXT_WINDOW),   # OpenAI Codex legacy (e.g. gpt-5.1-codex)
     ("codex", CODEX_CONTEXT_WINDOW),
     # Claude — safe 200K floor for every bare id (opus / sonnet / haiku). The
     # real 1M window comes from the runtime value (primary) or the [1m] suffix.
