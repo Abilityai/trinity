@@ -206,8 +206,6 @@ class ScheduleStatsMixin:
 
         Used for the agent detail token usage display (issue #250).
         """
-        from datetime import datetime, timezone, timedelta
-
         cutoff_24h = iso_cutoff(24)
         cutoff_7d = iso_cutoff(168)
 
@@ -245,9 +243,9 @@ class ScheduleStatsMixin:
             # Per-day breakdown for last 7 days.
             #
             # `started_at` is an ISO-Z TEXT column (Invariant #16), so the day
-            # bucket is a SUBSTRING, never a date function — the same
-            # dialect-agnostic bucketer `get_agent_analytics` (#1107) and
-            # `get_fleet_execution_timeline` (ent#326) already use.
+            # bucket is a SUBSTRING, never a date function — byte-identical
+            # to the bucketer `get_agent_analytics` (#1107) already uses,
+            # so the two day series cannot drift.
             #
             # `DATE(started_at)` was NOT dialect-agnostic and failed SILENTLY on
             # PostgreSQL: `date(x)` there is the type-name-as-function cast, so
@@ -259,15 +257,16 @@ class ScheduleStatsMixin:
             # showed a real "Today $100" above a permanently flat sparkline.
             # Nothing raised, on either backend.
             #
-            # `replace` handles pre-#1474 scheduler rows (`YYYY-MM-DD HH:MM:SS`,
-            # space separator, no Z): they clear the lexicographic cutoff and
-            # are counted by the scalar query, so bucketing them as
-            # `2026-08-06 ` would drop them from the chart alone — the same
-            # chart-contradicts-the-number-above-it failure by another route.
+            # Pre-#1474 scheduler rows (`YYYY-MM-DD HH:MM:SS`, space separator,
+            # no Z) need no special handling HERE: the separator sits at
+            # position 11, outside a 10-char slice, so both shapes yield the
+            # same day. ent#326's hour bucket does need `replace`, because its
+            # 13-char slice spans the separator — do not copy that expression
+            # here on the strength of the similar name.
             day_rows = conn.execute(
                 text("""
                 SELECT
-                    substr(replace(started_at, ' ', 'T'), 1, 10) as day,
+                    substr(started_at, 1, 10) as day,
                     SUM(COALESCE(cost, 0)) as day_cost,
                     SUM(COALESCE(context_used, 0)) as day_context_tokens,
                     COUNT(*) as day_executions
@@ -275,7 +274,7 @@ class ScheduleStatsMixin:
                 WHERE agent_name = :agent_name
                   AND started_at > :c7d
                   AND status IN ('success', 'failed')
-                GROUP BY substr(replace(started_at, ' ', 'T'), 1, 10)
+                GROUP BY substr(started_at, 1, 10)
                 ORDER BY day ASC
                 """),
                 {"agent_name": agent_name, "c7d": cutoff_7d},
@@ -661,6 +660,14 @@ def _day_bucket_key(value) -> str:
     types; anything else is coerced first so a surprising type degrades to a
     non-matching STRING (a real gap) instead of an unhashable or a type-based
     silent miss.
+
+    Scope, stated precisely: this closes the type mismatch, NOT every possible
+    key hazard. The call site builds a dict comprehension, so if a backend ever
+    returned SUB-DAY buckets they would collide here and the last row would win
+    rather than being summed. That cannot happen against the `substr(..., 1, 10)`
+    above — one bucket per day by construction — which is why the call site is
+    a comprehension and not an accumulator; a different bucket expression would
+    have to revisit this.
     """
     return str(value)[:10]
 

@@ -59,9 +59,9 @@ Component: AgentHeader.vue TOKEN USAGE ROW
 
 Two SQL queries:
 1. Single-pass aggregation for lifetime, 24h, and 7d windows using `CASE WHEN started_at > ?` with `iso_cutoff()` helpers
-2. `GROUP BY substr(replace(started_at, ' ', 'T'), 1, 10)` for the per-day
-   breakdown (last 7 days) — a SUBSTRING, never a date function (see the
-   time-window invariant below)
+2. `GROUP BY substr(started_at, 1, 10)` for the per-day breakdown (last 7
+   days) — a SUBSTRING, never a date function, spelled exactly as
+   `get_agent_analytics` spells it (see the time-window invariant below)
 
 Gap-filling: iterates days 6..0 (oldest→today), zero-fills missing dates so sparkline always has exactly 7 data points.
 
@@ -102,10 +102,12 @@ bucket read as a legitimate zero, so the sparkline was permanently flat on every
 PostgreSQL install while `cost_24h` / `cost_7d` / `lifetime_*` (query 1, no date
 function) stayed correct. Nothing errored on either backend.
 
-`replace` covers pre-#1474 scheduler rows (`YYYY-MM-DD HH:MM:SS`, space
-separator, no `Z`): they clear the lexicographic cutoff and ARE counted by query
-1, so bucketing them as `2026-08-06 ` would drop them from the chart alone.
-`_day_bucket_key` normalizes the join key on the Python side as a belt, and
+Pre-#1474 scheduler rows (`YYYY-MM-DD HH:MM:SS`, space separator, no `Z`) need
+no special handling here — the separator sits at position 11, outside a 10-char
+slice, so both shapes yield the same day. ent#326's **hour** bucket does wrap the
+column in `replace(..., ' ', 'T')`, because its 13-char slice spans the
+separator; do not copy that expression into a day bucket on the strength of the
+similar name. `_day_bucket_key` normalizes the join key on the Python side, and
 `tests/unit/test_2193_token_stats_day_bucket.py` AST-guards the SQL literals —
 the behavioural cases cannot catch a reintroduction in CI, which runs SQLite-only
 unless `TEST_POSTGRES_URL` is set.
