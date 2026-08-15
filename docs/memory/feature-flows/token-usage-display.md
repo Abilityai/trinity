@@ -53,13 +53,15 @@ Component: AgentHeader.vue TOKEN USAGE ROW
 
 ## Backend Layer
 
-### DB Method (`src/backend/db/schedules.py`)
+### DB Method (`src/backend/db/schedules/stats.py`)
 
 `ScheduleOperations.get_agent_token_stats(agent_name: str) -> Dict`
 
 Two SQL queries:
 1. Single-pass aggregation for lifetime, 24h, and 7d windows using `CASE WHEN started_at > ?` with `iso_cutoff()` helpers
-2. `GROUP BY DATE(started_at)` for per-day breakdown (last 7 days)
+2. `GROUP BY substr(replace(started_at, ' ', 'T'), 1, 10)` for the per-day
+   breakdown (last 7 days) — a SUBSTRING, never a date function (see the
+   time-window invariant below)
 
 Gap-filling: iterates days 6..0 (oldest→today), zero-fills missing dates so sparkline always has exactly 7 data points.
 
@@ -86,7 +88,27 @@ Gap-filling: iterates days 6..0 (oldest→today), zero-fills missing dates so sp
 
 **Note**: Only `schedule_executions` is queried. `chat_sessions` (interactive chat) is not included.
 
-**Time-window invariant**: Uses `iso_cutoff(hours)` from `utils/helpers.py` (ISO-Z format), never `datetime('now', ...)` (see Architectural Invariant #16).
+**Time-window invariant** (Architectural Invariant #16): `started_at` is an ISO-Z
+TEXT column, so BOTH halves of the query treat it as text — the cutoff comes from
+`iso_cutoff(hours)` in `utils/helpers.py`, never `datetime('now', ...)`, and the
+day bucket is a `substr`, never a SQL date function.
+
+The bucket half was learned the hard way (#2193). It shipped as
+`GROUP BY DATE(started_at)`, which is not dialect-agnostic: SQLite returns TEXT,
+while on PostgreSQL `date(x)` is the type-name-as-function cast and psycopg hands
+back a `datetime.date`. The gap-fill below keys on `strftime("%Y-%m-%d")`
+**strings**, and a `str`/`date` dict lookup does not raise — it MISSES. Every
+bucket read as a legitimate zero, so the sparkline was permanently flat on every
+PostgreSQL install while `cost_24h` / `cost_7d` / `lifetime_*` (query 1, no date
+function) stayed correct. Nothing errored on either backend.
+
+`replace` covers pre-#1474 scheduler rows (`YYYY-MM-DD HH:MM:SS`, space
+separator, no `Z`): they clear the lexicographic cutoff and ARE counted by query
+1, so bucketing them as `2026-08-06 ` would drop them from the chart alone.
+`_day_bucket_key` normalizes the join key on the Python side as a belt, and
+`tests/unit/test_2193_token_stats_day_bucket.py` AST-guards the SQL literals —
+the behavioural cases cannot catch a reintroduction in CI, which runs SQLite-only
+unless `TEST_POSTGRES_URL` is set.
 
 ### Router (`src/backend/routers/agents.py`)
 
