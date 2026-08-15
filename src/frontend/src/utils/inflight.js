@@ -1,21 +1,32 @@
 // In-flight request de-duplication (#2198).
 //
 // THE PROBLEM this solves, precisely: two callers that ask for the same thing
-// *concurrently* both hit the network. That is not what either existing
-// precedent in this repo does, which is why this is a third mechanism rather
-// than a reuse:
+// *concurrently* both hit the network.
 //
+// Three prior art points in this repo, and why none of them is simply reused:
+//
+//   • `src/api.js:71` (`deduplicatedGet`, PERF-269) is THE CLOSEST — it is a
+//     real in-flight join, keyed on URL+params, cleared in `.finally()`. It is
+//     not reused because it only covers callers that go through the `api`
+//     instance, and the calls in question use raw `axios` with an explicit
+//     `authStore.authHeader` (the widespread Invariant #7 deviation). Moving
+//     them onto `api` would have been the smaller diff, and was rejected for a
+//     specific reason: `api`'s response interceptor hard-redirects to `/login`
+//     on ANY 401, whereas AgentDetail deliberately renders its own error banner
+//     and its own 404 not-found panel (#1914). Migrating the store is a real
+//     change of failure behaviour on a page whose failure behaviour was
+//     deliberately built, and it belongs in an Invariant #7 cleanup, not in a
+//     request-count fix.
 //   • `stores/executions.js:124` is a RESULT cache — it answers from a value
 //     that has already arrived, so two simultaneous first-calls still both
-//     issue a request. Every duplicate in #2198 is concurrent, so a result
-//     cache does not touch them.
+//     issue a request.
 //   • `stores/fleetGrid.js:305` is an in-flight SKIP — the second caller
-//     returns early with NO value. That is fine for a fire-and-forget tile
-//     hydration and wrong here, because `AgentDetail.loadAgent()` needs the
-//     agent object back.
+//     returns early with NO value. Fine for a fire-and-forget tile hydration,
+//     wrong here, because `AgentDetail.loadAgent()` needs the agent object back.
 //
-// What is needed is an in-flight JOIN: the second caller receives the SAME
-// promise and therefore the same value. This is that, and only that.
+// So: same shape as `api.js`, reachable from a raw-`axios` caller, plus the
+// `once()` variant below, which `api.js` has no equivalent of and which the
+// staggered duplicates need.
 //
 // Semantics, each load-bearing:
 //
