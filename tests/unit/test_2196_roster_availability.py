@@ -294,6 +294,32 @@ def test_a_magicmock_docker_module_reads_unknown_not_unavailable(roster_db, monk
     assert {c.availability for c in cards} == {"unknown"}
 
 
+def test_a_raising_leaf_reads_unknown_through_both_seams(monkeypatch):
+    """The seams' OWN except branches, driven by a leaf that raises.
+
+    The real leaves swallow their errors and return `None`, so the seams'
+    `except` arms are otherwise only reachable through a broken stub or an
+    import failure — exactly the two silent shapes the #2114 learning names for
+    a lazy cross-package import inside a fail-open handler. A raise must degrade
+    to `unknown` (render as today), never propagate into a roster 500 and never
+    read as `unavailable`.
+    """
+    from client_portal import service
+
+    def _boom_batch():
+        raise RuntimeError("docker exploded")
+
+    def _boom_single(name):
+        raise RuntimeError("docker exploded")
+
+    ds = _services_module("docker_service")
+    monkeypatch.setattr(ds, "agent_container_states", _boom_batch)
+    monkeypatch.setattr(ds, "agent_container_state", _boom_single)
+
+    assert _run(service._availability_map(["scout"])) == {"scout": "unknown"}
+    assert _run(service._agent_availability("scout")) == "unknown"
+
+
 def test_the_availability_map_never_returns_another_tenants_agents(monkeypatch):
     """The underlying call sees EVERY agent container on the host — other
     clients' agents, and agents outside this caller's roster entirely. That map
