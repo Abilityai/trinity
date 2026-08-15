@@ -101,12 +101,14 @@ instead of skipping under a false "agent not found". Use the shared
 
 > **Known gap:** `circuit-breaker-badge.spec.js` still carries the legacy
 > unauthenticated probe, so both its tests skip on every run. It was left as-is
-> deliberately: with an authenticated probe its `@smoke` test **fails** (the
-> `circuit-open-badge` element never appears, though the `data-testid` is still
-> present in `AgentHeader.vue`), which looks like a product defect. Un-skipping
-> it would turn the nightly signal red for a cause that belongs in its own
-> issue. Convert it to an explicit `test.skip(true, 'blocked by #NNNN')` once
-> that issue exists.
+> deliberately: with an authenticated probe its `@smoke` test **fails** — a
+> **test** defect, not a product one (#2210): the spec mocks the standalone
+> `/circuit-breaker` endpoint, which the agent page never calls (the badge reads
+> the `circuit_breaker` block embedded in the `GET /api/agents/{name}`
+> response), so one test fails and the sibling passes vacuously. Un-skipping it
+> here would turn the nightly signal red for a cause that belongs in #2210.
+> Convert the probes per #2210, then `test.skip(true, 'blocked by #2210')`
+> until it lands.
 
 The probe checks **existence only**. If a spec needs the agent running or on a
 particular runtime, say so in the spec header: reporting a *present but
