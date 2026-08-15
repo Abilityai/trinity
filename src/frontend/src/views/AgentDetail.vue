@@ -1207,11 +1207,22 @@ async function runDashboardProbe() {
         hasDashboard.value = true
         return
       }
+      // #2198: the retries exist for an agent that has not finished booting.
+      // `settled` means the agent ran its handler and answered — so "no
+      // dashboard" is the real answer and asking twice more changes nothing.
+      // Without this the page spent 3 requests over 9 SECONDS on every load of
+      // an agent that will never have a dashboard, and #2130 recorded that same
+      // ladder as what delayed deep-link landing by ~10s.
+      //
+      // Absent (an older backend, or a genuinely inconclusive reply) keeps the
+      // old behaviour, so this degrades safely rather than turning a transient
+      // failure into a permanently missing tab.
+      if (response?.settled === true) break
     } catch {
       // Continue to next retry
     }
   }
-  // All retries exhausted — no dashboard found
+  // Settled negative, or all retries exhausted — no dashboard found
   hasDashboard.value = false
 }
 
