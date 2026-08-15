@@ -571,9 +571,11 @@ function usePlaybook(text) { prefill.value = ''; nextTick(() => { prefill.value 
 
 // ent#359 — per-viewer star + unread state, merged onto the thread list.
 //
-// Kept out of `fetchAllSessions` on purpose: that call fans out over the roster
-// and degrades per agent, while this is one call for the whole viewer. Merging
-// here means a chat-state failure costs the stars and badges, never the list.
+// Kept a separate call from `fetchAllSessions` on purpose, so that a chat-state
+// failure costs the stars and badges, never the list. (#2198: the original
+// wording — "that call fans out over the roster and degrades per agent, while
+// this is one call for the whole viewer" — described the shape sessions should
+// have had; sessions is now one viewer-scoped call too.)
 const chatState = ref({})
 const chatKey = (t) => `${t.is_room ? 'room' : 'thread'}:${t.id || t.session_id}`
 
@@ -587,12 +589,20 @@ function decorate(list) {
 }
 
 async function refreshThreads() {
+  // #2198: both halves are caught. `fetchAllSessions` already returns its last
+  // good list rather than rejecting, but this is a belt on the load-bearing
+  // property: `bootstrap()` AWAITS this before `resolveAgentQuery()` and the
+  // deep-link `sessionId` branch, so an unhandled rejection here would not
+  // merely empty the sidebar — it would break Workspace deep-link landing
+  // outright, on the most client-visible surface in the product. Before the
+  // batch this was structurally impossible (each per-agent call had its own
+  // catch); with one request it is one 500 away, so it is made explicit.
   const [list, state] = await Promise.all([
-    store.fetchAllSessions(),
+    store.fetchAllSessions().catch(() => store.lastSessions),
     store.fetchChatState().catch(() => chatState.value),
   ])
   chatState.value = state || {}
-  threads.value = decorate(list)
+  threads.value = decorate(list || [])
 }
 
 // A turn finishing in the conversation the user is LOOKING AT is read by
