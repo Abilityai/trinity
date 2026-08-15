@@ -8,6 +8,23 @@ on:
 permissions:
   contents: read
 
+# #2204: serialise deploys. Measured up to FOUR runs executing concurrently
+# against the one dev VM (2026-08-12T12:49:51-12:50:15, overlapping 960-1215s),
+# each running `docker compose build --no-cache` then `up -d` on the same host
+# and compose project: concurrent recreates of the same container, and four
+# concurrent full image builds on one box.
+#
+# cancel-in-progress MUST stay false. Cancelling mid-run is precisely what
+# strands a half-recreated container -- compose renames the outgoing container
+# to a <12-hex>_<name> backup and removes it once the replacement is up, so a
+# run killed in between leaves the backup resident (see the reaper below).
+# GitHub supersedes the *pending* run rather than the running one, so this
+# converges on "current deploy finishes, then the newest commit deploys"
+# without ever interrupting a deploy in flight.
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -170,6 +187,32 @@ jobs:
               BUILD_DATE="${BUILD_DATE}" \
               docker compose ${COMPOSE_FILES} build --no-cache backend frontend mcp-server scheduler
 
+            echo "=== Reap stale compose backup containers (#2204) ==="
+            # Compose renames the outgoing container to <12-hex>_<name> before
+            # starting its replacement, then removes the backup once the new one
+            # is up. A run that dies in between leaves the backup resident, and
+            # every later deploy hits "container name is already in use" at the
+            # identical point.
+            #
+            # HONEST SCOPE: this is hygiene, NOT the fix for the #2204 outage.
+            # That outage was a corrupted database crash-looping the backend;
+            # host inspection found no orphan at all, and clearing one would
+            # only have moved the failure to the health check below. Do not
+            # record this block as the fix for that incident.
+            #
+            # Both guards are load-bearing under the `set -e` at the top of this
+            # script: `grep` exits 1 when nothing matches, and `docker rm -f`
+            # exits 1 when given no arguments. Unguarded, either would abort
+            # EVERY healthy deploy -- the no-orphan path is the common one.
+            STALE=$(sudo docker ps -a --format '{{.Names}}' | grep -E '^[0-9a-f]{12}_trinity-' || true)
+            if [ -n "$STALE" ]; then
+              echo "Reaping stale compose backup containers:"
+              printf '%s\n' "$STALE"
+              printf '%s\n' "$STALE" | xargs -r sudo docker rm -f
+            else
+              echo "No stale compose backup containers."
+            fi
+
             echo "=== Restart ==="
             sudo docker compose ${COMPOSE_FILES} up -d backend frontend mcp-server scheduler
 
@@ -179,6 +222,27 @@ jobs:
             SCHED=$(sudo docker inspect trinity-scheduler --format='{{.State.Health.Status}}')
             echo "Scheduler: $SCHED"
             [ "$SCHED" = "healthy" ] || echo "WARNING: scheduler not healthy yet"
+
+            echo "=== Backend boot log ==="
+            # ONE read, several consumers (enterprise registration below, and
+            # the #2204 seeding check). Scope it to the CURRENT container run,
+            # so a line left over from a previous boot cannot fail today's
+            # deploy.
+            #
+            # The --tail fallback does NOT carry that property, and is sound
+            # only here: `up -d` just recreated this container, so its whole log
+            # is a few hundred lines and every boot line is inside the window.
+            # On a long-running container it would be wrong in both directions
+            # -- deep enough to catch a previous boot's failure line, and too
+            # shallow to reach the current boot's success line (a live instance
+            # measured 14k lines since start). Don't lift this block somewhere
+            # the container isn't newly started.
+            BOOT_SINCE=$(sudo docker inspect -f '{{.State.StartedAt}}' trinity-backend 2>/dev/null || echo "")
+            if [ -n "$BOOT_SINCE" ]; then
+              BOOT_LOG=$(sudo docker logs trinity-backend --since "$BOOT_SINCE" 2>&1 || true)
+            else
+              BOOT_LOG=$(sudo docker logs trinity-backend --tail 2000 2>&1 || true)
+            fi
 
             echo "=== Enterprise registration (#2068) ==="
             # The enterprise version-line is upgraded during module
@@ -205,45 +269,153 @@ jobs:
             # submodule genuinely failed to init falls through to the
             # ::warning:: path above. An OSS-only deploy is NEVER failed here.
             if [ -f src/backend/enterprise/backend/__init__.py ]; then
-              # Scope the read to the CURRENT container run, so a FAILED line
-              # left over from a previous boot cannot fail today's deploy.
-              #
-              # The --tail fallback below does NOT carry that property, and is
-              # sound only here: `up -d` just recreated this container, so its
-              # whole log is a few hundred lines and every boot line is inside
-              # the window. On a long-running container it would be wrong in
-              # both directions — deep enough to catch a previous boot's FAILED
-              # line, and too shallow to reach the current boot's success line
-              # (a live instance measured 14k lines since start). Don't lift
-              # this block somewhere the container isn't newly started.
-              ENT_SINCE=$(sudo docker inspect -f '{{.State.StartedAt}}' trinity-backend 2>/dev/null || echo "")
-              if [ -n "$ENT_SINCE" ]; then
-                ENT_LOG=$(sudo docker logs trinity-backend --since "$ENT_SINCE" 2>&1 || true)
-              else
-                ENT_LOG=$(sudo docker logs trinity-backend --tail 2000 2>&1 || true)
-              fi
-              if printf '%s\n' "$ENT_LOG" | grep -q 'Trinity Enterprise registration FAILED'; then
+              if printf '%s\n' "$BOOT_LOG" | grep -q 'Trinity Enterprise registration FAILED'; then
                 echo "::error::Enterprise registration FAILED — the submodule is mounted but this instance is running OSS-only (every entitled route will 403). See trinity#2068."
-                printf '%s\n' "$ENT_LOG" | grep -A 20 'Trinity Enterprise registration FAILED' | head -40
+                printf '%s\n' "$BOOT_LOG" | grep -A 20 'Trinity Enterprise registration FAILED' | head -40
                 exit 1
-              elif printf '%s\n' "$ENT_LOG" | grep -q 'Trinity Enterprise modules registered'; then
+              elif printf '%s\n' "$BOOT_LOG" | grep -q 'Trinity Enterprise modules registered'; then
                 echo "ENTERPRISE: modules registered"
               else
                 echo "::error::Enterprise submodule is mounted but the backend never printed 'Trinity Enterprise modules registered' — registration did not complete. See trinity#2068."
-                printf '%s\n' "$ENT_LOG" | grep -i 'enterprise' | tail -20
+                printf '%s\n' "$BOOT_LOG" | grep -i 'enterprise' | tail -20
                 exit 1
               fi
               # Partial degradation: registration finished, but some modules
               # failed — the success line still prints. Out of scope for #2068
               # and not a deploy blocker on its own, so warn rather than fail;
               # failing on it deserves its own decision.
-              if printf '%s\n' "$ENT_LOG" | grep -q 'FAILED module(s)'; then
+              if printf '%s\n' "$BOOT_LOG" | grep -q 'FAILED module(s)'; then
                 echo "::warning::Enterprise registration completed with FAILED module(s) — some entitled features are unavailable on this instance"
-                printf '%s\n' "$ENT_LOG" | grep 'FAILED module(s)' | head -5
+                printf '%s\n' "$BOOT_LOG" | grep 'FAILED module(s)' | head -5
               fi
             fi
+
+            echo "=== Agent seeding check (#2204) ==="
+            # A green deploy is not evidence the instance is CORRECT. Agent
+            # creation failures are logged, never raised, so this workflow can
+            # report success with the fleet incomplete -- observed 2026-08-15,
+            # when a seeded agent lost an SSH port race (#2215) and was simply
+            # never created while the deploy stayed green.
+            #
+            # Same precedent as the enterprise-registration grep above: assert
+            # on post-deploy STATE, not on the job's conclusion. That is the
+            # difference between this and the `Error check` below, which ends in
+            # `|| echo "No errors"` and therefore only ever PRINTS.
+            #
+            # This cannot wedge the pipeline. Seeding is first-run-only behind
+            # the durable `cornelius_seeded` / `default_system_seeded` flags, and
+            # BOOT_LOG is scoped to the current container run -- so this fails
+            # exactly once, on the deploy that actually left the instance
+            # incomplete, and later deploys are clean.
+            if printf '%s\n' "$BOOT_LOG" | grep -q 'Failed to create agent'; then
+              echo "::error::An agent failed to be created during boot -- this instance is running with an incomplete fleet. See trinity#2215."
+              printf '%s\n' "$BOOT_LOG" | grep 'Failed to create agent' | head -10
+              exit 1
+            fi
+            echo "No agent creation failures."
 
             echo "=== Error check ==="
             sudo docker logs trinity-backend --tail 50 2>&1 | grep -iE 'error|exception|failed' | head -10 || echo "No errors"
 
             echo "=== Done ==="
+
+  # #2204: a red deploy must not be able to run silently. 39 consecutive
+  # failures over five days produced no alert, no issue, and no signal on any of
+  # the ~39 PRs that merged into the broken branch -- the SECOND occurrence of
+  # that class (the first ran four days / thirty merges).
+  #
+  # Deliberately a separate JOB, not a step inside the deploy script. An alert
+  # sent from inside the SSH session shares a failure domain with the thing it
+  # is alerting on: Tailscale down, SSH refused, or a wedged host means no
+  # alert at all, precisely when one is most needed. A job-level `if: failure()`
+  # fires even when the host is unreachable.
+  #
+  # A Slack webhook was considered and REJECTED: no webhook secret exists in
+  # this repo or at org level, so `secrets.SLACK_WEBHOOK_URL` would render empty
+  # and the step would no-op silently -- the packaging-gap class recorded six
+  # times in docs/memory/learnings.md (#1039, #1056, #1707, #1871, ent#14,
+  # ent#31). An alert that silently never fires is worse than none, because it
+  # retires the concern. GITHUB_TOKEN needs no provisioning and cannot ship
+  # inert. If a webhook secret is added later, a sibling step is trivially
+  # additive -- but it must not REPLACE this one, for the failure-domain reason
+  # above.
+  #
+  # `if: failure()` deliberately does NOT fire on `cancelled`: with
+  # cancel-in-progress:false a superseded PENDING run is cancelled, and that is
+  # not a deploy failure. (See learnings.md 2026-07-28 on `if: always()` +
+  # a cancelled clause silently defeating cancel-in-progress.)
+  notify-failure:
+    needs: deploy
+    if: failure()
+    runs-on: ubuntu-latest
+    # Job-level `permissions:` REPLACES the workflow-level block, so this grant
+    # is scoped to this job alone; the deploy job keeps `contents: read`.
+    # Elevation works despite the repo default of read-only -- claim.yml
+    # already relies on it.
+    permissions:
+      issues: write
+    steps:
+      - name: File a deploy-failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+
+          # ONE open issue at a time. Re-filing per failure would have produced
+          # 39 issues during the outage this fixes; commenting per failure would
+          # have produced 39 notifications. An open issue IS the signal, so a
+          # further failure while one is open is a deliberate no-op.
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --label deploy-failure --state open \
+            --json number --jq '.[0].number // empty' 2>/dev/null || true)
+
+          if [ -n "$EXISTING" ]; then
+            echo "Deploy failure already tracked at #${EXISTING} -- not re-filing."
+            exit 0
+          fi
+
+          cat > /tmp/deploy-failure-body.md <<BODY
+          ## Summary
+
+          \`Deploy to Dev\` failed. This issue was filed automatically by the
+          workflow itself, so that a red deploy cannot run silently (trinity#2204).
+
+          - **Failed run**: ${RUN_URL}
+          - **Commit**: \`${COMMIT_SHA}\`
+
+          ## What this means
+
+          The dev instance is **not** running this commit. Every merge to
+          \`dev\` from now until this is fixed ships nothing, and no other
+          signal will report that -- CI stays green and PRs merge cleanly.
+
+          ## First checks
+
+          1. Open the failed run above and read the last \`===\` section header
+             reached. The deploy script is sectioned (\`Pull\`, \`Build\`,
+             \`Restart\`, \`Health\`, \`Agent seeding check\`) so the header
+             names the stage.
+          2. If it failed at \`Agent seeding check\`, the instance is up but its
+             fleet is incomplete -- see trinity#2215.
+          3. If it failed at \`Restart\` with a container-name conflict, the
+             reaper should have cleared it; check whether the pattern matched.
+          4. If it failed at \`Health\`, the backend is not becoming healthy.
+             Check \`docker logs trinity-backend\` on the host -- a database
+             that cannot be opened crash-loops every worker before uvicorn
+             binds, and the other services then sit in \`Created\` behind
+             \`depends_on: service_healthy\`.
+
+          ## Closing this issue
+
+          Close it once a \`Deploy to Dev\` run is green. While it stays open,
+          further failures will **not** file duplicates, so do not leave it open
+          after the deploy recovers -- a stale open issue suppresses the alert
+          for the next outage.
+          BODY
+
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "bug(ci): Deploy to Dev is failing on \`dev\`" \
+            --label "deploy-failure,priority-p1,type-bug,status-ready,theme-infrastructure" \
+            --body-file /tmp/deploy-failure-body.md
