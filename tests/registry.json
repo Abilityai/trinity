@@ -2146,6 +2146,18 @@
         "unit"
       ],
       "description": "#2114 subscription-shadow guard: arm_subscription_auth_guard trigger matrix (baseline-token arms; empty-string token, non-Claude runtime, terminal-auth, platform-key, .env-managed auth all inert), override-layer semantics (hot-reload window without baseline, extra-last precedence, explicit override beats arm), observability (per-key WARNING memo with active invalidation via re-add, mirror deliberately unguarded while env_drift_report carries suppressed_for_spawn incl. keys absent from .env — the widened iteration set), and the DELIBERATELY UNFIXED stale-.env-OAuth residual pinned by name. Standalone module load by path (test_1999 idiom); names-only logging asserted (stale value must not appear in caplog.text)."
+    },
+    {
+      "file": "unit/test_2127_background_task_gate.py",
+      "feature": "#2127",
+      "added": "2026-08-14",
+      "categories": [
+        "agent-server",
+        "unit",
+        "headless",
+        "reliability"
+      ],
+      "description": "Fan-out turn no longer killed mid-wait (#2127): `claude --print` emits one result line per turn segment and stays alive to await background subagents, so the #970 early-finalize now requires result_seen AND an empty background-task ledger AND a quiet stream. Covers the pure _count_waited_bg_tasks denylist (local_bash/local_shell excluded, unknown types counted, malformed ledger degrades to 0); the ledger half via a replayed fan-out-still-running stream; the IDLE half via the ledger-empty-while-composing stream (the shape the issue actually reports — measured 5 subagents done at t+27.8s, real FINAL REPORT at t+55.9s), each asserted on END STATE and each verified failing without its half of the gate; unparseable output counting as proof-of-life; the AGENT_IDLE_FINALIZE_S resolver fallbacks (<=0 refused — it would restore the #2127 kill); a pin that the 300s default keeps ≥5x headroom over the measured 40.54s single-message silence; #970 preserved when there is no fan-out; the effective_timeout backstop still bounding a subagent that never completes; the pending-at-exit notice + metadata flag; and a parity guard that BOTH claude spawn sites set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS."
     }
   ]
 }
