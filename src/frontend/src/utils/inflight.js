@@ -61,6 +61,43 @@ export function dedupe(key, fn) {
   return flight
 }
 
+// A strictly stronger form: an in-flight join PLUS a resolved-value cache.
+//
+// `dedupe` only collapses calls that overlap in time. Some duplicates do not:
+// `GET /api/settings/feature-flags` is requested by two domain-scoped Pinia
+// stores that parse disjoint slices of the same document, and they were
+// measured 319 ms apart — far enough apart that the second call starts after
+// the first has already resolved.
+//
+// This is deliberately NOT the default. It must only be used for a document
+// that is immutable for the lifetime of a page load and whose refresh is
+// explicit. Every agent-scoped endpoint is the opposite — agent state changes
+// under you, and `AgentDetail.waitForAgentStatus()` polls `fetchAgent` in a
+// loop expecting a fresh answer each time — so those stay on `dedupe`.
+//
+// A FAILURE is never cached: the stores fall back to safe defaults and a later
+// caller must be able to retry.
+const settled = new Map()
+
+/**
+ * Fetch once per page load (or once per `force`), joining any call already in
+ * flight and answering later callers from the resolved value.
+ *
+ * @param {string} key
+ * @param {() => Promise<T>} fn
+ * @param {{force?: boolean}} [opts]
+ * @returns {Promise<T>}
+ */
+export function once(key, fn, { force = false } = {}) {
+  if (force) settled.delete(key)
+  else if (settled.has(key)) return Promise.resolve(settled.get(key))
+
+  return dedupe(key, fn).then((value) => {
+    settled.set(key, value)
+    return value
+  })
+}
+
 /** Test/diagnostic helper — the number of calls currently in flight. */
 export function inFlightCount() {
   return inFlight.size
@@ -69,4 +106,5 @@ export function inFlightCount() {
 /** Test helper — drop all entries. Never call this from product code. */
 export function resetInFlight() {
   inFlight.clear()
+  settled.clear()
 }
