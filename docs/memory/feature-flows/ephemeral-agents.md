@@ -113,8 +113,11 @@ recorded accepted-risk follow-up.
 ## Hard discard (`services/agent_service/ephemeral.py`)
 
 `discard_ephemeral_agent(name, reason)` under a Redis SETNX+TTL lock
-`ephemeral:discard:{name}` (hook vs GC vs second worker; fail-open unlocked
-when Redis is down — steps are idempotent). Crash-convergent ordering:
+`ephemeral:discard:{name}` — taken + released through the shared
+`redis_breaker_util.SingleFlightLock` (#1920: unique per-acquire token +
+compare-and-delete release, dropping the old double-`GET` + dead `.encode()`
+branch) — (hook vs GC vs second worker; fail-open unlocked when Redis is down —
+steps are idempotent). Crash-convergent ordering:
 
 0. **Durable intent marker**: `ephemeral_expires_at = now`
    (`mark_ephemeral_discard_intent`) — any crash below re-qualifies via GC
