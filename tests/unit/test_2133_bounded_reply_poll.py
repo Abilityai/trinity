@@ -139,14 +139,20 @@ def portal(monkeypatch, redis_stub):
 
     monkeypatch.setattr(svc, "agent_on_roster", lambda a, e, include_owned=False: True)
     monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s: s or SESSION)
-    monkeypatch.setattr(svc, "_agent_is_running", lambda name: True)
+    # #2219 moved the availability gate to the async `_agent_availability`;
+    # `_agent_is_running` survives DEFINED BUT UNCALLED, so patching it would
+    # not raise and would silently leave the real gate reaching Docker.
+    async def _ready(name):
+        return "ready"
+
+    monkeypatch.setattr(svc, "_agent_availability", _ready)
     monkeypatch.setattr(core_db, "create_task_execution",
                         lambda **kw: types.SimpleNamespace(id=EXEC_ID))
     monkeypatch.setattr(core_db, "get_agent_subscription_id", lambda a: "sub-1")
 
     async def _fake_chat(agent_name, message, email, session_id=None,
                          include_owned=False, execution_id=None,
-                         turn_timeout_seconds=None):
+                         turn_timeout_seconds=None, availability=None):
         state.chat_calls.append({
             "execution_id": execution_id,
             "turn_timeout_seconds": turn_timeout_seconds,
@@ -211,6 +217,11 @@ def real_chat(monkeypatch):
     monkeypatch.setattr(portal_db, "touch_portal_session", lambda *a, **kw: None)
     monkeypatch.setattr(portal_db, "get_cached_claude_session_id", lambda sid: None)
     monkeypatch.setattr(portal_db, "update_cached_claude_session_id", lambda sid, u: None)
+
+    async def _ready(name):
+        return "ready"
+
+    monkeypatch.setattr(svc, "_agent_availability", _ready)
 
     monkeypatch.setattr(sts, "supports_session_resume", lambda a: True)
     monkeypatch.setattr(sts, "resolve_lock_ttl", lambda a: 60)

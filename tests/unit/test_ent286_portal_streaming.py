@@ -60,17 +60,21 @@ def portal(monkeypatch):
     from client_portal import service as svc
     from database import db as core_db
 
-    state = types.SimpleNamespace(chat_calls=[], created=[], row=None)
+    state = types.SimpleNamespace(chat_calls=[], created=[], row=None, availability="ready")
 
     monkeypatch.setattr(svc, "agent_on_roster", lambda a, e, include_owned=False: True)
     monkeypatch.setattr(svc, "_resolve_session_id", lambda a, e, s: s or SESSION)
 
+    # `availability` (#2196): `start_portal_turn` resolved the state for its own
+    # gate and hands it down, so the streamed turn costs ONE Docker read rather
+    # than one at dispatch and another inside `portal_chat`.
     async def _fake_chat(agent_name, message, email, session_id=None,
                         include_owned=False, execution_id=None,
-                        turn_timeout_seconds=None):
+                        turn_timeout_seconds=None, availability=None):
         state.chat_calls.append({
             "agent": agent_name, "message": message, "email": email,
             "session_id": session_id, "execution_id": execution_id,
+            "availability": availability,
         })
         return {"response": "done", "cost": 0.01, "session_id": session_id}
 
@@ -84,15 +88,26 @@ def portal(monkeypatch):
     monkeypatch.setattr(core_db, "get_agent_subscription_id", lambda a: "sub-1")
     monkeypatch.setattr(core_db, "get_execution", lambda eid: state.row)
 
-    # Default: the agent is up. A turn is refused for a stopped agent, so every
-    # test that isn't ABOUT that needs the healthy case; the ones that are
-    # override this.
+    # Default: the agent is up. A turn is refused for an agent that cannot run,
+    # so every test that isn't ABOUT that needs the healthy case; the ones that
+    # are override this.
     #
     # Patched on the SEAM, not on services.docker_service: a sibling module
     # installs a MagicMock stub for that module at collection time, and patching
     # one copy while the code resolves another is why these tests passed alone
     # and failed in the full suite.
-    monkeypatch.setattr(svc, "_agent_is_running", lambda name: True)
+    #
+    # #2196 moved the seam from the boolean `_agent_is_running` to the tri-state
+    # `_agent_availability`, because the turn paths need the STATE — one Docker
+    # read has to answer both "may this dispatch?" and "what do we tell the
+    # client?". Patching the old boolean here would now be INERT, which is worse
+    # than no patch: the real read would run against whatever Docker the machine
+    # happens to have, and these tests would pass or fail by daemon.
+    async def _available(name):
+        return state.availability
+
+    state.availability = "ready"
+    monkeypatch.setattr(svc, "_agent_availability", _available)
     return svc, state
 
 
@@ -325,7 +340,7 @@ def test_the_marker_is_set_while_the_turn_is_still_running(portal, redis_stub, m
 
     async def _slow_chat(agent_name, message, email, session_id=None,
                          include_owned=False, execution_id=None,
-                         turn_timeout_seconds=None):
+                         turn_timeout_seconds=None, availability=None):
         seen["during"] = svc.get_turn_inflight(session_id)
         return {"response": "done", "cost": 0.0, "session_id": session_id}
 
@@ -345,19 +360,57 @@ def test_a_stopped_agent_is_refused_before_anything_is_created(portal, monkeypat
     result was the same message persisted twice, 320ms apart.
     """
     svc, state = portal
-    monkeypatch.setattr(svc, "_agent_is_running", lambda name: False)
+    state.availability = "stopped"
 
     with pytest.raises(svc.ClientPortalError) as excinfo:
         _run(svc.start_portal_turn(AGENT, "hello", EMAIL, SESSION))
 
     assert excinfo.value.status_code == 502
-    assert "offline" in excinfo.value.detail.lower()
+    # #2196: the copy names the state and the next action, and drops "try
+    # again" — for these two states retrying cannot work.
+    assert "start it" in excinfo.value.detail.lower()
+    assert "try again" not in excinfo.value.detail.lower()
     assert state.created == [], "an execution row was created for a turn that cannot run"
 
 
-def test_a_running_agent_still_dispatches(portal, monkeypatch):
+def test_a_containerless_agent_is_refused_with_its_own_copy(portal):
+    """#2196: "stopped" and "no container at all" are different refusals.
+
+    The old single message said "it may be offline… Please try again", which is
+    fair for a stopped agent and actively misleading for one whose container is
+    gone — retrying never works there, and that is the state a Workspace client
+    is most likely to hit (#1747 documents it as routine).
+    """
     svc, state = portal
-    monkeypatch.setattr(svc, "_agent_is_running", lambda name: True)
+    state.availability = "unavailable"
+
+    with pytest.raises(svc.ClientPortalError) as excinfo:
+        _run(svc.start_portal_turn(AGENT, "hello", EMAIL, SESSION))
+
+    assert excinfo.value.status_code == 502
+    assert excinfo.value.detail != svc._refusal_detail("stopped")
+    assert "try again" not in excinfo.value.detail.lower()
+    assert state.created == []
+
+
+def test_a_running_agent_still_dispatches(portal):
+    svc, state = portal
+    state.availability = "ready"
+
+    out = _run(svc.start_portal_turn(AGENT, "hello", EMAIL, SESSION))
+    assert out["execution_id"] == EXEC_ID
+
+
+def test_an_unreadable_docker_still_dispatches(portal):
+    """The fail-OPEN direction at the turn gate (#2196).
+
+    `unknown` means "Docker could not be asked", which is not evidence the agent
+    is down: a daemon restart or a socket-permission change leaves containers
+    running and answering HTTP over the agent network. Refusing here would turn
+    one unreadable socket into "no Workspace client can send a message".
+    """
+    svc, state = portal
+    state.availability = "unknown"
 
     out = _run(svc.start_portal_turn(AGENT, "hello", EMAIL, SESSION))
     assert out["execution_id"] == EXEC_ID
@@ -365,19 +418,71 @@ def test_a_running_agent_still_dispatches(portal, monkeypatch):
 
 def test_a_docker_hiccup_does_not_block_a_turn(portal, monkeypatch):
     """Fail OPEN on the running-check: Docker being briefly unreadable is not
-    evidence the agent is down, and refusing a healthy turn is the worse error."""
+    evidence the agent is down, and refusing a healthy turn is the worse error.
+
+    #2196 repointed this at `agent_container_state`, the tri-state read
+    `_agent_is_running` now uses. Left on `get_agent_container` it would have
+    passed VACUOUSLY — the raiser would never be called, and the fix's most
+    important behaviour would have lost its only guard.
+
+    It also matters that this exercises the REAL predicate: before #2196 the
+    docstring claimed fail-open while the code failed CLOSED, because
+    `get_agent_container` had already swallowed the error and returned None, so
+    the `except` branch was unreachable. A test that patched the boolean seam
+    with a lambda could never have caught that.
+    """
     svc, _ = portal
 
     def _boom(name):
         raise RuntimeError("docker socket down")
 
-    # Exercises the REAL seam so the fail-open branch is what is under test,
-    # not a lambda standing in for it. Patched on the sys.modules ENTRY, which
-    # is the exact object `_agent_is_running`'s in-function import resolves —
+    # Patched on the sys.modules ENTRY, which is the exact object
+    # `_agent_is_running`'s in-function import resolves —
     # `import services.docker_service as m` can bind a different copy when a
     # sibling module has stubbed it, which is the whole bug this file just hit.
     import sys
     module = sys.modules["services.docker_service"]
-    monkeypatch.setattr(module, "get_agent_container", _boom)
+    monkeypatch.setattr(module, "agent_container_state", _boom)
 
     assert svc._agent_is_running(AGENT) is True
+
+
+def test_the_running_check_reads_the_tri_state_and_fails_open_on_unknown(portal, monkeypatch):
+    """The unreadable-Docker case that does NOT raise.
+
+    `agent_container_state` returns `None` for "could not be asked" — it does
+    not raise — so the fail-open rule has to hold on the RETURN value too, not
+    only in the `except`. That is the exact shape of the bug #2196 fixed: the old
+    implementation's swallowed-error path made its documented `except` branch
+    dead code.
+    """
+    import sys
+    svc, _ = portal
+    module = sys.modules["services.docker_service"]
+
+    monkeypatch.setattr(module, "agent_container_state", lambda name: None)
+    assert svc._agent_is_running(AGENT) is True          # unreadable ⇒ allow
+
+    monkeypatch.setattr(module, "agent_container_state", lambda name: "missing")
+    assert svc._agent_is_running(AGENT) is False         # Docker answered: gone
+
+    monkeypatch.setattr(module, "agent_container_state", lambda name: "stopped")
+    assert svc._agent_is_running(AGENT) is False
+
+    monkeypatch.setattr(module, "agent_container_state", lambda name: "running")
+    assert svc._agent_is_running(AGENT) is True
+
+
+def test_the_streamed_turn_does_not_re_read_docker(portal):
+    """One Docker read per turn (#2196).
+
+    `start_portal_turn` gates on the resolved state and `portal_chat` gates on it
+    too — the `/chat` path has no other gate. Letting the background turn resolve
+    it again would double the read on the hottest portal path for no new
+    information, so the dispatch hands its answer down.
+    """
+    svc, state = portal
+
+    _run(_drain(svc.start_portal_turn(AGENT, "hello", EMAIL, SESSION)))
+
+    assert state.chat_calls[0]["availability"] == "ready"

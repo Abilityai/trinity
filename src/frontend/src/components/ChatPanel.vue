@@ -157,6 +157,7 @@
           :disabled="loading || voice.isActive.value"
           :agent-name="agentName"
           :agent-status="agentStatus"
+          :playbooks="playbooks"
           :voice-available="voiceAvailable"
           :voice-active="voice.isActive.value"
           @submit="sendMessage"

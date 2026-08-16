@@ -113,6 +113,21 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // takes back on an entitled instance.
     rosterLoaded: false,
 
+    // #2198 — the last successfully-loaded thread list, and whether the most
+    // recent attempt failed.
+    //
+    // Both exist because the batch inverted a failure mode. The old per-agent
+    // fan-out could not reject: each call was individually caught
+    // (`catch { return [] }`) so "one down agent never blanks the whole list".
+    // One request cannot degrade per agent, so without a remembered list a
+    // single 500 would blank a populated sidebar — which
+    // design-system-contract:43/55 forbid ("no skeleton re-flash", "nothing
+    // shifts on arrival") and which `Portal.vue::bootstrap()` cannot survive:
+    // it awaits refreshThreads() before resolveAgentQuery(), so a transient
+    // blip would break Workspace deep-link landing entirely.
+    lastSessions: [],
+    sessionsFailed: false,
+
     // --- Reports tab (#2162) ---
     // Which agent the report state below belongs to, and a monotonic counter
     // every report request captures before its first await. A reset bumps it,
@@ -769,34 +784,115 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
-    // #138: unified history across ALL rostered agents for the sidebar. The
-    // per-agent /sessions endpoint is the source; a small roster makes merging
-    // N calls cheap (a single all-agents endpoint is a later optimization). Each
-    // thread is tagged with its agent so the sidebar can show the color dot and
-    // route to the right conversation. Best-effort per agent (one down agent
-    // never blanks the whole list); sorted most-recently-active first.
+    // #138 / #2198: unified history across ALL rostered agents for the sidebar.
+    //
+    // ONE viewer-scoped call (`GET /client-portal/sessions`), not one per
+    // rostered agent. The fan-out this replaces was N+1 in HTTP and 2N-3N in DB
+    // queries — `list_sessions` re-resolves the roster per agent before reading
+    // the session table — and it ran on all SIX `refreshThreads()` call sites,
+    // including every thread open and every completed turn.
+    //
+    // Sorted most-recently-active first; each thread carries its agent so the
+    // sidebar can show the colour dot and route to the right conversation.
+    // `agent_name` now comes from the DB row rather than being stamped on
+    // client-side from `this.agents`.
     async fetchAllSessions() {
+      const agents = this.agents || []
+      let lists = []
+      if (agents.length) {
+        try {
+          lists = [await this.fetchSessionsBatch()]
+          this.sessionsFailed = false
+        } catch (err) {
+          // TRANSITIONAL (#2198) — delete one release after the batch ships.
+          //
+          // Deploy skew: a cached or partially-rolled-out bundle can reach a
+          // backend that does not have `/client-portal/sessions` yet. That 404s,
+          // and the sidebar — the most client-visible surface in the product —
+          // would simply empty. Fall back to the per-agent fan-out this replaced.
+          //
+          // 404 ONLY, deliberately. A 5xx or a network error already degrades
+          // correctly above (keep the last good list), and fanning out there
+          // would turn one failed request into N.
+          if (err?.response?.status === 404) {
+            try {
+              lists = [await this._fetchSessionsFanout()]
+              this.sessionsFailed = false
+              return this._mergeThreadList(lists, await this._fetchRoomsSafe())
+            } catch { /* fall through to the last-good-list path below */ }
+          }
+          // NEVER blank an already-populated sidebar. Return what we last had
+          // and flag the failure so the UI can say so honestly.
+          this.sessionsFailed = true
+          console.warn('[portal] session list refresh failed:', err?.message || err)
+          return this.lastSessions
+        }
+      }
+      // ent#361: multi-agent chats are rooms, and they belong in the same list —
+      // to the user these are all just conversations. Room fetch failure
+      // degrades to threads-only rather than emptying the sidebar (an
+      // unentitled or OSS build has no rooms at all, and that is not an error).
+      const rooms = await this._fetchRoomsSafe()
+      return this._mergeThreadList(lists, rooms)
+    },
+
+    // TRANSITIONAL (#2198) — the pre-batch per-agent fan-out, kept only for the
+    // deploy-skew window above. Delete with its caller.
+    async _fetchSessionsFanout() {
       const agents = this.agents || []
       const lists = await Promise.all(agents.map(async (a) => {
         try {
           const sessions = await this.fetchSessions(a.name)
           return sessions.map((s) => ({ ...s, agent_name: a.name }))
-        } catch { return [] }
+        } catch { return [] }   // one down agent never blanks the whole list
       }))
-      // ent#361: multi-agent chats are rooms, and they belong in the same list —
-      // to the user these are all just conversations. Room fetch failure
-      // degrades to threads-only rather than emptying the sidebar (an
-      // unentitled or OSS build has no rooms at all, and that is not an error).
-      let rooms = []
-      try { rooms = await this.fetchRooms() } catch { rooms = [] }
+      return lists.flat()
+    },
 
-      const merged = lists.flat().concat(rooms.map(normalizeRoomRow))
+    async _fetchRoomsSafe() {
+      try { return await this.fetchRooms() } catch { return [] }
+    },
+
+    // Merge threads + rooms into the single recency-sorted list the sidebar
+    // renders, and remember it (see `lastSessions`).
+    _mergeThreadList(lists, rooms) {
+      const merged = lists.flat().concat((rooms || []).map(normalizeRoomRow))
       merged.sort((x, y) => {
         const tx = x.last_message_at || x.created_at || ''
         const ty = y.last_message_at || y.created_at || ''
         return ty.localeCompare(tx)
       })
+      this.lastSessions = merged
       return merged
+    },
+
+    // The batch read behind `fetchAllSessions`, scoped client-side to the
+    // DISPLAYED roster.
+    //
+    // The backend scopes by the caller's roster — that is the access boundary
+    // and it is not negotiable here. This second, narrower filter is a
+    // rendering rule: `this.agents` is what the sidebar actually shows, and a
+    // thread whose agent is not in it would route nowhere (a dead end,
+    // design-system-contract principle 16). Today the two sets are identical,
+    // so this is a no-op that preserves current rendering exactly — and it
+    // keeps the sidebar correct whatever #2196 decides about hiding
+    // container-less agents from the displayed roster.
+    async fetchSessionsBatch() {
+      const { data } = await axios.get(
+        '/api/enterprise/client-portal/sessions',
+        { headers: this.authHeader }
+      )
+      const shown = new Set((this.agents || []).map((a) => a.name))
+      const rows = data.sessions || []
+      const kept = rows.filter((s) => shown.has(s.agent_name))
+      if (import.meta.env.DEV && kept.length !== rows.length) {
+        // Not a normal condition: it means the displayed roster and the
+        // backend's roster have diverged. Worth knowing about.
+        console.warn(
+          `[portal] ${rows.length - kept.length} thread(s) dropped — their agent is not on the displayed roster`
+        )
+      }
+      return kept
     },
 
     async fetchRoster() {

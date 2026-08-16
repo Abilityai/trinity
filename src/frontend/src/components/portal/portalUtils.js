@@ -508,6 +508,74 @@ export function starterFor(p) {
 // playbooks, and the roster is fetched once at mount. "This agent has no
 // playbooks exposed" would therefore be a false claim about operator
 // configuration for the ordinary state of an idle fleet.
+// ---------------------------------------------------------------------------
+// #2196 — the availability chip
+// ---------------------------------------------------------------------------
+//
+// ONE rule, here, consumed by every surface that renders it (sidebar row today;
+// picker, @-typeahead and briefing line next). Four inline `v-if`s across four
+// components is how four surfaces end up disagreeing about the same agent — and
+// there is no component-mount harness in this project (`package.json` carries no
+// @vue/test-utils, jsdom or happy-dom), so a rule expressed in a template can
+// only be guarded by regexing source, which catches deletion but never a wrong
+// rule. A pure function is genuinely unit-tested.
+
+export const AVAILABILITY_READY = 'ready'
+export const AVAILABILITY_STOPPED = 'stopped'
+export const AVAILABILITY_UNAVAILABLE = 'unavailable'
+export const AVAILABILITY_UNKNOWN = 'unknown'
+
+/**
+ * The chip for one roster card, or `null` when nothing should be rendered.
+ *
+ * Null for `ready` AND for `unknown`: `unknown` means Trinity could not read
+ * container state at all (an unreadable Docker socket marks every card at once),
+ * so labelling it would put a warning on the whole roster over an infrastructure
+ * fault the viewer can neither see nor act on. Fail-open — render as before.
+ *
+ * `detailed` distinguishes STOPPED from NO-CONTAINER, and defaults to false.
+ * That is a disclosure decision, not a formatting one: to an external client the
+ * two states differ only in whether the operator deleted or lost the agent, and
+ * neither is actionable for them (starting an agent is an operator action, and
+ * the Workspace deliberately has no start control). A platform session — an
+ * operator looking at their own fleet — sees the distinction, because for them
+ * it is the difference between "start it" and "find out what happened to it".
+ *
+ * Nothing here is derived from a Docker string: `availability` is one of four
+ * server-chosen constants, and an unrecognised value renders nothing.
+ */
+export function availabilityChip(agent, { detailed = false } = {}) {
+  const state = String(agent?.availability ?? '')
+  if (state !== AVAILABILITY_STOPPED && state !== AVAILABILITY_UNAVAILABLE) return null
+
+  const owner = String(agent?.owner ?? '').trim()
+  // The card already carries the owner, so naming them costs nothing and is far
+  // more actionable than "its owner".
+  const who = owner ? owner : 'its owner'
+
+  if (!detailed) {
+    return {
+      state,
+      label: 'Unavailable',
+      variant: 'warning',
+      title: `This agent can't take a message right now — ask ${who} to start it.`,
+    }
+  }
+  return state === AVAILABILITY_STOPPED
+    ? {
+      state,
+      label: 'Stopped',
+      variant: 'warning',
+      title: `This agent is stopped — ask ${who} to start it.`,
+    }
+    : {
+      state,
+      label: 'Unavailable',
+      variant: 'danger',
+      title: `This agent has no running container — ask ${who} to start it.`,
+    }
+}
+
 export const EMPTY_REASON_NO_PLAYBOOKS = 'No playbooks are available for this agent right now.'
 export const EMPTY_REASON_NO_PEERS = 'No other agents are shared with you.'
 export const EMPTY_REASON_NO_MENTIONABLE_PEERS =

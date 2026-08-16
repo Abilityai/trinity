@@ -181,6 +181,19 @@ synchronous send on any streaming failure — an older backend, a buffering prox
 a stopped agent — because streaming is an improvement to how a turn is *watched*,
 never a new way for one to fail.
 
+**That fallback is why `portal_chat`'s missing liveness gate mattered (#2196).**
+`start_portal_turn` refuses a turn the agent cannot run before creating anything;
+`portal_chat` had no such gate at all, and its 502 sits at the far end — *after*
+`_persist_user_turn`, which ent#286 deliberately moved earlier so a refresh
+mid-turn shows what was sent. Against a containerless agent the two decisions
+combined to leave a durable user message with no reply in the client's thread,
+plus an execution row. Since the browser reaches this path on any streaming
+failure, it was not a headless-only concern. `portal_chat` now gates on the same
+resolved availability, placed after the roster check (so a state-dependent
+refusal cannot become an existence oracle) and before `_resolve_session_id` (so a
+refused turn does not even open a thread). `start_portal_turn` passes the state
+it already resolved, so a streamed turn still costs one Docker read.
+
 **Reading a stream requires all three:** the agent on the caller's roster, the
 execution belonging to that agent, and the execution having been started by that
 caller (`source_user_email`). The third is the one that matters — executions are
