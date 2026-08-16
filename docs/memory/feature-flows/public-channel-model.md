@@ -24,10 +24,15 @@ the agent behaves in my own chats.
   is no longer a valid public-channel model (defense-in-depth, mirrors `voice_name` #28).
 
 ## Validation
-- `services/settings_service.PUBLIC_CHANNEL_MODELS` (frozenset of current-gen ids) +
-  `is_valid_public_channel_model()`. Kept in sync by hand with `ModelSelector.vue`
-  presets (no shared Python/Vue registry). A model removed after it was saved degrades to
-  the platform default (consistent with #1080 graceful degradation).
+- `services/settings_service.PUBLIC_CHANNEL_MODELS` + `is_valid_public_channel_model()`.
+  Since **#2086** the frozenset is **re-exported from the single-source catalog**
+  `services/model_catalog.py` (the `public_channel`-flagged ids) instead of being
+  hand-synced with `ModelSelector.vue` presets — so the allow-list and the frontend picker
+  can no longer drift, and `claude-opus-5` is selectable end-to-end (422→200 on the PUT).
+  The generated `src/frontend/src/constants/modelCatalog.js` and a
+  `tests/unit/test_2086_model_catalog_parity.py` guard keep the two in lockstep. A model
+  removed after it was saved degrades to the platform default (consistent with #1080
+  graceful degradation).
 
 ## Backend
 - `GET /api/agents/{name}/public-channel-model` (any authenticated accessor) → raw
