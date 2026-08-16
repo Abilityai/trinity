@@ -400,14 +400,23 @@ async def _alert_skill_not_found(
 _SWITCH_RETRY_DELAY_S = 3.0
 
 
-def _extract_agent_error(response: Optional[httpx.Response], fallback: str) -> tuple[str, dict]:
-    """Pull a human error string + any #678 structured ``metadata`` from an
-    agent error-response body. Shared by the pre-raise switch path (#792) and
-    the ``except httpx.HTTPError`` handler so both read the body identically."""
+def _extract_agent_error(
+    response: Optional[httpx.Response], fallback: str
+) -> tuple[str, dict, Any]:
+    """Pull a human error string, any #678 structured ``metadata``, and the
+    #1853 ``execution_log`` transcript from an agent error-response body. Shared
+    by the pre-raise switch path (#792) and the ``except httpx.HTTPError``
+    handler so both read the body identically.
+
+    ``execution_log`` is the raw stream-json transcript list the agent's
+    structured 502/504 body now carries (``_execution_error_502_detail`` /
+    ``_timeout_504_detail``); ``None`` for a bare-string body (old image) — the
+    graceful mixed-fleet degrade."""
     error_msg = fallback
     partial_metadata: dict = {}
+    execution_log: Any = None
     if response is None:
-        return error_msg, partial_metadata
+        return error_msg, partial_metadata, execution_log
     try:
         error_data = response.json()
         detail = error_data.get("detail")
@@ -416,12 +425,14 @@ def _extract_agent_error(response: Optional[httpx.Response], fallback: str) -> t
             error_msg = detail.get("message") or str(detail)
             if isinstance(detail.get("metadata"), dict):
                 partial_metadata = detail["metadata"]
+            # #1853: the full stream-json transcript, salvaged onto the FAILED row.
+            execution_log = detail.get("execution_log")
         elif "detail" in error_data:
             error_msg = error_data["detail"]
     except Exception:
         if response.text:
             error_msg = response.text[:500]
-    return error_msg, partial_metadata
+    return error_msg, partial_metadata, execution_log
 
 
 def classify_switch_failure(response: httpx.Response) -> Optional[str]:
@@ -446,7 +457,7 @@ def classify_switch_failure(response: httpx.Response) -> Optional[str]:
     if code in (503, 401, 403, 402):
         return "auth"
     if code >= 400:
-        error_msg, _ = _extract_agent_error(response, "")
+        error_msg, _, _ = _extract_agent_error(response, "")
         if is_auth_failure(error_msg):
             return "auth"
     return None
@@ -1428,7 +1439,7 @@ class TaskExecutionService:
                 switch_failure_kind = classify_switch_failure(response)
                 if switch_failure_kind is not None:
                     subscription_switch_attempted = True
-                    switch_error_msg, switch_partial_meta = _extract_agent_error(
+                    switch_error_msg, switch_partial_meta, _ = _extract_agent_error(
                         response, f"HTTP {response.status_code} from agent"
                     )
                     switch_result = None
@@ -1697,7 +1708,7 @@ class TaskExecutionService:
             # failure row instead of writing null-everything. Shared extractor
             # (#792) so this handler and the pre-raise switch path read the body
             # identically.
-            error_msg, partial_metadata = _extract_agent_error(
+            error_msg, partial_metadata, agent_execution_log = _extract_agent_error(
                 getattr(e, "response", None), f"HTTP error: {type(e).__name__}"
             )
             logger.error(f"[TaskExecService] Failed to execute task on {agent_name}: {error_msg}")
@@ -1752,6 +1763,12 @@ class TaskExecutionService:
                 error=error_msg,
                 error_code=error_code,  # Issue #285: AUTH (503) or None
                 metadata=partial_metadata,
+                # #1853: thread the agent's salvaged transcript + session id onto
+                # the FAILED envelope so apply_result persists them (mirrors
+                # SUCCESS). session_id was already UUID-validated agent-side; it
+                # is re-sanitized with the rest of the metadata in apply_result.
+                execution_log=agent_execution_log,
+                session_id=partial_metadata.get("session_id"),
                 retry_count=retry_count,
                 previous_attempt_cost=previous_attempt_cost,
             )
@@ -2027,6 +2044,36 @@ class TaskExecutionService:
         else:
             salvage_cost = salvage_cost_raw
 
+        # #1853: persist the transcript + session id onto the FAILED row, mirroring
+        # the SUCCESS branch above. The agent's structured error_during_execution
+        # (502) / timeout (504) body now carries `execution_log` = the raw
+        # stream-json transcript; sanitize it with the SAME sanitize_execution_log
+        # the SUCCESS branch uses (defense-in-depth redaction at the backend
+        # applier), and derive the #1741 tool_calls SUMMARY (never a second copy
+        # of the transcript). None (a bare-string old-image body) leaves both
+        # columns null = today.
+        exec_log = envelope.execution_log
+        salvage_execution_log_json = None
+        salvage_tool_calls_json = None
+        if isinstance(exec_log, list) and len(exec_log) > 0:
+            try:
+                salvage_execution_log_json = sanitize_execution_log(json.dumps(exec_log))
+                salvage_tool_calls = extract_tool_calls(exec_log)
+                salvage_tool_calls_json = (
+                    sanitize_execution_log(json.dumps(salvage_tool_calls))
+                    if salvage_tool_calls
+                    else None
+                )
+            except Exception as e:
+                logger.error(
+                    f"[TaskExecService] Failed to serialize FAILED execution_log for {eid}: {e}"
+                )
+        # claude_session_id: the envelope's id (UUID-validated agent-side) wins,
+        # else the salvaged metadata session_id.
+        salvage_session_id = envelope.session_id or (
+            partial_metadata.get("session_id") if partial_metadata else None
+        )
+
         won = True
         if eid:
             won = db.update_execution_status(
@@ -2039,6 +2086,12 @@ class TaskExecutionService:
                 cost=salvage_cost,
                 context_used=salvage_context,
                 context_max=salvage_context_max,
+                # #1853: mirror SUCCESS — persist the sanitized transcript, the
+                # tool_calls summary, and the session id so the failing row is
+                # diagnosable via the same API as a successful one.
+                execution_log=salvage_execution_log_json,
+                tool_calls=salvage_tool_calls_json,
+                claude_session_id=salvage_session_id,
                 retry_count=envelope.retry_count or None,
             )
         # #671/H4: complete the activity, record the AUTH breaker outcome, and
