@@ -475,6 +475,63 @@ class TestReadinessGating:
 
         _run(_bounded())  # completes well under 5s via the inner 0.5s wait_for
 
+    def test_readiness_poll_runs_outside_semaphore(self, gs, monkeypatch):
+        """Concurrency invariant (R1): the `/health` readiness poll must run
+        OUTSIDE `_gitignore_merge_semaphore` — the cap bounds only the Docker-exec
+        section. A slow-/never-booting agent parked in its readiness wait must not
+        head-of-line-block a healthy, already-ready agent's merge exec; otherwise
+        a handful of slow agents exhaust the shared 4-thread-pool cap and push a
+        fast agent's merge past its own first auto-sync cycle — re-opening the
+        exact leak #2069 closes. Pinned with a 1-permit semaphore: pre-fix the
+        poll ran INSIDE it, so the fast agent would block forever on `async with`
+        and this test would time out."""
+        monkeypatch.setattr(gs, "_gitignore_merge_semaphore", asyncio.Semaphore(1))
+        monkeypatch.setattr(gs, "_MERGE_READY_TIMEOUT_SECONDS", 30)
+        monkeypatch.setattr(gs, "_MERGE_READY_INTERVAL_SECONDS", 0.01)
+        monkeypatch.setattr(gs, "_MERGE_EXEC_TIMEOUT_SECONDS", 30)
+
+        slow_parked = asyncio.Event()
+        never_ready = asyncio.Event()
+
+        async def _probe(name):
+            if name == "slow":
+                slow_parked.set()  # the slow poller has entered its readiness wait
+                await never_ready.wait()  # ...and stays there (never becomes ready)
+                return False
+            return True  # "fast" is ready on its first probe
+
+        monkeypatch.setattr(gs, "_probe_agent_server_ready", _probe)
+        monkeypatch.setattr(gs, "_container_has_git_dir", AsyncMock(return_value=True))
+        monkeypatch.setattr(
+            gs, "_git_toplevel", AsyncMock(return_value="/home/developer")
+        )
+        exec_mock = AsyncMock(return_value={"exit_code": 0, "output": ""})
+        monkeypatch.setattr(gs, "execute_command_in_container", exec_mock)
+
+        async def _body():
+            slow = asyncio.create_task(gs.merge_gitignore_after_clone("slow"))
+            # Let the slow poller reach its readiness wait. Pre-fix it has already
+            # taken the sole semaphore permit by this point.
+            await asyncio.wait_for(slow_parked.wait(), timeout=2)
+            fast = asyncio.create_task(gs.merge_gitignore_after_clone("fast"))
+            # The fast agent must acquire the permit and finish its Docker-exec
+            # merge while the slow agent is still parked. Pre-fix this blocks on
+            # `async with _gitignore_merge_semaphore` and wait_for raises.
+            await asyncio.wait_for(fast, timeout=2)
+            assert not slow.done(), "the slow agent must still be parked in its poll"
+            slow.cancel()
+            try:
+                await slow
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        _run(_body())
+
+        # Exactly the fast agent's merge ran; the slow one never became ready.
+        assert exec_mock.await_count == 1
+        expected = gs._build_gitignore_merge_command("/home/developer")
+        assert exec_mock.await_args.kwargs["command"] == expected
+
 
 # ---------------------------------------------------------------------------
 # 4. _git_auto_sync_baked matrix + creation spawn wiring (AC#6) — R2

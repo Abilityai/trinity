@@ -1654,8 +1654,14 @@ _MERGE_READY_INTERVAL_SECONDS = int(
 # task. HONEST: `wait_for` frees the TASK, not the pinned Docker pool thread (the
 # shared 4-worker executor, docker_utils.py) — hence the Semaphore cap below.
 _MERGE_EXEC_TIMEOUT_SECONDS = 30
-# Fleet-wide cap so N concurrent creations can't spawn unbounded pollers and
-# starve unrelated Docker ops on the shared 4-thread pool.
+# Fleet-wide cap so N concurrent creations can't fire unbounded concurrent Docker
+# execs and starve unrelated Docker ops on the shared 4-thread pool. Scoped to the
+# EXEC section only (`.git` check / `_git_toplevel` / merge) — NOT the readiness
+# poll, which is pure agent-`/health` HTTP and touches no pool thread. Holding the
+# cap across a (<= _MERGE_READY_TIMEOUT_SECONDS) readiness wait would let a handful
+# of slow-/never-booting agents head-of-line-block a healthy, fast-booting agent's
+# merge past its OWN first auto-sync cycle (server-boot + ~900s) — re-opening the
+# exact leak this fix closes.
 _MERGE_POLLER_CONCURRENCY = int(os.getenv("TRINITY_GITIGNORE_MERGE_CONCURRENCY", "6"))
 _gitignore_merge_semaphore = asyncio.Semaphore(_MERGE_POLLER_CONCURRENCY)
 _inflight_gitignore_merge_tasks: "set[asyncio.Task]" = set()
@@ -1758,9 +1764,12 @@ async def merge_gitignore_after_clone(agent_name: str) -> None:
 
     Bounded & non-fatal: a monotonic deadline (`_MERGE_READY_TIMEOUT_SECONDS`,
     sized to clone + startup, NOT the 900s cycle), a module-level Semaphore cap on
-    concurrent pollers (batch creation must not starve the shared 4-thread Docker
-    pool), and `asyncio.wait_for` around every exec/HTTP. wait_for frees the TASK,
-    not the pinned pool thread. Any failure logs and returns; on deadline the Push
+    the DOCKER-EXEC section only (batch creation must not starve the shared 4-thread
+    Docker pool), and `asyncio.wait_for` around every exec/HTTP. wait_for frees the
+    TASK, not the pinned pool thread. The readiness poll runs OUTSIDE the Semaphore
+    — it is pure agent-`/health` HTTP and touches no pool thread, so capping it
+    would let slow-booting agents head-of-line-block a healthy agent's merge past
+    its own first cycle. Any failure logs and returns; on deadline the Push
     migration remains the backstop.
 
     Known limitation: a backend restart within the readiness-wait window loses
@@ -1768,33 +1777,43 @@ async def merge_gitignore_after_clone(agent_name: str) -> None:
     #1703 is the structural fix.
     """
     container_name = f"agent-{agent_name}"
-    async with _gitignore_merge_semaphore:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + _MERGE_READY_TIMEOUT_SECONDS
-        ready = False
-        try:
-            while loop.time() < deadline:
-                try:
-                    ready = await asyncio.wait_for(
-                        _probe_agent_server_ready(agent_name),
-                        timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
-                    )
-                except asyncio.TimeoutError:
-                    ready = False
-                if ready:
-                    break
-                await asyncio.sleep(_MERGE_READY_INTERVAL_SECONDS)
-
-            if not ready:
-                logger.warning(
-                    "[#2069] agent-server for %s never became ready within %ss; "
-                    "skipping the creation .gitignore merge — the Push migration "
-                    "remains the backstop.",
-                    agent_name,
-                    _MERGE_READY_TIMEOUT_SECONDS,
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _MERGE_READY_TIMEOUT_SECONDS
+    ready = False
+    try:
+        # Readiness poll — pure agent-`/health` HTTP, NOT a Docker exec, so it runs
+        # OUTSIDE `_gitignore_merge_semaphore` (which bounds only the Docker-pool
+        # exec section below). Holding the pool cap across a <=1800s readiness wait
+        # would let slow-booting agents head-of-line-block a healthy agent's merge
+        # past its own first auto-sync cycle — re-opening the leak this fix closes.
+        while loop.time() < deadline:
+            try:
+                ready = await asyncio.wait_for(
+                    _probe_agent_server_ready(agent_name),
+                    timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
                 )
-                return
+            except asyncio.TimeoutError:
+                ready = False
+            if ready:
+                break
+            await asyncio.sleep(_MERGE_READY_INTERVAL_SECONDS)
 
+        if not ready:
+            logger.warning(
+                "[#2069] agent-server for %s never became ready within %ss; "
+                "skipping the creation .gitignore merge — the Push migration "
+                "remains the backstop.",
+                agent_name,
+                _MERGE_READY_TIMEOUT_SECONDS,
+            )
+            return
+
+        # Docker-exec section (`.git` check / `_git_toplevel` / merge) — bound the
+        # shared 4-thread pool HERE. Each exec is short, so the cap drains fast even
+        # under batch creation; a queued agent's exec still lands well inside its
+        # ~900s pre-first-cycle window because it is no longer stuck behind other
+        # agents' readiness waits.
+        async with _gitignore_merge_semaphore:
             # Server is up ⟹ startup.sh is past ALL git mutation (single launch
             # point, sequential) — no more `git checkout` can revert the merge.
             try:
@@ -1845,13 +1864,13 @@ async def merge_gitignore_after_clone(agent_name: str) -> None:
                 agent_name,
                 git_dir,
             )
-        except Exception as exc:
-            logger.warning(
-                "[#2069] creation .gitignore merge failed for %s: %s. "
-                "The Push migration remains the backstop.",
-                agent_name,
-                exc,
-            )
+    except Exception as exc:
+        logger.warning(
+            "[#2069] creation .gitignore merge failed for %s: %s. "
+            "The Push migration remains the backstop.",
+            agent_name,
+            exc,
+        )
 
 
 def spawn_gitignore_merge_after_clone(agent_name: str) -> None:
@@ -1859,9 +1878,11 @@ def spawn_gitignore_merge_after_clone(agent_name: str) -> None:
     `activity_service.spawn_close_execution_activity`): zero creation latency;
     the merge lands within one poll interval of agent-server readiness.
 
-    Concurrency is bounded INSIDE the coro by `_gitignore_merge_semaphore`, so an
-    excess spawn queues rather than piling another live poller onto the shared
-    Docker pool. A strong ref in `_inflight_gitignore_merge_tasks` defeats the
+    The Docker-exec section is bounded INSIDE the coro by
+    `_gitignore_merge_semaphore`, so an excess spawn's merge exec queues rather
+    than piling another concurrent exec onto the shared Docker pool; the readiness
+    poll runs OUTSIDE the cap (pure agent-`/health` HTTP, no pool thread). A strong
+    ref in `_inflight_gitignore_merge_tasks` defeats the
     asyncio `create_task` GC footgun. With no running loop the coro is closed and
     the spawn is skipped (logged), never raised — the Push migration is the
     backstop.
