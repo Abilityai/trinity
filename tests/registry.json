@@ -1940,6 +1940,32 @@
       "description": "The .trinity/ authored-vs-runtime split survives a backend Push (#2070). Every Push runs `git rm --cached` over tracked-but-now-ignored files; the fleet list ignored `.trinity/` WHOLESALE, so template-committed content there was untracked and its deletion pushed, guarded only by a hardcoded two-entry pathspec that was wrong three times (brain-orb ent#76, setup.sh — swept live — and pre-check #2070, the SCHED-COND-001 hook the platform's own docs tell authors to commit). Silent by construction: only the index is touched, so the working tree keeps running and the failure lands one re-clone/recreate later as an agent with no hook, whose every cron tick then runs a full LLM turn. Runs the REAL `_build_gitignore_merge_command` + `_build_rm_cached_ignored_command` against REAL git repos in tmp (the defect is in git's own descend/negation semantics, which a mocked container cannot express). Asserts the SPLIT, never the current exemption strings: 8 authored paths survive, 9 runtime files stay untracked, a fresh clone still RUNS the hook, the superseded wholesale line is replaced (append-only would be inert — git never descends into a dir-form exclusion), user rules merely mentioning .trinity are preserved, the merge is idempotent, exemptions are derived from `_TRINITY_AUTHORED_PATHS`, and a newly-invented runtime file needs no action. Mutation-verified 4 ways (wholesale ignore restored 5F, hardcoded exemptions 1F, no stale-line migration 2F, pre-check dropped from the set 4F)."
     },
     {
+      "file": "unit/test_2069_gitignore_at_creation.py",
+      "feature": "#2069",
+      "added": "2026-08-16",
+      "categories": [
+        "backend",
+        "git",
+        "agents",
+        "unit",
+        "reliability",
+        "security"
+      ],
+      "description": "The fleet-wide `.gitignore` merge now runs at agent CREATION (#2069). `_GITIGNORE_PATTERNS` was applied only on Push/init, never at creation, so a `github:` agent whose 15-min in-container auto-sync loop is on from birth (the GIT_SYNC_AUTO set — non-source/fork agents, ephemeral ghosts INCLUDED) auto-committed `.trinity/` runtime state and the root-level `.env`/`.mcp.json` into its user-owned repo before any Push could migrate the list. Loads the REAL git_service (heavy deps mocked) through crud.git_service so the predicate, merge builders and readiness poller are production code. (1) Merge behaviour (AC#2): the real `_build_gitignore_merge_command` output run against real tmp git repos — no-.gitignore template gets the full list, a partial one is preserved+completed, and after the merge a bare `git add -A` stages NONE of .env/.mcp.json/.trinity/*/content/*/.claude/projects while genuine code + the .gitignore itself ARE staged; #2070 authored hooks (.trinity/pre-check) stay includable. (2) Idempotence/#953 (AC#4): an EXACT-seed template committed to a bare origin shows no `M .gitignore`; run-twice is a no-op (no pattern duplicated); a stale wholesale `.trinity/` line yields a LEGITIMATE supersede→append edit (#2070) — proving the no-drift contract is scoped to already-canonical templates. (3) Readiness gating (AC#1/R1): merge_gitignore_after_clone waits while /health is down and times out cleanly with no exception; once ready ∧ .git present it runs `_build_gitignore_merge_command` against the toplevel and NEVER `_build_rm_cached_ignored_command` (creation is PREVENT, not REMEDIATE); skips a ready-but-no-.git failed clone and an unresolved `_git_toplevel` None; and a hung docker exec is `asyncio.wait_for`-bounded (a missing wrap would hang the test). (4) `_git_auto_sync_baked` matrix (R2): fork-to-own AND non-source AND ephemeral non-source github+PAT bake (the ghost is never operator-Pushed, so the merge MUST cover it — the predicate ignores config.ephemeral), while source-mode-non-fork, local/no-repo, no-PAT and ephemeral-source-mode do NOT — and `_materialize_agent_files` fires spawn_gitignore_merge_after_clone on EXACTLY that predicate (the AC#6 regression, real predicate flowing through crud). (5) Start/recreate wiring (T1): an AST structural guard that start_agent_internal fires the spawn gated on db.get_git_auto_sync_enabled and NOWHERE ungated (fleet remediation for existing leakers; ghosts never recreate so the DB flag is complete). No Docker, no live backend, no Redis."
+    },
+    {
+      "file": "unit/test_2069_gitignore_merge_caller_guard.py",
+      "feature": "#2069",
+      "added": "2026-08-16",
+      "categories": [
+        "backend",
+        "git",
+        "unit",
+        "guard"
+      ],
+      "description": "AST writer-SET guard that `_GITIGNORE_PATTERNS` stays the single source of truth (#2069 AC#3 / R4, the test_ent109_git_env_seam precedent). Pins TWO sets in git_service.py: (a) the functions calling `_build_gitignore_merge_command` == {_migrate_workspace_gitignore, initialize_git_in_container, merge_gitignore_after_clone} exactly — a fourth caller is a fourth application point to re-reason about; and (b) the load-bearing half — the functions with an ast.Name LOAD of `_GITIGNORE_PATTERNS` == {_build_gitignore_merge_command} only, which catches the bypass where a new writer feeds the constant into the generic `_build_gitignore_append_command(git_dir, _GITIGNORE_PATTERNS)` (already called with a DIFFERENT list) or hand-rolls a shell append — neither of which a callers-only guard would see. AST, not grep: docstring mentions are ast.Constant not ast.Name, and a black reflow can split a call across lines. Scope is git_service.py only; compatibility/fixes.py is a documented out-of-scope cross-module consumer."
+    },
+    {
       "file": "unit/test_2080_harness_contract.py",
       "feature": "#2080",
       "added": "2026-08-10",
