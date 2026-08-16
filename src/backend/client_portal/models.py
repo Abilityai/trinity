@@ -1,7 +1,7 @@
 """Pydantic models for the enterprise client-portal exposure config (#79)."""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -56,6 +56,27 @@ class PortalAgentCard(BaseModel):
     # exposed-playbook tier, else the template `use_cases` fallback.
     description: Optional[str] = None
     playbooks: list[PortalPlaybook] = Field(default_factory=list)
+    # #2196 — whether this agent can currently run. Roster MEMBERSHIP is a DB
+    # fact (`agent_ownership` / `agent_sharing`); this is a Docker fact
+    # PROJECTED onto the card, and is never a membership filter. A live
+    # ownership row with no container is routine (#1747), so hiding those rows
+    # would make "not shared with me" indistinguishable from "shared but
+    # containerless" on the one surface a client has.
+    #
+    #   ready       container exists and runs        (renders as today)
+    #   stopped     container exists, not running    (chip)
+    #   unavailable no container at all — #2196      (chip)
+    #   unknown     Docker could not be asked        (renders as today)
+    #
+    # ⚠️ The default is fail-OPEN, which is the OPPOSITE of `voice_available`
+    # above and `PortalRoster.multi_agent_chat_available` below, and that
+    # inversion is deliberate — do not "tidy" it into consistency. Those bits
+    # fail closed because their bug is promising an affordance that cannot work.
+    # This one's bug is the mirror image: denying a working agent, and — since
+    # one unreadable Docker socket marks EVERY card at once — emptying a paying
+    # customer's roster over an infrastructure fault. When Docker is unreadable
+    # every card reads `unknown` and the roster renders exactly as it does today.
+    availability: Literal["ready", "stopped", "unavailable", "unknown"] = "unknown"
 
 
 class PortalTtsRequest(BaseModel):
@@ -226,6 +247,14 @@ class PortalAgentHeader(BaseModel):
     avatar_url: Optional[str] = None
     owner: Optional[str] = None
     health: PortalAgentHealth = Field(default_factory=PortalAgentHealth)
+    # #2196 — a projection of the roster card's field, NOT a second Docker read,
+    # and a SECOND FACT beside `health` rather than a replacement for it. The two
+    # differ in freshness by construction: `health` is the last persisted
+    # `agent_health_checks` row (stale by design, and `unknown` on most installs
+    # because monitoring is default-OFF), while this is read at request time.
+    # One widget carrying both freshness semantics would tell the viewer neither.
+    # Same fail-open default and rationale as `PortalAgentCard.availability`.
+    availability: Literal["ready", "stopped", "unavailable", "unknown"] = "unknown"
     last_active: Optional[str] = None
 
 

@@ -155,7 +155,7 @@
 **Services (`services/`)** — 67 service modules:
 
 *Core:*
-- `docker_service.py` - Docker container management (single point of Docker interaction, Invariant #11)
+- `docker_service.py` - Docker container management (single point of Docker interaction, Invariant #11). Also owns the **tri-state** container-state pair `agent_container_states()` (batch, one `sparse=True` `containers.list()`) / `agent_container_state(name)` (single) added by #2196: `None` means *Docker could not be asked*, distinct from `{}` / `"missing"` meaning *Docker answered: no container*. Every older helper collapses those two into one falsy value, which is why a naive "drop agents with no container" reconcile empties a customer's roster on any Docker fault. `sparse=True` is load-bearing and constrains the code: the SDK default full-inspects **every** container, and under sparse `.name` returns `None` while `.labels` raises — so the key comes from `attrs["Names"][0]` and the status is classified **explicitly** to `running`/`stopped` rather than reusing `list_all_agents_fast`'s raw-status fall-through (which would pass `paused`/`removing` through to a consumer's `Literal`). `list_all_agents_fast`'s `[]`-on-fault contract is unchanged.
 - `docker_utils.py` - Docker utility helpers
 - `template_service.py` - GitHub template cloning and processing; owns the tolerant `credentials:` readers (`credential_shape_errors` / `credential_mcp_server_names` / `credential_env_file_names` / `credential_mcp_env_vars` / `declared_credential_names`) — read paths degrade + surface `credential_errors`, the `.env` writer raises `CredentialDeclarationError` → 400 (ent#128) — see [template-processing.md](feature-flows/template-processing.md). **ent#89:** both builders also surface the declared `schedules:` (normalized) + `schedule_errors` via `services/template_schedules.py`, the same tolerant-reader shape; **both GitHub catalog list paths are now fenced** per-template (`_safe_build_github_template`) — they were bare list comprehensions, so a raise in the untrusted GitHub builder 500'd the whole GitHub half of `GET /api/templates` (ent#128 PR-A fenced only the local path). `fetch_template_metadata_for_create(repo, pat, ref)` is the **creation-path** metadata read: resolved PAT + parsed ref, cache-bypassed, loud on any failure — the catalog cache uses the global platform PAT off the default branch and would silently return `{}` for a private repo read with a per-user token. **ent#14:** the GitHub half of the catalog resolves **admin override → remote registry (`template_registry_service`) → `DEFAULT_GITHUB_TEMPLATE_REPOS`** in **both** `get_all_templates()` and `get_github_template()` (the second feeds `GET /api/templates/{id}` *and* agent creation, so one ladder or the display fields diverge by surface); registry entries arrive as `admin_override` dicts and are fenced so any failure degrades to the bundled floor. The per-repo fetch *reason* is now cached beside the metadata and surfaced as `metadata_unavailable`, because "declares no `template.yaml`" and "could not read it" were the same value — and `fork_to_own: required` silently read as absent under a rate limit. `fetch_template_metadata_result_for_create` is the reason-preserving form of the creation read (the plain wrapper drops the reason, which is fine for schedules and wrong for a security gate): the `fork_to_own` gate decides from IT, not from `gh_template`, because the catalog read answers 404 for a private repo the platform PAT cannot see and would classify a `required` template as absent
 - "credential declaration standard" (ent#128): `credentials:` is FROZEN names-only; the sibling `credential_setup:` enriches it per variable and `normalize_credential_requirements(data, *, source_trust)` emits base-set-plus-overlay records as `credential_requirements` (never raises, never mutates — `_build_template` runs unfenced in `get_all_templates()`). Contract: [docs/schemas/trinity-agent-credentials.schema.json](../schemas/trinity-agent-credentials.schema.json)
@@ -1320,6 +1320,22 @@ through `client_portal/portal_auth.py::get_portal_principal`, which returns
 `(email, is_platform)`; the roster is every agent shared with that email, plus — for a
 platform session only — the agents they own.
 
+**Membership is a DB fact; container state is a projection onto the card (#2196).** The
+roster is built from `agent_ownership` / `agent_sharing` and is **never** filtered by
+whether a container exists. A live ownership row with no container is a routine state
+(#1747: identity lives in the row, and #834 Phase 1c recovery, a `docker system prune`
+or a crash mid-create all reach it), so hiding those rows would make "not shared with
+me" indistinguishable from "shared but containerless" on the one surface a client has.
+Filtering is also the dangerous direction at scale: every Docker read in the platform
+collapses *no container* and *Docker could not be asked* into one falsy value
+(`list_all_agents_fast` returns `[]` on any fault), so one daemon restart or one
+`DOCKER_GID` change would tell every paying customer they have no agents. Instead each
+card carries `availability` (`ready`/`stopped`/`unavailable`/`unknown`), resolved once
+per roster load in `get_roster` — **not** in `_roster_rows`, which stays pure SQL so
+#2198's batch-sessions gate does not inherit a Docker read, and **not** inside
+`_agent_briefing`, so #2163 stays free to defer/bound/cache the briefing. Invariant #11
+is untouched: every Docker read still happens inside `docker_service.py`.
+
 It was an entitled module and returned 404 in community builds; ent#356 moved it into
 OSS core (adoption: this is the main surface a non-operator uses to work with agents).
 The `/api/enterprise/client-portal` prefix and the `enterprise_portal_sessions` /
@@ -1419,6 +1435,28 @@ containment** — a portal token legitimately reaches the room endpoints where t
 and the real boundary is the serving module's own roster-scoped access plus
 membership-scoped uniform 404s. Room data is untouched by the flag and reappears intact
 if the capability returns.
+
+**`availability` is the second per-agent field on this channel, and it fails in the
+OPPOSITE direction (#2196).** `voice_available` and `multi_agent_chat_available` default
+**False** (fail-closed) because their bug is *promising an affordance that cannot work*.
+`availability` defaults **`"unknown"`** (fail-open) because its bug is the mirror image:
+*denying a working agent*, and — since a Docker fault would mark every card at once —
+*emptying a paying customer's roster over an infrastructure fault*. Same payload channel,
+opposite default, for a stated reason; the asymmetry is deliberate and is written into
+`PortalAgentCard` itself so it is not later "tidied" into consistency. It is resolved from
+the tri-state pair `docker_service.agent_container_states()` (batch, one **sparse**
+`containers.list()` per roster load) / `agent_container_state(name)` (single, for the
+agent page and each turn — routing one agent through the batch would make it pay a
+fleet-scale read, against #2160). Those two exist because no pre-existing Docker helper
+can distinguish *no container* from *Docker unreadable*: both return a falsy value, which
+is the single fact this design turns on. Both are awaited through a `docker_utils`
+executor wrapper (that module's mandatory async contract), and `list_all_agents_fast`'s
+`[]`-on-fault contract is deliberately left unchanged — ~60 stub sites depend on it. The
+portal seams `_availability_map` / `_agent_availability` are isinstance/enum-guarded (the
+`a2a_outbound` precedent, here failing in the safe direction) so a `sys.modules` MagicMock
+stub degrades to `unknown` rather than silently inverting the default inside the suite
+meant to prove it; `_availability_map` also narrows its result to the requested names,
+because the underlying call sees **every** agent container on the host.
 
 ### Enterprise Modules (#847)
 
