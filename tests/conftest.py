@@ -26,7 +26,7 @@ Configuration:
 """
 
 # Skip test files that require backend context (can't be run from test suite)
-collect_ignore = ["test_archive_security.py"]
+collect_ignore: list[str] = []  # test_archive_security relocated to tests/unit/ (#1895)
 
 # ---------------------------------------------------------------------------
 # Issue #589: backend config now raises at import-time if REDIS_URL lacks
