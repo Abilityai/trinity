@@ -324,10 +324,12 @@ follow-up (fragile, couples to Claude's moving internal files, may be subsumed b
   (runtime `/plugin install`, not in the template) are not captured yet; that
   needs an agent-side distill of Claude's own `known_marketplaces.json` +
   `enabledPlugins`, whose shapes are undocumented and version-drifting.
-- **Cornelius / tokenless source-mode agents** cannot push to git, so their
-  manifest persists only if the **template repo ships it** (committed
-  `.trinity/plugins.yaml` or a `template.yaml plugins:` block the boot hook
-  re-materializes); their plugins otherwise survive by volume + boot re-install.
+- **Cornelius / tokenless source-mode agents** cannot push a materialized
+  `.trinity/plugins.yaml` back to git, so the boot hook **falls back to reading
+  the `template.yaml plugins:` block** the re-cloned template carries (same
+  nested shape; BUDGET alias policy since template.yaml may legitimately anchor).
+  startup.sh's guard fires on the manifest OR a top-level `plugins:` key, so the
+  fallback is reachable; their plugins otherwise survive by volume + boot re-install.
 - **Supply chain:** `plugin@marketplace` pins identity, not a commit — a
   re-install re-fetches the marketplace's current content (the #192
   `auto_update: on` behaviour); a pinned mode is a documented follow-up.

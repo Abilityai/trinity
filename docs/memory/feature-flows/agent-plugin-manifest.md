@@ -155,10 +155,12 @@ manifest. Without this the 15-min auto-sync loop would re-commit a churning file
   `/plugin install`, not in the template) are not captured — that needs an
   agent-side distill of Claude's own `known_marketplaces.json` + `enabledPlugins`,
   whose shapes are undocumented and version-drifting, and may be subsumed by #192.
-- **Cornelius / tokenless source-mode agents** cannot push to git, so their
-  manifest persists only if the **template repo ships it** (committed
-  `.trinity/plugins.yaml` or a `template.yaml plugins:` block the boot hook
-  re-materializes); otherwise their plugins survive by volume + boot re-install.
+- **Cornelius / tokenless source-mode agents** cannot push a materialized
+  `.trinity/plugins.yaml` back to git, so the boot hook **falls back to reading
+  the `template.yaml plugins:` block** the re-cloned template carries (`load_manifest`
+  → `_read_plugins_block(template.yaml, BUDGET)`; startup.sh's guard fires on the
+  manifest OR a top-level `plugins:` key, so it is reachable). Otherwise their
+  plugins survive by volume + boot re-install.
 - **Supply chain.** `plugin@marketplace` pins identity, not a commit — a
   re-install re-fetches the marketplace's current content (the #192
   `auto_update: on` behaviour); a commit-pinned (`auto_update: off`) mode is a

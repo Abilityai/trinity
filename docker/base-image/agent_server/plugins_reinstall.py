@@ -57,6 +57,10 @@ except ImportError:  # pragma: no cover — … or standalone, for a script run
 
 AGENT_HOME = Path("/home/developer")
 MANIFEST_FILE = AGENT_HOME / ".trinity" / "plugins.yaml"
+# Fallback for a source-mode / tokenless agent (Cornelius) whose committed
+# `.trinity/plugins.yaml` never materialized: a git-reconstituted clone still
+# carries `template.yaml`, whose `plugins:` block is the SAME nested shape.
+TEMPLATE_FILE = AGENT_HOME / "template.yaml"
 
 # The manifest is agent-writable; cap the read.
 _MAX_BYTES = 256 * 1024
@@ -111,31 +115,49 @@ def _is_source(value: object) -> bool:
     return True
 
 
-def load_manifest(path: Path = MANIFEST_FILE) -> Dict[str, object]:
-    """Read + validate `plugins.yaml`. Returns `{marketplaces, installed}` or `{}`.
+def _read_plugins_block(path: Path, alias_policy: "AliasPolicy") -> Optional[dict]:
+    """Read `path`, hardened-parse it, and return its `plugins:` block (or None).
 
-    Never raises. The nested `{plugins: {marketplaces, installed}}` shape the
-    backend writes is unwrapped; any invalid marketplace/plugin/source is dropped
-    with a logged reason rather than trusted.
+    Never raises. `alias_policy` differs by source: `.trinity/plugins.yaml` is a
+    simple platform-written manifest (REJECT — no legitimate anchor), while
+    `template.yaml` is a full author document that may legitimately anchor a
+    repeated block (BUDGET), so REJECTing it would drop a valid template.
     """
     try:
         if not path.is_file() or path.stat().st_size > _MAX_BYTES:
-            return {}
+            return None
         raw = path.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         _log(f"could not read {path}: {e}")
-        return {}
-
+        return None
     try:
-        data = load_hardened_yaml(raw, kind="plugins", alias_policy=AliasPolicy.REJECT)
+        data = load_hardened_yaml(raw, kind="plugins", alias_policy=alias_policy)
     except HardenedYamlError as e:
-        _log(f"withheld all: manifest is not safe to parse ({e})")
-        return {}
+        _log(f"withheld all: {path.name} is not safe to parse ({e})")
+        return None
     except Exception as e:  # noqa: BLE001 — one bad file must never cost the boot
-        _log(f"withheld all: manifest could not be parsed ({type(e).__name__}: {e})")
-        return {}
-
+        _log(f"withheld all: {path.name} could not be parsed ({type(e).__name__}: {e})")
+        return None
     block = data.get("plugins") if isinstance(data, dict) else None
+    return block if isinstance(block, dict) else None
+
+
+def load_manifest(
+    path: Path = MANIFEST_FILE, template_path: Path = TEMPLATE_FILE
+) -> Dict[str, object]:
+    """Read + validate the declared plugins. Returns `{marketplaces, installed}` or `{}`.
+
+    Prefers the committed `.trinity/plugins.yaml` manifest; if it is absent or
+    empty, falls back to `template.yaml`'s `plugins:` block (the same nested
+    shape) so a source-mode / tokenless agent — whose manifest may never have
+    materialized — still self-heals from the template the clone carries.
+
+    Never raises. Any invalid marketplace/plugin/source is dropped with a logged
+    reason rather than trusted (the block is on the agent-writable volume).
+    """
+    block = _read_plugins_block(path, AliasPolicy.REJECT)
+    if block is None:
+        block = _read_plugins_block(template_path, AliasPolicy.BUDGET)
     if not isinstance(block, dict):
         return {}
 

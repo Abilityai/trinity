@@ -580,7 +580,14 @@ fi
 # agent's GITHUB_PAT env inside the module, never from the manifest). Reads
 # current state first, so a volume-persisting restart runs zero installs.
 # Never fails startup (a hung/no-TTY install is timeout-bounded in the module).
-if [ -f "/home/developer/.trinity/plugins.yaml" ]; then
+#
+# The guard fires on the committed manifest OR a `template.yaml plugins:` block:
+# a source-mode / tokenless agent (Cornelius) whose `.trinity/plugins.yaml` never
+# materialized still re-clones its `template.yaml`, and the module falls back to
+# that block. The `grep` is a cheap top-level-key pre-check; the module does the
+# real hardened parse and no-ops when nothing is declared.
+if [ -f "/home/developer/.trinity/plugins.yaml" ] || \
+   grep -qE '^plugins:' /home/developer/template.yaml 2>/dev/null; then
     echo "Restoring declared Claude Code plugins..."
     (cd /app && python3 -m agent_server.plugins_reinstall) || \
         echo "Warning: plugin re-install failed (continuing startup)"

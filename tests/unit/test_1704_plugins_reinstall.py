@@ -271,7 +271,68 @@ def test_load_manifest_rejects_userinfo_source(mod, tmp_path):
 
 
 def test_load_manifest_missing_file_is_empty(mod, tmp_path):
-    assert mod.load_manifest(tmp_path / ".trinity" / "plugins.yaml") == {}
+    # Explicit non-existent template_path so the fallback can't reach the real
+    # /home/developer/template.yaml on the test host.
+    assert (
+        mod.load_manifest(
+            tmp_path / ".trinity" / "plugins.yaml", tmp_path / "template.yaml"
+        )
+        == {}
+    )
+
+
+def test_load_manifest_falls_back_to_template_yaml(mod, tmp_path):
+    """Cornelius / source-mode survival: no committed manifest, but the
+    re-cloned template.yaml carries the `plugins:` block (same nested shape)."""
+    tpl = tmp_path / "template.yaml"
+    tpl.write_text(
+        "name: cornelius\n"
+        "resources: {cpu: '2', memory: '4g'}\n"
+        "plugins:\n"
+        "  marketplaces:\n"
+        "  - name: abilityai\n"
+        "    source: abilityai/abilities\n"
+        "  installed:\n"
+        "  - trinity@abilityai\n"
+    )
+    out = mod.load_manifest(tmp_path / ".trinity" / "plugins.yaml", tpl)
+    assert out["marketplaces"] == {"abilityai": "abilityai/abilities"}
+    assert out["installed"] == ["trinity@abilityai"]
+
+
+def test_manifest_wins_over_template_yaml(mod, tmp_path):
+    """When both exist, the committed manifest is authoritative (an operator or
+    the materializer decided it), not template.yaml."""
+    p = _write_manifest(
+        tmp_path,
+        "plugins:\n  marketplaces:\n  - name: m\n    source: o/r\n  installed:\n  - p@m\n",
+    )
+    tpl = tmp_path / "template.yaml"
+    tpl.write_text(
+        "plugins:\n  marketplaces:\n  - name: other\n    source: x/y\n  installed:\n  - q@other\n"
+    )
+    out = mod.load_manifest(p, tpl)
+    assert out["marketplaces"] == {"m": "o/r"}
+    assert out["installed"] == ["p@m"]
+
+
+def test_template_yaml_fallback_tolerates_anchors(mod, tmp_path):
+    """template.yaml is a full author document and may legitimately use a YAML
+    anchor elsewhere — the fallback uses BUDGET, not REJECT, so it is not dropped."""
+    tpl = tmp_path / "template.yaml"
+    tpl.write_text(
+        "defaults: &d {cpu: '2'}\n"
+        "resources: *d\n"
+        "plugins:\n"
+        "  marketplaces:\n"
+        "  - name: ab\n"
+        "    source: a/b\n"
+        "  installed:\n"
+        "  - p@ab\n"
+    )
+    out = mod.load_manifest(tmp_path / ".trinity" / "plugins.yaml", tpl)
+    assert out["marketplaces"] == {"ab": "a/b"}
+    assert out["installed"] == ["p@ab"]
 
 
 def test_load_manifest_size_cap(mod, tmp_path):
