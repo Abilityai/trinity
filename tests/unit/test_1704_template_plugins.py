@@ -155,6 +155,9 @@ def test_non_owner_repo_source_is_refused():
     for bad in [
         "not a repo; rm -rf",
         "http://github.com/o/r",
+        "ftp://evil.com/x",  # non-https scheme (agent-side parity, #1704)
+        "file:///etc/passwd",  # non-https scheme
+        "ssh://host/path",  # non-https scheme
         "git@github.com:o/r",
         "../../etc",
         "/abs/path",

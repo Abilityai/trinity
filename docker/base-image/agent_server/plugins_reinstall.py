@@ -106,7 +106,11 @@ def _is_source(value: object) -> bool:
         return False
     if _SOURCE_RE.fullmatch(value) is None:
         return False
-    if value.startswith("http") and not value.startswith("https://"):
+    if "://" in value and not value.startswith("https://"):
+        # Any URL-form must be https:// — reject ftp://, file://, ssh://, data://,
+        # etc. Mirrors the backend `template_plugins._validate_source` exactly; the
+        # two must not diverge, because this copy is the SOLE gate for the untrusted
+        # `template.yaml` fallback path (a source-mode agent's clone).
         return False
     if "://" not in value:
         # `owner/repo` shorthand: exactly two plain-name segments.

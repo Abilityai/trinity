@@ -370,6 +370,9 @@ def test_load_manifest_rejects_yaml_alias_bomb(mod, tmp_path):
         ("--evil", False),  # flag injection
         ("../../etc", False),  # traversal
         ("http://github.com/o/r", False),  # not https
+        ("ftp://evil.com/x", False),  # non-https scheme (backend parity, #1704)
+        ("file:///etc/passwd", False),  # non-https scheme
+        ("ssh://host/path", False),  # non-https scheme
         ("git@github.com:o/r", False),  # ssh/userinfo
         ("a/b/c", False),  # not owner/repo
     ],
