@@ -45,6 +45,7 @@ from services.template_service import (
     generate_credential_files,
 )
 from services.template_schedules import normalize_declared_schedules
+from services.template_plugins import normalize_declared_plugins
 from services import git_service
 from services.settings_service import (
     get_anthropic_api_key,

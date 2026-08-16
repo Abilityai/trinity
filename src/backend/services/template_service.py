@@ -29,6 +29,10 @@ from services.template_schedules import (
     normalize_declared_schedules,
     schedule_shape_errors,
 )
+from services.template_plugins import (
+    normalize_declared_plugins,
+    plugin_shape_errors,
+)
 
 logger = logging.getLogger(__name__)
 
