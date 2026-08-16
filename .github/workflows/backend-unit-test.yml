@@ -50,6 +50,12 @@ jobs:
           python-version: '3.13'
       - name: Run sys.modules lint
         run: python tests/lint_sys_modules.py
+      # Issue #1895: keep self-contained tests OUT of the tests/ root (the per-PR
+      # unit job only collects tests/unit/) and keep async unit tests explicitly
+      # marked (strict pytest-asyncio). Stdlib-only AST check; same unconditional
+      # push+PR home as the sys.modules lint so it can never be path-filtered away.
+      - name: Run root-test-placement lint
+        run: python tests/lint_root_test_placement.py
 
   test:
     name: pytest (${{ matrix.side }}, seed ${{ matrix.seed }})

@@ -29,6 +29,26 @@ if _backend_path not in sys.path:
 # - models: depends on utils.helpers
 from unittest.mock import MagicMock as _MagicMock
 
+# #1895: confine these import-time stubs to THIS file so they cannot leak into a
+# LATER unit file's collection-time import. The code under test
+# (services.cleanup_service) is imported LAZILY inside the test methods, by which
+# point the conftest autouse restore has reverted these to the real modules — so
+# the stubs are only load-bearing during this module's own body, and restoring
+# them immediately after is safe. Sanctioned _STUBBED_MODULE_NAMES/
+# _restore_sys_modules pair (precedent: test_telegram_webhook_backfill.py).
+_STUBBED_MODULE_NAMES = ['utils.helpers', 'utils.credential_sanitizer', 'database']
+_SAVED_STUBBED_MODULES = {_k: sys.modules.get(_k) for _k in _STUBBED_MODULE_NAMES}
+
+
+def _restore_sys_modules():
+    for _k in _STUBBED_MODULE_NAMES:
+        _v = _SAVED_STUBBED_MODULES[_k]
+        if _v is not None:
+            sys.modules[_k] = _v
+        else:
+            sys.modules.pop(_k, None)
+
+
 # tests/utils shadows src/backend/utils — provide real helper implementations
 # needed by cleanup_service for timestamp math
 import types as _types
@@ -59,6 +79,8 @@ _sanitizer_mod.sanitize_text = lambda x: x  # Pass-through for tests
 sys.modules["utils.credential_sanitizer"] = _sanitizer_mod
 
 sys.modules.setdefault("database", _MagicMock())
+
+_restore_sys_modules()
 
 
 # ---------------------------------------------------------------------------

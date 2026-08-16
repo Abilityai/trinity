@@ -15,11 +15,9 @@ audit envelope captures the delivered/skipped/failed outcome.
 import asyncio
 import os
 import sys
-import types
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 
 _backend_path = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "src", "backend")
@@ -28,59 +26,31 @@ if _backend_path not in sys.path:
     sys.path.insert(0, _backend_path)
 
 
-# Modules stubbed by the fixture below — snapshot/restored around each test so
-# the stubs don't leak into sibling test files. Pattern matches
-# tests/unit/test_telegram_webhook_backfill.py (see tests/lint_sys_modules.py).
-_STUBBED_MODULE_NAMES = [
-    "database",
-    "services.platform_audit_service",
-    "services.proactive_message_service",
-    "proactive_message_service",
-]
-
-
-@pytest.fixture(autouse=True)
-def _restore_sys_modules():
-    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
-    try:
-        yield
-    finally:
-        for name, value in saved.items():
-            if value is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = value
-
-
 @pytest.fixture
 def proactive_service(monkeypatch):
-    """Load ProactiveMessageService with stubbed database + audit modules."""
-    fake_db_mod = types.ModuleType("database")
-    fake_db_mod.db = MagicMock()
-    monkeypatch.setitem(sys.modules, "database", fake_db_mod)
+    """ProactiveMessageService with the audit references patched IN PLACE.
 
-    fake_audit_mod = types.ModuleType("services.platform_audit_service")
+    #1895: do NOT del + reimport the module to inject the stubbed audit. The
+    reimport left a fresh module in sys.modules whose identity diverged from the
+    instance every later unit test captured (test_1609's get_proactive_rate_limit
+    patch then silently no-oped against a zombie module). `send_access_grant_
+    notification` reads `platform_audit_service`/`AuditEventType` as module
+    globals, so monkeypatch.setattr on the already-imported module reaches them
+    and keeps the module identity stable (island-safe); monkeypatch restores at
+    teardown.
+    """
+    import services.proactive_message_service as pms
 
     class _AuditEventType:
         PROACTIVE_MESSAGE = "proactive_message"
 
     fake_audit = MagicMock()
     fake_audit.log = AsyncMock(return_value="evt-1")
-    fake_audit_mod.platform_audit_service = fake_audit
-    fake_audit_mod.AuditEventType = _AuditEventType
-    monkeypatch.setitem(
-        sys.modules, "services.platform_audit_service", fake_audit_mod
-    )
+    monkeypatch.setattr(pms, "platform_audit_service", fake_audit)
+    monkeypatch.setattr(pms, "AuditEventType", _AuditEventType)
+    monkeypatch.setattr(pms, "db", MagicMock())
 
-    # Force a fresh import so the stubs above take effect. The
-    # autouse `_restore_sys_modules` fixture above puts the prior
-    # cached modules back, so this is safe.
-    monkeypatch.delitem(sys.modules, "services.proactive_message_service", raising=False)
-    monkeypatch.delitem(sys.modules, "proactive_message_service", raising=False)
-
-    from services.proactive_message_service import ProactiveMessageService
-
-    return ProactiveMessageService(), fake_audit
+    return pms.ProactiveMessageService(), fake_audit
 
 
 def _run(coro):
@@ -179,6 +149,7 @@ def test_opt_in_check_is_bypassed(proactive_service):
 
     # Wire the db mock so `can_agent_message_email` would say NO if asked.
     import database
+
     database.db.can_agent_message_email = MagicMock(return_value=False)
 
     service._deliver_via_channel = AsyncMock(

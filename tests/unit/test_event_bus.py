@@ -30,7 +30,7 @@ import pytest
 # also needed, and it's stdlib-only.
 
 _BACKEND_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "src", "backend")
+    os.path.join(os.path.dirname(__file__), "..", "..", "src", "backend")
 )
 if _BACKEND_PATH not in sys.path:
     sys.path.insert(0, _BACKEND_PATH)

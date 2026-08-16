@@ -12,7 +12,6 @@ with the correct kwargs (`actor_agent_name` instead of `actor_type`/`actor_id`).
 import asyncio
 import os
 import sys
-import types
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -26,31 +25,30 @@ if _backend_path not in sys.path:
 
 @pytest.fixture
 def proactive_service(monkeypatch):
-    # Stub database.db — only used by other methods, not _audit_send.
-    fake_db_mod = types.ModuleType("database")
-    fake_db_mod.db = MagicMock()
-    monkeypatch.setitem(sys.modules, "database", fake_db_mod)
-
-    # Stub platform_audit_service with an AsyncMock for .log so we can assert call kwargs.
-    fake_audit_mod = types.ModuleType("services.platform_audit_service")
+    # #1895: patch the audit references IN PLACE on the already-imported
+    # proactive_message_service module — do NOT del + reimport it. `_audit_send`
+    # reads `platform_audit_service`/`AuditEventType` as module globals (via its
+    # __globals__), so monkeypatch.setattr on the module reaches it. The old
+    # approach re-imported the module under a stubbed audit and left that fresh
+    # module in sys.modules; every later unit test that captured the ORIGINAL
+    # module (e.g. test_1609's ProactiveMessageService instance) then diverged
+    # from the sys.modules entry a sibling test patched — the patch silently
+    # no-oped. Patching in place keeps the module's identity stable (island-safe)
+    # and monkeypatch restores the attributes at teardown.
+    import services.proactive_message_service as pms
 
     class _AuditEventType:
         PROACTIVE_MESSAGE = "proactive_message"
 
     fake_service = MagicMock()
     fake_service.log = AsyncMock(return_value="evt-1")
-    fake_audit_mod.platform_audit_service = fake_service
-    fake_audit_mod.AuditEventType = _AuditEventType
-    monkeypatch.setitem(sys.modules, "services.platform_audit_service", fake_audit_mod)
+    monkeypatch.setattr(pms, "platform_audit_service", fake_service)
+    monkeypatch.setattr(pms, "AuditEventType", _AuditEventType)
+    # db is only used by other methods, not _audit_send; stub it in place too so
+    # the constructor never touches a real DB.
+    monkeypatch.setattr(pms, "db", MagicMock())
 
-    # Fresh import so stubs take effect.
-    for mod in ("services.proactive_message_service", "proactive_message_service"):
-        if mod in sys.modules:
-            del sys.modules[mod]
-
-    from services.proactive_message_service import ProactiveMessageService
-
-    return ProactiveMessageService(), fake_service
+    return pms.ProactiveMessageService(), fake_service
 
 
 def test_audit_send_invokes_platform_audit_log(proactive_service):
@@ -124,6 +122,7 @@ def test_send_message_success_path_writes_success_audit(proactive_service, monke
 
     # 1. Authorization passes.
     from database import db as fake_db
+
     fake_db.can_agent_message_email = MagicMock(return_value=True)
 
     # 2. Rate limit passes (both helpers are sync; stub them).
@@ -133,7 +132,9 @@ def test_send_message_success_path_writes_success_audit(proactive_service, monke
     # 3. Delivery succeeds.
     from services.proactive_message_service import DeliveryResult
 
-    async def _fake_deliver(agent_name, recipient_email, text, channel, reply_to_thread):
+    async def _fake_deliver(
+        agent_name, recipient_email, text, channel, reply_to_thread
+    ):
         return DeliveryResult(success=True, channel=channel, message_id="msg-42")
 
     monkeypatch.setattr(service, "_deliver_via_channel", _fake_deliver)
