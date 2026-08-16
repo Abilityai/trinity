@@ -353,3 +353,42 @@ def cleanup_after_test():
     _restore_invariant_sys_modules()
     yield
     _restore_invariant_sys_modules()
+
+
+# ---------------------------------------------------------------------------
+# #1895: collection-time restore of the STATELESS shared modules.
+#
+# The autouse per-test restores above run only once collection has finished, so a
+# module that stubs a shared module at COLLECTION (e.g. test_voice_tools installs a
+# `config` stub with a fixed SECRET_KEY) leaks into a LATER file's collection-time
+# capture. test_voice_auth binds `from config import SECRET_KEY` at import and signs
+# JWTs with it, while routers.voice re-reads config.SECRET_KEY at request time — a
+# collection-time config divergence makes every signed token decode as "Invalid
+# token" (WS close 4001) order-dependently.
+#
+# This hook restores ONLY the modules already captured in the baseline above
+# (config, models, database, utils*), each a stateless module (constants /
+# functions / classes) whose object identity a test may capture but whose VALUE is
+# fixed. It deliberately does NOT touch services.settings_service or any other
+# singleton-holding module — those are reloaded by their tests and are confined at
+# the source instead (test_platform_default_model's autouse fixture), because
+# restoring a fresh singleton to a stale baseline is the divergence documented for
+# `agent_server` above.
+# ---------------------------------------------------------------------------
+_COLLECT_RESTORE_KEYS = (
+    "utils",
+    "utils.helpers",
+    "models",
+    "database",
+    "config",
+)
+
+
+def pytest_collectstart(collector):
+    if isinstance(collector, pytest.Module):
+        for _k in _COLLECT_RESTORE_KEYS:
+            _v = _SYS_MODULES_BASELINE_VALUES.get(_k)
+            if _v is not None:
+                sys.modules[_k] = _v
+
+
