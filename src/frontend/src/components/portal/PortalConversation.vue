@@ -223,7 +223,7 @@ import PortalTypeahead from './PortalTypeahead.vue'
 import {
   deliveryFailureReason,
   mentionedAgents,
-  REPLY_MAX_WAIT_MS_FALLBACK,
+  resolveWaitBudgetMs,
   applyTypeaheadInsert,
   boundCandidates,
   buildMentionToken,
@@ -282,12 +282,19 @@ async function loadThread(sessionId) {
   loadingHistory.value = true
   messages.value = []
   let inFlight = null
+  let inFlightBudget = null
+  let budgetReadAt = null
   try {
-    const { sessionId: resolved, messages: msgs, inFlightExecutionId } =
+    const { sessionId: resolved, messages: msgs, inFlightExecutionId, inFlightWaitBudgetSeconds } =
       await store.fetchHistory(props.agent.name, sessionId || null)
+    // #2214: the budget is the marker's REMAINING TTL, honest only from the
+    // instant it was measured — stamp that instant beside the fetch, not when
+    // the (possibly long) reattached stream later ends.
+    budgetReadAt = Date.now()
     currentSessionId.value = sessionId || resolved || null
     messages.value = (msgs || []).map((m) => ({ role: m.role, content: m.content }))
     inFlight = inFlightExecutionId
+    inFlightBudget = inFlightWaitBudgetSeconds
   } catch { /* start empty */ }
   finally { loadingHistory.value = false; await scrollDown() }
 
@@ -295,12 +302,15 @@ async function loadThread(sessionId) {
   // rather than showing a thread that looks finished. The user's message is
   // already in `messages` (persisted at dispatch), so what is missing is only
   // the "working" state and the reply.
-  if (inFlight) await reattach(inFlight)
+  if (inFlight) await reattach(inFlight, inFlightBudget, budgetReadAt)
 }
 
 // Rejoin a turn already in progress. The agent replays its buffered log before
 // streaming live, so a client that reloaded sees what it missed.
-async function reattach(executionId) {
+// #2214: `budgetSeconds` is the server's remaining wait budget for that turn
+// (the marker's TTL at read time) and `budgetReadAt` the instant it was read —
+// together they bound the wait the same way a fresh dispatch's 202 budget does.
+async function reattach(executionId, budgetSeconds, budgetReadAt) {
   if (sending.value) return
   sending.value = true
   streaming.value = true
@@ -315,7 +325,8 @@ async function reattach(executionId) {
   const baseline = messages.value.filter((m) => m.role === 'assistant').length
   try {
     await store.streamPortalExecution(props.agent.name, executionId, onStreamEvent)
-    const data = await awaitPersistedReply(currentSessionId.value, baseline)
+    const data = await awaitPersistedReply(currentSessionId.value, baseline,
+                                           budgetSeconds, budgetReadAt)
     if (data?.response) {
       messages.value.push({ role: 'assistant', content: data.response })
       // A reattached reply is still a reply the user just watched land, so it
@@ -717,17 +728,17 @@ const REPLY_POLL_MS = 700
 // into two minutes of spinner before the no-answer message appeared.
 const REPLY_IDLE_GIVE_UP_MS = 6_000
 
-// #2133: the absolute ceiling, for when the marker is ORPHANED rather than
-// merely slow — a hard backend kill skips the `finally` that clears it, and
-// `except Exception` does not catch `CancelledError`.
+// #2133/#2214: the absolute ceiling, for when the marker is ORPHANED rather
+// than merely slow — a hard backend kill skips the `finally` that clears it,
+// and `except Exception` does not catch `CancelledError`.
 //
-// The server sends the budget with the 202 (`wait_budget_seconds`) because the
-// server owns the turn timeout. This constant is only the fallback for an older
-// backend, and it is sized the same way: TWO full turns, because a failed
-// `--resume` re-runs the whole thing cold. A ceiling of one turn would declare a
-// live, already-billed cold retry "not delivered" — exactly what #2120 fixed,
-// on exactly the path it was fixed for.
-// (imported from portalUtils so a test can compare it to the server's value)
+// The server owns the turn timeout (per-agent since #2214) and sends the budget
+// with the 202 (`wait_budget_seconds`) and with the history response on
+// reattach (`in_flight_wait_budget_seconds` — the marker's remaining TTL). The
+// pick lives in portalUtils' `resolveWaitBudgetMs`: a positive server budget
+// wins, anything else falls back to a literal frozen at the pre-#2214 server
+// bound — see its comment for why that literal must never chase the new
+// arithmetic.
 
 // Polling every 700ms for ten minutes is ~850 history reads per tab. The reply
 // almost always lands in the first seconds, so the fast interval is what
@@ -755,9 +766,7 @@ async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds,
   // and the marker's disappearance would be read as "nothing running" instead
   // of tripping the ceiling. The two clocks now share an origin.
   const startedAt = dispatchedAtMs || Date.now()
-  const budgetMs = Number(budgetSeconds) > 0
-    ? Number(budgetSeconds) * 1000
-    : REPLY_MAX_WAIT_MS_FALLBACK
+  const budgetMs = resolveWaitBudgetMs(budgetSeconds)
   const deadline = startedAt + budgetMs
   const wait = () => new Promise((r) => setTimeout(r, replyPollInterval(Date.now() - startedAt)))
 

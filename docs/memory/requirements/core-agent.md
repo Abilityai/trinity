@@ -352,6 +352,36 @@
   plus a reattach poller, #1376/#759), so absorbing it into a non-streaming
   Workspace is not a regression. Workspace streaming is tracked separately in
   abilityai/trinity-enterprise#286 and is **not** a prerequisite of this change.
+- **Turn bound = the agent's own timeout (#2214, 2026-08-15)**: a Workspace turn
+  is bounded by the agent's `execution_timeout_seconds` (TIMEOUT-001, #665), not
+  a flat 300s constant. The engine owns the read —
+  `session_turn_service.resolve_turn_timeout(agent_name)`, beside
+  `resolve_lock_ttl` — read-side clamped to TIMEOUT-001's own range [60, 7200]
+  (the #506 stray-row pattern), fail-open to the platform default 3600 (the
+  *default*, deliberately not the lock's fallback-to-*cap*: an over-TTL lock is a
+  harmless auto-expiring key, an over-long turn is billable work).
+  `start_portal_turn` resolves **once per turn** and threads the same value to
+  the marker TTL, the 202 `wait_budget_seconds`, and the dispatch, so the three
+  cannot disagree; the derived bounds (`portal_attempt_ceiling_seconds` =
+  timeout + 10 + `_AUTO_RETRY_MAX_TIMEOUT_S` (imported, never copied);
+  `portal_max_turn_seconds` = 2 × ceiling + 60 — the cold retry re-runs the whole
+  turn) are pure functions of it, and the old module constants are deleted so a
+  missed consumer fails loudly at import. **No Workspace clamp below the agent
+  cap** — a clamp under 7200 re-introduces the silent-override bug for exactly
+  the upper half of the range TIMEOUT-001 sells; the accepted cost is a bigger
+  orphaned-marker window (hard-kill only — graceful shutdown clears the marker in
+  `finally`), absolute worst `portal_max_turn_seconds(7200)` = 15,080s, precedent
+  the Session surface's own ≤7230s in-flight sentinel. Operator recovery for an
+  orphaned marker: `DEL portal_inflight:{session}` (the same manual-DEL escape
+  the engine documents for its lock keys). A reloading client's wait budget rides
+  the history response (`in_flight_wait_budget_seconds` = the marker's remaining
+  TTL; fail-open to the full per-agent budget on an unreadable TTL), so reattach
+  respects the same bound. A turn that hits the bound 504s naming the agent's
+  limit. Configurability is by derivation: operators set the bound where they
+  already set the agent timeout (`PUT /api/agents/{name}/timeout`). Long-timeout
+  **headless** integrators should prefer the streaming route — the synchronous
+  `POST .../chat` holds a byte-silent HTTP response for the whole turn, which is
+  proxy read-timeout territory at hour scale.
 - **Flow**: `docs/memory/feature-flows/session-tab.md`
 
 ### 5.10 Workspace sidebar IA — agents block, starred chats, unread badges

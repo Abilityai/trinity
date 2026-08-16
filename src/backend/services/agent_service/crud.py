@@ -2476,6 +2476,185 @@ def _created_by_this_attempt(container, floor_ts: Optional[str]) -> bool:
         return False
 
 
+# #2215 D2: bounded port-bind-conflict retry around `_create_agent_container`.
+# The per-port Redis reservation (docker_service, D1) is fail-open, so a Redis
+# outage/restart, an expired reservation, or a foreign host process can still
+# surface as a bind failure at `containers.run` — this belt converges those
+# within the same create call, before the caller (e.g. a first-run seed deploy)
+# computes a permanently-latched `partial`.
+_PORT_BIND_RETRY_MAX_ATTEMPTS = 3
+
+
+def _is_port_bind_conflict(exc: BaseException) -> bool:
+    """True when the failure is Docker failing to BIND the published SSH port.
+
+    Deliberately NARROW — exactly two daemon phrasings:
+      * "port is already allocated"  (docker-proxy, native Linux)
+      * "address already in use"     (userland-proxy phrasing, Docker Desktop)
+    and deliberately NOT the generic "conflict": daemon-unreachable / timeout /
+    name-conflict errors must bubble immediately without burning retries.
+
+    NOTE the overlap with `_is_container_name_conflict`, whose text fallback
+    matches the bare substring "already in use" — which Docker Desktop's bind
+    failure CONTAINS. A bind conflict proves `containers.create` SUCCEEDED
+    (only the start/bind failed) — the exact opposite of a name conflict (the
+    daemon created NOTHING) — so wherever both could match, bind must be
+    classified FIRST (see `_reclaim_failed_creation_container`). Duck-typed,
+    cycle-guarded cause/context walk, mirroring `_is_container_name_conflict`
+    (never `isinstance` against the docker module — it may be a test double).
+    """
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        # Defensive str(): docker.errors.APIError.__str__ dereferences response
+        # attributes and can itself raise on a partial/stubbed response object —
+        # and this classifier runs inside the never-raises reclaim (D2b), where
+        # a raise would REPLACE the creation error being reported.
+        try:
+            text = str(exc).lower()
+        except Exception:
+            text = ""
+        if "port is already allocated" in text or "address already in use" in text:
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+async def _cleanup_bind_failed_container(agent_name: str, floor_ts: Optional[str]) -> bool:
+    """Remove the Created container a failed port bind left behind (#2215 D2).
+
+    A bind failure means `containers.create` succeeded and only the start
+    failed — the daemon holds a Created `agent-{name}` husk that would 409 the
+    next attempt's name. Runs on EVERY bind-classified attempt, the final one
+    included, so a bind husk is never handed to the generic ent#313 reclaim
+    still on the name.
+
+    Returns True only when the name is PROVABLY clear for another attempt
+    (husk removed, or no container exists). Returns False on ANY doubt —
+    ownership row present, lookup failure, unprovable provenance, removal
+    failure — so the caller aborts retries and re-raises the ORIGINAL bind
+    error (the outer ent#313 reclaim then takes its own gated removal shot via
+    the bind-before-name precedence guard there). Proceeding after a failed
+    removal would make the next attempt 409 against our OWN husk, which the
+    reclaim reads as "not ours" and strands.
+
+    The lookup is a direct `containers.get`, NOT `get_agent_container`: that
+    helper flattens a lookup FAILURE into "absent", and here absent means
+    "safe to retry" while failure must abort. NotFound is duck-typed off the
+    response status (the `_is_container_name_conflict` rationale — the docker
+    module may be a test double).
+    """
+    try:
+        if db.is_agent_name_reserved(agent_name):
+            # Ownership-gate parity with the ent#313 reclaim: on a shared
+            # daemon the name may be claimed by an agent that is not ours.
+            logger.warning(
+                "#2215: %s has an ownership row — leaving its container alone; "
+                "aborting port retries",
+                agent_name,
+            )
+            return False
+    except Exception as lookup_exc:  # noqa: BLE001 — fail closed
+        logger.warning(
+            "#2215: ownership lookup failed for %s (%s) — aborting port retries",
+            agent_name,
+            lookup_exc,
+        )
+        return False
+    try:
+        target = docker_client.containers.get(f"agent-{agent_name}")
+    except Exception as lookup_exc:  # noqa: BLE001
+        status = getattr(getattr(lookup_exc, "response", None), "status_code", None)
+        if status == 404:
+            # No husk — the daemon kept nothing; the name is clear.
+            return True
+        logger.warning(
+            "#2215: container lookup failed for %s (%s) — aborting port retries",
+            agent_name,
+            lookup_exc,
+        )
+        return False
+    if not _created_by_this_attempt(target, floor_ts):
+        logger.warning(
+            "#2215: a container named agent-%s exists but is not provably this "
+            "attempt's — aborting port retries",
+            agent_name,
+        )
+        return False
+    try:
+        await container_remove(target, force=True)
+    except Exception as remove_exc:  # noqa: BLE001
+        logger.warning(
+            "#2215: could not remove the bind-failed container for %s (%s) — "
+            "aborting port retries",
+            agent_name,
+            remove_exc,
+        )
+        return False
+    logger.info(
+        "#2215: removed the bind-failed container for %s before the port retry",
+        agent_name,
+    )
+    return True
+
+
+async def _run_agent_container_with_port_retry(
+    config: AgentConfig,
+    volumes: dict,
+    env_vars: dict,
+    current_user: User,
+    ephemeral_expires_at: Optional[str],
+    handles: "_RollbackHandles",
+    auto_allocated_port: bool,
+):
+    """`_create_agent_container` with a bounded port-bind-conflict retry (#2215).
+
+    The D1 reservation is fail-open, so a collision can still surface at
+    `containers.run` (Redis down/restarted, reservation expired, a foreign
+    process on the host). On a bind-classified failure, in strict order:
+    (1) record the failed port; (2) clean up the leaked husk — on EVERY
+    bind-classified attempt, the final one included; (3) if attempts remain,
+    re-allocate with the failed ports excluded and retry. Bounded at
+    `_PORT_BIND_RETRY_MAX_ATTEMPTS` total attempts, and gated on the port
+    having been AUTO-allocated — a caller-pinned port never silently moves.
+    Any cleanup doubt aborts and re-raises the ORIGINAL bind error, never the
+    cleanup error. Mutating `config.port` between attempts is safe: it is
+    consumed only inside `_create_agent_container` (label + ports map, rebuilt
+    per call) and no DB copy of the port exists anywhere.
+    """
+    attempted_ports: set = set()
+    attempt = 1
+    while True:
+        try:
+            return await _create_agent_container(
+                config, volumes, env_vars, current_user, ephemeral_expires_at
+            )
+        except Exception as exc:  # noqa: BLE001 — non-bind re-raised immediately
+            if not auto_allocated_port or not _is_port_bind_conflict(exc):
+                raise
+            attempted_ports.add(config.port)
+            if not await _cleanup_bind_failed_container(
+                config.name, handles.container_floor_ts
+            ):
+                # Cleanup doubt: abort — the bare raise re-raises the ORIGINAL
+                # bind error, so the outer ent#313 reclaim gets its own shot.
+                raise
+            if attempt >= _PORT_BIND_RETRY_MAX_ATTEMPTS:
+                raise
+            new_port = get_next_available_port(exclude=attempted_ports)
+            logger.warning(
+                "#2215: port %s was already bound — retrying %s on port %s "
+                "(attempt %d/%d)",
+                config.port,
+                config.name,
+                new_port,
+                attempt + 1,
+                _PORT_BIND_RETRY_MAX_ATTEMPTS,
+            )
+            config.port = new_port
+            attempt += 1
+
+
 async def _reclaim_failed_creation_container(
     handles: _RollbackHandles, container, exc: BaseException
 ) -> None:
@@ -2538,7 +2717,12 @@ async def _reclaim_failed_creation_container(
         return
 
     if target is None:
-        if _is_container_name_conflict(exc):
+        # #2215 D2b: classify bind-conflict BEFORE the name-conflict decline —
+        # Docker Desktop's bind failure ("… bind: address already in use")
+        # contains the name-conflict text fallback's substring, but a bind
+        # conflict proves the create SUCCEEDED, so fall through to the
+        # fail-closed lookup + ownership + provenance gates instead.
+        if _is_container_name_conflict(exc) and not _is_port_bind_conflict(exc):
             logger.info(
                 "ent#313: creation of %s hit a container-name conflict — the "
                 "existing container is not ours, leaving it untouched",
@@ -2842,8 +3026,10 @@ async def create_agent_internal(
     if config.runtime:
         config.runtime = config.runtime.lower()
 
-    if config.port is None:
-        config.port = get_next_available_port()
+    # #2215: the SSH-port allocation moved INTO the docker try-block below (just
+    # before the container run) — see the comment there. `config.port` is
+    # consumed only by `_create_agent_container`, so nothing between here and
+    # there needs it.
 
     # CRED-002: Credentials are now injected directly into agents after creation
     # via the inject_credentials endpoint, not auto-injected during creation.
@@ -2942,8 +3128,33 @@ async def create_agent_internal(
                 cred_files_volume,
                 tr.template_shared_folders,
             )
-            container = await _create_agent_container(
-                config, volumes, env_vars, current_user, ephemeral_expires_at
+            # #2215: allocate the SSH port HERE — inside the rollback fence and
+            # as close to `containers.run` as possible. Two reasons it is not
+            # up with the other pre-try resolution steps: (1) the allocator now
+            # fails LOUD on a Docker listing fault (a swallowed fault would
+            # allocate 2222 over the existing fleet), and a raise before this
+            # try would strand the `agent_git_config` reservation
+            # `_resolve_template` already wrote — after which every create of
+            # that name fails `agent_git_config already exists`, Cornelius's
+            # next-boot retry included; (2) the per-port Redis reservation is
+            # TTL-bounded (600s), so the ent#15 snapshot prepopulate and the
+            # volume builds above must not eat into it. `auto_allocated_port`
+            # is captured BEFORE the mutation — captured after it, the gate is
+            # always-False and the bind-conflict retry ships dead. Only an
+            # auto-allocated port may move between attempts; a caller-pinned
+            # port never silently changes (a published port differing from the
+            # requested one is a surprise with security texture).
+            auto_allocated_port = config.port is None
+            if config.port is None:
+                config.port = get_next_available_port()
+            container = await _run_agent_container_with_port_retry(
+                config,
+                volumes,
+                env_vars,
+                current_user,
+                ephemeral_expires_at,
+                handles,
+                auto_allocated_port,
             )
             created_container = container
             agent_status = get_agent_status_from_container(container)

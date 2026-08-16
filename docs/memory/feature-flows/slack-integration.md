@@ -381,14 +381,17 @@ expected_signature = 'v0=' + hmac.new(
 
 ### Authorization Checks
 
-Uses standard codebase access control methods (consistent with other routers):
+Auth is enforced through the shared #1310 imperative guards (`assert_agent_*` in
+`dependencies.py`), which wrap the standard `db.can_user_*` predicates — consistent
+with other routers. #1710 migrated these off the inline `if not db.can_user_*: raise`
+shape and retired the `# noqa: inv8` carve-out; the 403 + detail is unchanged.
 
 | Endpoint | Check | Method | File:Line |
 |----------|-------|--------|-----------|
-| Connect Slack | Owner or admin | `db.can_user_share_agent()` | `routers/slack.py:460` |
-| Disconnect | Owner or admin | `db.can_user_share_agent()` | `routers/slack.py:495` |
-| Update | Owner or admin | `db.can_user_share_agent()` | `routers/slack.py:522` |
-| Get status | Any access level | `db.can_user_access_agent()` | `routers/slack.py:425` |
+| Connect Slack | Owner or admin | `assert_agent_owner()` → `db.can_user_share_agent()` | `routers/slack.py:249` |
+| Disconnect | Owner or admin | `assert_agent_owner()` → `db.can_user_share_agent()` | `routers/slack.py:338` |
+| Update | Owner or admin | `assert_agent_owner()` → `db.can_user_share_agent()` | `routers/slack.py:360` |
+| Get status | Any access level | `assert_agent_access()` → `db.can_user_access_agent()` | `routers/slack.py:214` |
 
 ## Error Handling
 
@@ -773,3 +776,4 @@ The #311 gate — for **workspace-connected agents** routed via the channel adap
 | 2026-03-12 | Claude | Fixed `initiate_slack_oauth()` to use `get_slack_signing_secret()` from settings_service instead of importing from config.py |
 | 2026-04-12 | Claude | Added `SlackAdapter.resolve_verified_email` for unified cross-channel access control (#311) — see [unified-channel-access-control.md](unified-channel-access-control.md) |
 | 2026-05-05 | Claude | Encrypted `slack_link_connections.slack_bot_token` at rest via AES-256-GCM (#453, Invariant #12). Same pattern as `db/slack_channels.py`, `telegram_channels.py`, `whatsapp_channels.py`. One-shot migration `slack_bot_token_encryption` walks both `slack_link_connections` and `slack_workspaces` and re-encrypts any plaintext `xoxb-*` rows on next backend startup. Read path includes plaintext fallback so runtime works pre-migration. 14 unit tests in `tests/unit/test_slack_token_encryption.py`. |
+| 2026-08-16 | Andrii | Migrated slack.py's inline auth gates onto the shared #1310 imperative guards (`assert_agent_access`/`assert_agent_owner`) and retired the `# noqa: inv8` carve-out (#1710). Behavior-preserving — same 403 + detail string; site #10's ent#223 human-only `reject_agent_principal` guard kept. |

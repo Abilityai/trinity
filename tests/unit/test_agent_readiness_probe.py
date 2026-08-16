@@ -49,6 +49,7 @@ def wait_for_agent_ready(monkeypatch):
         "services.docker_service": types.SimpleNamespace(
             docker_client=None, get_agent_container=lambda _n: None,
             get_next_available_port=lambda: 2222,  # added to lifecycle.py import (#1559 recreate path)
+            reserve_port_for_recreate=lambda _p: None,  # added to lifecycle.py import (#2215)
         ),
         "services.docker_utils": types.SimpleNamespace(
             container_stop=None, container_remove=None, container_start=None,

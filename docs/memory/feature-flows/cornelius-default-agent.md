@@ -59,7 +59,8 @@ Gates, in order (all fail-open / idempotent — a skip or error never blocks boo
 
 ## Error Handling
 - Every trigger backgrounds `ensure_seeded()` and swallows exceptions (logged) — a provisioning failure (e.g. Docker briefly unreachable) leaves `cornelius_seeded` **unset**, so the next boot's lifespan safety-net retries. Setup never fails because Cornelius didn't seed.
-- Concurrent workers: the SETNX lock means only one attempts provisioning; the loser no-ops.
+- **Operator visibility (#2215)**: a `create_failed`/`create_blocked` result (or a raise despite never-raises, caught by the orchestrator's belt-except) is no longer log-only — `ensure_first_run_seeded()` raises a `system-seed-cornelius-failed` operator-queue alert (reserved `system-seed-` prefix, sanitized message + logs pointer); the flag stays unset so the next-boot retry remains the recovery mechanism.
+- Concurrent workers: the SETNX lock means only one attempts provisioning; the loser no-ops. **#2215**: additionally, the whole first-run pass (Cornelius + default-system seed) runs under one pass-level lock (`first_run_seed:provision`, token + compare-and-delete, TTL 900s, fail-open) — the loser skips BOTH seeders, so one worker's slow Cornelius clone can no longer run concurrently with another worker's fleet deploy (the SSH-port-collision burst).
 
 ## Known Deviation (AC5 — local bundle, no upstream origin)
 Because the default Cornelius is a **LOCAL bundle** (not github-native), it has **no git `origin`** — it will **not** auto-`git pull` upstream template updates the way a `github:` / fork-to-own agent does. Durable, upstream-tracking ownership of the default Cornelius is deferred to **fork-to-own** (trinity-enterprise#109). This is the accepted Path-B tradeoff: instant, offline, credential-free first-run provisioning in exchange for no automatic upstream sync.
