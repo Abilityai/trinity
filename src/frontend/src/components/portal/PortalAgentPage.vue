@@ -18,6 +18,15 @@
             <span class="inline-flex items-center gap-1.5">
               <span class="w-2 h-2 rounded-full" :class="healthDot"></span>{{ healthLabel }}
             </span>
+            <!-- #2196: availability is its OWN labelled fact, beside health and
+                 never folded into that dot. The two differ in freshness by
+                 construction — health is the last persisted agent_health_checks
+                 row (stale by design, and `unknown` on most installs because
+                 monitoring is default-OFF), while this is read at request time.
+                 One widget carrying both would tell the viewer neither. -->
+            <span v-if="availability" class="inline-flex items-center gap-1.5" :title="availability.title">
+              <span class="w-2 h-2 rounded-full" :class="availabilityDot"></span>{{ availability.label }}
+            </span>
             <span v-if="page?.header?.last_active">Last active {{ relative(page.header.last_active) }}</span>
           </div>
         </div>
@@ -367,7 +376,7 @@ import LoadFailed from '@/components/LoadFailed.vue'
 import ReportRenderer from '@/components/reports/ReportRenderer.vue'
 import ReportSummary from '@/components/reports/ReportSummary.vue'
 import PortalAvatar from './PortalAvatar.vue'
-import { PORTAL_BUCKET_LABELS } from './portalUtils'
+import { PORTAL_BUCKET_LABELS, availabilityChip } from './portalUtils'
 
 const props = defineProps({
   agentName: { type: String, required: true },
@@ -455,6 +464,16 @@ const healthLabel = computed(() => ({
 const healthDot = computed(() => ({
   healthy: 'bg-status-success-500', unhealthy: 'bg-status-danger-500', degraded: 'bg-status-warning-500',
 }[page.value?.header?.health?.status] || 'bg-gray-300 dark:bg-gray-600'))
+
+// #2196: the same pure rule the sidebar row uses — one decision, four surfaces.
+// `owner` comes off the header so the copy can name who to ask.
+const availability = computed(() => availabilityChip(
+  { availability: page.value?.header?.availability, owner: page.value?.header?.owner },
+  { detailed: store.isPlatformSession },
+))
+const availabilityDot = computed(() => ({
+  warning: 'bg-status-warning-500', danger: 'bg-status-danger-500',
+}[availability.value?.variant] || 'bg-gray-300 dark:bg-gray-600'))
 
 // AC5 (#2160): `${name}:${window}` cache, the convention `stores/executions.js`
 // already uses. Flipping 7d → 30d → 7d refetched an identical payload every

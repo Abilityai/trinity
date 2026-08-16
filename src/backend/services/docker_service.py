@@ -3,7 +3,7 @@ Docker service for managing agent containers.
 """
 import logging
 import time
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 import docker
 from models import AgentStatus
 from redis_breaker_util import get_breaker_redis
@@ -21,6 +21,27 @@ logger = logging.getLogger(__name__)
 # under a race is harmless.
 _SOCKET_WARN_THROTTLE_S = 60.0
 _last_socket_warn_monotonic: Optional[float] = None
+
+# #2196: the tri-state readers below get their OWN throttle slots. Sharing
+# `_last_socket_warn_monotonic` would let whichever function warned first
+# silence the others for a full window — so a persistent fault on the roster
+# path could go unlogged because an unrelated poll had just reported it.
+_last_warn_monotonic: Dict[str, float] = {}
+
+
+def _warn_throttled(slot: str, message: str, *args) -> None:
+    """WARN at most once per `_SOCKET_WARN_THROTTLE_S` per `slot` (#2196).
+
+    Same rationale as `list_all_agents_fast`'s throttle: a denied socket is a
+    persistent condition on a per-request path, so an unthrottled warn floods
+    Vector — but the failure must stay diagnosable, and a silent Docker fault is
+    exactly what makes the tri-state distinction unverifiable in production.
+    """
+    now = time.monotonic()
+    last = _last_warn_monotonic.get(slot)
+    if last is None or now - last >= _SOCKET_WARN_THROTTLE_S:
+        _last_warn_monotonic[slot] = now
+        logger.warning(message, *args)
 
 
 # Initialize Docker client
@@ -236,6 +257,121 @@ def list_all_agents_fast() -> List[AgentStatus]:
             _last_socket_warn_monotonic = now
             logger.warning("Failed to list agents from Docker: %s", e)
         return []
+
+
+# #2196: the tri-state container-state readers.
+#
+# NO pre-existing helper in this module can distinguish "Docker says this agent
+# has no container" from "Docker could not be asked": `get_agent_container`
+# returns None for both, and `list_all_agents_fast` returns [] for both. That one
+# missing distinction is why a naive "hide agents with no container" reconcile is
+# dangerous — a daemon restart or a wrong `group_add` GID would report the whole
+# fleet as absent, which on the client-facing Workspace roster means telling a
+# paying customer they have no agents.
+#
+# So these two return `None` for *unreadable* and a real answer otherwise, and
+# every consumer is expected to treat `None` as "render as if nothing changed".
+# `list_all_agents_fast`'s []-on-fault contract is deliberately NOT changed —
+# ~60 stub sites and many callers depend on it.
+
+
+def agent_container_states() -> Optional[Dict[str, str]]:
+    """Every Trinity agent container's coarse state, in ONE Docker round trip.
+
+    Returns ``{agent_name: "running" | "stopped"}``, or ``None`` when Docker
+    could not be asked. ``{}`` is a real answer ("Docker looked; there are no
+    agent containers") and is deliberately distinct from ``None``.
+
+    ``sparse=True`` is load-bearing, and it constrains the body:
+
+    * Without it, docker-py's ``ContainerCollection.list`` runs a FULL INSPECT
+      per container (``containers.append(self.get(r['Id']))``), so this would
+      cost ``1 list + N_fleet inspects`` — worse than the N_roster inspects it
+      replaces for the typical 1-3-agent Workspace client on a large fleet.
+      With it, the cost is one HTTP call regardless of fleet size.
+    * Under sparse, ``container.name`` returns **None** (the summary carries
+      ``Names``, a list, not ``Name``) and ``container.labels`` **raises**
+      ``DockerException``. Both fail in the *safe* direction — every caller
+      would read "unknown" forever with a green test suite — so the key is taken
+      from ``attrs["Names"][0]`` and the label is never read here.
+      ``container.status`` is safe: its property handles both shapes.
+
+    Keyed by container NAME, never by the ``trinity.agent-name`` label: rename
+    moves the container name (``docker_utils.container_rename``) while the label
+    is written once at create and goes stale, so label-keying would report every
+    renamed agent as having no container. Same reason
+    ``list_all_agents_fast`` says "use container name as authoritative source".
+
+    The status is classified EXPLICITLY. ``list_all_agents_fast`` falls through
+    with ``else: normalized_status = docker_status``, which passes ``paused``,
+    ``restarting`` and — routinely, during any delete — ``removing`` straight to
+    the caller; consumers of this function map the result onto a closed set, so a
+    raw status escaping here would fail their validation instead of degrading.
+    """
+    if not docker_client:
+        return None
+    try:
+        containers = docker_client.containers.list(
+            all=True,
+            filters={"label": "trinity.platform=agent"},   # server-side; unaffected by sparse
+            sparse=True,
+        )
+        states: Dict[str, str] = {}
+        for container in containers:
+            raw = (container.attrs.get("Names") or [""])[0] or ""
+            name = raw.lstrip("/").removeprefix("agent-")
+            if not name:
+                continue
+            states[name] = "running" if container.status == "running" else "stopped"
+        return states
+    except Exception as e:  # noqa: BLE001 — unreadable Docker is a valid answer here
+        # Total by design: anything unexpected (no daemon, denied socket, a shape
+        # this code does not understand) resolves to "could not be asked", which
+        # every consumer renders as today's behaviour. A partial map would be
+        # worse — a skipped entry reads as "that agent has no container".
+        _warn_throttled(
+            "agent_container_states",
+            "Failed to read agent container states from Docker: %s", e,
+        )
+        return None
+
+
+def agent_container_state(name: str) -> Optional[str]:
+    """One agent's coarse state: ``"running"``/``"stopped"``/``"missing"``, or
+    ``None`` when Docker could not be asked.
+
+    The single-agent form exists so opening ONE agent's page (or taking one
+    turn) does not pay a fleet-scale read — the property #2160 exists to
+    protect. ``containers.get()`` is not sparse, so ``.labels`` is readable
+    here, and the ``trinity.platform`` check is what makes the two forms answer
+    the SAME question: the batch call filters on that label server-side, so
+    without this check a container merely *named* ``agent-x`` would read as
+    absent on the roster and present on the page.
+    """
+    if not docker_client:
+        return None
+    try:
+        container = docker_client.containers.get(f"agent-{name}")
+    except docker.errors.NotFound:
+        # The distinction `get_agent_container` cannot make: Docker answered,
+        # and the answer is "there is no such container".
+        return "missing"
+    except Exception as e:  # noqa: BLE001
+        _warn_throttled(
+            "agent_container_state",
+            "Failed to read container state for agent %s from Docker: %s", name, e,
+        )
+        return None
+    try:
+        if (container.labels or {}).get("trinity.platform") != "agent":
+            return "missing"
+        return "running" if container.status == "running" else "stopped"
+    except Exception as e:  # noqa: BLE001
+        _warn_throttled(
+            "agent_container_state",
+            "Failed to classify container state for agent %s: %s", name, e,
+        )
+        return None
 
 
 def get_agent_by_name(name: str) -> Optional[AgentStatus]:

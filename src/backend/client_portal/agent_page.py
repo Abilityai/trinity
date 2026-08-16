@@ -283,6 +283,14 @@ def build_page(email: str, agent_name: str, card: Optional[dict],
             "avatar_url": card.get("avatar_url"),
             "owner": card.get("owner"),
             "health": _health(agent_name),
+            # #2196: a projection of the card the caller already resolved, NOT a
+            # second Docker read — and `or "unknown"`, never a bare `.get`.
+            # `card` is documented-reachable as None (the agent vanished between
+            # the roster read and this one), which `card = card or {}` above
+            # turns into an explicit None here; a Literal-with-default REJECTS
+            # an explicit None, so the bare form would 500 the one page ent#360
+            # built to always render.
+            "availability": card.get("availability") or "unknown",
             "last_active": _last_active(agent_name),
         },
         # "What it can do" — a projection of the briefing the roster already

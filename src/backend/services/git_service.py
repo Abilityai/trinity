@@ -513,6 +513,16 @@ _DATA_PATHS_PATH = "/home/developer/.trinity/data-paths.yaml"
 # runtime data never lands in a commit.
 _DATA_ROOT_GITIGNORE = "data/"
 
+# #1704: declared Claude Code plugin selection (marketplaces + installed
+# plugins). Unlike persistent-state.yaml / data-paths.yaml this file is
+# COMMITTED — it is in `_TRINITY_AUTHORED_PATHS`, so it rides the #2070
+# contents-only re-include and survives a git-based reconstitution onto a
+# fresh volume or a new host (the real #1704 gap; a plain recreate is already
+# volume-safe). The boot hook (`agent_server.plugins_reinstall`) reads it and
+# re-installs anything declared-but-missing. Opt-in — empty declaration writes
+# no file.
+_PLUGINS_PATH = "/home/developer/.trinity/plugins.yaml"
+
 
 # ---------------------------------------------------------------------------
 # Shared `.trinity/<file>.yaml` list primitives (#1169)
@@ -522,6 +532,34 @@ _DATA_ROOT_GITIGNORE = "data/"
 # heredoc delimiter is a parameter so each caller keeps its own marker (the
 # S4 tests pin `PSTATE_EOF`).
 # ---------------------------------------------------------------------------
+
+
+async def _write_trinity_yaml_file(
+    agent_name: str,
+    *,
+    path: str,
+    body: str,
+    heredoc: str,
+    timeout: int = 10,
+) -> None:
+    """Write a pre-serialized YAML `body` to `path` inside the agent container.
+
+    THE single container-write mechanism for every `.trinity/*.yaml` the backend
+    materializes (#953: never hand-roll a raw container write). The single-quoted
+    heredoc preserves the body verbatim and is injection-safe (no shell expansion
+    inside `<<'HEREDOC'`); callers keep the body's values free of the outer
+    `bash -c "..."` metacharacters (`$`, backtick, `"`, `\\`) — which the reused
+    `_SAFE_DATA_PATH_RE` / `template_plugins` charset validators guarantee.
+    """
+    cmd = (
+        f"mkdir -p /home/developer/.trinity && "
+        f"cat > {path} <<'{heredoc}'\n{body}{heredoc}"
+    )
+    await execute_command_in_container(
+        container_name=f"agent-{agent_name}",
+        command=f'bash -c "{cmd}"',
+        timeout=timeout,
+    )
 
 
 async def materialize_trinity_yaml_list(
@@ -541,14 +579,8 @@ async def materialize_trinity_yaml_list(
     import yaml as _yaml
 
     body = _yaml.safe_dump({key: list(patterns)}, sort_keys=False)
-    cmd = (
-        f"mkdir -p /home/developer/.trinity && "
-        f"cat > {path} <<'{heredoc}'\n{body}{heredoc}"
-    )
-    await execute_command_in_container(
-        container_name=f"agent-{agent_name}",
-        command=f'bash -c "{cmd}"',
-        timeout=timeout,
+    await _write_trinity_yaml_file(
+        agent_name, path=path, body=body, heredoc=heredoc, timeout=timeout
     )
 
 
@@ -692,6 +724,48 @@ async def _data_paths_for(agent_name: str) -> list[str]:
         path=_DATA_PATHS_PATH,
         key="data_paths",
         default=DEFAULT_DATA_PATHS,
+    )
+
+
+async def materialize_plugins(agent_name: str, plugins: dict) -> None:
+    """Materialize an agent's declared Claude Code plugins (#1704).
+
+    Writes `.trinity/plugins.yaml` as nested
+    `{plugins: {marketplaces: [{name, source}], installed: ["plugin@mkt"]}}` via
+    the shared injection-safe heredoc writer. The file is COMMITTED (it is in
+    `_TRINITY_AUTHORED_PATHS`), so the declaration survives a git-based
+    reconstitution onto a fresh volume or a new host, where the gitignored
+    `~/.claude.json` + `~/.claude/plugins/` cache are dropped.
+
+    `plugins` is the ALREADY-normalized dict from
+    `template_plugins.normalize_declared_plugins` — every value is
+    charset-validated, so the nested body is safe inside the outer `bash -c`
+    double quotes (see `_write_trinity_yaml_file`).
+
+    Opt-in: a falsy declaration (`{}` / None / no marketplaces + no installed)
+    is a complete no-op — no file is written.
+
+    Determinism (a correctness property): `sort_keys=True` + the normalizer's
+    sorted, de-duplicated lists mean a stable plugin set produces a byte-
+    identical file, so the 15-min auto-sync loop never re-commits a churning
+    manifest — unlike the flat `materialize_trinity_yaml_list` (`sort_keys=False`).
+    """
+    import yaml as _yaml
+
+    if not isinstance(plugins, dict):
+        return
+    marketplaces = plugins.get("marketplaces") or []
+    installed = plugins.get("installed") or []
+    if not marketplaces and not installed:
+        return
+
+    body = _yaml.safe_dump(
+        {"plugins": {"marketplaces": marketplaces, "installed": installed}},
+        sort_keys=True,
+        default_flow_style=False,
+    )
+    await _write_trinity_yaml_file(
+        agent_name, path=_PLUGINS_PATH, body=body, heredoc="PLUGINS_EOF"
     )
 
 
@@ -1298,6 +1372,14 @@ _TRINITY_AUTHORED_PATHS: Tuple[str, ...] = (
     ".trinity/brain-orb/",      # brain-orb convention hooks (#58/#60)
     ".trinity/pipelines/",      # agent-defined pipeline DEFINITIONS (#919);
                                 # instance STATE lives in pipeline-state/
+    # #1704: declared Claude Code plugin selection (marketplaces + installed).
+    # COMMITTED — unlike persistent-state.yaml / data-paths.yaml (volume-local,
+    # re-materialized at creation), this must survive a git-based reconstitution
+    # onto a fresh volume or a new host, the gap #1704 closes. This entry alone
+    # yields both the `!` re-include and the `git rm --cached` exemption, so the
+    # manifest is committable while `.claude.json` and `.claude/plugins/` (#1705)
+    # stay gitignored.
+    ".trinity/plugins.yaml",
 )
 
 

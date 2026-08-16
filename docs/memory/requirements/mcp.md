@@ -546,6 +546,24 @@ are *refused* by `ipaddress` rather than folded, so the normalisation can never
 equate two addresses a resolver would treat differently. The card stays a hint: a
 card declaring a different address, port or scheme is still refused.
 
+#### FR-5b — A blank credential means "leave it alone", in every spelling (#2175 F5b)
+`upsert_endpoint` documents three credential paths — omit (leave), set,
+`clear_credential` (remove). A whitespace-only value was a fourth: it skipped the
+header-safety check (`if credential.strip() and …`) and then took the
+`elif credential:` branch, because `"   "` is truthy, writing `""`. So `None` and
+`""` preserved the stored secret while `"   "` destroyed it. Not reachable over
+HTTP (`A2AOutboundEndpointUpsert._validate_credential` normalises a blank
+`SecretStr` to `None`, so the API surface is honest) — a public-module-function
+defect, over a partner secret the caller may hold no other copy of.
+
+Every blank spelling now collapses to `None` in ONE normalisation applied after
+the validity checks and before either write path, so a future third write site
+cannot reintroduce the fourth path. `clear_credential` stays the only removal
+path. The length cap is still measured on the raw value, so the bound an operator
+is told about does not move when their secret carries surrounding whitespace, and
+the header-safety guard still refuses a credential with an *interior* space —
+only an entirely blank one is "leave it alone".
+
 #### FR-6 — `message/send` only; no SSE; no fake `stream` parameter
 Filed AC4 (stream token chunks back to the calling agent over SSE) is
 **rejected**: an MCP tool call is one request and one response — a FastMCP

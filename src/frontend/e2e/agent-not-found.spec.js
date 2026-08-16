@@ -52,9 +52,39 @@ test.describe('agent detail — not found', () => {
     await expect(panel).not.toContainText(/no such agent|does not exist on this instance|was deleted/i)
   })
 
+  test('@smoke the missing agent is fetched ONCE, not twice (#2198 AC 3)', async ({ page }) => {
+    // AgentDetail is KeepAlive'd (App.vue), so Vue fires onMounted AND
+    // onActivated on the first mount and BOTH awaited `loadAgent()` — two
+    // identical 404s for one navigation. The store now joins the in-flight
+    // request, and the first-activation sentinel stops the second call being
+    // made at all.
+    //
+    // The URL shape test is the same one the 500 case below uses: it isolates
+    // the single-agent GET from `/api/agents`, `/api/agents/sync-health`, etc.
+    let singleAgentGets = 0
+    await page.route('**/api/agents/*', (route) => {
+      if (/\/api\/agents\/[^/?]+(\?|$)/.test(route.request().url())) singleAgentGets++
+      return route.continue()
+    })
+
+    await page.goto(`/agents/${MISSING_AGENT}`)
+    await expect(page.getByTestId('agent-not-found')).toBeVisible({ timeout: 10000 })
+    // Settle past the point where a second hook, a route watcher or a status
+    // watcher would have fired.
+    await page.waitForTimeout(3000)
+
+    expect(singleAgentGets).toBe(1)
+  })
+
   test('@smoke a non-404 failure shows a retryable load error, not the not-found state', async ({ page }) => {
     // Retrying a 404 is pointless; retrying a 500/network blip is not. The two
     // failures must stay visually and behaviourally distinct.
+    //
+    // #2198 note: this interceptor now fires ONCE instead of twice, because the
+    // store joins the two concurrent callers. The assertion still holds — the
+    // rejection propagates to every joiner, so `loadAgent`'s catch runs exactly
+    // as before — but the change in observed traffic is deliberate, not a
+    // symptom.
     await page.route('**/api/agents/*', (route) => {
       const url = route.request().url()
       // Only the single-agent GET — leave /api/agents, /sync-health, etc. alone.

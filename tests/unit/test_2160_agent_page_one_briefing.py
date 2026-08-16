@@ -54,9 +54,16 @@ def _rows(names, **extra):
 def svc(monkeypatch):
     from client_portal import service as s
 
+    counted = {"batch": 0, "single": 0}
+
     briefed = []
 
-    async def counting_briefing(name):
+    # #2196 gave `_agent_briefing` a second parameter: the container state the
+    # caller already resolved (it used to make that Docker call itself, per card,
+    # and discard the answer). A 1-arg stub here would raise TypeError inside
+    # `get_roster`'s list comprehension — synchronously, OUTSIDE `gather`, so the
+    # whole roster call would raise rather than degrade.
+    async def counting_briefing(name, availability="ready"):
         briefed.append(name)
         return ("desc", [])
 
@@ -64,14 +71,31 @@ def svc(monkeypatch):
     monkeypatch.setattr(s.db, "get_owned_roster", lambda e: [])
     monkeypatch.setattr(s, "_agent_briefing", counting_briefing)
 
+    # #2196: pin the container-state seams. `docker.from_env()` runs at import
+    # and conftest re-imports that module after every test, so on a machine with
+    # Docker up these would answer for real and the fixture's agents — which have
+    # no containers — would all read "unavailable". Stubbed here so the counts
+    # below stay about briefings, and the availability assertions stay about the
+    # code rather than about the developer's daemon.
+    async def _map(names):
+        counted["batch"] += 1
+        return {n: "ready" for n in names}
+
+    async def _one(name):
+        counted["single"] += 1
+        return "ready"
+
+    monkeypatch.setattr(s, "_availability_map", _map)
+    monkeypatch.setattr(s, "_agent_availability", _one)
+
     import services.tts_service as tts
     monkeypatch.setattr(tts, "is_available", lambda: False)
-    return s, briefed
+    return s, briefed, counted
 
 
 def test_one_agents_page_costs_one_briefing(svc):
     """The fix. Twelve agents in the fleet, one briefing issued."""
-    s, briefed = svc
+    s, briefed, _counted = svc
 
     card = asyncio.run(s.get_agent_card(EMAIL, "agent-3"))
 
@@ -82,7 +106,7 @@ def test_one_agents_page_costs_one_briefing(svc):
 def test_the_roster_still_briefs_everyone(svc):
     """The comparison that makes the number above meaningful — and the roster's
     own behaviour is deliberately unchanged (its cards all need briefings)."""
-    s, briefed = svc
+    s, briefed, _counted = svc
 
     asyncio.run(s.get_roster(EMAIL))
 
@@ -93,7 +117,7 @@ def test_the_cost_does_not_grow_with_the_fleet(svc, monkeypatch):
     """The property that actually matters: a bigger fleet must not make one
     agent's page slower. A count taken on a 2-agent fixture would have passed
     against the original code too."""
-    s, briefed = svc
+    s, briefed, _counted = svc
     monkeypatch.setattr(s.db, "get_shared_roster", lambda e: _rows([f"a{i}" for i in range(200)]))
 
     asyncio.run(s.get_agent_card(EMAIL, "a137"))
@@ -104,7 +128,7 @@ def test_the_cost_does_not_grow_with_the_fleet(svc, monkeypatch):
 def test_an_agent_off_the_roster_yields_no_card_and_no_briefing(svc):
     """The caller has already gated access, so None means "vanished between the
     two reads" — and an agent we will not render must not be contacted."""
-    s, briefed = svc
+    s, briefed, _counted = svc
 
     assert asyncio.run(s.get_agent_card(EMAIL, "not-mine")) is None
     assert briefed == []
@@ -115,7 +139,7 @@ def test_owned_agents_are_reachable_only_for_a_platform_session(svc, monkeypatch
     external client sees only what was shared, a platform session also sees what
     it owns. A second rule here would let the page reach an agent the sidebar
     does not list."""
-    s, _ = svc
+    s, _briefed, _counted = svc
     monkeypatch.setattr(s.db, "get_shared_roster", lambda e: [])
     monkeypatch.setattr(s.db, "get_owned_roster", lambda e: _rows(["mine"]))
 
@@ -138,7 +162,7 @@ def test_every_row_field_survives_the_extraction(svc, monkeypatch):
     The identity test below pins that both paths call one helper; it cannot
     catch a field missing from that helper. This pins the field.
     """
-    s, _ = svc
+    s, _briefed, _counted = svc
     labelled = _rows(["agent-3"], display_label="Due Diligence")
     monkeypatch.setattr(s.db, "get_shared_roster", lambda e: labelled)
 
@@ -147,13 +171,17 @@ def test_every_row_field_survives_the_extraction(svc, monkeypatch):
 
     assert page_card.display_label == "Due Diligence"
     assert roster_card.display_label == "Due Diligence"
+    # #2196's field rides the same builder and is subject to exactly the same
+    # silent-drop hazard the docstring above describes.
+    assert page_card.availability == "ready"
+    assert roster_card.availability == "ready"
 
 
 def test_an_unset_label_stays_none_rather_than_being_coalesced(svc):
     """NULL means "render the slug" and that decision belongs to the render site
     (ent#181). Coalescing to the slug here would make the two ends disagree
     about what unset means — the thing #2159 deliberately avoided."""
-    s, _ = svc
+    s, _briefed, _counted = svc
 
     card = asyncio.run(s.get_agent_card(EMAIL, "agent-3"))
 
@@ -181,3 +209,28 @@ def test_the_router_no_longer_builds_the_whole_roster():
     src = inspect.getsource(r.portal_agent_page)
     assert "get_agent_card(" in src
     assert "get_roster(" not in src
+
+
+def test_the_page_pays_a_single_container_read_not_the_fleet_one(svc):
+    """#2196 rides the #2160 property rather than undoing it.
+
+    The roster resolves container state for the whole set in ONE batch call; the
+    page resolves ONE agent's with the single-agent form. Routing the page
+    through the batch would put the fleet-scale read straight back, which is the
+    cost this whole file exists to keep out.
+    """
+    s, _briefed, counted = svc
+
+    asyncio.run(s.get_agent_card(EMAIL, "agent-3"))
+
+    assert counted == {"batch": 0, "single": 1}
+
+
+def test_a_roster_load_reads_docker_once_for_the_whole_set(svc):
+    """A structural count, not a duration: a per-card read would pass any timing
+    assertion on a small fixture and cost N inspects on a real fleet."""
+    s, _briefed, counted = svc
+
+    asyncio.run(s.get_roster(EMAIL))
+
+    assert counted == {"batch": 1, "single": 0}
