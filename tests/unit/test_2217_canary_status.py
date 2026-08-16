@@ -327,6 +327,52 @@ async def test_status_handler_round_trips_every_field(monkeypatch):
     assert result.model_dump() == fixed
 
 
+def _dependency_calls(dependant):
+    """Every callable in a route's dependency tree (recursive), so a nested
+    `require_admin → get_current_user` chain is reached without FastAPI's
+    `get_flat_dependant` (known-drifty in this tree)."""
+    calls = []
+    for dep in dependant.dependencies:
+        calls.append(dep.call)
+        calls.extend(_dependency_calls(dep))
+    return calls
+
+
+def test_status_route_is_registered_and_admin_gated():
+    """The `/status` handler test round-trips the model with auth bypassed
+    (`None`), so it cannot catch a dropped `@router.get` or a dropped
+    `Depends(require_admin)`. Assert the route is mounted at the literal
+    `/api/canary/status` (a distinct root, so no Invariant #4 collision with
+    `/violations/{violation_id}`) AND carries the admin gate — the one wiring
+    fact the pure-handler test structurally can't see.
+    """
+    from routers import canary as router_module
+
+    # Resolve `require_admin` from the router's OWN namespace, NOT a fresh
+    # `from dependencies import require_admin`: under pytest-randomly a sibling
+    # test can re-import `dependencies` under a second module identity, and the
+    # route captured the object bound in `routers.canary` at decoration time —
+    # a freshly-imported one is a DIFFERENT function object (the module-identity
+    # gotcha), which false-fails this guard. `router_module.require_admin` is
+    # exactly what the decorator saw, and stays internally consistent with
+    # `router_module.router` even if the router module itself is reloaded.
+    require_admin = router_module.require_admin
+
+    route = next(
+        (
+            r
+            for r in router_module.router.routes
+            if getattr(r, "path", None) == "/api/canary/status"
+            and "GET" in getattr(r, "methods", set())
+        ),
+        None,
+    )
+    assert route is not None, "GET /api/canary/status is not registered"
+    assert require_admin in _dependency_calls(
+        route.dependant
+    ), "GET /api/canary/status lost its require_admin gate"
+
+
 def test_feature_flags_carries_canary_enabled(monkeypatch):
     """The feature-flags handler exposes `canary_enabled == is_enabled()`.
 
