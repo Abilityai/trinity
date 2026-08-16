@@ -41,6 +41,7 @@ from services.template_service import (
     generate_credential_files,
 )
 from services.template_schedules import normalize_declared_schedules
+from services.template_plugins import normalize_declared_plugins
 from services import git_service
 from services.settings_service import get_anthropic_api_key, resolve_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
@@ -337,6 +338,11 @@ class _TemplateResolution:
     # key at all, so merging the two would change credential generation for
     # every GitHub agent. One normalized carrier, two producers.
     declared_schedules: list = field(default_factory=list)
+    # #1704: NORMALIZED declared `plugins:` (Claude Code marketplace plugins),
+    # fed by ALL THREE resolver branches — same one-carrier-two-producers shape
+    # as `declared_schedules`, NOT folded into `template_data` (the `github:`
+    # path never populates it). Empty dict = opt-in no-op.
+    declared_plugins: dict = field(default_factory=dict)
     # trinity-enterprise#15: staged backend-materialized snapshot for the
     # "copy" import intent. When set, `github_repo_for_agent` stays None by
     # design — the container gets NO GitHub env, no git-config row, no PAT.
@@ -578,6 +584,26 @@ def _declared_schedules_for_snapshot(snapshot) -> list:
             snapshot.source_repo, e,
         )
         return []
+
+
+def _declared_plugins_for_snapshot(snapshot) -> dict:
+    """Normalized `plugins:` for a copy-intent agent, read from the STAGED tree
+    (#1704) — twin of `_declared_schedules_for_snapshot`. Non-fatal: plugins are
+    advisory, so any read failure yields the opt-in empty declaration."""
+    template_yaml = Path(snapshot.staging_dir) / "template.yaml"
+    if not template_yaml.is_file():
+        return {}
+    try:
+        metadata = load_template_yaml(template_yaml.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            return {}
+        return normalize_declared_plugins(metadata.get("plugins"))
+    except Exception as e:  # noqa: BLE001 — plugins are advisory, never fatal
+        logger.warning(
+            "snapshot-import: could not read template.yaml plugins for %s: %s",
+            snapshot.source_repo, e,
+        )
+        return {}
 
 
 def _gate_tokenless_request(
@@ -1315,6 +1341,9 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
                 tr.declared_schedules = _declared_schedules_for_snapshot(
                     tr.copy_snapshot
                 )
+                tr.declared_plugins = _declared_plugins_for_snapshot(
+                    tr.copy_snapshot
+                )
                 return tr
 
             (
@@ -1336,6 +1365,9 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             )
             tr.declared_schedules = normalize_declared_schedules(
                 source_metadata.get("schedules")
+            )
+            tr.declared_plugins = normalize_declared_plugins(
+                source_metadata.get("plugins")
             )
             (
                 tr.github_repo_for_agent,
@@ -1367,6 +1399,9 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             # construction, so neither source can quietly diverge.
             tr.declared_schedules = normalize_declared_schedules(
                 tr.template_data.get("schedules")
+            )
+            tr.declared_plugins = normalize_declared_plugins(
+                tr.template_data.get("plugins")
             )
     return tr
 
@@ -1676,7 +1711,13 @@ def _apply_github_env(
         # ent#123: `and github_pat_for_agent` is a belt — tokenless is
         # provably source-mode+non-fork today, but auto-push must never
         # engage without credentials if that restriction is ever relaxed.
-        if (not config.source_mode or fork_upstream_repo) and github_pat_for_agent:
+        # #2069: this exact condition is the single owner
+        # `git_service._git_auto_sync_baked`, shared with the creation-time
+        # `.gitignore` merge spawn so the merge covers EXACTLY the population
+        # whose in-container auto-sync loop commits (ephemeral ghosts included).
+        if git_service._git_auto_sync_baked(
+            config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
+        ):
             env_vars['GIT_SYNC_AUTO'] = 'true'
 
         # Source mode (default): Track source branch directly for pull-only sync
@@ -2196,11 +2237,12 @@ async def _materialize_agent_files(
     github_pat_for_agent: Optional[str] = None,
     declared_schedules: Optional[list] = None,
     owner_username: str = "",
+    declared_plugins: Optional[dict] = None,
 ) -> None:
     """Materialize the S4 persistent-state allowlist (#383), the declared
-    data_paths (#1169) and the declared `schedules:` (trinity-enterprise#89)
-    into the agent, then opt non-source-mode GitHub agents into the auto-sync
-    heartbeat (#389). All four are non-fatal."""
+    data_paths (#1169), the declared `plugins:` (#1704) and the declared
+    `schedules:` (trinity-enterprise#89) into the agent, then opt non-source-mode
+    GitHub agents into the auto-sync heartbeat (#389). All are non-fatal."""
     # S4 (#383): Materialize persistent-state allowlist into the agent.
     # Runtime sync/reset paths read `.trinity/persistent-state.yaml`;
     # template.yaml is only read at creation (10-min cache), so this
@@ -2240,6 +2282,25 @@ async def _materialize_agent_files(
             f"{config.name}: {e}"
         )
 
+    # #1704: materialize the template's declared Claude Code `plugins:` into a
+    # COMMITTED `.trinity/plugins.yaml`, so the plugin selection survives a
+    # git-based reconstitution (the boot hook re-installs anything missing).
+    # Opt-in (empty = no-op) and ghost-skipped: an ephemeral agent never
+    # recreates and never persists. Non-fatal — sits inside the destructive
+    # rollback fence, so a raise here must never cost a successful creation
+    # (`declared_plugins` comes from the resolver, NOT `template_data`, since the
+    # `github:` path never populates the latter).
+    if declared_plugins and not config.ephemeral:
+        try:
+            await git_service.materialize_plugins(
+                config.name, declared_plugins
+            )
+        except Exception as e:
+            logger.warning(
+                f"[#1704] Failed to materialize plugins.yaml for "
+                f"{config.name}: {e}"
+            )
+
     # trinity-enterprise#89: materialize the template's declared `schedules:`.
     # The ghost skip lives HERE rather than in the helper: schedules on an
     # ephemeral agent are a 400 by ent#69 fleet hygiene, and a new caller must
@@ -2272,6 +2333,22 @@ async def _materialize_agent_files(
             logger.warning(
                 f"Failed to enable auto-sync for {config.name}: {e}"
             )
+
+    # #2069: the fleet-wide `.gitignore` merge never ran at creation, so the
+    # 15-min in-container auto-sync loop (on from birth for the GIT_SYNC_AUTO
+    # set — non-source/fork `github:` agents, ephemeral ghosts INCLUDED) staged
+    # `.trinity/` runtime state + the root-level `.env`/`.mcp.json` into a
+    # user-owned repo before any Push could migrate the list. Land the canonical
+    # list after startup.sh's FULL git setup (gated inside the merge on
+    # agent-server /health readiness, which follows the clone+checkout at
+    # startup.sh:517) and before the first auto-sync cycle. Fire-and-forget so it
+    # adds no creation latency; non-fatal. Gated on the SAME ENV predicate that
+    # bakes GIT_SYNC_AUTO (NOT the DB-flag block above, which excludes ghosts),
+    # so the merge covers exactly the auto-committing population.
+    if git_service._git_auto_sync_baked(
+        config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
+    ):
+        git_service.spawn_gitignore_merge_after_clone(config.name)
 
 
 def _rollback_failed_creation(handles: _RollbackHandles) -> None:
@@ -2895,6 +2972,7 @@ async def create_agent_internal(
                 tr.github_pat_for_agent,
                 tr.declared_schedules,
                 current_user.username,
+                tr.declared_plugins,
             )
             return agent_status
         except Exception as e:

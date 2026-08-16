@@ -346,7 +346,12 @@ node src/frontend/scripts/scan-raw-colors.mjs src/frontend
   everything); agent names also accept a substring, because they are short
   identifiers that frequently share a deployment prefix.
 * The empty line cannot distinguish "no playbooks configured" from "the agent was
-  stopped when the roster was built", so it deliberately says neither.
+  stopped when the roster was built", so it deliberately says neither. **#2196
+  makes the underlying fact available** — each roster card now carries
+  `availability`, so the distinction is resolvable at this seam; wiring it into
+  the empty line (and annotating an `@`-candidate row with its state) is PR 2 of
+  that issue. Note the rule it must follow: **annotate, never filter** — an
+  unavailable agent stays mentionable, exactly as it stays on the roster.
 * The room `@` list is scoped to current participants — the names a pick is known
   to wake. If the engine's ent#361 newcomer-join path does recruit on a
   non-participant mention (not established here; see above), this list is

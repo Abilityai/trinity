@@ -474,4 +474,76 @@
   `src/frontend/src/components/CreateAgentModal.vue` + `ImportValidationStep.vue`.
 - **GitHub Issue**: trinity-enterprise#15 (Epic ent#122)
 
+### 11.14 Creation-Time Canonical `.gitignore` Seed (#2069)
+- **Status**: ✅ Implemented (2026-08-16)
+- **Description**: The canonical fleet-wide ignore list `_GITIGNORE_PATTERNS` was
+  applied at exactly two operator-initiated moments — the on-Push migration
+  (`_migrate_workspace_gitignore`) and the init-path merge
+  (`initialize_git_in_container` step 2) — and **never at agent creation**.
+  Meanwhile the in-container 15-min auto-sync loop is on **from birth** for the
+  `GIT_SYNC_AUTO` set (non-source-mode / fork-to-own `github:` agents), so such an
+  agent auto-committed `.trinity/` runtime state, `.claude/projects/`, `content/`
+  and the root-level `.env` / `.mcp.json` into its **user-owned** repo on the first
+  cycle — before any Push could migrate the list (a credential-leak-into-a-private-repo
+  hygiene hazard + the #1595/#1596 unbounded-`.git`-bloat class). #1908 fixed only the
+  bundled templates; external `github:` templates are the general case. This lands the
+  merged list on disk **after** startup.sh finishes ALL its git setup and **before**
+  the first auto-sync cycle can commit — the bounded fix until #1703 (repo root ≡
+  `$HOME`) retires this compensation layer.
+- **Key Features**:
+  - **Reuses `_build_gitignore_merge_command`** verbatim — `_GITIGNORE_PATTERNS`
+    stays the single source of truth; no fourth call site with its own list (one
+    backend `docker exec`, nothing moves into the agent-server / Invariant #5). An
+    AST writer-SET guard pins both the merge-command callers and the
+    `_GITIGNORE_PATTERNS` name-refs (`tests/unit/test_2069_gitignore_merge_caller_guard.py`).
+  - **Readiness-gated, not filesystem-gated**: `merge_gitignore_after_clone` polls the
+    agent-server `/health` (a **direct** `agent_httpx_client` probe, never the masking
+    backend proxy) ∧ `/home/developer/.git` present. The server is launched **once**,
+    at `startup.sh:517`, strictly after the whole clone→tar→checkout→remote-config git
+    block — so `/health` responding proves startup.sh is past all working-tree mutation
+    (no `git checkout` can revert the merge) while still ~900s before the auto-sync
+    loop's first cycle. The `.git`-present arm skips a failed clone (Push migration is
+    the backstop). Correctness does **not** depend on the 900s pre-first-cycle sleep.
+  - **Fire-and-forget** (`spawn_gitignore_merge_after_clone`, mirroring
+    `activity_service.spawn_close_execution_activity`): zero creation latency, bounded
+    by a monotonic deadline (`_MERGE_READY_TIMEOUT_SECONDS`, default 1800, env-tunable,
+    sized to a slow full-history clone + startup — decoupled from the 900s cycle) and a
+    module-level `asyncio.Semaphore` so batch creation can't starve the shared 4-thread
+    Docker pool. Every exec/HTTP is `asyncio.wait_for`-bounded (honestly: that frees the
+    task, not the pinned pool thread). Non-fatal — logs and swallows on any failure.
+  - **Merge-only at creation = PREVENT** (no `_build_rm_cached_ignored_command`): the
+    generated `.env`/`.mcp.json` are written post-clone as **untracked** files, so a
+    merge-installed `.gitignore` stops `git add -A` from ever staging them. A template
+    that *committed* a credential file (an unusual subclass) stays tracked and is
+    remediated on the first operator Push + retired by #1703 — no creation-time untrack.
+  - **Gated on the ENV `GIT_SYNC_AUTO`-baking predicate** via the shared
+    `_git_auto_sync_baked(config, github_repo, github_pat, fork_upstream)` helper (the
+    single owner of "does this agent bake `GIT_SYNC_AUTO`", used at both
+    `crud.py::_apply_github_env` and the merge spawn), so the merge covers exactly the
+    population whose loop auto-commits — **ephemeral non-source `github:`+PAT ghosts
+    included** (the DB-flag block excludes them via `and not config.ephemeral`, but the
+    baked env does not, and a ghost is never operator-Pushed). Source-mode stays
+    excluded — the uncommitted `.gitignore` change would block a pull-only agent's next
+    `git pull`; a non-source/fork agent's first auto-commit turns it into the committed fix.
+  - **Idempotent (#953)**: the `grep -qxF` gate means a template already shipping the
+    patterns shows no `M .gitignore` drift against `origin`; a template carrying the
+    stale wholesale `.trinity/` line gets a *legitimate* supersede→append (#2070).
+  - **Fleet remediation (T1)**: the same spawn is wired into `start_agent_internal`
+    (gated on the DB `auto_sync_enabled` flag — ghosts never recreate, so the ephemeral
+    gap does not apply here), so already-leaking existing agents converge on their next
+    base-image-drift recreate / restart. Touches neither `sync_to_github` nor the Push
+    migration — an additive convergence path, no behaviour change on Push.
+  - **Known limitation**: a backend restart within the readiness-wait window loses the
+    in-memory `create_task`; the Push migration remediates and #1703 is the structural fix.
+- **Source of truth**: `services/git_service.py`
+  (`merge_gitignore_after_clone` / `spawn_gitignore_merge_after_clone` /
+  `_git_auto_sync_baked`), `services/agent_service/crud.py`
+  (`_apply_github_env` predicate unification + `_materialize_agent_files` spawn),
+  `services/agent_service/lifecycle.py` (`start_agent_internal` T1 spawn).
+- **Flow**: `docs/memory/feature-flows/git-sync-health.md`
+- **GitHub Issue**: #2069 (sub-issue of Epic #1045)
+- **Follow-up (filed separately)**: `GIT_SYNC_AUTO` is baked for ephemeral ghosts at
+  all, contradicting the "ghosts never auto-push" intent — a distinct pre-existing bug;
+  #2069 only ensures the merge *covers* everyone who auto-syncs.
+
 ---

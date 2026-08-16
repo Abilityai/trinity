@@ -496,6 +496,31 @@ async def start_agent_internal(agent_name: str) -> dict:
         logger.warning(f"Failed to sync read-only config for agent {agent_name}: {e}")
         read_only_result = {"status": "failed", "error": str(e)}
 
+    # #2069 (T1): heal the already-leaking existing fleet. The creation-time
+    # `.gitignore` merge protects only agents created after that fix; existing
+    # auto-sync agents converge HERE on their next base-image-drift recreate /
+    # restart. Gated on the DB `auto_sync_enabled` flag — the persisted owner
+    # intent the runtime already honors (`_apply_git_env_from_db`: GIT_SYNC_AUTO
+    # = DB flag OR baked env). The R2 ephemeral gap does NOT apply on this path:
+    # ghosts never recreate (they are volume-less by design), so no ephemeral
+    # agent reaches start/recreate and the DB flag is correct and complete here.
+    # Same readiness-gated, idempotent, non-fatal merge as creation — a warm
+    # restart with an existing `.git` satisfies the readiness probe immediately
+    # (one fast merge), a cold recreate waits for readiness like creation.
+    # Touches neither `sync_to_github` nor the Push migration (AC#5); an
+    # additive convergence path. Fire-and-forget so it adds no start latency.
+    try:
+        if db.get_git_auto_sync_enabled(agent_name):
+            from services import git_service
+            git_service.spawn_gitignore_merge_after_clone(agent_name)
+    except Exception as e:
+        logger.warning(
+            "[#2069] failed to spawn the creation-parity .gitignore merge for "
+            "%s on start: %s",
+            agent_name,
+            e,
+        )
+
     return {
         "message": f"Agent {agent_name} started",
         "credentials_injection": credentials_status,

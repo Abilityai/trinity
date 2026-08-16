@@ -450,6 +450,15 @@ def _load_crud(docker_available=True):
         return_value=("iid-1", "main"))
     git_service.materialize_persistent_state = AsyncMock()
     git_service.materialize_data_paths = AsyncMock()
+    # #2069: `_apply_github_env` / `_materialize_agent_files` now gate on the real
+    # `_git_auto_sync_baked` predicate; a bare MagicMock is TRUTHY and would set
+    # GIT_SYNC_AUTO for every case. Faithful copy (real matrix guard-tested in
+    # test_2069_gitignore_at_creation::TestBakePredicate).
+    git_service._git_auto_sync_baked = (
+        lambda config, github_repo, github_pat, fork_upstream: bool(github_repo)
+        and bool(github_pat)
+        and (not config.source_mode or bool(fork_upstream))
+    )
 
     settings_service = MagicMock()
     settings_service.get_anthropic_api_key = MagicMock(return_value="sk-ant-key")

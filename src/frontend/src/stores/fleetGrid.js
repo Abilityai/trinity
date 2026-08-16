@@ -17,6 +17,11 @@ import {
   widgetKey,
 } from '@/utils/gridWidgets'
 import { serverSkewMs } from '@/utils/timestamps'
+import {
+  LAYOUT_KEY_V1,
+  LAYOUT_KEY,
+  WIDGET_PREFS_KEY,
+} from '@/utils/gridStorageKeys'
 
 /**
  * Fleet Grid store (trinity-enterprise#47) — owns the Dashboard Grid view's
@@ -34,17 +39,6 @@ import { serverSkewMs } from '@/utils/timestamps'
  *     while the Grid is mounted.
  */
 
-// ent#325: layout v2 admits `widget:*` keys alongside agents. The key is
-// bumped rather than reused so a v1 client and a v2 client on the same browser
-// cannot fight over one blob — and the migration is a one-time COPY, leaving
-// v1 in place, so downgrading is not a data-loss event.
-const LAYOUT_KEY_V1 = 'trinity-grid-layout-v1'
-const LAYOUT_KEY = 'trinity-grid-layout-v2'
-// Sparse `{ widgetId: boolean }` OVERRIDE map — see gridWidgets.isWidgetEnabled.
-// Its own key: the org overlay (#305) persists Zones/Lines under keys of its
-// own and the tile prefs must not be entangled with either, so that "Reset
-// tiles" cannot clobber an overlay toggle (ent#325 scope note).
-const WIDGET_PREFS_KEY = 'trinity-grid-widgets-v1'
 const ANALYTICS_WINDOW = '14d' // one fetch feeds Activity·14d + Context·7d (last 7 entries)
 const ANALYTICS_STALE_MS = 5 * 60 * 1000
 const HYDRATE_CONCURRENCY = 4
