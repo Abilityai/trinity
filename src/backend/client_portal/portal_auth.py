@@ -29,6 +29,7 @@ from dependencies import (
     decode_portal_session,
     get_current_user,
     portal_session_needs_rotation,
+    reject_agent_principal,
     renew_portal_session,
 )
 
@@ -119,6 +120,26 @@ async def get_portal_principal(
     # Otherwise a platform principal (operator preview / signed-in user) →
     # resolve their email.
     user = await get_current_user(request, token)  # raises 401 if the token is invalid
+
+    # #2198 — the Workspace is HUMAN-only for platform principals. An
+    # agent-scoped MCP key resolves to its OWNER carrying the owner's role
+    # (the ent#293/#297 trap), so without this line any agent's injected
+    # TRINITY_MCP_API_KEY reached every portal route as `is_platform=True` for
+    # its owner — including agents the calling agent has NO agent_permissions
+    # edge to, i.e. a REST path around the MCP layer's agent-to-agent
+    # permission matrix, and (new in #2198) a one-call read of the owner's
+    # entire cross-agent thread index via GET /sessions. Rejected here, at the
+    # dependency, so all current and future portal routes inherit it: no MCP
+    # tool targets this surface and neither agent images nor the base image
+    # call it (verified), so there is no legitimate agent caller to break.
+    # `reject_agent_principal`, not the stricter allowlist
+    # `reject_non_interactive_principal`, deliberately: this is a *use*
+    # surface, so a user's own user-scoped key scripting their own Workspace
+    # stays legitimate, and `scope='system'` (trinity-system) keeps platform
+    # breadth by design. Connector and portal_delegate keys never get here —
+    # `get_current_user` fences both to their own routes.
+    reject_agent_principal(user)
+
     from database import db
     row = db.get_user_by_username(user.username)
     email = (row or {}).get("email") if row else None

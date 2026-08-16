@@ -72,6 +72,18 @@ Health reports `unknown`, never `unhealthy`, when nothing has ever checked the
 agent. Monitoring is default-OFF (#1121), so on many installs that is every
 agent, and "unhealthy" there would be a lie about the whole fleet.
 
+**#2196 adds `header.availability` beside it — a second, independent fact, not a
+second health source.** It is a *projection of the roster card* (`get_agent_card`
+resolves it once, `build_page` copies it), never a second Docker read of its own.
+The two are rendered as two labelled facts because their freshness differs by
+construction: `health` is the last persisted `agent_health_checks` row and is
+stale by design, while `availability` is read at request time. Overloading the
+health dot would leave the viewer unable to tell which of the two they were
+looking at. `build_page` writes `card.get("availability") or "unknown"` — the
+bare `.get` is a 500, because `card` is documented-reachable as `None` (the agent
+vanished between the roster read and the page read) and an explicit `None` fails
+the `Literal`.
+
 ## The two AC #3 metrics
 
 **First-try rate** is real: successes with `retry_count` 0 over the window

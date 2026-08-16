@@ -228,6 +228,27 @@ async def get_agent_dashboard_logic(
                 data = response.json()
                 data["agent_name"] = agent_name
                 data["status"] = "running"
+                # #2198: the agent executed its handler and answered. Whatever
+                # that answer is, it is DEFINITIVE for right now — so a caller
+                # must not retry it.
+                #
+                # This bit is the whole fix for the 9-second dashboard ladder.
+                # An agent with no dashboard.yaml replies 200 with
+                # `has_dashboard: false` AND an `error` string ("No dashboard
+                # .yaml found at ..."), which was byte-indistinguishable from
+                # the `has_dashboard: false` + `error` produced by a timeout or
+                # an unreachable container. The frontend could only assume the
+                # pessimistic case, so it re-probed at 0s / 3s / 9s on EVERY
+                # page load of an agent that will never have a dashboard.
+                #
+                # Derived from the transport, not from the error text, so it is
+                # true on every already-deployed agent image and needs no
+                # base-image rebuild: only an HTTP 200 with a parseable body
+                # reaches this line. Every inconclusive path (timeout,
+                # connection error, non-200) goes through _serve_cached_or_error
+                # instead and stays unsettled, so a still-booting agent keeps
+                # its retries.
+                data["settled"] = True
 
                 # If the agent returned an error (YAML parse/validation),
                 # try to serve the last valid cached dashboard from DB

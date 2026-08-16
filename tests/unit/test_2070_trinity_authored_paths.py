@@ -76,6 +76,7 @@ AUTHORED_FILES = {
     ".trinity/brain-orb/search": "#!/bin/sh\n",               # #58/#60
     ".trinity/brain-orb/scopes": "#!/bin/sh\n",
     ".trinity/pipelines/research.yaml": "id: research\n",     # #919 definitions
+    ".trinity/plugins.yaml": "plugins:\n  installed: []\n",   # #1704 (COMMITTED)
 }
 
 _ENV = {"PATH": "/usr/bin:/bin:/usr/local/bin", "GIT_CONFIG_GLOBAL": "/dev/null",
