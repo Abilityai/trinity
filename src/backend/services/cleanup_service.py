@@ -216,9 +216,19 @@ def _guard_allows(
 
     Called INLINE inside each sweep's existing try/except and immediately before
     its `db.prune_*` call — so even an unexpected raise here skips the prune
-    (fail-closed) rather than falling through to it. `retention_guard.evaluate`
-    also never raises on its own; this is belt and braces on the one code path
-    where being wrong is unrecoverable.
+    (fail-closed) rather than falling through to it.
+
+    `retention_guard.evaluate` does not raise (#1833): every failure inside it —
+    including a `count_fn` that returns a non-number or a negative sentinel —
+    returns a REFUSING verdict, so the refusal keeps its ERROR and its durable
+    operator-queue alarm. That claim used to be nearly-true and load-bearing in
+    the wrong direction; it is now true of the code, not just of the docstring.
+
+    This belt stays anyway. It is the difference between "the prune is skipped"
+    and "the prune is skipped *and nobody is told*": a raise here would still
+    protect the DATA (control never reaches `db.prune_*`) while destroying the
+    SIGNAL, surfacing as a nondescript "Error pruning ..." with no refusal alarm.
+    Belt and braces on the one code path where being wrong is unrecoverable.
     """
     from services import retention_guard
 

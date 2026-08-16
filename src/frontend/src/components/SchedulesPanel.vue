@@ -74,16 +74,29 @@
                 type="text"
                 required
                 placeholder="0 9 * * *"
+                @blur="cronTouched = true"
                 class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-md font-mono focus:outline-none focus:ring-2 focus:ring-action-primary-500"
               />
-              <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                Format: minute hour day month day_of_week (e.g., "0 9 * * *" for 9 AM daily)
+              <!-- #925: the format hint doubles as the reserved error slot — one
+                   footprint (min-h-8 ≈ the hint's own 2 wrapped lines), so the
+                   modal never jumps when validation kicks in (p4/p6). -->
+              <p
+                class="text-xs mt-1 min-h-8"
+                :class="showCronError ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-gray-500 dark:text-gray-400'"
+              >
+                <template v-if="showCronError"><span data-testid="cron-error">{{ cronVerdict.error }}</span></template>
+                <template v-else>Format: minute hour day month day_of_week (e.g., "0 9 * * *" for 9 AM daily)</template>
               </p>
               <div class="mt-1 flex flex-wrap gap-1">
-                <button type="button" @click="setCronPreset('0 9 * * *')" class="text-xs px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600 dark:text-gray-300">Daily 9 AM</button>
-                <button type="button" @click="setCronPreset('0 9 * * 1')" class="text-xs px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600 dark:text-gray-300">Weekly Mon</button>
-                <button type="button" @click="setCronPreset('0 */6 * * *')" class="text-xs px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600 dark:text-gray-300">Every 6h</button>
-                <button type="button" @click="setCronPreset('*/30 * * * *')" class="text-xs px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600 dark:text-gray-300">Every 30m</button>
+                <!-- #925: presets come from the exported CRON_PRESETS so "presets
+                     never warn" is tested against the shipped list. -->
+                <button
+                  v-for="p in CRON_PRESETS"
+                  :key="p.expression"
+                  type="button"
+                  @click="setCronPreset(p.expression)"
+                  class="text-xs px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600 dark:text-gray-300"
+                >{{ p.label }}</button>
               </div>
             </div>
 
@@ -248,9 +261,11 @@
               >
                 Cancel
               </button>
+              <!-- #925: disabled ONLY for non-empty-AND-invalid cron — an empty
+                   cron keeps the native `required` bubble path for the form. -->
               <button
                 type="submit"
-                :disabled="formLoading"
+                :disabled="formLoading || submitBlockedByCron"
                 class="px-4 py-2 text-sm font-medium text-white bg-action-primary-600 border border-transparent rounded-md hover:bg-action-primary-700 disabled:bg-gray-400"
               >
                 <span v-if="formLoading" class="flex items-center">
@@ -356,6 +371,21 @@
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
                 <code class="font-mono bg-gray-100 dark:bg-gray-700 px-1 rounded">{{ schedule.cron_expression }}</code>
+                <!-- #925: stored-invalid cron (won't register with the scheduler).
+                     Inside the chip span so flex-wrap can't detach the icon from
+                     its chip; `=== false` so a map miss can never false-warn. -->
+                <span
+                  v-if="cronValidity[schedule.id] === false"
+                  class="ml-1 text-status-warning-600 dark:text-status-warning-400"
+                  title="Invalid cron expression"
+                  aria-label="Invalid cron expression"
+                  role="img"
+                  data-testid="cron-invalid-warning"
+                >
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.07 19H19a2 2 0 001.75-2.96l-6.93-12a2 2 0 00-3.5 0l-6.93 12A2 2 0 005.07 19z" />
+                  </svg>
+                </span>
               </span>
               <span class="flex items-center">
                 <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -859,6 +889,14 @@ import ScheduleAnalyticsCard from './ScheduleAnalyticsCard.vue'
 import LoadFailed from './LoadFailed.vue'
 import InlineError from './InlineError.vue'
 import { apiErrorMessage } from '../utils/apiError'
+// #925: client-side mirror of the backend cron grammar (see utils/cronValidation.js
+// header — parity pinned by tests/fixtures/cron-grammar-cases.json in both suites).
+import {
+  validateCronExpression,
+  shouldShowCronError,
+  computeCronValidityMap,
+  CRON_PRESETS,
+} from '../utils/cronValidation'
 import { useAuthStore } from '../stores/auth'
 import { useExecutionsStore } from '../stores/executions'
 
@@ -906,6 +944,29 @@ const showCreateForm = ref(false)
 const editingSchedule = ref(null)
 const formLoading = ref(false)
 const formError = ref('')
+
+// #925: client-side cron validation. Display gating lives in the pure, exported
+// shouldShowCronError/computeCronValidityMap (node-tested); these computeds are
+// thin wiring only.
+const cronTouched = ref(false) // first blur of the cron input (create flow)
+const cronVerdict = computed(() => validateCronExpression(formData.value.cron_expression))
+const showCronError = computed(() =>
+  shouldShowCronError({
+    valid: cronVerdict.value.valid,
+    expr: formData.value.cron_expression,
+    touched: cronTouched.value,
+    editing: !!editingSchedule.value,
+  })
+)
+// Submit blocked ONLY when non-empty AND invalid — empty keeps the native
+// `required` bubble (disabling on empty would kill the browser's
+// constraint-validation path for every field in the form).
+const submitBlockedByCron = computed(() => {
+  const expr = String(formData.value.cron_expression ?? '')
+  return expr.trim() !== '' && !cronVerdict.value.valid
+})
+// Row warning icons: id → validity, recomputed only when the list is replaced.
+const cronValidity = computed(() => computeCronValidityMap(schedules.value))
 const triggerLoading = ref(null)
 // #1634: a Set, not one id — two rows can be in flight at once, and a single ref
 // let the first completion re-enable the second row's control mid-request (AC #6).
@@ -1285,6 +1346,8 @@ function closeForm() {
   showCreateForm.value = false
   editingSchedule.value = null
   formError.value = ''
+  cronTouched.value = false // #925: next create starts un-flashed
+
   formData.value = {
     name: '',
     cron_expression: '',
@@ -1596,6 +1659,7 @@ watch(() => props.initialMessage, (newMessage) => {
     formData.value.enabled = true
     formData.value.timeout_seconds = 3600  // #665
     formData.value.allowed_tools = null
+    cronTouched.value = false // #925: this path opens the form without closeForm()
     showCreateForm.value = true
   }
 }, { immediate: true })

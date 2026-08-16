@@ -531,6 +531,7 @@ async def get_retention_status(
          FLOOR_SCHEDULES, db.count_soft_deleted_schedules_past_retention),
     )
     pending_acknowledgements = []
+    blocked_sweeps = []
     for _key, _label, _floor, _count_fn in _ack_sweeps:
         _window = _ops_int(_key)
         if _window <= 0:
@@ -541,9 +542,10 @@ async def get_retention_status(
             floor=_floor,
         )
         # Only "over_threshold" is a genuine pending-approval. `count_failed` /
-        # `ack_lookup_failed` are fail-closed error states, not approvable, and
-        # an already-acked sweep returns allowed=True (so it drops off the list —
-        # the single-use, no-stale-state guarantee the panel needs).
+        # `count_uninterpretable` / `count_negative` / `ack_lookup_failed` are
+        # fail-closed error states, not approvable, and an already-acked sweep
+        # returns allowed=True (so it drops off the list — the single-use,
+        # no-stale-state guarantee the panel needs).
         if not _verdict.allowed and _verdict.reason == "over_threshold":
             pending_acknowledgements.append({
                 "key": _key,
@@ -551,6 +553,21 @@ async def get_retention_status(
                 "window_days": _window,
                 "candidate_count": _verdict.candidates,
                 "floor": _floor,
+            })
+        elif not _verdict.allowed:
+            # #1833: NOT approvable is not the same as NOT worth showing. Before
+            # #1833 an uninterpretable count raised out of `evaluate` and took
+            # this whole endpoint down with a 500 — ugly, but loud. Now it
+            # refuses, so without this the sweep is blocked forever in
+            # `cleanup_service` while the panel renders a clean "nothing
+            # pending" — the guard's own anti-pattern ("a guard that fails open
+            # manufactures confidence") relocated from the prune to the operator
+            # surface. Identifiers and reason codes ONLY, the same SECURITY rule
+            # as the alarm payload: no counts of row content, no sample rows.
+            blocked_sweeps.append({
+                "key": _key,
+                "window_days": _window,
+                "reason": _verdict.reason,
             })
 
     return {
@@ -576,6 +593,14 @@ async def get_retention_status(
         # #1709: sweeps a cleanup cycle would refuse right now, awaiting an admin
         # ack via POST /api/settings/retention/acknowledge. Empty ⇒ nothing pending.
         "pending_acknowledgements": pending_acknowledgements,
+        # #1833: sweeps the guard is refusing for a reason this panel cannot
+        # offer an approve control for (the count failed / could not be
+        # interpreted / was a negative error sentinel, or the ack lookup itself
+        # failed). Blocked, not pending. SCOPE: the same two ack-gated sweeps
+        # `_ack_sweeps` re-runs above — the other six windows are not evaluated
+        # here at all, so a refusal on those reaches an operator only through the
+        # durable operator-queue alarm `cleanup_service` raises.
+        "blocked_sweeps": blocked_sweeps,
         "windows": {
             # Log archival (env-driven; LOG_* escape hatch)
             "log_retention_days": int(os.getenv("LOG_RETENTION_DAYS", "5")),
