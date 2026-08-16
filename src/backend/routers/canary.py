@@ -23,6 +23,7 @@ from database import db
 from dependencies import require_admin
 from models import (
     CanaryStatsResponse,
+    CanaryStatusResponse,
     CanaryViolation,
     CanaryViolationListResponse,
     CycleTransition,
@@ -101,6 +102,26 @@ async def get_canary_stats(
     """Aggregate violation counts by invariant_id and severity. Admin only."""
     stats = db.get_canary_stats(start_time=start_time, end_time=end_time)
     return CanaryStatsResponse(**stats)
+
+
+@router.get("/status", response_model=CanaryStatusResponse)
+async def get_canary_status(
+    _: User = Depends(require_admin),
+) -> CanaryStatusResponse:
+    """Run-state of the canary harness. Admin only.
+
+    Answers the question a disabled/stale canary otherwise hides: a harness
+    emitting zero violations because it is OFF is byte-identical to a clean
+    fleet (the H-01 class one level up — H-01 catches a blind collector while
+    a cycle runs; this catches "no cycle running at all"). All logic lives in
+    the service (Invariant #1); this handler is a thin pass-through.
+
+    Fail-open: a disabled install reads `disabled` and a Redis/parse failure
+    reads `unknown` — never `stale`, so a default-OFF install never alarms.
+    A distinct root literal, so no Invariant #4 collision with
+    `/violations/{violation_id}`.
+    """
+    return CanaryStatusResponse(**canary_service.get_run_status())
 
 
 @router.get("/violations/{violation_id}", response_model=CanaryViolation)
