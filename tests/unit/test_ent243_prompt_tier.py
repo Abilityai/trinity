@@ -14,11 +14,9 @@ already pins what MINIMAL is allowed to drop.
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
 import pytest
 
+from services.model_catalog import MODEL_CATALOG
 from services.platform_prompt_service import (
     _ALWAYS_SECTIONS,
     _KNOWN_SECTION_HEADINGS,
@@ -34,20 +32,16 @@ from services.prompt_tier import (
     resolve_prompt_tier,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-MODEL_SELECTOR = REPO_ROOT / "src" / "frontend" / "src" / "components" / "ModelSelector.vue"
-
 
 def _preset_models() -> list[str]:
-    """Every model id the picker offers, read from the live Vue source.
+    """Every model id the picker offers, from the single source of truth.
 
-    Deliberately parsed rather than duplicated: a hardcoded copy would silently
-    stop covering a preset added later, which is exactly the model most likely to
-    be a new frontier one.
+    Repointed from a brittle ModelSelector.vue regex to the Python catalog
+    (#2086): the picker now derives from ``services/model_catalog.py``, so this
+    list covers any preset added there without anyone touching this file — and it
+    no longer breaks when the Vue array stops being a literal.
     """
-    source = MODEL_SELECTOR.read_text(encoding="utf-8")
-    block = source.split("const PRESET_MODELS = [", 1)[1].split("]", 1)[0]
-    return re.findall(r"value:\s*'([^']+)'", block)
+    return [m.id for m in MODEL_CATALOG]
 
 
 class TestNoOp:
