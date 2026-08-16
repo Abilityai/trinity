@@ -114,6 +114,16 @@ PG is deliberately excluded from the boot hook in v1 (Alembic DDL is transaction
 | SIGKILL mid-copy | aged `*.tmp.*` sweep next run | orphan reclaimed |
 | `/data/backups` unwritable | `mkdir`/write raises | `failed` + alarm |
 
+## Security Considerations
+
+- **No new attack surface** — no new endpoint, no new auth path, no WS, no MCP tool. Status rides the existing admin-only `GET /api/settings/retention` (`assert_admin`, which rejects agent principals since #1890); the only write path is the validated `PUT /api/settings/ops/config`.
+- **No user-controlled input reaches the job.** Artifact names are server-generated from a UTC day key, so there is no traversal surface; the retention knob passes ops-config validation (422 on garbage) before it can reach the prune.
+- **The DB password never leaves the process except as `PGPASSWORD` on the subprocess env** — never in argv (world-readable via `/proc`), never logged. `create_subprocess_exec` (no shell) means the conninfo URI is never word-split or interpolated. An unparseable `DATABASE_URL` raises `BackupRunError from None` so neither the ERROR log nor the durable status echoes the URL — the exception chain is the leak path a bare `raise` would keep.
+- **Artifacts are the full database** — dir 0700, files 0600, same bind mount as `trinity.db` itself, so no new exposure class. They carry the AES-256-GCM envelopes (Invariant #12) but **not** `CREDENTIAL_ENCRYPTION_KEY`, which lives in `.env`: an artifact alone decrypts nothing. Backing up `.env` stays a documented operator step.
+- **An agent cannot silence the platform's own failure alarm.** `db-backup-` is registered in `operator_queue_service._RESERVED_ID_PREFIXES` — without it an agent could pre-create the id and the ingestion path's `on_conflict_do_nothing` would swallow the real alert; the `_db-backup` sentinel host is uncreatable because `sanitize_agent_name` strips the leading `_`, and it is excluded from canary L-03's orphan scan with service↔canary parity pinned by test.
+- **Alarm context carries status, paths and sizes only** — never row data or DB contents (the canary G-04 rule).
+- **Prune is pattern-scoped** to the three artifact globs among the direct children of the backup dir, so a misconfigured path can never turn the sweep into an arbitrary-file deleter; deletions are logged by name only.
+
 ## Testing
 
 | File | Covers | Count |
