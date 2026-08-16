@@ -81,6 +81,22 @@ class BackupVerificationError(RuntimeError):
 
 
 # --------------------------------------------------------------------------
+# Enable knob — ONE reader for both producers
+# --------------------------------------------------------------------------
+
+def backup_enabled_from_env() -> bool:
+    """``DB_BACKUP_ENABLED`` (default ``true``), read the same way by BOTH
+    producers — the daily service AND the boot pre-migration hook. A single
+    reader so "disable backups entirely" (the documented knob) cannot mean
+    "disable the nightly job but keep writing un-pruned boot copies": the
+    prune lives only in the daily job's tail, so a boot hook that ignored
+    this flag would accumulate a full-DB copy per upgrade forever — the
+    #1871 disk-fill class, in the one configuration where the operator
+    explicitly opted out."""
+    return os.getenv("DB_BACKUP_ENABLED", "true").strip().lower() == "true"
+
+
+# --------------------------------------------------------------------------
 # Naming / paths
 # --------------------------------------------------------------------------
 
@@ -142,6 +158,14 @@ def sqlite_backup_to(src_path: str, dest_path: str) -> Dict[str, Any]:
             dst.close()
     finally:
         src.close()
+    # The artifact is the full DB: owner-only, like the 0700 dir around it.
+    # sqlite3 creates files 0644 & ~umask; tighten before the atomic rename so
+    # the artifact is never world-readable, even for an instant. Best-effort
+    # (a filesystem that refuses chmod must not fail the backup).
+    try:
+        os.chmod(dest_path, 0o600)
+    except OSError:
+        pass
     duration = time.monotonic() - start
     if duration >= _COPY_DURATION_WARN_SECONDS:
         logger.warning(
@@ -237,13 +261,21 @@ def prune_backups(
     now_ts = now if now is not None else time.time()
     cutoff = now_ts - retention_days * 86400
 
-    files = _artifact_files(backup_dir)
-    # Newest first by mtime; the head `min_keep` are untouchable.
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    deleted: List[str] = []
-    for candidate in files[max(min_keep, 0):]:
+    # Stat once, up front, tolerating a concurrent sibling prune (Redis-down
+    # duplicate run) unlinking an entry between listing and stat — a vanished
+    # file is simply not a candidate, never an exception out of the tail.
+    stamped: List[tuple] = []
+    for entry in _artifact_files(backup_dir):
         try:
-            if candidate.stat().st_mtime >= cutoff:
+            stamped.append((entry.stat().st_mtime, entry))
+        except FileNotFoundError:
+            continue
+    # Newest first by mtime; the head `min_keep` are untouchable.
+    stamped.sort(key=lambda t: t[0], reverse=True)
+    deleted: List[str] = []
+    for mtime, candidate in stamped[max(min_keep, 0):]:
+        try:
+            if mtime >= cutoff:
                 continue  # inside the window — kept regardless of pressure
             candidate.unlink()
             deleted.append(candidate.name)
@@ -347,6 +379,18 @@ def maybe_backup_before_migrations(
 
     Returns a summary dict when a backup was taken, else ``None``.
     """
+    # Gate 0: the ONE enable knob (`DB_BACKUP_ENABLED`, read via the same
+    # helper the daily service uses). Disabled means disabled for BOTH
+    # producers — the nightly prune is the only thing that ever reclaims a
+    # boot copy, so writing one here while the job is off would grow the dir
+    # by a full-DB copy per upgrade, forever. Silent INFO: an operator who
+    # opted out must not see an ERROR at every boot.
+    if not backup_enabled_from_env():
+        logger.info(
+            "[DBBackup] pre-migration backup skipped: DB_BACKUP_ENABLED=false"
+        )
+        return None
+
     resolved_dir = backup_dir or default_backup_dir(db_path)
     tmp: Optional[str] = None
     try:

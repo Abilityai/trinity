@@ -63,6 +63,13 @@ def _existing_install(path: Path, *, applied: int) -> None:
         conn.close()
 
 
+@pytest.fixture(autouse=True)
+def _default_enabled(monkeypatch):
+    """The hook reads DB_BACKUP_ENABLED (default on); a developer shell that
+    exports it false must not silently turn every branch here into a skip."""
+    monkeypatch.delenv("DB_BACKUP_ENABLED", raising=False)
+
+
 def _hook(conn, db_path: Path, backup_dir: Path):
     cursor = conn.cursor()
     return bp.maybe_backup_before_migrations(
@@ -101,6 +108,25 @@ class TestSkipBranches:
         )
         assert any("fresh install" in r.message for r in caplog.records)
         assert not (tmp_path / "backups").exists()
+
+    def test_disabled_knob_skips_the_boot_hook_too(self, tmp_path, monkeypatch, caplog):
+        """`DB_BACKUP_ENABLED=false` means disabled for BOTH producers. The
+        prune lives only in the daily job's tail, so a boot hook that ignored
+        the knob would write one un-pruned full-DB copy per upgrade forever —
+        the #1871 disk-fill class in the exact configuration where the
+        operator opted out. Silent INFO skip, no dir touched, no ERROR."""
+        monkeypatch.setenv("DB_BACKUP_ENABLED", "false")
+        db_path = tmp_path / "t.db"
+        _existing_install(db_path, applied=1)  # migrations ARE pending
+        conn = sqlite3.connect(str(db_path))
+        try:
+            with caplog.at_level(logging.INFO, logger="db.backup_primitives"):
+                assert _hook(conn, db_path, tmp_path / "backups") is None
+        finally:
+            conn.close()
+        assert not (tmp_path / "backups").exists()
+        assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+        assert any("DB_BACKUP_ENABLED" in r.message for r in caplog.records)
 
     def test_empty_schema_migrations_is_fresh_too(self, tmp_path):
         db_path = tmp_path / "t.db"

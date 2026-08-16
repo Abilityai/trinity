@@ -12,7 +12,7 @@ Trinity backs up its own database — you do not need to set anything up.
 | PostgreSQL | `trinity-backup-YYYYMMDD.dump` — `pg_dump -Fc` (custom format, restorable with `pg_restore`) |
 | Pre-migration | `pre-migration-YYYYMMDD-HHMMSS.db` — an extra safety copy taken automatically at boot when a schema migration is about to run (SQLite) |
 | Retention | `backup_retention_days` (default **14**, bounds 1–3650) — set via `PUT /api/settings/ops/config`. The newest **3** artifacts are always kept, regardless of age. |
-| Default | **Enabled.** Disable with `DB_BACKUP_ENABLED=false` in `.env` |
+| Default | **Enabled.** Disable with `DB_BACKUP_ENABLED=false` in `.env` — this turns off both the nightly job and the boot-time pre-migration copy |
 | Failure visibility | A failed or skipped backup raises an item in Operations → Needs Response, and a "backups are stale" alarm re-fires weekly while the newest success is older than 3 days |
 
 ### Checking backup status (no shell needed)
@@ -39,7 +39,7 @@ host**. For disaster recovery, ship artifacts off-host on your own schedule
 
 ```bash
 # .env (all forwarded by both compose files)
-DB_BACKUP_ENABLED=true      # false disables backups entirely
+DB_BACKUP_ENABLED=true      # false disables backups entirely (nightly + boot pre-migration)
 DB_BACKUP_HOUR=3            # UTC
 DB_BACKUP_MINUTE=30
 DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS=1800

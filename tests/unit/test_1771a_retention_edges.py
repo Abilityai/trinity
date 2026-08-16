@@ -1124,9 +1124,14 @@ class TestStructuralInvariants:
         # refusable count: an ack-gated refusal would fail in the INVERTED
         # direction here (refused prune → backups fill the disk, #1871 class),
         # so the prune must run unconditionally within its floor. That floor is
-        # pinned by tests/unit/test_2216_backup_primitives.py.
-        _NON_ROW_WINDOWS = {"backup_retention_days"}
-        row_windows = set(RETENTION_OPS_KEYS) - _NON_ROW_WINDOWS
+        # pinned by tests/unit/test_2216_backup_primitives.py. The carve-out
+        # set lives in CODE beside RETENTION_OPS_KEYS (not test-locally), so
+        # the next file-artifact window is declared where the key is added.
+        from services.settings_service import NON_ROW_RETENTION_OPS_KEYS
+        assert NON_ROW_RETENTION_OPS_KEYS <= set(RETENTION_OPS_KEYS), (
+            "a non-row carve-out must itself be a registered retention window"
+        )
+        row_windows = set(RETENTION_OPS_KEYS) - NON_ROW_RETENTION_OPS_KEYS
         assert set(guarded) == row_windows, (
             "every registered ROW-retention window must have exactly one "
             "_guard_allows call site, and every guarded sweep must be a "

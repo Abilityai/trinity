@@ -182,6 +182,16 @@ class TestSqliteBackup:
         with pytest.raises(bp.BackupVerificationError):
             bp.verify_sqlite_backup(str(empty))
 
+    def test_artifact_is_owner_only(self, tmp_path):
+        """The artifact is the full DB. sqlite3 creates files 0644 & ~umask;
+        the primitive tightens to 0600 before the atomic rename (the 0700
+        dir is the outer wall, this is the inner one)."""
+        src = tmp_path / "src.db"
+        _make_db(src, rows=5)
+        dest = tmp_path / "copy.db"
+        bp.sqlite_backup_to(str(src), str(dest))
+        assert (os.stat(dest).st_mode & 0o777) == 0o600
+
     def test_atomic_replace_is_last_writer_wins_never_torn(self, tmp_path):
         """Two concurrent writers to the same day-keyed final name resolve via
         os.replace: last writer wins on ONE intact file — the 'lease is
@@ -270,6 +280,33 @@ class TestPrune:
             f"trinity-backup-2026010{i}.db" for i in range(bp.BACKUP_MIN_KEEP)
         )
 
+    def test_floor_boundary_exactly_min_keep_deletes_zero(self, tmp_path):
+        """Boundary: exactly MIN_KEEP ancient artifacts at retention_days=1 →
+        NOTHING is deleted (the floor is inclusive)."""
+        for i in range(bp.BACKUP_MIN_KEEP):
+            _touch_artifact(
+                tmp_path, f"trinity-backup-2026010{i}.db", age_days=100 + i
+            )
+        assert bp.prune_backups(str(tmp_path), 1) == []
+        assert len(list(tmp_path.iterdir())) == bp.BACKUP_MIN_KEEP
+
+    def test_floor_boundary_min_keep_plus_one_deletes_exactly_the_oldest(self, tmp_path):
+        """Boundary: MIN_KEEP+1 ancient artifacts → exactly ONE deleted, and it
+        is the OLDEST by mtime (never a newer one)."""
+        names = []
+        for i in range(bp.BACKUP_MIN_KEEP + 1):
+            # i=0 is the oldest (largest age).
+            p = _touch_artifact(
+                tmp_path, f"trinity-backup-2026010{i}.db",
+                age_days=100 + (bp.BACKUP_MIN_KEEP + 1 - i),
+            )
+            names.append(p.name)
+        deleted = bp.prune_backups(str(tmp_path), 1)
+        assert deleted == [names[0]], f"only the oldest may go, got {deleted}"
+        assert not (tmp_path / names[0]).exists()
+        for n in names[1:]:
+            assert (tmp_path / n).exists()
+
     def test_floor_holds_across_patterns(self, tmp_path):
         """The floor counts across the union of artifact patterns — mixed
         sqlite + pre-migration artifacts still leave MIN_KEEP total."""
@@ -347,3 +384,54 @@ class TestTmpSweep:
 
 def test_default_backup_dir_is_beside_the_db():
     assert bp.default_backup_dir("/data/trinity.db") == "/data/backups"
+
+
+# ---------------------------------------------------------------------------
+# Import-graph rule + the shared enable knob
+# ---------------------------------------------------------------------------
+
+def test_leaf_never_imports_database_or_services():
+    """The leaf runs inside init_database() at import time (the
+    migration_lock.py precedent). An import of `database` or anything under
+    `services/` — at module level OR lazily inside a function — is a circular
+    import waiting to crash boot. Walk the AST, not just the header."""
+    import ast
+    import inspect
+    tree = ast.parse(inspect.getsource(bp))
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root in ("database", "services"):
+                    offenders.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            root = (node.module or "").split(".")[0]
+            if root in ("database", "services"):
+                offenders.append(node.module)
+    assert offenders == [], (
+        f"db/backup_primitives.py must stay import-free of database/services: "
+        f"{offenders}"
+    )
+
+
+class TestEnableKnob:
+
+    def test_default_is_on(self, monkeypatch):
+        monkeypatch.delenv("DB_BACKUP_ENABLED", raising=False)
+        assert bp.backup_enabled_from_env() is True
+
+    @pytest.mark.parametrize("raw", ["false", "FALSE", " false ", "0", "no"])
+    def test_anything_but_true_is_off(self, monkeypatch, raw):
+        monkeypatch.setenv("DB_BACKUP_ENABLED", raw)
+        assert bp.backup_enabled_from_env() is False
+
+    def test_service_reads_the_same_knob(self):
+        """One reader for both producers: the daily service's module constant
+        must come from this helper, not a second os.getenv (else "disable
+        backups" could disable one producer and not the other)."""
+        import inspect
+        import services.db_backup_service as svc
+        src = inspect.getsource(svc)
+        assert "bp.backup_enabled_from_env()" in src
+        assert 'os.getenv("DB_BACKUP_ENABLED"' not in src

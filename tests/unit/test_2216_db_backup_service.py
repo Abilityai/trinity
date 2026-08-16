@@ -390,6 +390,22 @@ class TestStaleness:
         _run(env)
         assert len(self._staleness_alarms(env)) == 1
 
+    def test_status_block_stale_agrees_with_the_alarm_reference(self, env):
+        """`stale` in the status block uses the SAME reference the alarm
+        uses (last success, else first attempt): a never-succeeded install
+        that is old enough to alarm must read `stale: true`, not a
+        reassuring `false` beside `last_status: failed`."""
+        env.fake.settings["db_backup_first_attempt_at"] = self._age(4)
+        env.fake.settings["db_backup_last_status"] = "failed"
+        block = asyncio.run(svc_mod.build_backup_status_block())
+        assert block["last_success_at"] is None
+        assert block["last_success_age_days"] is None
+        assert block["stale"] is True
+        # ...and a fresh success reads not-stale.
+        env.fake.settings["db_backup_last_success_at"] = self._age(1)
+        block = asyncio.run(svc_mod.build_backup_status_block())
+        assert block["stale"] is False
+
 
 # ---------------------------------------------------------------------------
 # Env parsing + retention reader (inverted coercion)
@@ -480,6 +496,18 @@ class TestPgConninfo:
             "PGPASSWORD needs the raw decoded password, not the URL-escaped form"
         )
 
+    def test_unparseable_url_never_echoes_the_url(self):
+        """SQLAlchemy's ArgumentError quotes the offending string — the whole
+        URL, password included — and this message reaches the ERROR log and
+        the durable db_backup_last_error row. The wrapper must raise a
+        password-free BackupRunError instead."""
+        bad = "not a url at all://user:hunter2@host/db"
+        with pytest.raises(svc_mod.BackupRunError) as exc:
+            _pg_conninfo_and_password(bad)
+        assert "hunter2" not in str(exc.value)
+        assert bad not in str(exc.value)
+        assert exc.value.__cause__ is None, "raise ... from None — no chained URL"
+
 
 class _FakeProc:
     def __init__(self, *, rc=0, stderr=b"", hang=False):
@@ -533,6 +561,9 @@ class TestPgDump:
         assert argv[argv.index("-d") + 1] == "postgresql://u@h:5432/db?sslmode=require"
         assert all("sekret" not in a for a in argv), "argv is world-readable /proc"
         assert captured["env"]["PGPASSWORD"] == "sekret"
+        # Owner-only, like the SQLite arm: pg_dump -f creates 0644 & ~umask
+        # and the verify step tightens it before the atomic rename.
+        assert (os.stat(tmp).st_mode & 0o777) == 0o600
 
     def test_no_password_leaves_pgpassword_unset(self, env, monkeypatch, tmp_path):
         monkeypatch.delenv("PGPASSWORD", raising=False)

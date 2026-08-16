@@ -96,6 +96,18 @@ RETENTION_OPS_KEYS = (
     "backup_retention_days",
 )
 
+# The RETENTION_OPS_KEYS members whose prune is NOT a #1644 row sweep (#2216).
+# `backup_retention_days` prunes FILE artifacts from the backup job's own tail;
+# its bounded-destruction guarantee is structural (the fixed BACKUP_MIN_KEEP
+# floor in db/backup_primitives.py — never zero recovery points), NOT the
+# count-threshold/ack-gated `_guard_allows` refusal in cleanup_service: an
+# ack-gated refusal fails in the INVERTED direction for backups (refused prune
+# → backups fill the disk, #1871 class), so that prune must run unconditionally
+# within its floor. `tests/unit/test_1771a_retention_edges.py` asserts every
+# key in RETENTION_OPS_KEYS minus THIS set has exactly one `_guard_allows`
+# call site — add a second file-artifact window HERE, or the guard fires.
+NON_ROW_RETENTION_OPS_KEYS = frozenset({"backup_retention_days"})
+
 
 # Default values for ops settings (as specified in requirements)
 OPS_SETTINGS_DEFAULTS = {

@@ -88,7 +88,10 @@ def _int_env(name: str, default: int, low: int, high: int) -> int:
     return value
 
 
-DB_BACKUP_ENABLED = os.getenv("DB_BACKUP_ENABLED", "true").lower() == "true"
+# ONE reader shared with the boot pre-migration hook (db/backup_primitives) —
+# "disabled" must mean disabled for BOTH producers, or an opted-out install
+# accumulates un-pruned boot copies (the prune lives only in this job's tail).
+DB_BACKUP_ENABLED = bp.backup_enabled_from_env()
 DB_BACKUP_HOUR = _int_env("DB_BACKUP_HOUR", 3, 0, 23)
 DB_BACKUP_MINUTE = _int_env("DB_BACKUP_MINUTE", 30, 0, 59)
 
@@ -138,7 +141,9 @@ _STDERR_CAP = 2000
 # db/backup_primitives.py writes a subset of these with hand-rolled SQL (it
 # runs before the db facade exists) — keep the names in sync with it.
 STATUS_KEYS = (
-    "db_backup_last_status",        # ok | failed | skipped_no_space | disabled
+    "db_backup_last_status",        # ok | failed | skipped_no_space
+                                    # (a disabled job writes nothing — the
+                                    # status block's `enabled` field says so)
     "db_backup_last_success_at",
     "db_backup_last_error",
     "db_backup_last_path",
@@ -210,7 +215,16 @@ def _pg_conninfo_and_password(url_str: str) -> Tuple[str, Optional[str]]:
     """
     from sqlalchemy.engine import make_url
 
-    url = make_url(url_str)
+    try:
+        url = make_url(url_str)
+    except Exception as exc:
+        # SQLAlchemy's ArgumentError echoes the OFFENDING STRING — i.e. the
+        # URL, password included — and this message flows into the ERROR log
+        # and the durable db_backup_last_error row. Never let the URL through.
+        raise BackupRunError(
+            f"DATABASE_URL could not be parsed ({type(exc).__name__}); "
+            "the URL is deliberately not echoed"
+        ) from None
     password = url.password  # raw (unescaped) — exactly what PGPASSWORD needs
     normalized = url.set(drivername="postgresql")
     stripped = normalized._replace(password=None)
@@ -537,6 +551,12 @@ class DBBackupService:
                     raise BackupRunError(
                         "pg_dump output is missing the PGDMP magic bytes"
                     )
+            # Owner-only, like the SQLite arm (bp.sqlite_backup_to) and the
+            # 0700 dir: pg_dump -f creates 0644 & ~umask. Best-effort.
+            try:
+                os.chmod(tmp_path, 0o600)
+            except OSError:
+                pass
             return size
 
         size = await asyncio.to_thread(_verify)
@@ -695,6 +715,12 @@ async def build_backup_status_block() -> Dict[str, Any]:
 
     def _read_status() -> Dict[str, Optional[str]]:
         out = {k: db.get_setting_value(k, None) for k in STATUS_KEYS}
+        # The staleness alarm's reference for installs that have NEVER
+        # succeeded — read here too so `stale` below cannot disagree with
+        # the alarm (the two-readers-disagree class, again).
+        out["db_backup_first_attempt_at"] = db.get_setting_value(
+            "db_backup_first_attempt_at", None
+        )
         out["retention_days"] = effective_backup_retention_days()
         return out
 
@@ -735,6 +761,21 @@ async def build_backup_status_block() -> Dict[str, Any]:
             )
         except ValueError:
             age_days = None
+    # `stale` uses the SAME reference the staleness alarm uses
+    # (_staleness_check): last success, else first attempt — so an install
+    # that has been failing since day one reads `stale: true` here exactly
+    # when the alarm fires, instead of a reassuring `false` beside a
+    # `last_status: failed`.
+    stale_reference = last_success_at or status.get("db_backup_first_attempt_at")
+    stale = False
+    if stale_reference:
+        try:
+            stale = (
+                (datetime.now(timezone.utc) - _parse_iso(stale_reference))
+                .total_seconds() / 86400.0
+            ) > _STALENESS_ALARM_DAYS
+        except ValueError:
+            stale = False
 
     def _int_or_none(value: Optional[str]) -> Optional[int]:
         try:
@@ -754,7 +795,7 @@ async def build_backup_status_block() -> Dict[str, Any]:
         "last_status": status.get("db_backup_last_status"),
         "last_success_at": last_success_at,
         "last_success_age_days": age_days,
-        "stale": bool(age_days is not None and age_days > _STALENESS_ALARM_DAYS),
+        "stale": stale,
         "last_error": status.get("db_backup_last_error") or None,
         "last_path": status.get("db_backup_last_path"),
         "last_size_bytes": _int_or_none(status.get("db_backup_last_size_bytes")),
