@@ -7,6 +7,7 @@ Handles:
 - Managing git configuration in the database
 - Initializing git in agent containers
 """
+
 import asyncio
 import os
 import re
@@ -34,6 +35,7 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------------
 # Conflict classification (S5 — operator-readable diagnosis, issue #386)
 # ----------------------------------------------------------------------------
+
 
 class ConflictClass(str, Enum):
     """Symbolic class of a git sync/push/pull failure, used by the UI to pick
@@ -64,7 +66,9 @@ _AUTH_PATTERNS = (
 )
 
 _UNCOMMITTED_PATTERNS = (
-    re.compile(r"your local changes to the following files would be overwritten", re.IGNORECASE),
+    re.compile(
+        r"your local changes to the following files would be overwritten", re.IGNORECASE
+    ),
     re.compile(r"please commit your changes or stash them", re.IGNORECASE),
 )
 
@@ -219,7 +223,8 @@ async def update_remote_pat(agent_name: str, github_pat: str, github_repo: str) 
         if not ok:
             logger.warning(
                 "update_remote_pat: set-url failed for %s: %s",
-                agent_name, result.get("output", "")[:200],
+                agent_name,
+                result.get("output", "")[:200],
             )
         return ok
     except Exception as e:  # noqa: BLE001 — best-effort, container may be down
@@ -283,40 +288,40 @@ async def rebind_origin_and_push(
 ) -> RebindResult:
     """Push the agent's current history to ``destination_repo`` and repoint ``origin``.
 
-    The in-container half of "bind this agent to a repo you own"
-    (trinity-enterprise#109 §4.4 step 5). Unlike ent#93's create-time fork,
-    the content source is the agent's **workspace volume** — the accumulated
-    knowledge base — not a clone of the template, which is the whole reason
-    the two paths cannot share a copy step.
+        The in-container half of "bind this agent to a repo you own"
+        (trinity-enterprise#109 §4.4 step 5). Unlike ent#93's create-time fork,
+        the content source is the agent's **workspace volume** — the accumulated
+        knowledge base — not a clone of the template, which is the whole reason
+        the two paths cannot share a copy step.
 
-``branch`` is the ref the caller already resolved via
-    ``inspect_container_git`` during classification, and is the SAME value it
-    wrote into the CAS's ``source_branch`` — re-reading it here would open a
-    window where the row and the pushed ref disagree.
+    ``branch`` is the ref the caller already resolved via
+        ``inspect_container_git`` during classification, and is the SAME value it
+        wrote into the CAS's ``source_branch`` — re-reading it here would open a
+        window where the row and the pushed ref disagree.
 
-    Order is chosen so a failure is never half-applied:
+        Order is chosen so a failure is never half-applied:
 
-    1. push to the destination via an **explicit URL**, not via ``origin`` —
-       so a push failure leaves ``origin`` still pointing at the old repo and
-       the agent exactly as it was;
-    2. only then repoint ``origin``, clear the ent#123 push blackhole, and add
-       the old repo as a credential-less ``upstream`` (skipped when
-       ``previous_repo`` is None — a resumption, where the row already names
-       the destination and writing it would erase the real upstream);
-    3. read ``origin`` back and confirm it resolves to the destination. AC #5
-       forbids a *silent* origin mismatch, and a set-url that exits 0 without
-       taking effect is precisely the silent case.
+        1. push to the destination via an **explicit URL**, not via ``origin`` —
+           so a push failure leaves ``origin`` still pointing at the old repo and
+           the agent exactly as it was;
+        2. only then repoint ``origin``, clear the ent#123 push blackhole, and add
+           the old repo as a credential-less ``upstream`` (skipped when
+           ``previous_repo`` is None — a resumption, where the row already names
+           the destination and writing it would erase the real upstream);
+        3. read ``origin`` back and confirm it resolves to the destination. AC #5
+           forbids a *silent* origin mismatch, and a set-url that exits 0 without
+           taking effect is precisely the silent case.
 
-    **Committed history only.** This deliberately does NOT ``git add``/commit
-    the working tree. Nothing is lost — the files live on the workspace volume
-    and the next Push (which now works) commits them — and staging blind would
-    walk straight into the ``git add .`` credential hazard that has to be
-    solved before `local:` agents are supported.
+        **Committed history only.** This deliberately does NOT ``git add``/commit
+        the working tree. Nothing is lost — the files live on the workspace volume
+        and the next Push (which now works) commits them — and staging blind would
+        walk straight into the ``git add .`` credential hazard that has to be
+        solved before `local:` agents are supported.
 
-    Idempotent: re-running after a partial failure re-pushes the same refs and
-    re-applies the same set-urls.
+        Idempotent: re-running after a partial failure re-pushes the same refs and
+        re-applies the same set-urls.
 
-    Never raises; the caller maps ``stage`` to a structured 502.
+        Never raises; the caller maps ``stage`` to a structured 502.
     """
     container_name = f"agent-{agent_name}"
     dest_url = _git_remote_url(user_pat, destination_repo)
@@ -324,7 +329,9 @@ async def rebind_origin_and_push(
     try:
         git_dir = await _detect_git_dir(container_name)
     except Exception as e:  # noqa: BLE001 — container may be down mid-op
-        return RebindResult(False, "detect", error=f"Could not reach the agent container: {e}")
+        return RebindResult(
+            False, "detect", error=f"Could not reach the agent container: {e}"
+        )
 
     async def _run(cmd: str, timeout: int = 120) -> tuple:
         result = await execute_command_in_container(
@@ -346,7 +353,9 @@ async def rebind_origin_and_push(
     if rc != 0:
         last = out.strip().splitlines()[-1][:300] if out.strip() else "push failed"
         return RebindResult(
-            False, "push", branch=branch,
+            False,
+            "push",
+            branch=branch,
             error=(
                 f"Could not push the agent's history to '{destination_repo}': "
                 f"{last}"
@@ -378,7 +387,9 @@ async def rebind_origin_and_push(
     if rc != 0:
         last = out.strip().splitlines()[-1][:300] if out.strip() else "rewire failed"
         return RebindResult(
-            False, "rewire", branch=branch,
+            False,
+            "rewire",
+            branch=branch,
             error=(
                 f"The history reached '{destination_repo}', but repointing the "
                 f"agent's origin failed: {last}"
@@ -390,7 +401,9 @@ async def rebind_origin_and_push(
     observed = (await inspect_container_git(agent_name)).origin_repo
     if not observed or observed.lower() != destination_repo.lower():
         return RebindResult(
-            False, "rewire", branch=branch,
+            False,
+            "rewire",
+            branch=branch,
             error=(
                 f"The history reached '{destination_repo}', but the agent's "
                 f"origin reads as '{observed or 'unset'}' afterwards, not the "
@@ -400,7 +413,10 @@ async def rebind_origin_and_push(
 
     logger.info(
         "repo-bind: %s pushed branch %s to %s and repointed origin (upstream=%s)",
-        agent_name, branch, destination_repo, previous_repo or "unchanged",
+        agent_name,
+        branch,
+        destination_repo,
+        previous_repo or "unchanged",
     )
     return RebindResult(True, "done", branch=branch)
 
@@ -452,7 +468,9 @@ async def inspect_container_git(agent_name: str) -> ContainerGitState:
     try:
         git_dir = await _detect_git_dir(container_name)
     except Exception as e:  # noqa: BLE001 — unknown, never "matches"
-        logger.warning("inspect_container_git: git dir probe failed for %s: %s", agent_name, e)
+        logger.warning(
+            "inspect_container_git: git dir probe failed for %s: %s", agent_name, e
+        )
         return ContainerGitState()
 
     async def _read(cmd: str) -> Optional[str]:
@@ -463,11 +481,15 @@ async def inspect_container_git(agent_name: str) -> ContainerGitState:
                 timeout=30,
             )
         except Exception as e:  # noqa: BLE001
-            logger.warning("inspect_container_git: %r failed for %s: %s", cmd, agent_name, e)
+            logger.warning(
+                "inspect_container_git: %r failed for %s: %s", cmd, agent_name, e
+            )
             return None
         if result.get("exit_code", 1) != 0:
             return None
-        lines = [ln.strip() for ln in (result.get("output") or "").splitlines() if ln.strip()]
+        lines = [
+            ln.strip() for ln in (result.get("output") or "").splitlines() if ln.strip()
+        ]
         return lines[-1] if lines else None
 
     origin_raw = await _read("git remote get-url origin")
@@ -513,6 +535,16 @@ _DATA_PATHS_PATH = "/home/developer/.trinity/data-paths.yaml"
 # runtime data never lands in a commit.
 _DATA_ROOT_GITIGNORE = "data/"
 
+# #1704: declared Claude Code plugin selection (marketplaces + installed
+# plugins). Unlike persistent-state.yaml / data-paths.yaml this file is
+# COMMITTED — it is in `_TRINITY_AUTHORED_PATHS`, so it rides the #2070
+# contents-only re-include and survives a git-based reconstitution onto a
+# fresh volume or a new host (the real #1704 gap; a plain recreate is already
+# volume-safe). The boot hook (`agent_server.plugins_reinstall`) reads it and
+# re-installs anything declared-but-missing. Opt-in — empty declaration writes
+# no file.
+_PLUGINS_PATH = "/home/developer/.trinity/plugins.yaml"
+
 
 # ---------------------------------------------------------------------------
 # Shared `.trinity/<file>.yaml` list primitives (#1169)
@@ -522,6 +554,35 @@ _DATA_ROOT_GITIGNORE = "data/"
 # heredoc delimiter is a parameter so each caller keeps its own marker (the
 # S4 tests pin `PSTATE_EOF`).
 # ---------------------------------------------------------------------------
+
+
+async def _write_trinity_yaml_file(
+    agent_name: str,
+    *,
+    path: str,
+    body: str,
+    heredoc: str,
+    timeout: int = 10,
+) -> None:
+    """Write a pre-serialized YAML `body` to `path` inside the agent container.
+
+    THE single container-write mechanism for every `.trinity/*.yaml` the backend
+    materializes (#953: never hand-roll a raw container write). The single-quoted
+    heredoc preserves the body verbatim and is injection-safe (no shell expansion
+    inside `<<'HEREDOC'`); callers are responsible for keeping the body's values
+    free of the outer `bash -c "…"` metacharacters (`$`, `` ` ``, `"`, `\\`) —
+    which the reused `_SAFE_DATA_PATH_RE` / `template_plugins` charset validators
+    guarantee.
+    """
+    cmd = (
+        f"mkdir -p /home/developer/.trinity && "
+        f"cat > {path} <<'{heredoc}'\n{body}{heredoc}"
+    )
+    await execute_command_in_container(
+        container_name=f"agent-{agent_name}",
+        command=f'bash -c "{cmd}"',
+        timeout=timeout,
+    )
 
 
 async def materialize_trinity_yaml_list(
@@ -541,14 +602,8 @@ async def materialize_trinity_yaml_list(
     import yaml as _yaml
 
     body = _yaml.safe_dump({key: list(patterns)}, sort_keys=False)
-    cmd = (
-        f"mkdir -p /home/developer/.trinity && "
-        f"cat > {path} <<'{heredoc}'\n{body}{heredoc}"
-    )
-    await execute_command_in_container(
-        container_name=f"agent-{agent_name}",
-        command=f'bash -c "{cmd}"',
-        timeout=timeout,
+    await _write_trinity_yaml_file(
+        agent_name, path=path, body=body, heredoc=heredoc, timeout=timeout
     )
 
 
@@ -567,6 +622,7 @@ async def _read_trinity_yaml_list(
     result, and must not mutate a shared default constant).
     """
     import yaml as _yaml
+
     result = await execute_command_in_container(
         container_name=f"agent-{agent_name}",
         command=f'bash -c "cat {path} 2>/dev/null || true"',
@@ -579,9 +635,12 @@ async def _read_trinity_yaml_list(
         return list(default)
     try:
         # ent#314: agent-written file read out of the container.
-        data = _load_hardened_yaml(
-            raw, kind="agent_yaml", alias_policy=_AliasPolicy.REJECT
-        ) or {}
+        data = (
+            _load_hardened_yaml(
+                raw, kind="agent_yaml", alias_policy=_AliasPolicy.REJECT
+            )
+            or {}
+        )
     except (_yaml.YAMLError, _HardenedYamlError):
         return list(default)
     patterns = data.get(key)
@@ -590,9 +649,7 @@ async def _read_trinity_yaml_list(
     return [str(p) for p in patterns]
 
 
-async def materialize_persistent_state(
-    agent_name: str, patterns: list[str]
-) -> None:
+async def materialize_persistent_state(agent_name: str, patterns: list[str]) -> None:
     """Write `.trinity/persistent-state.yaml` inside the agent container.
 
     Called once from `agent_service.crud` after the container is running.
@@ -676,9 +733,7 @@ async def materialize_data_paths(agent_name: str, paths: list[str]) -> None:
         patterns=safe,
         heredoc="DATAPATHS_EOF",
     )
-    await _append_agent_gitignore(
-        agent_name, _data_paths_gitignore_entries(safe)
-    )
+    await _append_agent_gitignore(agent_name, _data_paths_gitignore_entries(safe))
 
 
 async def _data_paths_for(agent_name: str) -> list[str]:
@@ -692,6 +747,50 @@ async def _data_paths_for(agent_name: str) -> list[str]:
         path=_DATA_PATHS_PATH,
         key="data_paths",
         default=DEFAULT_DATA_PATHS,
+    )
+
+
+async def materialize_plugins(agent_name: str, plugins: dict) -> None:
+    """Materialize an agent's declared Claude Code plugins (#1704).
+
+    Writes `.trinity/plugins.yaml` as nested
+    `{plugins: {marketplaces: [{name, source}], installed: ["plugin@mkt"]}}` via
+    the shared injection-safe heredoc writer. The file is COMMITTED (it is in
+    `_TRINITY_AUTHORED_PATHS`), so the declaration survives a git-based
+    reconstitution onto a fresh volume or a new host, where the gitignored
+    `~/.claude.json` + `~/.claude/plugins/` cache are dropped.
+
+    `plugins` is the ALREADY-normalized dict from
+    `template_plugins.normalize_declared_plugins` — every value is
+    charset-validated, so the nested body is safe inside the outer `bash -c`
+    double quotes (see `_write_trinity_yaml_file`).
+
+    Opt-in: a falsy declaration (`{}` / None / no marketplaces + no installed)
+    is a complete no-op — no file is written — so undeclared agents are
+    entirely unaffected.
+
+    Determinism (a correctness property): `sort_keys=True` + the normalizer's
+    sorted, de-duplicated lists mean a stable plugin set produces a byte-
+    identical file. The 15-min auto-sync loop must not re-commit a churning
+    manifest, so unlike the flat `materialize_trinity_yaml_list`
+    (`sort_keys=False`) this path pins a stable key order.
+    """
+    import yaml as _yaml
+
+    if not isinstance(plugins, dict):
+        return
+    marketplaces = plugins.get("marketplaces") or []
+    installed = plugins.get("installed") or []
+    if not marketplaces and not installed:
+        return
+
+    body = _yaml.safe_dump(
+        {"plugins": {"marketplaces": marketplaces, "installed": installed}},
+        sort_keys=True,
+        default_flow_style=False,
+    )
+    await _write_trinity_yaml_file(
+        agent_name, path=_PLUGINS_PATH, body=body, heredoc="PLUGINS_EOF"
     )
 
 
@@ -762,7 +861,9 @@ async def check_remote_branch_exists(github_repo: str, branch: str) -> bool:
             )
             return False
     except FileNotFoundError:
-        logger.warning("git not installed on backend host; skipping remote branch check")
+        logger.warning(
+            "git not installed on backend host; skipping remote branch check"
+        )
         return False
     except Exception as exc:  # pragma: no cover — defensive
         logger.warning(
@@ -792,7 +893,7 @@ async def check_remote_branch_exists(github_repo: str, branch: str) -> bool:
 # credentials (private) or does not exist. Anonymous GitHub deliberately
 # answers both the same way, so callers must present them as one outcome.
 _ANON_PROBE_DEFINITIVE_PATTERNS = (
-    "could not read username",       # auth challenge with GIT_TERMINAL_PROMPT=0
+    "could not read username",  # auth challenge with GIT_TERMINAL_PROMPT=0
     "authentication failed",
     "repository not found",
     "could not read password",
@@ -841,9 +942,7 @@ async def probe_anonymous_repo_access(github_repo: str) -> str:
             )
             return "transient"
     except FileNotFoundError:
-        logger.warning(
-            "probe_anonymous_repo_access: git not installed on backend host"
-        )
+        logger.warning("probe_anonymous_repo_access: git not installed on backend host")
         return "transient"
     except Exception as exc:  # noqa: BLE001 — defensive
         logger.warning(
@@ -964,9 +1063,7 @@ async def reserve_and_generate_instance_id(
 
 
 async def create_git_config_for_agent(
-    agent_name: str,
-    github_repo: str,
-    instance_id: Optional[str] = None
+    agent_name: str, github_repo: str, instance_id: Optional[str] = None
 ) -> AgentGitConfig:
     """
     Create git configuration for a new agent.
@@ -989,7 +1086,7 @@ async def create_git_config_for_agent(
         agent_name=agent_name,
         github_repo=github_repo,
         working_branch=working_branch,
-        instance_id=instance_id
+        instance_id=instance_id,
     )
 
     return config
@@ -1055,8 +1152,9 @@ def _agent_has_write_credentials(agent_name: str, container) -> bool:
         return bool(db.get_agent_github_pat(agent_name))
     except Exception as exc:  # noqa: BLE001 — guard must never break push
         logger.warning(
-            "_agent_has_write_credentials: check failed for %s: %s — "
-            "failing open", agent_name, exc,
+            "_agent_has_write_credentials: check failed for %s: %s — " "failing open",
+            agent_name,
+            exc,
         )
         return True
 
@@ -1065,7 +1163,7 @@ async def sync_to_github(
     agent_name: str,
     message: Optional[str] = None,
     paths: Optional[list] = None,
-    strategy: Optional[str] = "normal"
+    strategy: Optional[str] = "normal",
 ) -> GitSyncResult:
     """
     Sync agent changes to GitHub.
@@ -1083,16 +1181,10 @@ async def sync_to_github(
     """
     container = get_agent_container(agent_name)
     if not container:
-        return GitSyncResult(
-            success=False,
-            message="Agent not found"
-        )
+        return GitSyncResult(success=False, message="Agent not found")
 
     if container.status != "running":
-        return GitSyncResult(
-            success=False,
-            message="Agent must be running to sync"
-        )
+        return GitSyncResult(success=False, message="Agent must be running to sync")
 
     # ent#123: a tokenless (anonymous public-template) agent has no push
     # credentials — fail with an honest, actionable message instead of
@@ -1121,8 +1213,7 @@ async def sync_to_github(
                 payload["paths"] = paths
 
             response = await client.post(
-                f"http://agent-{agent_name}:8000/api/git/sync",
-                json=payload
+                f"http://agent-{agent_name}:8000/api/git/sync", json=payload
             )
 
             if response.status_code == 200:
@@ -1138,7 +1229,11 @@ async def sync_to_github(
                     message=data.get("message", "Sync completed"),
                     files_changed=data.get("files_changed", 0),
                     branch=data.get("branch"),
-                    sync_time=datetime.fromisoformat(data["sync_time"]) if data.get("sync_time") else datetime.utcnow()
+                    sync_time=(
+                        datetime.fromisoformat(data["sync_time"])
+                        if data.get("sync_time")
+                        else datetime.utcnow()
+                    ),
                 )
             elif response.status_code == 409:
                 # Conflict - return with conflict info
@@ -1160,14 +1255,10 @@ async def sync_to_github(
             else:
                 error_detail = response.json().get("detail", "Sync failed")
                 return GitSyncResult(
-                    success=False,
-                    message=f"Sync failed: {error_detail}"
+                    success=False, message=f"Sync failed: {error_detail}"
                 )
     except Exception as e:
-        return GitSyncResult(
-            success=False,
-            message=f"Sync error: {str(e)}"
-        )
+        return GitSyncResult(success=False, message=f"Sync error: {str(e)}")
 
 
 async def get_git_log(agent_name: str, limit: int = 10) -> Optional[Dict[str, Any]]:
@@ -1183,8 +1274,7 @@ async def get_git_log(agent_name: str, limit: int = 10) -> Optional[Dict[str, An
     try:
         async with agent_httpx_client(agent_name, timeout=30.0) as client:
             response = await client.get(
-                f"http://agent-{agent_name}:8000/api/git/log",
-                params={"limit": limit}
+                f"http://agent-{agent_name}:8000/api/git/log", params={"limit": limit}
             )
             if response.status_code == 200:
                 return response.json()
@@ -1194,7 +1284,9 @@ async def get_git_log(agent_name: str, limit: int = 10) -> Optional[Dict[str, An
         return None
 
 
-async def pull_from_github(agent_name: str, strategy: Optional[str] = "clean") -> Dict[str, Any]:
+async def pull_from_github(
+    agent_name: str, strategy: Optional[str] = "clean"
+) -> Dict[str, Any]:
     """
     Pull latest changes from GitHub to the agent.
 
@@ -1216,7 +1308,7 @@ async def pull_from_github(agent_name: str, strategy: Optional[str] = "clean") -
         async with agent_httpx_client(agent_name, timeout=120.0) as client:
             response = await client.post(
                 f"http://agent-{agent_name}:8000/api/git/pull",
-                json={"strategy": strategy}
+                json={"strategy": strategy},
             )
 
             if response.status_code == 200:
@@ -1285,19 +1377,28 @@ def delete_agent_git_config(agent_name: str) -> bool:
 # descend into a directory excluded by the `.trinity/` dir-form, so negations
 # under it never apply (which is also why compat check S-005 accepts it).
 _TRINITY_AUTHORED_PATHS: Tuple[str, ...] = (
-    ".trinity/pre-check",       # SCHED-COND-001 conditional-schedule hook (#454)
+    ".trinity/pre-check",  # SCHED-COND-001 conditional-schedule hook (#454)
     # Template-authored output-contract validator. No platform executor runs it
     # today (compat check I-005 was retired in #2137 as gating on a fiction), but
     # the path stays: #2070 derives the `!` re-includes from this tuple, and 14
     # bundled templates already ship `!.trinity/post-check`, so removing it would
     # untrack an authored hook on the next push — the exact #2070 regression.
     ".trinity/post-check",
-    ".trinity/pre-snapshot",    # data-snapshot quiesce hook (#1169)
-    ".trinity/setup.sh",        # startup setup convention (trinity-enterprise#76)
+    ".trinity/pre-snapshot",  # data-snapshot quiesce hook (#1169)
+    ".trinity/setup.sh",  # startup setup convention (trinity-enterprise#76)
     ".trinity/persistent-processes.allow",  # orphan-sweep allowlist patterns (#1501)
-    ".trinity/brain-orb/",      # brain-orb convention hooks (#58/#60)
-    ".trinity/pipelines/",      # agent-defined pipeline DEFINITIONS (#919);
-                                # instance STATE lives in pipeline-state/
+    ".trinity/brain-orb/",  # brain-orb convention hooks (#58/#60)
+    ".trinity/pipelines/",  # agent-defined pipeline DEFINITIONS (#919);
+    # instance STATE lives in pipeline-state/
+    # #1704: declared Claude Code plugin selection (marketplaces + installed).
+    # COMMITTED — unlike persistent-state.yaml / data-paths.yaml (volume-local,
+    # re-materialized at creation), this must survive a git-based reconstitution
+    # onto a fresh volume or a new host, which is exactly the gap #1704 closes.
+    # This entry alone yields both the `!` re-include (:1325) and the
+    # `git rm --cached` exemption (_build_rm_cached_ignored_command) — the plugin
+    # manifest is committable while `.claude.json` (:1351) and `.claude/plugins/`
+    # (:1364, #1705) stay gitignored.
+    ".trinity/plugins.yaml",
 )
 
 
@@ -1553,15 +1654,14 @@ async def _detect_git_dir_fallback(container_name: str) -> str:
         container_name=container_name,
         command=(
             'bash -c "[ -d /home/developer/workspace ] && '
-            'find /home/developer/workspace -mindepth 1 -maxdepth 1 | '
+            "find /home/developer/workspace -mindepth 1 -maxdepth 1 | "
             'head -1 | wc -l"'
         ),
         timeout=5,
     )
-    workspace_has_content = (
-        check_workspace.get("exit_code") == 0
-        and "1" in check_workspace.get("output", "")
-    )
+    workspace_has_content = check_workspace.get(
+        "exit_code"
+    ) == 0 and "1" in check_workspace.get("output", "")
     return "/home/developer/workspace" if workspace_has_content else "/home/developer"
 
 
@@ -1624,6 +1724,7 @@ async def _migrate_workspace_gitignore(agent_name: str) -> None:
 @dataclass
 class GitInitResult:
     """Result of git initialization in container."""
+
     success: bool
     git_dir: str
     working_branch: Optional[str] = None
@@ -1674,7 +1775,9 @@ async def initialize_git_in_container(
     # post-init Push migration targets the same path.
     git_dir = await _detect_git_dir(container_name)
     if git_dir == "/home/developer/workspace":
-        logger.info(f"[LEGACY] Using workspace directory with existing content: {git_dir}")
+        logger.info(
+            f"[LEGACY] Using workspace directory with existing content: {git_dir}"
+        )
     else:
         logger.info(f"Using home directory: {git_dir}")
 
@@ -1696,39 +1799,39 @@ async def initialize_git_in_container(
     setup_commands: list[tuple[str, bool]] = [
         ('git config --global user.email "trinity@agent.local"', True),
         ('git config --global user.name "Trinity Agent"', True),
-        ('git config --global init.defaultBranch main', True),
+        ("git config --global init.defaultBranch main", True),
         # #1595: auto-gc always detaches to PID 1 and is SIGKILLed by the
         # orphan sweep — disable it; the agent-server's registered maintenance
         # pass owns repo upkeep. Global (volume-persisted ~/.gitconfig) so
         # agents on older base images pick it up on the next sync init.
-        ('git config --global gc.auto 0', True),
-        ('git config --global gc.autoDetach false', True),
-        ('git config --global maintenance.auto false', True),
-        ('git config --global maintenance.autoDetach false', True),
-        ('git init', True),
+        ("git config --global gc.auto 0", True),
+        ("git config --global gc.autoDetach false", True),
+        ("git config --global maintenance.auto false", True),
+        ("git config --global maintenance.autoDetach false", True),
+        ("git init", True),
         (_remote_seturl_subcommand(_git_remote_url(github_pat, github_repo)), True),
-        ('git fetch origin', False),  # Optional — remote may be empty
+        ("git fetch origin", False),  # Optional — remote may be empty
     ]
 
     for cmd, required in setup_commands:
         result = await execute_command_in_container(
             container_name=container_name,
             command=f'bash -c "cd {git_dir} && {cmd}"',
-            timeout=60
+            timeout=60,
         )
         if result.get("exit_code", 0) != 0 and required:
             output = result.get("output", "")
             return GitInitResult(
                 success=False,
                 git_dir=git_dir,
-                error=f"Git command failed: {cmd}\nOutput: {output}"
+                error=f"Git command failed: {cmd}\nOutput: {output}",
             )
 
     # Check if remote has commits on main (to preserve history)
     check_main = await execute_command_in_container(
         container_name=container_name,
         command=f'bash -c "cd {git_dir} && git rev-parse --verify origin/main"',
-        timeout=10
+        timeout=10,
     )
     remote_has_main = check_main.get("exit_code", 1) == 0
 
@@ -1736,25 +1839,25 @@ async def initialize_git_in_container(
         # Preserve remote history: reset index to origin/main, then stage
         # the current workspace on top of it and fast-forward push.
         commit_commands = [
-            'git reset origin/main',
-            'git add .',
+            "git reset origin/main",
+            "git add .",
             'git commit -m "Initial commit from Trinity Agent" || echo "Nothing to commit"',
             # Always set upstream; no-op when there is nothing new to push.
-            'git push -u origin main',
+            "git push -u origin main",
         ]
     else:
         # Empty repo: force push creates the initial history.
         commit_commands = [
-            'git add .',
+            "git add .",
             'git commit -m "Initial commit from Trinity Agent" || echo "Nothing to commit"',
-            'git push -u origin main --force',
+            "git push -u origin main --force",
         ]
 
     for cmd in commit_commands:
         result = await execute_command_in_container(
             container_name=container_name,
             command=f'bash -c "cd {git_dir} && {cmd}"',
-            timeout=60
+            timeout=60,
         )
         if result.get("exit_code", 0) != 0:
             output = result.get("output", "")
@@ -1762,7 +1865,7 @@ async def initialize_git_in_container(
                 return GitInitResult(
                     success=False,
                     git_dir=git_dir,
-                    error=f"Git command failed: {cmd}\nOutput: {output}"
+                    error=f"Git command failed: {cmd}\nOutput: {output}",
                 )
 
     # Step 4: Create (or check out) the working branch.
@@ -1800,41 +1903,39 @@ async def initialize_git_in_container(
         working_branch = generate_working_branch(agent_name, instance_id)
 
         branch_commands = [
-            f'git checkout -b {working_branch}',
-            f'git push -u origin {working_branch}'
+            f"git checkout -b {working_branch}",
+            f"git push -u origin {working_branch}",
         ]
 
         for cmd in branch_commands:
             result = await execute_command_in_container(
                 container_name=container_name,
                 command=f'bash -c "cd {git_dir} && {cmd}"',
-                timeout=60
+                timeout=60,
             )
             if result.get("exit_code", 0) != 0:
                 # Working branch creation is optional - log but don't fail
-                logger.warning(f"Failed to create working branch: {result.get('output', '')}")
+                logger.warning(
+                    f"Failed to create working branch: {result.get('output', '')}"
+                )
 
     # Step 5: Verify
     verify_result = await execute_command_in_container(
         container_name=container_name,
         command=f'bash -c "cd {git_dir} && git rev-parse --git-dir"',
-        timeout=5
+        timeout=5,
     )
 
     if verify_result.get("exit_code", 0) != 0:
         return GitInitResult(
             success=False,
             git_dir=git_dir,
-            error="Git initialization verification failed"
+            error="Git initialization verification failed",
         )
 
     logger.info(f"Git initialization verified successfully in {git_dir}")
 
-    return GitInitResult(
-        success=True,
-        git_dir=git_dir,
-        working_branch=working_branch
-    )
+    return GitInitResult(success=True, git_dir=git_dir, working_branch=working_branch)
 
 
 async def check_git_initialized(agent_name: str) -> Optional[str]:
@@ -1854,7 +1955,7 @@ async def check_git_initialized(agent_name: str) -> Optional[str]:
     result = await execute_command_in_container(
         container_name=container_name,
         command='bash -c "[ -d /home/developer/workspace/.git ] && echo workspace || ([ -d /home/developer/.git ] && echo home || echo notexists)"',
-        timeout=5
+        timeout=5,
     )
 
     output = result.get("output", "").strip()
