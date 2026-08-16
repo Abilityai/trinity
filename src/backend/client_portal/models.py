@@ -395,6 +395,15 @@ class PortalHistory(BaseModel):
     # that reloaded mid-turn subscribes to this id to reattach to the live
     # stream instead of showing a thread that looks finished.
     in_flight_execution_id: Optional[str] = None
+    # #2214: how long the reattaching client may honestly keep waiting for that
+    # turn — the in-flight marker's REMAINING TTL in seconds, measured at this
+    # read (the budget was fixed at dispatch, so a fresh full budget here would
+    # over-wait by the turn's elapsed time). None when nothing is in flight or
+    # the TTL is unreadable; the client then falls back. Optional and additive —
+    # declared here because the route's `response_model` strips undeclared
+    # fields, so without this line the budget would silently never leave the
+    # server.
+    in_flight_wait_budget_seconds: Optional[int] = None
 
 
 # --- Operator controls over a signed-in client (ent#281) ----------------------
