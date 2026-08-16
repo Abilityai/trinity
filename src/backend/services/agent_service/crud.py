@@ -3,7 +3,6 @@ Agent Service CRUD - Agent creation and deletion operations.
 
 Contains the core logic for creating and deleting agents.
 """
-
 import asyncio
 import os
 import re
@@ -30,10 +29,7 @@ from services.docker_service import (
     get_agent_status_from_container,
 )
 from services.docker_utils import (
-    volume_get,
-    volume_create,
-    containers_run,
-    container_remove,
+    volume_get, volume_create, containers_run, container_remove
 )
 from services.agent_runtime_state import clear_agent_breakers, clear_agent_runtime_state
 from services.template_service import (
@@ -47,27 +43,13 @@ from services.template_service import (
 from services.template_schedules import normalize_declared_schedules
 from services.template_plugins import normalize_declared_plugins
 from services import git_service
-from services.settings_service import (
-    get_anthropic_api_key,
-    resolve_github_pat,
-    get_agent_full_capabilities,
-    get_agent_quota_for_role,
-    get_agent_default_resources,
-    get_agent_default_require_email,
-    get_ephemeral_agent_quota,
-    get_ephemeral_ttl_ceiling_seconds,
-)
+from services.settings_service import get_anthropic_api_key, resolve_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
 from services import rate_limiter
 from . import ephemeral as ephemeral_service
 from services.github_service import GitHubService, GitHubError
 from services.agent_auth import derive_agent_token
-from utils.helpers import (
-    parse_iso_timestamp,
-    sanitize_agent_name,
-    to_utc_iso,
-    utc_now_iso,
-)
+from utils.helpers import parse_iso_timestamp, sanitize_agent_name, to_utc_iso, utc_now_iso
 from utils.safe_yaml import HardenedYamlError, load_template_yaml
 from .fork_to_own import fork_template_to_own_repo
 from . import snapshot_import
@@ -278,9 +260,7 @@ def _safe_cred_file_path(relative_path: str, root: Path) -> Path:
     return candidate
 
 
-def _fork_destination_in_use_message(
-    destination: str, bound_agent: str, username: str
-) -> str:
+def _fork_destination_in_use_message(destination: str, bound_agent: str, username: str) -> str:
     """409 detail for a destination repo already bound to an agent (#93).
 
     Names the bound agent only when the caller can access it — a creator-role
@@ -339,7 +319,6 @@ class _TemplateResolution:
     before a field is produced leaves a benign default (no new NameError
     surface).
     """
-
     template_data: dict = field(default_factory=dict)
     github_template_path: Optional[str] = None
     github_repo_for_agent: Optional[str] = None
@@ -361,9 +340,8 @@ class _TemplateResolution:
     declared_schedules: list = field(default_factory=list)
     # #1704: NORMALIZED declared `plugins:` (Claude Code marketplace plugins),
     # fed by ALL THREE resolver branches — same one-carrier-two-producers shape
-    # as `declared_schedules`, and NOT folded into `template_data` for the same
-    # reason (the `github:` path never populates `template_data`). Empty dict =
-    # opt-in no-op.
+    # as `declared_schedules`, NOT folded into `template_data` (the `github:`
+    # path never populates it). Empty dict = opt-in no-op.
     declared_plugins: dict = field(default_factory=dict)
     # trinity-enterprise#15: staged backend-materialized snapshot for the
     # "copy" import intent. When set, `github_repo_for_agent` stays None by
@@ -376,7 +354,6 @@ class _RollbackHandles:
     """The exact handles the except/else roll back (AC #3). Every field is
     defaulted and the ORCHESTRATOR is the sole populator — the phase-helpers
     never touch it, so the caught behavior is byte-identical to the monolith."""
-
     agent_name: str = ""
     agent_mcp_key: object = None
     git_instance_id: Optional[str] = None
@@ -472,7 +449,8 @@ def _apply_ephemeral_pregates(config: AgentConfig, current_user: User) -> Option
         for _ in range(5):
             candidate = f"{base_name}-{secrets.token_hex(4)}"
             if not (
-                get_agent_by_name(candidate) or db.is_agent_name_reserved(candidate)
+                get_agent_by_name(candidate)
+                or db.is_agent_name_reserved(candidate)
             ):
                 config.name = candidate
                 break
@@ -491,7 +469,11 @@ async def _guard_leftover_workspace_volume(
     caller explicitly declares an adopt. Raised BEFORE the docker try-block so
     the 409 isn't flattened to a generic 500 (nothing is built yet to roll
     back). Ghosts are volume-less, so they never reach here."""
-    if not config.ephemeral and not adopt_existing_workspace and docker_client:
+    if (
+        not config.ephemeral
+        and not adopt_existing_workspace
+        and docker_client
+    ):
         _workspace_vol = f"agent-{config.name}-workspace"
         try:
             await volume_get(_workspace_vol)
@@ -534,10 +516,7 @@ def _parse_github_ref(config: AgentConfig) -> tuple[str, str, Optional[str]]:
     if "@" in template_str:
         template_str, url_branch = template_str.rsplit("@", 1)
         # Validate branch name (alphanumeric plus - _ /)
-        if (
-            url_branch
-            and url_branch.replace("-", "").replace("_", "").replace("/", "").isalnum()
-        ):
+        if url_branch and url_branch.replace("-", "").replace("_", "").replace("/", "").isalnum():
             config.source_branch = url_branch
             logger.info(f"GIT-002: Parsed branch from URL: {url_branch}")
         else:
@@ -557,7 +536,9 @@ def _parse_github_ref(config: AgentConfig) -> tuple[str, str, Optional[str]]:
     return template_lookup, template_str, url_branch
 
 
-def _read_source_template(repo: str, pat: Optional[str], ref: Optional[str]) -> tuple:
+def _read_source_template(
+    repo: str, pat: Optional[str], ref: Optional[str]
+) -> tuple:
     """The ONE creation-time read of a `github:` template's `template.yaml`.
     Returns `(metadata, reason)`.
 
@@ -600,8 +581,7 @@ def _declared_schedules_for_snapshot(snapshot) -> list:
     except Exception as e:  # noqa: BLE001 — schedules are advisory, never fatal
         logger.warning(
             "snapshot-import: could not read template.yaml schedules for %s: %s",
-            snapshot.source_repo,
-            e,
+            snapshot.source_repo, e,
         )
         return []
 
@@ -621,13 +601,14 @@ def _declared_plugins_for_snapshot(snapshot) -> dict:
     except Exception as e:  # noqa: BLE001 — plugins are advisory, never fatal
         logger.warning(
             "snapshot-import: could not read template.yaml plugins for %s: %s",
-            snapshot.source_repo,
-            e,
+            snapshot.source_repo, e,
         )
         return {}
 
 
-def _gate_tokenless_request(config: AgentConfig, github_pat: str) -> Optional[str]:
+def _gate_tokenless_request(
+    config: AgentConfig, github_pat: str
+) -> Optional[str]:
     """ent#123: admit or reject a github-template create with no PAT.
 
     ``resolve_github_pat`` returns an EMPTY STRING (not None) when no tier
@@ -698,7 +679,7 @@ def _resolve_github_repo_and_pat(
     if "/" not in repo_path:
         raise HTTPException(
             status_code=400,
-            detail="Invalid GitHub template format. Use: github:owner/repo or github:owner/repo@branch",
+            detail="Invalid GitHub template format. Use: github:owner/repo or github:owner/repo@branch"
         )
 
     # Resolve the GitHub PAT: per-agent → this owner's per-user
@@ -707,9 +688,7 @@ def _resolve_github_repo_and_pat(
     github_pat, github_pat_tier = resolve_github_pat(owner_id=creator_user_id)
     github_pat = _gate_tokenless_request(config, github_pat)
 
-    logger.info(
-        f"Using dynamic GitHub template: {repo_path} (branch: {config.source_branch})"
-    )
+    logger.info(f"Using dynamic GitHub template: {repo_path} (branch: {config.source_branch})")
     return None, repo_path, github_pat, github_pat_tier
 
 
@@ -878,12 +857,7 @@ async def _apply_fork_to_own(
     # origin main holds captures; auto-sync pushes there.
     config.source_branch = fork_result.default_branch
     config.source_mode = True
-    return (
-        github_repo_for_agent,
-        github_pat_for_agent,
-        github_pat_tier,
-        fork_upstream_repo,
-    )
+    return github_repo_for_agent, github_pat_for_agent, github_pat_tier, fork_upstream_repo
 
 
 async def _validate_github_access(
@@ -901,7 +875,9 @@ async def _validate_github_access(
     (#1121) a fail-open would produce a silently empty agent.
     """
     if not github_pat_for_agent:
-        outcome = await git_service.probe_anonymous_repo_access(github_repo_for_agent)
+        outcome = await git_service.probe_anonymous_repo_access(
+            github_repo_for_agent
+        )
         if outcome == "unavailable":
             raise HTTPException(
                 status_code=400,
@@ -952,39 +928,32 @@ async def _validate_github_access(
                 raise HTTPException(
                     status_code=400,
                     detail=f"GitHub repository '{github_repo_for_agent}' not found or PAT does not have access. "
-                    f"Verify the repository exists and the configured GitHub PAT has read access.",
+                           f"Verify the repository exists and the configured GitHub PAT has read access."
                 )
-            logger.info(
-                f"Validated GitHub repo access: {github_repo_for_agent} (private={repo_info.private})"
-            )
+            logger.info(f"Validated GitHub repo access: {github_repo_for_agent} (private={repo_info.private})")
 
             # If source_branch specified, validate branch exists
-            if (
-                config.source_branch
-                and config.source_branch != repo_info.default_branch
-            ):
+            if config.source_branch and config.source_branch != repo_info.default_branch:
                 try:
                     branch_resp = await gh_service._request(
-                        "GET",
-                        f"/repos/{github_repo_for_agent}/branches/{config.source_branch}",
+                        "GET", f"/repos/{github_repo_for_agent}/branches/{config.source_branch}"
                     )
                     if branch_resp.status_code == 404:
                         raise HTTPException(
                             status_code=400,
                             detail=f"Branch '{config.source_branch}' not found in repository '{github_repo_for_agent}'. "
-                            f"Available default branch: '{repo_info.default_branch}'.",
+                                   f"Available default branch: '{repo_info.default_branch}'."
                         )
                 except HTTPException:
                     raise
                 except Exception as e:
-                    logger.warning(
-                        f"Could not validate branch '{config.source_branch}': {e}"
-                    )
+                    logger.warning(f"Could not validate branch '{config.source_branch}': {e}")
     except HTTPException:
         raise
     except GitHubError as e:
         raise HTTPException(
-            status_code=502, detail=f"Failed to validate GitHub repository access: {e}"
+            status_code=502,
+            detail=f"Failed to validate GitHub repository access: {e}"
         )
     except Exception as e:
         # Log but don't block creation for transient network errors
@@ -1029,9 +998,7 @@ async def _reserve_git_instance(
             except Exception as cleanup_exc:
                 logger.warning(
                     "fork-to-own: failed to roll back git config for %s "
-                    "after destination race: %s",
-                    config.name,
-                    cleanup_exc,
+                    "after destination race: %s", config.name, cleanup_exc,
                 )
             raise HTTPException(
                 status_code=409,
@@ -1175,7 +1142,7 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
             if shared_folders_config:
                 template_shared_folders = {
                     "expose": shared_folders_config.get("expose", False),
-                    "consume": shared_folders_config.get("consume", False),
+                    "consume": shared_folders_config.get("consume", False)
                 }
         except Exception as e:
             # Still broad and still non-fatal, deliberately: the file parsed, so
@@ -1223,9 +1190,7 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
     return template_data, template_shared_folders
 
 
-async def _resolve_template(
-    config: AgentConfig, current_user: User
-) -> _TemplateResolution:
+async def _resolve_template(config: AgentConfig, current_user: User) -> _TemplateResolution:
     """Dispatch template resolution (github incl. fork | local | none) and return
     the set-once `_TemplateResolution`. The whole github phase — including the
     real fork-to-own GitHub write — stays here, BEFORE the caller's docker
@@ -1350,9 +1315,7 @@ async def _resolve_template(
                     # resource/MCP defaults still apply to the snapshot agent.
                     copy_repo = gh_template["github_repo"]
                     config.resources = gh_template.get("resources", config.resources)
-                    config.mcp_servers = gh_template.get(
-                        "mcp_servers", config.mcp_servers
-                    )
+                    config.mcp_servers = gh_template.get("mcp_servers", config.mcp_servers)
                 else:
                     if "/" not in repo_path:
                         raise HTTPException(
@@ -1360,7 +1323,9 @@ async def _resolve_template(
                             detail="Invalid GitHub template format. Use: github:owner/repo or github:owner/repo@branch",
                         )
                     copy_repo = repo_path
-                copy_pat, _copy_tier = resolve_github_pat(owner_id=current_user.id)
+                copy_pat, _copy_tier = resolve_github_pat(
+                    owner_id=current_user.id
+                )
                 # GIT-002 parity with startup.sh (`-b` only when ≠ "main"):
                 # the default "main" means "the repo's default branch".
                 copy_branch = (
@@ -1376,7 +1341,9 @@ async def _resolve_template(
                 tr.declared_schedules = _declared_schedules_for_snapshot(
                     tr.copy_snapshot
                 )
-                tr.declared_plugins = _declared_plugins_for_snapshot(tr.copy_snapshot)
+                tr.declared_plugins = _declared_plugins_for_snapshot(
+                    tr.copy_snapshot
+                )
                 return tr
 
             (
@@ -1427,9 +1394,7 @@ async def _resolve_template(
                 config, current_user, tr.github_repo_for_agent
             )
         elif config.template.startswith("local:"):
-            tr.template_data, tr.template_shared_folders = _resolve_local_template(
-                config
-            )
+            tr.template_data, tr.template_shared_folders = _resolve_local_template(config)
             # Same normalizer as the `github:` branch above — symmetric by
             # construction, so neither source can quietly diverge.
             tr.declared_schedules = normalize_declared_schedules(
@@ -1442,9 +1407,8 @@ async def _resolve_template(
 
 
 def _stage_config_files(
-    config: AgentConfig,
-    template_data: dict,
-    github_template_path: Optional[Union[Path, str]],
+    config: AgentConfig, template_data: dict,
+    github_template_path: Optional[Union[Path, str]]
 ) -> tuple[Path, Path, Optional[dict], Optional[dict]]:
     """CRED-002: write the agent-config.yaml + empty credentials.json + template
     cred files under /tmp and compute the template/cred bind specs. Also
@@ -1468,12 +1432,10 @@ def _stage_config_files(
         # Generate empty credential files structure from template
         try:
             generated_files = generate_credential_files(
-                template_data,
-                {},
-                config.name,
+                template_data, {}, config.name,
                 # `github_template_path` first so the field's eventual revival
                 # wins; it has zero writers today (#1900 follow-up).
-                template_base_path=github_template_path or local_template_base,
+                template_base_path=github_template_path or local_template_base
             )
         except CredentialDeclarationError as e:
             # Invariant #1: the service raises an HTTP-free domain error and
@@ -1505,7 +1467,7 @@ def _stage_config_files(
             "tools": config.tools,
             "mcp_servers": config.mcp_servers,
             "custom_instructions": config.custom_instructions,
-            "credentials": {},  # CRED-002: Credentials injected after creation
+            "credentials": {}  # CRED-002: Credentials injected after creation
         }
     }
 
@@ -1534,7 +1496,9 @@ def _stage_config_files(
             # same host path, which was true in prod compose (host bind)
             # but not in dev compose (named volume).
             raw_name = config.template[6:]
-            curated_path = _safe_local_template_path(raw_name, _LOCAL_TEMPLATE_ROOTS[0])
+            curated_path = _safe_local_template_path(
+                raw_name, _LOCAL_TEMPLATE_ROOTS[0]
+            )
             if curated_path.exists():
                 # `or`, NOT `os.getenv(key, default)` (#1759): an EMPTY
                 # HOST_TEMPLATES_PATH made `Path("") / name` collapse to the
@@ -1548,14 +1512,10 @@ def _stage_config_files(
                 # join here is on a value that survived the regex + resolve
                 # barriers above, so the bind source can't traverse out.
                 host_template_path = Path(host_templates_base) / curated_path.name
-                template_volume = {
-                    str(host_template_path): {"bind": "/template", "mode": "ro"}
-                }
+                template_volume = {str(host_template_path): {'bind': '/template', 'mode': 'ro'}}
 
         if generated_files:
-            cred_files_volume = {
-                str(cred_files_dir): {"bind": "/generated-creds", "mode": "ro"}
-            }
+            cred_files_volume = {str(cred_files_dir): {'bind': '/generated-creds', 'mode': 'ro'}}
 
     # #1197: validate/normalize template resource fields against the allowed
     # set BEFORE any side effects (MCP key, subscription, container). A
@@ -1567,11 +1527,11 @@ def _stage_config_files(
     if config.resources is None:
         config.resources = {}
     try:
-        config.resources["cpu"] = normalize_cpu(
-            config.resources.get("cpu"), _get_default_resource("cpu")
+        config.resources['cpu'] = normalize_cpu(
+            config.resources.get('cpu'), _get_default_resource('cpu')
         )
-        config.resources["memory"] = normalize_memory(
-            config.resources.get("memory"), _get_default_resource("memory")
+        config.resources['memory'] = normalize_memory(
+            config.resources.get('memory'), _get_default_resource('memory')
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1583,46 +1543,45 @@ def _build_base_env(config: AgentConfig) -> dict:
     """Base container env (name/type/creds/runtime/#1098 TMPDIR) plus the #1369
     stall-watchdog ceiling and GUARD-001 guardrails overrides."""
     env_vars = {
-        "AGENT_NAME": config.name,
-        "CREDENTIALS_FILE": "/config/credentials.json",
-        "ANTHROPIC_API_KEY": get_anthropic_api_key(),
-        "ENABLE_SSH": "true",
-        "ENABLE_AGENT_UI": "true",
-        "AGENT_SERVER_PORT": "8000",
-        "TEMPLATE_NAME": config.template if config.template else "",
+        'AGENT_NAME': config.name,
+        'CREDENTIALS_FILE': '/config/credentials.json',
+        'ANTHROPIC_API_KEY': get_anthropic_api_key(),
+        'ENABLE_SSH': 'true',
+        'ENABLE_AGENT_UI': 'true',
+        'AGENT_SERVER_PORT': '8000',
+        'TEMPLATE_NAME': config.template if config.template else '',
         # Multi-runtime support
-        "AGENT_RUNTIME": config.runtime or "claude-code",
-        "AGENT_RUNTIME_MODEL": config.runtime_model or "",
+        'AGENT_RUNTIME': config.runtime or 'claude-code',
+        'AGENT_RUNTIME_MODEL': config.runtime_model or '',
         # #1098: redirect scratch (pip/npm/build, ML wheels) off the 100 MB
         # noexec /tmp tmpfs onto the disk-backed, exec-capable home volume.
         # The dir is created at container start by startup.sh.
-        "TMPDIR": AGENT_DEFAULT_TMPDIR,
+        'TMPDIR': AGENT_DEFAULT_TMPDIR,
     }
 
     # #1369: operator-configurable headless per-tool stall-watchdog ceiling.
     # Only propagate when the backend env sets it — an unset value leaves the
     # agent-side default (1800s). Baked at create like AGENT_TMP_SIZE; existing
     # agents pick up a change on their next recreate (not a plain restart).
-    _stall_limit = (os.getenv("AGENT_TOOL_STALL_LIMIT_S") or "").strip()
+    _stall_limit = (os.getenv('AGENT_TOOL_STALL_LIMIT_S') or '').strip()
     if _stall_limit:
-        env_vars["AGENT_TOOL_STALL_LIMIT_S"] = _stall_limit
+        env_vars['AGENT_TOOL_STALL_LIMIT_S'] = _stall_limit
 
     # #2127: operator-configurable headless early-finalize idle ceiling. Same
     # propagation idiom as the stall limit above — unset leaves the agent-side
     # default (300s). This is the documented escape hatch for the known bound
     # that agents with an execution timeout under the ceiling lose #970's early
     # finalize, so it has to actually be settable end to end.
-    _idle_finalize = (os.getenv("AGENT_IDLE_FINALIZE_S") or "").strip()
+    _idle_finalize = (os.getenv('AGENT_IDLE_FINALIZE_S') or '').strip()
     if _idle_finalize:
-        env_vars["AGENT_IDLE_FINALIZE_S"] = _idle_finalize
+        env_vars['AGENT_IDLE_FINALIZE_S'] = _idle_finalize
 
     # GUARD-001: per-agent guardrails overrides (empty by default; baseline
     # is always applied inside the container).
     _guardrails = db.get_guardrails_config(config.name)
     if _guardrails:
         import json as _json
-
-        env_vars["AGENT_GUARDRAILS"] = _json.dumps(_guardrails)
+        env_vars['AGENT_GUARDRAILS'] = _json.dumps(_guardrails)
 
     return env_vars
 
@@ -1645,16 +1604,12 @@ def _apply_subscription_env(config: AgentConfig, env_vars: dict) -> Optional[str
             if least_used:
                 token = db.get_subscription_token(least_used.id)
                 if token:
-                    env_vars["CLAUDE_CODE_OAUTH_TOKEN"] = token
-                    env_vars.pop("ANTHROPIC_API_KEY", None)
+                    env_vars['CLAUDE_CODE_OAUTH_TOKEN'] = token
+                    env_vars.pop('ANTHROPIC_API_KEY', None)
                     auto_assigned_subscription_id = least_used.id
-                    logger.info(
-                        f"Auto-assigned subscription '{least_used.name}' to agent {config.name}"
-                    )
+                    logger.info(f"Auto-assigned subscription '{least_used.name}' to agent {config.name}")
                 else:
-                    logger.warning(
-                        f"Failed to decrypt subscription '{least_used.name}' token, using platform API key"
-                    )
+                    logger.warning(f"Failed to decrypt subscription '{least_used.name}' token, using platform API key")
         except Exception as e:
             logger.warning(f"Subscription auto-assign failed for {config.name}: {e}")
     else:
@@ -1670,28 +1625,22 @@ def _apply_gemini_and_otel_env(config: AgentConfig, env_vars: dict) -> None:
     OpenTelemetry export vars."""
     # Add Google API key if using Gemini runtime
     # Gemini CLI expects GEMINI_API_KEY environment variable
-    if config.runtime == "gemini-cli" or config.runtime == "gemini":
-        google_api_key = os.getenv("GOOGLE_API_KEY", "")
+    if config.runtime == 'gemini-cli' or config.runtime == 'gemini':
+        google_api_key = os.getenv('GOOGLE_API_KEY', '')
         if google_api_key:
-            env_vars["GEMINI_API_KEY"] = google_api_key  # Gemini CLI expects this name
+            env_vars['GEMINI_API_KEY'] = google_api_key  # Gemini CLI expects this name
         else:
             logger.warning("Gemini runtime selected but GOOGLE_API_KEY not configured")
 
     # OpenTelemetry Configuration (enabled by default)
     # Claude Code has built-in OTel support - these vars enable metrics export
-    if os.getenv("OTEL_ENABLED", "1") == "1":
-        env_vars["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
-        env_vars["OTEL_METRICS_EXPORTER"] = os.getenv("OTEL_METRICS_EXPORTER", "otlp")
-        env_vars["OTEL_LOGS_EXPORTER"] = os.getenv("OTEL_LOGS_EXPORTER", "otlp")
-        env_vars["OTEL_EXPORTER_OTLP_PROTOCOL"] = os.getenv(
-            "OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"
-        )
-        env_vars["OTEL_EXPORTER_OTLP_ENDPOINT"] = os.getenv(
-            "OTEL_COLLECTOR_ENDPOINT", "http://trinity-otel-collector:4317"
-        )
-        env_vars["OTEL_METRIC_EXPORT_INTERVAL"] = os.getenv(
-            "OTEL_METRIC_EXPORT_INTERVAL", "60000"
-        )
+    if os.getenv('OTEL_ENABLED', '1') == '1':
+        env_vars['CLAUDE_CODE_ENABLE_TELEMETRY'] = '1'
+        env_vars['OTEL_METRICS_EXPORTER'] = os.getenv('OTEL_METRICS_EXPORTER', 'otlp')
+        env_vars['OTEL_LOGS_EXPORTER'] = os.getenv('OTEL_LOGS_EXPORTER', 'otlp')
+        env_vars['OTEL_EXPORTER_OTLP_PROTOCOL'] = os.getenv('OTEL_EXPORTER_OTLP_PROTOCOL', 'grpc')
+        env_vars['OTEL_EXPORTER_OTLP_ENDPOINT'] = os.getenv('OTEL_COLLECTOR_ENDPOINT', 'http://trinity-otel-collector:4317')
+        env_vars['OTEL_METRIC_EXPORT_INTERVAL'] = os.getenv('OTEL_METRIC_EXPORT_INTERVAL', '60000')
 
 
 def _apply_mcp_and_auth_env(
@@ -1701,15 +1650,13 @@ def _apply_mcp_and_auth_env(
     MCP key) and the unconditional per-agent in-container auth token (#1159)."""
     # Phase: Agent-to-Agent Collaboration - Inject Trinity MCP credentials
     if agent_mcp_key:
-        env_vars["TRINITY_MCP_URL"] = trinity_mcp_url
-        env_vars["TRINITY_MCP_API_KEY"] = agent_mcp_key.api_key
+        env_vars['TRINITY_MCP_URL'] = trinity_mcp_url
+        env_vars['TRINITY_MCP_API_KEY'] = agent_mcp_key.api_key
         # RELIABILITY-004 / #307: backend base URL for the liveness heartbeat
         # loop. The agent authenticates the beat with the MCP key injected
         # above (Option B — no master internal secret in agents); the agent
         # heartbeat is gated on both this URL and the MCP key being present.
-        env_vars["TRINITY_BACKEND_URL"] = os.getenv(
-            "TRINITY_BACKEND_URL", "http://backend:8000"
-        )
+        env_vars['TRINITY_BACKEND_URL'] = os.getenv('TRINITY_BACKEND_URL', 'http://backend:8000')
 
     # #1159: per-agent in-container auth token. Derived from the stable master
     # (AGENT_AUTH_SECRET); the agent middleware verifies it on every inbound
@@ -1717,7 +1664,7 @@ def _apply_mcp_and_auth_env(
     # protected; recomputed identically on recreate (lifecycle.py) and checked
     # by check_agent_auth_token_env_matches so a rename re-derives under the new
     # name. Raises if AGENT_AUTH_SECRET is unset — fail-closed, never tokenless.
-    env_vars["TRINITY_AGENT_AUTH_TOKEN"] = derive_agent_token(config.name)
+    env_vars['TRINITY_AGENT_AUTH_TOKEN'] = derive_agent_token(config.name)
 
 
 def _apply_github_env(
@@ -1733,27 +1680,27 @@ def _apply_github_env(
     source-vs-working-branch mode. ent#123: a tokenless agent (anonymous
     public-template clone) gets repo + sync flags but NO token vars."""
     if github_repo_for_agent:
-        env_vars["GITHUB_REPO"] = github_repo_for_agent
+        env_vars['GITHUB_REPO'] = github_repo_for_agent
         if github_pat_for_agent:
-            env_vars["GITHUB_PAT"] = github_pat_for_agent
+            env_vars['GITHUB_PAT'] = github_pat_for_agent
             # #1574: the SAME managed token also authenticates the `gh` CLI
             # and the REST API (which read GH_TOKEN/GITHUB_TOKEN), not just
             # git. Gated identically to GITHUB_PAT — never set for a
             # tokenless agent.
-            env_vars["GH_TOKEN"] = github_pat_for_agent
-            env_vars["GITHUB_TOKEN"] = github_pat_for_agent
+            env_vars['GH_TOKEN'] = github_pat_for_agent
+            env_vars['GITHUB_TOKEN'] = github_pat_for_agent
         # Phase 7: Enable git sync for GitHub-native agents (tokenless
         # included — the .git dir is what makes pull-only updates work)
-        env_vars["GIT_SYNC_ENABLED"] = "true"
+        env_vars['GIT_SYNC_ENABLED'] = 'true'
         # Dev/self-host: propagate optional git base-URL override to agent container
-        _git_base = os.getenv("TRINITY_GIT_BASE_URL")
+        _git_base = os.getenv('TRINITY_GIT_BASE_URL')
         if _git_base:
-            env_vars["TRINITY_GIT_BASE_URL"] = _git_base
+            env_vars['TRINITY_GIT_BASE_URL'] = _git_base
 
         # trinity-enterprise#93: startup.sh adds a credential-less `upstream`
         # remote so `git pull upstream <branch>` adopts template updates.
         if fork_upstream_repo:
-            env_vars["GIT_UPSTREAM_REPO"] = fork_upstream_repo
+            env_vars['GIT_UPSTREAM_REPO'] = fork_upstream_repo
 
         # #389 S1a: 15-min auto-sync heartbeat. Only legacy (working-branch)
         # agents get it — source-mode agents track main read-only, and
@@ -1765,20 +1712,20 @@ def _apply_github_env(
         # provably source-mode+non-fork today, but auto-push must never
         # engage without credentials if that restriction is ever relaxed.
         if (not config.source_mode or fork_upstream_repo) and github_pat_for_agent:
-            env_vars["GIT_SYNC_AUTO"] = "true"
+            env_vars['GIT_SYNC_AUTO'] = 'true'
 
         # Source mode (default): Track source branch directly for pull-only sync
         # Legacy mode: Create a unique working branch for bidirectional sync
         if config.source_mode:
-            env_vars["GIT_SOURCE_MODE"] = "true"
-            env_vars["GIT_SOURCE_BRANCH"] = config.source_branch or "main"
+            env_vars['GIT_SOURCE_MODE'] = 'true'
+            env_vars['GIT_SOURCE_BRANCH'] = config.source_branch or 'main'
             logger.info(
                 f"GitHub template env vars set for {config.name}: "
                 f"repo={github_repo_for_agent}, branch={config.source_branch or 'main'}, "
                 f"source_mode=true, sync=true"
             )
         else:
-            env_vars["GIT_WORKING_BRANCH"] = git_working_branch
+            env_vars['GIT_WORKING_BRANCH'] = git_working_branch
             logger.info(
                 f"GitHub template env vars set for {config.name}: "
                 f"repo={github_repo_for_agent}, working_branch={git_working_branch}, "
@@ -1811,7 +1758,6 @@ def _build_env_vars(
     # pool. Returns {} (a no-op) for every non-pilot agent, so the default push
     # behavior is unchanged. See services/agent_service/pull_mode.py.
     from services.agent_service.pull_mode import pull_mode_env_vars
-
     env_vars.update(pull_mode_env_vars(config.name))
     return env_vars, auto_assigned_subscription_id
 
@@ -1856,14 +1802,11 @@ async def _workspace_volume_mount(config: AgentConfig, volumes: dict) -> None:
         await volume_create(
             name=agent_volume_name,
             labels={
-                "trinity.platform": "agent-workspace",
-                "trinity.agent-name": config.name,
-            },
+                'trinity.platform': 'agent-workspace',
+                'trinity.agent-name': config.name
+            }
         )
-    volumes[agent_volume_name] = {
-        "bind": "/home/developer",
-        "mode": "rw",
-    }  # Persistent workspace
+    volumes[agent_volume_name] = {'bind': '/home/developer', 'mode': 'rw'}  # Persistent workspace
 
 
 async def _shared_folder_mounts(
@@ -1877,15 +1820,11 @@ async def _shared_folder_mounts(
             db.upsert_shared_folder_config(
                 agent_name=config.name,
                 expose_enabled=template_shared_folders.get("expose", False),
-                consume_enabled=template_shared_folders.get("consume", False),
+                consume_enabled=template_shared_folders.get("consume", False)
             )
-            logger.info(
-                f"Applied template shared folder config for {config.name}: expose={template_shared_folders.get('expose')}, consume={template_shared_folders.get('consume')}"
-            )
+            logger.info(f"Applied template shared folder config for {config.name}: expose={template_shared_folders.get('expose')}, consume={template_shared_folders.get('consume')}")
         except Exception as e:
-            logger.warning(
-                f"Failed to apply template shared folder config for {config.name}: {e}"
-            )
+            logger.warning(f"Failed to apply template shared folder config for {config.name}: {e}")
 
     shared_folder_config = db.get_shared_folder_config(config.name)
     if shared_folder_config:
@@ -1899,9 +1838,9 @@ async def _shared_folder_mounts(
                 await volume_create(
                     name=shared_volume_name,
                     labels={
-                        "trinity.platform": "agent-shared",
-                        "trinity.agent-name": config.name,
-                    },
+                        'trinity.platform': 'agent-shared',
+                        'trinity.agent-name': config.name
+                    }
                 )
                 volume_created = True
 
@@ -1909,18 +1848,15 @@ async def _shared_folder_mounts(
             if volume_created:
                 try:
                     await containers_run(
-                        "alpine",
-                        command="chown 1000:1000 /shared",
-                        volumes={shared_volume_name: {"bind": "/shared", "mode": "rw"}},
-                        remove=True,
+                        'alpine',
+                        command='chown 1000:1000 /shared',
+                        volumes={shared_volume_name: {'bind': '/shared', 'mode': 'rw'}},
+                        remove=True
                     )
                 except Exception as e:
                     logger.warning(f"Could not fix shared volume ownership: {e}")
 
-            volumes[shared_volume_name] = {
-                "bind": "/home/developer/shared-out",
-                "mode": "rw",
-            }
+            volumes[shared_volume_name] = {'bind': '/home/developer/shared-out', 'mode': 'rw'}
 
         # If agent consumes shared folders, mount available shared volumes
         if shared_folder_config.consume_enabled:
@@ -1931,7 +1867,7 @@ async def _shared_folder_mounts(
                 # Only mount if the source volume exists
                 try:
                     await volume_get(source_volume)
-                    volumes[source_volume] = {"bind": mount_path, "mode": "rw"}
+                    volumes[source_volume] = {'bind': mount_path, 'mode': 'rw'}
                 except docker.errors.NotFound:
                     # Source agent hasn't started yet or doesn't have shared volume
                     pass
@@ -1949,8 +1885,8 @@ async def _public_volume_mount(config: AgentConfig, volumes: dict) -> None:
             await volume_create(
                 name=public_volume_name,
                 labels={
-                    "trinity.platform": "agent-public",
-                    "trinity.agent-name": config.name,
+                    'trinity.platform': 'agent-public',
+                    'trinity.agent-name': config.name,
                 },
             )
             public_volume_created = True
@@ -1958,15 +1894,15 @@ async def _public_volume_mount(config: AgentConfig, volumes: dict) -> None:
         if public_volume_created:
             try:
                 await containers_run(
-                    "alpine",
-                    command="chown 1000:1000 /public",
-                    volumes={public_volume_name: {"bind": "/public", "mode": "rw"}},
+                    'alpine',
+                    command='chown 1000:1000 /public',
+                    volumes={public_volume_name: {'bind': '/public', 'mode': 'rw'}},
                     remove=True,
                 )
             except Exception as e:
                 logger.warning(f"Could not fix public volume ownership: {e}")
 
-        volumes[public_volume_name] = {"bind": db.get_public_mount_path(), "mode": "rw"}
+        volumes[public_volume_name] = {'bind': db.get_public_mount_path(), 'mode': 'rw'}
 
 
 async def _build_volume_mounts(
@@ -1997,8 +1933,8 @@ async def _build_volume_mounts(
     # makes both paths agree and closes the surface. The volume itself is not
     # deleted, so anything historically written to it remains on the host.
     volumes = {
-        str(config_path): {"bind": "/config/agent-config.yaml", "mode": "ro"},
-        str(credentials_path): {"bind": "/config/credentials.json", "mode": "ro"},
+        str(config_path): {'bind': '/config/agent-config.yaml', 'mode': 'ro'},
+        str(credentials_path): {'bind': '/config/credentials.json', 'mode': 'ro'},
     }
     if not config.ephemeral:
         await _workspace_volume_mount(config, volumes)
@@ -2032,44 +1968,44 @@ async def _create_agent_container(
     # - Always apply AppArmor profile
     # - Always apply noexec,nosuid to /tmp
     container_labels = {
-        "trinity.platform": "agent",
-        "trinity.agent-name": config.name,
-        "trinity.ssh-port": str(config.port),
-        "trinity.cpu": config.resources["cpu"],
-        "trinity.memory": config.resources["memory"],
-        "trinity.created": utc_now_iso(),
-        "trinity.template": config.template or "",
-        "trinity.agent-runtime": config.runtime or "claude-code",
-        "trinity.full-capabilities": str(full_capabilities).lower(),
-        "trinity.base-image-version": get_platform_version(),
+        'trinity.platform': 'agent',
+        'trinity.agent-name': config.name,
+        'trinity.ssh-port': str(config.port),
+        'trinity.cpu': config.resources['cpu'],
+        'trinity.memory': config.resources['memory'],
+        'trinity.created': utc_now_iso(),
+        'trinity.template': config.template or '',
+        'trinity.agent-runtime': config.runtime or 'claude-code',
+        'trinity.full-capabilities': str(full_capabilities).lower(),
+        'trinity.base-image-version': get_platform_version()
     }
     if config.import_intent:
         # trinity-enterprise#15: ops-visible import provenance (a copy agent
         # is otherwise indistinguishable from a local agent post-hoc).
-        container_labels["trinity.import-intent"] = config.import_intent
+        container_labels['trinity.import-intent'] = config.import_intent
     if config.ephemeral:
         # trinity-enterprise#69: Docker-as-truth ghost markers — the GC
         # orphan pass reclaims labeled containers whose ownership row
         # is gone (backend restarted mid-create/mid-discard).
-        container_labels["trinity.ephemeral"] = "true"
-        container_labels["trinity.ephemeral-expires-at"] = ephemeral_expires_at or ""
+        container_labels['trinity.ephemeral'] = 'true'
+        container_labels['trinity.ephemeral-expires-at'] = ephemeral_expires_at or ''
     if current_user.agent_name:
         # Part 2 spawn provenance rides on ANY agent-spawned creation
         # (durable or ephemeral), pairing with the DB columns.
-        container_labels["trinity.spawned-by"] = current_user.agent_name
+        container_labels['trinity.spawned-by'] = current_user.agent_name
 
     return await containers_run(
         config.base_image,
         detach=True,
         name=f"agent-{config.name}",
-        ports={"22/tcp": config.port},
+        ports={'22/tcp': config.port},
         volumes=volumes,
         environment=env_vars,
         labels=container_labels,
         # Always apply AppArmor for additional sandboxing
-        security_opt=["apparmor:docker-default"],
+        security_opt=['apparmor:docker-default'],
         # Always drop ALL capabilities first (defense in depth)
-        cap_drop=["ALL"],
+        cap_drop=['ALL'],
         # Add back only the capabilities needed for the mode
         cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
         read_only=False,
@@ -2080,14 +2016,14 @@ async def _create_agent_container(
         # unbounded, so without this the log grows until the Docker data root
         # fills and dockerd wedges. Creation-time — see AGENT_LOG_CONFIG.
         log_config=AGENT_LOG_CONFIG,
-        network="trinity-agent-network",
+        network='trinity-agent-network',
         # #1197: cpu/memory normalized + validated above (raises 400 on
         # a bad template value), so these are guaranteed Docker-valid.
-        mem_limit=config.resources["memory"],
+        mem_limit=config.resources['memory'],
         # #1126: nano_cpus (Linux CFS quota), NOT cpu_count — the latter
         # is Windows-only in docker-py and left NanoCpus=0, so newly
         # created agents never got a CPU limit on Linux.
-        nano_cpus=int(config.resources["cpu"]) * 1_000_000_000,
+        nano_cpus=int(config.resources['cpu']) * 1_000_000_000,
     )
 
 
@@ -2095,21 +2031,17 @@ async def _broadcast_agent_created(agent_status: AgentStatus, ws_manager) -> Non
     """Broadcast the `agent_created` WS event (best-effort, no-op without a
     ws_manager)."""
     if ws_manager:
-        await ws_manager.broadcast(
-            json.dumps(
-                {
-                    "event": "agent_created",
-                    "data": {
-                        "name": agent_status.name,
-                        "status": agent_status.status,
-                        "port": agent_status.port,
-                        "created": agent_status.created.isoformat(),
-                        "resources": agent_status.resources,
-                        "container_id": agent_status.container_id,
-                    },
-                }
-            )
-        )
+        await ws_manager.broadcast(json.dumps({
+            "event": "agent_created",
+            "data": {
+                "name": agent_status.name,
+                "status": agent_status.status,
+                "port": agent_status.port,
+                "created": agent_status.created.isoformat(),
+                "resources": agent_status.resources,
+                "container_id": agent_status.container_id
+            }
+        }))
 
 
 def _register_agent(
@@ -2135,17 +2067,13 @@ def _register_agent(
             parent_key = db.get_agent_mcp_api_key(current_user.agent_name)
             spawned_by_key_id = parent_key.id if parent_key else None
         except Exception as e:
-            logger.warning(
-                f"Could not resolve parent key id for {current_user.agent_name}: {e}"
-            )
+            logger.warning(f"Could not resolve parent key id for {current_user.agent_name}: {e}")
     db.register_agent_owner(
         config.name,
         current_user.username,
         require_email=get_agent_default_require_email(),
         is_ephemeral=bool(config.ephemeral),
-        ephemeral_max_executions=(
-            config.ephemeral.max_executions if config.ephemeral else None
-        ),
+        ephemeral_max_executions=(config.ephemeral.max_executions if config.ephemeral else None),
         ephemeral_expires_at=ephemeral_expires_at,
         spawned_by_agent=current_user.agent_name,
         spawned_by_key_id=spawned_by_key_id,
@@ -2191,40 +2119,24 @@ def _register_agent(
         try:
             db.assign_subscription_to_agent(config.name, auto_assigned_subscription_id)
         except Exception as e:
-            logger.warning(
-                f"Failed to persist subscription assignment for {config.name}: {e}"
-            )
+            logger.warning(f"Failed to persist subscription assignment for {config.name}: {e}")
 
     # AVATAR-003: Seed avatar prompt from template
     # (skipped for ephemeral ghosts — avatar generation is a paid,
     # durable-identity nicety a disposable agent never benefits from)
-    _avatar_prompt = (
-        (template_data.get("avatar_prompt") if template_data else None)
-        if not config.ephemeral
-        else None
-    )
+    _avatar_prompt = (template_data.get("avatar_prompt") if template_data else None) if not config.ephemeral else None
     if _avatar_prompt:
         try:
-            db.set_default_avatar(
-                config.name, _avatar_prompt, datetime.now(timezone.utc).isoformat()
-            )
-            logger.info(
-                f"[AVATAR-003] Seeded avatar prompt from template for {config.name}"
-            )
+            db.set_default_avatar(config.name, _avatar_prompt, datetime.now(timezone.utc).isoformat())
+            logger.info(f"[AVATAR-003] Seeded avatar prompt from template for {config.name}")
         except Exception as e:
-            logger.warning(
-                f"[AVATAR-003] Failed to seed avatar prompt for {config.name}: {e}"
-            )
+            logger.warning(f"[AVATAR-003] Failed to seed avatar prompt for {config.name}: {e}")
 
     # Phase 9.10: Grant default permissions (Option B - same-owner agents)
     try:
-        permissions_count = db.grant_default_permissions(
-            config.name, current_user.username
-        )
+        permissions_count = db.grant_default_permissions(config.name, current_user.username)
         if permissions_count > 0:
-            logger.info(
-                f"Granted {permissions_count} default permissions for agent {config.name}"
-            )
+            logger.info(f"Granted {permissions_count} default permissions for agent {config.name}")
     except Exception as e:
         logger.warning(f"Failed to grant default permissions for {config.name}: {e}")
 
@@ -2290,9 +2202,7 @@ def reconcile_declared_schedules(
             failed += 1
             logger.warning(
                 "[ent#89] Failed to create declared schedule %r for %s: %s",
-                name,
-                agent_name,
-                e,
+                name, agent_name, e,
             )
             continue
         if not schedule:
@@ -2300,8 +2210,7 @@ def reconcile_declared_schedules(
             logger.warning(
                 "[ent#89] Declared schedule %r for %s was not created "
                 "(no user, no access, or the agent is not live)",
-                name,
-                agent_name,
+                name, agent_name,
             )
             continue
         seen.add(name)
@@ -2310,11 +2219,7 @@ def reconcile_declared_schedules(
     logger.info(
         "[ent#89] Declared schedules for %s: %d created, %d already existed, "
         "%d failed (%d declared)",
-        agent_name,
-        created,
-        skipped,
-        failed,
-        len(declared),
+        agent_name, created, skipped, failed, len(declared),
     )
 
 
@@ -2337,11 +2242,15 @@ async def _materialize_agent_files(
     # template.yaml is only read at creation (10-min cache), so this
     # is the source of truth going forward. Non-fatal on failure —
     # reset operations fall back to the default list at read time.
-    persistent_state = (template_data or {}).get(
-        "persistent_state", git_service.DEFAULT_PERSISTENT_STATE
+    persistent_state = (
+        (template_data or {}).get(
+            "persistent_state", git_service.DEFAULT_PERSISTENT_STATE
+        )
     )
     try:
-        await git_service.materialize_persistent_state(config.name, persistent_state)
+        await git_service.materialize_persistent_state(
+            config.name, persistent_state
+        )
     except Exception as e:
         logger.warning(
             f"[S4] Failed to materialize persistent-state.yaml for "
@@ -2354,29 +2263,36 @@ async def _materialize_agent_files(
     # `data/` root in the agent's own .gitignore. Non-fatal — the
     # home volume is already durable; the declaration just enables
     # selective snapshot/export and keeps runtime data out of git.
-    data_paths = (template_data or {}).get("data_paths", git_service.DEFAULT_DATA_PATHS)
+    data_paths = (template_data or {}).get(
+        "data_paths", git_service.DEFAULT_DATA_PATHS
+    )
     try:
-        await git_service.materialize_data_paths(config.name, data_paths)
+        await git_service.materialize_data_paths(
+            config.name, data_paths
+        )
     except Exception as e:
         logger.warning(
-            f"[#1169] Failed to materialize data-paths.yaml for " f"{config.name}: {e}"
+            f"[#1169] Failed to materialize data-paths.yaml for "
+            f"{config.name}: {e}"
         )
 
     # #1704: materialize the template's declared Claude Code `plugins:` into a
     # COMMITTED `.trinity/plugins.yaml`, so the plugin selection survives a
-    # git-based reconstitution (the boot hook re-installs anything missing). Opt-
-    # in (empty declaration = no-op) and ghost-skipped: an ephemeral agent never
-    # recreates and never persists, so there is nothing for the manifest to
-    # protect. Non-fatal — sits inside the destructive rollback fence, so a raise
-    # here must never cost a successful creation (`declared_plugins` comes from
-    # the resolver, NOT `template_data`, since the `github:` path never populates
-    # the latter).
+    # git-based reconstitution (the boot hook re-installs anything missing).
+    # Opt-in (empty = no-op) and ghost-skipped: an ephemeral agent never
+    # recreates and never persists. Non-fatal — sits inside the destructive
+    # rollback fence, so a raise here must never cost a successful creation
+    # (`declared_plugins` comes from the resolver, NOT `template_data`, since the
+    # `github:` path never populates the latter).
     if declared_plugins and not config.ephemeral:
         try:
-            await git_service.materialize_plugins(config.name, declared_plugins)
+            await git_service.materialize_plugins(
+                config.name, declared_plugins
+            )
         except Exception as e:
             logger.warning(
-                f"[#1704] Failed to materialize plugins.yaml for {config.name}: {e}"
+                f"[#1704] Failed to materialize plugins.yaml for "
+                f"{config.name}: {e}"
             )
 
     # trinity-enterprise#89: materialize the template's declared `schedules:`.
@@ -2404,16 +2320,13 @@ async def _materialize_agent_files(
     # trinity-enterprise#69: ghosts never auto-push — their workspace
     # is throwaway by definition, so the 15-min sync heartbeat stays off.
     # ent#123: tokenless agents never auto-push (belt — see _apply_github_env).
-    if (
-        github_repo_for_agent
-        and github_pat_for_agent
-        and not config.ephemeral
-        and (not config.source_mode or fork_upstream_repo)
-    ):
+    if github_repo_for_agent and github_pat_for_agent and not config.ephemeral and (not config.source_mode or fork_upstream_repo):
         try:
             db.set_git_auto_sync_enabled(config.name, True)
         except Exception as e:
-            logger.warning(f"Failed to enable auto-sync for {config.name}: {e}")
+            logger.warning(
+                f"Failed to enable auto-sync for {config.name}: {e}"
+            )
 
 
 def _rollback_failed_creation(handles: _RollbackHandles) -> None:
@@ -2461,7 +2374,8 @@ def _rollback_failed_creation(handles: _RollbackHandles) -> None:
             db.delete_agent_mcp_api_key(handles.agent_name)
         except Exception as cleanup_exc:
             logger.warning(
-                "Failed to roll back MCP key for %s after creation " "failure: %s",
+                "Failed to roll back MCP key for %s after creation "
+                "failure: %s",
                 handles.agent_name,
                 cleanup_exc,
             )
@@ -2740,25 +2654,21 @@ def _enforce_role_quota(config: AgentConfig, current_user: User) -> None:
     # Ephemeral agents have their OWN quota (atomic reservation just before
     # the docker block) — counting ghosts against the durable quota would
     # starve the burst-parallelism use case (trinity-enterprise#69).
-    max_agents = (
-        get_agent_quota_for_role(current_user.role) if not config.ephemeral else 0
-    )
+    max_agents = get_agent_quota_for_role(current_user.role) if not config.ephemeral else 0
     if max_agents > 0:
         owned = db.get_agents_by_owner(current_user.username)
         # System agents don't count toward user quota
-        non_system = [
-            a for a in owned if not (db.get_agent_owner(a) or {}).get("is_system")
-        ]
+        non_system = [a for a in owned if not (db.get_agent_owner(a) or {}).get("is_system")]
         if len(non_system) >= max_agents:
             raise HTTPException(
                 status_code=429,
                 detail={
                     "error": f"Agent quota exceeded. You have {len(non_system)}/{max_agents} agents. "
-                    f"Delete an agent to create a new one.",
+                             f"Delete an agent to create a new one.",
                     "code": "QUOTA_EXCEEDED",
                     "current": len(non_system),
-                    "limit": max_agents,
-                },
+                    "limit": max_agents
+                }
             )
 
 
@@ -2769,17 +2679,15 @@ def _mint_agent_mcp_key(config: AgentConfig, current_user: User) -> tuple[object
     # Phase: Agent-to-Agent Collaboration
     # Generate agent-scoped MCP API key for Trinity MCP access
     agent_mcp_key = None
-    trinity_mcp_url = os.getenv("TRINITY_MCP_URL", "http://mcp-server:8080/mcp")
+    trinity_mcp_url = os.getenv('TRINITY_MCP_URL', 'http://mcp-server:8080/mcp')
     try:
         agent_mcp_key = db.create_agent_mcp_api_key(
             agent_name=config.name,
             owner_username=current_user.username,
-            description=f"Auto-generated Trinity MCP key for agent {config.name}",
+            description=f"Auto-generated Trinity MCP key for agent {config.name}"
         )
         if agent_mcp_key:
-            logger.info(
-                f"Created MCP API key for agent {config.name}: {agent_mcp_key.key_prefix}..."
-            )
+            logger.info(f"Created MCP API key for agent {config.name}: {agent_mcp_key.key_prefix}...")
     except Exception as e:
         logger.warning(f"Failed to create MCP API key for agent {config.name}: {e}")
     return agent_mcp_key, trinity_mcp_url
@@ -2796,19 +2704,11 @@ def _reserve_ephemeral_slot(
     ephemeral_owner_id = None
     if config.ephemeral:
         owner_row = db.get_user_by_username(current_user.username)
-        ephemeral_owner_id = (
-            (owner_row or {}).get("id")
-            if isinstance(owner_row, dict)
-            else getattr(owner_row, "id", None)
-        )
+        ephemeral_owner_id = (owner_row or {}).get("id") if isinstance(owner_row, dict) else getattr(owner_row, "id", None)
         if ephemeral_owner_id is None:
-            raise HTTPException(
-                status_code=500, detail="Could not resolve owner for ephemeral quota"
-            )
+            raise HTTPException(status_code=500, detail="Could not resolve owner for ephemeral quota")
         eph_cap = get_ephemeral_agent_quota()
-        if not ephemeral_service.try_reserve_ephemeral_slot(
-            ephemeral_owner_id, eph_cap
-        ):
+        if not ephemeral_service.try_reserve_ephemeral_slot(ephemeral_owner_id, eph_cap):
             raise HTTPException(
                 status_code=429,
                 detail={
@@ -2867,10 +2767,7 @@ async def create_agent_internal(
         config.name = sanitize_agent_name(config.name)
 
     if not config.name:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid agent name - must contain at least one alphanumeric character",
-        )
+        raise HTTPException(status_code=400, detail="Invalid agent name - must contain at least one alphanumeric character")
 
     # trinity-enterprise#69: ephemeral "ghost" pre-gates. All BEFORE any side
     # effect (no partial state on refusal). Mutates config.name to the suffixed
@@ -2969,7 +2866,9 @@ async def create_agent_internal(
         container_floor_ts=utc_now_iso(),
         # trinity-enterprise#15: staged snapshot dir travels into the rollback
         # so a mid-try failure never strands it.
-        copy_staging_dir=(tr.copy_snapshot.staging_dir if tr.copy_snapshot else None),
+        copy_staging_dir=(
+            tr.copy_snapshot.staging_dir if tr.copy_snapshot else None
+        ),
     )
 
     if docker_client:
@@ -2998,7 +2897,6 @@ async def create_agent_internal(
             # already passed pre-try, so no other owner can claim it).
             if tr.copy_snapshot:
                 from .deploy import _prepopulate_workspace_from_template
-
                 # Armed BEFORE the call (review F4): `_prepopulate` creates the
                 # volume first and can fail mid-stream — an unarmed handle
                 # would strand a half-populated volume that 409s the user's
@@ -3066,12 +2964,10 @@ async def create_agent_internal(
             # keeps the #1667 guard from 409ing the retry.
             _cleanup_copy_artifacts(handles)
             logger.error(f"Failed to create agent {config.name}: {e}")
-            raise HTTPException(
-                status_code=500, detail="Failed to create agent. Please try again."
-            )
+            raise HTTPException(status_code=500, detail="Failed to create agent. Please try again.")
     else:
         _release_ephemeral_on_no_docker(handles)
         raise HTTPException(
             status_code=503,
-            detail="Docker not available - cannot create agents in demo mode",
+            detail="Docker not available - cannot create agents in demo mode"
         )

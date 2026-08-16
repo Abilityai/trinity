@@ -4,7 +4,6 @@ Template service for processing agent templates.
 Metadata for GitHub templates is fetched from each repo's template.yaml
 via the GitHub API and cached in memory (10-minute TTL).
 """
-
 import base64
 import difflib
 import json
@@ -18,6 +17,7 @@ from typing import Dict, List, Optional
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 import httpx
+import yaml
 from config import DEFAULT_GITHUB_TEMPLATE_REPOS, GITHUB_PAT_CREDENTIAL_ID
 from utils.safe_yaml import HardenedYamlError, load_template_yaml
 from services.credential_charset import (
@@ -247,7 +247,6 @@ def fetch_template_metadata_for_create(
 def _get_github_pat() -> str:
     """Get GitHub PAT (avoids circular import)."""
     from services.settings_service import get_github_pat
-
     return get_github_pat()
 
 
@@ -381,7 +380,6 @@ def _coerce_priority(value) -> int:
 #   * the write path (`generate_credential_files`) raises, because writing an
 #     agent's credential files from a declaration nobody can parse is exactly
 #     the silent failure this closes.
-
 
 class CredentialDeclarationError(ValueError):
     """A template's `credentials:` block is structurally invalid.
@@ -631,9 +629,7 @@ def credential_mcp_env_vars(block) -> Dict[str, List[str]]:
 
     out: Dict[str, List[str]] = {}
     for name, server_config in servers.items():
-        env_vars = (
-            server_config.get("env_vars") if isinstance(server_config, dict) else None
-        )
+        env_vars = server_config.get("env_vars") if isinstance(server_config, dict) else None
         if not isinstance(env_vars, list):
             out[str(name)] = []
             continue
@@ -694,8 +690,7 @@ def operator_supplied_credential_names(block) -> List[str]:
     `declared_credential_names` or `credential_requirements`.
     """
     return [
-        name
-        for name in declared_credential_names(block)
+        name for name in declared_credential_names(block)
         if not _is_platform_injected(name)
     ]
 
@@ -1152,11 +1147,10 @@ def _template_schedules(block, template_id: str) -> tuple:
 def _template_plugins(block, template_id: str) -> tuple:
     """Normalized declared `plugins:` + named errors for a catalog entry (#1704).
 
-    Same contract as `_template_schedules`: exactly one WARNING per malformed
-    template naming the id, the template still lists (a broken block costs it its
-    plugin metadata, not its place in the catalog), and the normalizer is total
-    so this cannot empty the catalog from a bare list comprehension in
-    `get_all_templates()`.
+    Same contract as `_template_schedules`: one WARNING per malformed template
+    naming the id, the template still lists (a broken block costs it its plugin
+    metadata, not its catalog place), and the normalizer is total so this cannot
+    empty the catalog from a bare list comprehension in `get_all_templates()`.
     """
     errors = plugin_shape_errors(block)
     if errors:
@@ -1247,7 +1241,10 @@ def _build_template(
         or metadata.get("name")
         or repo.split("/")[-1]
     )
-    description = override.get("description") or metadata.get("description", "")
+    description = (
+        override.get("description")
+        or metadata.get("description", "")
+    )
 
     # S4 (#383): import lazily to avoid any circular-import risk with
     # git_service, which imports database/docker modules at module load.
@@ -1301,7 +1298,7 @@ def _build_template(
         # the catalog while its own Info tab listed them. All three surfaces
         # (catalog-local, catalog-github, agent `/api/template/info`) now agree.
         "mcp_servers": metadata.get("mcp_servers")
-        or credential_mcp_server_names(metadata.get("credentials")),
+            or credential_mcp_server_names(metadata.get("credentials")),
         # Derived, never read from a top-level `required_credentials:` key. That
         # key is declared by ZERO templates anywhere — 25 bundled and all 7
         # configured GitHub repos — so the catalog's "N credentials" badge rendered
@@ -1317,8 +1314,7 @@ def _build_template(
         # `_build_local_template`. (trinity-enterprise#128)
         "credential_errors": _template_credential_errors(
             metadata.get("credentials"), f"github:{repo}"
-        )
-        + setup_errors,
+        ) + setup_errors,
         # Per-variable setup metadata (ent#128 AC #2). Empty list when the template
         # declares nothing; `required == "unknown"` marks a record carrying no
         # authorial intent.
@@ -1377,7 +1373,6 @@ def _build_template(
 # Public API
 # ============================================================================
 
-
 def _local_templates_dir() -> Path:
     """Return the canonical local-templates directory.
 
@@ -1389,11 +1384,7 @@ def _local_templates_dir() -> Path:
     inside_container = Path("/agent-configs/templates")
     if inside_container.exists():
         return inside_container
-    return (
-        Path(__file__).resolve().parent.parent.parent.parent
-        / "config"
-        / "agent-templates"
-    )
+    return Path(__file__).resolve().parent.parent.parent.parent / "config" / "agent-templates"
 
 
 #: Allowed shape for a local-template directory name — the `<name>` in a
@@ -1501,7 +1492,9 @@ def _build_local_template(template_dir: Path, *, is_bundled: bool) -> Optional[d
     schedules, schedule_errors = _template_schedules(
         data.get("schedules"), f"local:{name}"
     )
-    plugins, plugin_errors = _template_plugins(data.get("plugins"), f"local:{name}")
+    plugins, plugin_errors = _template_plugins(
+        data.get("plugins"), f"local:{name}"
+    )
 
     # `bundled` only when this really is the curated catalog root. The deploy-local
     # writable store (#950) is operator-uploaded and must not inherit our own
@@ -1535,7 +1528,7 @@ def _build_local_template(template_dir: Path, *, is_bundled: bool) -> Optional[d
         # catalog and the agent's own Info tab disagreed for any template declaring
         # both.
         "mcp_servers": data.get("mcp_servers")
-        or credential_mcp_server_names(credentials_block),
+            or credential_mcp_server_names(credentials_block),
         "required_credentials": operator_supplied_credential_names(credentials_block),
         # Named errors for a malformed `credentials:` block. The template still
         # lists — it just loses its credential metadata, instead of taking
@@ -1543,8 +1536,7 @@ def _build_local_template(template_dir: Path, *, is_bundled: bool) -> Optional[d
         # (trinity-enterprise#128)
         "credential_errors": _template_credential_errors(
             credentials_block, f"local:{name}"
-        )
-        + setup_errors,
+        ) + setup_errors,
         # Per-variable setup metadata (ent#128 AC #2).
         "credential_requirements": credential_requirements,
         # Local templates surface their full capabilities/use-cases so the
@@ -1641,7 +1633,7 @@ def get_local_template(template_id: str) -> Optional[dict]:
     """
     if not template_id.startswith("local:"):
         return None
-    name = template_id[len("local:") :]
+    name = template_id[len("local:"):]
     template_dir = contained_template_dir(name, _local_templates_dir())
     if template_dir is None:
         # DEBUG, not WARNING: this endpoint carries no rate limit, so a
@@ -1728,9 +1720,7 @@ def get_all_templates() -> List[dict]:
         # purely additive and on a curated install it is not even consulted.
         overrides = _registry_template_overrides()
         if not overrides:
-            overrides = [
-                {"github_repo": repo} for repo in DEFAULT_GITHUB_TEMPLATE_REPOS
-            ]
+            overrides = [{"github_repo": repo} for repo in DEFAULT_GITHUB_TEMPLATE_REPOS]
 
     repos = [e["github_repo"] for e in overrides]
     all_metadata = _fetch_all_metadata(repos)
@@ -1757,11 +1747,10 @@ def get_github_template(template_id: str) -> Optional[dict]:
     if not template_id.startswith("github:"):
         return None
 
-    repo = template_id[len("github:") :]
+    repo = template_id[len("github:"):]
 
     # Check if it's in the configured list (DB or defaults)
     from services.settings_service import get_github_templates
-
     db_entries = get_github_templates()
 
     if db_entries is not None:
@@ -1797,9 +1786,7 @@ def get_github_template(template_id: str) -> Optional[dict]:
     return _build_template(repo, metadata, None, reason)
 
 
-def clone_github_repo(
-    github_repo: str, github_pat: str, dest_path: Path, branch: str = None
-) -> bool:
+def clone_github_repo(github_repo: str, github_pat: str, dest_path: Path, branch: str = None) -> bool:
     """
     Clone a GitHub repository using a Personal Access Token.
 
@@ -1821,7 +1808,12 @@ def clone_github_repo(
     clone_cmd.extend([clone_url, str(dest_path)])
 
     try:
-        result = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(
+            clone_cmd,
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
 
         if result.returncode != 0:
             print(f"Git clone failed: {result.stderr}")
@@ -1920,12 +1912,12 @@ def extract_credentials_from_env_example(file_path: Path) -> List[str]:
         with open(file_path) as f:
             for line in f:
                 line = line.strip()
-                if not line or line.startswith("#"):
+                if not line or line.startswith('#'):
                     continue
-                if "=" in line:
+                if '=' in line:
                     # `.strip()` before the anchored match is load-bearing — the
                     # validator uses `\Z`, so it would reject a trailing newline.
-                    var_name = line.split("=")[0].strip()
+                    var_name = line.split('=')[0].strip()
                     if var_name and CREDENTIAL_DETECTOR_NAME_RE.match(var_name):
                         vars.append(var_name)
     except IOError as e:
@@ -1951,7 +1943,11 @@ def extract_agent_credentials(repo_path: Path) -> Dict:
             "env_file_vars": ["BLOTATO_API_KEY", ...]
         }
     """
-    result = {"required_credentials": [], "mcp_servers": {}, "env_file_vars": []}
+    result = {
+        "required_credentials": [],
+        "mcp_servers": {},
+        "env_file_vars": []
+    }
 
     all_vars = {}
 
@@ -2015,9 +2011,10 @@ def extract_agent_credentials(repo_path: Path) -> Dict:
     for var_name in sorted(all_vars.keys()):
         sources = all_vars[var_name]
         primary_source = sources[0] if sources else "unknown"
-        result["required_credentials"].append(
-            {"name": var_name, "source": primary_source}
-        )
+        result["required_credentials"].append({
+            "name": var_name,
+            "source": primary_source
+        })
 
     return result
 
@@ -2026,7 +2023,7 @@ def generate_credential_files(
     template_data: dict,
     agent_credentials: dict,
     agent_name: str,
-    template_base_path: Optional[Path] = None,
+    template_base_path: Optional[Path] = None
 ) -> dict:
     """
     Generate credential files (.mcp.json, .env, config files) with real values.
@@ -2100,11 +2097,7 @@ def generate_credential_files(
             for server_name, server_config in mcp_config.get("mcpServers", {}).items():
                 if "env" in server_config:
                     for env_key, env_val in server_config["env"].items():
-                        if (
-                            isinstance(env_val, str)
-                            and env_val.startswith("${")
-                            and env_val.endswith("}")
-                        ):
+                        if isinstance(env_val, str) and env_val.startswith("${") and env_val.endswith("}"):
                             var_name = env_val[2:-1]
                             real_value = agent_credentials.get(var_name, "")
                             server_config["env"][env_key] = real_value
@@ -2112,11 +2105,7 @@ def generate_credential_files(
                 if "args" in server_config:
                     new_args = []
                     for arg in server_config["args"]:
-                        if (
-                            isinstance(arg, str)
-                            and arg.startswith("${")
-                            and arg.endswith("}")
-                        ):
+                        if isinstance(arg, str) and arg.startswith("${") and arg.endswith("}"):
                             var_name = arg[2:-1]
                             real_value = agent_credentials.get(var_name, "")
                             new_args.append(real_value)
@@ -2267,15 +2256,13 @@ def get_name_from_template(path: Path) -> Optional[str]:
 # Keep in sync with crud.py:470-559 (the env_vars dict assembled in
 # create_agent_internal). A static mirror is deliberate (D3): sharing the
 # live allowlist would couple this advisory check to the hot create path.
-_PLATFORM_INJECTED_EXACT = frozenset(
-    {
-        "ANTHROPIC_API_KEY",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "GEMINI_API_KEY",
-        "GITHUB_PAT",
-        "GITHUB_REPO",
-    }
-)
+_PLATFORM_INJECTED_EXACT = frozenset({
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "GEMINI_API_KEY",
+    "GITHUB_PAT",
+    "GITHUB_REPO",
+})
 # Prefixes cover the family-namespaced vars: TRINITY_MCP_API_KEY/URL/
 # GIT_BASE_URL, GIT_SYNC_*/SOURCE_*/WORKING_BRANCH, OTEL_*, and
 # CLAUDE_CODE_ENABLE_TELEMETRY.
