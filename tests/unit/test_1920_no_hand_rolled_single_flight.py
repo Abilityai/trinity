@@ -3,8 +3,9 @@
 The reliability value of #1920 is not the cleanup, it's that the SETNX
 single-flight lock class **can't quietly recur** — a new `set(..., nx=True, …)`
 lock that skips the shared, ownership-checked `redis_breaker_util.SingleFlightLock`
-is exactly how #1919's bug lived on in six sibling copies (worst: system_seed's
-tokenless delete). A doc line doesn't fail CI; this does.
+is exactly how #1919's bug lived on in sibling copies (worst class: the
+constant-"1" + unconditional tokenless delete in system_seed, and its verbatim
+twins cornelius/compat_fix). A doc line doesn't fail CI; this does.
 
 Two invariants:
 
@@ -17,11 +18,11 @@ Two invariants:
    fails here, forcing the author to adopt `SingleFlightLock` or justify the
    divergence in one place.
 
-2. **The five #1920-adopted sync-lock files no longer hand-roll one.** After
-   consolidation, `system_seed_service` / `routers.ops` / `skill_service` issue
-   NO `nx=True` set of their own, and `ephemeral` keeps only its (non-lock)
-   quota seed — proof the consolidation actually removed the copies rather than
-   adding a sixth.
+2. **The #1920-adopted sync-lock files no longer hand-roll one.** After
+   consolidation, `system_seed_service` / `routers.ops` / `skill_service` /
+   `cornelius_agent_service` / `compatibility.fixes` issue NO `nx=True` set of
+   their own, and `ephemeral` keeps only its (non-lock) quota seed — proof the
+   consolidation actually removed the copies rather than adding another.
 
 Plus the ACL trap: the leaf `redis_breaker_util.py` must never introduce
 `KEYS` / `.keys(` / `SCAN` — the backend Redis ACL is `-@dangerous`, so `KEYS`
@@ -59,9 +60,6 @@ _ALLOWED = {
     "routers/git.py": "agent:bind_op / agent:bind_dest single-flight locks (ent#109) — pre-#1920, follow-up",
     "services/agent_mcp_key_service.py": "agent MCP-key regen lock (#1854) — pre-#1920, follow-up",
     "services/credential_requirements_service.py": "credential-requirements probe lock (ent#127) — pre-#1920, follow-up",
-    "services/compatibility/fixes.py": "compat_fix lock (#668, constant-'1') — pre-#1920, follow-up",
-    "services/cornelius_agent_service.py": "cornelius provision lock (constant-'1' sibling of system_seed's bug) — "
-    "pre-#1920, follow-up",
     # --- genuine non-lock nx=True uses ---
     "adapters/transports/twilio_media_stream.py": "voip_saved:{call_id} single-fire transcript guard — a once-guard, not a mutex",
     "services/agent_service/ephemeral.py": "ephemeral:quota:{owner_id} counter seed — the discard LOCK now uses "
@@ -69,14 +67,18 @@ _ALLOWED = {
     "services/heartbeat_service.py": "agent:heartbeat:seen:{name} liveness marker — not a lock",
 }
 
-# The five sync-lock files #1920 adopted MUST no longer hand-roll a nx=True set.
+# The sync-lock files #1920 adopted MUST no longer hand-roll a nx=True set.
 # `ephemeral` is the exception: its discard lock is adopted, but its quota SEED
 # is a separate, legitimate non-lock nx use — so it stays in _ALLOWED and is
-# excluded from this hard "must be clean" set.
+# excluded from this hard "must be clean" set. `cornelius_agent_service` and
+# `compatibility/fixes` carried the SAME constant-"1" + unconditional-delete bug
+# as system_seed (found while building this guard) and were adopted too.
 _ADOPTED_MUST_BE_CLEAN = {
     "services/system_seed_service.py",
     "routers/ops.py",
     "services/skill_service.py",
+    "services/cornelius_agent_service.py",
+    "services/compatibility/fixes.py",
 }
 
 

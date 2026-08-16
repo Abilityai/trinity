@@ -53,7 +53,7 @@ from typing import Optional
 from database import db
 from models import AgentConfig, User
 from services.docker_service import docker_client
-from redis_breaker_util import get_breaker_redis
+from redis_breaker_util import get_breaker_redis, SingleFlightLock
 
 logger = logging.getLogger(__name__)
 
@@ -137,8 +137,13 @@ class CorneliusAgentService:
                 "Admin user not present yet (pre-setup) — deferring Cornelius seed",
             )
 
-        # 4. Cross-worker lock (fail-open). Only the winner provisions this pass.
-        if not self._acquire_lock():
+        # 4. Cross-worker lock (fail-open). Only the winner provisions this
+        #    pass. The lock is LOCAL to the pass (never on this singleton) so
+        #    its ownership-checked release can never delete a *successor's*
+        #    live lock — the pre-#1920 constant-"1" + unconditional-delete bug
+        #    it shared verbatim with system_seed_service.
+        lock = self._acquire_lock()
+        if lock is None:
             return self._skip(result, "skipped_locked", "Another worker is provisioning Cornelius")
 
         try:
@@ -193,7 +198,7 @@ class CorneliusAgentService:
             logger.error("Failed to seed Cornelius agent: %s", e)
             return result
         finally:
-            self._release_lock()
+            self._release_lock(lock)
 
     async def _provision(self, admin_user: User) -> None:
         """Create the Cornelius agent from the public upstream template.
@@ -248,26 +253,27 @@ class CorneliusAgentService:
             db.set_setting(_BRAIN_ORB_FLAG, "true")
             logger.info("Brain Orb enabled by default (seeded %s=true)", _BRAIN_ORB_FLAG)
 
-    def _acquire_lock(self) -> bool:
-        """SETNX provisioning lock. Fail-open (no Redis → sole-worker behaviour)."""
-        r = get_breaker_redis()
-        if r is None:
-            return True
-        try:
-            return bool(r.set(_PROVISION_LOCK_KEY, "1", nx=True, ex=_PROVISION_LOCK_TTL))
-        except Exception as e:
-            logger.warning("Cornelius provision lock failed-open (%s)", e)
-            return True
+    def _acquire_lock(self):
+        """Take the provisioning lock via the shared ownership-checked
+        primitive (#1920). Returns a held ``SingleFlightLock`` when this pass
+        may provision, or ``None`` when another worker holds it. Fail-open (no
+        Redis → sole-worker behaviour).
 
-    def _release_lock(self) -> None:
-        """Best-effort release so a legitimate retry isn't blocked for the TTL."""
-        r = get_breaker_redis()
-        if r is None:
-            return
-        try:
-            r.delete(_PROVISION_LOCK_KEY)
-        except Exception:
-            pass  # TTL will expire it
+        The returned lock is LOCAL to the pass — never stored on this
+        singleton — so the release below is a compare-and-delete against a
+        unique per-acquire token and can never remove a *successor's* live
+        lock (the pre-#1920 constant-``"1"`` + unconditional ``delete`` bug,
+        shared verbatim with system_seed_service)."""
+        lock = SingleFlightLock(
+            _PROVISION_LOCK_KEY, _PROVISION_LOCK_TTL, client=get_breaker_redis()
+        )
+        return lock if lock.acquire() else None
+
+    def _release_lock(self, lock) -> None:
+        """Best-effort ownership-checked release so a legitimate retry isn't
+        blocked for the TTL. Compare-and-delete: only our own token deletes."""
+        if lock is not None:
+            lock.release_if_owned()
 
     @staticmethod
     def _skip(result: dict, action: str, message: str) -> dict:

@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import re
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -1095,3 +1096,66 @@ class TestRuntimeDataPathChecks:
         assert _run_one("DP-004", snap)[0] == "fail"
 
 
+class TestCompatFixLock:
+    """#1920: compat_fix adopts the shared ownership-checked SingleFlightLock.
+    A busy holder -> FixBusy, and release is a compare-and-delete against the
+    minted token -- never the pre-#1920 constant-'1' + unconditional delete
+    that could remove a *successor's* lock."""
+
+    @staticmethod
+    def _store_backed_redis():
+        client = MagicMock()
+        store = {}
+
+        def _set(key, val, nx=None, ex=None):
+            if nx and key in store:
+                return None
+            store[key] = val
+            return True
+
+        client.set.side_effect = _set
+        client.get.side_effect = lambda key: store.get(key)
+        client.delete.side_effect = lambda key: store.pop(key, None)
+        client.store = store
+        return client
+
+    def test_lock_win_busy_then_ownership_checked_release(self, monkeypatch):
+        client = self._store_backed_redis()
+        monkeypatch.setattr(
+            fixes, "_redis_lib", MagicMock(from_url=lambda *a, **k: client)
+        )
+        monkeypatch.setattr(fixes, "_REDIS_URL", "redis://x")
+
+        lock = fixes._lock("agent-x")
+        assert lock is not None and lock.held
+        # a real uuid token was stored, not the constant '1'
+        assert client.store["compat_fix:agent-x"] == lock.token
+
+        # A concurrent fix finds the key held -> FixBusy.
+        with pytest.raises(fixes.FixBusy):
+            fixes._lock("agent-x")
+
+        # A successor took the key after our TTL lapsed -> release must NOT
+        # delete it (the #1920 successor-safety property).
+        client.store["compat_fix:agent-x"] = "successor-token"
+        fixes._unlock(lock, "agent-x")
+        assert client.store["compat_fix:agent-x"] == "successor-token"
+
+    def test_lock_fails_open_when_redis_unconfigured(self, monkeypatch):
+        monkeypatch.setattr(fixes, "_redis_lib", None)
+        assert fixes._lock("agent-x") is None  # fail-open
+        fixes._unlock(None, "agent-x")  # no-op, no raise
+
+    def test_lock_fails_open_when_client_connect_raises(self, monkeypatch, caplog):
+        """Redis is CONFIGURED (URL present) but the client build throws — the
+        distinct fail-open branch from the ``None`` case above: it logs a
+        warning and returns ``None`` so the fix still runs best-effort."""
+
+        def _boom(*a, **k):
+            raise RuntimeError("redis unreachable")
+
+        monkeypatch.setattr(fixes, "_redis_lib", MagicMock(from_url=_boom))
+        monkeypatch.setattr(fixes, "_REDIS_URL", "redis://x")
+        with caplog.at_level("WARNING"):
+            assert fixes._lock("agent-x") is None  # fail-open, not FixBusy
+        assert any("fix lock unavailable" in r.getMessage() for r in caplog.records)

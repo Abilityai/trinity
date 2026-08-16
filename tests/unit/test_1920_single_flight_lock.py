@@ -1,8 +1,9 @@
 """#1920 — behaviour of the shared ``SingleFlightLock`` primitive.
 
 `redis_breaker_util.SingleFlightLock` consolidates the SETNX single-flight lock
-idiom that was hand-rolled in five sync sites (ops, ephemeral, skill×2,
-system_seed) with divergent — and, in system_seed's case, buggy — behaviour.
+idiom that was hand-rolled in seven sync sites (ops, ephemeral, skill×2,
+system_seed, cornelius, compat_fix) with divergent — and, in the
+system_seed/cornelius/compat_fix constant-"1" case, buggy — behaviour.
 This suite pins the primitive's contract against **fakeredis** (a real Redis
 data model with no server) plus MagicMock clients for the error-injection and
 call-count cases fakeredis can't force.

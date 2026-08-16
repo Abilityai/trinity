@@ -122,9 +122,10 @@ def lock_token_matches(current: Any, token: str) -> bool:
 # ----- Single-flight lock (#1920) -------------------------------------------
 #
 # ONE ownership-checked, fail-open single-flight lock, consolidating the SETNX
-# idiom that was hand-rolled in five sync sites with divergent (and in
-# system_seed's case, buggy — a tokenless unconditional release could delete a
-# *successor's* lock) behaviour. Reuses `lock_token_matches` as the ownership
+# idiom that was hand-rolled in seven sync sites with divergent (and in
+# system_seed / cornelius / compat_fix, buggy — a constant-"1" value + a
+# tokenless unconditional release could delete a *successor's* lock) behaviour.
+# Reuses `lock_token_matches` as the ownership
 # predicate. Release is GET-then-DELETE compare-and-delete — deliberately NOT
 # atomic-Lua: it stays fakeredis-unit-testable and ships the same accepted
 # GET→DELETE TOCTOU window `ops.py` already carried. The async `ResumeLock`

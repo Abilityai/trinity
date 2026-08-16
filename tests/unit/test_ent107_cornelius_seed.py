@@ -217,6 +217,28 @@ def test_generic_provision_failure_does_not_burn_flag(env):
     assert result["status"] == "error"
 
 
+def _store_backed_redis():
+    """A MagicMock Redis honouring SETNX + GET + DELETE against a real dict
+    so the #1920 compare-and-delete release (SingleFlightLock.release_if_owned)
+    can match the internally-minted token. A bare MagicMock returns a fresh
+    MagicMock on GET (never == the token), which would wrongly read as 'not our
+    lock' and skip the DELETE."""
+    redis = MagicMock()
+    store = {}
+
+    def _set(key, val, nx=None, ex=None):
+        if nx and key in store:
+            return None  # SETNX loses on an already-held key
+        store[key] = val
+        return True
+
+    redis.set.side_effect = _set
+    redis.get.side_effect = lambda key: store.get(key)
+    redis.delete.side_effect = lambda key: store.pop(key, None)
+    redis.store = store
+    return redis
+
+
 def test_provision_lock_held_skips(env):
     """Another worker holds the SETNX lock (set(nx=True) → falsy) → skip, no
     provision, flag untouched."""
@@ -230,16 +252,48 @@ def test_provision_lock_held_skips(env):
 
 
 def test_provision_lock_acquired_and_released(env):
-    """Lock winner (set(nx=True) → truthy) provisions and releases the lock."""
-    redis = MagicMock()
-    redis.set.return_value = True      # we won the lock
+    """#1920: lock winner provisions and releases via an ownership-checked
+    compare-and-delete against the minted token, not a tokenless delete."""
+    redis = _store_backed_redis()
     env.monkeypatch.setattr(cas, "get_breaker_redis", lambda: redis)
     result = _run()
     env.provision.assert_awaited_once()
     redis.set.assert_called_once()
     _, kwargs = redis.set.call_args
     assert kwargs.get("nx") is True and kwargs.get("ex")  # SETNX with a TTL
-    redis.delete.assert_called_once()                     # released
+    # The SETNX stored a real uuid token; the release GET matched it -> DELETE.
+    redis.delete.assert_called_once_with(cas._PROVISION_LOCK_KEY)
+    assert redis.store.get(cas._PROVISION_LOCK_KEY) is None  # lock free again
+    assert result["action"] == "created"
+
+
+def test_provision_release_never_deletes_a_successor_lock(env):
+    """THE #1920 property for cornelius (a verbatim twin of system_seed's bug):
+    worker A's TTL lapses, worker B acquires a FRESH lock, A finishes and
+    releases -- A's compare-and-delete must leave B's live lock intact. The
+    pre-#1920 tokenless delete removed it."""
+    redis = _store_backed_redis()
+    env.monkeypatch.setattr(cas, "get_breaker_redis", lambda: redis)
+
+    # A acquires (via the real _acquire_lock, minting A's token).
+    lock_a = svc._acquire_lock()
+    assert lock_a is not None
+
+    # A's lease TTL-expires and worker B SETNX-acquires a fresh token.
+    redis.store[cas._PROVISION_LOCK_KEY] = "worker-B-token"
+
+    # A finishes and releases -- must NOT touch B's live lock.
+    svc._release_lock(lock_a)
+    redis.delete.assert_not_called()
+    assert redis.store[cas._PROVISION_LOCK_KEY] == "worker-B-token"
+
+
+def test_provision_lock_fails_open_when_redis_down(env):
+    """Redis unreachable (client None) -> the lock fails open (sole worker) and
+    the provision still runs; release is a safe no-op."""
+    env.monkeypatch.setattr(cas, "get_breaker_redis", lambda: None)
+    result = _run()
+    env.provision.assert_awaited_once()
     assert result["action"] == "created"
 
 
