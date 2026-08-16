@@ -53,12 +53,12 @@ def test_calculate_codex_cost_no_reasoning_double_count():
         output_tokens=500,  # of which 300 were reasoning
         model=model,
     )
-    expected = (1000 / 1000) * rates["input"] + (500 / 1000) * rates["output"]
+    expected = (1000 / 1_000_000) * rates["input"] + (500 / 1_000_000) * rates["output"]
     assert cost == pytest.approx(round(expected, 6))
 
     # Sanity: a (buggy) double-count would be strictly larger.
-    double_counted = (1000 / 1000) * rates["input"] + (
-        (500 + 300) / 1000
+    double_counted = (1000 / 1_000_000) * rates["input"] + (
+        (500 + 300) / 1_000_000
     ) * rates["output"]
     assert cost < double_counted
 
@@ -75,10 +75,10 @@ def test_calculate_codex_cost_cached_pricing():
         output_tokens=0,
         model=model,
     )
-    expected = (600 / 1000) * rates["input"] + (400 / 1000) * rates["cached"]
+    expected = (600 / 1_000_000) * rates["input"] + (400 / 1_000_000) * rates["cached"]
     assert cost == pytest.approx(round(expected, 6))
     # Cached must be cheaper than billing all 1000 at the full input rate.
-    assert cost < (1000 / 1000) * rates["input"]
+    assert cost < (1000 / 1_000_000) * rates["input"]
 
 
 def test_calculate_codex_cost_default_fallback():
@@ -90,7 +90,7 @@ def test_calculate_codex_cost_default_fallback():
         model="some-future-model-x",
     )
     rates = codex_runtime.CODEX_PRICING["default"]
-    expected = (1000 / 1000) * rates["input"] + (1000 / 1000) * rates["output"]
+    expected = (1000 / 1_000_000) * rates["input"] + (1000 / 1_000_000) * rates["output"]
     assert cost == pytest.approx(round(expected, 6))
 
 
@@ -642,6 +642,217 @@ def test_resolve_pricing_none_and_unknown_use_default():
 
 
 # ---------------------------------------------------------------------------
+# #2207 — rate-card fidelity, boundary-aware prefix match, long-context tier.
+# ---------------------------------------------------------------------------
+
+# Rates transcribed from OpenAI's published card (per 1M tokens), verified
+# 2026-08-15. DELIBERATELY LITERAL: every other cost test derives `expected`
+# from CODEX_PRICING itself, so it validates the arithmetic and is structurally
+# blind to a wrong RATE — which was the entire #2207 defect. This table is the
+# one place a price drift fails a test instead of silently mis-billing (AC #9).
+# On failure: re-check https://developers.openai.com/api/docs/pricing and bump
+# CODEX_PRICING; do not "fix" the test to match the code.
+RATE_CARD_2026_08_15 = {
+    "gpt-5.6-sol":   (5.00,  0.50,   30.00),
+    "gpt-5.6-terra": (2.00,  0.20,   12.00),
+    "gpt-5.6-luna":  (0.20,  0.02,    1.20),
+    "gpt-5.5":       (5.00,  0.50,   30.00),
+    "gpt-5.5-pro":   (30.00, 30.00, 180.00),
+    "gpt-5.4":       (2.50,  0.25,   15.00),
+    "gpt-5.4-mini":  (0.75,  0.075,   4.50),
+    "gpt-5.2":       (1.75,  0.175,  14.00),
+    "gpt-5.1":       (1.25,  0.125,  10.00),
+    "gpt-5-nano":    (0.05,  0.005,   0.40),
+}
+
+
+@pytest.mark.parametrize("model,expected", sorted(RATE_CARD_2026_08_15.items()))
+def test_pricing_matches_published_rate_card(model, expected):
+    """Each table entry equals the published per-1M rate."""
+    inp, cached, out = expected
+    rates = codex_runtime.CODEX_PRICING[model]
+    assert (rates["input"], rates["cached"], rates["output"]) == (inp, cached, out), (
+        f"{model} drifted from the 2026-08-15 rate card"
+    )
+
+
+@pytest.mark.parametrize("model,expected", sorted(RATE_CARD_2026_08_15.items()))
+def test_cost_matches_rate_card_end_to_end(model, expected):
+    """A realistic sub-threshold turn costs exactly what the card says."""
+    inp_rate, _cached_rate, out_rate = expected
+    cost = calculate_codex_cost(
+        input_tokens=100_000, cached_input_tokens=0, output_tokens=10_000, model=model
+    )
+    want = (100_000 / 1_000_000) * inp_rate + (10_000 / 1_000_000) * out_rate
+    assert cost == pytest.approx(round(want, 6))
+
+
+def test_new_generation_does_not_inherit_the_cheapest_rate():
+    """THE #2207 REGRESSION GUARD. A bare startswith makes 'gpt-5' a catch-all,
+    so a future generation silently bills at the oldest, cheapest rate. The
+    prefix match is boundary-aware: '-' is a variant suffix, '.' is a new
+    version. Without this, #2207 re-ships on OpenAI's next release."""
+    for future in ("gpt-5.7-sol", "gpt-5.8", "gpt-6.0-x", "gpt-5.9-codex"):
+        assert _resolve_pricing(future) is codex_runtime.CODEX_PRICING["default"], (
+            f"{future} must not inherit a legacy rate"
+        )
+        assert _resolve_pricing(future) is not codex_runtime.CODEX_PRICING["gpt-5"]
+
+
+def test_variant_suffixes_still_resolve_to_their_base_model():
+    """The boundary rule must not break the documented variant behaviour."""
+    assert _resolve_pricing("gpt-5.2-codex") is codex_runtime.CODEX_PRICING["gpt-5.2"]
+    assert (
+        _resolve_pricing("gpt-5.6-sol-2026-08-15")
+        is codex_runtime.CODEX_PRICING["gpt-5.6-sol"]
+    )
+    assert (
+        _resolve_pricing("gpt-5.1-codex-mini")
+        is codex_runtime.CODEX_PRICING["gpt-5.1-codex"]
+    )
+
+
+def test_default_rate_is_not_the_cheapest_tier():
+    """AC #2 — an unrecognised id must not under-report. The default is the
+    flagship rate because an UNPINNED agent lands here on every turn: Trinity
+    is handed model=None and thread.started carries no model id, while the CLI
+    is really running its own default (gpt-5.6-sol)."""
+    default = codex_runtime.CODEX_PRICING["default"]
+    priced = [
+        v for k, v in codex_runtime.CODEX_PRICING.items()
+        if k != "default" and "pro" not in k
+    ]
+    assert default["input"] >= max(r["input"] for r in priced) or default["input"] == 5.00
+    assert default == codex_runtime.CODEX_PRICING["gpt-5.6-sol"]
+    # An unpinned turn must cost the same as an explicit sol turn.
+    assert calculate_codex_cost(50_000, 0, 5_000, None) == calculate_codex_cost(
+        50_000, 0, 5_000, "gpt-5.6-sol"
+    )
+
+
+def test_long_context_tier_escalates_above_the_threshold():
+    """>272K input bills the FULL request at 2x input / 1.5x output."""
+    t = codex_runtime.LONG_CONTEXT_THRESHOLD_TOKENS
+    assert t == 272_000
+    at = calculate_codex_cost(t, 0, 100_000, "gpt-5.6-sol")
+    over = calculate_codex_cost(t + 1, 0, 100_000, "gpt-5.6-sol")
+    assert at == pytest.approx(round((t / 1e6) * 5.00 + 0.1 * 30.00, 6))
+    assert over == pytest.approx(round(((t + 1) / 1e6) * 10.00 + 0.1 * 45.00, 6))
+    assert over > at
+
+
+def test_long_context_tier_not_applied_to_models_without_one():
+    """gpt-5.1 publishes no long tier (its whole window is 272K), so a large
+    input must not invent a 2x charge."""
+    cost = calculate_codex_cost(300_000, 0, 1_000, "gpt-5.1")
+    assert cost == pytest.approx(round((300_000 / 1e6) * 1.25 + (1_000 / 1e6) * 10.00, 6))
+
+
+def test_unsourceable_models_fall_back_rather_than_carry_invented_rates():
+    """gpt-5.3-codex is reachable with an API key but has no published rate.
+    It must over-report via `default`, never carry a guessed number."""
+    assert _resolve_pricing("gpt-5.3-codex") is codex_runtime.CODEX_PRICING["default"]
+    assert "gpt-5.3-codex" not in codex_runtime.CODEX_PRICING
+
+
+def test_cache_writes_are_priced_from_a_real_measured_turn():
+    """Cache writes are a SUBSET of input_tokens carrying a 1.25x surcharge.
+
+    Token counts are the ACTUAL usage payload from a live gpt-5.6-sol turn on
+    codex-cli 0.147.0 (2026-08-15), not a synthetic fixture:
+        {"input_tokens": 11398, "cached_input_tokens": 0,
+         "cache_write_input_tokens": 11395, "output_tokens": 6}
+    99.97% of that input was cache writes, so treating them as plain input
+    under-reports by ~20% — the same defect class #2207 exists to fix.
+    """
+    cost = calculate_codex_cost(11_398, 0, 6, "gpt-5.6-sol", 11_395)
+    expected = round(
+        (3 / 1e6) * 5.00 + (11_395 / 1e6) * 6.25 + (6 / 1e6) * 30.00, 6
+    )
+    assert cost == pytest.approx(expected)
+    # Ignoring the writes is strictly cheaper — i.e. an under-report.
+    assert calculate_codex_cost(11_398, 0, 6, "gpt-5.6-sol", 0) < cost
+
+
+def test_cache_write_subset_never_double_counts_input():
+    """plain + cached + writes must reconstruct input_tokens exactly."""
+    cost = calculate_codex_cost(1_000, 400, 0, "gpt-5.6-sol", 600)
+    assert cost == pytest.approx(
+        round((400 / 1e6) * 0.50 + (600 / 1e6) * 6.25, 6)
+    )
+    # Nothing is billed twice: all 1000 input tokens are accounted for once.
+    assert cost < calculate_codex_cost(1_000, 0, 0, "gpt-5.6-sol", 1_000)
+
+
+def test_cache_write_absent_or_malformed_is_safe():
+    """Older payloads omit the counter; a malformed one must never REDUCE the
+    bill by producing a negative plain remainder."""
+    # Back-compat: omitted -> all input bills as plain.
+    assert calculate_codex_cost(1_000, 0, 0, "gpt-5.6-sol") == pytest.approx(
+        round((1_000 / 1e6) * 5.00, 6)
+    )
+    # Subsets summing past input_tokens are clamped, not trusted.
+    assert calculate_codex_cost(1_000, 900, 0, "gpt-5.6-sol", 900) >= 0
+    assert calculate_codex_cost(100, -5, 0, "gpt-5.6-sol", -50) >= 0
+
+
+def test_models_without_a_cache_write_surcharge_bill_writes_as_input():
+    """No published surcharge -> writes bill at the plain input rate, rather
+    than inheriting a multiplier we cannot source."""
+    assert calculate_codex_cost(1_000, 0, 0, "gpt-5.1", 500) == pytest.approx(
+        round((1_000 / 1e6) * 1.25, 6)
+    )
+
+
+def test_cache_write_rate_is_1_25x_input_where_published():
+    """AC — pin the surcharge itself, so a rate bump that forgets the write
+    column fails here."""
+    for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"):
+        rates = codex_runtime.CODEX_PRICING[model]
+        assert rates["cache_write"] == pytest.approx(rates["input"] * 1.25), model
+        assert rates["long_cache_write"] == pytest.approx(rates["long_input"] * 1.25), model
+    # ...and is ABSENT where OpenAI does not list caching support, rather than
+    # inferred from the 1.25x rule (the "never add an unsourced rate" line).
+    for model in ("gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.2", "gpt-5.1", "gpt-5"):
+        assert "cache_write" not in codex_runtime.CODEX_PRICING[model], model
+
+
+def test_parser_reads_cache_write_tokens_from_usage():
+    """The parser must consume the field Codex actually emits — it was absent
+    from the codebase entirely before #2207."""
+    events = [
+        {"type": "thread.started", "thread_id": "t1"},
+        {"type": "turn.completed", "usage": {
+            "input_tokens": 11398, "cached_input_tokens": 0,
+            "cache_write_input_tokens": 11395, "output_tokens": 6,
+            "reasoning_output_tokens": 0,
+        }},
+    ]
+    _resp, _log, meta, _raw = codex_runtime.parse_codex_jsonl(
+        [json.dumps(e) for e in events], model="gpt-5.6-sol"
+    )
+    assert meta.cost_usd == pytest.approx(
+        calculate_codex_cost(11_398, 0, 6, "gpt-5.6-sol", 11_395)
+    )
+    # And the 5.6 window, not the legacy 272K.
+    assert meta.context_window == 1_050_000
+
+
+def test_resolve_pricing_is_total_and_warns_once(caplog):
+    """AC #3 — never raises, and an unknown id is logged once, not per turn."""
+    codex_runtime._WARNED_UNKNOWN_MODELS.discard("totally-unknown-model")
+    with caplog.at_level("WARNING"):
+        for _ in range(5):
+            assert _resolve_pricing("totally-unknown-model") is (
+                codex_runtime.CODEX_PRICING["default"]
+            )
+    warnings = [r for r in caplog.records if "totally-unknown-model" in r.getMessage()]
+    assert len(warnings) == 1, f"expected 1 warning, got {len(warnings)}"
+    for weird in (None, "", "   ", "gpt", "!!!", "gpt-5." , "-"):
+        assert isinstance(_resolve_pricing(weird), dict)
+
+
+# ---------------------------------------------------------------------------
 # _compose_prompt — Codex exec has no system-prompt flag, so the effective
 # platform prompt is PREPENDED with a "---" separator; no system prompt passes
 # the user message through unchanged.
@@ -762,10 +973,15 @@ def test_load_api_key_none_when_absent_everywhere(tmp_path, monkeypatch):
 
 def test_get_default_model_and_context_window():
     rt = CodexRuntime()
-    assert rt.get_default_model() == "gpt-5.1-codex"
-    assert rt.get_context_window() == codex_runtime.CODEX_CONTEXT_WINDOW
-    # Model arg is cosmetic for the window — always the GPT-5 input window.
+    # The Codex CLI's own default (#2207); the old gpt-5.1-codex is legacy.
+    assert rt.get_default_model() == "gpt-5.6-sol"
+    # No model → the default model's window, which for the 5.6 family is 1.05M.
+    assert rt.get_context_window() == 1_050_000
+    # Legacy families keep the real 272K window.
     assert rt.get_context_window("gpt-5-nano") == codex_runtime.CODEX_CONTEXT_WINDOW
+    assert rt.get_context_window("gpt-5.1-codex") == codex_runtime.CODEX_CONTEXT_WINDOW
+    # 272K is a PRICE break, not the 5.6 window — the #2207 conflation.
+    assert rt.get_context_window("gpt-5.6-terra") == 1_050_000
 
 
 def test_is_available_true_when_version_succeeds(monkeypatch):

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { ALL_LAYOUT_KEYS } from '../src/utils/gridStorageKeys.js'
 
 /**
  * Grid org overlay e2e (trinity-enterprise#305).
@@ -9,7 +10,10 @@ import { test, expect } from '@playwright/test'
  * create org facts via the tags API on it and clean up after themselves.
  */
 
-const LAYOUT_KEY = 'trinity-grid-layout-v1'
+// Layout keys come from the store's own module (#2199) — this file's
+// hand-copied 'v1' literal silently stopped clearing the real (v2) layout
+// after the #2042 bump. ORG_KEY stays local on purpose: it has never been
+// bumped and this copy matches composables/useOrgOverlay.js.
 const ORG_KEY = 'trinity-grid-org-v1'
 
 async function gotoGrid(page) {
@@ -54,12 +58,13 @@ test.describe('grid org overlay (trinity-enterprise#305)', () => {
   let priorSystemTags = null
 
   test.beforeEach(async ({ page }) => {
+    // Spread into one flat array and iterate — nesting would call removeItem()
+    // with an Array and silently clear nothing (#2199).
     await page.addInitScript(
-      ([layoutKey, orgKey]) => {
-        localStorage.removeItem(layoutKey)
-        localStorage.removeItem(orgKey)
+      (keys) => {
+        keys.forEach((k) => localStorage.removeItem(k))
       },
-      [LAYOUT_KEY, ORG_KEY]
+      [...ALL_LAYOUT_KEYS, ORG_KEY]
     )
     priorSystemTags = null
   })

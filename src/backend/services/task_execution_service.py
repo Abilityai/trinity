@@ -265,6 +265,17 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # install is reading the reply. The interactive-ish triggers deliberately
     # left out (`manual`, `mcp`, `public`, `chat`, `session`) all have a human
     # looking at the "Unknown command" text as it comes back.
+    #
+    # `room` (ent#169/#220) is deliberately NOT here, and the reason is worth
+    # keeping because the absence reads like an oversight. A room turn's reply
+    # — including its failure line — is posted straight into the room's
+    # transcript, which is a durable, client-facing surface someone is looking
+    # at. It is the `chat`/`public` case, not the `schedule` case: the text is
+    # already where the reader is. Adding it would ALSO route an external
+    # Workspace client's typo into the operator queue, one alert per unresolved
+    # command, on the one trigger an untrusted participant can drive — operator
+    # fatigue by design (the #1632 concern), for a message the room already
+    # shows.
     {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder", "a2a"}
 )
 

@@ -60,7 +60,11 @@ export function createVoiceReplyTools(
         "reply is still delivered as text unless you end your turn with [NO_REPLY]. " +
         "Requires voice to be enabled for this agent and allowed on the current channel; " +
         "if voice can't be delivered the call returns delivered=false and you should just " +
-        "reply with text. Keep the spoken text short (a long reply is refused by the cost cap).",
+        "reply with text. Keep the spoken text short (a long reply is refused by the cost cap). " +
+        "A refusal here is a limit on THIS TOOL, not proof the surface has no voice at all — " +
+        "the Workspace, for one, reads your text aloud on the client's own speaker control. " +
+        "Read the `guidance` field when present, act on it, and never quote a `reason` code " +
+        "back to a user (#2157).",
       parameters: z.object({
         text: z.string().min(1).max(4096)
           .describe("The text to speak as a voice note. Keep it short and natural to hear."),
@@ -109,6 +113,11 @@ export function createVoiceReplyTools(
               delivered: result.delivered,
               channel: result.channel,
               reason: result.reason,
+              // #2157: the backend's plain-language explanation of a refusal, when
+              // it has one. `reason` is a machine code an agent was relaying to
+              // clients verbatim ("The system confirmed it: not_a_channel_turn");
+              // this is the sentence it should reason from — and act on — instead.
+              ...(result.guidance ? { guidance: result.guidance } : {}),
               // Hint the agent to still send text when voice didn't go out.
               fallback_to_text: !result.delivered,
             },

@@ -87,12 +87,19 @@ calling agent.
   `setActive` gate so a WS trigger only refetches while the panel is mounted). Wired into
   `utils/websocket.js` `agent_report` dispatch.
 - **Renderers** `components/reports/` — `ReportRenderer.vue` picks by `display_hint` →
-  `report_type` prefix → JSON, validating payload shape and falling back to `ReportJson` on
-  mismatch (Codex #10). Typed renderers: `ReportTable`, `ReportKpiTiles`, `ReportMarkdown`
-  (DOMPurify via `utils/markdown.js`), `ReportTimeline`, `ReportJson`.
-- **Panels** — `ReportsPanel.vue` (Agent Detail "Reports" tab) and `ReportsPanelFleet.vue`
-  (Operations → Reports tab; agent/type/time/search filters + KPI tiles from
-  `GET /api/reports/stats`). Lists show metadata; full payload lazy-loads on expand.
+  `report_type` prefix → fallback, validating payload shape and falling back on mismatch
+  (Codex #10). Typed renderers: `ReportTable`, `ReportKpiTiles`, `ReportMarkdown`
+  (DOMPurify via `utils/markdown.js`), `ReportTimeline`. The fallback is a **prop**, not a
+  fixture (#2162): `fallbackComponent` defaults to `ReportJson`, which is what both operator
+  panels still render, and only the client-facing Workspace passes `ReportSummary` — there is
+  no disclosure behind it, because a raw payload must be unreachable on that surface.
+- **Panels — THREE consumers, not two** (#2162) — `ReportsPanel.vue` (Agent Detail "Reports"
+  tab), `ReportsPanelFleet.vue` (Operations → Reports tab; agent/type/time/search filters +
+  KPI tiles from `GET /api/reports/stats`), and the **Workspace agent page's Reports tab**
+  (`components/portal/PortalAgentPage.vue`, client-facing — see
+  [workspace-agent-page.md](workspace-agent-page.md)). Lists show metadata; full payload
+  lazy-loads on expand. Enumerating them is load-bearing: this list said "two" while the
+  third shipped a raw JSON dump to external clients.
 
 ### Renderer payload contracts
 | hint | expected payload shape |
@@ -101,7 +108,18 @@ calling agent.
 | `kpi` | `{ tiles: Array<{label, value, unit?}> }` |
 | `markdown` | `{ markdown: string }` |
 | `timeline` | `{ events: Array<{ts?, label, detail?}> }` |
-| `json` (or anything malformed) | rendered as a pretty-printed JSON viewer |
+| `json` (or anything malformed) | `ReportJson` by default; the overriding surface's `fallbackComponent` (#2162) |
+
+**The fallback is per-surface, since #2162.** `ReportJson` — a pretty-printed dump — stays the
+default, and both operator panels keep it: it is the useful answer when you are debugging an
+agent's own output. It is unacceptable for an external client, so `ReportRenderer` takes a
+`fallbackComponent` prop and the Workspace passes `ReportSummary`, a bounded summary (≤40 entries
+with a counted remainder, ~200-char values, depth 1 — a nested value is described as "12 items",
+never serialised) with credential-shaped tokens redacted at **value** level, mirroring canary
+G-04's prefix set, and no raw payload behind it. AC #2 asks for a client fallback "deliberately
+stricter than the operator side", so the split is the design. The override covers an
+agent-chosen `json` hint as well as a shape mismatch — replacing only the mismatch path would
+leave an agent able to request a dump in front of a client.
 
 ## Retention
 `cleanup_service._sweep_retention_772` prunes `agent_reports` older than
@@ -202,6 +220,17 @@ transfers **8,699 bytes** instead of 1.16 MB.
 is needed to know whether to page. Non-tabular payloads answer 400 on the rows route rather
 than being given an invented row axis, and no-access answers 404 exactly like
 `GET /reports/{id}`, so the sibling route cannot be used to probe an id.
+
+**The client-facing surface windows differently, on purpose (#2162).** This route is
+`Depends(get_current_user)`, which a portal principal — a verified email with no `users` row —
+structurally cannot satisfy, so the Workspace could not reuse it and a clone on a
+client-facing prefix would have needed its own copy of the uniform-404 contract. Its detail
+route took two optional query params instead (`rows_offset`/`rows_limit`), and the **server**
+decides tabularity from the real payload rather than trusting `display_hint`: a non-tabular
+payload comes back whole with no `row_meta` instead of a 400, which removes the
+predict-then-recover round trip the operator client needs. Same honest residual as below, plus
+one more — paging re-reads the blob per request, so on a prefix a client can loop it is
+rate-limited per (client, agent).
 
 **Honest residual.** The slice happens in Python after the whole blob is read from the
 column, so it bounds the RESPONSE, not the read. Moving the slice into SQL needs the rows

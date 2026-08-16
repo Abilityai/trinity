@@ -2,13 +2,13 @@
 
 > **Type**: feature · P1 · `theme-devex` · Epic #1045 (Agent Infrastructure)
 >
-> **One-line**: Advisory, non-blocking server-side validation of a **running** agent's workspace against ~100 best-practice checks (11 categories), surfaced in the Agent Detail Overview tab with one-click auto-fix for the 10 gitignore checks, plus an MCP tool.
+> **One-line**: Advisory, non-blocking server-side validation of a **running** agent's workspace against 88 best-practice checks (12 categories), surfaced in the Agent Detail Overview tab with one-click auto-fix for the 9 gitignore checks, plus an MCP tool.
 
 ## Overview
 
 Agents deployed to Trinity that don't follow Trinity conventions (no `template.yaml`, `.claude/` gitignored away, secrets committed, no playbooks) fail silently at runtime. This feature runs a deterministic + AI-assisted compatibility check against the agent's live workspace and surfaces HARD / SOFT / INFO findings — **without blocking deployment**.
 
-The canonical check list is **`docs/agent-validation-spec.md`** (100 checks), the single source of truth kept in lockstep with `services/compatibility/spec.py` by `tests/unit/test_compatibility_checks.py::TestSpecDocSync`.
+The canonical check list is **`docs/agent-validation-spec.md`** (88 checks), the single source of truth kept in lockstep with `services/compatibility/spec.py` by `tests/unit/test_compatibility_checks.py::TestSpecDocSync` — which asserts the id set **and** the Severity column, over a `[A-Z]{1,2}-\d{3}` id regex (#2137).
 
 ## End-to-end flow
 
@@ -47,7 +47,7 @@ Mirrors the deterministic `canary/` library: `spec.py` (single source of truth),
 - **Verdict changes (release-noted, not monotone).** The blanket "strictly monotone, `fail→pass` only" claim is false. The complete set: `fail→pass` for K-001/K-002/T-015 (the fix); `pass→fail` for K-002 on `${env_file}`/`${mcp_servers}`/`${config_files}` (a closed false negative, deliberate); `pass→fail` for **K-003 (SOFT)** on a lowercase-only comment-free `.env.example` (collateral of widening `_env_example_vars`, which is K-003's precondition for *demanding* comments — the verdict is correct but it is a `pass→fail`); and `pass→pass` for S-010, safe only because its `generic` blocklist is uppercase-exact — asserted, not assumed. The claim that survives: **no agent gains a HARD failure.**
 - **AI checks**: category-batched calls to Anthropic `/v1/messages` (`claude-haiku-4-5`) via `settings_service.get_anthropic_api_key` + httpx, tool-use structured output. **Iterate-expected** (an omitted check becomes `skipped`, never vanishes), per-item validation, concurrent via `asyncio.gather`, fail-open (no key / API error → `skipped` with reason). **AI severity is capped at SOFT** — an LLM verdict never drives the HARD count. Secret-bearing files are never sent; a redaction pass runs over every file before egress.
 - **Runtime-aware**: Claude-only checks (`CLAUDE.md`, `.claude/` skills) are omitted for non-Claude runtimes (Codex/Gemini, #1187).
-- **Fixes**: the 10 gitignore checks; reuses `git_service._GITIGNORE_PATTERNS`; per-agent Redis lock (`compat_fix:{name}`); atomic base64 write-back (`… | base64 -d > .gitignore.tmp && mv`); G-001 removes a blanket `.claude/` line by exact-line match (never substring, CRLF-normalized). **No auto-commit** — uncommitted until the agent's next git sync. `check_id` validated against the spec-derived whitelist (400 otherwise; 409 on a concurrent fix).
+- **Fixes**: the 9 gitignore checks (G-002 retired in #2137); reuses `git_service._GITIGNORE_PATTERNS`; per-agent Redis lock (`compat_fix:{name}`); atomic base64 write-back (`… | base64 -d > .gitignore.tmp && mv`); G-001 removes a blanket `.claude/` line by exact-line match (never substring, CRLF-normalized). **No auto-commit** — uncommitted until the agent's next git sync. `check_id` validated against the spec-derived whitelist (400 otherwise; 409 on a concurrent fix).
 
 ### T-018 and the fail-open class (trinity-enterprise#89)
 
@@ -99,6 +99,72 @@ Regression coverage runs every malformed fixture through **all** of
 T-018-only assertion would never have caught `c_p006` — plus a `build_report`
 test pinning the *direction* (a raising reader must still yield
 `overall_status == "issues"`).
+
+### Catalog alignment (#2137)
+
+The catalog had drifted from both what the platform implements and what the
+public `create-agent` wizards generate. A freshly-scaffolded agent landed with
+**9 findings (6 SOFT + 3 INFO)** that were not the author's fault and could not
+be acted on — which trains operators to ignore the panel — while the one HARD
+check guarding autonomous runs from hanging (**P-006**) was silently inert.
+101 checks → **88**; a wizard agent now reports **0 HARD, 0 SOFT, 5 INFO**
+(optional `template.yaml` metadata + the A-001 determinism suggestion).
+
+- **Gating on fields nothing reads.** `template.yaml`'s `git:` block
+  (`commit_paths` / `ignore_paths` / `push_enabled`) has no backend reader
+  anywhere and no bundled template declares it — yet **T-017 was HARD**. Same for
+  `metrics:` (D-006; `dashboard.yaml` is the read surface) and `.trinity/post-check`
+  (I-005), whose only other mention was a `git_service` comment pointing back at
+  I-005. All retired, and `TRINITY_COMPATIBLE_AGENT_GUIDE.md` now marks the `git:`
+  block inert so authors stop writing it. **The `.trinity/post-check` PATH stays in
+  `_TRINITY_AUTHORED_PATHS`** — #2070 derives the `!` re-includes from that tuple
+  and 14 bundled templates ship `!.trinity/post-check`, so removing it would
+  untrack an authored hook on the next push.
+- **A retired duplicate is not always a severity duplicate.** `c_k002` was
+  literally `return c_t015(snap)` — but K-002 was declared **HARD** and T-015
+  **SOFT**. Retiring K-002 as a plain duplicate would have silently downgraded the
+  credential-declaration gate and undone ent#128's deliberate choice. **T-015 was
+  promoted to HARD**; `test_ent128b1_compat_gates.py` (which asserts
+  `hard_count >= 1` on a hostile declaration) is what caught it.
+- **P-006 had never fired.** `_slash_command()` anchored at position 0
+  (`^\s*/`), but the marketplace's own generated schedules read
+  `"Run /pipeline-tick"`, `"Run /project-steward"`, `"Run /weekly-report and post
+  the summary"`. The scheduled-command set came back empty, so the HARD check
+  returned *"no scheduled/autonomous skills declared"* on precisely the agents it
+  exists to guard. The matcher now finds a slash command anywhere a token starts
+  (`(?<![^\s(\[])/…`), so a POSIX path or URL is still not mistaken for one.
+  P-006 also honours an **`automation: gated|manual`** frontmatter opt-out — the
+  convention already used across `abilityai/abilities`; an intentional human pause
+  is a design decision, not a defect.
+- **X-007 was blind to the only layout the wizards produce.** `_command_names()`
+  globbed `.claude/commands/` only, so a skill-based agent naming a real skill was
+  reported as referencing a missing command. Both layouts now resolve.
+- **The catalog contradicted itself.** P-009 tells authors to split reference
+  material out of `SKILL.md`; P-004 then flagged the resulting `reference.md`,
+  because `_skill_files()` walks every `.md` under `.claude/skills/`. P-004 is
+  scoped to `SKILL.md` (matching P-002), so the two are now a ladder: split at
+  ~200, fail at 500.
+- **Unactionable SOFTs downgraded to INFO** — `T-007`/`T-008` (metadata),
+  `T-010`/`T-011` (only `_build_local_template()` surfaces these; the
+  GitHub-sourced builder, now the default path, never reads them), `K-003`,
+  `C-012`, and `A-001` (prose schedule messages are valid Trinity input, and the
+  wizards generate prose for all 13 of their scheduled tasks). `F-004` became
+  conditional on the agent actually declaring credentials.
+- **The anti-drift test did not hold.** `test_ids_match_doc` matched
+  `^\|\s*([A-Z]-\d{3})\s*\|` — a **single** letter — so the doc's
+  `DP-001`…`DP-005` never participated: five checks were documented, indexed, and
+  entirely unimplemented while the test reported the two files in sync. The regex
+  is now `[A-Z]{1,2}-\d{3}`, and a **new `test_severities_match_doc`** asserts the
+  Severity column too (an id-only test passes happily while the doc claims HARD for
+  a check the catalog emits as INFO — and that column is what an operator reads).
+  `DP-001`..`DP-004` are now implemented (`data_paths` IS a real field: #1169
+  `materialize_data_paths`); `DP-005` was retired because `.trinity/pre-snapshot`
+  has no executor. DP-001 shares `git_service._is_safe_data_path` with the
+  materializer — the A-002 discipline of validating with the parser the executor
+  uses — and adds the containment check the materializer deliberately omits.
+- **Retired ids are never reissued**, so persisted `checks_json` rows written
+  before the retirement stay interpretable. The full table is in
+  `docs/agent-validation-spec.md` § Retired checks.
 
 ## Persistence
 

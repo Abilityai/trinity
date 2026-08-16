@@ -1,8 +1,32 @@
 <template>
   <div id="app" class="min-h-screen bg-gray-100 dark:bg-gray-900">
-    <!-- KeepAlive preserves terminal WebSocket connections when navigating away -->
+    <!-- AgentDetail is cached across navigation. #2198 re-examined whether it
+         still should be, because the stated reason had gone stale: the Terminal
+         tab is hidden for all users, `TerminalPanelContent` is imported but
+         never rendered, and `terminalRef` is bound to nothing — so there is no
+         terminal WebSocket to preserve.
+
+         It stays, for reasons that ARE live and were measured:
+           - `e2e/schedules-toggle-scroll.spec.js` names this caching as a
+             load-bearing premise; without it two shipped regression tests pass
+             even with the fix they guard deleted.
+           - `ChatPanel` is `v-show` (so mounted on every tab) and its
+             `onUnmounted` calls `closeSSE()` and stops an active voice session.
+             Un-caching makes navigating away kill an in-flight chat stream and
+             end a live voice call.
+           - `activeTab` is never URL-synced, so every revisit would reset the
+             user to Overview.
+           - It is not even a win on requests: measured on a running agent,
+             removing it saved 6 on first load and cost 19 on every revisit
+             (27 -> 47), and `learnings.md:118-120` records the cached-revisit
+             path as "the common path".
+         The duplicate fetches it caused are fixed at their source instead.
+
+         'SystemAgent' matched no component in the codebase — the `/system-agent`
+         route redirects to `/agents/trinity-system`, i.e. to AgentDetail — so
+         removing it is a no-op, verified by grep. -->
     <router-view v-slot="{ Component }">
-      <KeepAlive :include="['SystemAgent', 'AgentDetail']">
+      <KeepAlive :include="['AgentDetail']">
         <component :is="Component" />
       </KeepAlive>
     </router-view>

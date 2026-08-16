@@ -513,6 +513,16 @@ _DATA_PATHS_PATH = "/home/developer/.trinity/data-paths.yaml"
 # runtime data never lands in a commit.
 _DATA_ROOT_GITIGNORE = "data/"
 
+# #1704: declared Claude Code plugin selection (marketplaces + installed
+# plugins). Unlike persistent-state.yaml / data-paths.yaml this file is
+# COMMITTED — it is in `_TRINITY_AUTHORED_PATHS`, so it rides the #2070
+# contents-only re-include and survives a git-based reconstitution onto a
+# fresh volume or a new host (the real #1704 gap; a plain recreate is already
+# volume-safe). The boot hook (`agent_server.plugins_reinstall`) reads it and
+# re-installs anything declared-but-missing. Opt-in — empty declaration writes
+# no file.
+_PLUGINS_PATH = "/home/developer/.trinity/plugins.yaml"
+
 
 # ---------------------------------------------------------------------------
 # Shared `.trinity/<file>.yaml` list primitives (#1169)
@@ -522,6 +532,34 @@ _DATA_ROOT_GITIGNORE = "data/"
 # heredoc delimiter is a parameter so each caller keeps its own marker (the
 # S4 tests pin `PSTATE_EOF`).
 # ---------------------------------------------------------------------------
+
+
+async def _write_trinity_yaml_file(
+    agent_name: str,
+    *,
+    path: str,
+    body: str,
+    heredoc: str,
+    timeout: int = 10,
+) -> None:
+    """Write a pre-serialized YAML `body` to `path` inside the agent container.
+
+    THE single container-write mechanism for every `.trinity/*.yaml` the backend
+    materializes (#953: never hand-roll a raw container write). The single-quoted
+    heredoc preserves the body verbatim and is injection-safe (no shell expansion
+    inside `<<'HEREDOC'`); callers keep the body's values free of the outer
+    `bash -c "..."` metacharacters (`$`, backtick, `"`, `\\`) — which the reused
+    `_SAFE_DATA_PATH_RE` / `template_plugins` charset validators guarantee.
+    """
+    cmd = (
+        f"mkdir -p /home/developer/.trinity && "
+        f"cat > {path} <<'{heredoc}'\n{body}{heredoc}"
+    )
+    await execute_command_in_container(
+        container_name=f"agent-{agent_name}",
+        command=f'bash -c "{cmd}"',
+        timeout=timeout,
+    )
 
 
 async def materialize_trinity_yaml_list(
@@ -541,14 +579,8 @@ async def materialize_trinity_yaml_list(
     import yaml as _yaml
 
     body = _yaml.safe_dump({key: list(patterns)}, sort_keys=False)
-    cmd = (
-        f"mkdir -p /home/developer/.trinity && "
-        f"cat > {path} <<'{heredoc}'\n{body}{heredoc}"
-    )
-    await execute_command_in_container(
-        container_name=f"agent-{agent_name}",
-        command=f'bash -c "{cmd}"',
-        timeout=timeout,
+    await _write_trinity_yaml_file(
+        agent_name, path=path, body=body, heredoc=heredoc, timeout=timeout
     )
 
 
@@ -692,6 +724,48 @@ async def _data_paths_for(agent_name: str) -> list[str]:
         path=_DATA_PATHS_PATH,
         key="data_paths",
         default=DEFAULT_DATA_PATHS,
+    )
+
+
+async def materialize_plugins(agent_name: str, plugins: dict) -> None:
+    """Materialize an agent's declared Claude Code plugins (#1704).
+
+    Writes `.trinity/plugins.yaml` as nested
+    `{plugins: {marketplaces: [{name, source}], installed: ["plugin@mkt"]}}` via
+    the shared injection-safe heredoc writer. The file is COMMITTED (it is in
+    `_TRINITY_AUTHORED_PATHS`), so the declaration survives a git-based
+    reconstitution onto a fresh volume or a new host, where the gitignored
+    `~/.claude.json` + `~/.claude/plugins/` cache are dropped.
+
+    `plugins` is the ALREADY-normalized dict from
+    `template_plugins.normalize_declared_plugins` — every value is
+    charset-validated, so the nested body is safe inside the outer `bash -c`
+    double quotes (see `_write_trinity_yaml_file`).
+
+    Opt-in: a falsy declaration (`{}` / None / no marketplaces + no installed)
+    is a complete no-op — no file is written.
+
+    Determinism (a correctness property): `sort_keys=True` + the normalizer's
+    sorted, de-duplicated lists mean a stable plugin set produces a byte-
+    identical file, so the 15-min auto-sync loop never re-commits a churning
+    manifest — unlike the flat `materialize_trinity_yaml_list` (`sort_keys=False`).
+    """
+    import yaml as _yaml
+
+    if not isinstance(plugins, dict):
+        return
+    marketplaces = plugins.get("marketplaces") or []
+    installed = plugins.get("installed") or []
+    if not marketplaces and not installed:
+        return
+
+    body = _yaml.safe_dump(
+        {"plugins": {"marketplaces": marketplaces, "installed": installed}},
+        sort_keys=True,
+        default_flow_style=False,
+    )
+    await _write_trinity_yaml_file(
+        agent_name, path=_PLUGINS_PATH, body=body, heredoc="PLUGINS_EOF"
     )
 
 
@@ -1286,13 +1360,26 @@ def delete_agent_git_config(agent_name: str) -> bool:
 # under it never apply (which is also why compat check S-005 accepts it).
 _TRINITY_AUTHORED_PATHS: Tuple[str, ...] = (
     ".trinity/pre-check",       # SCHED-COND-001 conditional-schedule hook (#454)
-    ".trinity/post-check",      # output-contract validator (compat I-005)
+    # Template-authored output-contract validator. No platform executor runs it
+    # today (compat check I-005 was retired in #2137 as gating on a fiction), but
+    # the path stays: #2070 derives the `!` re-includes from this tuple, and 14
+    # bundled templates already ship `!.trinity/post-check`, so removing it would
+    # untrack an authored hook on the next push — the exact #2070 regression.
+    ".trinity/post-check",
     ".trinity/pre-snapshot",    # data-snapshot quiesce hook (#1169)
     ".trinity/setup.sh",        # startup setup convention (trinity-enterprise#76)
     ".trinity/persistent-processes.allow",  # orphan-sweep allowlist patterns (#1501)
     ".trinity/brain-orb/",      # brain-orb convention hooks (#58/#60)
     ".trinity/pipelines/",      # agent-defined pipeline DEFINITIONS (#919);
                                 # instance STATE lives in pipeline-state/
+    # #1704: declared Claude Code plugin selection (marketplaces + installed).
+    # COMMITTED — unlike persistent-state.yaml / data-paths.yaml (volume-local,
+    # re-materialized at creation), this must survive a git-based reconstitution
+    # onto a fresh volume or a new host, the gap #1704 closes. This entry alone
+    # yields both the `!` re-include and the `git rm --cached` exemption, so the
+    # manifest is committable while `.claude.json` and `.claude/plugins/` (#1705)
+    # stay gitignored.
+    ".trinity/plugins.yaml",
 )
 
 
@@ -1613,6 +1700,284 @@ async def _migrate_workspace_gitignore(agent_name: str) -> None:
         logger.warning(
             f"_migrate_workspace_gitignore failed for {agent_name}: {exc}. "
             "Push will proceed against the existing .gitignore."
+        )
+
+
+# ---------------------------------------------------------------------------
+# #2069: creation-time canonical `.gitignore` seed
+# ---------------------------------------------------------------------------
+#
+# `_GITIGNORE_PATTERNS` was applied at exactly two operator-initiated moments —
+# the Push migration (`_migrate_workspace_gitignore`) and the init-path merge
+# (`initialize_git_in_container` step 2) — and NEVER at agent creation. But the
+# in-container 15-min auto-sync loop (`agent_server/auto_sync.py`, a bare
+# `git add -A`) is on FROM BIRTH for the `GIT_SYNC_AUTO` set (non-source-mode /
+# fork-to-own `github:` agents, ephemeral ghosts included), so such an agent
+# auto-committed `.trinity/` runtime state, `.claude/projects/`, `content/` and
+# the root-level `.env` / `.mcp.json` (which sit at the repo root because $HOME
+# IS the repo root, #1703) into its user-owned repo before any Push could
+# migrate the list — a credential-leak-into-a-private-repo hygiene hazard plus
+# the #1595/#1596 unbounded-`.git`-bloat class. This lands the canonical list on
+# disk after startup.sh's FULL git setup and before the first auto-sync cycle.
+# #1703 (repo root ≡ $HOME) is the structural fix that retires this whole layer.
+
+# Deadline sized to a slow full-history clone + startup, NOT to the 900s
+# pre-first-cycle sleep (which is NOT relied on for correctness). Env-tunable.
+_MERGE_READY_TIMEOUT_SECONDS = int(
+    os.getenv("TRINITY_GITIGNORE_MERGE_TIMEOUT_SECONDS", "1800")
+)
+_MERGE_READY_INTERVAL_SECONDS = int(
+    os.getenv("TRINITY_GITIGNORE_MERGE_INTERVAL_SECONDS", "5")
+)
+# Per-operation `asyncio.wait_for` belt around EVERY exec/HTTP (the /health
+# probe, the `.git` check, `_git_toplevel`, the merge exec): `execute_command_in_
+# container`'s `timeout=` arg is never forwarded to `container_exec_run`
+# (docker_service.py), so a hung exec would otherwise pin the fire-and-forget
+# task. HONEST: `wait_for` frees the TASK, not the pinned Docker pool thread (the
+# shared 4-worker executor, docker_utils.py) — hence the Semaphore cap below.
+_MERGE_EXEC_TIMEOUT_SECONDS = 30
+# Fleet-wide cap so N concurrent creations can't fire unbounded concurrent Docker
+# execs and starve unrelated Docker ops on the shared 4-thread pool. Scoped to the
+# EXEC section only (`.git` check / `_git_toplevel` / merge) — NOT the readiness
+# poll, which is pure agent-`/health` HTTP and touches no pool thread. Holding the
+# cap across a (<= _MERGE_READY_TIMEOUT_SECONDS) readiness wait would let a handful
+# of slow-/never-booting agents head-of-line-block a healthy, fast-booting agent's
+# merge past its OWN first auto-sync cycle (server-boot + ~900s) — re-opening the
+# exact leak this fix closes.
+_MERGE_POLLER_CONCURRENCY = int(os.getenv("TRINITY_GITIGNORE_MERGE_CONCURRENCY", "6"))
+_gitignore_merge_semaphore = asyncio.Semaphore(_MERGE_POLLER_CONCURRENCY)
+_inflight_gitignore_merge_tasks: "set[asyncio.Task]" = set()
+
+
+def _git_auto_sync_baked(
+    config,
+    github_repo: Optional[str],
+    github_pat: Optional[str],
+    fork_upstream: Optional[str],
+) -> bool:
+    """Does this agent bake ``GIT_SYNC_AUTO='true'`` at creation? — the single
+    owner of that predicate (the ent#109 `_apply_git_env_from_db` "single owner
+    of the env gate" discipline; used at both `crud.py::_apply_github_env` and
+    the #2069 merge spawn).
+
+    Mirrors `_apply_github_env` verbatim: the flag is set inside `if
+    github_repo:` when `(not source_mode or fork_upstream) and github_pat`. The
+    in-container auto-sync loop gates purely on this env var, so this predicate —
+    NOT the `_materialize_agent_files` DB-flag block, which additionally excludes
+    ephemeral ghosts (`and not config.ephemeral`) — is exactly the population
+    whose loop auto-commits, and therefore exactly what the #2069 merge must
+    cover: an ephemeral non-source `github:`+PAT ghost bakes the env, auto-commits
+    from birth, and is never operator-Pushed, so the DB-flag-gated path would
+    leave it leaking unremediated.
+    """
+    return (
+        bool(github_repo)
+        and bool(github_pat)
+        and (not config.source_mode or bool(fork_upstream))
+    )
+
+
+async def _probe_agent_server_ready(agent_name: str) -> bool:
+    """One DIRECT agent-server `/health` probe (#2069 / #1159).
+
+    Direct (`agent_httpx_client` → `http://agent-{name}:8000/health`), NEVER the
+    backend proxy route, which masks a mid-startup `httpx.ConnectError` as an
+    HTTP 200 fallback body carrying a `message` key (ent#15 / learnings
+    2026-08-04). Until the server is up the connect raises and we return False;
+    a real 200 returns True. `/health` is the ONE path the agent-server auth
+    middleware exempts, so the probe needs nothing beyond what the client stamps.
+    """
+    try:
+        async with agent_httpx_client(
+            agent_name, timeout=_MERGE_READY_INTERVAL_SECONDS
+        ) as client:
+            resp = await client.get(f"http://agent-{agent_name}:8000/health")
+            return resp.status_code == 200
+    except Exception:
+        return False
+
+
+async def _container_has_git_dir(container_name: str) -> bool:
+    """True iff `/home/developer/.git` exists (one exec)."""
+    result = await execute_command_in_container(
+        container_name=container_name,
+        command='bash -c "[ -d /home/developer/.git ]"',
+        timeout=5,
+    )
+    return result.get("exit_code") == 0
+
+
+async def merge_gitignore_after_clone(agent_name: str) -> None:
+    """Readiness-gated fire-and-forget merge of `_GITIGNORE_PATTERNS` into a
+    fresh `github:` agent's `.gitignore`, so the first in-container auto-sync
+    cycle stages none of the ignored runtime/credential paths (#2069).
+
+    Two-tier safety property:
+      * **Creation-time = PREVENT** — merge-only (NO `_build_rm_cached_ignored_
+        command`). The generated `.env`/`.mcp.json` are written post-clone as
+        UNTRACKED files, so a merge-installed `.gitignore` stops `git add -A`
+        from ever staging them (the common case). Untracking the template's own
+        committed content just because it matches a broad pattern would be
+        surprising; a template that COMMITTED a credential file (unusual
+        subclass) is remediated on the first Push (`_migrate_workspace_gitignore`)
+        + retired by #1703.
+      * **Push = REMEDIATE** — `_migrate_workspace_gitignore` still does
+        merge + untrack, unchanged (AC#5: no behaviour change on `sync_to_github`).
+
+    Merge point — the central correctness question. The merge must run AFTER
+    startup.sh finishes ALL of its git setup and BEFORE the first auto-sync
+    cycle, WITHOUT relying on the 900s pre-first-cycle sleep for correctness. The
+    gate is **agent-server /health readiness ∧ /home/developer/.git present**:
+      * The agent server is launched ONCE, at startup.sh:517 — strictly after the
+        entire git block (clone → tar-merge → `git checkout` of the source/working
+        branch → remote-config). A filesystem gate like `.git ∧ ¬.trinity-clone-
+        tmp` fires mid-git-setup, where a later `git checkout` can REVERT the
+        merged `.gitignore` (target branch ships a different one) or FAIL on the
+        uncommitted change — and because the poll fires the merge once and exits,
+        a reverted merge is not retried (Codex #1). `/health` responding proves
+        startup.sh is past ALL working-tree mutation, and is still ~900s before
+        the auto-sync loop (which lives inside that same server) runs its first
+        cycle. The readiness gate is therefore STRONGER than the filesystem check.
+      * The probe is DIRECT — the backend proxy masks a mid-startup ConnectError
+        as a 200 fallback body (ent#15).
+      * `.git` present handles the failed-clone case: the server still launches
+        (startup.sh has no `set -e`), so `/health` comes up, but `.git` is absent
+        → skip (nothing to pollute; the Push migration is the backstop).
+
+    Bounded & non-fatal: a monotonic deadline (`_MERGE_READY_TIMEOUT_SECONDS`,
+    sized to clone + startup, NOT the 900s cycle), a module-level Semaphore cap on
+    the DOCKER-EXEC section only (batch creation must not starve the shared 4-thread
+    Docker pool), and `asyncio.wait_for` around every exec/HTTP. wait_for frees the
+    TASK, not the pinned pool thread. The readiness poll runs OUTSIDE the Semaphore
+    — it is pure agent-`/health` HTTP and touches no pool thread, so capping it
+    would let slow-booting agents head-of-line-block a healthy agent's merge past
+    its own first cycle. Any failure logs and returns; on deadline the Push
+    migration remains the backstop.
+
+    Known limitation: a backend restart within the readiness-wait window loses
+    this in-memory task. Acceptable for a P2 — the Push migration remediates and
+    #1703 is the structural fix.
+    """
+    container_name = f"agent-{agent_name}"
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _MERGE_READY_TIMEOUT_SECONDS
+    ready = False
+    try:
+        # Readiness poll — pure agent-`/health` HTTP, NOT a Docker exec, so it runs
+        # OUTSIDE `_gitignore_merge_semaphore` (which bounds only the Docker-pool
+        # exec section below). Holding the pool cap across a <=1800s readiness wait
+        # would let slow-booting agents head-of-line-block a healthy agent's merge
+        # past its own first auto-sync cycle — re-opening the leak this fix closes.
+        while loop.time() < deadline:
+            try:
+                ready = await asyncio.wait_for(
+                    _probe_agent_server_ready(agent_name),
+                    timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                ready = False
+            if ready:
+                break
+            await asyncio.sleep(_MERGE_READY_INTERVAL_SECONDS)
+
+        if not ready:
+            logger.warning(
+                "[#2069] agent-server for %s never became ready within %ss; "
+                "skipping the creation .gitignore merge — the Push migration "
+                "remains the backstop.",
+                agent_name,
+                _MERGE_READY_TIMEOUT_SECONDS,
+            )
+            return
+
+        # Docker-exec section (`.git` check / `_git_toplevel` / merge) — bound the
+        # shared 4-thread pool HERE. Each exec is short, so the cap drains fast even
+        # under batch creation; a queued agent's exec still lands well inside its
+        # ~900s pre-first-cycle window because it is no longer stuck behind other
+        # agents' readiness waits.
+        async with _gitignore_merge_semaphore:
+            # Server is up ⟹ startup.sh is past ALL git mutation (single launch
+            # point, sequential) — no more `git checkout` can revert the merge.
+            try:
+                has_git = await asyncio.wait_for(
+                    _container_has_git_dir(container_name),
+                    timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                has_git = False
+            if not has_git:
+                logger.info(
+                    "[#2069] %s is ready but has no .git (failed clone / not "
+                    "git-bound); skipping the creation .gitignore merge.",
+                    agent_name,
+                )
+                return
+
+            # The gate already proved a repo exists, so resolve the toplevel with
+            # `_git_toplevel` (None → skip) rather than `_detect_git_dir`'s
+            # heuristic fallback — safer to skip on unresolved than merge against
+            # a guessed path.
+            try:
+                git_dir = await asyncio.wait_for(
+                    _git_toplevel(container_name),
+                    timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                git_dir = None
+            if git_dir is None:
+                logger.info(
+                    "[#2069] could not resolve the git toplevel for %s; "
+                    "skipping the creation .gitignore merge.",
+                    agent_name,
+                )
+                return
+
+            await asyncio.wait_for(
+                execute_command_in_container(
+                    container_name=container_name,
+                    command=_build_gitignore_merge_command(git_dir),
+                    timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
+                ),
+                timeout=_MERGE_EXEC_TIMEOUT_SECONDS,
+            )
+            logger.info(
+                "[#2069] seeded the canonical .gitignore for %s at %s before "
+                "its first auto-sync cycle.",
+                agent_name,
+                git_dir,
+            )
+    except Exception as exc:
+        logger.warning(
+            "[#2069] creation .gitignore merge failed for %s: %s. "
+            "The Push migration remains the backstop.",
+            agent_name,
+            exc,
+        )
+
+
+def spawn_gitignore_merge_after_clone(agent_name: str) -> None:
+    """Fire ``merge_gitignore_after_clone`` fire-and-forget (mirrors
+    `activity_service.spawn_close_execution_activity`): zero creation latency;
+    the merge lands within one poll interval of agent-server readiness.
+
+    The Docker-exec section is bounded INSIDE the coro by
+    `_gitignore_merge_semaphore`, so an excess spawn's merge exec queues rather
+    than piling another concurrent exec onto the shared Docker pool; the readiness
+    poll runs OUTSIDE the cap (pure agent-`/health` HTTP, no pool thread). A strong
+    ref in `_inflight_gitignore_merge_tasks` defeats the
+    asyncio `create_task` GC footgun. With no running loop the coro is closed and
+    the spawn is skipped (logged), never raised — the Push migration is the
+    backstop.
+    """
+    coro = merge_gitignore_after_clone(agent_name)
+    try:
+        task = asyncio.create_task(coro)
+        _inflight_gitignore_merge_tasks.add(task)
+        task.add_done_callback(_inflight_gitignore_merge_tasks.discard)
+    except RuntimeError as e:
+        coro.close()
+        logger.debug(
+            "[#2069] spawn_gitignore_merge_after_clone skipped (no loop): %s", e
         )
 
 

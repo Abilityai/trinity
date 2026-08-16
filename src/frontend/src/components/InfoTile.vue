@@ -68,7 +68,19 @@
  * Interactive children carry `.nodrag`, which `FleetGrid.onTilePointerDown`
  * checks before starting a drag — otherwise clicking a tile's own link would
  * begin a tile drag instead.
+ *
+ * `inheritAttrs: false` because a tile is a thin wrapper whose single root IS
+ * this component: any prop the chassis binds that the wrapping tile did not
+ * declare (`now` on a tile that only declares `agents`, say) would otherwise
+ * fall through twice and land on `<article>` as a literal DOM attribute —
+ * rewritten on every tick, visible in the inspector, meaningless. One line
+ * makes that structurally impossible for every present and future tile; a
+ * lint-style guard over `defineProps` would miss both the array form
+ * (`defineProps([...])`) and the type-only form (`defineProps<{...}>()`),
+ * which are legal and would reintroduce it while passing green.
  */
+defineOptions({ inheritAttrs: false })
+
 defineProps({
   /** Scope prefix rendered before the title: "Fleet", "Host", … */
   scope: { type: String, default: 'Fleet' },
@@ -103,7 +115,12 @@ defineProps({
   background: var(--gv-tile, rgba(255, 255, 255, 0.9));
   border: 1px solid var(--gv-border, #e5e7eb);
   box-shadow: var(--gv-tile-shadow, 0 1px 2px rgba(0, 0, 0, 0.06));
-  overflow: hidden;
+  /* Deliberately NOT `overflow: hidden`: this box is the peg's containing
+     block, so clipping here amputates the half-inset peg into a 16px sliver
+     jammed against the left border with the glyph sliced down the middle —
+     the defect the tiles shipped with. `.it-body` already clips the content
+     that actually needs it, and `AgentTile`'s avatar overhangs its own tile
+     the same way (`gridLayout.GAP_X` is sized for exactly that). */
 }
 .it.is-error {
   border-color: var(--gv-danger-border, rgba(220, 38, 38, 0.35));

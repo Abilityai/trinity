@@ -42,6 +42,15 @@
       </div>
 
       <div class="ml-auto flex items-center gap-1">
+        <!-- ent#359 AC #4: star from the header too. Hidden until the thread
+             exists — a chat with no id yet cannot be pinned, and rendering a
+             control that silently does nothing is the dead end this family of
+             issues keeps removing. -->
+        <PortalStarButton
+          v-if="currentSessionId"
+          :starred="starred"
+          @toggle="$emit('toggle-star', { id: currentSessionId, is_room: false, starred })"
+        />
         <button
           v-if="ttsEnabled"
           class="p-2 rounded-lg transition"
@@ -82,7 +91,7 @@
               class="text-xs text-status-danger-700 dark:text-status-danger-300 text-right max-w-[32ch]"
             >{{ m.error }}</p>
             <button
-              v-if="m.failed"
+              v-if="m.failed && m.retryable !== false"
               class="text-xs text-status-danger-600 dark:text-status-danger-400 hover:underline inline-flex items-center gap-1"
               @click="retry(i)"
             >
@@ -159,15 +168,34 @@
           >
             <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m0-3a4 4 0 004-4V7a4 4 0 10-8 0v6a4 4 0 004 4z" /></svg>
           </button>
-          <textarea
-            ref="textarea"
-            v-model="input"
-            rows="1"
-            :placeholder="listening ? 'Listening…' : `Message ${agentDisplayName(agent)}…`"
-            class="flex-1 resize-none rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-gray-100 px-4 py-2.5 leading-6 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
-            @input="autoGrow"
-            @keydown.enter.exact.prevent="send"
-          ></textarea>
+          <!-- ent#392: this is the composer's FIRST anchored overlay, so the
+               wrapper is new. It must inherit the flex sizing the textarea used
+               to carry (`flex-1 min-w-0`) — a bare `relative` div collapses the
+               field to content width — and it deliberately carries no z-index,
+               so it creates no stacking context of its own. -->
+          <div ref="composerWrap" class="relative flex-1 min-w-0">
+            <PortalTypeahead
+              v-if="typeaheadOpen"
+              :kind="typeaheadKind"
+              :rows="typeaheadRows"
+              :active-index="activeIndex"
+              :overflow="typeaheadBound.overflow"
+              :empty-message="typeaheadEmpty || ''"
+              @pick="acceptActive"
+              @hover="activeIndex = $event"
+            />
+            <textarea
+              ref="textarea"
+              v-model="input"
+              rows="1"
+              :placeholder="composerPlaceholder"
+              class="w-full resize-none rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-gray-100 px-4 py-2.5 leading-6 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
+              @input="onComposerInput"
+              @keydown="onComposerKeydown"
+              @click="onComposerCaret"
+              @select="onComposerCaret"
+            ></textarea>
+          </div>
           <button
             type="submit"
             class="shrink-0 p-2.5 rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 disabled:hover:bg-action-primary-600 transition"
@@ -190,15 +218,38 @@ import { useClientPortalStore } from '@/stores/clientPortal'
 import { renderMarkdown } from '@/utils/markdown'
 import { agentDisplayName } from '@/utils/agentName'
 import PortalAvatar from './PortalAvatar.vue'
-import { deliveryFailureReason } from './portalUtils'
+import PortalStarButton from './PortalStarButton.vue'
+import PortalTypeahead from './PortalTypeahead.vue'
+import {
+  deliveryFailureReason,
+  mentionedAgents,
+  resolveWaitBudgetMs,
+  applyTypeaheadInsert,
+  boundCandidates,
+  buildMentionToken,
+  clampActiveIndex,
+  detectTypeaheadTrigger,
+  dismissAfterInsert,
+  filterAgentCandidates,
+  filterPlaybookCandidates,
+  isSuppressed,
+  nextActiveIndex,
+  nextDismissState,
+  resolveComposerKey,
+  starterFor,
+  typeaheadEmptyMessage,
+} from './portalUtils'
 
 const props = defineProps({
   agent: { type: Object, required: true },      // {name, owner, avatar_url, description, playbooks, voice_available}
   roster: { type: Array, default: () => [] },
   sessionId: { type: String, default: null },   // current thread, or null for a new chat
   prefill: { type: String, default: '' },
+  // ent#359: whether the CURRENT thread is starred. Owned by the shell (it
+  // holds the per-viewer chat state), rendered here.
+  starred: { type: Boolean, default: false },
 })
-const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu'])
+const emit = defineEmits(['switch-agent', 'session-adopted', 'sessions-changed', 'open-files', 'open-menu', 'toggle-star', 'escalate-to-room'])
 
 const store = useClientPortalStore()
 const messages = ref([])
@@ -215,6 +266,15 @@ const fileInput = ref(null)
 const pickerRef = ref(null)
 const pickerOpen = ref(false)
 
+// ent#392 — composer typeahead state. Three refs, no decisions: `trigger` is
+// whatever the pure scanner last returned, `activeIndex` is the roving
+// selection (-1 = nothing chosen, which is what makes Enter send), `dismissed`
+// is the Esc sentinel.
+const composerWrap = ref(null)
+const typeaheadTrigger = ref(null)
+const activeIndex = ref(-1)
+const dismissed = ref(null)
+
 const render = (c) => renderMarkdown(c || '')
 
 // ---- Load history when the thread/agent changes -------------------------------
@@ -222,12 +282,19 @@ async function loadThread(sessionId) {
   loadingHistory.value = true
   messages.value = []
   let inFlight = null
+  let inFlightBudget = null
+  let budgetReadAt = null
   try {
-    const { sessionId: resolved, messages: msgs, inFlightExecutionId } =
+    const { sessionId: resolved, messages: msgs, inFlightExecutionId, inFlightWaitBudgetSeconds } =
       await store.fetchHistory(props.agent.name, sessionId || null)
+    // #2214: the budget is the marker's REMAINING TTL, honest only from the
+    // instant it was measured — stamp that instant beside the fetch, not when
+    // the (possibly long) reattached stream later ends.
+    budgetReadAt = Date.now()
     currentSessionId.value = sessionId || resolved || null
     messages.value = (msgs || []).map((m) => ({ role: m.role, content: m.content }))
     inFlight = inFlightExecutionId
+    inFlightBudget = inFlightWaitBudgetSeconds
   } catch { /* start empty */ }
   finally { loadingHistory.value = false; await scrollDown() }
 
@@ -235,12 +302,15 @@ async function loadThread(sessionId) {
   // rather than showing a thread that looks finished. The user's message is
   // already in `messages` (persisted at dispatch), so what is missing is only
   // the "working" state and the reply.
-  if (inFlight) await reattach(inFlight)
+  if (inFlight) await reattach(inFlight, inFlightBudget, budgetReadAt)
 }
 
 // Rejoin a turn already in progress. The agent replays its buffered log before
 // streaming live, so a client that reloaded sees what it missed.
-async function reattach(executionId) {
+// #2214: `budgetSeconds` is the server's remaining wait budget for that turn
+// (the marker's TTL at read time) and `budgetReadAt` the instant it was read —
+// together they bound the wait the same way a fresh dispatch's 202 budget does.
+async function reattach(executionId, budgetSeconds, budgetReadAt) {
   if (sending.value) return
   sending.value = true
   streaming.value = true
@@ -248,10 +318,23 @@ async function reattach(executionId) {
   elapsed.value = 0
   clearInterval(elapsedTimer)
   elapsedTimer = setInterval(() => { elapsed.value += 1 }, 1000)
+  // The baseline is what is on screen right now: this client reloaded INTO a
+  // running turn, so every assistant message it can see predates that turn.
+  // Passing nothing made `assistants.length > undefined` false on every poll,
+  // so the reply never rendered and the user had to reload a second time.
+  const baseline = messages.value.filter((m) => m.role === 'assistant').length
   try {
     await store.streamPortalExecution(props.agent.name, executionId, onStreamEvent)
-    const data = await awaitPersistedReply(currentSessionId.value)
-    if (data?.response) messages.value.push({ role: 'assistant', content: data.response })
+    const data = await awaitPersistedReply(currentSessionId.value, baseline,
+                                           budgetSeconds, budgetReadAt)
+    if (data?.response) {
+      messages.value.push({ role: 'assistant', content: data.response })
+      // A reattached reply is still a reply the user just watched land, so it
+      // has to announce itself like `deliver()` does. Without this the thread
+      // keeps its server-side unread count and the sidebar badges the
+      // conversation on screen.
+      emit('sessions-changed', currentSessionId.value)
+    }
   } catch { /* the reply lands in history on the next load */ }
   finally {
     sending.value = false
@@ -264,12 +347,13 @@ async function reattach(executionId) {
 
 watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {
   currentSessionId.value = sid
+  resetTypeahead()
   if (props.agent.name !== oldName || sid) await loadThread(sid)
   else { messages.value = []; currentSessionId.value = null }   // brand-new chat
 })
 
 watch(() => props.prefill, (v) => {
-  if (v) { input.value = v; nextTick(() => { autoGrow(); textarea.value?.focus() }) }
+  if (v) { input.value = v; resetTypeahead(); nextTick(() => { autoGrow(); textarea.value?.focus() }) }
 })
 
 onMounted(async () => {
@@ -289,7 +373,14 @@ onBeforeUnmount(() => {
 })
 
 function onNet() { offline.value = navigator.onLine === false }
-function onDocClick(e) { if (pickerOpen.value && pickerRef.value && !pickerRef.value.contains(e.target)) pickerOpen.value = false }
+function onDocClick(e) {
+  if (pickerOpen.value && pickerRef.value && !pickerRef.value.contains(e.target)) pickerOpen.value = false
+  // Outside the composer AND its popup closes the typeahead WITHOUT arming the
+  // Esc sentinel; a click inside the textarea recomputes via @click, and a click
+  // on the popup's own padding or scrollbar must not close it. This also covers
+  // the files drawer and the mobile nav, whose buttons live outside the wrapper.
+  if (typeaheadTrigger.value && composerWrap.value && !composerWrap.value.contains(e.target)) closeTypeahead()
+}
 
 function pickAgent(a) {
   pickerOpen.value = false
@@ -305,6 +396,173 @@ function autoGrow() {
   if (!el) return
   el.style.height = 'auto'
   el.style.height = Math.min(el.scrollHeight, 160) + 'px'
+}
+
+// ---- ent#392: composer typeahead (`/` playbooks, `@` agents) -----------------
+//
+// A DISPATCHER. Every decision — what counts as a trigger, what is offered, what
+// a key does, what a pick splices — lives in the pure exports of portalUtils.js,
+// because `vitest` runs `environment: 'node'` with no component-mount harness,
+// so a decision left here is a decision no test can reach.
+
+const typeaheadKind = computed(() => typeaheadTrigger.value?.kind || '/')
+
+const typeaheadResult = computed(() => {
+  const t = typeaheadTrigger.value
+  if (!t) return null
+  if (t.kind === '/') {
+    return { kind: '/', enabled: true, ...filterPlaybookCandidates(props.agent?.playbooks, t.query) }
+  }
+  return {
+    kind: '@',
+    ...filterAgentCandidates(props.roster, t.query, {
+      exclude: [props.agent?.name],
+      // #2128: with no rooms substrate an @mention is deliberately ordinary
+      // text, so offering a picker for it is a dead-end affordance. The gate
+      // lives in the pure filter, so it is tested rather than grepped.
+      enabled: store.multiAgentChatAvailable,
+    }),
+  }
+})
+
+const typeaheadBound = computed(() => boundCandidates(typeaheadResult.value?.items || []))
+
+// The two empty conditions are NOT the same: a source with nothing in it shows
+// one honest line, while a query that matches nothing CLOSES the popup (AC#6 —
+// the user is writing "50/50", not picking). Restricting the line to a bare
+// trigger keeps a playbook-less agent from floating a panel over the rest of the
+// message as they keep typing.
+const typeaheadEmpty = computed(() => {
+  const t = typeaheadTrigger.value
+  const r = typeaheadResult.value
+  if (!t || !r || r.items.length || t.query !== '') return null
+  return typeaheadEmptyMessage(r.kind, r)
+})
+
+// A computed, not an imperative ref: it self-heals when the roster refreshes,
+// the capability flips, or playbooks arrive late.
+const typeaheadOpen = computed(() => {
+  const t = typeaheadTrigger.value
+  const r = typeaheadResult.value
+  if (!t || !r || r.enabled === false) return false
+  if (isSuppressed(dismissed.value, t)) return false
+  return typeaheadBound.value.visible.length > 0 || !!typeaheadEmpty.value
+})
+
+const typeaheadRows = computed(() => typeaheadBound.value.visible.map((c, i) => (
+  typeaheadKind.value === '/'
+    ? { key: `pb-${i}-${c.title}`, primary: c.title, secondary: c.description || '' }
+    // The slug rides along beside the label: it IS the token, and teaching it is
+    // half of why this exists.
+    : { key: `ag-${c.name}`, primary: agentDisplayName(c), secondary: `@${c.name}` }
+)))
+
+// The selection has to follow the list. A stale index is DROPPED rather than
+// clamped to a neighbour — "whatever is now at index 5" is not the row the user
+// chose, and inserting it is how the wrong agent (or `@undefined`) ships.
+watch(typeaheadBound, (b) => { activeIndex.value = clampActiveIndex(activeIndex.value, b.visible.length) })
+
+// The only part of this change that reaches a user who does not already know the
+// feature exists. `@` is advertised only with the capability — a placeholder
+// promising something the build cannot do is the #2128 dead end in text form.
+const composerPlaceholder = computed(() => {
+  if (listening.value) return 'Listening…'
+  const base = `Message ${agentDisplayName(props.agent)}…  ·  / for playbooks`
+  return store.multiAgentChatAvailable ? `${base}  ·  @ to add an agent` : base
+})
+
+function closeTypeahead() {
+  typeaheadTrigger.value = null
+  activeIndex.value = -1
+}
+
+// ONLY Esc arms the sentinel. A click-outside, an agent switch or a capability
+// flip closes without arming — otherwise "type @, click away to read something,
+// click back, keep typing" stays suppressed until the @ is deleted.
+function dismissTypeahead() {
+  dismissed.value = nextDismissState(typeaheadTrigger.value)
+  closeTypeahead()
+}
+
+// Called from every path that writes `input.value` PROGRAMMATICALLY — send(),
+// the prefill watcher, the thread switch, and both dictation handlers. None of
+// them fires an input event, so without this a sentinel armed while composing
+// message 1 kills the popup for every later message that starts the same way: a
+// feature that is dead for the rest of the session.
+function resetTypeahead() {
+  closeTypeahead()
+  dismissed.value = null
+}
+
+function refreshTypeahead(el) {
+  if (!el) return
+  // Read the EVENT TARGET, never the v-model ref: reading the ref makes
+  // correctness depend on Vue's internal listener ordering, which is true today
+  // and an implementation detail.
+  typeaheadTrigger.value = detectTypeaheadTrigger(el.value, el.selectionStart, el.selectionEnd)
+  if (!typeaheadTrigger.value) activeIndex.value = -1
+}
+
+function onComposerInput(e) {
+  autoGrow()
+  // A paste that happens to end in a token must not open a popup nobody asked
+  // for, whose very next keystroke is Enter.
+  if (e?.inputType === 'insertFromPaste' || e?.inputType === 'insertFromDrop') {
+    closeTypeahead()
+    return
+  }
+  refreshTypeahead(e?.target)
+}
+
+// The caret moves with no input event — a click, a drag-select — and accepting
+// against bounds computed for where it used to be splices over the wrong text.
+function onComposerCaret(e) { refreshTypeahead(e?.target) }
+
+function onComposerKeydown(e) {
+  const length = typeaheadBound.value.visible.length
+  switch (resolveComposerKey({
+    key: e.key,
+    shiftKey: e.shiftKey,
+    ctrlKey: e.ctrlKey,
+    metaKey: e.metaKey,
+    altKey: e.altKey,
+    isComposing: e.isComposing,
+    keyCode: e.keyCode,
+    open: typeaheadOpen.value,
+    hasActive: activeIndex.value >= 0,
+    hasCandidates: length > 0,
+  })) {
+    case 'move-down': e.preventDefault(); activeIndex.value = nextActiveIndex(activeIndex.value, 1, length); break
+    case 'move-up': e.preventDefault(); activeIndex.value = nextActiveIndex(activeIndex.value, -1, length); break
+    case 'accept': e.preventDefault(); acceptActive(activeIndex.value >= 0 ? activeIndex.value : 0); break
+    case 'dismiss': e.preventDefault(); dismissTypeahead(); break
+    case 'close': closeTypeahead(); break
+    case 'send': e.preventDefault(); send(); break
+    default: break
+  }
+}
+
+function acceptActive(index) {
+  const t = typeaheadTrigger.value
+  const row = typeaheadBound.value.visible[index]
+  if (!t || !row) return                  // never insert `@undefined`
+  const insert = t.kind === '/' ? starterFor(row) : buildMentionToken(row.name)
+  const { value, caret } = applyTypeaheadInsert(input.value, t, insert)
+  input.value = value
+  closeTypeahead()
+  // A pick that lands mid-sentence leaves the caret inside the token it just
+  // inserted, and the setSelectionRange() below fires a `select` that would
+  // re-detect it — the popup reopening on top of its own successful choice.
+  // Suppress exactly that token; editing it back re-arms.
+  const settled = dismissAfterInsert(value, caret)
+  if (settled) dismissed.value = settled
+  nextTick(() => {
+    const el = textarea.value
+    // focus() BEFORE setSelectionRange(): Safari resets and scrolls the
+    // selection when focusing a textarea that did not previously have focus.
+    if (el) { el.focus(); el.setSelectionRange(caret, caret) }
+    autoGrow()
+  })
 }
 
 // ---- Attachments: upload to the agent inbox; the next turn sees them ----------
@@ -367,6 +625,9 @@ async function deliver(text) {
     }
 
     if (started) {
+      // Stamp the dispatch instant: the server's marker TTL starts here, so the
+      // client's ceiling must too (see awaitPersistedReply).
+      const dispatchedAt = Date.now()
       if (started.session_id && currentSessionId.value !== started.session_id) {
         // Adopt the thread NOW rather than at the end, so a refresh mid-turn
         // reattaches to it instead of opening a second conversation.
@@ -385,7 +646,17 @@ async function deliver(text) {
         streaming.value = false
         liveActivity.value = []
       }
-      data = await awaitPersistedReply(started.session_id || currentSessionId.value, baseline)
+      data = await awaitPersistedReply(
+        started.session_id || currentSessionId.value, baseline,
+        started.wait_budget_seconds, dispatchedAt,
+      )
+      if (data?.lost) {
+        // #2133: we ran out of budget while the marker still claimed a turn.
+        // That turn probably RAN and was billed — we merely lost sight of it.
+        // So this is reported without a Retry: re-sending is the one action
+        // guaranteed to be wrong.
+        return { lost: true, error: "Still no reply — we've lost track of this turn. It may still finish; check the conversation shortly." }
+      }
       if (!data) {
         // The server reports nothing running and no new reply — a genuine
         // no-answer. Report it; never re-send, the turn was already billed.
@@ -399,7 +670,12 @@ async function deliver(text) {
       currentSessionId.value = data.session_id
       emit('session-adopted', data.session_id)
     }
-    if (startedNew || currentSessionId.value) emit('sessions-changed')
+    // ent#359: carry WHICH thread finished. The shell marks a completed turn
+    // read only when the user is still looking at it — this event fires even
+    // after the user has navigated away (the send is an async closure that
+    // outlives the component), and without the id the shell cannot tell the two
+    // apart, so it cleared the badge for a reply the user never saw.
+    if (startedNew || currentSessionId.value) emit('sessions-changed', currentSessionId.value)
     attachments.value = []
     return true
   } catch (err) {
@@ -447,17 +723,63 @@ function onStreamEvent(evt) {
 // the local list instead let a retry return the PREVIOUS turn's reply on its
 // first poll — the answer to the wrong question, while a second turn ran unseen.
 const REPLY_POLL_MS = 700
-const REPLY_IDLE_GIVE_UP = 8      // ~5.6s of the server saying "nothing running"
+// Time-based, NOT poll-count-based. With the backoff below, 8 polls is up to
+// 8 x 15s = 120s late in a turn — so a count silently stretched this debounce
+// into two minutes of spinner before the no-answer message appeared.
+const REPLY_IDLE_GIVE_UP_MS = 6_000
 
-async function awaitPersistedReply(sessionId, baselineAssistants) {
-  let idlePolls = 0
+// #2133/#2214: the absolute ceiling, for when the marker is ORPHANED rather
+// than merely slow — a hard backend kill skips the `finally` that clears it,
+// and `except Exception` does not catch `CancelledError`.
+//
+// The server owns the turn timeout (per-agent since #2214) and sends the budget
+// with the 202 (`wait_budget_seconds`) and with the history response on
+// reattach (`in_flight_wait_budget_seconds` — the marker's remaining TTL). The
+// pick lives in portalUtils' `resolveWaitBudgetMs`: a positive server budget
+// wins, anything else falls back to a literal frozen at the pre-#2214 server
+// bound — see its comment for why that literal must never chase the new
+// arithmetic.
+
+// Polling every 700ms for ten minutes is ~850 history reads per tab. The reply
+// almost always lands in the first seconds, so the fast interval is what
+// matters; after that, widen. Same total wait, an order of magnitude fewer
+// requests on the long tail.
+const REPLY_POLL_STEPS = [
+  { afterMs: 30_000, everyMs: 2_000 },
+  { afterMs: 120_000, everyMs: 5_000 },
+  { afterMs: 300_000, everyMs: 15_000 },
+]
+
+function replyPollInterval(elapsedMs) {
+  let every = REPLY_POLL_MS
+  for (const step of REPLY_POLL_STEPS) if (elapsedMs >= step.afterMs) every = step.everyMs
+  return every
+}
+
+async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds,
+                                   dispatchedAtMs) {
+  let idleSince = null
+  // Measured from DISPATCH, not from when this function was reached. The
+  // server's marker TTL starts ticking at dispatch, so a client clock that
+  // starts after the stream breaks (which can be minutes later, on exactly the
+  // orphaned-marker path this ceiling exists for) would outlive the marker —
+  // and the marker's disappearance would be read as "nothing running" instead
+  // of tripping the ceiling. The two clocks now share an origin.
+  const startedAt = dispatchedAtMs || Date.now()
+  const budgetMs = resolveWaitBudgetMs(budgetSeconds)
+  const deadline = startedAt + budgetMs
+  const wait = () => new Promise((r) => setTimeout(r, replyPollInterval(Date.now() - startedAt)))
+
   for (;;) {
+    // `lost` — NOT a failure. The turn may well have run and been billed; we
+    // simply stopped being able to see it. The caller must not offer a Retry.
+    if (Date.now() > deadline) return { lost: true }
     let data
     try {
       data = await store.fetchHistory(props.agent.name, sessionId || null)
     } catch {
       // A hiccup reading history is not evidence the turn failed.
-      await new Promise((r) => setTimeout(r, REPLY_POLL_MS))
+      await wait()
       continue
     }
     const assistants = (data.messages || []).filter((m) => m.role === 'assistant')
@@ -466,9 +788,16 @@ async function awaitPersistedReply(sessionId, baselineAssistants) {
       return { response: last.content, cost: last.cost, session_id: data.sessionId || sessionId }
     }
     // Still running server-side? Then keep waiting, however long it takes.
-    if (data.inFlightExecutionId) { idlePolls = 0 }
-    else if (++idlePolls >= REPLY_IDLE_GIVE_UP) return null
-    await new Promise((r) => setTimeout(r, REPLY_POLL_MS))
+    if (data.inFlightExecutionId) { idleSince = null }
+    else {
+      if (idleSince === null) idleSince = Date.now()
+      // The server has said "nothing running" for long enough. NOT retryable:
+      // the turn may well have run and been billed — notably when Redis is down,
+      // `mark_turn_inflight` no-ops and this branch is reached on the very first
+      // poll of a perfectly healthy turn.
+      else if (Date.now() - idleSince >= REPLY_IDLE_GIVE_UP_MS) return { lost: true, idle: true }
+    }
+    await wait()
   }
 }
 
@@ -483,15 +812,57 @@ async function persistedAssistantCount(sessionId) {
   }
 }
 
+// Mark a sent message as undelivered, THROUGH the reactive array.
+//
+// `messages` is a ref([]), so pushing a plain object stores the raw target and
+// Vue only proxies it when you read `messages.value[i]`. Mutating the local
+// variable you pushed writes past the proxy: the value changes, nothing
+// re-renders, and the failure is invisible.
+function markFailed(index, content, error, { retryable = true } = {}) {
+  const row = messages.value[index]
+  // The array can be replaced under us (thread switch, history reload). Only
+  // mark the row if it is still the message we sent.
+  if (!row || row.role !== 'user' || row.content !== content) return
+  row.failed = true
+  row.error = error || null
+  // #2133: a turn we merely lost sight of is NOT offered a Retry. Re-sending
+  // a turn that already ran is the double-billing this whole path exists to
+  // prevent, so the distinction lives on the row rather than in the copy.
+  row.retryable = retryable
+}
+
 async function send() {
   const text = input.value.trim()
   if (!text || sending.value) return
+  // The composer is about to be cleared programmatically, which fires no input
+  // event — so the popup and its Esc sentinel are cleared here rather than left
+  // armed against a message that no longer exists.
+  resetTypeahead()
+
+  // ent#361: @mentioning another agent from a 1:1 makes this a group discussion.
+  // Handled BEFORE the message is appended: the conversation moves to a room, so
+  // leaving a copy of it in this thread would show the user their message in two
+  // places and only one of them would ever get a reply.
+  //
+  // Gated on the rooms capability for the same reason the picker is (#2128) —
+  // without it there is nowhere to escalate TO, and an @mention has to keep
+  // working as ordinary text.
+  if (store.multiAgentChatAvailable) {
+    const others = mentionedAgents(text, props.roster, { exclude: [props.agent.name] })
+    if (others.length) {
+      input.value = ''
+      autoGrow()
+      emit('escalate-to-room', { agents: [props.agent.name, ...others], message: text })
+      return
+    }
+  }
+
   const index = messages.value.push({ role: 'user', content: text, failed: false, error: null }) - 1
   input.value = ''
   autoGrow()
   await scrollDown()
   const res = await deliver(text)
-  if (res !== true) markFailed(index, text, res?.error)
+  if (res !== true) markFailed(index, text, res?.error, { retryable: !res?.lost })
 }
 
 async function retry(i) {
@@ -501,7 +872,7 @@ async function retry(i) {
   msg.failed = false
   msg.error = null
   const res = await deliver(content)
-  if (res !== true) markFailed(i, content, res?.error)
+  if (res !== true) markFailed(i, content, res?.error, { retryable: !res?.lost })
 }
 
 // ---- Voice: speak replies (TTS) + dictate (STT) — carried over from #78 -------
@@ -510,7 +881,21 @@ const canRecord = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.
 const micMode = SpeechRec ? 'speech' : (canRecord ? 'record' : null)
 const sttSupported = micMode !== null
 const ttsEnabled = computed(() => !!props.agent.voice_available)
-const voiceMode = ref(false)
+
+// #2157: the speaker choice sticks per client+agent instead of resetting to off
+// on every page load. Narration was already hard to find — an agent that had
+// just told the client this surface was "text-only" was the only hint it existed
+// — and re-muting it every reload taught clients it had not really worked.
+const voiceModeKey = computed(() => `trinity.portal.voiceMode.${props.agent?.name || ''}`)
+function loadVoiceMode() {
+  try { return localStorage.getItem(voiceModeKey.value) === '1' } catch { return false }
+}
+const voiceMode = ref(loadVoiceMode())
+watch(voiceMode, (on) => {
+  try { localStorage.setItem(voiceModeKey.value, on ? '1' : '0') } catch { /* private mode: session-only */ }
+})
+// Switching agents adopts that agent's own remembered choice.
+watch(() => props.agent?.name, () => { stopSpeaking(); voiceMode.value = loadVoiceMode() })
 const speaking = ref(false)
 const listening = ref(false)
 const transcribing = ref(false)
@@ -536,7 +921,7 @@ function toggleMic() {
 function toggleSpeech() {
   if (listening.value) { try { recog?.stop() } catch { /* noop */ } return }
   recog = new SpeechRec(); recog.lang = 'en-US'; recog.interimResults = false; recog.maxAlternatives = 1
-  recog.onresult = (e) => { const t = e.results?.[0]?.[0]?.transcript || ''; if (t) { input.value = input.value ? `${input.value} ${t}` : t; autoGrow() } }
+  recog.onresult = (e) => { const t = e.results?.[0]?.[0]?.transcript || ''; if (t) { input.value = input.value ? `${input.value} ${t}` : t; resetTypeahead(); autoGrow() } }
   recog.onend = () => { listening.value = false }
   recog.onerror = () => { listening.value = false }
   listening.value = true
@@ -553,7 +938,7 @@ async function toggleRecord() {
     const blob = new Blob(recChunks, { type: mediaRec?.mimeType || 'audio/webm' }); recChunks = []
     if (blob.size < 1500) return
     transcribing.value = true
-    try { const t = await store.transcribeStt(props.agent.name, blob); if (t) { input.value = input.value ? `${input.value} ${t}` : t; autoGrow() } }
+    try { const t = await store.transcribeStt(props.agent.name, blob); if (t) { input.value = input.value ? `${input.value} ${t}` : t; resetTypeahead(); autoGrow() } }
     catch { /* keep text mode */ } finally { transcribing.value = false }
   }
   listening.value = true

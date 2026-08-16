@@ -84,7 +84,7 @@ def supports_session_resume(agent_name: str) -> bool:
 #    lock's key shape changes between cold and warm turns.
 #
 # TTL for both is dynamic: at acquire time we look up the per-agent
-# `execution_timeout_seconds` (default 900) and add a 30s buffer, capped at
+# `execution_timeout_seconds` (default 3600) and add a 30s buffer, capped at
 # 7230s. Stale-lock cleanup after a backend crash is bounded by this TTL
 # (worst case ≈ 2h); admins can manually `DEL` if needed.
 
@@ -124,7 +124,7 @@ def session_inflight_key(session_id: str) -> str:
 def resolve_lock_ttl(agent_name: str) -> int:
     """Resolve a turn's TTL from the agent's per-agent execution timeout.
 
-    Uses ``db.get_execution_timeout(agent_name)`` (default 900s) plus a 30s
+    Uses ``db.get_execution_timeout(agent_name)`` (default 3600s) plus a 30s
     buffer, capped at ``LOCK_TTL_FALLBACK``. Falls back to the cap on any
     lookup failure — safer to over-TTL than under-TTL since both keys are
     auto-expiring strings, not state we care to keep precise.
@@ -140,6 +140,43 @@ def resolve_lock_ttl(agent_name: str) -> int:
             LOCK_TTL_FALLBACK,
         )
         return LOCK_TTL_FALLBACK
+
+
+# #2214: the bound on ONE turn — distinct from the lock TTL above. Both read the
+# same per-agent knob (TIMEOUT-001), but their failure directions differ, which
+# is why there are two resolvers instead of one:
+#   * the LOCK falls back to its CAP — over-TTL is harmless on an auto-expiring
+#     key, and under-TTL lets a concurrent `--resume` corrupt the JSONL;
+#   * the TURN falls back to the platform DEFAULT — the timeout allows billable
+#     work, so "assume the platform default" beats "assume the maximum".
+TURN_TIMEOUT_FALLBACK_SECONDS = 3600   # = the TIMEOUT-001 default (#665) — what an
+                                       # agent with no stored override runs at
+TURN_TIMEOUT_MIN_SECONDS = 60          # = TIMEOUT-001's PUT-validated range,
+TURN_TIMEOUT_MAX_SECONDS = 7200        #   re-applied as a read-side clamp (#506
+                                       #   pattern) so a stray stored row cannot
+                                       #   collapse or explode the bound
+
+
+def resolve_turn_timeout(agent_name: str) -> int:
+    """The bound on ONE turn = the agent's own execution timeout (TIMEOUT-001).
+
+    The per-agent knob operators already set via ``PUT /api/agents/{name}/timeout``
+    (default 3600, range 60–7200). Read-side clamped into that same range and
+    fail-open to the platform default — a DB hiccup must never produce a 0s or
+    crashed turn. Deliberately distinct from ``resolve_lock_ttl`` (see the
+    constants block above for why the fallbacks differ).
+    """
+    try:
+        t = int(db.get_execution_timeout(agent_name))
+        return max(TURN_TIMEOUT_MIN_SECONDS, min(t, TURN_TIMEOUT_MAX_SECONDS))
+    except Exception as e:
+        logger.warning(
+            "[SessionTurn] get_execution_timeout failed for %s (%s) — using default %ds",
+            agent_name,
+            e,
+            TURN_TIMEOUT_FALLBACK_SECONDS,
+        )
+        return TURN_TIMEOUT_FALLBACK_SECONDS
 
 
 def get_async_redis():

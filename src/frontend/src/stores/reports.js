@@ -1,7 +1,8 @@
 import { defineStore } from 'pinia'
 
-// Mirrors REPORT_ROWS_PAGE_DEFAULT (#1537).
-const ROWS_PAGE = 100
+// The page size moved to a dependency-free leaf in #2162 so the Workspace
+// store can share this one number instead of typing a third copy of it.
+import { REPORT_ROWS_PAGE as ROWS_PAGE } from '../utils/reportPaging'
 import { ref } from 'vue'
 import api from '../api'
 

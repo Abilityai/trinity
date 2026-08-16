@@ -8,13 +8,32 @@
  * ent#356 moved the module into OSS core, so it ships in every build.
  */
 import { defineStore } from 'pinia'
+import { normalizeRoomRow } from '@/components/portal/portalUtils'
 import axios from 'axios'
 import { useAuthStore } from './auth'
+// #2162: the page size for a windowed report read. A dependency-free leaf
+// shared with the operator reports store — never re-typed here, since the
+// backend already owns REPORT_ROWS_PAGE_DEFAULT and a third hand-written copy
+// is the shape that drifts while each side's tests pin its own version.
+import { REPORT_ROWS_PAGE as ROWS_PAGE } from '@/utils/reportPaging'
 
 const PORTAL_TOKEN_KEY = 'trinity.portalToken'
 // Mirrors `SESSION_ROTATION_HEADER` in client_portal/portal_auth.py (ent#375).
 // Lower-case: axios normalises response header names.
 const SESSION_ROTATION_HEADER = 'x-trinity-session-token'
+
+// #2128 — the one sentence shown when a chat with several agents cannot be
+// started on this instance. Exported from the STORE, not from portalUtils: this
+// is the message the store's own guard throws, and no store in this codebase
+// imports from `@/components` — adding that edge would invert the dependency
+// direction for one string.
+//
+// It states the capability and stops. Never "not licensed", never an edition
+// name, never an upgrade prompt: the audience for this surface is the
+// operator's customer, who can neither buy the missing module nor act on
+// knowing it exists.
+export const MULTI_AGENT_UNAVAILABLE =
+  'Chats with more than one agent are not available on this instance.'
 
 // ent#375 — adopt a rotated session token wherever it arrives.
 //
@@ -79,6 +98,56 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // Where the user was when it expired, so re-authenticating returns them
     // there instead of the roster root.
     resumePath: null,
+    // #2128 — may a chat hold MORE THAN ONE agent on this instance? Carried on
+    // the roster payload, because the platform feature-flag endpoint is
+    // JWT-gated and an external client on a portal session cannot read it.
+    //
+    // Default false is the live policy for everything unconfigured, so it has
+    // to be the safe value: the picker renders single-select until a roster
+    // actually says otherwise, and the component never sees an undefined
+    // tri-state.
+    multiAgentChatAvailable: false,
+    // Set once a roster attempt REACHED A VERDICT for this session. The room
+    // route needs to tell "still loading" from "loaded, and the answer is no" —
+    // without it a hard-loaded /workspace/r/:id would flash a refusal it then
+    // takes back on an entitled instance.
+    rosterLoaded: false,
+
+    // #2198 — the last successfully-loaded thread list, and whether the most
+    // recent attempt failed.
+    //
+    // Both exist because the batch inverted a failure mode. The old per-agent
+    // fan-out could not reject: each call was individually caught
+    // (`catch { return [] }`) so "one down agent never blanks the whole list".
+    // One request cannot degrade per agent, so without a remembered list a
+    // single 500 would blank a populated sidebar — which
+    // design-system-contract:43/55 forbid ("no skeleton re-flash", "nothing
+    // shifts on arrival") and which `Portal.vue::bootstrap()` cannot survive:
+    // it awaits refreshThreads() before resolveAgentQuery(), so a transient
+    // blip would break Workspace deep-link landing entirely.
+    lastSessions: [],
+    sessionsFailed: false,
+
+    // --- Reports tab (#2162) ---
+    // Which agent the report state below belongs to, and a monotonic counter
+    // every report request captures before its first await. A reset bumps it,
+    // so a response that arrives after an agent switch is discarded instead of
+    // landing under the new agent's name.
+    reportsAgent: null,
+    _reportsGeneration: 0,
+    reports: [],
+    // Set ONLY by a fetch that succeeded — the empty state reads it, and
+    // "loaded" must never mean "failed and returned nothing" (contract #15).
+    reportsLoaded: false,
+    reportsError: null,
+    reportPayloads: {},
+    // id -> {total, loaded}; present only for a payload the server actually
+    // windowed, so a bounded document never renders a paging footer.
+    reportRowMeta: {},
+    // id -> message. Deliberately NOT stored inside reportPayloads: an error
+    // object there would be handed to the renderer and presented as a report.
+    reportErrors: {},
+    _reportInFlight: {},
   }),
 
   getters: {
@@ -156,6 +225,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.agents = []
       this.sessionExpired = false
       this.resumePath = null
+      // #2128: both are per-session facts. A different client signing in on the
+      // same browser must not inherit the previous one's capability verdict,
+      // and `rosterLoaded` must go back to "no verdict yet" or the room route
+      // would read a stale one as authoritative.
+      this.multiAgentChatAvailable = false
+      this.rosterLoaded = false
       localStorage.removeItem(PORTAL_TOKEN_KEY)
     },
 
@@ -227,43 +302,370 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // rooms are the only substrate that models several agents, @mention-waking
     // and per-participant budgets. The sidebar merges both.
 
+    // #2128 — ONE chokepoint in front of every room call. A build with no rooms
+    // substrate must never issue one: the request is a guaranteed 4xx whose
+    // generic failure copy is the dead end this issue is about.
+    //
+    // Applied to all FIVE room actions, not just the two reachable today. Three
+    // of them have exactly one caller each, inside a component the render gate
+    // stops mounting — so gating them is redundant *for the current call graph*,
+    // which is precisely the claim `learnings.md` 2026-07-01 records failing: a
+    // kill-switch is only as airtight as its least-gated entry point. Cost:
+    // three lines. Deliberate, not oversight.
+    _requireRooms() {
+      if (this.multiAgentChatAvailable) return
+      const err = new Error(MULTI_AGENT_UNAVAILABLE)
+      // A typed code, never message-sniffing: the view has to tell this apart
+      // from a transport failure, which needs different copy.
+      err.code = 'rooms_unavailable'
+      throw err
+    },
+
+    // The capability can vanish BETWEEN the roster load and the confirm (an
+    // entitlement lapsing, an instance restarted into lockdown). A definitive
+    // refusal from the rooms endpoint itself is evidence the substrate is gone,
+    // so lower the flag and let the picker collapse on the same tick. Without
+    // this the gate is correct at load and still dead-ends mid-session.
+    //
+    // 404/403 only. A network error or a 5xx is "could not ask", not "is
+    // absent", and lowering on those would unmount a live room over a blip.
+    //
+    // But the STATUS ALONE IS NOT THE SIGNAL, and reading it as one is a live
+    // bug: on a fully entitled instance the rooms module answers "you cannot
+    // reach that agent" with a 403 and "you are not in that room" with a
+    // uniform 404. Lowering on those turns one denied request into a
+    // session-long false claim about the operator's build — and overwrites the
+    // only message that tells the user what to do.
+    //
+    // The two are cleanly separable by the BODY, because absence and denial are
+    // authored by different layers: a module that is SERVING answers with its
+    // own structured `detail: {code, message}`, while absence is a plain string
+    // — FastAPI's own "Not Found" when the route was never mounted, and the
+    // entitlement gate's one-sentence 403 when it is mounted but unlicensed. A
+    // coded detail therefore PROVES the substrate is present; treat it as an
+    // ordinary refusal and let the caller surface the server's own words.
+    //
+    // Runs on all FIVE room calls, for the same reason `_requireRooms` does —
+    // and here it is not redundant. `refreshThreads()` is event-driven, not
+    // periodic, so a capability that lapses while a room is OPEN is only ever
+    // observed by the room's own calls: without this the 3s poll swallows its
+    // 404 (`load()` only reports on a full load), sending shows the generic
+    // "That message was not delivered.", and the state never converges — the
+    // gate is correct at load and the room is a dead end for the rest of the
+    // session. With it, the poll lowers the flag, `<PortalRoom>` unmounts, and
+    // the room route's honest refusal takes the stage. That is AC #4 holding
+    // THROUGH a transition, and it is only safe because of the discriminator
+    // above: `/api/rooms/:id` answers a uniform coded 404 for a room the caller
+    // is not in, and reading THAT as absence would let a stale room link switch
+    // an entitled workspace to single-select.
+    _noteRoomsRefusal(err) {
+      const status = err?.response?.status
+      if (status !== 404 && status !== 403) return err
+      const detail = err?.response?.data?.detail
+      if (detail && typeof detail === 'object' && detail.code) return err
+      this.multiAgentChatAvailable = false
+      err.code = 'rooms_unavailable'
+      err.message = MULTI_AGENT_UNAVAILABLE
+      return err
+    },
+
     async createRoom(agentNames, name) {
-      const { data } = await axios.post(
-        '/api/rooms',
-        { name: name || 'New chat', agents: agentNames },
-        { headers: this.authHeader }
+      this._requireRooms()
+      try {
+        const { data } = await axios.post(
+          '/api/rooms',
+          { name: name || 'New chat', agents: agentNames },
+          { headers: this.authHeader }
+        )
+        return data
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
+    },
+
+    async fetchRooms() {
+      // Returns [] rather than throwing: this one is called on every sidebar
+      // refresh and its caller already treats "no rooms" as normal. Returning
+      // early removes a guaranteed-4xx round-trip per refresh.
+      if (!this.multiAgentChatAvailable) return []
+      try {
+        const { data } = await axios.get('/api/rooms', { headers: this.authHeader })
+        return (data.rooms || []).map((r) => ({ ...r, is_room: true }))
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
+    },
+
+    // ent#360 — the agent page. One call for the whole page: it is one screen,
+    // and fetching header/stats/asks/work separately renders it in pieces.
+    async fetchAgentPage(agentName, window = '7d') {
+      const { data } = await axios.get(
+        `/api/enterprise/client-portal/agents/${agentName}/page`,
+        { headers: this.authHeader, params: { window } },
       )
       return data
     },
 
-    async fetchRooms() {
-      const { data } = await axios.get('/api/rooms', { headers: this.authHeader })
-      return (data.rooms || []).map((r) => ({ ...r, is_room: true }))
+    async fetchAgentReports(agentName) {
+      const { data } = await axios.get(
+        `/api/enterprise/client-portal/agents/${agentName}/reports`,
+        { headers: this.authHeader },
+      )
+      return data.reports || []
+    },
+
+    // #2162: `rowsLimit` windows a TABULAR payload server-side. Sent on every
+    // expand — the server decides whether the payload actually has a row axis,
+    // so the client never predicts the shape from an agent-authored
+    // `display_hint` that can disagree with what was filed. A non-tabular
+    // payload simply comes back whole with no `row_meta`.
+    async fetchAgentReport(agentName, reportId, { rowsOffset, rowsLimit } = {}) {
+      const params = {}
+      if (rowsLimit !== undefined && rowsLimit !== null) {
+        params.rows_limit = rowsLimit
+        params.rows_offset = rowsOffset || 0
+      }
+      const { data } = await axios.get(
+        `/api/enterprise/client-portal/agents/${agentName}/reports/${encodeURIComponent(reportId)}`,
+        { headers: this.authHeader, params },
+      )
+      return data
+    },
+
+    // --- Reports tab orchestration (#2162) --------------------------------
+    //
+    // Lives in the store, not the component (design contract #21: loading flags
+    // belong to stores). That is not only tidiness — it is what makes the three
+    // riskiest paths here testable at all, since this project has no
+    // component-mount harness but does unit-test store fetchers against a
+    // mocked axios.
+    //
+    // EVERY await is generation-guarded. Clearing refs on agent switch cannot
+    // cancel a promise already in flight, so without this:
+    //
+    //   on agent A, open Reports   → fetch starts
+    //   click agent B              → state cleared
+    //   A's fetch resolves         → writes A's reports into the cleared state
+    //   open Reports on B          → "already loaded" → no refetch
+    //                              → A's reports render under B's name
+    //
+    // …which is the ent#359 class of bug, and adding a `reportsLoaded` flag
+    // makes it PERMANENT rather than self-correcting: B stays marked
+    // loaded-with-A's-data for the life of the mount. The flag and the guard
+    // have to ship together.
+
+    /** Drop all report state and invalidate every in-flight report request. */
+    resetAgentReports(agentName = null) {
+      this._reportsGeneration += 1
+      this.reportsAgent = agentName
+      this.reports = []
+      this.reportsLoaded = false
+      this.reportsError = null
+      this.reportPayloads = {}
+      this.reportRowMeta = {}
+      this.reportErrors = {}
+      this._reportInFlight = {}
+    },
+
+    async loadAgentReports(agentName) {
+      // Self-correcting: a caller that loads for a different agent without
+      // resetting first gets the reset anyway, rather than merging two agents.
+      if (this.reportsAgent !== agentName) this.resetAgentReports(agentName)
+      const gen = this._reportsGeneration
+      this.reportsError = null
+      try {
+        const rows = await this.fetchAgentReports(agentName)
+        if (gen !== this._reportsGeneration) return
+        this.reports = rows
+        // Only a SUCCEEDED fetch may set this: the empty state gates on it, and
+        // an empty list after a failure is the wrong sentence (contract #15).
+        this.reportsLoaded = true
+      } catch {
+        if (gen !== this._reportsGeneration) return
+        // Paired with `LoadFailed`'s title ("Couldn't load reports"), so this
+        // says what to DO rather than restating what happened (contract #25).
+        this.reportsError = 'The request failed. Check your connection and try again.'
+      }
+    },
+
+    async loadAgentReport(agentName, reportId) {
+      if (this.reportPayloads[reportId] || this._reportInFlight[reportId]) return
+      const gen = this._reportsGeneration
+      this._reportInFlight = { ...this._reportInFlight, [reportId]: true }
+      // Clear a previous failure up front, so a retry that succeeds does not
+      // leave the error banner sitting under a rendered report.
+      const { [reportId]: _dropped, ...remainingErrors } = this.reportErrors
+      this.reportErrors = remainingErrors
+      try {
+        const data = await this.fetchAgentReport(agentName, reportId, {
+          rowsOffset: 0, rowsLimit: ROWS_PAGE,
+        })
+        if (gen !== this._reportsGeneration) return
+        const payload = data?.payload ?? {}
+        this.reportPayloads = { ...this.reportPayloads, [reportId]: payload }
+        // `row_meta` present ⇒ the server windowed a real table. Absent ⇒ a
+        // bounded document, and no paging footer must render for it.
+        const meta = data?.row_meta
+        if (meta && Array.isArray(payload.rows)) {
+          this.reportRowMeta = {
+            ...this.reportRowMeta,
+            [reportId]: { total: meta.total, loaded: payload.rows.length },
+          }
+        }
+      } catch {
+        if (gen !== this._reportsGeneration) return
+        // Deliberately NOT written into reportPayloads: a `{error: …}` object
+        // there would be handed to the renderer and presented AS a report.
+        //
+        // Retryable regardless of status: the read swallows a DB fault into the
+        // same 404 a missing report gets (invariant #8), so the client cannot
+        // tell a transient failure from a gone report — and stranding someone on
+        // a transient one is the worse of the two mistakes.
+        this.reportErrors = {
+          ...this.reportErrors, [reportId]: 'Could not load this report.',
+        }
+      } finally {
+        // Generation-guarded like every other write: a reset already emptied
+        // this map, so clearing "our" key afterwards would clear a NEW request's
+        // marker instead and let a duplicate through — the guard leaking through
+        // its own bookkeeping.
+        if (gen === this._reportsGeneration) {
+          const { [reportId]: _done, ...stillInFlight } = this._reportInFlight
+          this._reportInFlight = stillInFlight
+        }
+      }
+    },
+
+    /** Dismiss one report's error banner without retrying (contract #18). */
+    clearReportError(reportId) {
+      if (!this.reportErrors[reportId]) return
+      const { [reportId]: _dropped, ...rest } = this.reportErrors
+      this.reportErrors = rest
+    },
+
+    async loadMoreReportRows(agentName, reportId) {
+      const meta = this.reportRowMeta[reportId]
+      const current = this.reportPayloads[reportId]
+      // Terminal guard. Without it a click at loaded === total appends [],
+      // `loaded` never moves, and ReportTable's `meta.total > rows.length`
+      // never goes false — a permanently visible, permanently inert button.
+      if (!meta || !current || meta.loaded >= meta.total) return
+      if (this._reportInFlight[reportId]) return
+      const gen = this._reportsGeneration
+      this._reportInFlight = { ...this._reportInFlight, [reportId]: true }
+      try {
+        const data = await this.fetchAgentReport(agentName, reportId, {
+          rowsOffset: meta.loaded, rowsLimit: ROWS_PAGE,
+        })
+        if (gen !== this._reportsGeneration) return
+        const next = data?.payload?.rows
+        const nextMeta = data?.row_meta
+        if (!Array.isArray(next) || !nextMeta) return
+        // Re-read through the store rather than trusting the `current` captured
+        // before the await — the same reason the operator store captures it.
+        const held = this.reportPayloads[reportId]
+        if (!held || !Array.isArray(held.rows)) return
+        const merged = [...held.rows, ...next]
+        this.reportPayloads = {
+          ...this.reportPayloads, [reportId]: { ...held, rows: merged },
+        }
+        this.reportRowMeta = {
+          ...this.reportRowMeta,
+          [reportId]: { total: nextMeta.total, loaded: merged.length },
+        }
+      } catch {
+        if (gen !== this._reportsGeneration) return
+        this.reportErrors = {
+          ...this.reportErrors, [reportId]: 'Could not load more rows.',
+        }
+      } finally {
+        // Generation-guarded like every other write: a reset already emptied
+        // this map, so clearing "our" key afterwards would clear a NEW request's
+        // marker instead and let a duplicate through — the guard leaking through
+        // its own bookkeeping.
+        if (gen === this._reportsGeneration) {
+          const { [reportId]: _done, ...stillInFlight } = this._reportInFlight
+          this._reportInFlight = stillInFlight
+        }
+      }
+    },
+
+    // ent#359 — per-viewer star + unread state, for BOTH chat kinds in one call.
+    // Threads and rooms come from different endpoints (and different repos) but
+    // sort into a single sidebar list, so their view state has to arrive
+    // together or the list would reshuffle as the second response landed.
+    //
+    // Keyed `${kind}:${id}`: the two id spaces are independent, so an id alone
+    // is not a key.
+    async fetchChatState() {
+      const { data } = await axios.get('/api/enterprise/client-portal/chat-state', {
+        headers: this.authHeader,
+      })
+      const out = {}
+      for (const c of data.chats || []) {
+        if (c && c.kind && c.id) out[`${c.kind}:${c.id}`] = c
+      }
+      return out
+    },
+
+    async setChatStar(kind, chatId, starred) {
+      const url = `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/star`
+      const cfg = { headers: this.authHeader }
+      if (starred) await axios.put(url, null, cfg)
+      else await axios.delete(url, cfg)
+    },
+
+    // Fire-and-forget by design: a failed read marker leaves a stale badge,
+    // which is not worth interrupting navigation over, and the next state fetch
+    // corrects it.
+    async markChatRead(kind, chatId) {
+      try {
+        await axios.post(
+          `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/read`,
+          null,
+          { headers: this.authHeader },
+        )
+      } catch { /* stale badge only */ }
     },
 
     // `since` is the seq cursor: 0 loads the whole transcript, a later value
     // fetches only what the client has not seen.
     async fetchRoom(roomId, since = 0) {
-      const { data } = await axios.get(`/api/rooms/${roomId}`, {
-        headers: this.authHeader, params: { since },
-      })
-      return data
+      this._requireRooms()
+      try {
+        const { data } = await axios.get(`/api/rooms/${roomId}`, {
+          headers: this.authHeader, params: { since },
+        })
+        return data
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
     },
 
     async postRoomMessage(roomId, content) {
-      const { data } = await axios.post(
-        `/api/rooms/${roomId}/messages`, { content },
-        { headers: this.authHeader }
-      )
-      return data   // {room_id, seq, mentions, woke}
+      this._requireRooms()
+      try {
+        const { data } = await axios.post(
+          `/api/rooms/${roomId}/messages`, { content },
+          { headers: this.authHeader }
+        )
+        return data   // {room_id, seq, mentions, woke}
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
     },
 
     async addRoomParticipant(roomId, agentName) {
-      const { data } = await axios.post(
-        `/api/rooms/${roomId}/participants`, { agent_name: agentName, role: 'member' },
-        { headers: this.authHeader }
-      )
-      return data
+      this._requireRooms()
+      try {
+        const { data } = await axios.post(
+          `/api/rooms/${roomId}/participants`, { agent_name: agentName, role: 'member' },
+          { headers: this.authHeader }
+        )
+        return data
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
     },
 
     // The client's conversation threads with an agent (most-recent first) — the
@@ -352,6 +754,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // ent#286: non-null when a turn is running on this thread right now —
         // what a client that reloaded mid-turn resubscribes to.
         inFlightExecutionId: data.in_flight_execution_id || null,
+        // #2214: how long that turn may honestly be waited for — the server
+        // marker's remaining TTL in seconds. Null/absent (old backend, TTL
+        // unreadable) → the component falls back via resolveWaitBudgetMs.
+        inFlightWaitBudgetSeconds: data.in_flight_wait_budget_seconds ?? null,
       }
     },
 
@@ -378,43 +784,115 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
-    // #138: unified history across ALL rostered agents for the sidebar. The
-    // per-agent /sessions endpoint is the source; a small roster makes merging
-    // N calls cheap (a single all-agents endpoint is a later optimization). Each
-    // thread is tagged with its agent so the sidebar can show the color dot and
-    // route to the right conversation. Best-effort per agent (one down agent
-    // never blanks the whole list); sorted most-recently-active first.
+    // #138 / #2198: unified history across ALL rostered agents for the sidebar.
+    //
+    // ONE viewer-scoped call (`GET /client-portal/sessions`), not one per
+    // rostered agent. The fan-out this replaces was N+1 in HTTP and 2N-3N in DB
+    // queries — `list_sessions` re-resolves the roster per agent before reading
+    // the session table — and it ran on all SIX `refreshThreads()` call sites,
+    // including every thread open and every completed turn.
+    //
+    // Sorted most-recently-active first; each thread carries its agent so the
+    // sidebar can show the colour dot and route to the right conversation.
+    // `agent_name` now comes from the DB row rather than being stamped on
+    // client-side from `this.agents`.
     async fetchAllSessions() {
+      const agents = this.agents || []
+      let lists = []
+      if (agents.length) {
+        try {
+          lists = [await this.fetchSessionsBatch()]
+          this.sessionsFailed = false
+        } catch (err) {
+          // TRANSITIONAL (#2198) — delete one release after the batch ships.
+          //
+          // Deploy skew: a cached or partially-rolled-out bundle can reach a
+          // backend that does not have `/client-portal/sessions` yet. That 404s,
+          // and the sidebar — the most client-visible surface in the product —
+          // would simply empty. Fall back to the per-agent fan-out this replaced.
+          //
+          // 404 ONLY, deliberately. A 5xx or a network error already degrades
+          // correctly above (keep the last good list), and fanning out there
+          // would turn one failed request into N.
+          if (err?.response?.status === 404) {
+            try {
+              lists = [await this._fetchSessionsFanout()]
+              this.sessionsFailed = false
+              return this._mergeThreadList(lists, await this._fetchRoomsSafe())
+            } catch { /* fall through to the last-good-list path below */ }
+          }
+          // NEVER blank an already-populated sidebar. Return what we last had
+          // and flag the failure so the UI can say so honestly.
+          this.sessionsFailed = true
+          console.warn('[portal] session list refresh failed:', err?.message || err)
+          return this.lastSessions
+        }
+      }
+      // ent#361: multi-agent chats are rooms, and they belong in the same list —
+      // to the user these are all just conversations. Room fetch failure
+      // degrades to threads-only rather than emptying the sidebar (an
+      // unentitled or OSS build has no rooms at all, and that is not an error).
+      const rooms = await this._fetchRoomsSafe()
+      return this._mergeThreadList(lists, rooms)
+    },
+
+    // TRANSITIONAL (#2198) — the pre-batch per-agent fan-out, kept only for the
+    // deploy-skew window above. Delete with its caller.
+    async _fetchSessionsFanout() {
       const agents = this.agents || []
       const lists = await Promise.all(agents.map(async (a) => {
         try {
           const sessions = await this.fetchSessions(a.name)
           return sessions.map((s) => ({ ...s, agent_name: a.name }))
-        } catch { return [] }
+        } catch { return [] }   // one down agent never blanks the whole list
       }))
-      // ent#361: multi-agent chats are rooms, and they belong in the same list —
-      // to the user these are all just conversations. Room fetch failure
-      // degrades to threads-only rather than emptying the sidebar (an
-      // unentitled or OSS build has no rooms at all, and that is not an error).
-      let rooms = []
-      try { rooms = await this.fetchRooms() } catch { rooms = [] }
+      return lists.flat()
+    },
 
-      const merged = lists.flat().concat(rooms.map((r) => ({
-        ...r,
-        // Normalised onto the thread shape the sidebar already renders, so one
-        // list component handles both kinds.
-        title: r.name,
-        last_message_at: r.last_message_at || r.created_at,
-        agent_names: (r.participants || [])
-          .filter((p) => p.kind === 'agent')
-          .map((p) => p.identity),
-      })))
+    async _fetchRoomsSafe() {
+      try { return await this.fetchRooms() } catch { return [] }
+    },
+
+    // Merge threads + rooms into the single recency-sorted list the sidebar
+    // renders, and remember it (see `lastSessions`).
+    _mergeThreadList(lists, rooms) {
+      const merged = lists.flat().concat((rooms || []).map(normalizeRoomRow))
       merged.sort((x, y) => {
         const tx = x.last_message_at || x.created_at || ''
         const ty = y.last_message_at || y.created_at || ''
         return ty.localeCompare(tx)
       })
+      this.lastSessions = merged
       return merged
+    },
+
+    // The batch read behind `fetchAllSessions`, scoped client-side to the
+    // DISPLAYED roster.
+    //
+    // The backend scopes by the caller's roster — that is the access boundary
+    // and it is not negotiable here. This second, narrower filter is a
+    // rendering rule: `this.agents` is what the sidebar actually shows, and a
+    // thread whose agent is not in it would route nowhere (a dead end,
+    // design-system-contract principle 16). Today the two sets are identical,
+    // so this is a no-op that preserves current rendering exactly — and it
+    // keeps the sidebar correct whatever #2196 decides about hiding
+    // container-less agents from the displayed roster.
+    async fetchSessionsBatch() {
+      const { data } = await axios.get(
+        '/api/enterprise/client-portal/sessions',
+        { headers: this.authHeader }
+      )
+      const shown = new Set((this.agents || []).map((a) => a.name))
+      const rows = data.sessions || []
+      const kept = rows.filter((s) => shown.has(s.agent_name))
+      if (import.meta.env.DEV && kept.length !== rows.length) {
+        // Not a normal condition: it means the displayed roster and the
+        // backend's roster have diverged. Worth knowing about.
+        console.warn(
+          `[portal] ${rows.length - kept.length} thread(s) dropped — their agent is not on the displayed roster`
+        )
+      }
+      return kept
     },
 
     async fetchRoster() {
@@ -436,6 +914,19 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // (ent#380) — shipped at sign-in so the new-chat screen renders with
         // zero extra fetches.
         this.agents = data.agents || []
+        // #2128 — a SUCCESSFUL roster is the only thing that may RAISE this
+        // flag, and strict `=== true` is what makes an older backend that omits
+        // the field (or a proxy that returns the string "false", or an HTML
+        // error body) read as absent rather than truthy.
+        //
+        // Deliberately NOT pre-reset at the top of this action, unlike the
+        // sibling `unavailable` above. That one resets to the OPTIMISTIC value
+        // so a stale 404 cannot paint over a roster that loaded fine; copying
+        // its shape here would invert its meaning — pessimistic mid-flight, so
+        // every background refetch would unmount a live room and flash a
+        // refusal at an entitled client before taking it back.
+        this.multiAgentChatAvailable = data.multi_agent_chat_available === true
+        this.rosterLoaded = true
       } catch (err) {
         // Two DIFFERENT failures, kept distinct — neither may swallow the other.
         //
@@ -458,6 +949,18 @@ export const useClientPortalStore = defineStore('clientPortal', {
           ? 'The workspace is not available on this instance.'
           : (err.response?.data?.detail || 'Failed to load your agents.')
         this.agents = []
+        // #2128: the attempt reached a verdict — the room route may stop
+        // showing its neutral placeholder and render the honest failure copy.
+        // `multiAgentChatAvailable` is deliberately left ALONE: a failed
+        // request is not evidence the capability went away.
+        //
+        // Assigned here rather than in `finally`, which runs AFTER this whole
+        // block — and CONDITIONALLY, because the 401 branch above already
+        // signed the session out. A bare `= true` in either place re-sets the
+        // flag the sign-out just cleared, and the field stops meaning "a
+        // verdict was reached for this session" and starts meaning "some
+        // attempt finished at some point".
+        this.rosterLoaded = this.isClientSignedIn
       } finally {
         this.loading = false
       }

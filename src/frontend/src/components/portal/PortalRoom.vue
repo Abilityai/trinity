@@ -32,6 +32,11 @@
       </div>
 
       <div class="flex items-center gap-1" :class="{ 'ml-auto': !budgetWarning }">
+        <!-- ent#359 AC #4: star from the header, same as a 1:1. -->
+        <PortalStarButton
+          :starred="starred"
+          @toggle="$emit('toggle-star', { id: roomId, is_room: true, starred })"
+        />
         <button
           v-if="!isClosed"
           class="px-2 py-1.5 rounded-lg text-xs font-medium text-action-primary-600 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
@@ -125,13 +130,32 @@
           This conversation has ended{{ room?.stop_reason ? ` (${closedReason})` : '' }}. Start a new chat to keep going.
         </p>
         <form v-else class="flex items-end gap-2" @submit.prevent="send">
-          <textarea
-            v-model="input"
-            rows="1"
-            :placeholder="placeholder"
-            class="flex-1 resize-none rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm px-4 py-2.5 leading-6 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
-            @keydown.enter.exact.prevent="send"
-          ></textarea>
+          <!-- ent#392: `@` typeahead over the room's WAKE-SET. Same anchored
+               wrapper as the 1:1 composer; it must carry the flex sizing the
+               textarea used to hold, or the field collapses to content width. -->
+          <div ref="composerWrap" class="relative flex-1 min-w-0">
+            <PortalTypeahead
+              v-if="typeaheadOpen"
+              kind="@"
+              :rows="typeaheadRows"
+              :active-index="activeIndex"
+              :overflow="typeaheadBound.overflow"
+              :empty-message="typeaheadEmpty || ''"
+              @pick="acceptActive"
+              @hover="activeIndex = $event"
+            />
+            <textarea
+              ref="textarea"
+              v-model="input"
+              rows="1"
+              :placeholder="placeholder"
+              class="w-full resize-none rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm px-4 py-2.5 leading-6 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
+              @keydown="onComposerKeydown"
+              @input="onComposerInput"
+              @click="onComposerCaret"
+              @select="onComposerCaret"
+            ></textarea>
+          </div>
           <button
             type="submit"
             class="shrink-0 p-2.5 rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 transition"
@@ -171,12 +195,33 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { renderMarkdown } from '@/utils/markdown'
 import PortalAvatar from './PortalAvatar.vue'
+import PortalStarButton from './PortalStarButton.vue'
+import PortalTypeahead from './PortalTypeahead.vue'
+import {
+  applyTypeaheadInsert,
+  boundCandidates,
+  buildMentionToken,
+  clampActiveIndex,
+  detectTypeaheadTrigger,
+  dismissAfterInsert,
+  filterAgentCandidates,
+  isSuppressed,
+  nextActiveIndex,
+  nextDismissState,
+  resolveComposerKey,
+  roomMentionSource,
+  typeaheadEmptyMessage,
+} from './portalUtils'
+import { agentDisplayName } from '@/utils/agentName'
 
 const props = defineProps({
   roomId: { type: String, required: true },
   roster: { type: Array, default: () => [] },
+  // ent#359: star state is per-viewer and owned by the shell, not by the room —
+  // a room is shared, a star is not.
+  starred: { type: Boolean, default: false },
 })
-defineEmits(['open-menu', 'rooms-changed'])
+defineEmits(['open-menu', 'rooms-changed', 'toggle-star'])
 
 const store = useClientPortalStore()
 
@@ -190,6 +235,14 @@ const scrollEl = ref(null)
 const addOpen = ref(false)
 const adding = ref(false)
 const addError = ref(null)
+
+// ent#392 — composer typeahead state (`@` only; see the block below for why
+// there is no `/` here).
+const textarea = ref(null)
+const composerWrap = ref(null)
+const typeaheadTrigger = ref(null)
+const activeIndex = ref(-1)
+const dismissed = ref(null)
 
 let pollTimer = null
 const POLL_MS = 3000
@@ -249,6 +302,148 @@ const addable = computed(() => {
   return (props.roster || []).filter((a) => !here.has(a.name))
 })
 
+// ---- ent#392: `@` typeahead over the room's wake-set ------------------------
+//
+// @mention-waking is first-class here and completely undiscoverable — a room has
+// many counterparts, so it needs the affordance more than a 1:1 does. The
+// candidate list is the AGENT PARTICIPANTS, never the roster, and that is not an
+// assumption: posting `@<participant>` to a live instance answered
+// {"mentions":["acme-scout"],"woke":["acme-scout"]} while `@<non-participant>`
+// answered {"mentions":[],"woke":[]}. Participants demonstrably wake; a
+// non-participant demonstrably wakes nobody on that turn — so offering the
+// roster would put names in front of the user with no evidence that choosing
+// one does anything, the same class of silent no-op as offering a slug the
+// grammar cannot carry. See roomMentionSource() in portalUtils.js for what this
+// deliberately does not claim about recruiting.
+//
+// There is deliberately NO `/` typeahead: a room has N participants and no
+// active agent, so "whose playbooks?" has no answer without inventing a picker
+// this issue does not specify. Stated as a scope limitation (AC#9).
+//
+// Recruiting a NEW agent stays with the explicit "+ Add agent" control, which is
+// the honest place for it — that spends money on another agent, and the probe
+// above saw a non-participant mention wake nobody. Whether it recruits by some
+// other path is OPEN, not settled here (requirements §5.12 records an
+// engine-side newcomer-join from ent#361).
+
+const mentionSource = computed(() => roomMentionSource(agentParticipants.value, props.roster))
+
+const typeaheadResult = computed(() => {
+  const t = typeaheadTrigger.value
+  if (!t || t.kind !== '@') return null
+  return filterAgentCandidates(mentionSource.value, t.query)
+})
+
+const typeaheadBound = computed(() => boundCandidates(typeaheadResult.value?.items || []))
+
+const typeaheadEmpty = computed(() => {
+  const t = typeaheadTrigger.value
+  const r = typeaheadResult.value
+  if (!t || !r || r.items.length || t.query !== '') return null
+  return typeaheadEmptyMessage('@', r, { scope: 'room' })
+})
+
+const typeaheadOpen = computed(() => {
+  const t = typeaheadTrigger.value
+  const r = typeaheadResult.value
+  if (!t || !r || isClosed.value) return false
+  if (isSuppressed(dismissed.value, t)) return false
+  return typeaheadBound.value.visible.length > 0 || !!typeaheadEmpty.value
+})
+
+const typeaheadRows = computed(() => typeaheadBound.value.visible.map((a) => ({
+  key: `ag-${a.name}`,
+  primary: agentDisplayName(a),
+  secondary: `@${a.name}`,
+})))
+
+watch(typeaheadBound, (b) => { activeIndex.value = clampActiveIndex(activeIndex.value, b.visible.length) })
+
+function closeTypeahead() {
+  typeaheadTrigger.value = null
+  activeIndex.value = -1
+}
+
+function dismissTypeahead() {
+  dismissed.value = nextDismissState(typeaheadTrigger.value)
+  closeTypeahead()
+}
+
+// Every programmatic write to `input.value` — send() clearing it, and send()
+// giving it back on failure — fires no input event, so the sentinel is cleared
+// here or it outlives the message it was armed against.
+function resetTypeahead() {
+  closeTypeahead()
+  dismissed.value = null
+}
+
+function refreshTypeahead(el) {
+  if (!el) return
+  const t = detectTypeaheadTrigger(el.value, el.selectionStart, el.selectionEnd)
+  // A room has no `/` surface, so a `/` trigger is simply not a trigger here —
+  // dropped at the edge rather than filtered downstream, so nothing below has to
+  // remember that this composer is single-kind.
+  typeaheadTrigger.value = t && t.kind === '@' ? t : null
+  if (!typeaheadTrigger.value) activeIndex.value = -1
+}
+
+function onComposerInput(e) {
+  if (e?.inputType === 'insertFromPaste' || e?.inputType === 'insertFromDrop') {
+    closeTypeahead()
+    return
+  }
+  refreshTypeahead(e?.target)
+}
+
+function onComposerCaret(e) { refreshTypeahead(e?.target) }
+
+function onComposerKeydown(e) {
+  const length = typeaheadBound.value.visible.length
+  switch (resolveComposerKey({
+    key: e.key,
+    shiftKey: e.shiftKey,
+    ctrlKey: e.ctrlKey,
+    metaKey: e.metaKey,
+    altKey: e.altKey,
+    isComposing: e.isComposing,
+    keyCode: e.keyCode,
+    open: typeaheadOpen.value,
+    hasActive: activeIndex.value >= 0,
+    hasCandidates: length > 0,
+  })) {
+    case 'move-down': e.preventDefault(); activeIndex.value = nextActiveIndex(activeIndex.value, 1, length); break
+    case 'move-up': e.preventDefault(); activeIndex.value = nextActiveIndex(activeIndex.value, -1, length); break
+    case 'accept': e.preventDefault(); acceptActive(activeIndex.value >= 0 ? activeIndex.value : 0); break
+    case 'dismiss': e.preventDefault(); dismissTypeahead(); break
+    case 'close': closeTypeahead(); break
+    case 'send': e.preventDefault(); send(); break
+    default: break
+  }
+}
+
+function acceptActive(index) {
+  const t = typeaheadTrigger.value
+  const row = typeaheadBound.value.visible[index]
+  if (!t || !row) return
+  const { value, caret } = applyTypeaheadInsert(input.value, t, buildMentionToken(row.name))
+  input.value = value
+  closeTypeahead()
+  // See PortalConversation: a mid-sentence pick leaves the caret inside the
+  // token, and setSelectionRange() fires a `select` that would reopen the popup
+  // over its own successful choice.
+  const settled = dismissAfterInsert(value, caret)
+  if (settled) dismissed.value = settled
+  nextTick(() => {
+    const el = textarea.value
+    if (el) { el.focus(); el.setSelectionRange(caret, caret) }
+  })
+}
+
+// Outside the composer and its popup closes without arming the Esc sentinel.
+function onDocClick(e) {
+  if (typeaheadTrigger.value && composerWrap.value && !composerWrap.value.contains(e.target)) closeTypeahead()
+}
+
 function isMine(m) {
   // Anything not an agent and not the room itself is this client — the room is
   // per-client here, so a human sender is the caller.
@@ -286,6 +481,7 @@ async function send() {
   sending.value = true
   sendError.value = null
   input.value = ''
+  resetTypeahead()
   try {
     await store.postRoomMessage(props.roomId, text)
     // The post returns once the mentioned agents have been woken; their replies
@@ -296,6 +492,7 @@ async function send() {
     sendError.value = detail?.message || (typeof detail === 'string' ? detail : null)
       || 'That message was not delivered.'
     input.value = text        // give it back rather than losing what they typed
+    resetTypeahead()
   } finally {
     sending.value = false
     await scrollDown()
@@ -338,12 +535,17 @@ function stopPolling() {
 watch(() => props.roomId, async () => {
   messages.value = []
   loading.value = true
+  resetTypeahead()
   await load({ full: true })
 })
 
 onMounted(async () => {
+  document.addEventListener('click', onDocClick)
   await load({ full: true })
   startPolling()
 })
-onBeforeUnmount(stopPolling)
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onDocClick)
+  stopPolling()
+})
 </script>

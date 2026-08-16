@@ -1352,6 +1352,17 @@ class FleetExecutionStats(BaseModel):
     deleted_agent_cost: float = 0.0
 
 
+class ExecutionTimelineSplit(BaseModel):
+    """One trigger's share of a time bucket (ent#96).
+
+    `failed` rides alongside `total` deliberately: a stack drawn from totals
+    alone hides failures inside the columns, which is exactly what the tile
+    reading this must not do.
+    """
+    total: int
+    failed: int
+
+
 class ExecutionTimelineBucket(BaseModel):
     """One bucket of `GET /api/executions/timeline` (ent#326)."""
     bucket: str
@@ -1365,6 +1376,10 @@ class ExecutionTimelineBucket(BaseModel):
     # the field is named for the quantity it actually holds. A tile labelling
     # this as tokens would be exactly the mislabel ent#326 warns against.
     context_used: int
+    # ent#96: present only for `split=trigger`, and then on EVERY bucket —
+    # a gap-filled empty hour carries `{}`, so a chart never has to tell
+    # "no runs" apart from "field missing".
+    by_trigger: Optional[Dict[str, ExecutionTimelineSplit]] = None
 
 
 class ExecutionTimeline(BaseModel):
@@ -1378,6 +1393,15 @@ class ExecutionTimeline(BaseModel):
     hours: int
     gap_filled: bool
     buckets: List[ExecutionTimelineBucket]
+    # ent#96: echoed back so a caller can tell a split response from a plain
+    # one without inspecting the buckets.
+    split: Optional[str] = None
+    # The stack/legend order for `by_trigger`, served by the backend so the
+    # tile, its legend and the #1107 Overview chart cannot order the same
+    # buckets differently. Includes every catalog bucket, not only the ones
+    # present in this window, so the colours a reader learns stay put as
+    # traffic comes and goes.
+    trigger_order: Optional[List[str]] = None
 
 
 class EvaluationCreate(BaseModel):
@@ -3642,3 +3666,112 @@ class SkillAssignmentsResponse(BaseModel):
     """
     assignments: Dict[str, List[SkillAssignmentAgent]] = Field(default_factory=dict)
     scope: str = "accessible"
+
+
+# ============================================================================
+# Outbound A2A calls (#736)
+# ============================================================================
+
+class A2ACallRequest(BaseModel):
+    """Body for `POST /api/agents/{name}/a2a/call` (#736).
+
+    Note what is NOT here: a URL. The target is an `endpoint` **reference** — an
+    id or the operator-facing name of a pre-registered endpoint — resolved
+    server-side. The issue's filed AC asked for `agent_card_url`, and it is
+    rejected: an agent's parameters are LLM-generated and prompt-injectable, so
+    a URL parameter would turn any document the agent reads into a lever on a
+    credentialed server-side request from inside the platform network. See
+    requirements mcp.md §32.5 FR-1.
+
+    There is likewise no `stream` field. A parameter that is accepted and
+    silently does not stream is a lie in a schema agents read (§32.5 FR-6).
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: str = Field(
+        ..., min_length=1, max_length=200,
+        description="Id or name of a pre-registered outbound A2A endpoint.",
+    )
+    message: str = Field(..., min_length=1, max_length=100_000)
+    dedup_label: str = Field(
+        ..., min_length=1, max_length=200,
+        description=(
+            "A distinct label per call within this turn. REQUIRED: the effect "
+            "guard keys on the endpoint + conversation ids, never the message "
+            "body, so without a distinct label a second question to the same "
+            "endpoint in one execution would replay the FIRST answer."
+        ),
+    )
+    context_id: Optional[str] = Field(default=None, max_length=200)
+    task_id: Optional[str] = Field(default=None, max_length=200)
+    execution_id: Optional[str] = Field(default=None, max_length=200)
+
+
+class A2ATaskRequest(BaseModel):
+    """Body for `POST /api/agents/{name}/a2a/task` — poll a remote task (#736)."""
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: str = Field(..., min_length=1, max_length=200)
+    task_id: str = Field(..., min_length=1, max_length=200)
+
+
+class A2ACallResponse(BaseModel):
+    """Allowlisted outbound-call result (#736).
+
+    An allowlist, not a filtered dump: the remote controls its response, so the
+    fields that reach the calling agent are enumerated here and nothing else
+    crosses — never the raw body, never request headers, never the resolved URL.
+    """
+    success: bool = True
+    state: str
+    text: Optional[str] = None
+    task_id: Optional[str] = None
+    context_id: Optional[str] = None
+    truncated: bool = False
+    protocol_version: str = "0.3"
+    endpoint: str
+    replayed: bool = False
+
+
+class A2AOutboundEndpointUpsert(BaseModel):
+    """Body for the admin OSS endpoint registry (#736 §32.5 FR-2).
+
+    `credentials` is WRITE-ONLY: it is accepted here and never returned by any
+    read. Omitting it on an update leaves an existing secret in place (so an
+    operator can repoint or rename without re-typing something they may not
+    have); `clear_credentials` removes it.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=200)
+    url: str = Field(..., min_length=1, max_length=2048)
+    credentials: Optional[SecretStr] = Field(default=None)
+    clear_credentials: bool = False
+
+    @field_validator("credentials")
+    @classmethod
+    def _validate_credential(cls, v: Optional[SecretStr]) -> Optional[SecretStr]:
+        """Reject a header-unsafe credential — the same guard, for the same
+        reason, as `_validate_pat_secret` (ent#109).
+
+        This value becomes an `Authorization: Bearer …` header on the outbound
+        POST, and h11 rejects an illegal header value by **echoing it**. A
+        credential carrying a stray line break — the routine paste artifact —
+        would therefore reappear inside the transport error the calling agent
+        reads and the backend logs. `error_handlers.validation_error_without_input`
+        strips Pydantic's `input` from every 422, so refusing here does not move
+        the leak into the rejection.
+        """
+        if v is None:
+            return None
+        raw = v.get_secret_value().strip()
+        if not raw:
+            return None
+        if not _PAT_SAFE_RE.match(raw):
+            # Never echo the value — that is the leak this guard prevents.
+            raise ValueError(
+                "credentials contains characters that are not valid in an HTTP "
+                "header (whitespace, line breaks or control characters). Paste "
+                "the token again without surrounding whitespace."
+            )
+        return SecretStr(raw)

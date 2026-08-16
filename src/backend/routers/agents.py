@@ -1253,6 +1253,7 @@ async def send_voice_reply_endpoint(
     misses return ``{delivered: false, reason}`` (HTTP 200) so the agent falls back
     to text; an in-flight duplicate for the same turn returns 409.
     """
+    import config as app_config
     from services import voice_reply_service, idempotency_service
 
     # Self-gate (mirrors reports / heartbeat): an agent-scoped key can only speak
@@ -1266,6 +1267,47 @@ async def send_voice_reply_endpoint(
 
     # Only user-facing channel turns have a deliverable voice destination.
     channel = execution.source_channel or execution.triggered_by
+    if channel == app_config.PORTAL_SOURCE_CHANNEL:
+        # #2157: the Workspace has no audio destination — but it is NOT text-only;
+        # it narrates the agent's text whenever the client turns the speaker on.
+        # A bare `not_a_channel_turn` stated only the first half, and agents
+        # generalized it into "this surface is text-only, go to Slack" — a false
+        # claim, made to a client, in the most credible voice in that UI. So the
+        # portal gets its own reason plus a plain-language line, which keeps the
+        # answer right even for a turn that never carried the system-prompt
+        # fragment (older session, prompt trimmed).
+        #
+        # The two portal answers split on the SAME gate the speaker control
+        # renders on — because "just switch the speaker on" is itself a false
+        # remedy for an agent that has no voice configured, and pointing a client
+        # at a control that is not there would re-make this bug facing the other
+        # way.
+        import services.tts_service as tts_service
+
+        if tts_service.resolve_voice_id(agent_name):
+            return {
+                "delivered": False,
+                "channel": channel,
+                "reason": "portal_client_narrated",
+                "guidance": (
+                    "You cannot send an audio file on this surface, but it is not "
+                    "text-only: the client hears your reply read aloud when they switch "
+                    "on the speaker control in this conversation. Reply with text and, if "
+                    "they asked to be spoken to, point them at that control — do not send "
+                    "them to another channel, and do not repeat this status message to them."
+                ),
+            }
+        return {
+            "delivered": False,
+            "channel": channel,
+            "reason": "portal_voice_not_configured",
+            "guidance": (
+                "Voice is not set up for you, so this reply cannot be spoken here or "
+                "anywhere else. Answer in text. Do not promise a spoken reply, do not "
+                "send the client to another channel for one, and do not repeat this "
+                "status message to them — the operator enables voice, not the client."
+            ),
+        }
     if channel not in ("telegram", "slack", "whatsapp"):
         return {"delivered": False, "channel": channel, "reason": "not_a_channel_turn"}
     if not execution.source_channel_chat_id:

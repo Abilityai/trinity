@@ -568,6 +568,23 @@ Consumption at creation is in
 the compatibility check is T-018 in
 [agent-compatibility-validation.md](agent-compatibility-validation.md).
 
+### Declared `plugins:` (#1704)
+
+The third untrusted block Trinity acts on, same tolerant-reader shape.
+`services/template_plugins.py` is a **leaf** (stdlib + the stdlib-only
+`utils.credential_sanitizer`) with `plugin_shape_errors` / `normalize_declared_plugins`
+over one private `_parse` — total by the same three-consumer contract as
+schedules (a raise would empty the catalog, enter creation's rollback fence, or
+break the boot hook's source-of-truth). Both builders surface the **normalized**
+`plugins` + `plugin_errors`. Two security properties are load-bearing because
+every accepted value is later written into the agent container (heredoc) AND
+passed to `claude plugin marketplace add / install` as a subprocess arg: the
+marketplace `source` must be `owner/repo` or an `https://` URL with **no
+`user:token@` userinfo** (refused via `redact_url_userinfo`), and every
+marketplace/plugin name is charset-validated (no traversal, no shell metachars).
+Consumption at creation writes `~/.trinity/plugins.yaml` and the boot hook
+re-installs — see [agent-plugin-manifest.md](agent-plugin-manifest.md).
+
 ### Trinity-Compatible Validation (`services/template_service.py:608-728`)
 ```python
 def is_trinity_compatible(path: Path) -> Tuple[bool, Optional[str], Optional[dict]]:

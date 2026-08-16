@@ -847,6 +847,55 @@ def build_voice_capability_prompt(agent_name: str, channel: str) -> Optional[str
     )
 
 
+def build_narrated_surface_prompt(agent_name: str) -> Optional[str]:
+    """Tell an agent that THIS surface reads its text aloud when the client asks
+    it to (#2157) — the Workspace/Client-Portal counterpart to
+    ``build_voice_capability_prompt``.
+
+    The two describe deliberately different things, which is the whole point of
+    keeping them apart:
+
+    * ``build_voice_capability_prompt`` advertises a **tool the agent invokes**
+      to deliver an audio artifact into a messaging channel.
+    * this advertises a **client-controlled surface affordance** — the browser
+      speaks the agent's text after it arrives. The agent cannot trigger it,
+      cannot hear it, and produces no audio file.
+
+    So the fragment must say the surface narrates WITHOUT implying the agent can
+    send audio here (it cannot, and claiming so is the mirror-image bug). Without
+    it an agent asked for a spoken reply reasons only from ``send_voice_reply``'s
+    refusal and over-generalizes to "this surface is text-only — go to Slack",
+    which is false and pushes a client off the surface built for them (#2157).
+
+    Returns None (no advertisement) unless narration would actually work for this
+    agent — same gate the speaker toggle renders on, so the fragment can never
+    promise a control the client does not have. Never raises."""
+    try:
+        import services.tts_service as tts_service
+
+        if not tts_service.resolve_voice_id(agent_name):
+            return None
+    except Exception as e:  # noqa: BLE001 — never block a chat on this
+        logger.warning("narrated-surface prompt check failed for %s: %s", agent_name, e)
+        return None
+    return (
+        "## Hearing you on this surface (client-controlled narration)\n"
+        "You are talking to a client in the Trinity Workspace (web). This surface is "
+        "NOT text-only: the client can switch on the speaker control in this "
+        "conversation, and their browser then reads your text replies aloud as they "
+        "arrive.\n"
+        "- Narration is the CLIENT's switch, not yours. You cannot start, stop, or "
+        "hear it, and it leaves no audio file in the conversation — so never claim to "
+        "have sent, or offer to send, a voice message or recording here.\n"
+        "- `send_voice_reply` delivers voice notes on messaging channels only "
+        "(Telegram/Slack/WhatsApp) and will refuse here. That is a limit on YOU, not "
+        "on this surface.\n"
+        "- If a client asks to be spoken to, point them at the speaker control in this "
+        "conversation. Never tell them this surface is text-only, and never send them "
+        "to another channel to be heard."
+    )
+
+
 def is_execution_context_enabled() -> bool:
     """Operator kill-switch for the execution context block. Default: enabled."""
     try:

@@ -2,7 +2,24 @@
 Unit test conftest — overrides the parent conftest's autouse fixtures.
 
 These tests run without a backend connection (no Docker, no API).
+
+WHERE DOES A NEW TEST GO? (#1895)
+`tests/unit/` is the ONLY directory the per-PR CI unit job collects
+(`backend-unit-test.yml` runs `pytest unit/`; this island is sealed by
+`tests/unit/pytest.ini`'s `norecursedirs = ..`). So:
+  * a test needing NO live backend (pure logic / tmp-SQLite; no api_client /
+    created_agent / ws_ticket, no raw httpx/ws_connect) belongs HERE;
+  * a MIXED file is split — the self-contained half here, the live half in the
+    tests/ root;
+  * a live-backend test stays in the tests/ root (add `# allow-root-live-test:`
+    if it takes no live *fixture* parameter).
+Async tests here MUST carry an explicit `@pytest.mark.asyncio` (function / class /
+module `pytestmark`): this island runs pytest-asyncio in STRICT mode (no
+`asyncio_mode`), so an unmarked `async def test_` does not run. Both rules are
+enforced by `tests/lint_root_test_placement.py`; see `tests/README.md`
+("Where does a new test go?").
 """
+import contextlib
 import importlib.util
 import os
 import sys
@@ -151,6 +168,34 @@ def _preload_real_agent_server():
         sys.modules["agent_server"] = _stub
 
 
+def _preload_backend_routers_namespace():
+    """Pre-register src/backend/routers/ as the `routers` namespace package.
+
+    Migrated from tests/conftest.py (#1895): test_inter_agent_timeout_unit.py
+    installs a PLAIN `routers` module stub at collection time
+    (``sys.modules["routers"] = types.ModuleType("routers")`` — no __path__).
+    A plain module breaks a later ``import routers.public`` in
+    test_ip_rate_limit_fix.py's unit half ("routers is not a package"). The root
+    conftest defused this, but the unit island (norecursedirs = ..) never loaded
+    it. Registering a real namespace package here — before collection — makes the
+    ``if "routers" not in sys.modules`` guard fire so the plain stub is never
+    installed, and upgrades any already-installed plain module to a package.
+    """
+    routers_dir = _BACKEND / "routers"
+    if not routers_dir.exists():
+        return
+    existing = sys.modules.get("routers")
+    if existing is not None:
+        if not getattr(existing, "__path__", None):
+            existing.__path__ = [str(routers_dir)]  # type: ignore[attr-defined]
+            existing.__package__ = "routers"
+        return
+    pkg = types.ModuleType("routers")
+    pkg.__path__ = [str(routers_dir)]  # type: ignore[attr-defined]
+    pkg.__package__ = "routers"
+    sys.modules["routers"] = pkg
+
+
 # Evict any shadow `utils` that parent conftest already cached, then preload
 # backend's utils package.
 for _mod in list(sys.modules):
@@ -160,6 +205,10 @@ _preload_backend_utils()
 
 # Evict any tests/agent_server shadow and register the real base-image package.
 _preload_real_agent_server()
+
+# Register src/backend/routers as a proper namespace package before collection so a
+# plain-module `routers` stub (test_inter_agent_timeout_unit) can't shadow it (#1895).
+_preload_backend_routers_namespace()
 
 # Pre-load services.agent_client so CircuitState is in sys.modules before
 # test_fleet_status_resilience.py / test_voice_tools.py install partial stubs
@@ -304,3 +353,42 @@ def cleanup_after_test():
     _restore_invariant_sys_modules()
     yield
     _restore_invariant_sys_modules()
+
+
+# ---------------------------------------------------------------------------
+# #1895: collection-time restore of the STATELESS shared modules.
+#
+# The autouse per-test restores above run only once collection has finished, so a
+# module that stubs a shared module at COLLECTION (e.g. test_voice_tools installs a
+# `config` stub with a fixed SECRET_KEY) leaks into a LATER file's collection-time
+# capture. test_voice_auth binds `from config import SECRET_KEY` at import and signs
+# JWTs with it, while routers.voice re-reads config.SECRET_KEY at request time — a
+# collection-time config divergence makes every signed token decode as "Invalid
+# token" (WS close 4001) order-dependently.
+#
+# This hook restores ONLY the modules already captured in the baseline above
+# (config, models, database, utils*), each a stateless module (constants /
+# functions / classes) whose object identity a test may capture but whose VALUE is
+# fixed. It deliberately does NOT touch services.settings_service or any other
+# singleton-holding module — those are reloaded by their tests and are confined at
+# the source instead (test_platform_default_model's autouse fixture), because
+# restoring a fresh singleton to a stale baseline is the divergence documented for
+# `agent_server` above.
+# ---------------------------------------------------------------------------
+_COLLECT_RESTORE_KEYS = (
+    "utils",
+    "utils.helpers",
+    "models",
+    "database",
+    "config",
+)
+
+
+def pytest_collectstart(collector):
+    if isinstance(collector, pytest.Module):
+        for _k in _COLLECT_RESTORE_KEYS:
+            _v = _SYS_MODULES_BASELINE_VALUES.get(_k)
+            if _v is not None:
+                sys.modules[_k] = _v
+
+

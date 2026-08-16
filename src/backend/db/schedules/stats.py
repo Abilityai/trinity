@@ -206,8 +206,6 @@ class ScheduleStatsMixin:
 
         Used for the agent detail token usage display (issue #250).
         """
-        from datetime import datetime, timezone, timedelta
-
         cutoff_24h = iso_cutoff(24)
         cutoff_7d = iso_cutoff(168)
 
@@ -242,11 +240,33 @@ class ScheduleStatsMixin:
             context_tokens_7d = row["context_tokens_7d"] or 0
             executions_7d = row["executions_7d"] or 0
 
-            # Per-day breakdown for last 7 days
+            # Per-day breakdown for last 7 days.
+            #
+            # `started_at` is an ISO-Z TEXT column (Invariant #16), so the day
+            # bucket is a SUBSTRING, never a date function — byte-identical
+            # to the bucketer `get_agent_analytics` (#1107) already uses,
+            # so the two day series cannot drift.
+            #
+            # `DATE(started_at)` was NOT dialect-agnostic and failed SILENTLY on
+            # PostgreSQL: `date(x)` there is the type-name-as-function cast, so
+            # the column comes back as a `datetime.date`, while the gap-filled
+            # axis below is keyed by `strftime("%Y-%m-%d")` STRINGS. Every
+            # lookup missed, so the whole series read as legitimate zeros — the
+            # scalar `cost_24h` / `cost_7d` / lifetime fields are computed by a
+            # different query and stayed correct, which is why the agent header
+            # showed a real "Today $100" above a permanently flat sparkline.
+            # Nothing raised, on either backend.
+            #
+            # Pre-#1474 scheduler rows (`YYYY-MM-DD HH:MM:SS`, space separator,
+            # no Z) need no special handling HERE: the separator sits at
+            # position 11, outside a 10-char slice, so both shapes yield the
+            # same day. ent#326's hour bucket does need `replace`, because its
+            # 13-char slice spans the separator — do not copy that expression
+            # here on the strength of the similar name.
             day_rows = conn.execute(
                 text("""
                 SELECT
-                    DATE(started_at) as day,
+                    substr(started_at, 1, 10) as day,
                     SUM(COALESCE(cost, 0)) as day_cost,
                     SUM(COALESCE(context_used, 0)) as day_context_tokens,
                     COUNT(*) as day_executions
@@ -254,13 +274,18 @@ class ScheduleStatsMixin:
                 WHERE agent_name = :agent_name
                   AND started_at > :c7d
                   AND status IN ('success', 'failed')
-                GROUP BY DATE(started_at)
+                GROUP BY substr(started_at, 1, 10)
                 ORDER BY day ASC
                 """),
                 {"agent_name": agent_name, "c7d": cutoff_7d},
             ).mappings().all()
 
-            raw_days = {row["day"]: row for row in day_rows}
+            # Belt to the SQL's braces. The bug above was a KEY-TYPE mismatch
+            # that read as data, so the join is normalized on the Python side
+            # too: whatever a backend hands back, the axis is matched on
+            # `YYYY-MM-DD` text. A future dialect that types this column
+            # differently degrades to correct instead of to silent zeros.
+            raw_days = {_day_bucket_key(row["day"]): row for row in day_rows}
 
             # Build complete 7-day series (fill gaps with zero)
             now_utc = datetime.now(timezone.utc)
@@ -484,6 +509,7 @@ class ScheduleStatsMixin:
         agent_names: Optional[List[str]],  # None = admin (no agent filter)
         group_by: str,
         hours: int,
+        split: Optional[str] = None,
     ) -> List[Dict]:
         """Bucketed fleet execution rollups — the time-series sibling of
         :meth:`get_fleet_execution_stats` (ent#326).
@@ -500,6 +526,13 @@ class ScheduleStatsMixin:
             ``Other`` catch-all, so a newly-added trigger type never silently
             vanishes from a chart.
           * ``agent`` — per agent_name.
+
+        `split="trigger"` adds a SECOND dimension to a time grouping: each hour
+        (or day) additionally carries its own trigger breakdown, so a stacked
+        chart is one request rather than one per bucket name (ent#96). It is
+        only meaningful over a time axis — the router refuses it for
+        `trigger`/`agent`, where it would mean "group by trigger, then by
+        trigger".
 
         Per bucket: execution count, failure count, cost sum, context-token sum.
 
@@ -548,8 +581,16 @@ class ScheduleStatsMixin:
         else:  # pragma: no cover - the router validates first
             raise ValueError(f"unsupported group_by: {group_by}")
 
+        # ent#96: the split is a second GROUP BY column, not a second query.
+        # `triggered_by` is folded to its user-facing bucket in Python (see
+        # `_fold_split_buckets`) for the same reason `group_by=trigger` is: the
+        # `Other` catch-all is a Python map, and a CASE would drop the guarantee
+        # that a newly-added trigger shows up rather than vanishing.
+        split_select = ", triggered_by AS split_key" if split == "trigger" else ""
+        split_group = ", triggered_by" if split == "trigger" else ""
+
         sql = f"""
-            SELECT {key_sql} AS bucket,
+            SELECT {key_sql} AS bucket{split_select},
                    COUNT(*) AS total,
                    SUM(CASE WHEN status IN ('failed', 'error') THEN 1 ELSE 0 END) AS failed,
                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success,
@@ -557,14 +598,15 @@ class ScheduleStatsMixin:
                    SUM(COALESCE(context_used, 0)) AS context_used
             FROM schedule_executions
             WHERE {" AND ".join(where)}
-            GROUP BY {key_sql}
+            GROUP BY {key_sql}{split_group}
         """
 
         with get_engine().connect() as conn:
             rows = conn.execute(text(sql), bind).mappings().all()
 
-        return [
-            {
+        out = []
+        for r in rows:
+            row = {
                 "bucket": r["bucket"],
                 "total": int(r["total"] or 0),
                 "failed": int(r["failed"] or 0),
@@ -572,11 +614,25 @@ class ScheduleStatsMixin:
                 "cost": round(float(r["cost"] or 0.0), 6),
                 "context_used": int(r["context_used"] or 0),
             }
-            for r in rows
-        ]
+            if split == "trigger":
+                row["split_key"] = r["split_key"]
+            out.append(row)
+        return out
+
+    def trigger_bucket_order(self) -> List[str]:
+        """The stack/legend order for trigger buckets (ent#96).
+
+        Exposed through the facade so a caller — the timeline route, and any
+        future tile — reads the SAME `_BUCKET_ORDER` the folding uses instead
+        of holding its own copy. A second list is how a chart and its legend
+        come to disagree about where `Other` sits (the #1107 lesson this
+        module's `_fold_trigger_buckets` already records).
+        """
+        return list(_BUCKET_ORDER)
 
     def shape_execution_timeline(
-        self, rows: List[Dict], *, group_by: str, hours: int
+        self, rows: List[Dict], *, group_by: str, hours: int,
+        split: Optional[str] = None,
     ) -> List[Dict]:
         """Post-SQL shaping for :meth:`get_fleet_execution_timeline` (ent#326).
 
@@ -584,7 +640,36 @@ class ScheduleStatsMixin:
         same `DatabaseManager` facade as the query it shapes, rather than the
         router importing a private db symbol directly.
         """
-        return _shape_execution_timeline(rows, group_by=group_by, hours=hours)
+        return _shape_execution_timeline(
+            rows, group_by=group_by, hours=hours, split=split
+        )
+
+
+def _day_bucket_key(value) -> str:
+    """Normalize a SQL day bucket to the `YYYY-MM-DD` text the axis is keyed by.
+
+    `get_agent_token_stats` joins SQL buckets to a Python-generated
+    `strftime("%Y-%m-%d")` axis, and a dict lookup between a `str` and a
+    `datetime.date` does not raise — it MISSES, and a missed bucket is
+    indistinguishable from a day with no executions. That is exactly how the
+    header sparkline went flat on PostgreSQL while every scalar beside it
+    stayed right.
+
+    So the join key is normalized rather than trusted. `date`/`datetime`
+    stringify to an ISO prefix, so one slice covers text and both temporal
+    types; anything else is coerced first so a surprising type degrades to a
+    non-matching STRING (a real gap) instead of an unhashable or a type-based
+    silent miss.
+
+    Scope, stated precisely: this closes the type mismatch, NOT every possible
+    key hazard. The call site builds a dict comprehension, so if a backend ever
+    returned SUB-DAY buckets they would collide here and the last row would win
+    rather than being summed. That cannot happen against the `substr(..., 1, 10)`
+    above — one bucket per day by construction — which is why the call site is
+    a comprehension and not an accumulator; a different bucket expression would
+    have to revisit this.
+    """
+    return str(value)[:10]
 
 
 def _empty_bucket(key: str) -> Dict:
@@ -652,8 +737,35 @@ def _gap_fill(rows: List[Dict], *, group_by: str, hours: int) -> List[Dict]:
     return out
 
 
+def _fold_split_buckets(rows: List[Dict]) -> List[Dict]:
+    """Collapse `(time bucket, raw trigger)` rows into one row per time bucket
+    carrying a `by_trigger` breakdown (ent#96).
+
+    The totals are re-summed from the split rows rather than queried twice, so
+    the stack can never disagree with the column it sits in — the failure mode
+    a second query invites, and the reason AC1 asks for one grouping shared by
+    tile, legend and Overview.
+
+    Trigger labels come from `_bucket_for_trigger`, i.e. the SAME `Other`
+    catch-all `group_by=trigger` uses. Per label we keep `total` AND `failed`:
+    a stacked chart that showed only totals would hide failures inside them,
+    which this tile exists not to do.
+    """
+    folded: Dict = {}
+    for row in rows:
+        key = row["bucket"]
+        target = folded.setdefault(key, _empty_bucket(key))
+        target.setdefault("by_trigger", {})
+        _accumulate(target, row)
+        label = _bucket_for_trigger(row.get("split_key"))
+        entry = target["by_trigger"].setdefault(label, {"total": 0, "failed": 0})
+        entry["total"] += row["total"]
+        entry["failed"] += row["failed"]
+    return list(folded.values())
+
+
 def _shape_execution_timeline(
-    rows: List[Dict], *, group_by: str, hours: int
+    rows: List[Dict], *, group_by: str, hours: int, split: Optional[str] = None
 ) -> List[Dict]:
     """Post-SQL shaping for :meth:`get_fleet_execution_timeline` (ent#326).
 
@@ -664,8 +776,18 @@ def _shape_execution_timeline(
     with a literal fallback and sorted alphabetically, which put `Other` in
     the middle of a chart the Overview page renders `Other`-last.
     """
+    if split == "trigger":
+        # Fold the second dimension away FIRST, then gap-fill: the axis has to
+        # be built from one row per interval, and a gap-filled empty bucket
+        # carries an empty breakdown rather than a missing key, so a chart never
+        # has to distinguish "no runs" from "no field".
+        rows = _fold_split_buckets(rows)
     if group_by == "trigger":
         return _fold_trigger_buckets(rows)
     if group_by in ("hour", "day"):
-        return _gap_fill(rows, group_by=group_by, hours=hours)
+        filled = _gap_fill(rows, group_by=group_by, hours=hours)
+        if split == "trigger":
+            for row in filled:
+                row.setdefault("by_trigger", {})
+        return filled
     return rows

@@ -2,7 +2,7 @@
   <div class="overflow-x-auto">
     <table class="min-w-full text-sm">
       <thead>
-        <tr class="text-left text-xs text-gray-500 border-b border-gray-200 dark:border-gray-700">
+        <tr class="text-left text-xs text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-700">
           <th v-for="col in columns" :key="col" class="py-1.5 pr-4 font-medium">{{ col }}</th>
         </tr>
       </thead>
@@ -26,7 +26,7 @@
     <!-- #1537: a tabular report is fetched a page at a time, so the card shows
          how much of the set it is holding and can pull the next window. -->
     <div v-if="meta && meta.total > rows.length" class="mt-2 flex items-center gap-3">
-      <span class="text-xs text-gray-500">
+      <span class="text-xs text-gray-500 dark:text-gray-400">
         Showing {{ rows.length.toLocaleString() }} of {{ meta.total.toLocaleString() }} rows
       </span>
       <button

@@ -105,6 +105,11 @@ def patched_loop(monkeypatch):
     monkeypatch.setattr(he, "_terminate_process_group", term)
     monkeypatch.setattr(he, "_drain_bounded", MagicMock())
     monkeypatch.setattr(he, "_WAIT_POLL_S", 0.05)
+    # #2127: early completion now also requires the stream to have gone quiet
+    # (production ceiling 300s). Scale it down so these #970 cases still assert
+    # the same behaviour — "turn over + process lingering ⇒ finalize early" —
+    # rather than burning their effective_timeout.
+    monkeypatch.setenv("AGENT_IDLE_FINALIZE_S", "0.15")
     return monkeypatch, term
 
 

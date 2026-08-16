@@ -3,9 +3,10 @@ Docker service for managing agent containers.
 """
 import logging
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional, Set
 import docker
 from models import AgentStatus
+from redis_breaker_util import get_breaker_redis
 from utils.helpers import parse_iso_timestamp, utc_now
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,27 @@ logger = logging.getLogger(__name__)
 # under a race is harmless.
 _SOCKET_WARN_THROTTLE_S = 60.0
 _last_socket_warn_monotonic: Optional[float] = None
+
+# #2196: the tri-state readers below get their OWN throttle slots. Sharing
+# `_last_socket_warn_monotonic` would let whichever function warned first
+# silence the others for a full window — so a persistent fault on the roster
+# path could go unlogged because an unrelated poll had just reported it.
+_last_warn_monotonic: Dict[str, float] = {}
+
+
+def _warn_throttled(slot: str, message: str, *args) -> None:
+    """WARN at most once per `_SOCKET_WARN_THROTTLE_S` per `slot` (#2196).
+
+    Same rationale as `list_all_agents_fast`'s throttle: a denied socket is a
+    persistent condition on a per-request path, so an unthrottled warn floods
+    Vector — but the failure must stay diagnosable, and a silent Docker fault is
+    exactly what makes the tri-state distinction unverifiable in production.
+    """
+    now = time.monotonic()
+    last = _last_warn_monotonic.get(slot)
+    if last is None or now - last >= _SOCKET_WARN_THROTTLE_S:
+        _last_warn_monotonic[slot] = now
+        logger.warning(message, *args)
 
 
 # Initialize Docker client
@@ -237,6 +259,121 @@ def list_all_agents_fast() -> List[AgentStatus]:
         return []
 
 
+# #2196: the tri-state container-state readers.
+#
+# NO pre-existing helper in this module can distinguish "Docker says this agent
+# has no container" from "Docker could not be asked": `get_agent_container`
+# returns None for both, and `list_all_agents_fast` returns [] for both. That one
+# missing distinction is why a naive "hide agents with no container" reconcile is
+# dangerous — a daemon restart or a wrong `group_add` GID would report the whole
+# fleet as absent, which on the client-facing Workspace roster means telling a
+# paying customer they have no agents.
+#
+# So these two return `None` for *unreadable* and a real answer otherwise, and
+# every consumer is expected to treat `None` as "render as if nothing changed".
+# `list_all_agents_fast`'s []-on-fault contract is deliberately NOT changed —
+# ~60 stub sites and many callers depend on it.
+
+
+def agent_container_states() -> Optional[Dict[str, str]]:
+    """Every Trinity agent container's coarse state, in ONE Docker round trip.
+
+    Returns ``{agent_name: "running" | "stopped"}``, or ``None`` when Docker
+    could not be asked. ``{}`` is a real answer ("Docker looked; there are no
+    agent containers") and is deliberately distinct from ``None``.
+
+    ``sparse=True`` is load-bearing, and it constrains the body:
+
+    * Without it, docker-py's ``ContainerCollection.list`` runs a FULL INSPECT
+      per container (``containers.append(self.get(r['Id']))``), so this would
+      cost ``1 list + N_fleet inspects`` — worse than the N_roster inspects it
+      replaces for the typical 1-3-agent Workspace client on a large fleet.
+      With it, the cost is one HTTP call regardless of fleet size.
+    * Under sparse, ``container.name`` returns **None** (the summary carries
+      ``Names``, a list, not ``Name``) and ``container.labels`` **raises**
+      ``DockerException``. Both fail in the *safe* direction — every caller
+      would read "unknown" forever with a green test suite — so the key is taken
+      from ``attrs["Names"][0]`` and the label is never read here.
+      ``container.status`` is safe: its property handles both shapes.
+
+    Keyed by container NAME, never by the ``trinity.agent-name`` label: rename
+    moves the container name (``docker_utils.container_rename``) while the label
+    is written once at create and goes stale, so label-keying would report every
+    renamed agent as having no container. Same reason
+    ``list_all_agents_fast`` says "use container name as authoritative source".
+
+    The status is classified EXPLICITLY. ``list_all_agents_fast`` falls through
+    with ``else: normalized_status = docker_status``, which passes ``paused``,
+    ``restarting`` and — routinely, during any delete — ``removing`` straight to
+    the caller; consumers of this function map the result onto a closed set, so a
+    raw status escaping here would fail their validation instead of degrading.
+    """
+    if not docker_client:
+        return None
+    try:
+        containers = docker_client.containers.list(
+            all=True,
+            filters={"label": "trinity.platform=agent"},   # server-side; unaffected by sparse
+            sparse=True,
+        )
+        states: Dict[str, str] = {}
+        for container in containers:
+            raw = (container.attrs.get("Names") or [""])[0] or ""
+            name = raw.lstrip("/").removeprefix("agent-")
+            if not name:
+                continue
+            states[name] = "running" if container.status == "running" else "stopped"
+        return states
+    except Exception as e:  # noqa: BLE001 — unreadable Docker is a valid answer here
+        # Total by design: anything unexpected (no daemon, denied socket, a shape
+        # this code does not understand) resolves to "could not be asked", which
+        # every consumer renders as today's behaviour. A partial map would be
+        # worse — a skipped entry reads as "that agent has no container".
+        _warn_throttled(
+            "agent_container_states",
+            "Failed to read agent container states from Docker: %s", e,
+        )
+        return None
+
+
+def agent_container_state(name: str) -> Optional[str]:
+    """One agent's coarse state: ``"running"``/``"stopped"``/``"missing"``, or
+    ``None`` when Docker could not be asked.
+
+    The single-agent form exists so opening ONE agent's page (or taking one
+    turn) does not pay a fleet-scale read — the property #2160 exists to
+    protect. ``containers.get()`` is not sparse, so ``.labels`` is readable
+    here, and the ``trinity.platform`` check is what makes the two forms answer
+    the SAME question: the batch call filters on that label server-side, so
+    without this check a container merely *named* ``agent-x`` would read as
+    absent on the roster and present on the page.
+    """
+    if not docker_client:
+        return None
+    try:
+        container = docker_client.containers.get(f"agent-{name}")
+    except docker.errors.NotFound:
+        # The distinction `get_agent_container` cannot make: Docker answered,
+        # and the answer is "there is no such container".
+        return "missing"
+    except Exception as e:  # noqa: BLE001
+        _warn_throttled(
+            "agent_container_state",
+            "Failed to read container state for agent %s from Docker: %s", name, e,
+        )
+        return None
+    try:
+        if (container.labels or {}).get("trinity.platform") != "agent":
+            return "missing"
+        return "running" if container.status == "running" else "stopped"
+    except Exception as e:  # noqa: BLE001
+        _warn_throttled(
+            "agent_container_state",
+            "Failed to classify container state for agent %s: %s", name, e,
+        )
+        return None
+
+
 def get_agent_by_name(name: str) -> Optional[AgentStatus]:
     """Get a specific agent by name from Docker."""
     container = get_agent_container(name)
@@ -246,7 +383,15 @@ def get_agent_by_name(name: str) -> Optional[AgentStatus]:
 
 
 def is_port_available(port: int) -> bool:
-    """Check if a port is available on the host system."""
+    """Check if a port is available on the host system.
+
+    #2215 NB: this binds inside the BACKEND CONTAINER'S OWN network namespace.
+    Agent SSH ports are host-published by Docker, so another agent's bind is
+    invisible from here in production — this is a weak extra filter (it still
+    catches backend-container-local binds), never the collision guard. The
+    real guards are the label scan + the Redis reservation in
+    `get_next_available_port`, plus the bind-conflict retry in crud (D2).
+    """
     import socket
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -257,30 +402,172 @@ def is_port_available(port: int) -> bool:
         return False
 
 
-def get_next_available_port() -> int:
-    """Get next available SSH port by checking existing containers and host availability.
+# ---------------------------------------------------------------------------
+# SSH-port allocation (#2215)
+# ---------------------------------------------------------------------------
 
-    Finds the next port that is:
-    1. Not used by any existing Trinity agent container
-    2. Actually available on the host system (not bound by other processes)
+# Transient per-port reservation bridging the allocator's check and the
+# caller's `containers.run`. Once the container exists, its `trinity.ssh-port`
+# label is the durable truth (Invariant #11) — the reservation is never a port
+# registry, so there is NO release path and NO refresh: TTL-only self-heal.
+# crud allocates immediately before the container run (inside its rollback
+# fence, after config staging / MCP-key mint / env build / the ent#15 snapshot
+# prepopulate / volume builds), so the reserved window is essentially the
+# `containers.run` itself plus the bounded bind-conflict retries; the other
+# callers (`recreate_missing_container`, the system-agent bootstrap) run within
+# a few statements of allocating. 600s is many-x headroom even over the
+# observed 60s Docker read timeout; an expired reservation degrades to today's
+# behaviour PLUS the crud bind-conflict retry (#2215 D2), and an orphaned
+# reservation after a failed create idles one port of ~279 for 10 min.
+# Keyspace note (#1560): `port_alloc:{port}` is deliberately NOT `agent:*` —
+# the agent_runtime_state registry governs agent-NAME-keyed state cleared
+# across the agent lifecycle; this key is port-keyed and self-expiring, and no
+# lifecycle event should clear it (clearing a reservation on an agent event
+# would un-reserve a port mid-create). Precedent: `ephemeral:quota:{owner_id}`.
+_PORT_RESERVATION_TTL_SECONDS = 600
+_PORT_RESERVATION_KEY_PREFIX = "port_alloc:"
+
+
+def _existing_agent_ports_strict() -> Set[int]:
+    """Agent SSH ports from container labels — RAISING on a Docker fault.
+
+    Deliberately not `list_all_agents_fast()`: its #1131 swallow degrades a
+    listing fault to `[]`, which here would make the allocator compute
+    `start_port = 2222` and confidently reserve an existing agent's port —
+    `is_port_available` is netns-blind in production, so nothing would catch
+    it, and the bounded bind-retry (D2) can't outrun a whole fleet. A failed
+    allocation is strictly better than a guaranteed collision, and every
+    caller is about to talk to Docker anyway. `docker_client is None` (demo
+    mode) still returns the empty set — crud's own 503 fires later, preserving
+    demo behaviour. A malformed per-container label skips that container only.
     """
-    agents = list_all_agents_fast()  # Only need port info from labels
-    existing_ports = set(a.port for a in agents if a.port)
+    if not docker_client:
+        return set()
+    try:
+        containers = docker_client.containers.list(
+            all=True,
+            filters={"label": "trinity.platform=agent"},
+        )
+    except Exception as e:
+        raise RuntimeError(
+            f"cannot allocate a port: Docker listing failed ({e})"
+        ) from e
+    ports: Set[int] = set()
+    for container in containers:
+        try:
+            port = int(container.labels.get("trinity.ssh-port", "0"))
+        except Exception:
+            continue
+        if port:
+            ports.add(port)
+    return ports
+
+
+def _try_reserve_port(client, port: int) -> bool:
+    """`SET port_alloc:{port} "1" NX EX 600` — True reserved, False contended.
+
+    Redis exceptions PROPAGATE; the caller decides fail-open. A dropped `ex`
+    would make a stale key permanently unallocatable (no reaper exists), so
+    the TTL rides on every reservation.
+    """
+    return bool(
+        client.set(
+            f"{_PORT_RESERVATION_KEY_PREFIX}{port}",
+            "1",
+            nx=True,
+            ex=_PORT_RESERVATION_TTL_SECONDS,
+        )
+    )
+
+
+def reserve_port_for_recreate(port: int) -> None:
+    """Re-assert the reservation for a port a recreate is about to reuse (#2215).
+
+    `recreate_container_with_updated_config` keeps the labeled port across its
+    remove->create gap, during which the port is invisible to the allocator —
+    and the most-recreated agent tends to hold the fleet's MAX port, exactly
+    what a concurrent allocation computes as max+1. SET **without NX** (it is
+    that agent's own port; a stale reservation must never block the recreate),
+    same TTL. Fail-open, never raises — the reservation is a belt, not a gate.
+    """
+    try:
+        client = get_breaker_redis()
+        if client is None:
+            return
+        client.set(
+            f"{_PORT_RESERVATION_KEY_PREFIX}{port}",
+            "1",
+            ex=_PORT_RESERVATION_TTL_SECONDS,
+        )
+    except Exception as e:
+        logger.warning("Port %d recreate-reservation failed-open (%s)", port, e)
+
+
+def get_next_available_port(exclude: Optional[Set[int]] = None) -> int:
+    """Allocate the next SSH port for a new agent container.
+
+    A candidate must pass, in order:
+      1. not used by any existing Trinity agent container (STRICT label scan —
+         a Docker listing fault raises instead of degrading to the empty set);
+      2. not in ``exclude`` (ports the caller already tried and failed to bind);
+      3. `is_port_available(port)` — weak, netns-blind extra filter (see above);
+      4. the per-port Redis reservation (`port_alloc:{port}`, SETNX + 600s TTL)
+         as the LAST gate, so reservations never leak onto candidates the scan
+         walks past (a host-bound port must not hold a 600s reservation).
+
+    Guarantee, stated precisely (#2215): with Redis up, two concurrent callers
+    structurally cannot be ASSIGNED the same port — the SETNX is the atomic
+    arbiter. With Redis down (every lock in this codebase deliberately fails
+    open, and they share one client, so every guard degrades together), a
+    same-port assignment is *convergent-under-retry*: it is detected at bind
+    time and resolved within the same create call by crud's bounded
+    bind-conflict retry (D2), which re-allocates with the failed ports
+    excluded. Do NOT build on "atomic, unconditionally".
+
+    SETNX contention (False) means a concurrent allocator holds that candidate
+    — scan on to the next. Only a RAISED Redis error fails open: warn and
+    return the current candidate unreserved (D2 converges any resulting
+    collision). Redis-down cost is one ~1s bounded connect per call —
+    `get_breaker_redis` pins 1s socket timeouts and caches only on success.
+    """
+    existing_ports = _existing_agent_ports_strict()
+    # Merge ONCE, before both scan loops, so exclusion binds the forward scan
+    # AND the 2222-2500 fallback scan.
+    existing_ports |= exclude or set()
+
+    redis_client = get_breaker_redis()  # resolved once per call; None => unreserved
+
+    def _first_allocatable(candidates) -> Optional[int]:
+        for port in candidates:
+            if port in existing_ports or not is_port_available(port):
+                continue
+            if redis_client is None:
+                return port
+            try:
+                if _try_reserve_port(redis_client, port):
+                    return port
+            except Exception as e:
+                logger.warning(
+                    "Port reservation failed-open (%s) — returning %d unreserved",
+                    e,
+                    port,
+                )
+                return port
+            # SETNX contention: a concurrent allocator holds this candidate —
+            # keep scanning.
+        return None
 
     # Start from max existing port + 1, or 2222 if no agents exist
     start_port = max(existing_ports or {2221}) + 1
 
     # Try up to 100 ports to find an available one
-    for port in range(start_port, start_port + 100):
-        if port not in existing_ports and is_port_available(port):
-            return port
-
-    # Fallback: if all sequential ports are taken, scan from base
-    for port in range(2222, 2500):
-        if port not in existing_ports and is_port_available(port):
-            return port
-
-    raise RuntimeError("No available ports in range 2222-2500")
+    port = _first_allocatable(range(start_port, start_port + 100))
+    if port is None:
+        # Fallback: if all sequential ports are taken, scan from base
+        port = _first_allocatable(range(2222, 2500))
+    if port is None:
+        raise RuntimeError("No available ports in range 2222-2500")
+    return port
 
 
 async def execute_command_in_container(container_name: str, command: str, timeout: int = 60) -> dict:

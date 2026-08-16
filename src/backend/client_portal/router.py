@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+from typing import Optional
 
 import httpx
 from fastapi import (
@@ -30,13 +31,12 @@ from dependencies import (
     reject_agent_principal,
     require_admin,
 )
-from models import User
-
+from models import REPORT_ROWS_PAGE_MAX, User
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
 
-from . import service
+from . import agent_page, service
 from .models import (
     PortalAuthRequest,
     PortalAuthVerify,
@@ -57,7 +57,11 @@ from .models import (
     PortalRoster,
     PortalSearchResults,
     PortalSession,
+    PortalAllSessions,
     PortalSessions,
+    PortalAgentPage,
+    PortalAgentReports,
+    PortalChatState,
     PortalSessionSummary,
     PortalTtsRequest,
     PortalTurnStarted,
@@ -471,6 +475,189 @@ def portal_search(q: str = "", limit: int = 30, principal: PortalPrincipal = Dep
     # No agent gate here: search is scoped to the caller's own portal rows by
     # email, so there is no roster decision to mirror.
     return service.search_chats(principal.email, q, limit=min(max(limit, 1), 50))
+
+
+@router.get("/sessions", response_model=PortalAllSessions)
+def portal_all_sessions(principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Every conversation thread the signed-in viewer has, across every agent on
+    their roster — the Workspace sidebar's list, in one call (#2198).
+
+    Declared HERE, beside `/my-agents`, `/search` and `/chat-state`, because it is
+    the same kind of thing: viewer-scoped, no agent parameter. `Portal.vue` already
+    articulated the shape when `/chat-state` was added — "kept out of
+    `fetchAllSessions` on purpose: that call fans out over the roster and degrades
+    per agent, while this is one call for the whole viewer". Sessions now join it.
+
+    Invariant #4: this router has no top-level `/{param}` catch-all today (every
+    segment-1 is a literal), so `sessions` cannot be shadowed — but keeping it in
+    this block means a future catch-all cannot capture it either.
+
+    Invariant #8: no agent parameter, so there is no existence oracle to probe —
+    strictly LESS enumerable than the per-agent route it replaces.
+    """
+    email = principal.email
+    # ent#358: the scope of what a caller can DO must equal what they can SEE.
+    include_owned = principal.is_platform
+
+    from services import rate_limiter
+
+    # This becomes the hottest authenticated read in the Workspace — six
+    # `refreshThreads()` call sites including every thread open and every
+    # completed turn — and unlike the fan-out it replaces it is no longer even
+    # incidentally throttled by the browser's per-host connection cap (and in
+    # production, behind cloudflared/HTTP-2, there is no such cap at all). There
+    # is no global limiter middleware, so every bounded portal surface enforces
+    # explicitly; this follows `portal_report_detail`.
+    rate_limiter.enforce(f"portal_sessions_all:{email}", 120, 60)
+    try:
+        return service.list_all_sessions(email, include_owned=include_owned)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+# --- Per-user chat state: stars + unread (ent#359) ----------------------------
+#
+# No roster gate on any of the three. Every row is keyed by the caller's own
+# email, so these read and write exactly one tenant's state and there is no agent
+# to authorize against. Neither writer checks that the chat exists, deliberately:
+# a 404 for an unknown id would turn `star` into an existence oracle over every
+# chat id in the install (OSS invariant #8). The service's row cap is what bounds
+# writing junk ids instead.
+
+@router.get("/chat-state", response_model=PortalChatState)
+def portal_chat_state(principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Star + unread state for the signed-in viewer's chats, both kinds."""
+    return service.get_chat_state(principal.email)
+
+
+@router.put("/chat-state/{chat_kind}/{chat_id}/star", status_code=204)
+def portal_star_chat(chat_kind: str, chat_id: str,
+                     principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Pin a chat above the sidebar's date groups, for this viewer only."""
+    try:
+        service.set_chat_star(principal.email, chat_kind, chat_id, True)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    return Response(status_code=204)
+
+
+@router.delete("/chat-state/{chat_kind}/{chat_id}/star", status_code=204)
+def portal_unstar_chat(chat_kind: str, chat_id: str,
+                       principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Unpin a chat. Keeps the row — it still carries the read cursor."""
+    try:
+        service.set_chat_star(principal.email, chat_kind, chat_id, False)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    return Response(status_code=204)
+
+
+@router.post("/chat-state/{chat_kind}/{chat_id}/read", status_code=204)
+def portal_mark_chat_read(chat_kind: str, chat_id: str,
+                          principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Advance this viewer's read cursor — clears the chat's unread count and
+    its share of the agent row's badge."""
+    try:
+        service.mark_chat_read(principal.email, chat_kind, chat_id)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    return Response(status_code=204)
+
+
+# --- The agent page (ent#360) -------------------------------------------------
+#
+# Roster-gated like every other per-agent route. Read-only by construction:
+# nothing here writes, and the payload carries no schedules, skills, logs, costs
+# or model — AC #7 keeps configuration operator-side, and the viewer may be an
+# external client rather than an operator.
+
+@router.get("/agents/{agent_name}/page", response_model=PortalAgentPage)
+async def portal_agent_page(
+    agent_name: str,
+    window: str = "7d",
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Everything the agent page needs, in one call.
+
+    One request rather than five because the page is one screen: fetching the
+    header, stats, asks and recent work separately renders it in pieces, and a
+    stats call that outruns the header shows numbers above a nameless card.
+    """
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    if window not in agent_page.WINDOWS:
+        raise HTTPException(status_code=422, detail="Unknown window")
+    # #2160: ONE card, not the whole roster. This projected the roster's card so
+    # the page and the sidebar could not disagree about an agent's capabilities —
+    # correct, but it built every card and fanned `_agent_briefing` across the
+    # whole fleet to use one, making the page's load time depend on the slowest
+    # agent in it. `get_agent_card` keeps the shared builder and does one.
+    card = await service.get_agent_card(email, agent_name,
+                                        include_owned=principal.is_platform)
+    return agent_page.build_page(
+        email, agent_name, card.model_dump() if card else None, window=window,
+    )
+
+
+@router.get("/agents/{agent_name}/reports", response_model=PortalAgentReports)
+def portal_agent_reports(
+    agent_name: str,
+    limit: int = 20,
+    offset: int = 0,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Report metadata for the page's Reports tab. Payloads are fetched per
+    report on expansion — one is capped at 5 MiB (`REPORT_PAYLOAD_MAX_BYTES`,
+    raised from 256 KB in #1537) and a list of them is not a list view."""
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    return {
+        "agent_name": agent_name,
+        "reports": agent_page.reports(
+            agent_name, limit=min(max(limit, 1), 50), offset=max(offset, 0)
+        ),
+    }
+
+
+@router.get("/agents/{agent_name}/reports/{report_id}")
+def portal_agent_report_detail(
+    agent_name: str,
+    report_id: str,
+    rows_offset: int = Query(0, ge=0),
+    rows_limit: Optional[int] = Query(None, ge=1, le=REPORT_ROWS_PAGE_MAX),
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """One report's payload. The report must belong to the path agent — a report
+    id from another agent returns the same 404 as one that does not exist, so
+    this is not a cross-agent read oracle.
+
+    `rows_offset`/`rows_limit` (#2162) window a **tabular** payload's rows, so a
+    large table is not shipped whole to a client — #1537's pattern, without
+    #1537's route: the operator row reader is JWT-gated and a portal principal
+    cannot reach it, and a second route here would need a second copy of the
+    uniform-404 contract above. Both params are optional and default to today's
+    behaviour; a non-tabular payload with `rows_limit` set comes back whole with
+    no `row_meta` rather than a 400, because the server holds the payload and the
+    client should not have to guess its shape from an agent-authored hint.
+
+    Bounds come from `models.REPORT_ROWS_PAGE_MAX`, the same constant the
+    operator reader uses — imported, never re-typed, so the two page sizes cannot
+    drift apart with each side's tests pinning its own version.
+    """
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import rate_limiter
+
+    # Paging re-reads and re-parses the whole (≤5 MiB) blob per request, so the
+    # route that exists to cut TRANSFER raises READS — fine behind an operator
+    # JWT, an amplification primitive on a prefix a client can loop. Keyed after
+    # the roster gate so an unreachable agent can never mint limiter keys.
+    rate_limiter.enforce(f"portal_report_detail:{email}:{agent_name}", 60, 60)
+    report = agent_page.report_detail(
+        agent_name, report_id, rows_offset=rows_offset, rows_limit=rows_limit,
+    )
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return report
 
 
 @router.post("/agents/{agent_name}/chat", response_model=PortalChatResponse)

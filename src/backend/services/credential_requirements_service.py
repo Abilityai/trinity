@@ -508,7 +508,8 @@ def _observed_operator_names(facts: Dict[str, Any]) -> List[Dict[str, str]]:
     `credentials: {}` and 13 declare nothing at all, so a legacy template with
     `${SLACK_BOT_TOKEN}` in `.mcp.json.template` would render "Ready — this
     agent needs no credentials". The codebase already treats
-    undeclared-but-referenced as a HARD compatibility failure (K-002/T-015).
+    undeclared-but-referenced as a HARD compatibility failure (T-015; its
+    #    duplicate K-002 was retired in #2137).
 
     These names are an ANTI-GREEN SIGNAL and nothing more. `.mcp.json.template`
     never becomes a declaration authority — the schema's authoring note forbids

@@ -19,6 +19,7 @@
 import { defineStore } from 'pinia'
 import axios from 'axios'
 import { useAuthStore } from './auth'
+import { once } from '../utils/inflight'
 
 export const useEnterpriseStore = defineStore('enterprise', {
   state: () => ({
@@ -42,9 +43,16 @@ export const useEnterpriseStore = defineStore('enterprise', {
         return
       }
       try {
-        const r = await axios.get('/api/settings/feature-flags', {
-          headers: authStore.authHeader,
-        })
+        // #2198: same URL, same key as `stores/sessions.js` — see the note
+        // there. The `isAuthenticated` short-circuit above is deliberately
+        // OUTSIDE the shared fetch: sessions.js has no such guard, so folding
+        // the two together would start issuing a request on a path that today
+        // issues none.
+        const r = await once(
+          'featureFlags',
+          () => axios.get('/api/settings/feature-flags', { headers: authStore.authHeader }),
+          { force }
+        )
         this.enterpriseFeatures = Array.isArray(r.data?.enterprise_features)
           ? r.data.enterprise_features
           : []

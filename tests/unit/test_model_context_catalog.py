@@ -19,6 +19,7 @@ import pytest
 # conftest wires docker/base-image/agent_server as the `agent_server` package.
 from agent_server.model_context import (  # noqa: E402
     CODEX_CONTEXT_WINDOW,
+    CODEX_EXTENDED_CONTEXT_WINDOW,
     DEFAULT_CONTEXT_WINDOW,
     EXTENDED_CONTEXT_WINDOW,
     pick_context_window,
@@ -55,6 +56,15 @@ class TestResolveContextWindow:
             ("gemini-3-flash", EXTENDED_CONTEXT_WINDOW),
             ("gemini-3-pro", EXTENDED_CONTEXT_WINDOW),
             ("gpt-5.1-codex", CODEX_CONTEXT_WINDOW),
+            # #2207 — the 5.6 family's window is 1.05M; 272K is only its PRICE
+            # break. Listed before "gpt-5" in _FAMILY_PREFIX_WINDOWS, so an
+            # accidental reorder shows up here.
+            ("gpt-5.6-sol", CODEX_EXTENDED_CONTEXT_WINDOW),
+            ("gpt-5.6-terra", CODEX_EXTENDED_CONTEXT_WINDOW),
+            ("gpt-5.6-luna", CODEX_EXTENDED_CONTEXT_WINDOW),
+            # A future generation must still land on the SAFE (small) floor here
+            # — the deliberate inverse of the pricing matcher (see the module).
+            ("gpt-5.7-sol", CODEX_CONTEXT_WINDOW),
             ("codex", CODEX_CONTEXT_WINDOW),
             # unknown / empty / None → safe floor
             ("some-future-model-x", DEFAULT_CONTEXT_WINDOW),

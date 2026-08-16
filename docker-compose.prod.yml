@@ -101,6 +101,11 @@ services:
       - VOIP_CALL_RATE_WINDOW=${VOIP_CALL_RATE_WINDOW:-60}        # rate-limit window (s)
       - VOIP_TICKET_TTL_SECONDS=${VOIP_TICKET_TTL_SECONDS:-180}   # Media Streams WSS ticket TTL
       - VOIP_INTENT_TTL_SECONDS=${VOIP_INTENT_TTL_SECONDS:-180}   # staged Gemini-intent TTL
+      # Outbound A2A calls (#736) — a Trinity agent tasking an EXTERNAL A2A agent.
+      # Opt-in, default OFF. The DB row (system_settings) is the primary leg, so a
+      # gap here cannot make the feature unreachable — but the env leg still has to
+      # be forwarded or an operator setting it in .env silently does nothing.
+      - A2A_OUTBOUND_ENABLED=${A2A_OUTBOUND_ENABLED:-false}
       # Outbound voice replies via shared TTS (epic #24; Telegram #25). The key
       # gates the feature (empty ⇒ adapters deliver text). Prod compose launches
       # standalone (no base merge / env_file), so wire it here too (#1056 class).
@@ -204,6 +209,7 @@ services:
       # it must reach the backend here or the .env lever is inert (#1039 class).
       # Default (1800s) lives agent-side; 0/negative disables. Recreate to apply.
       - AGENT_TOOL_STALL_LIMIT_S=${AGENT_TOOL_STALL_LIMIT_S:-}
+      - AGENT_IDLE_FINALIZE_S=${AGENT_IDLE_FINALIZE_S:-}
       # #946 pull-pilot routing flag (observability mirror of the mcp-server gate).
       - MCP_AGENT_CHAT_PULL_ENABLED=${MCP_AGENT_CHAT_PULL_ENABLED:-false}
       # #848 inline email auth — read by BOTH processes from this one key. The
@@ -667,6 +673,10 @@ services:
       # #848 ceiling for the four backend relay fetches on the inline-auth path.
       # Functional via its 15000ms default; wired so the lever is not inert.
       - MCP_INLINE_AUTH_TIMEOUT_MS=${MCP_INLINE_AUTH_TIMEOUT_MS:-15000}
+      # #736 ceiling for the mcp-server's own outbound-A2A fetches. Must stay
+      # below the MCP client's gateway abort — see docker-compose.yml.
+      # Functional via its 40000ms default; wired so the lever is not inert.
+      - MCP_A2A_TIMEOUT_MS=${MCP_A2A_TIMEOUT_MS:-40000}
       # ent#328: `ask_trinity` POSTs here for grounded Trinity docs answers.
       # Empty = the public Cloud Function default baked into the client.
       - ASK_TRINITY_ENDPOINT=${ASK_TRINITY_ENDPOINT:-}

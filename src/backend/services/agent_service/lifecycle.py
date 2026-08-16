@@ -19,10 +19,11 @@ from services.docker_service import (
     docker_client,
     get_agent_container,
     get_next_available_port,
+    reserve_port_for_recreate,
 )
 from services.docker_utils import (
     container_stop, container_remove, container_start, container_reload,
-    volume_get, volume_create, containers_run, image_get
+    volume_get, volume_create, containers_run, image_get, container_stop
 )
 from services.agent_service.helpers import validate_base_image
 from services.agent_runtime_state import clear_agent_breakers
@@ -411,8 +412,22 @@ async def start_agent_internal(agent_name: str) -> dict:
 
         # Recreate container with updated config
         # Use system user for internal operations
+        #
+        # #2186: `require_running=False` because THIS caller recreates stopped
+        # containers by design — it calls `container_start` on the very next
+        # line. #2092 added the guard with a `True` default and the note that
+        # every caller already enforced the precondition; that held for the two
+        # running-only callers and not for this one, so a stopped agent with any
+        # drift 500'd on start. The #1809 base-image branch made it worse than
+        # occasional: that predicate is gated on `not was_already_running`, so it
+        # fires ONLY for a stopped container — cold-start image adoption was
+        # 100% unreachable.
+        #
+        # `preserve_run_state` stays False: leaving the replacement stopped would
+        # be wrong on the one path whose whole purpose is to start it.
         await recreate_container_with_updated_config(
-            agent_name, container, "system", env_overrides=mcp_env_overrides
+            agent_name, container, "system", env_overrides=mcp_env_overrides,
+            require_running=False,
         )
         container = get_agent_container(agent_name)
 
@@ -481,6 +496,31 @@ async def start_agent_internal(agent_name: str) -> dict:
     except Exception as e:
         logger.warning(f"Failed to sync read-only config for agent {agent_name}: {e}")
         read_only_result = {"status": "failed", "error": str(e)}
+
+    # #2069 (T1): heal the already-leaking existing fleet. The creation-time
+    # `.gitignore` merge protects only agents created after that fix; existing
+    # auto-sync agents converge HERE on their next base-image-drift recreate /
+    # restart. Gated on the DB `auto_sync_enabled` flag — the persisted owner
+    # intent the runtime already honors (`_apply_git_env_from_db`: GIT_SYNC_AUTO
+    # = DB flag OR baked env). The R2 ephemeral gap does NOT apply on this path:
+    # ghosts never recreate (they are volume-less by design), so no ephemeral
+    # agent reaches start/recreate and the DB flag is correct and complete here.
+    # Same readiness-gated, idempotent, non-fatal merge as creation — a warm
+    # restart with an existing `.git` satisfies the readiness probe immediately
+    # (one fast merge), a cold recreate waits for readiness like creation.
+    # Touches neither `sync_to_github` nor the Push migration (AC#5); an
+    # additive convergence path. Fire-and-forget so it adds no start latency.
+    try:
+        if db.get_git_auto_sync_enabled(agent_name):
+            from services import git_service
+            git_service.spawn_gitignore_merge_after_clone(agent_name)
+    except Exception as e:
+        logger.warning(
+            "[#2069] failed to spawn the creation-parity .gitignore merge for "
+            "%s on start: %s",
+            agent_name,
+            e,
+        )
 
     return {
         "message": f"Agent {agent_name} started",
@@ -772,13 +812,44 @@ async def recreate_container_with_updated_config(
     *,
     full_capabilities: Optional[bool] = None,
     env_overrides: Optional[dict] = None,
+    require_running: bool = True,
+    preserve_run_state: bool = False,
 ):
     """
     Recreate an agent container with updated configuration.
     Handles shared folder mounts and API key settings.
     Preserves the agent's workspace volume and other configuration.
 
+    **This function STARTS the replacement container.** That was true before
+    #2092 too, but only the call sites knew it: each in-tree caller pre-checked
+    `container.status == "running"` and refused otherwise, while this function
+    captured no run state, offered no way to preserve it, and said nothing about
+    the precondition — which documented `env_overrides` at length.
+
+    Recreating a deliberately-stopped agent therefore started it, silently and
+    with no log line saying the run state had changed. Out-of-tree ops tooling
+    doing a base-image adoption wave hit exactly that: two agents stopped eight
+    days earlier came back up. Note what did NOT contain it — `autonomy_enabled
+    = 0` gates cron fires and reminders (#1806) but not human-initiated inbound
+    chat, so a channel binding and a public link became reachable again. No
+    traffic arrived; the containment was luck.
+
     Args:
+        require_running: refuse (ValueError) unless ``old_container`` is
+            running. Default True, which is what every existing caller already
+            enforces for itself — so this changes no behaviour and converts the
+            silent start into a loud error for the next caller. Pass False to
+            recreate a stopped agent deliberately.
+        preserve_run_state: leave the replacement STOPPED when the original was
+            stopped. What a base-image adoption wave actually wants, and awkward
+            to do from outside: the caller would have to read the state before,
+            then stop the container after it is already up and its agent server
+            has begun booting — racing its own recreate. Here the stop is issued
+            immediately after the handoff. The replacement is still created via
+            ``containers_run`` and so boots briefly before being stopped; that is
+            visible in the container's log, and is the honest cost of not
+            duplicating the (heavily conditioned) creation call.
+
         env_overrides: #1854 — env vars to force onto the replacement,
             applied LAST (immediately before the container handoff), so they win
             over every derived rule in between. The caller owns the value; this
@@ -804,6 +875,18 @@ async def recreate_container_with_updated_config(
             satisfies (infinite recreate loop — the hazard this module already
             documents for the guardrails/PAT matchers).
     """
+    # #2092: the precondition, enforced rather than assumed. Read BEFORE any
+    # work, so a refusal costs nothing and cannot half-recreate.
+    was_running = getattr(old_container, "status", None) == "running"
+    if require_running and not was_running:
+        raise ValueError(
+            f"recreate_container_with_updated_config would START agent "
+            f"{agent_name!r}, whose container is "
+            f"{getattr(old_container, 'status', 'unknown')!r}. Pass "
+            f"require_running=False to do that deliberately, and "
+            f"preserve_run_state=True to leave it stopped afterwards (#2092)."
+        )
+
     # Extract configuration from old container
     old_config = old_container.attrs.get("Config", {})
     old_host_config = old_container.attrs.get("HostConfig", {})
@@ -900,6 +983,15 @@ async def recreate_container_with_updated_config(
         env_vars['AGENT_TOOL_STALL_LIMIT_S'] = _stall_limit
     else:
         env_vars.pop('AGENT_TOOL_STALL_LIMIT_S', None)
+
+    # #2127: same set-or-clear treatment for the early-finalize idle ceiling —
+    # this dict is seeded from the OLD container, so an unset backend env must
+    # POP the stale baked value rather than leave it (the #1809/ent#109 rule).
+    _idle_finalize = (os.getenv('AGENT_IDLE_FINALIZE_S') or '').strip()
+    if _idle_finalize:
+        env_vars['AGENT_IDLE_FINALIZE_S'] = _idle_finalize
+    else:
+        env_vars.pop('AGENT_IDLE_FINALIZE_S', None)
 
     # #1159: refresh the per-agent auth token. Deterministic from agent_name, so
     # this re-derives under the CURRENT name — the load-bearing part of the
@@ -1015,6 +1107,12 @@ async def recreate_container_with_updated_config(
         await container_stop(old_container)
     except Exception:
         pass
+    # #2215: across the remove->create gap below, this port is invisible to the
+    # allocator (its label is gone) and unreserved — and the most-recreated
+    # agent tends to hold the fleet's MAX port, exactly what a concurrent
+    # allocation computes as max+1. Re-assert the reservation before removal
+    # (SET no-NX: it is this agent's own port; fail-open, never raises).
+    reserve_port_for_recreate(ssh_port)
     try:
         await container_remove(old_container)
     except docker.errors.NotFound:
@@ -1061,7 +1159,7 @@ async def recreate_container_with_updated_config(
         env_vars.update({str(k): str(v) for k, v in env_overrides.items() if k})
 
     try:
-        return await _provision_folders_and_run_agent_container(
+        new_container = await _provision_folders_and_run_agent_container(
             agent_name,
             image=image,
             env_vars=env_vars,
@@ -1073,6 +1171,11 @@ async def recreate_container_with_updated_config(
             full_capabilities=full_capabilities,
             restart_policy=restart_policy,
         )
+        # #2092: put the run state back. Here, NOT in the shared provisioning
+        # helper — that one also serves agent creation, where "the original was
+        # stopped" is meaningless and stopping the result would be wrong.
+        await _restore_stopped_state(agent_name, new_container, preserve_run_state, was_running)
+        return new_container
     except docker.errors.APIError as e:
         # #1809: 409 name-conflict — a concurrent start won the recreate race
         # and already ran the replacement. Adopt the winner's container instead
@@ -1086,6 +1189,34 @@ async def recreate_container_with_updated_config(
                 )
                 return existing
         raise
+
+
+async def _restore_stopped_state(agent_name, container, preserve_run_state, was_running):
+    """Stop a freshly recreated container when the original was stopped (#2092).
+
+    A recreate that changes whether an agent is running is exactly the event
+    that used to be silent, so both outcomes are logged.
+
+    A failed stop does NOT fail the recreate: the replacement exists and is
+    healthy, and failing here leaves the caller worse off than the outcome they
+    asked to avoid. But it logs at ERROR, because the agent is now running
+    against an explicit request that it not be.
+    """
+    if not (preserve_run_state and not was_running):
+        return
+    try:
+        await container_stop(container)
+        logger.info(
+            "Recreated container for agent %s and stopped it again "
+            "(preserve_run_state: it was not running before)",
+            agent_name,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            "Recreated container for agent %s but could NOT stop it again "
+            "(preserve_run_state): %s. The agent is running.",
+            agent_name, e,
+        )
 
 
 async def _provision_folders_and_run_agent_container(
@@ -1560,6 +1691,12 @@ def _apply_persisted_auth_env(agent_name: str, env_vars: dict, runtime: str) -> 
     _stall_limit = (os.getenv("AGENT_TOOL_STALL_LIMIT_S") or "").strip()
     if _stall_limit:
         env_vars["AGENT_TOOL_STALL_LIMIT_S"] = _stall_limit
+
+    # #2127: early-finalize idle ceiling (rebuild-from-nothing path — no old
+    # container to inherit a stale value from, so set-only mirrors the sibling).
+    _idle_finalize = (os.getenv("AGENT_IDLE_FINALIZE_S") or "").strip()
+    if _idle_finalize:
+        env_vars["AGENT_IDLE_FINALIZE_S"] = _idle_finalize
 
     # #1159: per-agent in-container auth token (fail-closed: raises if secret unset).
     env_vars["TRINITY_AGENT_AUTH_TOKEN"] = derive_agent_token(agent_name)

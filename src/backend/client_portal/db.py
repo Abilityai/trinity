@@ -13,8 +13,15 @@ from typing import Optional
 from sqlalchemy import select, func, and_, or_, text, bindparam
 
 from db.engine import get_engine, make_insert
-from db.tables import system_settings, agent_sharing, agent_ownership, users
-from utils.helpers import utc_now_iso
+from db.tables import (
+    system_settings, agent_sharing, agent_ownership, users,
+    enterprise_portal_chat_state,
+)
+from utils.helpers import iso_cutoff, utc_now_iso
+
+
+# Max agents per SQL statement — see `list_portal_sessions_for_agents` (#2198).
+_AGENT_CHUNK = 500
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -39,18 +46,6 @@ def set_setting(key: str, value: str, now: str) -> None:
         conn.execute(stmt)
 
 
-def get_agent_tts_voice_id(agent_name: str) -> Optional[str]:
-    """The agent's configured ElevenLabs voice id (``agent_ownership.tts_voice_id``),
-    or None. Drives portal voice mode (#78) — reuses the same per-agent voice the
-    channel adapters speak with."""
-    stmt = select(agent_ownership.c.tts_voice_id).where(
-        agent_ownership.c.agent_name == agent_name
-    )
-    with get_engine().connect() as conn:
-        row = conn.execute(stmt).first()
-        return row[0] if row and row[0] else None
-
-
 def get_shared_roster(email: str) -> list[dict]:
     """Every agent shared with ``email`` — the client's "My Agents" roster.
 
@@ -68,6 +63,13 @@ def get_shared_roster(email: str) -> list[dict]:
             agent_ownership.c.avatar_updated_at,
             agent_ownership.c.is_default_avatar,
             agent_ownership.c.tts_voice_id,          # portal voice (#78): drives voice_available
+            # #2157: the agent-level voice enable, so the speaker control obeys the
+            # same gate the channel path does instead of a voice id alone.
+            agent_ownership.c.tts_voice_replies_enabled,
+            # #2159: the human-facing name (ent#181/#1640). Selected HERE rather
+            # than resolved per agent — `get_display_label` is one query each,
+            # which would add an N+1 to fix a row that renders the wrong title.
+            agent_ownership.c.display_label,
             users.c.username.label("owner"),
         )
         .select_from(
@@ -119,6 +121,8 @@ def get_owned_roster(email: str) -> list[dict]:
             agent_ownership.c.avatar_updated_at,
             agent_ownership.c.is_default_avatar,
             agent_ownership.c.tts_voice_id,
+            agent_ownership.c.tts_voice_replies_enabled,   # #2157
+            agent_ownership.c.display_label,        # #2159, same rationale as above
             users.c.username.label("owner"),
         )
         .select_from(
@@ -206,6 +210,71 @@ def list_portal_sessions(agent_name: str, client_email: str) -> list[dict]:
         return [dict(r) for r in conn.execute(stmt, {
             "agent": agent_name, "email": (client_email or "").lower(),
         }).mappings()]
+
+
+def list_portal_sessions_for_agents(client_email: str, agent_names: list[str]) -> list[dict]:
+    """Every thread this client has with ANY of ``agent_names``, most-recently-active
+    first — the batch form of :func:`list_portal_sessions` (#2198).
+
+    The Workspace sidebar renders one merged, cross-agent, recency-sorted list, so
+    it previously issued N of those calls (one per rostered agent) on bootstrap AND
+    on every thread open and every completed turn.
+
+    Three deliberate differences from the single-agent query:
+
+    * ``agent_name`` is SELECTed. The per-agent query omits it because the caller
+      already knows it; a flat batch list has to carry it per row.
+    * ``client_email = :email`` with the lowercasing done PYTHON-side at the bind,
+      as ``list_portal_sessions`` does — not ``lower(s.client_email) = :email``
+      like ``search_portal_sessions``, which puts a function on the column and is
+      non-sargable.
+    * ``ORDER BY ... , id DESC``. The tiebreaker is inert today (no LIMIT, and the
+      caller re-sorts) but makes the boundary row deterministic the moment anyone
+      adds one.
+
+    ``agent_name IN (:agents)`` is BOTH the tenant scope and the index path: the
+    only index on this table is ``(agent_name, client_email, last_message_at)``, so
+    this resolves as one index seek per agent with both leading columns on
+    equality — the same plan each of today's N separate queries already gets,
+    executed once instead of N times over HTTP. Deliberately NO ``LIMIT``: today's
+    per-agent query is unbounded and runs N times, so the batch's row volume is
+    already what crosses the wire, and adding a cap would be a new behaviour that
+    collides with the starred-chat pinning guarantee (requirements §5.10).
+    """
+    if not agent_names:
+        # An expanding bindparam raises on an empty list, and there is nothing to
+        # ask anyway. Same guard as `search_portal_sessions`.
+        return []
+    stmt = text(
+        "SELECT id, agent_name, title, created_at, last_message_at, message_count "
+        "FROM enterprise_portal_sessions "
+        "WHERE client_email = :email AND agent_name IN :agents "
+        "ORDER BY COALESCE(last_message_at, created_at) DESC, id DESC"
+    ).bindparams(bindparam("agents", expanding=True))
+
+    email = (client_email or "").lower()
+    rows: list[dict] = []
+    with get_engine().connect() as conn:
+        # Chunked because an expanding bindparam emits ONE placeholder per agent
+        # and SQLITE_MAX_VARIABLE_NUMBER is 999 on SQLite < 3.32. A platform
+        # principal with include_owned=True on a large fleet would otherwise turn
+        # today's always-working N single-agent queries into a hard 500 — on the
+        # Workspace bootstrap path.
+        for i in range(0, len(agent_names), _AGENT_CHUNK):
+            chunk = list(agent_names[i:i + _AGENT_CHUNK])
+            rows.extend(dict(r) for r in conn.execute(
+                stmt, {"email": email, "agents": chunk}
+            ).mappings())
+
+    if len(agent_names) > _AGENT_CHUNK:
+        # Each chunk is sorted independently, so concatenating them is NOT
+        # globally ordered — a recent thread from the last chunk would sit below
+        # an old one from the first. Re-sort on exactly the SQL key so the
+        # docstring's ordering contract holds for every roster size. Only
+        # reachable past the chunk threshold, so the common path pays nothing.
+        rows.sort(key=lambda r: (r.get("last_message_at") or r.get("created_at") or "",
+                                 r.get("id") or ""), reverse=True)
+    return rows
 
 
 def get_portal_session(session_id: str, agent_name: str, client_email: str) -> Optional[dict]:
@@ -499,3 +568,218 @@ def list_agent_share_emails(agent_name: str) -> list[str]:
     )
     with get_engine().connect() as conn:
         return [r[0] for r in conn.execute(stmt) if r[0]]
+
+
+# --- Per-user chat state: stars + read cursor (ent#359) -----------------------
+# Every function here is keyed on the caller's own (lower-cased) email, so the
+# key IS the tenant scope: there is no way to address, read, or overwrite another
+# user's state, and no filter that could be forgotten.
+
+CHAT_KINDS = ("thread", "room")
+
+# Two ceilings, because one number cannot do both jobs.
+#
+# MAX_CHAT_STATE_ROWS bounds ABUSE: `star` and `read` both write a row and
+# neither validates that the chat exists (a 404 for an unknown id would be an
+# enumeration oracle), so without it a portal session is an unbounded write
+# primitive.
+#
+# MAX_STARRED_CHATS bounds the STARRED set, and it is the one a real user can
+# reach. It has to be separate: read cursors accumulate from ordinary use (one
+# per chat ever opened, rooms included), so a single total-row cap would be
+# consumed by activity the user cannot undo — every star click 409ing forever
+# with "unstar some first" while unstarring frees nothing. Counting only starred
+# rows makes that advice true.
+MAX_CHAT_STATE_ROWS = 1000
+MAX_STARRED_CHATS = 200
+
+
+def get_chat_state(client_email: str) -> list[dict]:
+    """Every chat-state row for one user: ``chat_kind``, ``chat_id``,
+    ``starred_at``, ``last_read_at``.
+
+    Unbounded read, bounded set: the write path caps how many rows a user can
+    create (``MAX_CHAT_STATE_ROWS``), so there is nothing here to paginate."""
+    stmt = text(
+        "SELECT chat_kind, chat_id, starred_at, last_read_at "
+        "FROM enterprise_portal_chat_state WHERE client_email = :email"
+    )
+    with get_engine().connect() as conn:
+        return [dict(r) for r in conn.execute(
+            stmt, {"email": (client_email or "").lower()}
+        ).mappings()]
+
+
+def count_chat_state_rows(client_email: str) -> int:
+    stmt = text(
+        "SELECT COUNT(*) FROM enterprise_portal_chat_state WHERE client_email = :email"
+    )
+    with get_engine().connect() as conn:
+        return int(conn.execute(stmt, {"email": (client_email or "").lower()}).scalar() or 0)
+
+
+def chat_state_row_exists(client_email: str, chat_kind: str, chat_id: str) -> bool:
+    """Whether this user already has a row for this chat. The row cap must only
+    apply to writes that CREATE one — otherwise a user at the ceiling stops being
+    able to advance a read cursor they already own."""
+    stmt = text(
+        "SELECT 1 FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND chat_kind = :kind AND chat_id = :id"
+    )
+    with get_engine().connect() as conn:
+        return conn.execute(stmt, {
+            "email": (client_email or "").lower(), "kind": chat_kind, "id": chat_id,
+        }).first() is not None
+
+
+def _upsert_chat_state(client_email: str, chat_kind: str, chat_id: str,
+                       now: str, **fields) -> None:
+    """Set the named columns on one (user, kind, id) row, inserting it if absent.
+
+    Only the columns in ``fields`` are touched, so marking a chat read cannot
+    clear its star and vice versa.
+    """
+    email = (client_email or "").lower()
+    values = {
+        "client_email": email, "chat_kind": chat_kind, "chat_id": chat_id,
+        "updated_at": now, **fields,
+    }
+    stmt = (
+        make_insert(enterprise_portal_chat_state)
+        .values(**values)
+        .on_conflict_do_update(
+            index_elements=[
+                enterprise_portal_chat_state.c.client_email,
+                enterprise_portal_chat_state.c.chat_kind,
+                enterprise_portal_chat_state.c.chat_id,
+            ],
+            set_={"updated_at": now, **fields},
+        )
+    )
+    with get_engine().begin() as conn:
+        conn.execute(stmt)
+
+
+def set_chat_star(client_email: str, chat_kind: str, chat_id: str,
+                  starred: bool, now: str) -> None:
+    """Star or unstar one chat for one user.
+
+    Unstar keeps the row when it still carries a read cursor — dropping that
+    would mark the chat unread again — but DELETES it when there is nothing
+    left to remember. Without that, a row could only ever be created: the star
+    cap below counts starred rows, but the table itself would grow forever from
+    ids that were starred once and unstarred.
+    """
+    if not starred and not _has_read_cursor(client_email, chat_kind, chat_id):
+        delete_chat_state(client_email, chat_kind, chat_id)
+        return
+    _upsert_chat_state(client_email, chat_kind, chat_id, now,
+                       starred_at=now if starred else None)
+
+
+def _has_read_cursor(client_email: str, chat_kind: str, chat_id: str) -> bool:
+    stmt = text(
+        "SELECT 1 FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND chat_kind = :kind AND chat_id = :id "
+        "  AND last_read_at IS NOT NULL"
+    )
+    with get_engine().connect() as conn:
+        return conn.execute(stmt, {
+            "email": (client_email or "").lower(), "kind": chat_kind, "id": chat_id,
+        }).first() is not None
+
+
+def delete_chat_state(client_email: str, chat_kind: str, chat_id: str) -> None:
+    stmt = text(
+        "DELETE FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND chat_kind = :kind AND chat_id = :id"
+    )
+    with get_engine().begin() as conn:
+        conn.execute(stmt, {
+            "email": (client_email or "").lower(), "kind": chat_kind, "id": chat_id,
+        })
+
+
+def count_starred_rows(client_email: str) -> int:
+    """Starred rows only — what the star cap counts, so unstarring is genuinely
+    the way back under it."""
+    stmt = text(
+        "SELECT COUNT(*) FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND starred_at IS NOT NULL"
+    )
+    with get_engine().connect() as conn:
+        return int(conn.execute(stmt, {"email": (client_email or "").lower()}).scalar() or 0)
+
+
+def mark_chat_read(client_email: str, chat_kind: str, chat_id: str, now: str) -> None:
+    """Advance one chat's read cursor for one user."""
+    _upsert_chat_state(client_email, chat_kind, chat_id, now, last_read_at=now)
+
+
+def count_unread_by_session(client_email: str) -> dict[str, int]:
+    """Per-thread count of agent messages newer than that thread's read cursor.
+
+    A thread with NO cursor reports nothing rather than reporting its whole
+    history as unread. "Unread" is defined relative to a cursor; inventing one at
+    the beginning of time would light up every historical chat the first time
+    this shipped, which is noise, not information. A cursor is written the first
+    time the user opens or sends in a thread, so any live conversation acquires
+    one immediately. (Rooms keep their own seq cursor and are not counted here —
+    see the feature flow's Known Limitations.)
+    """
+    stmt = text(
+        "SELECT m.session_id AS session_id, COUNT(*) AS n "
+        "FROM enterprise_portal_messages m "
+        "JOIN enterprise_portal_chat_state st "
+        "  ON st.client_email = :email AND st.chat_kind = 'thread' "
+        " AND st.chat_id = m.session_id "
+        "WHERE m.client_email = :email "
+        "  AND m.role = 'assistant' "
+        "  AND st.last_read_at IS NOT NULL "
+        "  AND m.created_at > st.last_read_at "
+        "GROUP BY m.session_id"
+    )
+    with get_engine().connect() as conn:
+        rows = conn.execute(stmt, {"email": (client_email or "").lower()}).mappings()
+        return {r["session_id"]: int(r["n"]) for r in rows if r["session_id"]}
+
+
+# --- Agent page: first-try rate (ent#360) ------------------------------------
+
+def first_try_stats(agent_name: str, hours: int) -> dict:
+    """Terminal executions in the window, and how many succeeded on the FIRST
+    attempt (``retry_count`` 0 or NULL).
+
+    Distinct from the success rate the analytics accessor already reports: an
+    execution that failed, was retried and then succeeded counts as a success
+    there, which is the right answer to "does this agent get there in the end"
+    and the wrong answer to "does it get there first time".
+
+    `retry_count` is NULL on rows written before #678, so NULL is read as zero —
+    a pre-#678 success genuinely had no retry.
+
+    Cutoff via `iso_cutoff` rather than SQL `datetime('now', ...)`: the column is
+    an ISO-Z string and the two formats do not compare (Invariant #16).
+    """
+    stmt = text(
+        "SELECT "
+        "  COUNT(*) AS terminal, "
+        "  SUM(CASE WHEN status = 'success' AND COALESCE(retry_count, 0) = 0 "
+        "           THEN 1 ELSE 0 END) AS first_try "
+        "FROM schedule_executions "
+        "WHERE agent_name = :agent AND started_at >= :cutoff "
+        "  AND status IN ('success', 'failed', 'error')"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {
+            "agent": agent_name, "cutoff": iso_cutoff(hours),
+        }).mappings().first()
+    terminal = int((row or {}).get("terminal") or 0)
+    first_try = int((row or {}).get("first_try") or 0)
+    return {
+        "terminal": terminal,
+        "first_try": first_try,
+        # None, not 0.0, with nothing to divide: a fresh agent has no first-try
+        # rate, and rendering 0% would read as "it fails every time".
+        "rate": (first_try / terminal) if terminal else None,
+    }
