@@ -193,6 +193,7 @@ credentials.json
 !.trinity/persistent-processes.allow
 !.trinity/brain-orb/
 !.trinity/pipelines/
+!.trinity/plugins.yaml
 .tmp/
 .trinity-clone-tmp/
 
