@@ -83,18 +83,31 @@ export function shouldMarkTurnRead(completedSessionId, openSessionId) {
   return !!completedSessionId && completedSessionId === openSessionId
 }
 
-// #2133: how long the client may wait for a reply before concluding it has lost
-// track of the turn. The server sends this on the 202 (`wait_budget_seconds`)
-// because the server owns the turn timeout; this is only the fallback for an
-// older backend, and it must be sized the same way — TWO attempts, each of which
-// can exceed `timeout_seconds` (the dispatch adds HTTP slack and the #678
-// reader-race retry adds a whole second call on top).
+// #2133/#2214: how long the client may wait for a reply before concluding it
+// has lost track of the turn. The server owns the turn timeout and sends the
+// budget with every dispatch (`wait_budget_seconds` on the 202) and every
+// reattach (`in_flight_wait_budget_seconds` on the history response), so a
+// current backend never forces the client to guess.
 //
-// Exported so a test can assert it against the server's value instead of
-// re-declaring the arithmetic and passing vacuously.
-export const PORTAL_TURN_TIMEOUT_S = 300
-export const PORTAL_ATTEMPT_CEILING_S = PORTAL_TURN_TIMEOUT_S + 10 + 300
-export const REPLY_MAX_WAIT_MS_FALLBACK = (2 * PORTAL_ATTEMPT_CEILING_S + 60) * 1000
+// This literal is therefore DELIBERATELY FROZEN at the pre-#2214 server bound
+// — `(2 × (300 + 10 + 300) + 60)s` — because its only remaining audience is a
+// backend that predates the per-agent bound, whose real ceiling WAS exactly
+// this number. Do NOT "sync" it with the new server arithmetic: the server
+// bound is per-agent now (there is no one number to mirror), and re-sizing this
+// to, say, the 3600-default arithmetic would make a client of an OLD backend
+// wait ~2h for a turn that server killed at ~21min. When the budget field is
+// unreadable on a NEW backend, under-waiting degrades to the honest
+// "lost track — check shortly" message with no Retry — never a double-bill.
+export const REPLY_MAX_WAIT_MS_FALLBACK = (2 * (300 + 10 + 300) + 60) * 1000
+
+// #2214: the budget pick, extracted from the component so it is testable
+// without a mount harness (the ent#392 rule — decidable logic lives here).
+// A positive server budget wins; anything else (absent field from an old
+// backend, 0, NaN, negative) falls back to the frozen literal above.
+export function resolveWaitBudgetMs(budgetSeconds) {
+  const s = Number(budgetSeconds)
+  return s > 0 ? s * 1000 : REPLY_MAX_WAIT_MS_FALLBACK
+}
 
 // ent#361: @mentioning another agent from a 1:1 turns it into a group chat.
 //

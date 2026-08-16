@@ -739,6 +739,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // ent#286: non-null when a turn is running on this thread right now —
         // what a client that reloaded mid-turn resubscribes to.
         inFlightExecutionId: data.in_flight_execution_id || null,
+        // #2214: how long that turn may honestly be waited for — the server
+        // marker's remaining TTL in seconds. Null/absent (old backend, TTL
+        // unreadable) → the component falls back via resolveWaitBudgetMs.
+        inFlightWaitBudgetSeconds: data.in_flight_wait_budget_seconds ?? null,
       }
     },
 
