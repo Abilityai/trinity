@@ -2451,7 +2451,14 @@ def _is_port_bind_conflict(exc: BaseException) -> bool:
     seen = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
-        text = str(exc).lower()
+        # Defensive str(): docker.errors.APIError.__str__ dereferences response
+        # attributes and can itself raise on a partial/stubbed response object —
+        # and this classifier runs inside the never-raises reclaim (D2b), where
+        # a raise would REPLACE the creation error being reported.
+        try:
+            text = str(exc).lower()
+        except Exception:
+            text = ""
         if "port is already allocated" in text or "address already in use" in text:
             return True
         exc = exc.__cause__ or exc.__context__

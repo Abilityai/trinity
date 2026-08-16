@@ -528,3 +528,126 @@ def test_orchestrator_never_raises_when_cornelius_explodes(orch):
     # Fleet seeder still ran despite the Cornelius failure.
     assert ("fleet", True, "true") in orch.calls
     assert result == {"action": "created"}
+
+
+# --- #2215: pass-level seed lock -------------------------------------------------
+#
+# The two inner seeder locks serialise each seeder only against ITSELF — worker
+# A's slow Cornelius clone ran concurrently with worker B's default-system
+# deploy (A holds cornelius:provision; B loses it, falls through, wins
+# system_seed:provision). ensure_first_run_seeded now takes ONE pass-level lock
+# (`first_run_seed:provision`, #1919 token hygiene) — the loser skips the WHOLE
+# pass and writes no flags.
+
+@pytest.fixture
+def pass_redis(orch):
+    """A real fakeredis behind the pass lock (honors nx/ex/get/delete), so the
+    SETNX + compare-and-delete semantics are exercised, not stubbed."""
+    import fakeredis
+
+    r = fakeredis.FakeStrictRedis(decode_responses=True)
+    orch.env.monkeypatch.setattr(sss, "get_breaker_redis", lambda: r)
+    return r
+
+
+def test_pass_lock_loser_skips_whole_pass_without_flags(orch, pass_redis):
+    """The observed race is precisely a HALF-skipped pass — so the loser must
+    run NEITHER seeder, persist no verdict, burn no flag, and leave the
+    sibling's lease untouched."""
+    pass_redis.set("first_run_seed:provision", "foreign-token", ex=900)
+
+    result = asyncio.run(ensure_first_run_seeded())
+
+    assert orch.calls == []                       # neither seeder ran
+    assert result["action"] == "skipped_locked"
+    assert orch.env.settings.get("first_run_fresh") is None
+    assert orch.env.settings.get("default_system_seeded") is None
+    # #1919: the loser must never delete a lease it does not hold.
+    assert pass_redis.get("first_run_seed:provision") == "foreign-token"
+
+
+def test_pass_lock_winner_runs_both_seeders_and_releases(orch, pass_redis):
+    asyncio.run(ensure_first_run_seeded())
+
+    assert [c[0] for c in orch.calls] == ["cornelius", "fleet"]
+    # Released via compare-and-delete in the finally.
+    assert pass_redis.get("first_run_seed:provision") is None
+
+
+def test_pass_lock_release_leaves_a_foreign_token_alone(orch, pass_redis):
+    """#1919: after a TTL lapse a sibling may hold a LIVE lease under our key —
+    a blind DELETE would release it. Compare-and-delete must no-op."""
+    pass_redis.set("first_run_seed:provision", "foreign-token", ex=900)
+
+    sss._release_pass_lock("my-token")
+
+    assert pass_redis.get("first_run_seed:provision") == "foreign-token"
+
+
+def test_pass_lock_redis_error_fails_open(orch):
+    """Seeding never blocks boot (G4/#1638): a raising Redis client means
+    proceed as sole worker."""
+    broken = MagicMock()
+    broken.set.side_effect = RuntimeError("redis exploded")
+    orch.env.monkeypatch.setattr(sss, "get_breaker_redis", lambda: broken)
+
+    asyncio.run(ensure_first_run_seeded())
+
+    assert [c[0] for c in orch.calls] == ["cornelius", "fleet"]
+
+
+# --- #2215 AC#3: operator alert on a failed Cornelius seed -----------------------
+
+def _cornelius_returning(orch, action, message="Failed to seed Cornelius: boom"):
+    async def fake(fresh=None):
+        return {"agent_name": "cornelius", "action": action,
+                "status": "error", "message": message}
+
+    orch.env.monkeypatch.setattr(sss.cornelius_agent_service, "ensure_seeded", fake)
+
+
+@pytest.mark.parametrize("action", ["create_failed", "create_blocked"])
+def test_cornelius_failure_raises_operator_alert(orch, action):
+    """A failed Cornelius creation was log-only (the partial/failed alerts
+    cover only the manifest deploy) — the orchestrator now captures the result
+    and raises a deterministic reserved-prefix alert. The seed flag stays
+    unset, so next boot retries (#1790 asymmetry untouched)."""
+    _cornelius_returning(orch, action)
+
+    asyncio.run(ensure_first_run_seeded())
+
+    orch.env.opq.assert_called_once()
+    agent_name, item = orch.env.opq.call_args.args
+    assert agent_name == "trinity-system"
+    assert item["id"] == "system-seed-cornelius-failed"
+    assert "backend logs" in item["question"]
+    assert item["context"]["message"] == "Failed to seed Cornelius: boom"
+
+
+@pytest.mark.parametrize(
+    "action", ["created", "none", "skipped_not_fresh", "deferred", "skipped_locked"]
+)
+def test_cornelius_success_and_skips_raise_no_alert(orch, action):
+    _cornelius_returning(orch, action)
+
+    asyncio.run(ensure_first_run_seeded())
+
+    orch.env.opq.assert_not_called()
+
+
+def test_cornelius_belt_except_also_alerts(orch):
+    """The seeder is contract-documented never-raises; if it raises anyway the
+    belt-except must not silently bypass the action check."""
+
+    async def boom(fresh=None):
+        raise RuntimeError("cornelius exploded")
+
+    orch.env.monkeypatch.setattr(sss.cornelius_agent_service, "ensure_seeded", boom)
+
+    result = asyncio.run(ensure_first_run_seeded())
+
+    orch.env.opq.assert_called_once()
+    assert orch.env.opq.call_args.args[1]["id"] == "system-seed-cornelius-failed"
+    # And the fleet seeder still ran (never-raises contract preserved).
+    assert ("fleet", True, "true") in orch.calls
+    assert result == {"action": "created"}
