@@ -175,6 +175,10 @@ async def get_public_feature_flags(
     )
     from services.entitlement_service import entitlement_service
     from services import a2a_outbound_service
+    # Function-local (#2217): a top-level import would pull the whole canary
+    # package into the settings-router load; the handler pattern here is
+    # function-local imports.
+    from services.canary_service import canary_service
     voice_available = VOICE_ENABLED and bool(GEMINI_API_KEY)
     # Brain Orb flags are RUNTIME-RESOLVED (#85): system_settings override →
     # BRAIN_ORB_* env opt-in → OFF. An admin flip via PUT /api/settings/brain-orb
@@ -225,6 +229,11 @@ async def get_public_feature_flags(
         # points. Lets an operator confirm via the API whether the correlated-
         # failure controls are armed during a soak. NOT a UI surface.
         "redelivery_governor_enabled": REDELIVERY_GOVERNOR_ENABLED,
+        # Canary run-state (#2217) — observability-only boolean, beside the
+        # other observability flags; any authed user, public-safe. Whether
+        # the canary harness is enabled. Last-cycle/stale/sink detail stays
+        # admin-only on GET /api/canary/status.
+        "canary_enabled": canary_service.is_enabled(),
         # Outbound voice replies (ent#117) — true when an ElevenLabs key resolves
         # (stored setting → ELEVENLABS_API_KEY env). Gates the agent-level Voice
         # config UI + the send_voice_reply capability. Non-sensitive boolean.
