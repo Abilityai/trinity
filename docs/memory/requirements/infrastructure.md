@@ -570,6 +570,94 @@
   "no overdue `next_run_at`"), so a catalog-sourced name can confidently
   mislabel a live alert.
 
+### 31.2 Canary Run-State Observability (#2217)
+- **Status**: ✅ Implemented (2026-08-16)
+- **GitHub Issue**: #2217
+- **Problem**: nothing reported whether the harness is running. A disabled
+  canary emits zero violations — byte-for-byte identical to a clean fleet. This
+  is the **H-01 class one level up, applied to the detector itself**: H-01
+  catches a blind collector *while a cycle runs*; it structurally cannot catch
+  "no cycle is running at all" (a dead loop emits nothing). The harness had been
+  switched OFF on the dev instance on the belief its snapshot reader was
+  SQLite-only and would go blind on PostgreSQL — a constraint **retired by #1540**
+  (every SQL-tier collector now reads the configured backend through the
+  `get_engine()`/`DATABASE_URL` seam; `src/backend/canary/` has zero `sqlite3`
+  imports). Re-enabling is a pure ops toggle (`CANARY_ENABLED=1` in the instance
+  `.env` + redeploy) — the compose wiring shipped in #1876; this requirement adds
+  only the surface that makes the state observable.
+- **Primary surface**: `GET /api/canary/status` (admin-only, `require_admin`) →
+  `CanaryService.get_run_status()` (Invariant #1 — logic in the service, thin
+  router). Response `CanaryStatusResponse` (`models.py`, Invariant #14):
+  `enabled` (`CANARY_ENABLED == "1"`), `status`
+  (`disabled|healthy|stale|unknown`), `last_cycle_at`,
+  `seconds_since_last_cycle` (clamped `max(0, int(age))`), `interval_seconds`,
+  `stale_after_seconds`, `alert_sink_configured`, `redis_available`.
+- **The contract the surface answers**: it reports the **shared** Redis cursor
+  `canary:last_cycle_at` — written at cycle END with `snapshot.snapshot_time`,
+  the instant the leader's collection *started*. So it answers "the
+  collection-start instant of the last cycle the leader completed", and **lags
+  real completion by up to one cycle's duration**. It is NOT "is the loop alive"
+  and NOT literally "when a cycle finished". The **shared** cursor is read (never
+  the per-worker `self.last_run_at`/`cumulative_cycles`): with #1881's leader
+  lease only one worker cycles, so a non-leader answering the request has
+  stale/zero in-process counters.
+- **`status` derivation** (AC#3 — three states all distinct from
+  enabled+fresh+zero-violations):
+  - `disabled` — `enabled=False`. Clean, **never** an alarm; Redis is never read
+    (`redis_available=None`). Default-OFF is the normal state for most installs.
+  - `unknown` — enabled but no readable timestamp (cursor never written yet **or**
+    Redis raised **or** unparseable). **Fail-open**, never an alarm.
+  - `stale` — enabled, cursor readable, `age > stale_after_seconds`. The incident
+    case.
+  - `healthy` — enabled, cursor readable, `age ≤ stale_after_seconds`.
+- **Staleness threshold** `stale_after_seconds =
+  _max_failover_seconds() + _MAX_CYCLE_LEASE_SECONDS` (≈780 + 900 = **1680s** at
+  defaults), both terms the service's own constants so the threshold cannot drift
+  out of step with the timing it guards. It is **provably above BOTH** the
+  leader-failover window (~780s) AND a legitimately-slow-but-healthy cycle: a
+  cycle may run up to `_MAX_CYCLE_LEASE_SECONDS` (900s, R-01's `docker exec`
+  sweep wedge-yield ceiling) before it is deemed wedged, and because the cursor
+  carries the collection-start instant, a healthy leader's observed cursor age
+  reaches `interval + cycle_duration` (up to 1200s). Budgeting only
+  `_max_failover + interval` (1080s) would false-`stale` a working harness.
+- **`alert_sink_configured` is a deliberately separate field** (not folded into
+  `status`): liveness and can-it-alert are orthogonal facts, and an
+  enabled+cycling canary with no `CANARY_SLACK_WEBHOOK_URL` persists violations
+  but **pushes nothing** — a silent-green canary that must not read as an
+  unqualified `healthy`. Read on **every** path (including disabled — an operator
+  wiring up a canary wants the sink state before flipping it on).
+- **Secondary surface**: `canary_enabled` boolean on `GET /api/settings/feature-flags`
+  (any authed user, public-safe), beside `mcp_agent_chat_pull_enabled` /
+  `redelivery_governor_enabled` — the observability-only flag home. **Boolean
+  only**; last-cycle/stale/sink detail stays admin-only on `/status`. Backed by a
+  thin public `CanaryService.is_enabled()` wrapping `_is_enabled()` so "is the
+  canary enabled" has one source of truth; the handler imports `canary_service`
+  **function-locally** (a top-level import would pull the whole `canary` package
+  into the settings-router load).
+- **A manual `POST /api/canary/run-cycle` also advances the cursor**, so
+  `/status` reports last-cycle across scheduled AND on-demand cycles — it is not a
+  probe for scheduled-loop liveness specifically.
+- **Backend-agnostic since #1540** — safe to keep `CANARY_ENABLED=1` on
+  PostgreSQL. Stated in `docs/POSTGRESQL_SETUP.md` and
+  `docs/migrations/SQLITE_TO_POSTGRES.md` (AC#4) so the next operator does not
+  re-derive the retired SQLite-only constraint from the docs.
+- **Deferred (follow-up)**: an **active push** liveness alarm. A pull-only
+  `/status` is queryable-if-asked; the bug's narrative ("switched off during an
+  incident, silently never switched back on") is a push problem. The canary
+  cannot self-emit its own not-running (H-01 recursion), but a different
+  always-on process (`cleanup_service` / `src/scheduler/`) could read
+  `canary:last_cycle_at` + `_is_enabled()` and push via the existing Slack sink on
+  `enabled && stale`. Deferred because it needs its own default-OFF gating so it
+  never alarms an install that never opted in — the exact false-alarm risk the
+  issue warns against.
+- **Location**: `src/backend/services/canary_service.py`
+  (`get_run_status`, `is_enabled`, `_read_last_cycle_for_status`),
+  `src/backend/routers/canary.py` (`GET /status`),
+  `src/backend/models.py` (`CanaryStatusResponse`),
+  `src/backend/routers/settings.py` (`canary_enabled` flag).
+- **Guard**: `tests/unit/test_2217_canary_status.py` (the `tests/test_canary_*.py`
+  root suite runs in no CI workflow, #1880 — new guards go under `tests/unit/`).
+
 ---
 
 ## 35. Enterprise Edition Architecture (#847)

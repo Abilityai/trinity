@@ -69,7 +69,8 @@ def portal(monkeypatch):
     # gate and hands it down, so the streamed turn costs ONE Docker read rather
     # than one at dispatch and another inside `portal_chat`.
     async def _fake_chat(agent_name, message, email, session_id=None,
-                        include_owned=False, execution_id=None, availability=None):
+                        include_owned=False, execution_id=None,
+                        turn_timeout_seconds=None, availability=None):
         state.chat_calls.append({
             "agent": agent_name, "message": message, "email": email,
             "session_id": session_id, "execution_id": execution_id,
@@ -339,7 +340,7 @@ def test_the_marker_is_set_while_the_turn_is_still_running(portal, redis_stub, m
 
     async def _slow_chat(agent_name, message, email, session_id=None,
                          include_owned=False, execution_id=None,
-                         availability=None):
+                         turn_timeout_seconds=None, availability=None):
         seen["during"] = svc.get_turn_inflight(session_id)
         return {"response": "done", "cost": 0.0, "session_id": session_id}
 

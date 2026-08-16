@@ -150,6 +150,8 @@ untouched — AC #3. Only the entry point went away.
 | `tests/unit/test_session_*` | the extraction is behaviour-preserving for the legacy surface |
 | `src/frontend/tests/unit/workspaceAgentLanding.spec.js` | the `?agent=` landing, including the roster miss and `?new=1` |
 | `src/frontend/e2e/workspace-absorbs-session.spec.js` | the redirect, that it replaces history, and that no mode toggle remains |
+| `tests/unit/test_2133_bounded_reply_poll.py` | the turn-bound chain (#2214 successors of the #2133 pins): derived arithmetic over the whole TIMEOUT-001 range against the real retry constant; resolver clamp + fail-open-to-default; marker TTL == 202 budget == dispatched timeout proven on one observed dispatch; reattach budget on the history response (remaining TTL / -2 / -1 / exception); the honest 504 |
+| `src/frontend/tests/unit/portalSidebarIA.spec.js` | `resolveWaitBudgetMs` (positive budget wins; unusable → fallback) and that the fallback stays frozen at the pre-#2214 server bound |
 
 ## Streaming (ent#286, same PR)
 
@@ -196,6 +198,64 @@ it already resolved, so a streamed turn still costs one Docker read.
 execution belonging to that agent, and the execution having been started by that
 caller (`source_user_email`). The third is the one that matters — executions are
 agent-scoped, so two clients of a shared agent can reach each other's ids.
+
+## Turn bound & wait budgets (#2133 → #2214)
+
+A Workspace turn is bounded by the agent's own `execution_timeout_seconds`
+(TIMEOUT-001; default 3600, operator range 60–7200) — not, as it originally
+shipped, by a flat `PORTAL_TURN_TIMEOUT_SECONDS = 300` that silently overrode
+the per-agent knob on exactly the surface clients use. The engine owns the read:
+`session_turn_service.resolve_turn_timeout(agent_name)`, beside
+`resolve_lock_ttl`, read-side clamped to TIMEOUT-001's own range and fail-open
+to the platform **default** (deliberately not the lock's fallback-to-**cap** —
+an over-TTL lock is a harmless auto-expiring key, an over-long turn is billable
+work).
+
+```
+resolve_turn_timeout(agent)  ..............  clamp[60, 7200], fail-open 3600
+  │  resolved ONCE per turn in start_portal_turn, threaded everywhere
+  ├─ dispatch ............. run_resumable_turn(timeout_seconds=t)
+  ├─ attempt ceiling ...... portal_attempt_ceiling_seconds(t) = t + 10 + retry cap
+  │                          (+10 = execute_task HTTP slack; retry cap =
+  │                          _AUTO_RETRY_MAX_TIMEOUT_S, IMPORTED never copied —
+  │                          the #678 auto-retry is a second full HTTP call)
+  ├─ marker TTL / budget .. portal_max_turn_seconds(t) = 2 × ceiling + 60
+  │                          (the cold retry re-runs the WHOLE turn)
+  ├─ 202 ................... wait_budget_seconds = that same number
+  └─ reattach .............. GET .../history returns
+                             in_flight_wait_budget_seconds = the marker's
+                             REMAINING Redis TTL (GET then TTL; -2 → treated as
+                             nothing running, -1 → fail-open to the full
+                             per-agent budget, exception → None so the client
+                             falls back)
+```
+
+The derived bounds are **pure functions**; the old module constants are deleted,
+not aliased, so a missed def-time consumer fails loudly at import.
+`mark_turn_inflight`'s TTL default became a None-sentinel resolved at call time
+for the same reason. One resolution per turn means marker, budget and dispatch
+cannot disagree, and the mid-turn `PUT /timeout` race between independent reads
+is gone (the resume **lock** still resolves its own TTL at acquire —
+pre-existing, engine-owned).
+
+Client side: `awaitPersistedReply` picks its ceiling via
+`portalUtils.resolveWaitBudgetMs` — a positive server budget wins;
+`REPLY_MAX_WAIT_MS_FALLBACK` is **frozen at the pre-#2214 server bound**
+(`2×(300+10+300)+60`s), because its only remaining audience is backends that
+predate the per-agent bound, whose real ceiling WAS that number. On reattach,
+`loadThread` stamps `budgetReadAt` beside the history fetch — the remaining-TTL
+budget is only honest from its own read time.
+
+Decisions worth remembering: **no Workspace clamp below the agent cap** (a
+clamp under 7200 re-introduces the silent override for the upper half of the
+range TIMEOUT-001 sells); the accepted cost is a bigger orphaned-marker window
+— hard-kill only (graceful shutdown clears the marker in `finally`), absolute
+worst `portal_max_turn_seconds(7200)` = 15,080s, precedent the Session
+surface's own ≤7230s sentinel; operator escape `DEL portal_inflight:{session}`.
+A turn that hits the bound 504s naming the agent's limit (seconds below 120,
+else rounded minutes). Long-timeout **headless** integrators should prefer the
+streaming route — the synchronous `POST .../chat` holds a byte-silent response
+for the whole turn, which is proxy read-timeout territory at hour scale.
 
 ## Known Limitations
 

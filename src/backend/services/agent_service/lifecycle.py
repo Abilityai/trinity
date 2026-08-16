@@ -19,6 +19,7 @@ from services.docker_service import (
     docker_client,
     get_agent_container,
     get_next_available_port,
+    reserve_port_for_recreate,
 )
 from services.docker_utils import (
     container_stop, container_remove, container_start, container_reload,
@@ -1106,6 +1107,12 @@ async def recreate_container_with_updated_config(
         await container_stop(old_container)
     except Exception:
         pass
+    # #2215: across the remove->create gap below, this port is invisible to the
+    # allocator (its label is gone) and unreserved — and the most-recreated
+    # agent tends to hold the fleet's MAX port, exactly what a concurrent
+    # allocation computes as max+1. Re-assert the reservation before removal
+    # (SET no-NX: it is this agent's own port; fail-open, never raises).
+    reserve_port_for_recreate(ssh_port)
     try:
         await container_remove(old_container)
     except docker.errors.NotFound:
