@@ -195,9 +195,12 @@ class TestFailedGolden:
         assert kw["cost"] == 0.02                   # salvaged from partial metadata
         assert kw["context_used"] == 50
         assert kw["context_max"] == 200000
-        # FAILED write must NOT carry response/tool_calls/execution_log/session.
+        # This envelope carries no transcript, so the FAILED write carries no
+        # response and no tool_calls/execution_log summary (#1853 persists those
+        # only when the failure envelope carries a transcript).
         assert "response" not in kw or kw.get("response") is None
         assert kw.get("tool_calls") is None
+        assert kw.get("execution_log") is None
         assert mact.complete_activity.await_args.kwargs["status"] == ActivityState.FAILED
         # Non-AUTH failure → breaker untouched.
         mrec.assert_not_awaited()

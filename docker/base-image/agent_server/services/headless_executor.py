@@ -19,6 +19,7 @@ import json
 import logging
 import math
 import os
+import re
 import subprocess
 import threading
 import time
@@ -447,30 +448,98 @@ def _try_recover_completed_turn(ctx: "HeadlessRunContext") -> bool:
     return True
 
 
+# #1853: the strict JSONL-filename UUID shape. A persisted ``claude_session_id``
+# must be a real session id — it points at
+# ``~/.claude/projects/.../<uuid>.jsonl`` and is what the reaper's keep-set /
+# reap_jsonl match on — and the fallback source ``ctx.claude_session_uuid`` can be
+# an untrusted ``resume_session_id`` straight from the /task request body (a
+# log-forging vector; ``sanitize_dict`` does not strip newlines). Mirrors the
+# reaper's ``_UUID_RE`` (session_cleanup_service.py); the agent server cannot
+# import the backend, so the shape is restated here.
+_SESSION_ID_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def _valid_session_id(session_id: Optional[str]) -> Optional[str]:
+    """Return ``session_id`` iff it is a strict UUID (the JSONL filename shape),
+    else ``None`` — the persisted ``claude_session_id`` fallback guard (#1853,
+    FI-1)."""
+    if session_id and _SESSION_ID_UUID_RE.match(session_id):
+        return session_id
+    return None
+
+
 def _timeout_504_detail(
     ctx: "HeadlessRunContext",
     message: str,
     termination_reason: str,
     stalled_tool: Optional[str] = None,
 ) -> Dict:
-    """Structured 504 body for an agent-side timeout kill (#1094, #1201).
+    """Structured 504 body for an agent-side timeout kill (#1094, #1201, #1853).
 
     Carries the telemetry accumulated before the kill (cost / context / tool
     calls) under ``metadata`` — the same sanitized
     ``ExecutionMetadata.model_dump()`` shape the #678 empty-result body uses —
-    so the backend's HTTPError salvage (`task_execution_service.py` HTTPError
-    branch) persists cost/context onto the timed-out FAILED row instead of
-    writing it bare. ``termination_reason`` ("max_duration" | "stall_no_output")
-    and the timeout-failure semantics are unchanged.
+    plus the full stream-json transcript under ``execution_log`` (#1853), so the
+    backend's HTTPError salvage (`task_execution_service.py` HTTPError branch)
+    persists cost / context / session_id AND the transcript onto the timed-out
+    FAILED row instead of writing it bare. ``termination_reason``
+    ("max_duration" | "stall_no_output") and the timeout-failure semantics are
+    unchanged.
     """
+    meta = sanitize_dict(ctx.metadata.model_dump())
+    # #1853: persist a session id pointing at the on-disk JSONL even when the
+    # reader race wedged before Claude echoed its id — validated, since the
+    # fallback can be an untrusted resume_session_id.
+    meta["session_id"] = _valid_session_id(
+        ctx.metadata.session_id or ctx.claude_session_uuid
+    )
     detail: Dict = {
         "message": message,
         "termination_reason": termination_reason,
-        "metadata": sanitize_dict(ctx.metadata.model_dump()),
+        "metadata": meta,
+        # #1853: the full stream-json transcript (in-memory, so present for short
+        # runs too). Backend sanitizes it with sanitize_execution_log.
+        "execution_log": ctx.raw_messages,
     }
     if stalled_tool is not None:
         detail["stalled_tool"] = stalled_tool
     return detail
+
+
+def _execution_error_502_detail(ctx: "HeadlessRunContext", message: str) -> Dict:
+    """Structured 502 body for a Claude Code ``error_during_execution`` (#1853).
+
+    Mirrors ``_timeout_504_detail``: carries the telemetry accumulated before the
+    failure (``metadata``) plus the full stream-json transcript
+    (``execution_log`` = ``ctx.raw_messages``), so the backend's HTTPError salvage
+    persists cost / context / session_id AND the transcript onto the FAILED row
+    instead of writing it bare — making the whole ``error_during_execution``
+    failure class diagnosable after the fact.
+
+    The ``message`` text is unchanged from the pre-#1853 bare body, so #1938's
+    error-string fix and the backend's resume-not-found self-heal (which reads
+    ``detail["message"]``) are preserved.
+    """
+    meta = sanitize_dict(ctx.metadata.model_dump())
+    # Persist a session id pointing at the on-disk JSONL even when the reader
+    # race wedged before Claude echoed its id. VALIDATE it: the fallback
+    # ctx.claude_session_uuid can be an untrusted resume_session_id (a
+    # log-forging vector — sanitize_dict does not strip newlines).
+    meta["session_id"] = _valid_session_id(
+        ctx.metadata.session_id or ctx.claude_session_uuid
+    )
+    return {
+        "message": message,
+        "metadata": meta,
+        # The full stream-json transcript SUCCESS sends as ``execution_log``
+        # (routers/chat.py = raw_messages). In-memory, so present for short runs
+        # too (no #678 JSONL dependency). Backend sanitizes it with
+        # sanitize_execution_log — same as the SUCCESS branch.
+        "execution_log": ctx.raw_messages,
+    }
 
 
 @dataclass
@@ -630,8 +699,9 @@ def _setup_headless_command(
         # recovery code can fire when the stdout reader thread wedges.
         # Short fan-out / utility tasks stay disk-cheap; long deliverable
         # tasks (the real telemetry-loss pain) get a recovery surface.
-        # The retention sweep in session_cleanup_service.py reaps these
-        # JSONLs after 24h so disk cost stays bounded.
+        # The retention sweep in session_cleanup_service.py reaps these JSONLs
+        # on a 6h cycle once they pass a 1h age guard (1-7h effective, #1853),
+        # so disk cost stays bounded.
         effective_persist = persist_session or (timeout_seconds > _JSONL_PERSIST_THRESHOLD_S)
         if persist_session is False and timeout_seconds > _JSONL_PERSIST_THRESHOLD_S:
             logger.info(
@@ -1330,9 +1400,12 @@ def _finalize_headless_result(
         if not _try_recover_completed_turn(ctx):
             err = sanitize_text(ctx.metadata.error_message or "Execution error")
             logger.error(f"[Headless Task] Claude Code execution error: {err[:300]}")
+            # #1853: carry the telemetry + full transcript (structured body) so
+            # the backend salvages cost / context / session_id + execution_log
+            # onto the FAILED row. `message` text is unchanged (preserves #1938).
             raise HTTPException(
                 status_code=502,
-                detail=f"Execution error: {err[:300]}",
+                detail=_execution_error_502_detail(ctx, f"Execution error: {err[:300]}"),
             )
 
     # Issue #520 + Session-tab pipe race recovery: clean exit
