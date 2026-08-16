@@ -2,6 +2,22 @@
 Unit test conftest — overrides the parent conftest's autouse fixtures.
 
 These tests run without a backend connection (no Docker, no API).
+
+WHERE DOES A NEW TEST GO? (#1895)
+`tests/unit/` is the ONLY directory the per-PR CI unit job collects
+(`backend-unit-test.yml` runs `pytest unit/`; this island is sealed by
+`tests/unit/pytest.ini`'s `norecursedirs = ..`). So:
+  * a test needing NO live backend (pure logic / tmp-SQLite; no api_client /
+    created_agent / ws_ticket, no raw httpx/ws_connect) belongs HERE;
+  * a MIXED file is split — the self-contained half here, the live half in the
+    tests/ root;
+  * a live-backend test stays in the tests/ root (add `# allow-root-live-test:`
+    if it takes no live *fixture* parameter).
+Async tests here MUST carry an explicit `@pytest.mark.asyncio` (function / class /
+module `pytestmark`): this island runs pytest-asyncio in STRICT mode (no
+`asyncio_mode`), so an unmarked `async def test_` does not run. Both rules are
+enforced by `tests/lint_root_test_placement.py`; see `tests/README.md`
+("Where does a new test go?").
 """
 import contextlib
 import importlib.util
