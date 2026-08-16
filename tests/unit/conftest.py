@@ -152,6 +152,34 @@ def _preload_real_agent_server():
         sys.modules["agent_server"] = _stub
 
 
+def _preload_backend_routers_namespace():
+    """Pre-register src/backend/routers/ as the `routers` namespace package.
+
+    Migrated from tests/conftest.py (#1895): test_inter_agent_timeout_unit.py
+    installs a PLAIN `routers` module stub at collection time
+    (``sys.modules["routers"] = types.ModuleType("routers")`` — no __path__).
+    A plain module breaks a later ``import routers.public`` in
+    test_ip_rate_limit_fix.py's unit half ("routers is not a package"). The root
+    conftest defused this, but the unit island (norecursedirs = ..) never loaded
+    it. Registering a real namespace package here — before collection — makes the
+    ``if "routers" not in sys.modules`` guard fire so the plain stub is never
+    installed, and upgrades any already-installed plain module to a package.
+    """
+    routers_dir = _BACKEND / "routers"
+    if not routers_dir.exists():
+        return
+    existing = sys.modules.get("routers")
+    if existing is not None:
+        if not getattr(existing, "__path__", None):
+            existing.__path__ = [str(routers_dir)]  # type: ignore[attr-defined]
+            existing.__package__ = "routers"
+        return
+    pkg = types.ModuleType("routers")
+    pkg.__path__ = [str(routers_dir)]  # type: ignore[attr-defined]
+    pkg.__package__ = "routers"
+    sys.modules["routers"] = pkg
+
+
 # Evict any shadow `utils` that parent conftest already cached, then preload
 # backend's utils package.
 for _mod in list(sys.modules):
@@ -161,6 +189,10 @@ _preload_backend_utils()
 
 # Evict any tests/agent_server shadow and register the real base-image package.
 _preload_real_agent_server()
+
+# Register src/backend/routers as a proper namespace package before collection so a
+# plain-module `routers` stub (test_inter_agent_timeout_unit) can't shadow it (#1895).
+_preload_backend_routers_namespace()
 
 # Pre-load services.agent_client so CircuitState is in sys.modules before
 # test_fleet_status_resilience.py / test_voice_tools.py install partial stubs
