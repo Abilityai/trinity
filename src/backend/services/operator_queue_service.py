@@ -106,6 +106,7 @@ _RESERVED_ID_PREFIXES = (
     "val_",              # validation_service
     "system-seed-",      # system_seed_service first-run seed alerts (ent#124)
     "base-image-stale-", # system_agent_service staleness + start-failure (#1816)
+    "db-backup-",        # db_backup_service failure/staleness alarms (#2216)
 )
 
 # Agent ids must be id-shaped: a create PK can't be safely rewritten, so a

@@ -571,12 +571,40 @@ async def get_retention_status(
             # Log archival (env-driven; LOG_* escape hatch)
             "log_retention_days": int(os.getenv("LOG_RETENTION_DAYS", "5")),
             "log_archive_enabled": os.getenv("LOG_ARCHIVE_ENABLED", "true").lower() == "true",
-            # Execution + health + soft-delete (OPS settings, 0 = disabled)
-            **{k: _ops_int(k) for k in RETENTION_OPS_KEYS},
+            # Execution + health + soft-delete (OPS settings, 0 = disabled).
+            # #2216: `backup_retention_days` is EXCLUDED here — _ops_int's
+            # garbage→0 coercion means "sweep disabled" for row windows but
+            # "keep backups forever" (the #1871 disk-fill trap) for backups,
+            # so on a malformed stored row this map and the backup service
+            # would disagree inside ONE response. The key is reported only in
+            # the `backup` block below, through the service's own inverted
+            # reader (garbage → 14). Pinned by
+            # tests/unit/test_2216_backup_observability.py.
+            **{
+                k: _ops_int(k)
+                for k in RETENTION_OPS_KEYS
+                if k != "backup_retention_days"
+            },
             # Audit log — exempt from the community floor (365-day integrity floor)
             "audit_log_retention_days": audit_days,
         },
+        # #2216: automatic database-backup status (BKUP-014) — durable
+        # system_settings keys + a live /data/backups listing, rendered by
+        # the one shared reader. `scope: "same-disk"` is the machine-readable
+        # boundary statement (protects against corruption/slips, not disk loss).
+        "backup": await _backup_block(),
     }
+
+
+async def _backup_block():
+    """Backup status for GET /retention — fail-soft: a broken block must not
+    take down the whole retention panel."""
+    try:
+        from services.db_backup_service import build_backup_status_block
+        return await build_backup_status_block()
+    except Exception as e:
+        logger.error(f"Could not build backup status block: {e}")
+        return {"error": "unavailable"}
 
 
 # ============================================================================
