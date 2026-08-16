@@ -46,6 +46,74 @@ spaces are independent: thread `x` and room `x` are different chats.
 
 ## Flow
 
+### 0. Loading the list (#2198)
+
+`GET /api/enterprise/client-portal/sessions` returns **every thread the viewer
+has, across every agent on their roster, in one call.**
+
+It replaced a literal N+1. The sidebar renders a merged, cross-agent,
+recency-sorted list, so `clientPortal.fetchAllSessions()` asked the per-agent
+`/agents/{name}/sessions` route once per rostered agent — and it does that from
+all **six** `refreshThreads()` call sites, including every thread open and every
+completed turn. Each of those calls cost 2–3 DB queries server-side, because
+`list_sessions` re-resolves the roster through `agent_on_roster` before it
+touches the session table. The batch resolves the roster once and issues one
+session query.
+
+Three things about it are load-bearing:
+
+- **The roster set IS the tenant scope.** `agent_name IN (:agents)`, populated
+  strictly from `roster_agent_names(email, include_owned)` — the same set
+  `agent_on_roster` enforces per agent, extracted so the two cannot drift.
+  Filtering on `client_email` alone would re-surface threads for an agent that
+  was un-shared, which the per-agent gate hides. `include_owned` is
+  `principal.is_platform`: a platform session sees agents it owns (ent#357), an
+  external client sees exactly what was shared with them.
+- **It must not become a single point of failure.** The fan-out it replaced
+  *could not reject* — every per-agent call had its own `catch { return [] }`,
+  so "one down agent never blanks the whole list" — and `refreshThreads`
+  `Promise.all`s it while only `fetchChatState` was caught. One request inverts
+  that: a single 500 would blank a populated sidebar and, worse, reject out of
+  `bootstrap()` before `resolveAgentQuery()`, breaking Workspace deep-link
+  landing entirely. So the store catches internally and returns its **last good
+  list** (never `[]`), raising `sessionsFailed`; `refreshThreads` catches both
+  halves as a belt.
+- **The rows are filtered client-side to the displayed roster.** The backend
+  scope is the access boundary; this narrower filter is a rendering rule, since
+  a thread whose agent the sidebar does not show would route nowhere. Today the
+  two sets are identical, so it is a no-op — and it keeps the sidebar correct
+  whatever #2196 decides about hiding container-less agents.
+
+No cap and no `total`: the per-agent route is unbounded and ran N times, so this
+ships the same row volume in one request. A cap would be a *new* behaviour that
+collides with §5.10's starred-chat pinning guarantee (a pure recency `LIMIT` can
+drop a starred-but-old thread out of the pinned section) — filed separately.
+
+Rate-limited per viewer (`portal_sessions_all:{email}`), because this becomes
+the hottest authenticated read in the Workspace and is no longer even
+incidentally throttled by the browser's per-host connection cap (and in
+production, behind cloudflared/HTTP-2, there is no such cap at all).
+
+**Human-only for platform principals (#2198 E7).** `get_portal_principal`'s
+platform branch now runs `reject_agent_principal`: an agent-scoped MCP key
+resolves to its owner *carrying the owner's role* (the ent#293/#297 trap), so
+before this any agent's injected `TRINITY_MCP_API_KEY` reached every portal
+route as the owner — a REST path around the MCP layer's agent-to-agent
+permission matrix — and the batch route would have turned "N calls against N
+discovered names" into one call returning the owner's whole thread index.
+Enforced at the dependency so every current and future portal route inherits
+it; user-scoped keys, `scope='system'` and portal session tokens pass exactly
+as before.
+
+*Behaviour change worth naming:* one unreadable agent used to degrade alone;
+with one query the read is all-or-nothing. Acceptable — a single indexed read,
+not N agent round-trips — but it is a real change in failure granularity.
+
+*Transitional:* a **404** falls back to the per-agent fan-out for the
+deploy-skew window (a cached bundle against a backend without the route). 404
+only — a 5xx already degrades correctly, and fanning out there would turn one
+failure into N. Delete one release after this ships.
+
 ### 1. Reading state
 
 `GET /chat-state` returns one entry per chat the viewer has state for:
@@ -128,11 +196,11 @@ destination with its own content, not a shortcut to a conversation).
 | Layer | File | Change |
 |---|---|---|
 | Schema | `db/schema.py`, `db/tables.py`, `db/migrations.py`, `migrations/versions/0038_portal_chat_state.py` | one table, four tracks (Invariant #3) |
-| DB | `client_portal/db.py` | state accessors + the unread aggregate |
-| Service | `client_portal/service.py` | kind/id validation, row cap, star + read + combined read |
-| Router | `client_portal/router.py` | 4 endpoints |
-| Store | `stores/clientPortal.js` | `fetchChatState`, `setChatStar`, `markChatRead` |
-| Shell | `views/Portal.vue` | merge state onto threads, optimistic star, mark-read on open |
+| DB | `client_portal/db.py` | state accessors + the unread aggregate; `list_portal_sessions_for_agents` (#2198, chunked at 500 for the SQLite variable ceiling) |
+| Service | `client_portal/service.py` | kind/id validation, row cap, star + read + combined read; `roster_agent_names` + `list_all_sessions` (#2198) |
+| Router | `client_portal/router.py` | 4 endpoints + `GET /sessions` (#2198) |
+| Store | `stores/clientPortal.js` | `fetchChatState`, `setChatStar`, `markChatRead`; `fetchSessionsBatch` + last-good-list resilience (#2198) |
+| Shell | `views/Portal.vue` | merge state onto threads, optimistic star, mark-read on open; `refreshThreads` catches both halves (#2198) |
 | UI | `components/portal/PortalSidebar.vue` | agents block, starred section, wordmark badge |
 | UI | `components/portal/PortalChatRow.vue` | **new** — one row shared by both sections |
 | UI | `components/portal/PortalStarButton.vue` | **new** — one star for its three homes |

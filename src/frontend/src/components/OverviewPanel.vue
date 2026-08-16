@@ -18,6 +18,7 @@ import { parseUTC } from '@/utils/timestamps'
 import { BUCKET_COLORS } from '@/utils/executionBuckets'
 import { useAuthStore } from '../stores/auth'
 import { useExecutionsStore } from '../stores/executions'
+import { useAgentsStore } from '../stores/agents'
 import StackedBarChart from './StackedBarChart.vue'
 import TrendLineChart from './TrendLineChart.vue'
 import CompatibilityPanel from './CompatibilityPanel.vue'
@@ -29,6 +30,7 @@ const emit = defineEmits(['navigate-tab', 'open-task'])
 
 const authStore = useAuthStore()
 const executionsStore = useExecutionsStore()
+const agentsStore = useAgentsStore()
 
 const agentName = computed(() => props.agent?.name)
 const isRunning = computed(() => props.agent?.status === 'running')
@@ -201,12 +203,22 @@ async function loadSidecars() {
     get(`/api/agents/${name}/schedules`),
     get(`/api/agents/${name}/skills`),
     get('/api/executions', { agent: name, limit: 5 }),
-    get(`/api/agents/${name}/info`),
+    // #2198: through the store, not a raw axios.get. Overview is the default
+    // landing tab, so this fired concurrently with AgentDetail's own
+    // `checkBrainOrbCapability()` — three `/info` requests for one mount. The
+    // store's in-flight join collapses them; `loadAnalytics()` two functions up
+    // already uses the cached store methods, so the precedent is adjacent.
+    agentsStore.getAgentInfo(name),
   ])
 
   const [stats, notif, opq, sync, hDetail, hHist, scheds, skills, recents, agentInfo] = results
 
-  if (agentInfo.status === 'fulfilled') info.value = agentInfo.value.data
+  // NOTE the missing `.data`: the store returns `response.data` already
+  // unwrapped, unlike the nine raw-axios siblings below. Keeping `.data` here
+  // would set `info` to `undefined` with no throw and no console error — a
+  // permanently blank "About" lead on the default tab. Do not "restore" it, and
+  // do not mass-edit the siblings, which are still raw Axios responses.
+  if (agentInfo.status === 'fulfilled') info.value = agentInfo.value
   if (stats.status === 'fulfilled') live.value = stats.value.data
   if (notif.status === 'fulfilled') notifCount.value = notif.value.data?.pending_count || 0
   if (opq.status === 'fulfilled') opQueuePending.value = opq.value.data?.count || 0

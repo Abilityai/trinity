@@ -258,6 +258,21 @@ const props = defineProps({
   voiceActive: {
     type: Boolean,
     default: false
+  },
+  // #2198 — playbooks supplied by the parent, so this component does not fetch
+  // them a second time. ChatPanel already loads the identical list (same
+  // endpoint, same `user_invocable` filter) for <ChatEmptyState>, and ChatPanel
+  // is `v-show` in AgentDetail, so it mounts on EVERY tab — two
+  // `/api/agents/{name}/playbooks` requests per page load.
+  //
+  // `null` means "not supplied — fetch your own", which is NOT the same as `[]`
+  // ("supplied, and empty"). That distinction is what keeps
+  // `views/PublicChat.vue` working: it is the other <ChatInput> consumer and it
+  // relies on the composable's public-token path, which ChatPanel never
+  // exercises. Do not change this default to `[]`.
+  playbooks: {
+    type: Array,
+    default: null
   }
 })
 
@@ -284,10 +299,24 @@ watch(localMessage, (val) => {
   emit('update:modelValue', val)
 })
 
-// ── Load playbooks when the agent is available ───────────────────────────────
+// ── Playbooks: adopt the parent's list, else fetch our own ───────────────────
+// #2198: when the parent supplies them, mirror the list instead of issuing a
+// second identical request. Kept as a watcher (not a one-shot read) because
+// ChatPanel populates its own list asynchronously and re-loads it on an agent
+// change, so the prop legitimately arrives and then changes.
+watch(
+  () => props.playbooks,
+  (list) => {
+    if (list) ac.playbooks.value = list
+  },
+  { immediate: true }
+)
+
 watch(
   () => [props.agentName, props.agentStatus],
   ([name, status]) => {
+    // The parent owns the list — do not fetch it again.
+    if (props.playbooks) return
     if (name && status === 'running') {
       ac.load(name, authStore.authHeader)
     }

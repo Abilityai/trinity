@@ -5,6 +5,14 @@ export const useAuthStore = defineStore('auth', {
   state: () => ({
     token: null,
     user: null,
+    // #2198 — true only after a SUCCESSFUL GET /api/users/me in this browsing
+    // session. Deliberately NOT persisted, and deliberately distinct from
+    // `user?.role` being present: `initializeAuth()` restores `user` (role
+    // included) synchronously from localStorage, which is user-editable, so a
+    // role gate reading it alone would fail OPEN on a forged value. Role-gated
+    // UI must require this flag, so the nav reflects a server answer rather
+    // than a stored one.
+    profileVerified: false,
     isAuthenticated: false,
     isLoading: true,
     authError: null,
@@ -175,6 +183,11 @@ export const useAuthStore = defineStore('auth', {
       try {
         const response = await axios.get('/api/users/me')
         this.user = { ...this.user, ...response.data }
+        // #2198: only a real server response verifies the profile. Set AFTER
+        // the assignment so a consumer waking on this flag always sees the
+        // merged user, and never in the catch — a failed fetch must leave
+        // role-gated UI closed.
+        this.profileVerified = true
         localStorage.setItem('auth0_user', JSON.stringify(this.user))
       } catch (e) {
         console.warn('Failed to fetch /api/users/me:', e?.message || e)
@@ -397,6 +410,11 @@ export const useAuthStore = defineStore('auth', {
       this.token = null
       this.user = null
       this.isAuthenticated = false
+      // #2198: the verification belonged to the session that just ended. A
+      // stale `true` here would let the next principal's role-gated UI render
+      // from whatever `user` happens to be restored before its own
+      // /api/users/me lands.
+      this.profileVerified = false
       this.authError = null
       this.mfaChallenge = null
 

@@ -1336,6 +1336,33 @@ per roster load in `get_roster` — **not** in `_roster_rows`, which stays pure 
 `_agent_briefing`, so #2163 stays free to defer/bound/cache the briefing. Invariant #11
 is untouched: every Docker read still happens inside `docker_service.py`.
 
+**The sidebar's thread list is one viewer-scoped call (#2198).**
+`GET /api/enterprise/client-portal/sessions` returns every thread the caller has across
+every agent on their roster. It replaced a literal N+1: the sidebar renders a merged,
+cross-agent, recency-sorted list, so it asked the per-agent route once per rostered
+agent — from six `refreshThreads()` call sites including every thread open and every
+completed turn — and each of those re-resolved the roster before reading the session
+table. The batch's tenant scope IS the roster: `agent_name IN (…)` populated from
+`service.roster_agent_names(email, include_owned)`, the same set `agent_on_roster`
+enforces, extracted so the two cannot drift (filtering on `client_email` alone would
+re-surface threads for an un-shared agent). No agent parameter, so it is strictly less
+enumerable than the route it replaces (Invariant #8); no schema change and no new index
+(the existing `(agent_name, client_email, last_message_at)` gives it the same plan each
+per-agent query already got); rate-limited per viewer, since it is no longer even
+incidentally throttled by a browser connection cap. The one real trade is failure
+granularity — one unreadable agent used to degrade alone, and the read is now
+all-or-nothing — which is why the store returns its **last good list** on failure rather
+than blanking, and `refreshThreads` catches both halves: an uncaught rejection there
+aborts `bootstrap()` before `resolveAgentQuery()` and breaks Workspace deep-link landing.
+Shipping it also closed the hole it would have amplified: `get_portal_principal`'s
+platform branch now runs `reject_agent_principal`, so an agent-scoped MCP key — which
+resolves to its owner carrying the owner's role — can no longer traverse the Workspace
+as `is_platform=True` (it could previously read the owner's threads with agents the
+calling agent holds no `agent_permissions` edge to, and this route would have made that
+one call). User-scoped keys, `scope='system'` and portal session tokens are unaffected;
+there is no legitimate agent caller of this surface (no MCP tool targets it, no agent
+image calls it).
+
 It was an entitled module and returned 404 in community builds; ent#356 moved it into
 OSS core (adoption: this is the main surface a non-operator uses to work with agents).
 The `/api/enterprise/client-portal` prefix and the `enterprise_portal_sessions` /

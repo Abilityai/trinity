@@ -821,11 +821,23 @@ def agent_on_roster(agent_name: str, email: str | None,
     no way to grant themselves access. Harmless while the Workspace was a
     secondary surface; fatal once it is the only one.
     """
-    if agent_name in {r["agent_name"] for r in db.get_shared_roster(email or "")}:
-        return True
+    return agent_name in roster_agent_names(email, include_owned)
+
+
+def roster_agent_names(email: str | None, include_owned: bool) -> set[str]:
+    """The set of agent names on the caller's roster — THE access boundary.
+
+    #2198: extracted so the per-agent gate above and the cross-agent batch read
+    (`list_all_sessions`) resolve membership through one implementation rather
+    than two that merely happen to agree. The batch's tenant scope is exactly
+    this set; if it could drift from what `agent_on_roster` enforces, the
+    sidebar would either leak threads for an agent the caller cannot open or
+    hide threads for one they can.
+    """
+    names = {r["agent_name"] for r in db.get_shared_roster(email or "")}
     if include_owned:
-        return agent_name in {r["agent_name"] for r in db.get_owned_roster(email or "")}
-    return False
+        names |= {r["agent_name"] for r in db.get_owned_roster(email or "")}
+    return names
 
 
 _HISTORY_CONTEXT_MESSAGES = 20  # last ~10 turns fed back to the model as context
@@ -1732,6 +1744,30 @@ def list_sessions(agent_name: str, email: str, include_owned: bool = False) -> d
     if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     return {"agent_name": agent_name, "sessions": db.list_portal_sessions(agent_name, email)}
+
+
+def list_all_sessions(email: str, include_owned: bool = False) -> dict:
+    """Every thread the caller has, across every agent on their roster (#2198).
+
+    Replaces the sidebar's N+1: `clientPortal.fetchAllSessions()` called the
+    per-agent route once per rostered agent — on bootstrap, on every thread open
+    and on every completed turn — and each of those cost 2-3 DB queries, because
+    `list_sessions` re-resolves the roster through `agent_on_roster` before
+    touching the session table. This resolves the roster ONCE and issues one
+    session query.
+
+    Scoped by `roster_agent_names`, the same set `agent_on_roster` enforces, so
+    the batch returns exactly the union of what the per-agent route would.
+    Filtering on `client_email` alone would be the one way to get this wrong: it
+    would re-surface threads for an agent that was un-shared, which the per-agent
+    gate hides today.
+    """
+    names = sorted(roster_agent_names(email, include_owned))
+    if not names:
+        # Nothing to ask, and the expanding bindparam would raise on an empty
+        # list. Return before touching the DB at all.
+        return {"sessions": []}
+    return {"sessions": db.list_portal_sessions_for_agents(email, names)}
 
 
 def create_session(agent_name: str, email: str, include_owned: bool = False) -> dict:

@@ -364,7 +364,6 @@ import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useEnterpriseStore } from '../stores/enterprise'
 import { useWebSocket } from '../utils/websocket'
 import { useBuildInfo } from '../composables/useBuildInfo'
-import axios from 'axios'
 
 const router = useRouter()
 const authStore = useAuthStore()
@@ -380,9 +379,24 @@ const { isConnected } = useWebSocket()
 const buildInfo = useBuildInfo()
 const showBuildInfoModal = ref(false)
 
-// Check if user is admin (fetch from backend)
-const userRole = ref(null)
-const isAdmin = computed(() => userRole.value === 'admin')
+// #2198: read the role from the auth store instead of issuing a second
+// GET /api/users/me — `auth.js::fetchUserProfile` already merges the identical
+// response into `authStore.user`, and it runs on both session restore and
+// admin login. In-repo precedent: `MonitoringPanel.vue:278` reads the store
+// "rather than a duplicate /api/users/me round-trip" (#1109).
+//
+// `profileVerified` is required, not decorative. `initializeAuth()` restores
+// `user` — role included — synchronously from localStorage, which is
+// user-editable, so `user?.role === 'admin'` alone would fail OPEN on a forged
+// value. Requiring a successful server fetch keeps exactly today's posture,
+// where this gate only ever reflected a real response.
+//
+// A computed, never a read-once: the store reports `user` before
+// /api/users/me lands (see Library.vue:474), so the nav must become admin
+// reactively when it arrives.
+const isAdmin = computed(
+  () => authStore.profileVerified && authStore.user?.role === 'admin'
+)
 
 // Check if currently in agent section (for highlighting nav)
 const route = router.currentRoute
@@ -423,7 +437,7 @@ const showUserMenu = ref(false)
 const userMenuRef = ref(null)
 const avatarError = ref(false)
 
-onMounted(async () => {
+onMounted(() => {
   // Add click outside listener
   document.addEventListener('click', handleClickOutside)
 
@@ -433,16 +447,6 @@ onMounted(async () => {
   // #926: kick off the cached build-info fetch — failures are non-fatal
   // (chip is hidden if fetch fails; e.g., unauthenticated brief window).
   buildInfo.load().catch(() => {})
-
-  // Fetch user role from backend
-  try {
-    const response = await axios.get('/api/users/me', {
-      headers: authStore.authHeader
-    })
-    userRole.value = response.data.role
-  } catch (e) {
-    console.warn('Failed to fetch user role:', e)
-  }
 
   // #847 Phase 0 — load enterprise entitlements. Fires once per page
   // load (the store gates on `featureFlagsLoaded`). The Enterprise nav

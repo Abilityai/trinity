@@ -178,6 +178,26 @@ class PortalSessions(BaseModel):
     sessions: list[PortalSessionSummary]
 
 
+class PortalAllSessionsItem(PortalSessionSummary):
+    """One thread in the cross-agent sidebar list — the per-agent summary plus the
+    one field a flat list cannot infer from its position (#2198)."""
+    agent_name: str
+
+
+class PortalAllSessions(BaseModel):
+    """Every thread the caller has, across every agent on their roster (#2198).
+
+    Deliberately NO cap and NO `total`. Today's per-agent route is unbounded and
+    the sidebar calls it once per rostered agent, so this ships the same row
+    volume in one request — a cap would be a new behaviour, and it would collide
+    with the starred-chat pinning guarantee in requirements §5.10 (a pure recency
+    LIMIT can drop a starred-but-old thread out of the pinned section). That is a
+    real product question and it deserves its own issue, not a side effect of a
+    request-count fix.
+    """
+    sessions: list[PortalAllSessionsItem]
+
+
 class PortalAgentAsk(BaseModel):
     """One thing the agent is waiting on a person for (ent#360).
 
