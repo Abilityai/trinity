@@ -55,35 +55,32 @@ def _gs():
 # Runtime state the platform writes under `.trinity/`. Each must stay ignored;
 # a file here that becomes tracked is repo bloat or a state leak.
 RUNTIME_FILES = {
-    ".trinity/operator-queue.json": "{}",  # OPS-001
-    ".trinity/sync-state.json": "{}",  # #389 S1a
-    ".trinity/read-only-config.json": "{}",  # read-only mode
-    ".trinity/persistent-state.yaml": "paths: []\n",  # S4 #383
-    ".trinity/data-paths.yaml": "paths: []\n",  # #1169
+    ".trinity/operator-queue.json": "{}",                     # OPS-001
+    ".trinity/sync-state.json": "{}",                         # #389 S1a
+    ".trinity/read-only-config.json": "{}",                   # read-only mode
+    ".trinity/persistent-state.yaml": "paths: []\n",          # S4 #383
+    ".trinity/data-paths.yaml": "paths: []\n",                # #1169
     ".trinity/pipeline-state/research/2026-01-01.json": "{}",  # #919 state
-    ".trinity/pending-results/e1.json": "{}",  # #1083
-    ".trinity/pending-pull-results/e2.json": "{}",  # #1081
-    ".trinity/backup/2026-01-01/x": "x",  # S3 snapshot
+    ".trinity/pending-results/e1.json": "{}",                 # #1083
+    ".trinity/pending-pull-results/e2.json": "{}",            # #1081
+    ".trinity/backup/2026-01-01/x": "x",                      # S3 snapshot
 }
 
 # Authored content a TEMPLATE commits and the platform reads back.
 AUTHORED_FILES = {
-    ".trinity/pre-check": "#!/bin/sh\necho run\n",  # #454
-    ".trinity/post-check": "#!/bin/sh\n",  # compat I-005
-    ".trinity/pre-snapshot": "#!/bin/sh\n",  # #1169
-    ".trinity/setup.sh": "#!/bin/sh\n",  # ent#76
-    ".trinity/persistent-processes.allow": "my-daemon\n",  # #1501
-    ".trinity/brain-orb/search": "#!/bin/sh\n",  # #58/#60
+    ".trinity/pre-check": "#!/bin/sh\necho run\n",            # #454
+    ".trinity/post-check": "#!/bin/sh\n",                     # compat I-005
+    ".trinity/pre-snapshot": "#!/bin/sh\n",                   # #1169
+    ".trinity/setup.sh": "#!/bin/sh\n",                       # ent#76
+    ".trinity/persistent-processes.allow": "my-daemon\n",     # #1501
+    ".trinity/brain-orb/search": "#!/bin/sh\n",               # #58/#60
     ".trinity/brain-orb/scopes": "#!/bin/sh\n",
-    ".trinity/pipelines/research.yaml": "id: research\n",  # #919 definitions
-    ".trinity/plugins.yaml": "plugins:\n  installed: []\n",  # #1704 (COMMITTED)
+    ".trinity/pipelines/research.yaml": "id: research\n",     # #919 definitions
+    ".trinity/plugins.yaml": "plugins:\n  installed: []\n",   # #1704 (COMMITTED)
 }
 
-_ENV = {
-    "PATH": "/usr/bin:/bin:/usr/local/bin",
-    "GIT_CONFIG_GLOBAL": "/dev/null",
-    "GIT_CONFIG_SYSTEM": "/dev/null",
-}
+_ENV = {"PATH": "/usr/bin:/bin:/usr/local/bin", "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null"}
 
 
 def _make_repo(tmp_path: Path, gitignore: str | None = None) -> Path:
@@ -107,9 +104,7 @@ def _make_repo(tmp_path: Path, gitignore: str | None = None) -> Path:
 
 def _git(cwd: Path, *args: str) -> str:
     env = dict(_ENV, HOME=str(cwd))
-    out = subprocess.run(
-        ["git", *args], cwd=cwd, env=env, capture_output=True, text=True
-    )
+    out = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True)
     assert out.returncode == 0, f"git {' '.join(args)} failed: {out.stderr}"
     return out.stdout
 
@@ -118,9 +113,7 @@ def _run(cmd: str, cwd: Path) -> None:
     """Run a builder's command the way the backend does — docker-py splits a
     string command with shlex, so the test does too."""
     env = dict(_ENV, HOME=str(cwd))
-    out = subprocess.run(
-        shlex.split(cmd), cwd=cwd, env=env, capture_output=True, text=True
-    )
+    out = subprocess.run(shlex.split(cmd), cwd=cwd, env=env, capture_output=True, text=True)
     assert out.returncode == 0, f"command failed: {out.stderr[:400]}"
 
 
@@ -135,7 +128,6 @@ def _push_sweep(home: Path) -> set[str]:
 # ---------------------------------------------------------------------------
 # The reported bug, and its two predecessors
 # ---------------------------------------------------------------------------
-
 
 @pytest.mark.parametrize("authored", sorted(AUTHORED_FILES))
 def test_authored_content_survives_the_push_sweep(tmp_path, authored):
@@ -163,28 +155,21 @@ def test_a_fresh_clone_still_runs_the_hook(tmp_path):
     _git(home, "commit", "-qam", "post-sweep")
 
     clone = tmp_path / "clone"
-    subprocess.run(
-        ["git", "clone", "-q", str(home), str(clone)],
-        env=dict(_ENV, HOME=str(tmp_path)),
-        check=True,
-        capture_output=True,
-    )
+    subprocess.run(["git", "clone", "-q", str(home), str(clone)],
+                   env=dict(_ENV, HOME=str(tmp_path)), check=True, capture_output=True)
 
     hook = clone / ".trinity" / "pre-check"
-    assert (
-        hook.is_file()
-    ), "a fresh clone has no pre-check — every cron tick now runs a full LLM turn"
+    assert hook.is_file(), "a fresh clone has no pre-check — every cron tick now runs a full LLM turn"
     os.chmod(hook, 0o755)
     out = subprocess.run([str(hook)], capture_output=True, text=True, env=_ENV)
-    assert (
-        out.returncode == 0 and out.stdout.strip() == "run"
-    ), f"the cloned hook did not run: rc={out.returncode} {out.stderr[:200]}"
+    assert out.returncode == 0 and out.stdout.strip() == "run", (
+        f"the cloned hook did not run: rc={out.returncode} {out.stderr[:200]}"
+    )
 
 
 # ---------------------------------------------------------------------------
 # The fleet this fixes already carries the superseded line
 # ---------------------------------------------------------------------------
-
 
 def test_the_superseded_wholesale_line_is_replaced(tmp_path):
     """Append-only would not have fixed anything.
@@ -205,17 +190,13 @@ def test_the_superseded_wholesale_line_is_replaced(tmp_path):
 
 def test_user_rules_mentioning_trinity_are_left_alone(tmp_path):
     """Removal is by EXACT line, confined to what this platform itself wrote."""
-    home = _make_repo(
-        tmp_path, gitignore=".trinity/scratch/\n!.trinity/mine\n.trinity/\n"
-    )
+    home = _make_repo(tmp_path, gitignore=".trinity/scratch/\n!.trinity/mine\n.trinity/\n")
     _push_sweep(home)
 
     lines = (home / ".gitignore").read_text().splitlines()
     assert ".trinity/scratch/" in lines, "a user's own rule was removed"
     assert "!.trinity/mine" in lines
-    assert (
-        ".trinity/" not in lines
-    ), "the platform's own superseded line should still go"
+    assert ".trinity/" not in lines, "the platform's own superseded line should still go"
 
 
 def test_the_merge_is_idempotent(tmp_path):
@@ -231,14 +212,12 @@ def test_the_merge_is_idempotent(tmp_path):
 # The split itself, not the strings that currently implement it
 # ---------------------------------------------------------------------------
 
-
 def test_every_authored_path_is_re_included_in_the_pattern_list():
     """Adding a path to `_TRINITY_AUTHORED_PATHS` without a matching negation
     would leave it ignored — tracked today, swept on the next Push."""
     gs = _gs()
-    missing = [
-        p for p in gs._TRINITY_AUTHORED_PATHS if f"!{p}" not in gs._GITIGNORE_PATTERNS
-    ]
+    missing = [p for p in gs._TRINITY_AUTHORED_PATHS
+               if f"!{p}" not in gs._GITIGNORE_PATTERNS]
     assert not missing, f"authored paths with no re-include: {missing}"
 
 
@@ -249,9 +228,9 @@ def test_the_rm_cached_exemptions_are_derived_not_hardcoded():
     gs = _gs()
     cmd = gs._build_rm_cached_ignored_command("/home/developer")
     for path in gs._TRINITY_AUTHORED_PATHS:
-        assert (
-            f":!{path.rstrip('/')}" in cmd
-        ), f"{path} is authored but absent from the rm --cached exemptions"
+        assert f":!{path.rstrip('/')}" in cmd, (
+            f"{path} is authored but absent from the rm --cached exemptions"
+        )
 
 
 def test_the_directory_is_not_excluded_wholesale():
@@ -276,9 +255,7 @@ def test_a_new_runtime_file_needs_no_action(tmp_path):
     _git(home, "commit", "-qm", "future state")
 
     tracked = _push_sweep(home)
-    assert (
-        ".trinity/some-future-state.json" not in tracked
-    ), "a newly-invented runtime file stayed tracked"
-    assert (
-        ".trinity/pre-check" in tracked
-    ), "…and it must not have cost the authored set"
+    assert ".trinity/some-future-state.json" not in tracked, (
+        "a newly-invented runtime file stayed tracked"
+    )
+    assert ".trinity/pre-check" in tracked, "…and it must not have cost the authored set"
