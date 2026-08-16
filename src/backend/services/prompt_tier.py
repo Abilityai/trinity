@@ -12,7 +12,7 @@ THE AXIS IS THE MODEL, NOT THE RUNTIME
 Deliberately NOT keyed on ``AGENT_RUNTIME``. MODEL-001 lets a schedule, loop, or
 chat turn pin any model string — including free text — so a ``claude-code``
 agent routinely runs Haiku 4.5. Gating on the runtime label would silently
-degrade the majority of the selectable surface (most ``PRESET_MODELS`` entries
+degrade the majority of the selectable surface (most ``model_catalog`` entries
 sit in the tier where the guidance does not apply). ``runtime`` already has an
 orthogonal job over in ``platform_prompt_service``: it rewrites MCP tool naming
 for Codex (#1187 F-MCP). Keep the two axes apart — a tier is about how much prose

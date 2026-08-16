@@ -56,19 +56,22 @@ class TestFeatureFlagsEndpoint:
 
     def test_feature_flags_default_is_claude_sonnet(self):
         """Out-of-box default must be claude-sonnet-4-6 unless overridden in DB."""
+        from services.model_catalog import MODEL_CATALOG
+
         headers = get_auth_headers()
         resp = httpx.get(f"{BASE_URL}/api/settings/feature-flags", headers=headers, timeout=10)
         assert resp.status_code == 200
         data = resp.json()
-        # Accept either the code default or a valid admin override. The override
-        # set must stay in lockstep with the options offered in Settings.vue's
-        # platform-default dropdown (#1080 added claude-opus-4-8).
-        assert data["platform_default_model"] in (
-            "claude-sonnet-4-6",
-            "claude-opus-4-8",
-            "claude-opus-4-7",
-            "claude-opus-4-6",
-        ), f"Unexpected default: {data['platform_default_model']}"
+        # Accept the code default or any valid admin override. Sourced from the
+        # single catalog (#2086) instead of a hand-maintained tuple that was
+        # already stale (missing fable-5/sonnet-5) — the admin dropdown offers
+        # exactly the admin_default_selectable set, so the default must be one of
+        # them (#1080 keeps Haiku out of this set).
+        admin_default_models = {m.id for m in MODEL_CATALOG if m.admin_default_selectable}
+        assert data["platform_default_model"] in admin_default_models, (
+            f"Unexpected default: {data['platform_default_model']} "
+            f"(not admin_default_selectable in the catalog: {sorted(admin_default_models)})"
+        )
 
     def test_feature_flags_unauthenticated_returns_401(self):
         resp = httpx.get(f"{BASE_URL}/api/settings/feature-flags", timeout=10)
