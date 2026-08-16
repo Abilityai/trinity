@@ -570,6 +570,22 @@ if [ -f "/home/developer/.mcp.json.template" ]; then
         echo "Warning: .mcp.json.template rendering failed (continuing startup)"
 fi
 
+# === Re-install declared Claude Code plugins (#1704) ===
+# The plugin selection is persisted as a committed, secret-free
+# `~/.trinity/plugins.yaml` manifest. A plain recreate is volume-safe, but a
+# git-based reconstitution onto a fresh volume drops the gitignored
+# `~/.claude.json` + `~/.claude/plugins/` cache — so re-install anything
+# declared-but-missing here. Runs AFTER credential injection above, because a
+# private marketplace needs a git credential at install time (resolved from the
+# agent's GITHUB_PAT env inside the module, never from the manifest). Reads
+# current state first, so a volume-persisting restart runs zero installs.
+# Never fails startup (a hung/no-TTY install is timeout-bounded in the module).
+if [ -f "/home/developer/.trinity/plugins.yaml" ]; then
+    echo "Restoring declared Claude Code plugins..."
+    (cd /app && python3 -m agent_server.plugins_reinstall) || \
+        echo "Warning: plugin re-install failed (continuing startup)"
+fi
+
 # === Content Folder Convention ===
 # Create content/ directory for large generated assets (videos, audio, images, exports)
 # These files persist across restarts but are NOT synced to GitHub
