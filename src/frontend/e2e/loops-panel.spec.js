@@ -1,4 +1,5 @@
 import { test, expect, request } from '@playwright/test'
+import { agentExists, missingAgentReason } from './helpers/agent-probe.js'
 
 /**
  * Loops tab e2e (#1106 / #740 Phase 2).
@@ -16,14 +17,23 @@ import { test, expect, request } from '@playwright/test'
  * "Run Loop" button.
  *
  * Required env: ADMIN_PASSWORD (enforced by auth.setup.js) and
- * LOOPS_TEST_AGENT (defaults to "testfix"). The agent must already exist;
+ * LOOPS_TEST_AGENT (defaults to "testfix"). The agent must already exist,
+ * and must be on the Claude runtime for the start/run test to be meaningful;
  * beforeAll starts it if it isn't running.
+ *
+ * A MISSING fixture agent reads as SKIPPED, never broken (#2199) — the probe
+ * is authenticated (see e2e/helpers/agent-probe.js for why that matters).
  */
 
 const TEST_AGENT = process.env.LOOPS_TEST_AGENT || 'testfix'
 
 let api
 let token
+// Set by beforeAll; read by the beforeEach guard. `test.skip()` is called from
+// beforeEach (the verified in-repo pattern) — NOT from beforeAll, where it does
+// not apply to the tests.
+let agentReady = false
+let skipReason = ''
 
 test.beforeAll(async ({ baseURL }) => {
   api = await request.newContext({ baseURL })
@@ -31,9 +41,18 @@ test.beforeAll(async ({ baseURL }) => {
     form: { username: 'admin', password: process.env.ADMIN_PASSWORD || '' },
   })
   if (!loginResp.ok()) {
-    throw new Error(`Admin login failed: ${loginResp.status()}`)
+    // A missing/incorrect ADMIN_PASSWORD is an environment gap, not a product
+    // failure — skip rather than throw (#2199).
+    skipReason = `admin login failed (${loginResp.status()}) — check ADMIN_PASSWORD`
+    return
   }
   token = (await loginResp.json()).access_token
+
+  if (!(await agentExists(TEST_AGENT, { baseURL, token }))) {
+    skipReason = missingAgentReason(TEST_AGENT, 'LOOPS_TEST_AGENT')
+    return
+  }
+  agentReady = true
 
   // Ensure the agent is running so the "Run Loop" button is enabled.
   // Best-effort: a 409/already-running response is fine.
@@ -47,6 +66,10 @@ test.afterAll(async () => {
 })
 
 test.describe('loops tab', () => {
+  test.beforeEach(() => {
+    test.skip(!agentReady, skipReason)
+  })
+
   test('@interactive tab is visible and Run Loop opens the form', async ({ page }) => {
     await page.goto(`/agents/${TEST_AGENT}`)
 
