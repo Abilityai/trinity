@@ -1676,7 +1676,13 @@ def _apply_github_env(
         # ent#123: `and github_pat_for_agent` is a belt — tokenless is
         # provably source-mode+non-fork today, but auto-push must never
         # engage without credentials if that restriction is ever relaxed.
-        if (not config.source_mode or fork_upstream_repo) and github_pat_for_agent:
+        # #2069: this exact condition is the single owner
+        # `git_service._git_auto_sync_baked`, shared with the creation-time
+        # `.gitignore` merge spawn so the merge covers EXACTLY the population
+        # whose in-container auto-sync loop commits (ephemeral ghosts included).
+        if git_service._git_auto_sync_baked(
+            config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
+        ):
             env_vars['GIT_SYNC_AUTO'] = 'true'
 
         # Source mode (default): Track source branch directly for pull-only sync
@@ -2272,6 +2278,22 @@ async def _materialize_agent_files(
             logger.warning(
                 f"Failed to enable auto-sync for {config.name}: {e}"
             )
+
+    # #2069: the fleet-wide `.gitignore` merge never ran at creation, so the
+    # 15-min in-container auto-sync loop (on from birth for the GIT_SYNC_AUTO
+    # set — non-source/fork `github:` agents, ephemeral ghosts INCLUDED) staged
+    # `.trinity/` runtime state + the root-level `.env`/`.mcp.json` into a
+    # user-owned repo before any Push could migrate the list. Land the canonical
+    # list after startup.sh's FULL git setup (gated inside the merge on
+    # agent-server /health readiness, which follows the clone+checkout at
+    # startup.sh:517) and before the first auto-sync cycle. Fire-and-forget so it
+    # adds no creation latency; non-fatal. Gated on the SAME ENV predicate that
+    # bakes GIT_SYNC_AUTO (NOT the DB-flag block above, which excludes ghosts),
+    # so the merge covers exactly the auto-committing population.
+    if git_service._git_auto_sync_baked(
+        config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
+    ):
+        git_service.spawn_gitignore_merge_after_clone(config.name)
 
 
 def _rollback_failed_creation(handles: _RollbackHandles) -> None:
