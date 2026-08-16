@@ -168,15 +168,34 @@
           >
             <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m0-3a4 4 0 004-4V7a4 4 0 10-8 0v6a4 4 0 004 4z" /></svg>
           </button>
-          <textarea
-            ref="textarea"
-            v-model="input"
-            rows="1"
-            :placeholder="listening ? 'Listening…' : `Message ${agentDisplayName(agent)}…`"
-            class="flex-1 resize-none rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-gray-100 px-4 py-2.5 leading-6 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
-            @input="autoGrow"
-            @keydown.enter.exact.prevent="send"
-          ></textarea>
+          <!-- ent#392: this is the composer's FIRST anchored overlay, so the
+               wrapper is new. It must inherit the flex sizing the textarea used
+               to carry (`flex-1 min-w-0`) — a bare `relative` div collapses the
+               field to content width — and it deliberately carries no z-index,
+               so it creates no stacking context of its own. -->
+          <div ref="composerWrap" class="relative flex-1 min-w-0">
+            <PortalTypeahead
+              v-if="typeaheadOpen"
+              :kind="typeaheadKind"
+              :rows="typeaheadRows"
+              :active-index="activeIndex"
+              :overflow="typeaheadBound.overflow"
+              :empty-message="typeaheadEmpty || ''"
+              @pick="acceptActive"
+              @hover="activeIndex = $event"
+            />
+            <textarea
+              ref="textarea"
+              v-model="input"
+              rows="1"
+              :placeholder="composerPlaceholder"
+              class="w-full resize-none rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-gray-100 px-4 py-2.5 leading-6 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
+              @input="onComposerInput"
+              @keydown="onComposerKeydown"
+              @click="onComposerCaret"
+              @select="onComposerCaret"
+            ></textarea>
+          </div>
           <button
             type="submit"
             class="shrink-0 p-2.5 rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 disabled:hover:bg-action-primary-600 transition"
@@ -200,7 +219,26 @@ import { renderMarkdown } from '@/utils/markdown'
 import { agentDisplayName } from '@/utils/agentName'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
-import { deliveryFailureReason, mentionedAgents, REPLY_MAX_WAIT_MS_FALLBACK } from './portalUtils'
+import PortalTypeahead from './PortalTypeahead.vue'
+import {
+  deliveryFailureReason,
+  mentionedAgents,
+  resolveWaitBudgetMs,
+  applyTypeaheadInsert,
+  boundCandidates,
+  buildMentionToken,
+  clampActiveIndex,
+  detectTypeaheadTrigger,
+  dismissAfterInsert,
+  filterAgentCandidates,
+  filterPlaybookCandidates,
+  isSuppressed,
+  nextActiveIndex,
+  nextDismissState,
+  resolveComposerKey,
+  starterFor,
+  typeaheadEmptyMessage,
+} from './portalUtils'
 
 const props = defineProps({
   agent: { type: Object, required: true },      // {name, owner, avatar_url, description, playbooks, voice_available}
@@ -228,6 +266,15 @@ const fileInput = ref(null)
 const pickerRef = ref(null)
 const pickerOpen = ref(false)
 
+// ent#392 — composer typeahead state. Three refs, no decisions: `trigger` is
+// whatever the pure scanner last returned, `activeIndex` is the roving
+// selection (-1 = nothing chosen, which is what makes Enter send), `dismissed`
+// is the Esc sentinel.
+const composerWrap = ref(null)
+const typeaheadTrigger = ref(null)
+const activeIndex = ref(-1)
+const dismissed = ref(null)
+
 const render = (c) => renderMarkdown(c || '')
 
 // ---- Load history when the thread/agent changes -------------------------------
@@ -235,12 +282,19 @@ async function loadThread(sessionId) {
   loadingHistory.value = true
   messages.value = []
   let inFlight = null
+  let inFlightBudget = null
+  let budgetReadAt = null
   try {
-    const { sessionId: resolved, messages: msgs, inFlightExecutionId } =
+    const { sessionId: resolved, messages: msgs, inFlightExecutionId, inFlightWaitBudgetSeconds } =
       await store.fetchHistory(props.agent.name, sessionId || null)
+    // #2214: the budget is the marker's REMAINING TTL, honest only from the
+    // instant it was measured — stamp that instant beside the fetch, not when
+    // the (possibly long) reattached stream later ends.
+    budgetReadAt = Date.now()
     currentSessionId.value = sessionId || resolved || null
     messages.value = (msgs || []).map((m) => ({ role: m.role, content: m.content }))
     inFlight = inFlightExecutionId
+    inFlightBudget = inFlightWaitBudgetSeconds
   } catch { /* start empty */ }
   finally { loadingHistory.value = false; await scrollDown() }
 
@@ -248,12 +302,15 @@ async function loadThread(sessionId) {
   // rather than showing a thread that looks finished. The user's message is
   // already in `messages` (persisted at dispatch), so what is missing is only
   // the "working" state and the reply.
-  if (inFlight) await reattach(inFlight)
+  if (inFlight) await reattach(inFlight, inFlightBudget, budgetReadAt)
 }
 
 // Rejoin a turn already in progress. The agent replays its buffered log before
 // streaming live, so a client that reloaded sees what it missed.
-async function reattach(executionId) {
+// #2214: `budgetSeconds` is the server's remaining wait budget for that turn
+// (the marker's TTL at read time) and `budgetReadAt` the instant it was read —
+// together they bound the wait the same way a fresh dispatch's 202 budget does.
+async function reattach(executionId, budgetSeconds, budgetReadAt) {
   if (sending.value) return
   sending.value = true
   streaming.value = true
@@ -268,7 +325,8 @@ async function reattach(executionId) {
   const baseline = messages.value.filter((m) => m.role === 'assistant').length
   try {
     await store.streamPortalExecution(props.agent.name, executionId, onStreamEvent)
-    const data = await awaitPersistedReply(currentSessionId.value, baseline)
+    const data = await awaitPersistedReply(currentSessionId.value, baseline,
+                                           budgetSeconds, budgetReadAt)
     if (data?.response) {
       messages.value.push({ role: 'assistant', content: data.response })
       // A reattached reply is still a reply the user just watched land, so it
@@ -289,12 +347,13 @@ async function reattach(executionId) {
 
 watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {
   currentSessionId.value = sid
+  resetTypeahead()
   if (props.agent.name !== oldName || sid) await loadThread(sid)
   else { messages.value = []; currentSessionId.value = null }   // brand-new chat
 })
 
 watch(() => props.prefill, (v) => {
-  if (v) { input.value = v; nextTick(() => { autoGrow(); textarea.value?.focus() }) }
+  if (v) { input.value = v; resetTypeahead(); nextTick(() => { autoGrow(); textarea.value?.focus() }) }
 })
 
 onMounted(async () => {
@@ -314,7 +373,14 @@ onBeforeUnmount(() => {
 })
 
 function onNet() { offline.value = navigator.onLine === false }
-function onDocClick(e) { if (pickerOpen.value && pickerRef.value && !pickerRef.value.contains(e.target)) pickerOpen.value = false }
+function onDocClick(e) {
+  if (pickerOpen.value && pickerRef.value && !pickerRef.value.contains(e.target)) pickerOpen.value = false
+  // Outside the composer AND its popup closes the typeahead WITHOUT arming the
+  // Esc sentinel; a click inside the textarea recomputes via @click, and a click
+  // on the popup's own padding or scrollbar must not close it. This also covers
+  // the files drawer and the mobile nav, whose buttons live outside the wrapper.
+  if (typeaheadTrigger.value && composerWrap.value && !composerWrap.value.contains(e.target)) closeTypeahead()
+}
 
 function pickAgent(a) {
   pickerOpen.value = false
@@ -330,6 +396,173 @@ function autoGrow() {
   if (!el) return
   el.style.height = 'auto'
   el.style.height = Math.min(el.scrollHeight, 160) + 'px'
+}
+
+// ---- ent#392: composer typeahead (`/` playbooks, `@` agents) -----------------
+//
+// A DISPATCHER. Every decision — what counts as a trigger, what is offered, what
+// a key does, what a pick splices — lives in the pure exports of portalUtils.js,
+// because `vitest` runs `environment: 'node'` with no component-mount harness,
+// so a decision left here is a decision no test can reach.
+
+const typeaheadKind = computed(() => typeaheadTrigger.value?.kind || '/')
+
+const typeaheadResult = computed(() => {
+  const t = typeaheadTrigger.value
+  if (!t) return null
+  if (t.kind === '/') {
+    return { kind: '/', enabled: true, ...filterPlaybookCandidates(props.agent?.playbooks, t.query) }
+  }
+  return {
+    kind: '@',
+    ...filterAgentCandidates(props.roster, t.query, {
+      exclude: [props.agent?.name],
+      // #2128: with no rooms substrate an @mention is deliberately ordinary
+      // text, so offering a picker for it is a dead-end affordance. The gate
+      // lives in the pure filter, so it is tested rather than grepped.
+      enabled: store.multiAgentChatAvailable,
+    }),
+  }
+})
+
+const typeaheadBound = computed(() => boundCandidates(typeaheadResult.value?.items || []))
+
+// The two empty conditions are NOT the same: a source with nothing in it shows
+// one honest line, while a query that matches nothing CLOSES the popup (AC#6 —
+// the user is writing "50/50", not picking). Restricting the line to a bare
+// trigger keeps a playbook-less agent from floating a panel over the rest of the
+// message as they keep typing.
+const typeaheadEmpty = computed(() => {
+  const t = typeaheadTrigger.value
+  const r = typeaheadResult.value
+  if (!t || !r || r.items.length || t.query !== '') return null
+  return typeaheadEmptyMessage(r.kind, r)
+})
+
+// A computed, not an imperative ref: it self-heals when the roster refreshes,
+// the capability flips, or playbooks arrive late.
+const typeaheadOpen = computed(() => {
+  const t = typeaheadTrigger.value
+  const r = typeaheadResult.value
+  if (!t || !r || r.enabled === false) return false
+  if (isSuppressed(dismissed.value, t)) return false
+  return typeaheadBound.value.visible.length > 0 || !!typeaheadEmpty.value
+})
+
+const typeaheadRows = computed(() => typeaheadBound.value.visible.map((c, i) => (
+  typeaheadKind.value === '/'
+    ? { key: `pb-${i}-${c.title}`, primary: c.title, secondary: c.description || '' }
+    // The slug rides along beside the label: it IS the token, and teaching it is
+    // half of why this exists.
+    : { key: `ag-${c.name}`, primary: agentDisplayName(c), secondary: `@${c.name}` }
+)))
+
+// The selection has to follow the list. A stale index is DROPPED rather than
+// clamped to a neighbour — "whatever is now at index 5" is not the row the user
+// chose, and inserting it is how the wrong agent (or `@undefined`) ships.
+watch(typeaheadBound, (b) => { activeIndex.value = clampActiveIndex(activeIndex.value, b.visible.length) })
+
+// The only part of this change that reaches a user who does not already know the
+// feature exists. `@` is advertised only with the capability — a placeholder
+// promising something the build cannot do is the #2128 dead end in text form.
+const composerPlaceholder = computed(() => {
+  if (listening.value) return 'Listening…'
+  const base = `Message ${agentDisplayName(props.agent)}…  ·  / for playbooks`
+  return store.multiAgentChatAvailable ? `${base}  ·  @ to add an agent` : base
+})
+
+function closeTypeahead() {
+  typeaheadTrigger.value = null
+  activeIndex.value = -1
+}
+
+// ONLY Esc arms the sentinel. A click-outside, an agent switch or a capability
+// flip closes without arming — otherwise "type @, click away to read something,
+// click back, keep typing" stays suppressed until the @ is deleted.
+function dismissTypeahead() {
+  dismissed.value = nextDismissState(typeaheadTrigger.value)
+  closeTypeahead()
+}
+
+// Called from every path that writes `input.value` PROGRAMMATICALLY — send(),
+// the prefill watcher, the thread switch, and both dictation handlers. None of
+// them fires an input event, so without this a sentinel armed while composing
+// message 1 kills the popup for every later message that starts the same way: a
+// feature that is dead for the rest of the session.
+function resetTypeahead() {
+  closeTypeahead()
+  dismissed.value = null
+}
+
+function refreshTypeahead(el) {
+  if (!el) return
+  // Read the EVENT TARGET, never the v-model ref: reading the ref makes
+  // correctness depend on Vue's internal listener ordering, which is true today
+  // and an implementation detail.
+  typeaheadTrigger.value = detectTypeaheadTrigger(el.value, el.selectionStart, el.selectionEnd)
+  if (!typeaheadTrigger.value) activeIndex.value = -1
+}
+
+function onComposerInput(e) {
+  autoGrow()
+  // A paste that happens to end in a token must not open a popup nobody asked
+  // for, whose very next keystroke is Enter.
+  if (e?.inputType === 'insertFromPaste' || e?.inputType === 'insertFromDrop') {
+    closeTypeahead()
+    return
+  }
+  refreshTypeahead(e?.target)
+}
+
+// The caret moves with no input event — a click, a drag-select — and accepting
+// against bounds computed for where it used to be splices over the wrong text.
+function onComposerCaret(e) { refreshTypeahead(e?.target) }
+
+function onComposerKeydown(e) {
+  const length = typeaheadBound.value.visible.length
+  switch (resolveComposerKey({
+    key: e.key,
+    shiftKey: e.shiftKey,
+    ctrlKey: e.ctrlKey,
+    metaKey: e.metaKey,
+    altKey: e.altKey,
+    isComposing: e.isComposing,
+    keyCode: e.keyCode,
+    open: typeaheadOpen.value,
+    hasActive: activeIndex.value >= 0,
+    hasCandidates: length > 0,
+  })) {
+    case 'move-down': e.preventDefault(); activeIndex.value = nextActiveIndex(activeIndex.value, 1, length); break
+    case 'move-up': e.preventDefault(); activeIndex.value = nextActiveIndex(activeIndex.value, -1, length); break
+    case 'accept': e.preventDefault(); acceptActive(activeIndex.value >= 0 ? activeIndex.value : 0); break
+    case 'dismiss': e.preventDefault(); dismissTypeahead(); break
+    case 'close': closeTypeahead(); break
+    case 'send': e.preventDefault(); send(); break
+    default: break
+  }
+}
+
+function acceptActive(index) {
+  const t = typeaheadTrigger.value
+  const row = typeaheadBound.value.visible[index]
+  if (!t || !row) return                  // never insert `@undefined`
+  const insert = t.kind === '/' ? starterFor(row) : buildMentionToken(row.name)
+  const { value, caret } = applyTypeaheadInsert(input.value, t, insert)
+  input.value = value
+  closeTypeahead()
+  // A pick that lands mid-sentence leaves the caret inside the token it just
+  // inserted, and the setSelectionRange() below fires a `select` that would
+  // re-detect it — the popup reopening on top of its own successful choice.
+  // Suppress exactly that token; editing it back re-arms.
+  const settled = dismissAfterInsert(value, caret)
+  if (settled) dismissed.value = settled
+  nextTick(() => {
+    const el = textarea.value
+    // focus() BEFORE setSelectionRange(): Safari resets and scrolls the
+    // selection when focusing a textarea that did not previously have focus.
+    if (el) { el.focus(); el.setSelectionRange(caret, caret) }
+    autoGrow()
+  })
 }
 
 // ---- Attachments: upload to the agent inbox; the next turn sees them ----------
@@ -495,17 +728,17 @@ const REPLY_POLL_MS = 700
 // into two minutes of spinner before the no-answer message appeared.
 const REPLY_IDLE_GIVE_UP_MS = 6_000
 
-// #2133: the absolute ceiling, for when the marker is ORPHANED rather than
-// merely slow — a hard backend kill skips the `finally` that clears it, and
-// `except Exception` does not catch `CancelledError`.
+// #2133/#2214: the absolute ceiling, for when the marker is ORPHANED rather
+// than merely slow — a hard backend kill skips the `finally` that clears it,
+// and `except Exception` does not catch `CancelledError`.
 //
-// The server sends the budget with the 202 (`wait_budget_seconds`) because the
-// server owns the turn timeout. This constant is only the fallback for an older
-// backend, and it is sized the same way: TWO full turns, because a failed
-// `--resume` re-runs the whole thing cold. A ceiling of one turn would declare a
-// live, already-billed cold retry "not delivered" — exactly what #2120 fixed,
-// on exactly the path it was fixed for.
-// (imported from portalUtils so a test can compare it to the server's value)
+// The server owns the turn timeout (per-agent since #2214) and sends the budget
+// with the 202 (`wait_budget_seconds`) and with the history response on
+// reattach (`in_flight_wait_budget_seconds` — the marker's remaining TTL). The
+// pick lives in portalUtils' `resolveWaitBudgetMs`: a positive server budget
+// wins, anything else falls back to a literal frozen at the pre-#2214 server
+// bound — see its comment for why that literal must never chase the new
+// arithmetic.
 
 // Polling every 700ms for ten minutes is ~850 history reads per tab. The reply
 // almost always lands in the first seconds, so the fast interval is what
@@ -533,9 +766,7 @@ async function awaitPersistedReply(sessionId, baselineAssistants, budgetSeconds,
   // and the marker's disappearance would be read as "nothing running" instead
   // of tripping the ceiling. The two clocks now share an origin.
   const startedAt = dispatchedAtMs || Date.now()
-  const budgetMs = Number(budgetSeconds) > 0
-    ? Number(budgetSeconds) * 1000
-    : REPLY_MAX_WAIT_MS_FALLBACK
+  const budgetMs = resolveWaitBudgetMs(budgetSeconds)
   const deadline = startedAt + budgetMs
   const wait = () => new Promise((r) => setTimeout(r, replyPollInterval(Date.now() - startedAt)))
 
@@ -603,6 +834,10 @@ function markFailed(index, content, error, { retryable = true } = {}) {
 async function send() {
   const text = input.value.trim()
   if (!text || sending.value) return
+  // The composer is about to be cleared programmatically, which fires no input
+  // event — so the popup and its Esc sentinel are cleared here rather than left
+  // armed against a message that no longer exists.
+  resetTypeahead()
 
   // ent#361: @mentioning another agent from a 1:1 makes this a group discussion.
   // Handled BEFORE the message is appended: the conversation moves to a room, so
@@ -646,7 +881,21 @@ const canRecord = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.
 const micMode = SpeechRec ? 'speech' : (canRecord ? 'record' : null)
 const sttSupported = micMode !== null
 const ttsEnabled = computed(() => !!props.agent.voice_available)
-const voiceMode = ref(false)
+
+// #2157: the speaker choice sticks per client+agent instead of resetting to off
+// on every page load. Narration was already hard to find — an agent that had
+// just told the client this surface was "text-only" was the only hint it existed
+// — and re-muting it every reload taught clients it had not really worked.
+const voiceModeKey = computed(() => `trinity.portal.voiceMode.${props.agent?.name || ''}`)
+function loadVoiceMode() {
+  try { return localStorage.getItem(voiceModeKey.value) === '1' } catch { return false }
+}
+const voiceMode = ref(loadVoiceMode())
+watch(voiceMode, (on) => {
+  try { localStorage.setItem(voiceModeKey.value, on ? '1' : '0') } catch { /* private mode: session-only */ }
+})
+// Switching agents adopts that agent's own remembered choice.
+watch(() => props.agent?.name, () => { stopSpeaking(); voiceMode.value = loadVoiceMode() })
 const speaking = ref(false)
 const listening = ref(false)
 const transcribing = ref(false)
@@ -672,7 +921,7 @@ function toggleMic() {
 function toggleSpeech() {
   if (listening.value) { try { recog?.stop() } catch { /* noop */ } return }
   recog = new SpeechRec(); recog.lang = 'en-US'; recog.interimResults = false; recog.maxAlternatives = 1
-  recog.onresult = (e) => { const t = e.results?.[0]?.[0]?.transcript || ''; if (t) { input.value = input.value ? `${input.value} ${t}` : t; autoGrow() } }
+  recog.onresult = (e) => { const t = e.results?.[0]?.[0]?.transcript || ''; if (t) { input.value = input.value ? `${input.value} ${t}` : t; resetTypeahead(); autoGrow() } }
   recog.onend = () => { listening.value = false }
   recog.onerror = () => { listening.value = false }
   listening.value = true
@@ -689,7 +938,7 @@ async function toggleRecord() {
     const blob = new Blob(recChunks, { type: mediaRec?.mimeType || 'audio/webm' }); recChunks = []
     if (blob.size < 1500) return
     transcribing.value = true
-    try { const t = await store.transcribeStt(props.agent.name, blob); if (t) { input.value = input.value ? `${input.value} ${t}` : t; autoGrow() } }
+    try { const t = await store.transcribeStt(props.agent.name, blob); if (t) { input.value = input.value ? `${input.value} ${t}` : t; resetTypeahead(); autoGrow() } }
     catch { /* keep text mode */ } finally { transcribing.value = false }
   }
   listening.value = true

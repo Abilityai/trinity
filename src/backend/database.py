@@ -1271,6 +1271,9 @@ class DatabaseManager:
     def list_agent_schedules(self, agent_name: str):
         return self._schedule_ops.list_agent_schedules(agent_name)
 
+    def get_agent_schedule_names(self, agent_name: str):
+        return self._schedule_ops.get_agent_schedule_names(agent_name)
+
     def find_active_schedules_exceeding_timeout(self, agent_name: str, ceiling_seconds: int):
         return self._schedule_ops.find_active_schedules_exceeding_timeout(
             agent_name, ceiling_seconds
@@ -1457,19 +1460,26 @@ class DatabaseManager:
         """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
         return self._schedule_ops.get_fleet_execution_stats(agent_names, hours)
 
-    def get_fleet_execution_timeline(self, agent_names, group_by: str, hours: int):
+    def get_fleet_execution_timeline(self, agent_names, group_by: str, hours: int,
+                                     split: str = None):
         """Bucketed fleet execution rollups — the time-series sibling of
-        :meth:`get_fleet_execution_stats` (ent#326)."""
+        :meth:`get_fleet_execution_stats` (ent#326). `split="trigger"` adds the
+        per-bucket trigger breakdown the executions tile stacks (ent#96)."""
         return self._schedule_ops.get_fleet_execution_timeline(
-            agent_names, group_by, hours
+            agent_names, group_by, hours, split=split
         )
 
-    def shape_execution_timeline(self, rows, *, group_by: str, hours: int):
+    def shape_execution_timeline(self, rows, *, group_by: str, hours: int,
+                                 split: str = None):
         """Fold/gap-fill the timeline rows (ent#326) — the domain transforms
         live beside the query, not in the router (Invariant #1)."""
         return self._schedule_ops.shape_execution_timeline(
-            rows, group_by=group_by, hours=hours
+            rows, group_by=group_by, hours=hours, split=split
         )
+
+    def trigger_bucket_order(self):
+        """Stack/legend order for trigger buckets (ent#96)."""
+        return self._schedule_ops.trigger_bucket_order()
 
     # =========================================================================
     # Git Configuration Management (delegated to db/schedules.py)

@@ -33,7 +33,12 @@ EMAIL = "alice@example.com"
 
 def test_recent_work_carries_no_message_cost_or_model(monkeypatch):
     """The underlying accessor returns all three. `message` is another user's
-    prompt; `cost` and `model_used` are excluded by AC #7."""
+    prompt; `cost` and `model_used` are excluded by AC #7.
+
+    Asserted as an EXACT dict on purpose: an allow-list of absences would pass
+    the day someone adds a column to the accessor. #2161 added exactly one field
+    to this shape (`schedule_name`), and this is where that has to be argued.
+    """
     from client_portal import agent_page
 
     monkeypatch.setattr(agent_page.db, "get_agent_executions_summary", lambda *a, **k: [{
@@ -52,7 +57,7 @@ def test_recent_work_carries_no_message_cost_or_model(monkeypatch):
     assert row == {
         "id": "e1", "status": "success", "triggered_by": "schedule",
         "started_at": "2026-08-13T10:00:00Z", "completed_at": "2026-08-13T10:00:09Z",
-        "duration_ms": 9000,
+        "duration_ms": 9000, "schedule_name": None,
     }
 
 

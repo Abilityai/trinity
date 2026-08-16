@@ -1,4 +1,5 @@
 import { test, expect, request } from '@playwright/test'
+import { agentExists, missingAgentReason } from './helpers/agent-probe.js'
 
 /**
  * "Continue as Chat" (EXEC-023) e2e — #1672.
@@ -26,6 +27,11 @@ import { test, expect, request } from '@playwright/test'
  *
  * Required env: ADMIN_PASSWORD (auth.setup.js) + SESSION_TEST_AGENT (default
  * "testfix"); the agent must exist, be running, and use the Claude runtime.
+ *
+ * A MISSING fixture agent reads as SKIPPED, never broken (#2199). Note the
+ * probe only proves EXISTENCE — if the agent exists but is stopped or on a
+ * non-Claude runtime, the failures below are real and must not be read as
+ * "fixture absent".
  */
 
 const TEST_AGENT = process.env.SESSION_TEST_AGENT || 'testfix'
@@ -34,14 +40,35 @@ const FLAG_KEY = 'session_tab_enabled'
 let api
 let token
 let priorFlag
+// `flagTouched` gates the restore: without it, a failure BEFORE the flag was
+// ever written leaves priorFlag === undefined, and afterAll's `=== null` test
+// is false, so it PUT `{ value: undefined }` onto a fleet-wide platform
+// setting (#2199).
+let flagTouched = false
+let agentReady = false
+let skipReason = ''
 
 test.beforeAll(async ({ baseURL }) => {
   api = await request.newContext({ baseURL })
   const loginResp = await api.post('/api/token', {
     form: { username: 'admin', password: process.env.ADMIN_PASSWORD || '' },
   })
-  if (!loginResp.ok()) throw new Error(`Admin login failed: ${loginResp.status()}`)
+  if (!loginResp.ok()) {
+    // Environment gap, not a product failure — skip rather than throw (#2199).
+    skipReason = `admin login failed (${loginResp.status()}) — check ADMIN_PASSWORD`
+    return
+  }
   token = (await loginResp.json()).access_token
+
+  // Probe BEFORE mutating the platform flag, and `return` on failure. Setting
+  // a flag alone does NOT abort beforeAll: without this early return execution
+  // falls straight through and flips a FLEET-WIDE setting for a run that is
+  // guaranteed to skip (#2199).
+  if (!(await agentExists(TEST_AGENT, { baseURL, token }))) {
+    skipReason = missingAgentReason(TEST_AGENT, 'SESSION_TEST_AGENT')
+    return
+  }
+  agentReady = true
 
   // Session mode ON is the interesting case: it is the DEFAULT the resume landing
   // must override. With the flag off, Chat is always legacy and the bug can't show.
@@ -54,15 +81,19 @@ test.beforeAll(async ({ baseURL }) => {
     data: { value: 'true' },
   })
   if (!setResp.ok()) throw new Error(`Failed to enable session_tab flag: ${setResp.status()}`)
+  flagTouched = true
 })
 
 test.afterAll(async () => {
   if (!api) return
-  const headers = { Authorization: `Bearer ${token}` }
-  if (priorFlag === null) {
-    await api.delete(`/api/settings/${FLAG_KEY}`, { headers })
-  } else {
-    await api.put(`/api/settings/${FLAG_KEY}`, { headers, data: { value: priorFlag } })
+  // Restore ONLY what we actually flipped.
+  if (flagTouched) {
+    const headers = { Authorization: `Bearer ${token}` }
+    if (priorFlag === null) {
+      await api.delete(`/api/settings/${FLAG_KEY}`, { headers })
+    } else {
+      await api.put(`/api/settings/${FLAG_KEY}`, { headers, data: { value: priorFlag } })
+    }
   }
   await api.dispose()
 })
@@ -100,6 +131,10 @@ async function createResumableExecution() {
 }
 
 test.describe('continue as chat (#1672)', () => {
+  test.beforeEach(() => {
+    test.skip(!agentReady, skipReason)
+  })
+
   test('@interactive KeepAlive navigation lands in legacy chat with the resume banner', async ({ page }) => {
     const execution = await createResumableExecution()
 

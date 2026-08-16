@@ -57,6 +57,34 @@ def _services_module(name: str):
     return sys.modules[f"services.{name}"]
 
 
+@pytest.fixture(autouse=True)
+def _pin_container_state(monkeypatch):
+    """#2196: pin the container-state seam for EVERY test in this module.
+
+    Not optional hygiene. `services/docker_service.py` runs `docker.from_env()`
+    at import, and `tests/unit/conftest.py` pops + re-imports it after every
+    test — so on any machine with Docker running (which local dev requires) the
+    real seam answers with a real map, a seeded fixture agent like `atlas` is not
+    in it, and every card reads "unavailable" instead of "unknown". That is green
+    in CI and red locally, on the one field whose whole purpose is to be
+    trustworthy.
+
+    Patched on `client_portal.service`'s own attribute — route (i) of this
+    file's PATCHING RULE, and precisely why #2196 gave these two reads named
+    seams instead of calling Docker inline.
+    """
+    from client_portal import service
+
+    async def _map(names):
+        return {n: "ready" for n in names}
+
+    async def _one(name):
+        return "ready"
+
+    monkeypatch.setattr(service, "_availability_map", _map)
+    monkeypatch.setattr(service, "_agent_availability", _one)
+
+
 
 @pytest.fixture()
 def portal_db(tmp_path, monkeypatch):
@@ -232,7 +260,7 @@ def test_roster_carries_briefing(roster_db, monkeypatch):
     from client_portal.models import PortalPlaybook
     monkeypatch.setattr(_services_module("tts_service"), "is_available", lambda: False)   # skip the global key check
 
-    async def fake_briefing(name):
+    async def fake_briefing(name, availability="ready"):
         if name == "atlas":
             return ("Atlas does research.", [
                 PortalPlaybook(title="Weekly report", description="A weekly digest",
@@ -257,7 +285,7 @@ def test_roster_briefing_is_fail_soft(roster_db, monkeypatch):
     from client_portal import service
     monkeypatch.setattr(_services_module("tts_service"), "is_available", lambda: False)
 
-    async def boom(name):
+    async def boom(name, availability="ready"):
         raise RuntimeError("agent unreachable")
 
     monkeypatch.setattr(service, "_agent_briefing", boom)
@@ -315,12 +343,11 @@ def _wire_briefing(monkeypatch, routes, connector_cfg=None):
 
     client = _FakeAgentClient(routes)
 
-    class _Running:
-        status = "running"
-
-    monkeypatch.setattr(
-        _services_module("docker_service"), "get_agent_container", lambda name: _Running()
-    )
+    # #2196: `_agent_briefing` no longer makes its own `get_agent_container()`
+    # call — the caller resolves container state once for the whole roster and
+    # hands it in (default `"ready"` for a direct call). The stub that used to
+    # live here is removed rather than left inert, since an inert patch reads
+    # like coverage that no longer exists.
 
     @asynccontextmanager
     async def fake_httpx(name, timeout=None):

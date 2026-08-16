@@ -221,7 +221,7 @@
 
 Trinity agents may run on the **OpenAI Codex CLI** as a third execution runtime
 ("harness == runtime") alongside Claude Code and Gemini. A template selects it
-via `runtime: { type: codex, model: gpt-5.1-codex }`; the container is created
+via `runtime: { type: codex, model: gpt-5.6-sol }`; the container is created
 with `AGENT_RUNTIME=codex` and `codex_runtime.py` implements the `AgentRuntime`
 ABC. Follow-up to spike #854.
 

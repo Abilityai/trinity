@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import axios from 'axios'
 import { useAuthStore } from './auth'
 import { agentDisplayName } from '../utils/agentName'
+import { dedupe } from '../utils/inflight'
 import api from '../api'
 
 // ent#260 composition contract: with the Agents page retired, the Dashboard's
@@ -99,7 +100,17 @@ export const useAgentsStore = defineStore('agents', {
       }
     },
 
+    // #2198: JOINED, not skipped. `onMounted` and `onActivated` both fire on the
+    // first mount of a KeepAlive'd AgentDetail (App.vue) and both await this —
+    // measured as two requests with an identical timestamp. A joiner must still
+    // receive the agent object, so `fleetGrid`'s in-flight *skip* is not usable
+    // here (see utils/inflight.js). The entry clears in `finally`, so
+    // `waitForAgentStatus`'s sequential polling loop is unaffected.
     async fetchAgent(name) {
+      return dedupe(`agent:${name}`, () => this._fetchAgentUncached(name))
+    },
+
+    async _fetchAgentUncached(name) {
       this.loading = true
       this.error = null
       try {
@@ -381,12 +392,17 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // #2198: three concurrent readers on one Agent Detail mount —
+    // `checkBrainOrbCapability` from both lifecycle hooks, plus OverviewPanel's
+    // sidecar batch (Overview is the default tab).
     async getAgentInfo(name) {
-      const authStore = useAuthStore()
-      const response = await axios.get(`/api/agents/${name}/info`, {
-        headers: authStore.authHeader
+      return dedupe(`agentInfo:${name}`, async () => {
+        const authStore = useAuthStore()
+        const response = await axios.get(`/api/agents/${name}/info`, {
+          headers: authStore.authHeader
+        })
+        return response.data
       })
-      return response.data
     },
 
     // #668 — agent compatibility report. STATIC checks recompute live; pass
@@ -739,19 +755,26 @@ export const useAgentsStore = defineStore('agents', {
 
     // Agent Dashboard Actions
     async getAgentDashboard(name) {
-      const authStore = useAuthStore()
-      const response = await axios.get(`/api/agent-dashboard/${name}`, {
-        headers: authStore.authHeader
+      return dedupe(`agentDashboard:${name}`, async () => {
+        const authStore = useAuthStore()
+        const response = await axios.get(`/api/agent-dashboard/${name}`, {
+          headers: authStore.authHeader
+        })
+        return response.data
       })
-      return response.data
     },
 
+    // NOTE: this is the STORE-level probe. `AgentDetail.vue` has a
+    // same-named local function that wraps it with the boot retry ladder —
+    // they are different functions (#2198 E13).
     async checkDashboardExists(name) {
-      const authStore = useAuthStore()
-      const response = await axios.get(`/api/agent-dashboard/${name}/exists`, {
-        headers: authStore.authHeader
+      return dedupe(`dashboardExists:${name}`, async () => {
+        const authStore = useAuthStore()
+        const response = await axios.get(`/api/agent-dashboard/${name}/exists`, {
+          headers: authStore.authHeader
+        })
+        return response.data?.has_dashboard === true
       })
-      return response.data?.has_dashboard === true
     },
 
     updateAgentStatus(name, status) {

@@ -279,6 +279,10 @@ _PORTAL_TEST_FILES = (
     "test_ent308_inbox_dir_collision.py",
     "test_ent311_portal_signin_hardening.py",
     "test_ent357_workspace_owned_roster.py",
+    # #2196 — a new portal test file must be ADDED here or it silently escapes
+    # both guards below, which turns an unchecked file into a believed-checked
+    # one (the #1871 "the guard covered one of two APIs" class).
+    "test_2196_roster_availability.py",
 )
 
 

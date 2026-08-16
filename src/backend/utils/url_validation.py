@@ -10,7 +10,8 @@ Related: SEC-179 (pentest finding 3.2.2)
 import ipaddress
 import re
 import socket
-from typing import List
+from dataclasses import dataclass
+from typing import Callable, List, Optional, Tuple
 from urllib.parse import urlparse
 
 # Allowed hostnames for skills library URLs
@@ -343,13 +344,287 @@ def validate_skills_library_url(url: str) -> str:
 _REGISTRY_URL_MAX_LEN = 2048
 
 
+#: The predicate stack that decides "is this address outside the perimeter?".
+#: One definition, consulted by every validator in this module that resolves a
+#: host, so a future range (the CGNAT clause was the last one) is added once.
+def _is_internal_address(ip: "ipaddress._BaseAddress") -> bool:
+    # The v4 view of `ip`: itself when it IS v4, its payload when it is the
+    # IPv4-MAPPED form `::ffff:a.b.c.d`, else None. The CGNAT clause below must
+    # ask THIS, never `ip.version == 4` (ent#393): `::ffff:100.64.0.1` reports
+    # version 6, so a version gate never reaches it — and the stdlib answers
+    # False to all six predicates above for it, which is the exact gap the
+    # clause exists to close. Every OTHER internal range survives its mapped
+    # form for free, because CPython's `is_private`/`is_reserved`/... delegate
+    # through `ipv4_mapped` before consulting their IPv6 tables; CGNAT is the
+    # one range whose refusal is Trinity's own code, so it is the one that has
+    # to do the delegation itself.
+    #
+    # Mapped is the ONLY embedding needing this. The other v4-in-v6 shapes are
+    # refused wholesale by prefix regardless of the address they carry —
+    # `::/8` (IPv4-compatible RFC 4291, IPv4-translated RFC 2765), `64:ff9b::/96`
+    # + `64:ff9b:1::/48` (NAT64), `2002::/16` (6to4), `2001::/32` (Teredo) — and
+    # none of them populates `ipv4_mapped`. Pinned by
+    # `test_736_a2a_outbound_edges.py::test_C1_ipv6_transition_forms_*`, because
+    # that refusal is the interpreter's, not ours (the #1891 class).
+    v4 = ip if ip.version == 4 else ip.ipv4_mapped
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_reserved
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_unspecified
+        or (v4 is not None and v4 in _SHARED_ADDRESS_SPACE)
+    )
+
+
+@dataclass(frozen=True)
+class ValidatedPublicUrl:
+    """The result of `_validate_public_https_url` — the URL AND what it resolved to.
+
+    `addresses` is the part callers other than the template registry need: a
+    validator that resolves a host and then throws the answer away forces the
+    HTTP client to resolve it a second time, which is precisely the TOCTOU
+    window a rebinding attack lives in (#736 FR-4). Returning the validated set
+    lets a caller pin the connection to an address this function approved.
+    """
+
+    url: str
+    hostname: str          # IDNA A-label, lowercased, trailing dot stripped
+    port: int              # `effective_port` of the authority — never 0, never None
+    addresses: Tuple[str, ...]
+
+
+#: The port a scheme addresses when the authority names none.
+SCHEME_DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
+def effective_port(port: Optional[int], scheme: str) -> Optional[int]:
+    """The port a URL actually addresses. `None` when the scheme has no default.
+
+    ONE normalisation for a field that had three (ent#398). Along a single call
+    path, `:0` used to mean three different things: the validator coalesced it to
+    443 (`parsed.port or 443` — `0` is falsy), `_pinned_url` dropped it and
+    therefore connected to 443, and `_same_origin` compared it literally as port
+    0. So a `:0` endpoint validated, would have connected correctly, and was then
+    permanently refused `card_origin_mismatch` against any card declaring the
+    ordinary form — fail-closed, but permanently broken with a reason code that
+    points at the wrong thing.
+
+    Three independent normalisations of one field is the actual hazard: today
+    they disagree harmlessly, and it is an edit to any one of them that turns
+    that into something else. Validation, connection pinning and origin
+    comparison now all consume this.
+
+    `0` is treated as "no port given", matching the validator's shipped
+    behaviour (and browsers, which refuse `:0` outright rather than dialing it):
+    port 0 is not a connectable destination, so the alternative reading — dial
+    port 0 — is not a reading anyone wants. An unknown scheme yields `None`; the
+    caller decides what that means, because "no default port" is not the same
+    answer for a comparison as it is for a connection.
+    """
+    if port:
+        return port
+    return SCHEME_DEFAULT_PORTS.get((scheme or "").lower())
+
+
+def canonical_host(hostname: str) -> Optional[str]:
+    """Canonicalise a hostname the way a browser resolves it, or `None`.
+
+    UTS-46 nontransitional via the `idna` package, matching
+    `services/setup_url_display.py` — NOT `str.encode("idna")`, which is
+    IDNA2003 and disagrees with every browser on the deviation set that matters
+    (`fass.de` vs `xn--fa-hia.de`). The point here is narrower than display
+    safety: the parser and the resolver must agree on **which host was
+    approved**, so the name is canonicalised ONCE and that one form is what gets
+    validated, resolved, and connected to.
+
+    Two deliberate asymmetries:
+
+    * A trailing dot is stripped first (`host.` and `host` resolve identically,
+      and the dot survives `idna.encode`).
+    * A codec failure on a **pure-ASCII** host is NOT fatal, and the host is
+      returned lowercased unchanged. Canonicalisation of an ASCII host is a
+      no-op by definition — there is no confusable to fold — so refusing
+      `my_registry.example.com` (underscores are illegal in IDNA) would break a
+      legitimate operator URL for no security gain. A codec failure on a
+      **non-ASCII** host is fatal, because that is exactly where the homograph
+      lives.
+    """
+    host = (hostname or "").strip().rstrip(".").lower()
+    if not host:
+        return None
+    # A percent-encoded authority is not verifiable from Python: `urlparse`
+    # leaves `%D0%B0pple.com` undecoded while a browser decodes it and resolves a
+    # different host. Refuse rather than rely on the codec happening to reject it
+    # (the `setup_url_display` rule).
+    if "%" in host:
+        return None
+    try:
+        import idna
+
+        return idna.encode(host, uts46=True, transitional=False).decode("ascii")
+    except Exception:  # noqa: BLE001 — see the ASCII asymmetry above
+        try:
+            host.encode("ascii")
+        except UnicodeEncodeError:
+            return None
+        return host
+
+
+#: Private alias retained so existing readers of the old name keep working.
+_canonical_host = canonical_host
+
+
+def canonical_origin_host(hostname: str) -> Optional[str]:
+    """A host as an ORIGIN key — IP literals canonicalised, names via `canonical_host`.
+
+    `canonical_host` deliberately leaves an IP literal alone: `idna.encode`
+    rejects it and the ASCII fallback returns it verbatim. That is correct for
+    its own job (the name handed to the resolver) and wrong for comparing two
+    origins, where `2606:4700:4700::1111` and `2606:4700:4700:0:0:0:0:1111` are
+    one address written two ways (ent#399). Comparing those textually refused a
+    registered IPv6-literal endpoint against its own peer's card — fail-closed,
+    but permanently, over a spelling the two sides have no reason to agree on.
+
+    IPv4 literals normalise through the same call for free. This cannot equate
+    two addresses a resolver would treat differently: `ipaddress` REFUSES the
+    ambiguous spellings (leading zeros, integer and octal forms) rather than
+    folding them, so those fall through to the textual path unchanged.
+
+    A **scope id is part of the key**: `fe80::1%eth0` and `fe80::1%eth1` are
+    different destinations, and `ipaddress` preserves the zone, so they stay
+    distinct. Brackets never reach here — `urlsplit().hostname` strips them —
+    but a bracketed value is handled anyway, so a caller reading a raw authority
+    cannot silently fall through to a textual comparison.
+
+    Returns None only where `canonical_host` does (an unusable name).
+    """
+    host = (hostname or "").strip().lower()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if host:
+        try:
+            return str(ipaddress.ip_address(host))
+        except ValueError:
+            pass
+    return canonical_host(hostname)
+
+
+def _validate_public_https_url(
+    url: str,
+    *,
+    label: str,
+    host_label: str,
+    credential_advice: str,
+    internal_advice: str,
+    max_len: int = _REGISTRY_URL_MAX_LEN,
+    resolver: Optional[Callable[..., list]] = None,
+) -> ValidatedPublicUrl:
+    """ONE public-HTTPS-destination gate, shared by every validator that needs it.
+
+    Extracted (#736) rather than cloned a third time: this module exists to
+    centralise "where may the backend connect?", and a third ~90%-identical copy
+    of the predicate stack inside it would be the Invariant #5 failure happening
+    *in the file whose job is preventing it*. The messages are parameterised so
+    each caller keeps its own operator-readable wording verbatim.
+
+    What it enforces, in order:
+
+    1. Non-empty, `<= max_len`.
+    2. **HTTPS only.** Not `http:`, not `file:`, not anything else.
+    3. **No userinfo**, refused outright rather than stripped — a stripped
+       credential is a credential the operator believes is still in use.
+    4. A hostname that canonicalises (see `_canonical_host`).
+    5. **Every** address the resolver returns is public. One internal record
+       among public ones refuses the whole URL: which record a resolver hands
+       out is not our choice, so a host that resolves to both is a DNS-level
+       smuggle.
+    6. **DNS failure is fatal**, deliberately unlike `validate_skills_library_url`
+       (whose target is a later `git clone` that fails loudly on its own).
+
+    Refusal messages are fixed strings and are **never** built from a resolved
+    address: they are shown to an operator, and echoing an internal IP back
+    turns a refusal into a topology oracle.
+
+    `resolver` is a seam for tests only — production always uses
+    `socket.getaddrinfo`.
+    """
+    if not url or not url.strip():
+        raise ValueError(f"{label} cannot be empty")
+
+    url = url.strip()
+
+    if len(url) > max_len:
+        raise ValueError(f"{label} is too long (max {max_len} characters)")
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        raise ValueError("Invalid URL format")
+
+    if parsed.scheme != "https":
+        raise ValueError(f"{label} must use HTTPS")
+
+    # `username`/`password` are None when absent. Check the raw netloc too: a
+    # malformed authority can carry an `@` that urlparse folds into the host.
+    if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
+        raise ValueError(credential_advice)
+
+    hostname = canonical_host(parsed.hostname or "")
+    if not hostname:
+        raise ValueError(f"{label} must have a valid hostname")
+
+    try:
+        # ent#398: the ONE normalisation, shared with `_pinned_url` and
+        # `_same_origin`. The scheme is https by construction here (checked
+        # above), so the default is never absent.
+        port = effective_port(parsed.port, parsed.scheme) or 443
+    except ValueError:
+        # urlparse raises on a non-numeric / out-of-range port only when `.port`
+        # is read, so this is the first place a junk authority surfaces.
+        raise ValueError(f"{label} must have a valid hostname")
+
+    resolve = resolver or socket.getaddrinfo
+    try:
+        resolved = resolve(hostname, port)
+    except socket.gaierror:
+        raise ValueError(f"{host_label} could not be resolved ({hostname})")
+
+    addresses: List[str] = []
+    for entry in resolved:
+        sockaddr = entry[4]
+        raw = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(raw)
+        except ValueError:
+            # An address the stdlib itself cannot parse is not one we are going
+            # to vet — refuse rather than skip (skipping is how a bad record
+            # passes through unexamined).
+            raise ValueError(internal_advice)
+        if _is_internal_address(ip):
+            raise ValueError(internal_advice)
+        addresses.append(str(ip))
+
+    if not addresses:
+        # An empty resolver result is indistinguishable from "nothing to check"
+        # and would sail through the loop above. Treat it as unresolvable.
+        raise ValueError(f"{host_label} could not be resolved ({hostname})")
+
+    return ValidatedPublicUrl(
+        url=url, hostname=hostname, port=port, addresses=tuple(addresses)
+    )
+
+
 def validate_template_registry_url(url: str) -> str:
     """Validate a remote template-registry URL, SSRF-gated.
 
     Sibling of `validate_skills_library_url`, deliberately NOT a reuse of it:
     that one is `github.com`-only, which is right for a git clone target and
     wrong here — an operator may self-host a registry on their own domain. The
-    rules that stay are the ones that bound where the backend will connect:
+    rules that stay are the ones that bound where the backend will connect, and
+    since #736 they live in `_validate_public_https_url`, which this function
+    parameterises with its own operator-readable wording:
 
     1. **HTTPS only.** No `http:`, no `file:`, no `gopher:`, nothing else. An
        unencrypted registry is a trivially-tampered catalog of repos users are
@@ -371,65 +646,103 @@ def validate_template_registry_url(url: str) -> str:
     the response is parsed into a display-only allowlisted record, and the body
     never reaches an eval/exec/deserialize sink. The fetcher's
     `follow_redirects=False` closes the adjacent bypass — a validated URL that
-    redirects is a fetch failure, not a hop to re-validate.
+    redirects is a fetch failure, not a hop to re-validate. It is NOT tolerable
+    on the A2A outbound path, which sends a credential — see
+    `validate_a2a_endpoint_url`, which returns the resolved addresses so the
+    caller can pin the connection to one this function approved (#736 FR-4).
     """
-    if not url or not url.strip():
-        raise ValueError("Template registry URL cannot be empty")
-
-    url = url.strip()
-
-    if len(url) > _REGISTRY_URL_MAX_LEN:
-        raise ValueError(
-            f"Template registry URL is too long (max {_REGISTRY_URL_MAX_LEN} characters)"
-        )
-
-    try:
-        parsed = urlparse(url)
-    except Exception:
-        raise ValueError("Invalid URL format")
-
-    if parsed.scheme != "https":
-        raise ValueError("Template registry URL must use HTTPS")
-
-    # `username`/`password` are None when absent. Check the raw netloc too: a
-    # malformed authority can carry an `@` that urlparse folds into the host.
-    if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
-        raise ValueError(
+    return _validate_public_https_url(
+        url,
+        label="Template registry URL",
+        host_label="Template registry hostname",
+        credential_advice=(
             "Template registry URL must not embed credentials "
             "(user:password@host). Host a public document, or put the "
             "registry behind a network boundary instead."
-        )
+        ),
+        internal_advice=(
+            "Template registry URL resolves to an internal address. "
+            "The registry must be reachable on the public internet."
+        ),
+    ).url
 
-    hostname = parsed.hostname
-    if not hostname:
-        raise ValueError("Template registry URL must have a valid hostname")
 
-    # Defense-in-depth: refuse anything that resolves inside the perimeter.
-    # A DNS failure is NOT treated as a pass-through here (unlike the skills
-    # validator, whose target is a later `git clone` that will fail loudly on
-    # its own): an unresolvable registry host is simply a URL that cannot work,
-    # and accepting it stores a setting that silently never fetches.
+# ============================================================================
+# Outbound A2A endpoints (#736)
+# ============================================================================
+
+#: Machine-readable refusal codes the A2A route maps 1:1 to HTTP. Distinct from
+#: the human message so the tool can branch without string-matching.
+A2A_URL_REASONS = {
+    "endpoint_not_https": "endpoint_not_https",
+    "endpoint_private_address": "endpoint_private_address",
+    "endpoint_dns_failure": "endpoint_dns_failure",
+    "endpoint_invalid": "endpoint_invalid",
+}
+
+
+class A2AEndpointUrlError(ValueError):
+    """A registered A2A endpoint URL that must not be fetched.
+
+    Carries a stable `reason` code alongside the operator message, because the
+    caller maps refusals to HTTP status + a machine-readable field and
+    string-matching a human message is how those two drift apart.
+    """
+
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
+
+
+def validate_a2a_endpoint_url(url: str) -> ValidatedPublicUrl:
+    """Validate an outbound A2A endpoint URL at CALL time (#736 FR-3).
+
+    Runs on **every** call, on a URL that came out of the endpoint registry —
+    because "it is in the registry" does not mean "it is safe to fetch". The
+    registration surface validates a URL with `startswith("http://") or
+    startswith("https://")` plus a length cap: no SSRF check at all, and plain
+    `http://` accepted. Without this gate an operator (or a compromised
+    management surface) could register `http://169.254.169.254/...` and have a
+    credentialed server-side fetch aimed at cloud metadata.
+
+    Two things it does that the template-registry sibling does not:
+
+    * **Refuses `http://` at USE rather than silently upgrading it.** An
+      operator who typed `http://` has to find out; a client that quietly
+      rewrites the scheme is a client that will one day quietly rewrite it back.
+    * **Returns the resolved, validated addresses.** This request carries a
+      credential, so the rebinding residual the registry validator documents is
+      not acceptable here: the caller pins the connection to an address this
+      function approved (`services/a2a_client.py`).
+
+    Raises `A2AEndpointUrlError` (a `ValueError`) carrying a stable `reason`.
+    """
     try:
-        resolved = socket.getaddrinfo(hostname, None)
-    except socket.gaierror:
-        raise ValueError(
-            f"Template registry hostname could not be resolved ({hostname})"
+        return _validate_public_https_url(
+            url,
+            label="A2A endpoint URL",
+            host_label="A2A endpoint hostname",
+            credential_advice=(
+                "A2A endpoint URL must not embed credentials (user:password@host). "
+                "Register the secret as the endpoint's credential instead — it is "
+                "stored encrypted and never echoed back."
+            ),
+            internal_advice=(
+                "A2A endpoint URL resolves to an internal address. An outbound "
+                "A2A endpoint must be reachable on the public internet."
+            ),
         )
-
-    for _family, _type, _proto, _canonname, sockaddr in resolved:
-        ip = ipaddress.ip_address(sockaddr[0])
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_reserved
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_unspecified
-            or (ip.version == 4 and ip in _SHARED_ADDRESS_SPACE)
-        ):
-            raise ValueError(
-                "Template registry URL resolves to an internal address. "
-                "The registry must be reachable on the public internet."
-            )
-
-    return url
+    except ValueError as exc:
+        message = str(exc)
+        if "must use HTTPS" in message:
+            raise A2AEndpointUrlError(
+                "endpoint_not_https",
+                "A2A endpoint URL must use HTTPS. Re-register this endpoint with "
+                "an https:// URL — the call is refused rather than silently "
+                "upgraded, because a credential would otherwise travel in clear.",
+            ) from None
+        if "internal address" in message:
+            raise A2AEndpointUrlError("endpoint_private_address", message) from None
+        if "could not be resolved" in message:
+            raise A2AEndpointUrlError("endpoint_dns_failure", message) from None
+        raise A2AEndpointUrlError("endpoint_invalid", message) from None

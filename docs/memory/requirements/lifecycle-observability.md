@@ -311,10 +311,43 @@ endpoint — reports flow agent → MCP → backend.
 - **FR-4 — Real-time**: a **thin** `agent_report` WebSocket trigger (agent_name, report_id,
   report_type, created_at — never title/payload, since `/ws` is unfiltered SCOPE_ALL); the
   frontend refetches via the access-controlled REST endpoints.
-- **FR-5 — Frontend**: Agent Detail "Reports" tab + Operations → "Reports" fleet tab. Generic
-  + typed renderers (table / KPI tiles / markdown / timeline / JSON) chosen by `display_hint`,
-  then `report_type` prefix, then JSON; each renderer validates payload shape and falls back to
-  the JSON viewer on mismatch. List shows metadata; full payload lazy-loads on expand.
+- **FR-5 — Frontend**: **three** surfaces share one renderer set — Agent Detail "Reports" tab,
+  Operations → "Reports" fleet tab, and the **Workspace agent page's Reports tab** (§5.11 of
+  `core-agent.md`). Typed renderers (table / KPI tiles / markdown / timeline) chosen by
+  `display_hint`, then `report_type` prefix; each validates payload shape and falls back on
+  mismatch. List shows metadata; full payload lazy-loads on expand.
+
+  **The fallback is per-surface, and the client-facing one is stricter (#2162).** The shared
+  default stays the JSON viewer: an operator reading a malformed report is debugging an agent's
+  own output, where the raw payload is the useful answer. For an external client it is not —
+  `payload` is free-form agent-authored JSON of the same class as an ask's `context`, which the
+  Workspace refuses to expose at all (a known credential-leak surface, canary G-04). So
+  `ReportRenderer` takes a `fallbackComponent` override (default `ReportJson`, so every operator
+  call site is untouched) and the Workspace passes `ReportSummary`: a bounded, humanised key-value
+  view (≤40 entries, truncated values, depth 1, credential-shaped tokens redacted) with **no raw
+  payload reachable behind it at all**. The override covers an agent-chosen
+  `display_hint: "json"` as well as a shape mismatch — `json` is a valid value in the MCP tool's
+  enum, so replacing only the mismatch path would leave an agent able to dump on request. A typed
+  renderer reads only the keys its hint declares, so routing a client through the shared set
+  **strictly reduces** what is exposed; the summary bounds and humanises the residual rather than
+  eliminating it (a boundary-side scrub is the general fix).
+
+  **Enumerating the surfaces here is load-bearing**: FR-5 said "two" while a third shipped a raw
+  dump to clients for two releases, which is how #2162 happened. A fourth consumer belongs in
+  this list before it ships.
+- **FR-5a — Client-facing row windowing (#2162)**: the Workspace cannot use FR-9's
+  `GET /api/reports/{id}/rows` — that route is `Depends(get_current_user)` and a portal principal
+  is a verified email with no `users` row (the #2128 structural fact). Rather than clone the
+  route on a client-facing prefix, the **existing** portal detail route takes two optional query
+  params, `rows_offset` / `rows_limit`, and windows `payload["rows"]` **only when the payload
+  really is `{columns, rows}`**, attaching `row_meta {total, offset, limit}` when it does.
+  `rows_limit` absent → byte-identical to before, so the change is purely additive; a non-tabular
+  payload with `rows_limit` set returns whole with no `row_meta` — never a 400, because the
+  server holds the payload and the client should not have to guess its shape from an
+  agent-authored `display_hint` that can disagree with it. Inherits the detail route's roster
+  gate and its uniform 404 rather than re-deriving either. Same honest limit as FR-9: the slice
+  is Python-side after the whole blob is read, so it bounds the **response**, not the read — and
+  because it is client-reachable and loopable it is **rate-limited** per (client, agent).
 - **FR-6 — Retention**: cleanup sweep deletes `agent_reports` older than
   `agent_reports_retention_days` (default 90; `0` disables), chunked like the #772 sweeps.
 - **FR-8 — Agent read-back** (#1538, epic #1534): MCP `list_reports` (metadata; filters
@@ -384,7 +417,10 @@ endpoint — reports flow agent → MCP → backend.
   something only agents whose own CLAUDE.md mentions it ever do. Documents the call, when to
   reach for it (results a human re-reads: scheduled-run findings, batch summaries, KPI
   snapshots), the payload shape per `display_hint` — the shapes FR-5's renderers dispatch on,
-  since a mismatch fails silently as a raw-JSON fallback — the aggregate-before-publishing
+  since a mismatch fails silently into the fallback (a bounded key-value summary since #2162,
+  and on the client-facing Workspace surface that is *all* the reader gets, with no raw payload
+  behind it — so a wrong shape costs the intended presentation outright) — the
+  aggregate-before-publishing
   expectation given the FR-3 cap, and the reports-are-one-way boundary against §26's operator
   queue. Runtime-aware for free via `_adapt_instructions_for_runtime` (#1187: Codex gets bare
   `report`, not `mcp__trinity__report`), and the Codex orientation note lists the tool.

@@ -11,6 +11,15 @@ predicate stack admitted it. Harmless in Trinity's own topology (both Docker
 networks are `172.28/16` and `172.29/16`, which ARE `is_private`) and a real hole
 on the cloud providers that address internal endpoints out of that range.
 
+**ent#393 — the mapped form of S3.** Because CGNAT is the one range refused by
+Trinity's own clause rather than by the interpreter, it is also the one whose
+IPv4-MAPPED form had to be handled explicitly: the clause was written
+`ip.version == 4 and ip in _SHARED_ADDRESS_SPACE`, and `::ffff:100.64.0.1`
+reports version 6. Every neighbouring range below survives its mapped form for
+free, because CPython delegates `is_private`/`is_reserved` through `ipv4_mapped`
+before consulting its IPv6 tables — which is exactly why S3 was the one that
+drifted. The fix resolves the v4 view once and tests membership against that.
+
 DNS is stubbed rather than dialled: a test that resolves real names is a test
 that fails on an aeroplane, and the property under test is the predicate, not
 the resolver.
@@ -83,7 +92,46 @@ def test_cgnat_addresses_are_refused(resolves, address):
 
 
 @pytest.mark.parametrize(
-    "address", ["100.63.255.255", "100.128.0.1", "99.64.0.1", "101.64.0.1"]
+    "address",
+    [
+        "::ffff:100.64.0.0",  # first address in the range
+        "::ffff:100.64.0.1",
+        "::ffff:6440:1",  # the same address written in hex, not dotted-quad
+        "::ffff:100.100.100.100",
+        "::ffff:100.127.255.255",  # last address in the range
+    ],
+)
+def test_mapped_cgnat_addresses_are_refused(resolves, address):
+    """ent#393. The registry validator shares `_is_internal_address` with the
+    A2A outbound path, so the version-gated CGNAT clause left BOTH open — an
+    `AAAA` record of `::ffff:100.64.0.1` made this fetch a probe of whatever the
+    provider hosts on RFC 6598 space.
+
+    This is the one range where the mapped form had to be handled by Trinity:
+    the rows in `test_internal_destinations_are_refused` below pass because
+    CPython delegates `is_private`/`is_loopback` through `ipv4_mapped` before it
+    consults its IPv6 tables, and CGNAT is deliberately absent from both.
+    """
+    resolves(address)
+    with pytest.raises(ValueError, match="internal address"):
+        validate(URL)
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "100.63.255.255",
+        "100.128.0.1",
+        "99.64.0.1",
+        "101.64.0.1",
+        # ent#393: the same boundaries through the mapped path, which is now a
+        # second way into the CGNAT clause and so a second way to widen it by
+        # accident.
+        "::ffff:100.63.255.255",
+        "::ffff:100.128.0.1",
+        "::ffff:99.64.0.1",
+        "::ffff:101.64.0.1",
+    ],
 )
 def test_the_boundaries_either_side_stay_public(resolves, address):
     """/10, not /8. Refusing `100.0.0.0/8` would blackhole a large slice of the

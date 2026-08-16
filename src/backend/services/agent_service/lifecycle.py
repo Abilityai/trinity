@@ -19,6 +19,7 @@ from services.docker_service import (
     docker_client,
     get_agent_container,
     get_next_available_port,
+    reserve_port_for_recreate,
 )
 from services.docker_utils import (
     container_stop, container_remove, container_start, container_reload,
@@ -411,8 +412,22 @@ async def start_agent_internal(agent_name: str) -> dict:
 
         # Recreate container with updated config
         # Use system user for internal operations
+        #
+        # #2186: `require_running=False` because THIS caller recreates stopped
+        # containers by design — it calls `container_start` on the very next
+        # line. #2092 added the guard with a `True` default and the note that
+        # every caller already enforced the precondition; that held for the two
+        # running-only callers and not for this one, so a stopped agent with any
+        # drift 500'd on start. The #1809 base-image branch made it worse than
+        # occasional: that predicate is gated on `not was_already_running`, so it
+        # fires ONLY for a stopped container — cold-start image adoption was
+        # 100% unreachable.
+        #
+        # `preserve_run_state` stays False: leaving the replacement stopped would
+        # be wrong on the one path whose whole purpose is to start it.
         await recreate_container_with_updated_config(
-            agent_name, container, "system", env_overrides=mcp_env_overrides
+            agent_name, container, "system", env_overrides=mcp_env_overrides,
+            require_running=False,
         )
         container = get_agent_container(agent_name)
 
@@ -481,6 +496,31 @@ async def start_agent_internal(agent_name: str) -> dict:
     except Exception as e:
         logger.warning(f"Failed to sync read-only config for agent {agent_name}: {e}")
         read_only_result = {"status": "failed", "error": str(e)}
+
+    # #2069 (T1): heal the already-leaking existing fleet. The creation-time
+    # `.gitignore` merge protects only agents created after that fix; existing
+    # auto-sync agents converge HERE on their next base-image-drift recreate /
+    # restart. Gated on the DB `auto_sync_enabled` flag — the persisted owner
+    # intent the runtime already honors (`_apply_git_env_from_db`: GIT_SYNC_AUTO
+    # = DB flag OR baked env). The R2 ephemeral gap does NOT apply on this path:
+    # ghosts never recreate (they are volume-less by design), so no ephemeral
+    # agent reaches start/recreate and the DB flag is correct and complete here.
+    # Same readiness-gated, idempotent, non-fatal merge as creation — a warm
+    # restart with an existing `.git` satisfies the readiness probe immediately
+    # (one fast merge), a cold recreate waits for readiness like creation.
+    # Touches neither `sync_to_github` nor the Push migration (AC#5); an
+    # additive convergence path. Fire-and-forget so it adds no start latency.
+    try:
+        if db.get_git_auto_sync_enabled(agent_name):
+            from services import git_service
+            git_service.spawn_gitignore_merge_after_clone(agent_name)
+    except Exception as e:
+        logger.warning(
+            "[#2069] failed to spawn the creation-parity .gitignore merge for "
+            "%s on start: %s",
+            agent_name,
+            e,
+        )
 
     return {
         "message": f"Agent {agent_name} started",
@@ -944,6 +984,15 @@ async def recreate_container_with_updated_config(
     else:
         env_vars.pop('AGENT_TOOL_STALL_LIMIT_S', None)
 
+    # #2127: same set-or-clear treatment for the early-finalize idle ceiling —
+    # this dict is seeded from the OLD container, so an unset backend env must
+    # POP the stale baked value rather than leave it (the #1809/ent#109 rule).
+    _idle_finalize = (os.getenv('AGENT_IDLE_FINALIZE_S') or '').strip()
+    if _idle_finalize:
+        env_vars['AGENT_IDLE_FINALIZE_S'] = _idle_finalize
+    else:
+        env_vars.pop('AGENT_IDLE_FINALIZE_S', None)
+
     # #1159: refresh the per-agent auth token. Deterministic from agent_name, so
     # this re-derives under the CURRENT name — the load-bearing part of the
     # rename fix (a renamed container otherwise keeps derive(old_name) and 401s
@@ -1058,6 +1107,12 @@ async def recreate_container_with_updated_config(
         await container_stop(old_container)
     except Exception:
         pass
+    # #2215: across the remove->create gap below, this port is invisible to the
+    # allocator (its label is gone) and unreserved — and the most-recreated
+    # agent tends to hold the fleet's MAX port, exactly what a concurrent
+    # allocation computes as max+1. Re-assert the reservation before removal
+    # (SET no-NX: it is this agent's own port; fail-open, never raises).
+    reserve_port_for_recreate(ssh_port)
     try:
         await container_remove(old_container)
     except docker.errors.NotFound:
@@ -1636,6 +1691,12 @@ def _apply_persisted_auth_env(agent_name: str, env_vars: dict, runtime: str) -> 
     _stall_limit = (os.getenv("AGENT_TOOL_STALL_LIMIT_S") or "").strip()
     if _stall_limit:
         env_vars["AGENT_TOOL_STALL_LIMIT_S"] = _stall_limit
+
+    # #2127: early-finalize idle ceiling (rebuild-from-nothing path — no old
+    # container to inherit a stale value from, so set-only mirrors the sibling).
+    _idle_finalize = (os.getenv("AGENT_IDLE_FINALIZE_S") or "").strip()
+    if _idle_finalize:
+        env_vars["AGENT_IDLE_FINALIZE_S"] = _idle_finalize
 
     # #1159: per-agent in-container auth token (fail-closed: raises if secret unset).
     env_vars["TRINITY_AGENT_AUTH_TOKEN"] = derive_agent_token(agent_name)

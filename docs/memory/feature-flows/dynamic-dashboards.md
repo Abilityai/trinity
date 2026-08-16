@@ -1,6 +1,7 @@
 # Feature: Dynamic Dashboards (DASH-001)
 
-> **Last Updated**: 2026-04-04 - Reliability improvements: DB-persisted cache, retry with backoff, partial YAML tolerance, decoupled tab visibility, immediate history display.
+> **Last Updated**: 2026-08-15 (#2198) - One probe per page load instead of four; the retry ladder stops on a `settled` answer.
+> **Previously**: 2026-04-04 - Reliability improvements: DB-persisted cache, retry with backoff, partial YAML tolerance, decoupled tab visibility, immediate history display.
 
 ## Overview
 
@@ -14,7 +15,7 @@ As an agent developer, I want my dashboard to show platform-tracked execution st
 
 ## Entry Points
 
-- **UI (tab check)**: `src/frontend/src/views/AgentDetail.vue:checkDashboardExists()` - DB-backed check with retry backoff
+- **UI (tab check)**: `src/frontend/src/views/AgentDetail.vue:checkDashboardExists()` - DB-backed check with retry backoff; one shared probe per (agent, running-ness) (#2198). Distinct from the same-named `stores/agents.js:checkDashboardExists()`, which is the single `/exists` call it wraps
 - **UI (render)**: `src/frontend/src/components/DashboardPanel.vue` - Dashboard display with warning banners
 - **API (lightweight)**: `GET /api/agent-dashboard/{name}/exists` - DB-only tab visibility check
 - **API (full)**: `GET /api/agent-dashboard/{name}?include_history=true&history_hours=24&include_platform_metrics=true`
@@ -63,8 +64,28 @@ AgentDetail.vue                       Backend
 
 ## Data Flow Summary
 
-1. **Tab Visibility Check**: Frontend calls `GET /{name}/exists` (DB-only, no container call)
-2. **Full Fetch** (with retry): Frontend requests dashboard with `include_history=true`; retries 3x on boot (0s, 3s, 6s)
+1. **Tab Visibility Check**: Frontend calls `GET /{name}/exists` (DB-only, no container call).
+   **One probe per page load, not one per trigger (#2198).** `checkDashboardExists()` has FOUR
+   triggers — the `route.params.name` watcher, the `agent.value?.status` watcher, `onMounted` and
+   `onActivated` — and each used to run its own full ladder, for 9 `/agent-dashboard/{name}` requests
+   over ~9s on a single load. They now join one component-scoped probe promise. A store-level
+   in-flight join cannot do this on its own: the triggers fire hundreds of ms apart and a join only
+   merges *concurrent* calls, so the sharing has to happen at the level of the probe. The probe key
+   carries running-ness (`{name}:{isRunning}`), because the ladder early-returns when the agent is
+   not running — a probe started while it was booting settles without ever asking, and the
+   "just became running" watcher joining that answer would strand a slow-starting agent without its
+   Dashboard tab permanently.
+2. **Full Fetch** (with retry): Frontend requests dashboard with `include_history=true`; retries up
+   to 3x on boot (0s, 3s, 6s) — but **only while the answer is inconclusive (#2198)**. The response
+   carries `settled: true` when the agent ran its handler and answered, and the ladder stops there.
+   Before this, an agent with no `dashboard.yaml` replied `{has_dashboard: false, error: "No
+   dashboard.yaml found…"}`, byte-indistinguishable from the `{has_dashboard: false, error: …}` a
+   timeout produces — so the page spent 3 requests and ~9 seconds re-asking on EVERY load of an
+   agent that will never have one (#2130 recorded the same ladder as a ~10s deep-link delay).
+   `settled` is derived from the transport (an HTTP 200 with a parseable body), never from the error
+   text, so it is correct on every already-deployed agent image with no base-image rebuild; every
+   inconclusive path (timeout, connection error, non-200, stopped container) stays unsettled and
+   keeps its retries.
 3. **Agent Validation**: Agent server validates YAML, strips invalid widgets (returns valid subset + warnings)
 4. **Backend Cache**: Valid config cached to `agent_dashboard_cache` DB table (survives restarts)
 5. **Fallback**: On agent error/timeout, backend serves DB-cached config with `stale: true`

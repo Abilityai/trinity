@@ -17,6 +17,11 @@ import {
   widgetKey,
 } from '@/utils/gridWidgets'
 import { serverSkewMs } from '@/utils/timestamps'
+import {
+  LAYOUT_KEY_V1,
+  LAYOUT_KEY,
+  WIDGET_PREFS_KEY,
+} from '@/utils/gridStorageKeys'
 
 /**
  * Fleet Grid store (trinity-enterprise#47) — owns the Dashboard Grid view's
@@ -34,17 +39,6 @@ import { serverSkewMs } from '@/utils/timestamps'
  *     while the Grid is mounted.
  */
 
-// ent#325: layout v2 admits `widget:*` keys alongside agents. The key is
-// bumped rather than reused so a v1 client and a v2 client on the same browser
-// cannot fight over one blob — and the migration is a one-time COPY, leaving
-// v1 in place, so downgrading is not a data-loss event.
-const LAYOUT_KEY_V1 = 'trinity-grid-layout-v1'
-const LAYOUT_KEY = 'trinity-grid-layout-v2'
-// Sparse `{ widgetId: boolean }` OVERRIDE map — see gridWidgets.isWidgetEnabled.
-// Its own key: the org overlay (#305) persists Zones/Lines under keys of its
-// own and the tile prefs must not be entangled with either, so that "Reset
-// tiles" cannot clobber an overlay toggle (ent#325 scope note).
-const WIDGET_PREFS_KEY = 'trinity-grid-widgets-v1'
 const ANALYTICS_WINDOW = '14d' // one fetch feeds Activity·14d + Context·7d (last 7 entries)
 const ANALYTICS_STALE_MS = 5 * 60 * 1000
 const HYDRATE_CONCURRENCY = 4
@@ -444,6 +438,63 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     }
   }
 
+  // ent#96 — "Executions" tile data. Two GETs for the same reason the failures
+  // tile uses two: the 24-bucket chart and the live running/queued chips are
+  // different questions with different failure modes, and one shared
+  // {loaded,error} pair would let a healthy chart vouch for stale chips (or the
+  // reverse). Each keeps its own triple; `loaded` flips true only on success and
+  // never back, so a failed background refresh leaves the last good chart on
+  // screen (stale-while-revalidate, ent#253's rule) while `error` still records
+  // that this cycle failed.
+  const EXEC_WINDOW_HOURS = 24
+  const execTimeline = ref([])        // [{bucket,total,failed,by_trigger}]
+  const execTriggerOrder = ref([])    // backend-served stack/legend order
+  const execTimelineLoaded = ref(false)
+  const execTimelineError = ref(false)
+  const execLive = ref(null)          // {running_count, queued_count, ...} | null
+  const execLiveLoaded = ref(false)
+  const execLiveError = ref(false)
+
+  async function fetchExecutionsTimeline() {
+    try {
+      const res = await axios.get('/api/executions/timeline', {
+        params: { group_by: 'hour', hours: EXEC_WINDOW_HOURS, split: 'trigger' },
+        headers: authStore.authHeader,
+      })
+      // A 200 whose body is not the documented shape is a FAULT, not an empty
+      // fleet — the manufactured-green class the failures tile documents,
+      // arriving through the store where a pure render function cannot see it.
+      if (!Array.isArray(res.data?.buckets)) {
+        execTimelineError.value = true
+        return
+      }
+      execTimeline.value = res.data.buckets
+      execTriggerOrder.value = Array.isArray(res.data.trigger_order)
+        ? res.data.trigger_order
+        : []
+      execTimelineLoaded.value = true
+      execTimelineError.value = false
+    } catch {
+      execTimelineError.value = true
+    }
+  }
+
+  async function fetchExecutionsLive() {
+    try {
+      const res = await axios.get('/api/executions/stats', {
+        params: { hours: EXEC_WINDOW_HOURS },
+        headers: authStore.authHeader,
+      })
+      // `running_count`/`queued_count` are always-live on this endpoint (not
+      // windowed), which is why the chips can sit beside a 24h chart.
+      execLive.value = res.data && typeof res.data === 'object' ? res.data : null
+      execLiveLoaded.value = execLive.value !== null
+      execLiveError.value = execLive.value === null
+    } catch {
+      execLiveError.value = true
+    }
+  }
+
   let _pollTimer = null
   let _visibilityHandler = null
 
@@ -457,6 +508,10 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     // left as folklore.
     if (activeWidgetKeys.value.includes(widgetKey('recent-failures'))) {
       tasks.push(fetchRecentFailures(), fetchFailureStats())
+    }
+    // Same rule as above: a tile switched off costs nothing (ent#96).
+    if (activeWidgetKeys.value.includes(widgetKey('executions'))) {
+      tasks.push(fetchExecutionsTimeline(), fetchExecutionsLive())
     }
     return Promise.allSettled(tasks)
   }
@@ -521,6 +576,16 @@ export const useFleetGridStore = defineStore('fleetGrid', () => {
     opQueuePending,
     skillRunnerStatus,
     recentFailures,
+    execTimeline,
+    execTriggerOrder,
+    execTimelineLoaded,
+    execTimelineError,
+    execLive,
+    execLiveLoaded,
+    execLiveError,
+    fetchExecutionsTimeline,
+    fetchExecutionsLive,
+    EXEC_WINDOW_HOURS,
     failuresListLoaded,
     failuresListError,
     failures24h,

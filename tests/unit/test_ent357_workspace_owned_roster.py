@@ -20,6 +20,36 @@ from __future__ import annotations
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _pin_container_state(monkeypatch):
+    """#2196: pin the container-state seams and quiet the briefing.
+
+    `get_roster` now projects container state onto every card, and
+    `services/docker_service.py` runs `docker.from_env()` at import while
+    conftest re-imports it after every test — so unpinned, these tests read
+    whatever Docker the machine happens to have. Worse than nondeterministic
+    values: on a Docker-less machine every card reads `unknown`, which makes the
+    briefing ATTEMPT its HTTP call (`unknown` is deliberately attemptable), so a
+    membership test would make real network attempts to `agent-{name}:8000`.
+    Nothing here asserts availability or briefings; both are pinned inert so the
+    file stays about the roster union.
+    """
+    from client_portal import service
+
+    async def _map(names):
+        return {n: "ready" for n in names}
+
+    async def _one(name):
+        return "ready"
+
+    async def _briefing(name, availability="ready"):
+        return (None, [])
+
+    monkeypatch.setattr(service, "_availability_map", _map)
+    monkeypatch.setattr(service, "_agent_availability", _one)
+    monkeypatch.setattr(service, "_agent_briefing", _briefing)
+
+
 @pytest.fixture()
 def roster_db(tmp_path, monkeypatch):
     """Fresh sqlite with the OSS tables the roster joins over."""

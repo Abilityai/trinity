@@ -86,6 +86,29 @@ class _Recorder:
         return self._results.pop(0) if self._results else _Result()
 
 
+@pytest.fixture(autouse=True)
+def _pin_container_state(monkeypatch):
+    """#2196: pin the container-state seam for every test in this module.
+
+    `portal_chat` gained a liveness gate (it had none, and its 502 fired only
+    AFTER the user's message was durably written). Without this fixture the gate
+    would consult the developer's real Docker — where these fixture agents have
+    no container — so the module would pass in a Docker-less CI container and
+    fail on every workstation, or the reverse. Patched on the consuming module's
+    own attribute, which is why that read has a named seam at all.
+    """
+    from client_portal import service as svc
+
+    async def _map(names):
+        return {n: "ready" for n in names}
+
+    async def _one(name):
+        return "ready"
+
+    monkeypatch.setattr(svc, "_availability_map", _map)
+    monkeypatch.setattr(svc, "_agent_availability", _one)
+
+
 @pytest.fixture()
 def portal(monkeypatch):
     """`client_portal.service` with its DB, roster and execution stack stubbed.

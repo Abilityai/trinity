@@ -193,6 +193,7 @@ credentials.json
 !.trinity/persistent-processes.allow
 !.trinity/brain-orb/
 !.trinity/pipelines/
+!.trinity/plugins.yaml
 .tmp/
 .trinity-clone-tmp/
 
@@ -337,6 +338,56 @@ Keep `data_paths` entries **under `data/`** — entries that escape the data roo
 
 ---
 
+## Declaring Plugins (`plugins`) — #1704
+
+If your agent relies on Claude Code **marketplace plugins** (skills / subagents /
+hooks bundled by a marketplace), declare them in `template.yaml`. Trinity writes a
+committed, secret-free `~/.trinity/plugins.yaml` manifest at creation and
+**re-installs anything missing on every container start** — so the selection is
+portable and survives a git-based reconstitution onto a fresh volume or a new
+host, not just a plain recreate (which the durable workspace volume already keeps).
+
+```yaml
+plugins:
+  marketplaces:
+    - name: abilityai
+      source: abilityai/abilities        # owner/repo shorthand, OR an https:// URL
+  installed:
+    - trinity@abilityai                    # plugin@marketplace (every entry's
+                                           # marketplace must be declared above)
+  # Alternatively, mirroring Claude Code's own settings.json shape:
+  # enabledPlugins:
+  #   trinity@abilityai: true              # value:false entries are dropped
+```
+
+Rules and why:
+
+- **Opt-in.** An absent/empty `plugins:` block is a full no-op — no file, no side
+  effect. Undeclared agents are unaffected.
+- **Committed, so it's portable.** `~/.trinity/plugins.yaml` is committed to your
+  agent's repo (unlike `data_paths`/`persistent_state`, which are volume-local).
+  Your installed *plugin cache* (`~/.claude/plugins/`) and `~/.claude.json` stay
+  gitignored — the manifest is a plugin-only, secret-free declaration, not the
+  cache.
+- **The `source` must be safe.** Use `owner/repo` shorthand or an `https://` URL.
+  A URL **must not embed credentials** (`https://user:token@…` is rejected) —
+  Trinity resolves a private marketplace's git credential from the agent's
+  `GITHUB_PAT` env at install time, never from the manifest. No `../` traversal,
+  no leading `-`.
+- **Re-install is idempotent.** On start Trinity reads the current state and
+  installs only what's missing — a volume-persisting restart runs zero installs.
+  A public marketplace works with network only; a private one needs the agent's
+  `GITHUB_PAT`.
+- **Trust model.** `plugin@marketplace` pins identity, not a commit — a re-install
+  re-fetches the marketplace's *current* content. (A commit-pinned mode is a
+  planned follow-up.)
+
+> **Runtime installs.** Plugins you install *after* creation via `/plugin install`
+> (not declared in the template) are **not** captured into the manifest yet — put
+> anything you want to survive a reconstitution in `template.yaml plugins:`.
+
+---
+
 ## template.yaml Schema
 
 Complete schema with all available fields:
@@ -478,6 +529,22 @@ metrics:
       - value: "active"           # Value written to metrics.json
         color: "green"            # green|red|yellow|gray|blue|orange
         label: "Active"           # Display label in UI
+
+# === RUNTIME DATA (Optional) — #1169 ===
+# Declared runtime-data globs under data/ (durable, gitignored, exportable).
+# See the "Runtime Data (data_paths)" section.
+data_paths:
+  - data/**
+
+# === PLUGINS (Optional) — #1704 ===
+# Claude Code marketplace plugins to install + re-install on boot. Committed +
+# secret-free. See the "Declaring Plugins (plugins)" section.
+plugins:
+  marketplaces:
+    - name: abilityai
+      source: abilityai/abilities   # owner/repo or an https:// URL (no userinfo)
+  installed:
+    - trinity@abilityai             # plugin@marketplace
 ```
 
 ---

@@ -46,6 +46,55 @@ def is_available() -> bool:
     return bool(_resolve_api_key())
 
 
+def resolve_voice_id(agent_name: str, *, default_voice_id: Optional[str] = None) -> Optional[str]:
+    """The voice an agent speaks with, or ``None`` when it may not speak at all (#2157).
+
+    ONE gate for every surface that turns an agent's words into audio, so the
+    channel path (``send_voice_reply``) and the Workspace narration path can no
+    longer disagree about whether voice is on for an agent:
+
+      platform TTS key  AND  agent-level ``tts_voice_replies_enabled``
+                        AND  (the agent's own ``tts_voice_id`` else the platform default)
+
+    Per-channel flags stay with the channel path — the Workspace is not a
+    messaging channel and has no per-channel row. ``default_voice_id`` lets a
+    caller that already read the platform default (a roster loop) pass it in
+    rather than re-resolving it per agent.
+
+    Never raises: any lookup failure resolves to ``None`` (no voice), because the
+    fail-safe answer for "may this agent be spoken aloud" is no.
+    """
+    try:
+        if not is_available():
+            return None
+        from database import db
+
+        cfg = db.get_tts_config(agent_name)
+        if default_voice_id is None:
+            from services.settings_service import settings_service
+            default_voice_id = settings_service.get_default_voice_id()
+        return resolve_voice_from_config(
+            enabled=bool(cfg.get("enabled")),
+            voice_id=cfg.get("voice_id"),
+            default_voice_id=default_voice_id,
+        )
+    except Exception as e:  # noqa: BLE001 — a voice lookup never breaks a turn
+        logger.warning("voice resolution failed for %s: %s", agent_name, e)
+        return None
+
+
+def resolve_voice_from_config(
+    *, enabled: bool, voice_id: Optional[str], default_voice_id: Optional[str]
+) -> Optional[str]:
+    """The pure predicate behind :func:`resolve_voice_id` (#2157), for a caller
+    that already holds the agent's voice columns — a roster query reads them for
+    every agent at once and must not turn that into an N+1 of per-agent lookups.
+    Both spellings therefore decide by the same rule, and cannot drift."""
+    if not enabled:
+        return None
+    return (voice_id or "").strip() or (default_voice_id or "").strip() or None
+
+
 def _within_cost_cap(text: str) -> bool:
     return 0 < len(text) <= config.TTS_MAX_CHARS
 
