@@ -215,7 +215,26 @@ _STUBS = {
         "EmbeddedCredentialError": type("EmbeddedCredentialError", (ValueError,), {}),
         "reject_embedded_credentials": lambda url: url,
     },
-    "redis_breaker_util": {"get_breaker_redis": lambda: None},
+    # `get_breaker_redis` is unused by skill_service (it holds its own client),
+    # but skills_sync_service imports it here; `SingleFlightLock` (#1920) is now
+    # imported by skill_service's lock helpers, so the stub must carry it or a
+    # 'redis_breaker_util-stub-first' ordering fails skill_service's import. The
+    # fake fails open (no Redis in unit tests → sole-worker acquire, no-op
+    # release) so the REAL `_acquire/_release_sync_lock` still run in the
+    # status-persistence tests.
+    "redis_breaker_util": {
+        "get_breaker_redis": lambda: None,
+        "SingleFlightLock": type(
+            "SingleFlightLock",
+            (),
+            {
+                "__init__": lambda self, *a, **kw: None,
+                "acquire": lambda self: True,
+                "release_if_owned": lambda self: None,
+                "held": False,
+            },
+        ),
+    },
     "services.docker_service": {
         "list_all_agents_fast": lambda: [],
         "execute_command_in_container": AsyncMock(),

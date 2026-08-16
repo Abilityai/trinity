@@ -58,6 +58,10 @@ try:  # Redis is optional here: the injection lock fails open without it.
 except Exception:  # noqa: BLE001 — import guard
     _redis_lib = None
 
+# The shared ownership-checked single-flight lock (#1920). Leaf module (stdlib +
+# redis), so importing it here adds no heavy dependency.
+from redis_breaker_util import SingleFlightLock  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 # Local path for skills library clone
@@ -421,35 +425,32 @@ class SkillService:
             self._release_sync_lock(sync_token)
 
     def _acquire_sync_lock(self):
-        """SETNX lock around the shared library clone.
+        """Ownership-checked SETNX lock around the shared library clone (#1920).
 
-        Returns a token when held, ``None`` when Redis is unavailable
-        (fail-open — a single-worker dev box must still be able to sync), or
-        ``False`` when another sync holds it.
+        Returns a held ``SingleFlightLock`` when acquired, ``None`` when Redis
+        is unavailable (fail-open — a single-worker dev box must still be able
+        to sync), or ``False`` when another sync holds it. Keep the
+        ``_redis_lib``/``_REDIS_URL`` guard so a box with no redis / unset URL
+        fails open cleanly instead of crashing on the client build.
         """
         if _redis_lib is None or not _REDIS_URL:
             return None
-        import secrets
-        token = secrets.token_hex(16)
         try:
-            client = self._redis_client()
-            if client.set(_SYNC_LOCK_KEY, token, nx=True, ex=_SYNC_LOCK_TTL_SECONDS):
-                return token
-            return False
+            lock = SingleFlightLock(
+                _SYNC_LOCK_KEY, _SYNC_LOCK_TTL_SECONDS, client=self._redis_client()
+            )
         except Exception as e:  # noqa: BLE001 — redis down → proceed best-effort
             logger.warning(f"skills sync lock unavailable: {e}")
             return None
+        # acquire() handles SETNX errors internally (fail-open → proceed); a
+        # real busy holder returns False, which the caller checks by identity.
+        return lock if lock.acquire() else False
 
-    def _release_sync_lock(self, token) -> None:
-        """Check-and-delete: only the holder's token releases the lock."""
-        if not token:
-            return
-        try:
-            client = self._redis_client()
-            if client.get(_SYNC_LOCK_KEY) == token:
-                client.delete(_SYNC_LOCK_KEY)
-        except Exception:  # noqa: BLE001
-            pass
+    def _release_sync_lock(self, lock) -> None:
+        """Ownership-checked compare-and-delete: only our own token releases.
+        No-op for the ``None`` (fail-open) / ``False`` (busy) sentinels."""
+        if isinstance(lock, SingleFlightLock):
+            lock.release_if_owned()
 
     def _sync_sources_locked(
         self, sources: List[Any], single_source: bool = False
@@ -1127,48 +1128,44 @@ class SkillService:
         return self._redis
 
     def _acquire_inject_lock(self, agent_name: str):
-        """SETNX lock serialising injections (start × manual sync race) and the
-        CLAUDE.md read-modify-write. Deliberately OUTSIDE the agent:* namespace
-        (compat_fix precedent) — a short-TTL lock has no lifecycle to register
-        in the #1560 keyspace registry. Redis down → fail open (None).
+        """Ownership-checked SETNX lock (#1920) serialising injections (start ×
+        manual sync race) and the CLAUDE.md read-modify-write. Deliberately
+        OUTSIDE the agent:* namespace (compat_fix precedent) — a short-TTL lock
+        has no lifecycle to register in the #1560 keyspace registry. Redis down
+        / no client → fail open (None).
 
         TTL must exceed the worst-case injection (one restore attempt alone is
         up to _RESTORE_TIMEOUT, ×2 with the repair retry, × N skills) — a lock
         that expires mid-injection evaporates exactly in the slow case it
-        exists for. Value is a random token so release can never delete a
-        successor's lock after an expiry.
+        exists for. The shared primitive mints a unique per-acquire token, so
+        release can never delete a successor's lock after an expiry.
+
+        Returns a held ``SingleFlightLock``; raises ``SkillInjectionBusy`` when
+        another injection holds it (the callers rely on that signal).
         """
         if _redis_lib is None or not _REDIS_URL:
             return None
-        import secrets
-        token = secrets.token_hex(16)
         try:
-            client = self._redis_client()
-            if client.set(
-                f"skill_inject:{agent_name}", token, nx=True,
-                ex=_INJECT_LOCK_TTL_SECONDS,
-            ):
-                return token
-            raise SkillInjectionBusy(
-                f"another skill injection is already running for {agent_name}"
+            lock = SingleFlightLock(
+                f"skill_inject:{agent_name}",
+                _INJECT_LOCK_TTL_SECONDS,
+                client=self._redis_client(),
             )
-        except SkillInjectionBusy:
-            raise
         except Exception as e:  # noqa: BLE001 — redis down → proceed best-effort
             logger.warning(f"skill inject lock unavailable for {agent_name}: {e}")
             return None
+        if lock.acquire():
+            return lock
+        raise SkillInjectionBusy(
+            f"another skill injection is already running for {agent_name}"
+        )
 
-    def _release_inject_lock(self, token, agent_name: str) -> None:
-        """Check-and-delete: only the holder's token releases the lock."""
-        if token is None:
-            return
-        try:
-            client = self._redis_client()
-            key = f"skill_inject:{agent_name}"
-            if client.get(key) == token:
-                client.delete(key)
-        except Exception:  # noqa: BLE001
-            pass
+    def _release_inject_lock(self, lock, agent_name: str) -> None:
+        """Ownership-checked compare-and-delete: only our own token releases.
+        No-op for the ``None`` fail-open sentinel. ``agent_name`` is kept for
+        the call-site signature; the lock already carries its own key."""
+        if isinstance(lock, SingleFlightLock):
+            lock.release_if_owned()
 
     # =========================================================================
     # In-container helpers (injected-python — zero shell interpolation of
