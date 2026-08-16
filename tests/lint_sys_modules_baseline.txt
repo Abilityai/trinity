@@ -14,7 +14,7 @@
 1 tests/unit/test_proactive_audit_unit.py
 2 tests/unit/test_self_execute.py
 4 tests/unit/test_telegram_login_gate.py
-4 tests/test_validation.py
+4 tests/unit/test_validation.py
 3 tests/unit/test_watchdog_unit.py
 2 tests/unit/test_whatsapp_adapter.py
 2 tests/unit/test_agent_server_auto_sync.py
