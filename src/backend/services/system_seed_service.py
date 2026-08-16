@@ -56,7 +56,7 @@ from database import db
 from models import User
 from services.docker_service import docker_client
 from services.cornelius_agent_service import cornelius_agent_service
-from redis_breaker_util import get_breaker_redis
+from redis_breaker_util import get_breaker_redis, SingleFlightLock
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -214,8 +214,14 @@ class SystemSeedService:
                 )
             return self._skip(result, "manifest_unavailable", resolve_error or "No bundled manifest found")
 
-        # 6. Cross-worker lock (fail-open). Only the winner provisions this pass.
-        if not self._acquire_lock():
+        # 6. Cross-worker lock (fail-open). Only the winner provisions this
+        #    pass. The lock is LOCAL to this pass — never stored on the
+        #    module-level singleton — so the two concurrent same-process call
+        #    sites on a fresh install (lifespan safety-net + setup-completion
+        #    bg task) can't clobber each other's ownership state and leak the
+        #    loser's lock for the TTL (#1920).
+        lock = self._acquire_lock()
+        if lock is None:
             return self._skip(result, "skipped_locked", "Another worker is seeding the default system")
 
         try:
@@ -345,7 +351,7 @@ class SystemSeedService:
             )
             return result
         finally:
-            self._release_lock()
+            self._release_lock(lock)
 
     # ------------------------------------------------------------------ utils
 
@@ -460,27 +466,26 @@ class SystemSeedService:
         except Exception as e:
             logger.debug("Seed operator alert failed (non-fatal): %s", e)
 
-    def _acquire_lock(self) -> bool:
-        """SETNX provisioning lock. Fail-open (no Redis → sole-worker behaviour;
-        the existence backstop covers the race)."""
-        r = get_breaker_redis()
-        if r is None:
-            return True
-        try:
-            return bool(r.set(_PROVISION_LOCK_KEY, "1", nx=True, ex=_PROVISION_LOCK_TTL))
-        except Exception as e:
-            logger.warning("System seed lock failed-open (%s)", e)
-            return True
+    def _acquire_lock(self):
+        """Take the provisioning lock via the shared ownership-checked
+        primitive (#1920). Returns a held ``SingleFlightLock`` when this pass
+        may provision, or ``None`` when another worker holds it. Fail-open (no
+        Redis → sole-worker behaviour; the existence backstop covers the race).
 
-    def _release_lock(self) -> None:
-        """Best-effort release so a legitimate retry isn't blocked for the TTL."""
-        r = get_breaker_redis()
-        if r is None:
-            return
-        try:
-            r.delete(_PROVISION_LOCK_KEY)
-        except Exception:
-            pass  # TTL will expire it
+        The returned lock is LOCAL to the pass — never stored on this singleton
+        — so the release below is a compare-and-delete against a unique
+        per-acquire token and can never remove a *successor's* live lock (the
+        pre-#1920 constant-``"1"`` + unconditional ``delete`` bug)."""
+        lock = SingleFlightLock(
+            _PROVISION_LOCK_KEY, _PROVISION_LOCK_TTL, client=get_breaker_redis()
+        )
+        return lock if lock.acquire() else None
+
+    def _release_lock(self, lock) -> None:
+        """Best-effort ownership-checked release so a legitimate retry isn't
+        blocked for the TTL. Compare-and-delete: only our own token deletes."""
+        if lock is not None:
+            lock.release_if_owned()
 
     @staticmethod
     def _skip(result: dict, action: str, message: str) -> dict:
