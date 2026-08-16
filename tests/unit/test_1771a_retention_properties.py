@@ -121,17 +121,19 @@ def isolated_guard():
 
       * `_RG.db` — the double accumulates `queue_items` across examples, so
         "exactly one alarm" silently becomes "one alarm, eventually";
-      * `_RG._last_refused` — module state that outlives the whole session
-        (`test_1644:177` already writes to it, and CI shuffles order under
+      * `_RG._refusal_episodes` — module state that outlives the whole session
+        (`test_1644` already refuses against it, and CI shuffles order under
         `pytest-randomly`), so a "first refusal" example degrades into a "repeat
-        refusal" one depending on what ran before.
+        refusal" one depending on what ran before. Since #1834 each entry also
+        carries a `_clock()` stamp and an undelivered-alarm retry budget, so a
+        leaked one can additionally land a later example on the escalation branch.
 
-    Both patches are BY OBJECT: `retention_guard.py:56` does
+    Both patches are BY OBJECT: `retention_guard.py` does
     `from database import db`, binding its own module-global, so patching
     `database.db` would be inert (learnings.md:99).
     """
     double = _DbDouble()
-    with patch.object(_RG, "db", double), patch.object(_RG, "_last_refused", {}):
+    with patch.object(_RG, "db", double), patch.object(_RG, "_refusal_episodes", {}):
         yield double
 
 
@@ -179,6 +181,14 @@ def _expected_verdict(available, floor, acked, count_raises=False, ack_raises=Fa
     if count_raises:
         return False, -1, threshold, "count_failed"
     candidates = min(available, threshold + 1)
+    if candidates < 0:
+        # #1833: a negative count is an error SENTINEL, not a count — no real
+        # accessor returns one (all 8 are `int(COUNT(*))`), and `-1` is the value
+        # this module itself uses for "unknown". Reachable from this strategy at
+        # floor=-2, where the bound is -1 and the bounded count is -1: before
+        # #1833 that returned `allowed=True`, a fail-OPEN inside the fail-closed
+        # guard. Modelled here from the spec, like every other branch.
+        return False, -1, threshold, "count_negative"
     if candidates <= threshold:
         return True, candidates, threshold, "under_threshold"
     if ack_raises:
@@ -385,14 +395,16 @@ class TestDecisionTable:
     )
     @settings(max_examples=PURE_EXAMPLES, deadline=None)
     def test_never_raises_for_any_numeric_count(self, value, floor):
-        """The half of the ':153' "NEVER raises" contract that is actually true.
+        """The "does not raise" contract, over the whole numeric input space.
 
-        The docstring is false for a non-NUMERIC return, because
-        `candidates <= threshold` (:183) sits outside the try that wraps
-        `count_fn`. That case is production-unreachable (all 8 `count_fn`s are
-        `db.count_*` accessors returning `int(...)`) and is pinned as OBSERVED
-        behaviour in `test_1771a_retention_edges.py`; the docstring correction is
-        a flagged follow-up. This property asserts the guarantee that does hold.
+        This used to be only HALF the contract: a non-NUMERIC return raised,
+        because `candidates <= threshold` sat outside the try that wraps
+        `count_fn`. #1833 closed that — a count the guard cannot compare now
+        REFUSES (`count_uninterpretable`) — so the numeric half asserted here is
+        no longer the only half that holds. The non-numeric half is pinned by
+        example in `test_1771a_retention_edges.py` and
+        `test_1833_retention_guard_contract.py`, where the shapes can be
+        enumerated rather than generated.
         """
         with isolated_guard():
             _RG.evaluate(
@@ -467,9 +479,12 @@ class TestAlarmTransitions:
         the #1638 failure mode repeated. It must equally not UNDER-fire — a
         narrowed window is a new blast radius and has to re-alarm.
 
-        The expected count is recomputed from the memo's contract (fresh iff
-        `_last_refused[key] != window`), never read back from the implementation's
-        own bookkeeping.
+        The expected count is recomputed from the memo's contract, never read
+        back from the implementation's own bookkeeping. Since #1834 freshness keys
+        on `(window, reason)` rather than window alone; every refusal generated
+        here carries the same `over_threshold` reason, so the window-only oracle
+        below remains exactly equivalent — stated rather than assumed, because a
+        future op that varied the reason would silently need a second term.
         """
         key = "execution_row_retention_days"
         with isolated_guard() as db:

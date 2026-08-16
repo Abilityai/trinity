@@ -37,6 +37,26 @@ def _days_ago_iso(days: int) -> str:
     return iso_cutoff(hours=days * 24)
 
 
+@pytest.fixture(autouse=True)
+def _reset_retention_episodes():
+    """#1834: clear `retention_guard`'s in-process refusal state around every test.
+
+    This file never had one, and it needs one: `test_alarm_failure_never_flips_the_
+    refusal` calls `announce_refusal` with a failing `create_operator_queue_item`,
+    which since #1834 leaves an UNDELIVERED episode carrying a `_clock()` stamp
+    (before #1834 it left an inert window int). CI runs the whole unit suite in one
+    process under `pytest-randomly` with three seeds, so a leaked undelivered
+    episode is an order-dependent flake: a later test refusing the same
+    `(setting_key, window, reason)` would take the repeat branch and, past
+    `ALARM_ESCALATION_AGE_SECONDS`, the escalation branch.
+    """
+    import services.retention_guard as rg
+
+    rg.reset_transition_memo()
+    yield
+    rg.reset_transition_memo()
+
+
 @pytest.fixture
 def ops(db_backend, monkeypatch):
     """Fresh operation classes bound to the harness engine.
