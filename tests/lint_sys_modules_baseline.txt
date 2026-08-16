@@ -5,7 +5,6 @@
 
 3 tests/git_sync/test_s5_conflict_classifier.py
 9 tests/git_sync/test_s7_reserve_instance_id.py
-5 tests/test_canary_invariants.py
 7 tests/test_cb_probe_execution_close.py
 1 tests/test_event_bus.py
 6 tests/test_github_pat_propagation_unit.py
