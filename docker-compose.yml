@@ -188,6 +188,15 @@ services:
       - LOG_ARCHIVE_ENABLED=${LOG_ARCHIVE_ENABLED:-true}
       - LOG_CLEANUP_HOUR=${LOG_CLEANUP_HOUR:-3}
       - LOG_ARCHIVE_PATH=/data/archives  # Local path for archived logs
+      # Automatic database backups (#2216) — daily job in the backend
+      # (services/db_backup_service.py), default ON, artifacts under
+      # /data/backups. This service uses an explicit environment list (no
+      # env_file), so an unforwarded var is INERT (#1486/#1488 class) —
+      # mirror any change into docker-compose.prod.yml.
+      - DB_BACKUP_ENABLED=${DB_BACKUP_ENABLED:-true}
+      - DB_BACKUP_HOUR=${DB_BACKUP_HOUR:-3}
+      - DB_BACKUP_MINUTE=${DB_BACKUP_MINUTE:-30}
+      - DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS=${DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS:-1800}
       - TRINITY_DB_PATH=/data/trinity.db
       # Configurable database backend (#300). Unset → SQLite at TRINITY_DB_PATH
       # (default). Set to a postgresql:// URL (with the postgres profile up) to

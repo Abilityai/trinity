@@ -18,7 +18,15 @@ ENV PYTHONUNBUFFERED=1
 # perfectly ordinary schedule create started 500ing. Do NOT drop this when
 # slimming the image — `tests/unit/test_1823_tz_capability_parity.py` fails if
 # an image that resolves timezones declares no tz-data source.
-RUN apt-get update && apt-get install -y --no-install-recommends curl git libmagic1 ffmpeg tzdata-legacy && rm -rf /var/lib/apt/lists/*
+# `postgresql-client-17` (#2216) carries pg_dump for the nightly PostgreSQL
+# backup arm (services/db_backup_service.py). MAJOR-PINNED deliberately, not
+# the floating `postgresql-client` meta-package: this image already migrated
+# bookworm→trixie silently once (#1823, the tzdata split above), and an
+# unpinned client's major could change under an unrelated rebuild — breaking
+# every PG install's backups at once. pg_dump handles servers ≤ its own major
+# (bundled dev PG is 16); a future server-major above 17 fails LOUDLY
+# (non-zero exit → operator alarm), never silently.
+RUN apt-get update && apt-get install -y --no-install-recommends curl git libmagic1 ffmpeg tzdata-legacy postgresql-client-17 && rm -rf /var/lib/apt/lists/*
 
 # Build-time provenance (#926). Each arg is forwarded by docker-compose
 # `backend.build.args` from shell vars set by `scripts/deploy/start.sh`.
