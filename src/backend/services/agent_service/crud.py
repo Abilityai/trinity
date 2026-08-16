@@ -2971,14 +2971,10 @@ async def create_agent_internal(
     if config.runtime:
         config.runtime = config.runtime.lower()
 
-    # #2215: capture BEFORE the mutation below — captured after it, the gate is
-    # always-False and the bind-conflict retry ships dead. Only an
-    # auto-allocated port may move between attempts; a caller-pinned port never
-    # silently changes (a published port differing from the requested one is a
-    # surprise with security texture).
-    auto_allocated_port = config.port is None
-    if config.port is None:
-        config.port = get_next_available_port()
+    # #2215: the SSH-port allocation moved INTO the docker try-block below (just
+    # before the container run) — see the comment there. `config.port` is
+    # consumed only by `_create_agent_container`, so nothing between here and
+    # there needs it.
 
     # CRED-002: Credentials are now injected directly into agents after creation
     # via the inject_credentials endpoint, not auto-injected during creation.
@@ -3077,6 +3073,25 @@ async def create_agent_internal(
                 cred_files_volume,
                 tr.template_shared_folders,
             )
+            # #2215: allocate the SSH port HERE — inside the rollback fence and
+            # as close to `containers.run` as possible. Two reasons it is not
+            # up with the other pre-try resolution steps: (1) the allocator now
+            # fails LOUD on a Docker listing fault (a swallowed fault would
+            # allocate 2222 over the existing fleet), and a raise before this
+            # try would strand the `agent_git_config` reservation
+            # `_resolve_template` already wrote — after which every create of
+            # that name fails `agent_git_config already exists`, Cornelius's
+            # next-boot retry included; (2) the per-port Redis reservation is
+            # TTL-bounded (600s), so the ent#15 snapshot prepopulate and the
+            # volume builds above must not eat into it. `auto_allocated_port`
+            # is captured BEFORE the mutation — captured after it, the gate is
+            # always-False and the bind-conflict retry ships dead. Only an
+            # auto-allocated port may move between attempts; a caller-pinned
+            # port never silently changes (a published port differing from the
+            # requested one is a surprise with security texture).
+            auto_allocated_port = config.port is None
+            if config.port is None:
+                config.port = get_next_available_port()
             container = await _run_agent_container_with_port_retry(
                 config,
                 volumes,

@@ -271,13 +271,16 @@ def is_port_available(port: int) -> bool:
 # ---------------------------------------------------------------------------
 
 # Transient per-port reservation bridging the allocator's check and the
-# caller's `containers.run` (a window of ~100 lines / seconds in crud). Once
-# the container exists, its `trinity.ssh-port` label is the durable truth
-# (Invariant #11) — the reservation is never a port registry, so there is NO
-# release path and NO refresh: TTL-only self-heal. 600s is ~2x headroom over
-# the worst observed post-allocation window (config staging + MCP-key mint +
-# env build + ent#15 snapshot prepopulate + volume builds + the observed 60s
-# Docker read timeout ~= <=5 min); an expired reservation degrades to today's
+# caller's `containers.run`. Once the container exists, its `trinity.ssh-port`
+# label is the durable truth (Invariant #11) — the reservation is never a port
+# registry, so there is NO release path and NO refresh: TTL-only self-heal.
+# crud allocates immediately before the container run (inside its rollback
+# fence, after config staging / MCP-key mint / env build / the ent#15 snapshot
+# prepopulate / volume builds), so the reserved window is essentially the
+# `containers.run` itself plus the bounded bind-conflict retries; the other
+# callers (`recreate_missing_container`, the system-agent bootstrap) run within
+# a few statements of allocating. 600s is many-x headroom even over the
+# observed 60s Docker read timeout; an expired reservation degrades to today's
 # behaviour PLUS the crud bind-conflict retry (#2215 D2), and an orphaned
 # reservation after a failed create idles one port of ~279 for 10 min.
 # Keyspace note (#1560): `port_alloc:{port}` is deliberately NOT `agent:*` —
