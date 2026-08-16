@@ -279,7 +279,17 @@ def log_effective_retention_windows() -> None:
         for key in RETENTION_OPS_KEYS:
             row = db.get_setting_value(key, None)
             source = "db-row" if row is not None else "code-default"
-            value = row if row is not None else OPS_SETTINGS_DEFAULTS.get(key, "?")
+            if key == "backup_retention_days":
+                # #2216: rendered through the ONE shared reader — its coercion
+                # is inverted (garbage → 14, never → 0/keep-forever), so this
+                # log must not disagree with the backup service on a malformed
+                # row (the two-readers-disagree defect the plan names).
+                from services.db_backup_service import (
+                    effective_backup_retention_days,
+                )
+                value = effective_backup_retention_days()
+            else:
+                value = row if row is not None else OPS_SETTINGS_DEFAULTS.get(key, "?")
             parts.append(f"{key}={value}d ({source})")
         logger.info(f"[Cleanup] Effective retention windows: {'; '.join(parts)}")
     except Exception as e:

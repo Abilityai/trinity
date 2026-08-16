@@ -63,6 +63,10 @@ _ALLOWED_CALLERS = {
         "the facade delegation itself (the _operator_queue_ops.create_item spelling)",
     ("services/agent_client.py", "_emit_dormant_alert"):
         "platform-only: edge-triggered after consecutive failed CB probes (cb-dormant)",
+    ("services/db_backup_service.py", "DBBackupService._emit_alarm"):
+        "platform-only: edge-triggered on the durable prior-status transition "
+        "(ok->failed), plus a staleness re-alarm throttled to weekly; volume is "
+        "bound by the daily job cadence and no agent input reaches it (#2216)",
     ("services/lease_reaper_service.py", "_create_park_item"):
         "platform-only + LOAD-BEARING: #1402 poison-park parks ONLY on a successful "
         "create — must never be throttled (the reason a db-sink bound was rejected)",

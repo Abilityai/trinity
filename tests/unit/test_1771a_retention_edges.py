@@ -1138,13 +1138,33 @@ class TestStructuralInvariants:
         assert len(guarded) == len(
             set(guarded)
         ), f"a retention window is guarded twice: {guarded}"
-        assert set(guarded) == set(RETENTION_OPS_KEYS), (
-            "every registered retention window must have exactly one "
+        # #2216: `backup_retention_days` is a retention window (it joins
+        # RETENTION_OPS_KEYS for the write-path protections) whose prune is
+        # deliberately NOT a #1644 count-threshold/ack-gated sweep. It prunes
+        # FILE artifacts from the backup service's own tail, and its
+        # bounded-destruction guarantee is structural — the fixed
+        # BACKUP_MIN_KEEP floor (never zero recovery points) — rather than a
+        # refusable count: an ack-gated refusal would fail in the INVERTED
+        # direction here (refused prune → backups fill the disk, #1871 class),
+        # so the prune must run unconditionally within its floor. That floor is
+        # pinned by tests/unit/test_2216_backup_primitives.py. The carve-out
+        # set lives in CODE beside RETENTION_OPS_KEYS (not test-locally), so
+        # the next file-artifact window is declared where the key is added.
+        from services.settings_service import NON_ROW_RETENTION_OPS_KEYS
+        assert NON_ROW_RETENTION_OPS_KEYS <= set(RETENTION_OPS_KEYS), (
+            "a non-row carve-out must itself be a registered retention window"
+        )
+        row_windows = set(RETENTION_OPS_KEYS) - NON_ROW_RETENTION_OPS_KEYS
+        assert set(guarded) == row_windows, (
+            "every registered ROW-retention window must have exactly one "
             "_guard_allows call site, and every guarded sweep must be a "
             "registered window.\n"
-            f"  unguarded windows: {set(RETENTION_OPS_KEYS) - set(guarded)}\n"
-            f"  guarded non-windows: {set(guarded) - set(RETENTION_OPS_KEYS)}"
+            f"  unguarded windows: {row_windows - set(guarded)}\n"
+            f"  guarded non-windows: {set(guarded) - row_windows}"
         )
+        # The carve-out is exactly the backup key and it does carry a floor.
+        from db.backup_primitives import BACKUP_MIN_KEEP
+        assert BACKUP_MIN_KEEP >= 2
 
     def test_the_prune_terminal_set_matches_the_platform_terminal_set(self):
         """A new terminal status must not fall silently out of BOTH the prune and

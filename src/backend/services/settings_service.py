@@ -77,7 +77,28 @@ RETENTION_OPS_KEYS = (
     # #1296: terminal agent_reminders rows (fired/cancelled/failed). A retention
     # window (surfaced/logged/reset-protected), NOT a community-floor key.
     "agent_reminders_retention_days",
+    # #2216: database-backup artifacts under /data/backups. Membership here
+    # buys the write-path protections (validated /ops/config only, generic
+    # PUT 422-blocked, /ops/reset skips) — but its READ is special-cased:
+    # every surface renders it through
+    # services.db_backup_service.effective_backup_retention_days(), whose
+    # coercion is INVERTED (garbage → 14, never → 0/keep-forever), and
+    # GET /api/settings/retention excludes it from the generic windows map.
+    # NOT a community-floor key (fewer days = the destructive direction here).
+    "backup_retention_days",
 )
+
+# The RETENTION_OPS_KEYS members whose prune is NOT a #1644 row sweep (#2216).
+# `backup_retention_days` prunes FILE artifacts from the backup job's own tail;
+# its bounded-destruction guarantee is structural (the fixed BACKUP_MIN_KEEP
+# floor in db/backup_primitives.py — never zero recovery points), NOT the
+# count-threshold/ack-gated `_guard_allows` refusal in cleanup_service: an
+# ack-gated refusal fails in the INVERTED direction for backups (refused prune
+# → backups fill the disk, #1871 class), so that prune must run unconditionally
+# within its floor. `tests/unit/test_1771a_retention_edges.py` asserts every
+# key in RETENTION_OPS_KEYS minus THIS set has exactly one `_guard_allows`
+# call site — add a second file-artifact window HERE, or the guard fires.
+NON_ROW_RETENTION_OPS_KEYS = frozenset({"backup_retention_days"})
 
 
 # Default values for ops settings (as specified in requirements)
@@ -133,6 +154,14 @@ OPS_SETTINGS_DEFAULTS = {
     # failed). Rows older than this many days are deleted; pending/firing never
     # deleted. "0" disables the sweep. Wide/safe default per the #1638 floor rule.
     "agent_reminders_retention_days": "90",
+    # Issue #2216: retention for database-backup artifacts. The #1638 "widest
+    # value" rule applies in spirit but the direction INVERTS: raising this
+    # default costs disk on every un-configured install (#1871 class), while
+    # lowering it deletes recovery points — NEVER lower it for existing
+    # installs without a migration note, and never raise it casually either.
+    # "0" is INVALID for this key (validated 1–3650): keep-forever is the
+    # disk-fill trap; disabling backups is DB_BACKUP_ENABLED=false.
+    "backup_retention_days": "14",
 }
 
 # Descriptions for each ops setting
@@ -154,6 +183,7 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "agent_reports_retention_days": "Days to retain agent_reports rows (default: 90, 0 = disabled, #918)",
     "operator_queue_retention_days": "Days to retain terminal operator_queue rows (acknowledged/cancelled/expired; default: 90, 0 = disabled, #1142)",
     "agent_reminders_retention_days": "Days to retain terminal agent_reminders rows (fired/cancelled/failed; default: 90, 0 = disabled, #1296)",
+    "backup_retention_days": "Days to retain database-backup artifacts in /data/backups (default: 14, bounds 1-3650 — 0 is invalid; the newest 3 artifacts are always kept; disable backups via DB_BACKUP_ENABLED=false, #2216)",
 }
 
 

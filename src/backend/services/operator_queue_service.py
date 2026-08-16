@@ -149,6 +149,7 @@ _RESERVED_ID_PREFIXES = (
     "alert-budget-",     # this service's #1677 budget episode alert (deterministic
                          # bucketed id — reservation is what keeps the DB
                          # on-conflict dedup from being agent-pre-suppressible)
+    "db-backup-",        # db_backup_service failure/staleness alarms (#2216)
 )
 
 # Agent ids must be id-shaped: a create PK can't be safely rewritten, so a

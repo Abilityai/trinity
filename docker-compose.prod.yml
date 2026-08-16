@@ -170,6 +170,15 @@ services:
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-5}
       - LOG_ARCHIVE_ENABLED=${LOG_ARCHIVE_ENABLED:-true}
       - LOG_CLEANUP_HOUR=${LOG_CLEANUP_HOUR:-3}
+      # Automatic database backups (#2216) — daily backend job, default ON,
+      # artifacts under /data/backups (the TRINITY_DATA_PATH bind mount).
+      # Prod launches standalone (no base-compose merge), so these MUST be
+      # wired here too or the .env knobs are inert (#1486/#1488 class) —
+      # mirrors docker-compose.yml.
+      - DB_BACKUP_ENABLED=${DB_BACKUP_ENABLED:-true}
+      - DB_BACKUP_HOUR=${DB_BACKUP_HOUR:-3}
+      - DB_BACKUP_MINUTE=${DB_BACKUP_MINUTE:-30}
+      - DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS=${DB_BACKUP_PG_DUMP_TIMEOUT_SECONDS:-1800}
       # Host paths for volumes (used when creating agent containers)
       - HOST_TEMPLATES_PATH=${HOST_TEMPLATES_PATH:-${PWD}/config/agent-templates}
       # First-run default system seed (trinity-enterprise#124): a path to an

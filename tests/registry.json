@@ -2235,6 +2235,69 @@
         "reliability"
       ],
       "description": "Fan-out turn no longer killed mid-wait (#2127): `claude --print` emits one result line per turn segment and stays alive to await background subagents, so the #970 early-finalize now requires result_seen AND an empty background-task ledger AND a quiet stream. Covers the pure _count_waited_bg_tasks denylist (local_bash/local_shell excluded, unknown types counted, malformed ledger degrades to 0); the ledger half via a replayed fan-out-still-running stream; the IDLE half via the ledger-empty-while-composing stream (the shape the issue actually reports — measured 5 subagents done at t+27.8s, real FINAL REPORT at t+55.9s), each asserted on END STATE and each verified failing without its half of the gate; unparseable output counting as proof-of-life; the AGENT_IDLE_FINALIZE_S resolver fallbacks (<=0 refused — it would restore the #2127 kill); a pin that the 300s default keeps ≥5x headroom over the measured 40.54s single-message silence; #970 preserved when there is no fan-out; the effective_timeout backstop still bounding a subagent that never completes; the pending-at-exit notice + metadata flag; and a parity guard that BOTH claude spawn sites set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS."
+    },
+    {
+      "file": "unit/test_2216_backup_primitives.py",
+      "feature": "#2216",
+      "added": "2026-08-16",
+      "categories": [
+        "backend",
+        "unit",
+        "infrastructure",
+        "database"
+      ],
+      "description": "Database-backup primitives (#2216, db/backup_primitives.py). The copy is the safe primitive, not the incident's raw cp: the online-backup API yields a consistent standalone snapshot that survives a writer committing mid-copy, is a point-in-time snapshot rather than a live view, and is written 0600 then atomically replaced (last-writer-wins on one intact file, never torn). Thread-affinity contract pinned by driving the sync worker through asyncio.to_thread — both sqlite3 connections open AND close inside it, so none ever crosses a thread (learnings 2026-07-20). Verification rejects a corrupt and an empty copy, so a failed copy never enters the artifact namespace. Prune's two bounds are the whole safety story and both are pinned at their boundaries: the fixed BACKUP_MIN_KEEP floor holds at retention_days=1 (the #1644 'small valid integer is the catastrophic input' case), is asserted >= 2 AND asserted NOT to be settings-backed, holds across artifact patterns, and exactly-floor deletes zero while floor+1 deletes exactly the oldest; nothing inside the window is ever pruned; only the three known artifact patterns are scanned, so foreign files are never collateral. Plus day-keyed naming (every generated name matches a prune pattern, tmp names are pid-suffixed and match none), the aged *.tmp.* orphan sweep (reclaims 25h, keeps fresh, ignores artifacts), the duration WARNING naming the 30s DELETE-mode busy-timeout wall, the DB_BACKUP_ENABLED reader shared with the service, and an import-graph guard that the leaf never imports database/services (it is called from init_database() at import time). Stdlib sqlite3 only, no Docker."
+    },
+    {
+      "file": "unit/test_2216_db_backup_service.py",
+      "feature": "#2216",
+      "added": "2026-08-16",
+      "categories": [
+        "backend",
+        "unit",
+        "infrastructure",
+        "database",
+        "reliability"
+      ],
+      "description": "Daily database-backup service (#2216, services/db_backup_service.py). Run orchestration: day-keyed idempotence (second run same day no-ops), the DB_BACKUP_ENABLED off path touching nothing, and durable system_settings status on every terminal (ent#236 — in-process state is invisible to the other worker). The Redis lease is pinned as duplicate-I/O SUPPRESSION, never a correctness boundary: taken/released, a held lease skips, Redis down fails OPEN to the day-key guard alone, release is own-token compare-and-delete (a foreign token is never deleted), and the TTL is derived from PG_DUMP_TIMEOUT_SECONDS so retuning the dump timeout visibly re-opens the math (learnings 2026-07-31). Prune runs on EVERY attempt — success, failure, and the no-space skip — which is the Catch-22 regression guard: prune-only-on-success means a full disk skips the backup, bypasses the prune, and an operator lowering the window frees nothing. Free-space preflight skips loudly with an alarm; an unavailable size estimate proceeds rather than failing closed. The alarm has two triggers because 'does not fail silently' must hold over time: the edge fires exactly once per failure episode and re-arms only after a success intervenes, and the staleness re-alarm never fires while fresh, fires past the 3-day threshold, then respects the 7-day re-fire window, covers an install that never succeeded at all, and agrees with the status block's own `stale` flag. Knobs: malformed and out-of-range env values fall back with a WARNING while an unset one is silent (#1871 shape), and the retention reader's INVERTED coercion (garbage → 14, never → 0 keep-forever) is parametrized. PG arm with the subprocess mocked: the conninfo URI normalizes the SQLAlchemy driver suffix away and strips the password while PRESERVING query params (?sslmode=require survives — re-parsing into -h/-p/-U would permanently break managed PG), the password reaches pg_dump via PGPASSWORD env ONLY and never argv, a no-password URL leaves PGPASSWORD unset, an unparseable URL never echoes the URL (no password in the log or the durable status), non-zero exit raises with size-capped stderr, a missing binary names the image rebuild (#1814 class), and the timeout path KILLS AND REAPS the child (wait_for cancels the await, never the process) before unlinking the partial tmp and reaching status + alarm."
+    },
+    {
+      "file": "unit/test_2216_boot_pre_migration_backup.py",
+      "feature": "#2216",
+      "added": "2026-08-16",
+      "categories": [
+        "backend",
+        "unit",
+        "infrastructure",
+        "database",
+        "migrations"
+      ],
+      "description": "Boot-time pre-migration backup (#2216) — a contract mostly about what the hook must NOT do, because it runs inside init_database() at import time where a raise crash-loops the backend permanently (the #1638 seed contract). Asserts an arbitrary exception never propagates out of the hook; that the two skip classes stay DISTINCT branches rather than one blanket except — a fresh install (no schema_migrations, and separately an empty one) skips SILENTLY at INFO, since a first boot must not emit a scary ERROR, while a corrupt file is the loud path; that no pending migrations means no backup, and DB_BACKUP_ENABLED=false skips the boot hook too (the disable knob covers BOTH producers, not just the nightly job); and that when migrations are pending the artifact exists BEFORE the migration mutates the DB, with status rows written durably. The corrupt-DB case is pinned against the real incident: the source is overwritten with the literal `HTTP/1.1 200 OK` + `server: uvicorn` bytes from the issue's hexdump, and the test asserts run_all_migrations on the same connection still raises the SAME exception type as pre-change — the incident's fingerprint must survive the feature that exists because of it — while the failed backup evicts no healthy artifact and unlinks its own tmp."
+    },
+    {
+      "file": "unit/test_2216_backup_restore_roundtrip.py",
+      "feature": "#2216",
+      "added": "2026-08-16",
+      "categories": [
+        "backend",
+        "unit",
+        "infrastructure",
+        "database"
+      ],
+      "description": "AC#5 exercised restore (#2216) — the proof that the produced artifact IS a recovery point, not merely a produced file. Replays the incident end to end against a scratch DB: seed rows, take a backup exactly the way the daily job does (copy → verify → atomic replace into the day-keyed artifact name), overwrite the SOURCE header with the incident's literal `HTTP/1.1 200 OK` bytes so it becomes unreadable with the production signature (sqlite3.DatabaseError: file is not a database), then restore by the documented procedure — remove the stale -wal/-shm/-journal sidecars, copy the artifact over the source — and assert row equality with the seed. Repeated for a pre-migration-*.db artifact, so both producers are proven restorable by the same procedure the user doc publishes."
+    },
+    {
+      "file": "unit/test_2216_backup_observability.py",
+      "feature": "#2216",
+      "added": "2026-08-16",
+      "categories": [
+        "backend",
+        "unit",
+        "infrastructure",
+        "settings",
+        "security"
+      ],
+      "description": "Backup observability + knob plumbing (#2216). GET /api/settings/retention carries the `backup` block (scope, enabled, retention_days, min_keep) AND EXCLUDES backup_retention_days from the generic `windows` map — the generic _ops_int coerces garbage → 0 meaning 'sweep disabled', which for backups means 'keep forever', so on one malformed row the two readers would disagree inside a single response; the test plants that malformed row and asserts the ONE rendered number is the shared reader's 14. A failing backup-block read degrades the block rather than 500ing the whole retention GET. Write path: the ops-config route validates 1..3650 and rejects 0 by design (0 = keep-forever is the #1871 disk-fill trap; disabling backups is the separate DB_BACKUP_ENABLED knob), the generic PUT /api/settings/{key} catch-all 422-blocks it via RETENTION_OPS_KEYS membership (which also means /ops/reset skips it), and it is deliberately NOT a community-floor seed key (floor-seeding would push the window DOWN, the destructive direction here). Alarm plumbing cannot be silenced or mis-scanned: `db-backup-` is a reserved operator-queue id prefix (else an agent pre-creates the id and on_conflict_do_nothing silences the platform's own failure alarm), the `_db-backup` sentinel is uncreatable as an agent name (sanitize_agent_name strips the leading underscore), and the canary L-03 exclusion is asserted by service↔canary constant parity plus a predicate check over every sentinel — the #1644 test's shape, extended because the single-value exclusion became a tuple and _retention-guard must still be covered. Isolated file-load of routers/settings.py (the test_retention_floor idiom) so pytest-randomly orderings cannot pollute the import."
     }
   ]
 }
