@@ -1,4 +1,6 @@
 import { test, expect } from '@playwright/test'
+import { ALL_LAYOUT_KEYS, LAYOUT_KEY, WIDGET_PREFS_KEY } from '../src/utils/gridStorageKeys.js'
+import { isWidgetKey } from '../src/utils/gridWidgets.js'
 
 /**
  * Dashboard Grid view e2e (trinity-enterprise#47).
@@ -17,7 +19,9 @@ import { test, expect } from '@playwright/test'
  * localStorage.
  */
 
-const LAYOUT_KEY = 'trinity-grid-layout-v1'
+// LAYOUT_KEY / ALL_LAYOUT_KEYS / WIDGET_PREFS_KEY are imported from the store's
+// own module (#2199) — a hand-copied literal here silently desynced on the
+// #2042 v1->v2 bump and both read-back assertions below resolved `null`.
 const MODE_KEY = 'trinity-dashboard-view'
 
 async function gotoGrid(page) {
@@ -29,11 +33,17 @@ async function gotoGrid(page) {
 test.describe('dashboard grid view (trinity-enterprise#47)', () => {
   test.beforeEach(async ({ page }) => {
     // Fresh layout + default mode for deterministic assertions.
+    // ALL generations, not just the current one: `_loadSavedRaw` migrates a v1
+    // blob into v2 when v2 is absent, so clearing only LAYOUT_KEY lets a stale
+    // layout be migrated straight back in and the board is not clean (#2199).
+    // The argument is SPREAD into one flat array and the callback iterates it —
+    // nesting it would call removeItem() with an Array and silently clear
+    // nothing, which looks identical to a working cleanup.
     await page.addInitScript(
-      ([layoutKey]) => {
-        localStorage.removeItem(layoutKey)
+      (keys) => {
+        keys.forEach((k) => localStorage.removeItem(k))
       },
-      [LAYOUT_KEY]
+      [...ALL_LAYOUT_KEYS, WIDGET_PREFS_KEY]
     )
   })
 
@@ -151,12 +161,25 @@ test.describe('dashboard grid view (trinity-enterprise#47)', () => {
     await page.getByRole('button', { name: 'Reset', exact: true }).click()
     const reset = await page.evaluate((k) => localStorage.getItem(k), LAYOUT_KEY)
     expect(reset).toBeTruthy()
-    // Reset yields the deterministic default: every position is a small
-    // non-negative reading-order cell.
-    const positions = Object.values(JSON.parse(reset))
-    for (const p of positions) {
+    // Reset yields the deterministic default. Layout v2 holds TWO occupant
+    // kinds (#2042 / ent#325), so the shape differs by kind and asserting
+    // `r >= 0` across the whole map is a stale v1-era assumption — v1 held
+    // agent keys only. Agents land in non-negative reading-order cells;
+    // info tiles are seeded into the band ABOVE the fleet (negative rows,
+    // `seedWidgetCells` band [-3, -1] — "spill upward, never into the
+    // agents"). `isWidgetKey` is imported rather than matching a hand-copied
+    // 'widget:' literal, for the same reason the layout key is (#2199).
+    const entries = Object.entries(JSON.parse(reset))
+    expect(entries.length).toBeGreaterThan(0)
+    for (const [key, p] of entries) {
+      expect(Number.isInteger(p.c)).toBe(true)
+      expect(Number.isInteger(p.r)).toBe(true)
       expect(p.c).toBeGreaterThanOrEqual(0)
-      expect(p.r).toBeGreaterThanOrEqual(0)
+      if (isWidgetKey(key)) {
+        expect(p.r).toBeLessThan(0)
+      } else {
+        expect(p.r).toBeGreaterThanOrEqual(0)
+      }
     }
   })
 

@@ -286,6 +286,13 @@ The migration is **best effort** — failures are caught, logged at WARNING,
 and Push proceeds against whatever `.gitignore` already exists. Rationale:
 a transient docker exec glitch must not break an operator's Push.
 
+This is the **REMEDIATE** half (merge + untrack). As of #2069 the same
+canonical merge (merge-only, PREVENT — never the untrack sweep) also runs at
+**agent creation** for the `GIT_SYNC_AUTO` set, so a fresh `github:` agent no
+longer auto-commits `.trinity/`/`.env`/`.mcp.json` before its first Push — see
+[git-sync-health.md](git-sync-health.md) § *Creation-time canonical `.gitignore`
+seed*. Push migration remains the backstop and its behaviour is unchanged.
+
 This means existing agents pick up new exclusion patterns automatically on
 their next Push, with no re-init or container rebuild required. The same
 shared `_detect_git_dir` helper used by `initialize_git_in_container`

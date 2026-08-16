@@ -75,7 +75,7 @@ Honest state:
 18. Verbs acknowledge in ~100ms and confirm completion; toasts for completed verbs, never errors. A failed verb surfaces an `InlineError` next to its control and persists until dismissed — never `console.error` alone, never `alert()` (#1926).
 19. Destructive actions: named verb, restated consequence, safe action focused first.
 22. Times are honest: relative for recency, absolute + timezone on hover/detail.
-23. Keyboard baseline: visible focus, Esc closes overlays, modal focus trap, tab order = visual order.
+23. Keyboard baseline: visible focus, Esc closes overlays, modal focus trap, tab order = visual order — and handlers are armed at mount, above every `await`, never behind fetched data. A surface that renders as interactive must already be interactive: the input-side twin of #15 (#2200).
 24. Encode identity in shape/icon as well as color — never hue alone.
 25. Errors say what happened, what it means, what to do — user vocabulary; codes/traces behind a disclosure.
 26. Set expectations: non-instant actions say what happens, how long, and where the result appears.

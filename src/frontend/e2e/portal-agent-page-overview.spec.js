@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { agentExists, missingAgentReason } from './helpers/agent-probe.js'
 
 /**
  * Workspace agent page — Overview geometry (#2169).
@@ -33,6 +34,11 @@ import { test, expect } from '@playwright/test'
  *
  * Required env: ADMIN_PASSWORD (auth.setup.js) and PORTAL_TEST_AGENT
  * (defaults to "testfix"). The agent must exist and be visible to the admin.
+ *
+ * A MISSING fixture agent reads as SKIPPED, never broken (#2199). All five
+ * tests need the agent, so the guard is describe-level. Without it each one
+ * hangs ~20s on a heading that never renders and then fails — a test-only
+ * cause presenting as a product failure.
  */
 
 const TEST_AGENT = process.env.PORTAL_TEST_AGENT || 'testfix'
@@ -99,6 +105,13 @@ const openAgent = async (page) => {
 }
 
 test.describe('Workspace agent page Overview layout', () => {
+  test.beforeEach(async ({ baseURL }) => {
+    test.skip(
+      !(await agentExists(TEST_AGENT, { baseURL })),
+      missingAgentReason(TEST_AGENT, 'PORTAL_TEST_AGENT')
+    )
+  })
+
   test('@interactive the top row is two equal columns at every split width', async ({ page }) => {
     await openAgent(page)
 

@@ -264,7 +264,7 @@
 | Agent Repo Binding | [agent-repo-binding.md](feature-flows/agent-repo-binding.md) | Bind a live agent to a GitHub repo the user owns (ent#109) |
 | GitHub Import Intents | [github-import-intents.md](feature-flows/github-import-intents.md) | fork / copy / clone create intents + inline compat check (ent#15) |
 | Persistent-State Allowlist | [persistent-state-allowlist.md](feature-flows/persistent-state-allowlist.md) | `.trinity/persistent-state.yaml` primitive for reset-preserve-state (S4, #383) |
-| Git Sync Health | [git-sync-health.md](feature-flows/git-sync-health.md) | Auto-sync heartbeat, dual ahead/behind, dashboard dot, `/api/fleet/sync-audit` |
+| Git Sync Health | [git-sync-health.md](feature-flows/git-sync-health.md) | Auto-sync heartbeat, dual ahead/behind, dashboard dot, `/api/fleet/sync-audit`, creation-time canonical `.gitignore` seed (#2069, readiness-gated) |
 
 ### Skills Management
 
