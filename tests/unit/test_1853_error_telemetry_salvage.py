@@ -22,9 +22,18 @@ Coverage:
   redacted, tool_calls summary, validated session id, salvaged cost — and the
   won-gated close/emit path unchanged (#1578/#1804).
 - Real-sqlite column-name proof (ENG#11).
+- #1944 §4.4 live-capture pattern: a REAL error tail written into the agent's
+  ``~/.claude/projects/-home-developer/`` drives the REAL
+  ``_finalize_headless_result`` (genuine #1870 recovery decline, not
+  monkeypatched) → the structured 502 carries the transcript + validated
+  session id; a #1870-recoverable tail is NOT re-failed by #1853.
+- End-to-end chain: real error tail → real finalize 502 body → backend
+  ``_extract_agent_error`` → ``apply_result`` → a persisted, redacted,
+  session-tagged FAILED row in real sqlite.
 
 Modules under test:
     docker/base-image/agent_server/services/headless_executor.py
+    docker/base-image/agent_server/services/jsonl_recovery.py
     src/backend/services/task_execution_service.py
 """
 
@@ -40,6 +49,10 @@ import pytest
 
 # conftest.py preloads the real agent_server namespace package.
 from agent_server.services import headless_executor as he  # noqa: E402
+from agent_server.services import jsonl_recovery as _jsonl  # noqa: E402
+from agent_server.services.headless_executor import (
+    _finalize_headless_result,
+)  # noqa: E402
 from agent_server.models import ExecutionMetadata  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
@@ -444,3 +457,294 @@ def test_failed_row_persists_new_columns_real_sqlite(tmp_db):
     assert _hscalar(
         "SELECT cost FROM schedule_executions WHERE id='e-1853'"
     ) == pytest.approx(0.13)
+
+
+# ==========================================================================
+# #1944 §4.4 live-capture pattern — write a REAL error tail into the agent's
+# ~/.claude/projects/-home-developer/ and drive the REAL
+# ``_finalize_headless_result`` against it. Unlike ``TestFinalizeErrorBranch``
+# above (which monkeypatches ``_try_recover_completed_turn`` → False), this
+# exercises the genuine #1870 recovery decision against an on-disk transcript,
+# so it proves the 502 body is built with real telemetry on the exact failure
+# path the fleet takes — and that #1853's structured 502 does NOT shadow a
+# #1870-recoverable turn.
+# ==========================================================================
+
+# The captured tail's own clock — both records precede "now" (the recovery
+# window is [since_iso, now + skew]), so a fixed past date is inside it.
+_TURN_START_ISO = "2026-07-28T18:06:00.000Z"
+_MARKER_TS = "2026-07-28T18:07:45.774Z"
+
+# The full stream-json transcript SUCCESS inlines as ``execution_log`` — an
+# in-memory list (Approach B), NOT re-read from the on-disk JSONL — carrying a
+# tool_use (→ #1741 summary) and an embedded credential (→ backend redaction).
+_TRANSCRIPT_WITH_SECRET = [
+    {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "echo hi"}}
+            ]
+        },
+    },
+    {"type": "assistant", "text": "leaked " + _SECRET + " here"},
+]
+
+
+@pytest.fixture
+def jsonl_dir(tmp_path, monkeypatch):
+    """Redirect the recovery module's project dir to tmp (test_1870 idiom)."""
+    target = tmp_path / "projects" / "-home-developer"
+    target.mkdir(parents=True)
+    monkeypatch.setattr(_jsonl, "_JSONL_PROJECTS_DIR", str(target))
+    return target
+
+
+def _write_jsonl(jsonl_dir: Path, session_id: str, records: list[dict]) -> Path:
+    p = jsonl_dir / f"{session_id}.jsonl"
+    p.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    return p
+
+
+def _failed_tail_records() -> list[dict]:
+    """A GENUINELY-failed tail: the last main-thread assistant marker reports
+    ``stop_reason: tool_use`` (interrupted mid-work), so
+    ``_recover_completed_turn_from_jsonl`` declines with reason ``not_finished``
+    and the 502 raise fires — the real ``error_during_execution`` scenario."""
+    return [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "do the thing"},
+            "timestamp": "2026-07-28T18:06:30.000Z",
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "id": "msg_fail",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}
+                ],
+                "stop_reason": "tool_use",
+            },
+            "timestamp": _MARKER_TS,
+        },
+    ]
+
+
+def _completed_tail_records() -> list[dict]:
+    """A misclassified-COMPLETE tail (#1870): ``stop_reason: end_turn`` with a
+    text block — recovery salvages it to SUCCESS. #1853's structured 502 must
+    NOT fire here."""
+    return [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "do the thing"},
+            "timestamp": "2026-07-28T18:06:30.000Z",
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "id": "msg_done",
+                "content": [{"type": "text", "text": "All done."}],
+                "stop_reason": "end_turn",
+            },
+            "timestamp": _MARKER_TS,
+        },
+    ]
+
+
+def _finalize_ctx(
+    session_id: str = _UUID,
+    *,
+    error_type: str = "execution_error",
+    error_message: str = "boom happened",
+    raw_messages=None,
+) -> "he.HeadlessRunContext":
+    """A post-subprocess ctx that reaches the execution_error branch of
+    ``_finalize_headless_result`` (mirrors test_1870's ``_make_ctx``)."""
+    ctx = he.HeadlessRunContext(
+        cmd=["claude", "--print"],
+        task_session_id="task-1853",
+        task_start_iso=_TURN_START_ISO,
+        effective_timeout=3600,
+        images=None,
+        prompt="dummy",
+        claude_session_uuid=session_id,
+    )
+    ctx.return_code = 0
+    ctx.metadata = ExecutionMetadata(
+        cost_usd=0.07, input_tokens=120, context_window=200000, num_turns=2
+    )
+    ctx.metadata.session_id = session_id
+    ctx.metadata.error_type = error_type
+    ctx.metadata.error_message = error_message
+    ctx.raw_messages = list(raw_messages or [])
+    return ctx
+
+
+class TestRealJsonlErrorTailFinalize:
+    """#1944 §4.4 — drive the real finalize against a real on-disk error tail."""
+
+    def test_genuine_failure_raises_structured_502_from_real_jsonl(self, jsonl_dir):
+        _write_jsonl(jsonl_dir, _UUID, _failed_tail_records())
+        ctx = _finalize_ctx(raw_messages=_TRANSCRIPT_WITH_SECRET)
+
+        with pytest.raises(HTTPException) as ei:
+            _finalize_headless_result(ctx)
+
+        exc = ei.value
+        assert exc.status_code == 502
+        assert isinstance(exc.detail, dict)
+        # Recovery genuinely DECLINED against the real tail — NOT monkeypatched.
+        assert getattr(ctx.metadata, "recovered_from_jsonl", None) is not True
+        # The structured body carries the in-memory transcript + validated
+        # session id (which points at the on-disk JSONL filename).
+        assert exc.detail["execution_log"] is ctx.raw_messages
+        assert exc.detail["metadata"]["session_id"] == _UUID
+        # Message text unchanged (#1938).
+        assert exc.detail["message"] == "Execution error: boom happened"
+
+    def test_recoverable_completed_turn_is_not_failed_by_1853(self, jsonl_dir):
+        # A #1870-recoverable turn must still surface as SUCCESS — #1853's
+        # structured 502 salvage is only reached on a GENUINE failure.
+        _write_jsonl(jsonl_dir, _UUID, _completed_tail_records())
+        ctx = _finalize_ctx(raw_messages=_TRANSCRIPT_WITH_SECRET)
+
+        resp_text, _raw, metadata, _sid = _finalize_headless_result(ctx)
+
+        assert metadata.recovered_from_jsonl is True
+        assert "All done." in resp_text
+
+
+# ==========================================================================
+# End-to-end chain: real error tail on disk → real finalize 502 body →
+# backend _extract_agent_error (parser) → apply_result (salvage) → a
+# persisted, diagnosable schedule_executions row in REAL sqlite. Each stage
+# is unit-tested in isolation above; this proves they compose — the exact
+# failure a user would hit, landing as a redacted, session-tagged row.
+# ==========================================================================
+def _apply_with_real_db(envelope):
+    """Run apply_result with a REAL ScheduleOperations db (lands in the active
+    engine) but mocked activity/capacity/breaker + no-op background fan-outs."""
+    import asyncio
+
+    from db.schedules import ScheduleOperations
+    from services.task_execution_service import TaskExecutionService
+
+    real_db = ScheduleOperations(user_ops=MagicMock(), agent_ops=MagicMock())
+    mock_activity = MagicMock(complete_activity=AsyncMock())
+    mock_capacity = MagicMock(release=AsyncMock())
+    mock_record = AsyncMock()
+
+    with (
+        patch("services.task_execution_service.db", real_db),
+        patch(
+            "services.task_execution_service.get_capacity_manager",
+            return_value=mock_capacity,
+        ),
+        patch("services.task_execution_service.activity_service", mock_activity),
+        patch("services.task_execution_service._record_dispatch_terminal", mock_record),
+        # Keep the CAS-won background fan-outs (emit / channel report / ephemeral
+        # discard) from scheduling coroutines the closing loop would orphan —
+        # they are covered by their own suites; this test isolates persistence.
+        patch("services.task_execution_service.event_dispatch_service", MagicMock()),
+        patch("services.task_execution_service.channel_completion_report", MagicMock()),
+        # Stub the ephemeral-discard hook (returns a non-coroutine) so the
+        # no-op _spawn_bg leaves no orphaned coroutine behind.
+        patch(
+            "services.task_execution_service._maybe_discard_exhausted_ephemeral",
+            MagicMock(return_value=None),
+        ),
+        patch("services.task_execution_service._spawn_bg", lambda *a, **k: None),
+    ):
+        svc = TaskExecutionService()
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(
+                svc.apply_result(
+                    "a",
+                    envelope,
+                    activity_id="act-e2e",
+                    breaker_enabled=False,
+                    release_slot=False,
+                )
+            )
+        finally:
+            loop.close()
+
+
+class TestEndToEndSalvageChain:
+    def test_real_error_tail_persists_diagnosable_row(self, jsonl_dir, tmp_db):
+        from services.task_execution_service import (
+            TaskExecutionStatus,
+            TerminalEnvelope,
+            _extract_agent_error,
+        )
+
+        # 1. Real error tail on disk → real finalize raises the structured 502.
+        _write_jsonl(jsonl_dir, _UUID, _failed_tail_records())
+        ctx = _finalize_ctx(raw_messages=_TRANSCRIPT_WITH_SECRET)
+        with pytest.raises(HTTPException) as ei:
+            _finalize_headless_result(ctx)
+        body = ei.value.detail
+
+        # 2. Backend parser stage: pull (message, metadata, transcript) from the body.
+        msg, meta, exec_log = _extract_agent_error(_resp(body), "fallback")
+        assert msg == "Execution error: boom happened"
+        assert exec_log is ctx.raw_messages
+        assert meta["session_id"] == _UUID
+        assert meta["cost_usd"] == pytest.approx(0.07)
+
+        # 3. Build the failure envelope exactly as the httpx handler does.
+        env = TerminalEnvelope(
+            execution_id="e2e-1853",
+            status=TaskExecutionStatus.FAILED,
+            error=msg,
+            error_code=None,
+            metadata=meta,
+            execution_log=exec_log,
+            session_id=meta.get("session_id"),
+        )
+
+        # 4. apply_result salvage → the real 'running' row is finalized in sqlite.
+        started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _hrun(
+            "INSERT INTO schedule_executions "
+            "(id, schedule_id, agent_name, status, started_at, message, triggered_by) "
+            "VALUES ('e2e-1853', '__manual__', 'a', 'running', :sa, 'm', 'schedule')",
+            sa=started,
+        )
+        _apply_with_real_db(env)
+
+        # 5. The persisted row is diagnosable via the SUCCESS-row columns.
+        assert (
+            _hscalar("SELECT status FROM schedule_executions WHERE id='e2e-1853'")
+            == "failed"
+        )
+        assert (
+            _hscalar(
+                "SELECT claude_session_id FROM schedule_executions WHERE id='e2e-1853'"
+            )
+            == _UUID
+        )
+        # The transcript is persisted WITH the embedded credential redacted.
+        persisted_log = _hscalar(
+            "SELECT execution_log FROM schedule_executions WHERE id='e2e-1853'"
+        )
+        assert persisted_log is not None
+        assert _SECRET not in persisted_log
+        assert "***REDACTED***" in persisted_log
+        # tool_calls is the #1741 SUMMARY, not a second copy of the transcript.
+        persisted_tools = _hscalar(
+            "SELECT tool_calls FROM schedule_executions WHERE id='e2e-1853'"
+        )
+        assert json.loads(persisted_tools) == [
+            {"type": "tool_use", "tool": "Bash", "input": {"command": "echo hi"}}
+        ]
+        assert persisted_log != persisted_tools
+        # cost salvaged from the body's metadata.
+        assert _hscalar(
+            "SELECT cost FROM schedule_executions WHERE id='e2e-1853'"
+        ) == pytest.approx(0.07)
