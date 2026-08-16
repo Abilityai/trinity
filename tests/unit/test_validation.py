@@ -26,6 +26,25 @@ _backend_path = os.path.abspath(
 if _backend_path not in sys.path:
     sys.path.insert(0, _backend_path)
 
+# #1895: the import-time stubs below must not leak into a LATER unit file's
+# import — the conftest's per-test restore runs only once collection has finished,
+# too late for a cross-file collection leak. Use the sanctioned
+# _STUBBED_MODULE_NAMES/_restore_sys_modules pair (precedent:
+# tests/unit/test_telegram_webhook_backfill.py) and call the restore below once the
+# collection-time module loads have bound what they need.
+_STUBBED_MODULE_NAMES = ["utils.helpers", "utils.credential_sanitizer", "database", "services.task_execution_service"]
+_SAVED_STUBBED_MODULES = {_k: sys.modules.get(_k) for _k in _STUBBED_MODULE_NAMES}
+
+
+def _restore_sys_modules():
+    for _k in _STUBBED_MODULE_NAMES:
+        _v = _SAVED_STUBBED_MODULES[_k]
+        if _v is not None:
+            sys.modules[_k] = _v
+        else:
+            sys.modules.pop(_k, None)
+
+
 # Pre-mock utils.helpers (shadowed by tests/utils/)
 _helpers_mod = types.ModuleType("utils.helpers")
 _helpers_mod.utc_now = lambda: datetime.utcnow()
@@ -57,6 +76,8 @@ from services.validation_service import (
     DEFAULT_VALIDATION_PROMPT,
 )
 from models import BusinessStatus
+
+_restore_sys_modules()
 
 
 class TestValidationPromptBuilding:

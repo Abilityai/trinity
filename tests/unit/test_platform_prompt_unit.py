@@ -28,6 +28,25 @@ if _backend_path not in sys.path:
 _fake_db = MagicMock()
 _fake_db.get_setting_value = MagicMock(return_value=None)
 _fake_db.get_permitted_agents = MagicMock(return_value=[])
+# #1895: the import-time stubs below must not leak into a LATER unit file's
+# import — the conftest's per-test restore runs only once collection has finished,
+# too late for a cross-file collection leak. Use the sanctioned
+# _STUBBED_MODULE_NAMES/_restore_sys_modules pair (precedent:
+# tests/unit/test_telegram_webhook_backfill.py) and call the restore below once the
+# collection-time module loads have bound what they need.
+_STUBBED_MODULE_NAMES = ["database", "utils.helpers", "services", "services.platform_prompt_service"]
+_SAVED_STUBBED_MODULES = {_k: sys.modules.get(_k) for _k in _STUBBED_MODULE_NAMES}
+
+
+def _restore_sys_modules():
+    for _k in _STUBBED_MODULE_NAMES:
+        _v = _SAVED_STUBBED_MODULES[_k]
+        if _v is not None:
+            sys.modules[_k] = _v
+        else:
+            sys.modules.pop(_k, None)
+
+
 sys.modules["database"] = types.SimpleNamespace(db=_fake_db)
 
 # Stub utils.helpers — tests/utils/ package shadows src/backend/utils in the
@@ -59,6 +78,8 @@ build_execution_context = pps.build_execution_context
 compose_system_prompt = pps.compose_system_prompt
 is_execution_context_enabled = pps.is_execution_context_enabled
 _sanitize_field = pps._sanitize_field
+
+_restore_sys_modules()
 
 
 # Override the backend-requiring autouse fixtures from the package conftest so

@@ -34,6 +34,25 @@ if _backend_path not in sys.path:
     sys.path.insert(0, _backend_path)
 
 
+# #1895: the import-time stubs below must not leak into a LATER unit file's
+# import — the conftest's per-test restore runs only once collection has finished,
+# too late for a cross-file collection leak. Use the sanctioned
+# _STUBBED_MODULE_NAMES/_restore_sys_modules pair (precedent:
+# tests/unit/test_telegram_webhook_backfill.py) and call the restore below once the
+# collection-time module loads have bound what they need.
+_STUBBED_MODULE_NAMES = ["database", "utils.helpers", "services", "services.task_execution_service", "services.fan_out_service", "dependencies", "models", "routers", "routers.fan_out"]
+_SAVED_STUBBED_MODULES = {_k: sys.modules.get(_k) for _k in _STUBBED_MODULE_NAMES}
+
+
+def _restore_sys_modules():
+    for _k in _STUBBED_MODULE_NAMES:
+        _v = _SAVED_STUBBED_MODULES[_k]
+        if _v is not None:
+            sys.modules[_k] = _v
+        else:
+            sys.modules.pop(_k, None)
+
+
 # Stub database and utils so fan_out_service can be imported without a
 # running backend.
 _fake_db = MagicMock()
@@ -94,6 +113,8 @@ sys.modules["routers.fan_out"] = fo_router
 _spec2.loader.exec_module(fo_router)  # type: ignore[union-attr]
 
 FanOutRequest = fo_router.FanOutRequest
+
+_restore_sys_modules()
 
 
 # Override the backend-requiring autouse fixtures from the package conftest.
