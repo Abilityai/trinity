@@ -186,6 +186,16 @@ def init_database():
         with get_db_connection() as conn:
             cursor = conn.cursor()
 
+            # #2216: pre-migration safety copy (SQLite arm, BKUP-012). Runs
+            # INSIDE the lock window and BEFORE the first migration pass —
+            # a pending schema migration is the one moment the platform knows
+            # is risky. Fail-open by contract: any failure logs + returns and
+            # boot proceeds so this can never crash-loop startup; on a corrupt
+            # DB the run_all_migrations below still raises the exact incident
+            # fingerprint (pinned by test_2216_boot_pre_migration_backup.py).
+            from db.backup_primitives import maybe_backup_before_migrations
+            maybe_backup_before_migrations(cursor, conn, db_path=DB_PATH)
+
             # Run migrations first (upgrade existing DB; skips if tables don't exist yet)
             run_all_migrations(cursor, conn)
 
