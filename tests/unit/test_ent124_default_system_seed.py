@@ -651,3 +651,25 @@ def test_cornelius_belt_except_also_alerts(orch):
     # And the fleet seeder still ran (never-raises contract preserved).
     assert ("fleet", True, "true") in orch.calls
     assert result == {"action": "created"}
+
+
+def test_cornelius_alert_message_is_credential_sanitized(orch):
+    """The `create_failed` message is `str(exc)` from a `github:` create that
+    resolves the platform PAT when one is configured, and git/GitHub errors can
+    embed PAT-bearing remote URLs — the deploy report already redacts at its
+    exit point (`system_service._failure_reason`); the operator-queue alert is
+    the same durable, UI-rendered class and must too."""
+    _cornelius_returning(
+        orch, "create_failed",
+        message="Failed to seed Cornelius: fatal: unable to access "
+                "'https://x-access-token:ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab"
+                "@github.com/acme/private.git/': 403",
+    )
+
+    asyncio.run(ensure_first_run_seeded())
+
+    item = orch.env.opq.call_args.args[1]
+    msg = item["context"]["message"]
+    assert "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab" not in msg
+    assert "github.com/acme/private.git" in msg  # the URL itself survives
+    assert item["id"] == "system-seed-cornelius-failed"

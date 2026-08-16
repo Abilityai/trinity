@@ -58,6 +58,7 @@ from models import User
 from services.docker_service import docker_client
 from services.cornelius_agent_service import cornelius_agent_service
 from redis_breaker_util import get_breaker_redis, lock_token_matches
+from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -167,18 +168,25 @@ def _notify_cornelius_failure(message) -> None:
     while any prior row exists — even resolved — later distinct failures are
     swallowed until the retention delete; correct for an ALARM (#1644: the
     queue item is never load-bearing — the unset seed flag's next-boot retry
-    is the actual recovery mechanism). Context carries the seeder's sanitized
-    message + a logs pointer, identifiers only (crud flattens the underlying
-    cause to a generic 500 string, so the alert names THAT seeding failed and
-    where to look for WHY). Best-effort: `_notify_operator` swallows
-    internally, never raises."""
+    is the actual recovery mechanism). Context carries the seeder's message +
+    a logs pointer, identifiers only (crud flattens the underlying cause to a
+    generic 500 string, so the alert names THAT seeding failed and where to
+    look for WHY). The message is credential-sanitized and URL-userinfo-
+    redacted at THIS exit point — the same rule `system_service._failure_reason`
+    applies to the deploy report: the seeder's `create_failed` text is
+    `str(exc)` from a `github:` create that resolves the platform PAT when one
+    is configured, and git/GitHub errors can embed PAT-bearing remote URLs
+    (learnings 2026-07-14); the operator queue is a durable, UI-rendered
+    surface. Best-effort: `_notify_operator` swallows internally, never
+    raises."""
+    safe_message = sanitize_text(redact_url_userinfo(str(message or "")))[:500]
     SystemSeedService._notify_operator(
         "cornelius-failed",
         "Cornelius seed failed",
         "The default Cornelius agent could not be created during first-run "
         "seeding. See the backend logs for the underlying create error. The "
         "seed flag is left unset, so the next boot retries automatically.",
-        {"agent": "cornelius", "message": str(message or "")[:500]},
+        {"agent": "cornelius", "message": safe_message},
     )
 
 
