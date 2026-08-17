@@ -9,8 +9,8 @@ Agents are created from templates or from scratch. Each agent runs as an isolate
 **Template sources** define where agent blueprints come from:
 
 - **GitHub Template** -- A repository in `github:Org/repo` format. Supports branch selection with `github:Org/repo@branch`. **Public** repos clone with **no GitHub token** -- Trinity clones them anonymously. This is **source-mode only**: an anonymous clone can't push back, so pushing, Working-Branch mode, and fork-to-own still require a token. Private repos require a GitHub PAT.
-- **Admin-Configured Templates** -- GitHub repos configured by an admin in Settings. Metadata (name, description, resources, MCP servers) is fetched from each repo's `template.yaml` via the GitHub API and cached for 10 minutes. These appear as cards in the **Library** page's Agent Templates section (`/library`; the old `/templates` path redirects there).
-- **Local Templates** -- Auto-discovered from the `config/agent-templates/` directory and shown as a curated **Starter Templates** section on the Library page. The recommended starters (`scout`, `sage`, `scribe`) are ordered first; internal test and demo fixtures (marked `hidden: true` in their `template.yaml`) are hidden from the list but stay creatable by id.
+- **Admin-Configured Templates** -- GitHub repos configured by an admin in Settings. Metadata (name, description, resources, MCP servers) is fetched from each repo's `template.yaml` via the GitHub API and cached for 10 minutes. These appear as cards on the **Library** page's Agent Templates tab (`/library?tab=templates`; the old `/templates` path redirects there).
+- **Local Templates** -- Auto-discovered from the `config/agent-templates/` directory and shown as a curated **Starter Templates** group on the Library's Agent Templates tab. The recommended starters (`scout`, `sage`, `scribe`) are ordered first; internal test and demo fixtures (marked `hidden: true` in their `template.yaml`) are hidden from the list but stay creatable by id.
 - **From Scratch** -- Creates a minimal agent with a default `CLAUDE.md`.
 
 **Where the GitHub template list comes from.** Trinity resolves it in order:
@@ -68,7 +68,7 @@ Once an agent is running, Trinity validates its workspace against best-practice 
 
 The check covers things like a present and valid `template.yaml`, a non-gitignored `.claude/` directory, defined playbooks, and accidentally committed secrets, grouped into findings ranked HARD / SOFT / INFO. Claude-specific checks (such as `CLAUDE.md` and `.claude/` skills) are skipped for Codex and Gemini agents.
 
-The 10 gitignore-related findings offer a one-click **Fix** button: Trinity rewrites the agent's `.gitignore` in place. The change is uncommitted until the agent's next git sync. Re-run the analysis at any time with **Re-run analysis**.
+The 9 gitignore-related findings offer a one-click **Fix** button: Trinity rewrites the agent's `.gitignore` in place. The change is uncommitted until the agent's next git sync. Re-run the analysis at any time with **Re-run analysis**.
 
 ### Declared Schedules
 

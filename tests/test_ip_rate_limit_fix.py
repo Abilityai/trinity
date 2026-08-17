@@ -75,7 +75,17 @@ def _load_public_router(monkeypatch):
     # `database` and `dependencies` must be unconditional (not setdefault)
     # because other test files may have installed incompatible stubs.
     monkeypatch.setitem(sys.modules, "database", MagicMock())
-    monkeypatch.setitem(sys.modules, "dependencies", MagicMock())
+    # `unsafe=True` on `dependencies` is LOAD-BEARING, not tidy-up (#2241).
+    # MagicMock raises AttributeError for any attribute whose name starts with
+    # `assert` — a typo guard against `mock.assert_called_once` — and the #1310
+    # imperative auth-guard family is named exactly that: `assert_admin`,
+    # `assert_agent_access`, `assert_agent_owner`, `assert_owns_or_admin`,
+    # `assert_owns`. `routers/public.py` does `from dependencies import
+    # get_current_user, assert_owns`, so a bare MagicMock() here fails at IMPORT
+    # time with "'assert_owns' is not a valid assertion", taking all 14 tests in
+    # this file down as setup errors before one of them runs. `unsafe=True` exists
+    # precisely to disable that prefix check.
+    monkeypatch.setitem(sys.modules, "dependencies", MagicMock(unsafe=True))
     monkeypatch.setitem(sys.modules, "models", MagicMock())
 
     stubs = {

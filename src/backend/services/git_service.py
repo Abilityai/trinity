@@ -1601,12 +1601,30 @@ async def _git_toplevel(container_name: str) -> Optional[str]:
     otherwise make git refuse to answer and silently drop the caller onto the
     fallback heuristic that this function exists to replace.
 
+    ``GIT_DISCOVERY_ACROSS_FILESYSTEM=1`` because the walk up has a second way to
+    stop that has nothing to do with repositories (#2245): git halts discovery at
+    a filesystem boundary by default, so on an agent whose ``workspace/`` is its
+    own mount — a bind mount, a distinct volume, an overlay — a probe started
+    inside it never reaches a repository rooted at the home directory. Git says so
+    in as many words: *"Stopping at filesystem boundary
+    (GIT_DISCOVERY_ACROSS_FILESYSTEM not set)"*, exit 128. This function would then
+    return None and the caller would fall through to the content heuristic, which
+    answers ``/home/developer/workspace`` for exactly that topology — the
+    misclassification #2075 exists to eliminate, reintroduced by a mount.
+
+    Crossing the boundary is safe here specifically because the containment check
+    below is unchanged: discovery may walk out of the mount, but an answer outside
+    the agent home is still refused before it is trusted. (Carried over from #2076,
+    a competing #2075 fix closed as superseded — this flag was the one thing it had
+    that #2077 did not.)
+
     Returns None when there is no repository at or above the probe point, or
     when git answers with a path outside the agent home (never trusted).
     """
     script = (
         f"start={shlex.quote(LEGACY_WORKSPACE_DIR)}; "
         f'[ -d "$start" ] || start={shlex.quote(AGENT_HOME_DIR)}; '
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM=1 "
         "git -c safe.directory='*' -C \"$start\" rev-parse --show-toplevel "
         "2>/dev/null"
     )
