@@ -22,6 +22,8 @@ Schedules take any IANA zone name — including legacy aliases like `US/Eastern`
 
 A template can ship the recurring work its agent is designed to do in a `schedules:` block, and Trinity creates those schedules when the agent is created — through the UI, the API, and MCP alike. They appear here like any other schedule and are yours to edit, disable, or delete. See [Creating Agents](../agents/creating-agents.md).
 
+**Keep the message to a bare playbook call.** The recommended shape for any schedule message — declared or hand-created — is a single line that invokes one of the agent's skills by name, e.g. `/daily-briefing`, with no inline instructions. The logic then lives in the versioned playbook, so changing what a scheduled run does is an edit to the skill, never to the schedule. A skill that normally asks questions at its decision points needs a headless mode (the abilities convention is a `--autonomous` argument) before it goes on a cron; otherwise every run blocks on a prompt nobody sees and burns its whole timeout. See [Abilities Marketplace](abilities-marketplace.md#playbook-calls-the-unit-of-inter-agent-work).
+
 ## How It Works
 
 ![Agent Schedules tab showing three active weekly schedules with cron expressions and execution history](../../screenshots/agent-schedules.png)

@@ -53,13 +53,18 @@ Each wizard asks domain-specific questions and scaffolds a complete agent.
 
 Authenticates and saves your MCP connection config. Only needed once per machine.
 
-### Step 3: Deploy to Trinity
+### Step 3: Add your GitHub token (one-time)
+
+Deployment is repository-first — Trinity clones the agent from its GitHub repo and tracks the branch. In the Trinity UI, go to **Settings → GitHub token** and add a fine-grained PAT with *Contents: Read* on the repos your agents live in. Public repos work without one.
+
+### Step 4: Push, then deploy to Trinity
 
 ```bash
+git push                # the wizard already initialized and committed the repo
 /trinity:onboard
 ```
 
-Creates `template.yaml`, checks compatibility, and deploys. Your agent is now running 24/7.
+Checks compatibility, fills in anything missing in `template.yaml` (declared credentials, schedules, plugins), verifies the repo is pushed and readable, and deploys from it. Your agent is now running 24/7 — turn on its **autonomy** toggle in the UI when you want its schedules to start firing.
 
 ## Path B: Onboarding an Existing Agent
 
@@ -77,7 +82,9 @@ Already have a Claude Code agent? Deploy it to Trinity.
 /trinity:onboard
 ```
 
-Checks your agent for Trinity compatibility, creates required files (`template.yaml`, `.mcp.json.template`), and deploys.
+Checks your agent for Trinity compatibility, creates required files (`template.yaml`, `.env.example`, `.mcp.json.template`, `.gitignore`), and deploys — from the agent's GitHub repo by default, from local files as the fallback when there is no repo yet.
+
+**Already deployed it from a bare repo?** If you created the agent in Trinity straight from a repository that had no `template.yaml` — someone else's agent, or one you didn't want to adapt locally — run `/trinity:onboard` *inside* that agent — send it `/trinity:onboard in-place` as a chat message, or run it from the agent's terminal — and it takes the **Onboard in place** path. It writes the Trinity files, installs and declares the plugins, pushes the result back to the repo, reconciles schedules, and verifies with the platform's compatibility report. See [Onboarding a deployed agent in place](../abilities/trinity-plugin.md#onboarding-a-deployed-agent-in-place).
 
 ### Step 3: Review and improve (optional)
 
@@ -103,7 +110,8 @@ Add capabilities and keep your agent in sync.
 /agent-dev:add-backlog
 
 # Push changes to Trinity
-/trinity:sync          # Or just: git push
+git push
+/trinity:sync          # advances the deployed agent; also reconciles schedules + plugins
 ```
 
 ## What Gets Created
@@ -114,8 +122,8 @@ Wizard-created agents include everything needed for Trinity:
 |------|---------|
 | `CLAUDE.md` | Agent identity and instructions |
 | `.claude/skills/` | 2-4 starter skills |
-| `template.yaml` | Trinity deployment config |
-| `.mcp.json.template` | Credential declarations |
+| `template.yaml` | Trinity deployment config — resources, declared credentials, `schedules:`, `plugins:` |
+| `.mcp.json.template` | MCP server configuration with `${VAR}` placeholders |
 | `dashboard.yaml` | Custom metrics dashboard |
 | `onboarding.json` | Setup progress tracker |
 
