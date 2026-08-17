@@ -26,6 +26,23 @@ ALARM_AGENT_NAME = "_log-archive"
 ALARM_ID_PREFIX = "log-archive-"
 
 
+def probe_archive_writability() -> bool:
+    """Re-check writability at the start of an archival run (review finding).
+
+    The constructor's probe fires once per PROCESS. Under `restart:
+    unless-stopped` a backend can run for weeks, so an operator who acknowledged
+    the alarm without actually fixing ownership would never hear about it again
+    while every nightly run kept failing — the #2216 sibling added
+    `_staleness_check` for exactly this. Because the alarm id is bucketed per day,
+    calling this per run re-alarms at most daily while the fault persists, and goes
+    quiet the moment it is fixed.
+    """
+    storage = get_archive_storage()
+    if not isinstance(storage, LocalArchiveStorage):
+        return True
+    return storage._preflight_writable() is not False
+
+
 def _alarm_unwritable_archive_dir(path: str, detail: str) -> None:
     """One operator-queue alarm for an unwritable archive directory.
 
@@ -126,28 +143,55 @@ class LocalArchiveStorage(ArchiveStorage):
             archive_path: Directory path for storing archives
         """
         self.archive_path = Path(archive_path)
-        self.archive_path.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Local archive storage initialized: {self.archive_path}")
+        # Review finding: this `mkdir` used to be unguarded, and it runs at IMPORT
+        # time — `log_archive_service` is a module-level singleton whose `__init__`
+        # constructs storage, and `main.py` imports it. So a missing
+        # `/data/archives` under a parent UID 1000 cannot write (prod brought up
+        # without `start.sh`, whose chown is Linux-only; or a root-owned host bind
+        # dir) raised straight out of the import and crash-looped the backend with
+        # no API and no alarm. That is the opposite of the guarantee this file
+        # claims, so a failed mkdir is now just another way of being unwritable.
+        created = True
+        try:
+            self.archive_path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            created = False
+            logger.error(
+                "[ArchiveStorage] cannot create %s: %s", self.archive_path, exc,
+            )
+            _alarm_unwritable_archive_dir(str(self.archive_path), f"{type(exc).__name__}: {exc}")
+        if created:
+            logger.info(f"Local archive storage initialized: {self.archive_path}")
         # #2205: prove writability HERE, not at the first store. `mkdir(exist_ok=True)`
         # silently no-ops on a pre-existing root-owned directory, so this class
         # reported itself "initialized" while every write was doomed — and the
         # resulting ERROR went into the very log files archival exists to prune, i.e.
         # the symptom and its diagnosis landed in the same unbounded file nobody
         # tails. The preflight turns that into one operator-visible alarm.
-        self._preflight_writable()
+        if created:
+            self._preflight_writable()
 
-    def _preflight_writable(self) -> None:
-        """Probe the archive directory and alarm ONCE per process if unwritable.
+    def _preflight_writable(self):
+        """Probe the archive directory and alarm if unwritable.
+
+        Skipped when `LOG_ARCHIVE_ENABLED=false` (review finding): storage is
+        constructed unconditionally while the flag is only read in
+        `LogArchiveService.start()`, so an install that deliberately disables
+        archival would get a `priority: high` alarm every boot asserting that
+        "archival fails on every run and /data/logs grows without bound" — about a
+        job that never runs. A false alarm that demands action is worse than none.
 
         Never raises: a broken archive directory must not take the backend down —
         archival is a maintenance job, not a request path. It must simply stop being
         silent.
         """
+        if os.getenv("LOG_ARCHIVE_ENABLED", "true").lower() != "true":
+            return
         probe = self.archive_path / f".perm-probe-{os.getpid()}"
         try:
             probe.touch()
             probe.unlink()
-            return
+            return True
         except OSError as exc:
             detail = f"{type(exc).__name__}: {exc}"
         logger.error(
@@ -156,6 +200,7 @@ class LocalArchiveStorage(ArchiveStorage):
             self.archive_path, getattr(os, "getuid", lambda: "?")(), detail,
         )
         _alarm_unwritable_archive_dir(str(self.archive_path), detail)
+        return False
 
     async def store_archive(
         self,

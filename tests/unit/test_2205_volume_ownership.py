@@ -48,8 +48,13 @@ _EXEMPT = {
     # Redis runs as its own image user and owns this volume itself; the backend
     # never touches it.
     "redis-data": "mounted only into the redis service, which owns it",
-    # Written by the agent containers (UID 1000 by image), not by backend/scheduler.
-    "agent-configs": "agent-side volume; backend does not write it",
+    # Review finding: `agent-configs` was exempted here on the false claim that the
+    # backend does not write it — it writes uploaded agent templates there. It is
+    # genuinely safe because the Dockerfile prepares AND chowns `/agent-configs`, so
+    # `_image_prepared_paths()` is the branch that should carry it. Dropping the
+    # entry matters because `_EXEMPT` is checked FIRST: if that volume were ever
+    # remounted at a nested path — the exact bug class this guard exists for — the
+    # untrue reason would have waved it through.
 }
 
 
@@ -132,12 +137,22 @@ def _image_prepared_paths() -> set[str]:
     `trinity trinity`, `/data/archives` was `root root`.
     """
     text = (_REPO / "docker" / "backend" / "Dockerfile").read_text(encoding="utf-8")
-    if "chown -R trinity:trinity" not in text:
+    # Review finding: harvesting every `mkdir -p /...` in the file while merely
+    # checking that `chown -R trinity:trinity` appears SOMEWHERE would classify a
+    # future `RUN mkdir -p /data/archives` in an unchowned layer as "prepared" —
+    # silently reintroducing #2205. A path counts only if it is an argument of the
+    # chown itself.
+    chowned: set[str] = set()
+    for m in re.finditer(r"chown -R trinity:trinity ([^&\n]+)", text):
+        for token in m.group(1).split():
+            if token.startswith("/"):
+                chowned.add(token.rstrip("/"))
+    if not chowned:
         return set()          # ownership story changed shape — fail closed, loudly
     prepared: set[str] = set()
     for m in re.finditer(r"mkdir -p ([^&\n]+)", text):
         for token in m.group(1).split():
-            if token.startswith("/"):
+            if token.startswith("/") and token.rstrip("/") in chowned:
                 prepared.add(token.rstrip("/"))
     return prepared
 
@@ -180,13 +195,27 @@ def test_the_archives_volume_is_covered_in_dev():
 
 
 def test_the_backend_waits_for_both_init_one_shots():
-    """A chown that races the first archival run is not a fix. Both one-shots are
-    `service_completed_successfully` dependencies of the backend."""
-    text = _compose_text("docker-compose.yml")
-    backend = text.split("\n  backend:", 1)[1].split("\n  vector:", 1)[0]
+    """A chown that races the first archival run is not a fix. Both one-shots must be
+    `service_completed_successfully` dependencies OF THE BACKEND.
+
+    Review finding: this used to split on `"\n  vector:"`, which is defined near the
+    end of the file — so the "backend" span covered six other services and was
+    satisfied by the one-shots' own service DEFINITIONS. Both gates could have been
+    deleted and it would still have passed. It now reads the backend's own
+    `depends_on` block via `_service_block`.
+    """
+    backend = _service_block(_compose_text("docker-compose.yml"), "backend")
+    assert backend, "no backend service block found"
+    depends = backend.split("depends_on:", 1)
+    assert len(depends) == 2, "backend has no depends_on"
+    # Up to the next 4-space key, i.e. the depends_on mapping only.
+    body = re.split(r"\n    [a-zA-Z]", depends[1])[0]
     for one_shot in ("logs-init", "archives-init"):
-        assert one_shot in backend, one_shot
-    assert backend.count("service_completed_successfully") >= 2
+        assert one_shot in body, f"{one_shot} is not a backend dependency: {body}"
+        after = body.split(one_shot, 1)[1]
+        assert "service_completed_successfully" in after.split("\n\n")[0], (
+            f"{one_shot} is depended on but not gated on completion"
+        )
 
 
 def test_prod_keeps_archives_on_the_chowned_bind_mount():

@@ -128,3 +128,96 @@ def test_the_alarm_host_is_uncreatable_and_canary_exempt():
 
     assert ALARM_AGENT_NAME in _PLATFORM_ALARM_SENTINELS
     assert sanitize_agent_name(ALARM_AGENT_NAME) != ALARM_AGENT_NAME
+
+
+# ---------------------------------------------------------------------------
+# Review findings (second round) — each of these was a real hole in round one
+# ---------------------------------------------------------------------------
+
+def test_an_uncreatable_directory_alarms_instead_of_crashing_the_import(tmp_path, monkeypatch):
+    """`mkdir` runs at IMPORT time (module-level `log_archive_service` singleton, and
+    `main.py` imports it), so an unwritable PARENT used to raise straight out of the
+    import and crash-loop the backend with no API and no alarm — the opposite of the
+    stated guarantee. It is now just another way of being unwritable."""
+    from services import archive_storage
+
+    db = MagicMock()
+    monkeypatch.setattr(
+        archive_storage.Path, "mkdir",
+        lambda self, **kw: (_ for _ in ()).throw(PermissionError(13, "denied")),
+    )
+    with patch("database.db", db):
+        storage = archive_storage.LocalArchiveStorage(str(tmp_path / "nope" / "archives"))
+
+    assert storage is not None                      # no raise
+    db.create_operator_queue_item.assert_called_once()
+
+
+def test_no_alarm_when_archival_is_deliberately_disabled(tmp_path, monkeypatch):
+    """Storage is constructed unconditionally while the flag is only read in
+    `start()`, so an install with `LOG_ARCHIVE_ENABLED=false` was told every boot
+    that "archival fails on every run" — about a job that never runs."""
+    archives = tmp_path / "archives"
+    archives.mkdir()
+    monkeypatch.setenv("LOG_ARCHIVE_ENABLED", "false")
+    db = MagicMock()
+    with patch("database.db", db), \
+         patch("pathlib.Path.touch", side_effect=PermissionError(13, "denied")):
+        _storage(archives)
+    db.create_operator_queue_item.assert_not_called()
+
+
+def test_the_probe_can_be_re_armed_per_run(tmp_path, monkeypatch):
+    """The constructor probes once per PROCESS. Under `restart: unless-stopped` a
+    backend runs for weeks, so an acknowledged-but-unfixed fault would go unreported
+    while every nightly run failed. `probe_archive_writability()` is the per-run
+    re-check (the alarm id is per-day, so it re-alarms at most daily)."""
+    from services import archive_storage
+
+    archives = tmp_path / "archives"
+    archives.mkdir()
+    with patch("database.db", MagicMock()):
+        storage = archive_storage.LocalArchiveStorage(str(archives))
+    monkeypatch.setattr(archive_storage, "get_archive_storage", lambda: storage)
+
+    with patch("database.db", MagicMock()):
+        assert archive_storage.probe_archive_writability() is True
+
+    db = MagicMock()
+    with patch("database.db", db), \
+         patch("pathlib.Path.touch", side_effect=PermissionError(13, "denied")):
+        assert archive_storage.probe_archive_writability() is False
+    db.create_operator_queue_item.assert_called_once()
+
+
+def test_staging_lands_beside_the_destination_not_on_the_tmpfs(tmp_path, monkeypatch):
+    """Both compose files mount `/tmp` as a 100 MB tmpfs. Measured on a real
+    instance, platform logs gzip ~42:1 — so the 4.6 GB file this issue was FILED
+    against stages to ~110 MB and blows that ceiling with ENOSPC, which
+    `archive_old_logs` swallows (`logger.error` + `continue`). Ownership alone would
+    not have pruned the largest file. Staging beside the destination removes the
+    ceiling and makes the final move a same-filesystem rename."""
+    from services import archive_storage, log_archive_service as las
+
+    archives = tmp_path / "archives"
+    archives.mkdir()
+    with patch("database.db", MagicMock()):
+        storage = archive_storage.LocalArchiveStorage(str(archives))
+    monkeypatch.setattr(archive_storage, "get_archive_storage", lambda: storage)
+
+    staging = las._staging_dir()
+    assert staging == archives / ".staging", staging
+    # Not `"/tmp" not in str(staging)` — `tmp_path` is itself under /tmp, so that
+    # assertion was nonsense. What matters is that staging is NOT the tmpfs fallback
+    # and IS on the same filesystem as the destination (so the store is a rename).
+    assert staging != las._TMP_STAGING_FALLBACK
+    assert staging.parent == archives
+
+
+def test_staging_falls_back_when_the_backend_is_not_local(monkeypatch):
+    """A non-local storage backend has no local destination to stage beside, so the
+    legacy tmp path is still the answer — the fallback must not disappear."""
+    from services import archive_storage, log_archive_service as las
+
+    monkeypatch.setattr(archive_storage, "get_archive_storage", lambda: object())
+    assert las._staging_dir() == las._TMP_STAGING_FALLBACK
