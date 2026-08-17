@@ -67,6 +67,9 @@
           <!-- #32 — Single Sign-On (enterprise, gated by `sso`) -->
           <SsoPanel v-if="activeTab === 'sso'" />
 
+          <!-- ent#279 — System Credential Vault (enterprise, gated by `credential_vault`) -->
+          <CredentialVaultPanel v-if="activeTab === 'credential-vault'" />
+
           <!-- Retention Tab Content (#1039) -->
           <div v-if="activeTab === 'retention'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-5">
@@ -2128,6 +2131,7 @@ import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import SkillSourcesPanel from '../components/SkillSourcesPanel.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
+import CredentialVaultPanel from '../components/settings/CredentialVaultPanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
 import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
 import OperatorIntakePanel from '../components/settings/OperatorIntakePanel.vue'
@@ -2189,6 +2193,7 @@ const ALL_TABS = [
   { id: 'agent-permissions', label: 'Agent Permissions', adminOnly: false, requires: 'permissions_matrix' },
   { id: 'security',     label: 'Security',     adminOnly: false, requires: '2fa' },
   { id: 'sso',          label: 'SSO',          adminOnly: true,  requires: 'sso' },
+  { id: 'credential-vault', label: 'Vault',    adminOnly: true,  requires: 'credential_vault' },
   { id: 'agents',       label: 'Agents',       adminOnly: true  },
   { id: 'retention',    label: 'Retention',    adminOnly: true  },
   // ent#184 — local product-event activation funnel. Capture is OSS-core;
