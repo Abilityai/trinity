@@ -1,6 +1,6 @@
 # MCP Server
 
-Trinity's MCP server exposes ~107 tools across 27 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. This is the community build; a few tools are enterprise-gated and return `"disabled"` where not entitled.
+Trinity's MCP server exposes 116 tools across 28 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. A few are enterprise-gated and return `"disabled"` where not entitled. Two further sets are conditional: three consumption-only tools for connector keys, and two sign-in tools that appear only when inline email auth is enabled.
 
 > 📺 **Watch:** [From Zero to Deployed AI Agent — MCP setup](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 

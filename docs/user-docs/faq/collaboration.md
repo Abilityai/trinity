@@ -70,6 +70,15 @@ To let an outside orchestrator actually reach an agent, turn on **A2A exposure**
 
 Set `PUBLIC_CHAT_URL` or `FRONTEND_URL` so the card advertises an externally reachable URL. See [A2A Protocol](../integrations/a2a-protocol.md).
 
+
+## Can my agents call an external A2A agent?
+
+Yes — this is the outbound direction, and it's off by default. An admin turns it on and registers each external endpoint by name (with any credential it needs); an agent then picks a target **by name** and can never supply a URL of its own, so a prompt injection can't aim Trinity at an address of the attacker's choosing. Agents call it with the `call_a2a_agent` tool and poll long-running work with `get_a2a_task`. Calls are bounded — 30 per minute per agent, 120 fleet-wide — and each one is deduplicated by a label you supply, so a re-run replays the earlier answer instead of paying twice. See [A2A Protocol](../integrations/a2a-protocol.md).
+
+## An outbound A2A call timed out — should I just try again?
+
+No, not blindly. A timeout means Trinity gave up waiting, not that the remote agent didn't run the task — the response says `possibly_delivered` for exactly this reason. If you have a task id, poll it with `get_a2a_task`. Otherwise re-send with the **same** dedup label: that replays the original answer if the call already completed, rather than triggering the work a second time. See [A2A Protocol](../integrations/a2a-protocol.md).
+
 ## Can my agent message me proactively instead of waiting for me to ask?
 
 Yes, with the `send_message` MCP tool, which delivers a message to a user identified by their verified email address. It's consent-based: the recipient must be the agent's owner or have the agent shared with them with the allow-proactive flag enabled, otherwise the send is rejected. Delivery goes over Telegram, Slack, or web — `auto` tries Telegram, then Slack, then web — and sends are rate-limited to 10 messages per recipient per hour, with a 4096-character limit per message. See [MCP Server](../integrations/mcp-server.md).
