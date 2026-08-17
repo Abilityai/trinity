@@ -53,9 +53,15 @@ def test_an_unwritable_directory_alarms_with_the_cause(tmp_path):
 
     # Simulate the real condition (root-owned dir, non-root process) rather than
     # chmod 000, which pytest may run as a user that can bypass.
+    from services import archive_storage
+
     with patch("database.db", db), \
          patch("pathlib.Path.touch", side_effect=PermissionError(13, "Permission denied")):
-        _storage(archives)
+        storage = _storage(archives)
+        # The alarm belongs to the RUN, not to construction (see the module docstring
+        # and `probe_archive_writability`).
+        with patch.object(archive_storage, "get_archive_storage", return_value=storage):
+            assert archive_storage.probe_archive_writability() is False
 
     db.create_operator_queue_item.assert_called_once()
     agent, item = db.create_operator_queue_item.call_args.args
@@ -75,12 +81,16 @@ def test_the_alarm_id_is_stable_within_a_day(tmp_path):
     (ON CONFLICT DO NOTHING), so the id has to repeat."""
     archives = tmp_path / "archives"
     archives.mkdir()
+    from services import archive_storage
+
     ids = []
     for _ in range(3):
         db = MagicMock()
         with patch("database.db", db), \
              patch("pathlib.Path.touch", side_effect=PermissionError(13, "denied")):
-            _storage(archives)
+            storage = _storage(archives)
+            with patch.object(archive_storage, "get_archive_storage", return_value=storage):
+                archive_storage.probe_archive_writability()
         ids.append(db.create_operator_queue_item.call_args.args[1]["id"])
     assert len(set(ids)) == 1, ids
 
@@ -134,11 +144,15 @@ def test_the_alarm_host_is_uncreatable_and_canary_exempt():
 # Review findings (second round) — each of these was a real hole in round one
 # ---------------------------------------------------------------------------
 
-def test_an_uncreatable_directory_alarms_instead_of_crashing_the_import(tmp_path, monkeypatch):
+def test_an_uncreatable_directory_neither_raises_nor_touches_the_db(tmp_path, monkeypatch):
     """`mkdir` runs at IMPORT time (module-level `log_archive_service` singleton, and
     `main.py` imports it), so an unwritable PARENT used to raise straight out of the
-    import and crash-loop the backend with no API and no alarm — the opposite of the
-    stated guarantee. It is now just another way of being unwritable."""
+    import and crash-loop the backend with no API and no alarm.
+
+    It now records the fault instead — and, per the CI finding, does NOT reach for the
+    database during construction: the alarm path imported `database` at import time on
+    any host without a writable `/data`, which is every CI runner, producing three
+    cascading tracebacks per test process. The fault surfaces on the next run."""
     from services import archive_storage
 
     db = MagicMock()
@@ -149,7 +163,14 @@ def test_an_uncreatable_directory_alarms_instead_of_crashing_the_import(tmp_path
     with patch("database.db", db):
         storage = archive_storage.LocalArchiveStorage(str(tmp_path / "nope" / "archives"))
 
-    assert storage is not None                      # no raise
+    assert storage is not None                       # no raise
+    assert storage.init_error                        # ...but it remembers
+    db.create_operator_queue_item.assert_not_called()   # and stays off the DB
+
+    # The run is what reports it.
+    with patch("database.db", db), \
+         patch.object(archive_storage, "get_archive_storage", return_value=storage):
+        assert archive_storage.probe_archive_writability() is False
     db.create_operator_queue_item.assert_called_once()
 
 
@@ -221,3 +242,23 @@ def test_staging_falls_back_when_the_backend_is_not_local(monkeypatch):
 
     monkeypatch.setattr(archive_storage, "get_archive_storage", lambda: object())
     assert las._staging_dir() == las._TMP_STAGING_FALLBACK
+
+
+def test_construction_does_not_import_or_touch_the_database(tmp_path, monkeypatch):
+    """CI finding, pinned: `log_archive_service` is a module-level singleton imported
+    by `main.py`, so anything the constructor reaches for lands on the import path of
+    every process that touches this module — including each CI test worker, on a host
+    with no writable `/data`. Construction must therefore stay filesystem-light and
+    completely DB-free; the alarm is the RUN's job."""
+    from services import archive_storage
+
+    sentinel = MagicMock(side_effect=AssertionError("construction reached the DB"))
+    with patch("database.db", sentinel):
+        # Both the healthy and the broken path.
+        archive_storage.LocalArchiveStorage(str(tmp_path / "ok"))
+        monkeypatch.setattr(
+            archive_storage.Path, "mkdir",
+            lambda self, **kw: (_ for _ in ()).throw(PermissionError(13, "denied")),
+        )
+        archive_storage.LocalArchiveStorage(str(tmp_path / "broken"))
+    sentinel.create_operator_queue_item.assert_not_called()

@@ -143,33 +143,28 @@ class LocalArchiveStorage(ArchiveStorage):
             archive_path: Directory path for storing archives
         """
         self.archive_path = Path(archive_path)
-        # Review finding: this `mkdir` used to be unguarded, and it runs at IMPORT
-        # time — `log_archive_service` is a module-level singleton whose `__init__`
-        # constructs storage, and `main.py` imports it. So a missing
-        # `/data/archives` under a parent UID 1000 cannot write (prod brought up
-        # without `start.sh`, whose chown is Linux-only; or a root-owned host bind
-        # dir) raised straight out of the import and crash-looped the backend with
-        # no API and no alarm. That is the opposite of the guarantee this file
-        # claims, so a failed mkdir is now just another way of being unwritable.
-        created = True
+        # Construction stays CHEAP and DB-free (CI finding). An earlier version
+        # probed and alarmed right here, which meant: a touch+unlink on every
+        # construction, and — on a host with no writable `/data`, i.e. exactly a CI
+        # runner — the alarm path importing `database` at IMPORT time, since
+        # `log_archive_service` is a module-level singleton. That produced three
+        # cascading tracebacks per test process and put database initialisation on
+        # the import path of anything that touches this module.
+        #
+        # So the constructor only records what it found; the operator alarm is
+        # raised by `probe_archive_writability()` at the start of an archival RUN,
+        # which is also where re-arming belongs.
+        self.init_error: Optional[str] = None
         try:
             self.archive_path.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            created = False
-            logger.error(
-                "[ArchiveStorage] cannot create %s: %s", self.archive_path, exc,
-            )
-            _alarm_unwritable_archive_dir(str(self.archive_path), f"{type(exc).__name__}: {exc}")
-        if created:
             logger.info(f"Local archive storage initialized: {self.archive_path}")
-        # #2205: prove writability HERE, not at the first store. `mkdir(exist_ok=True)`
-        # silently no-ops on a pre-existing root-owned directory, so this class
-        # reported itself "initialized" while every write was doomed — and the
-        # resulting ERROR went into the very log files archival exists to prune, i.e.
-        # the symptom and its diagnosis landed in the same unbounded file nobody
-        # tails. The preflight turns that into one operator-visible alarm.
-        if created:
-            self._preflight_writable()
+        except OSError as exc:
+            self.init_error = f"{type(exc).__name__}: {exc}"
+            logger.error(
+                "[ArchiveStorage] cannot create %s: %s — log archival will fail "
+                "and /data/logs will grow unbounded",
+                self.archive_path, self.init_error,
+            )
 
     def _preflight_writable(self):
         """Probe the archive directory and alarm if unwritable.
@@ -186,7 +181,11 @@ class LocalArchiveStorage(ArchiveStorage):
         silent.
         """
         if os.getenv("LOG_ARCHIVE_ENABLED", "true").lower() != "true":
-            return
+            return True
+        if self.init_error:
+            # The directory could not even be created; nothing to probe.
+            _alarm_unwritable_archive_dir(str(self.archive_path), self.init_error)
+            return False
         probe = self.archive_path / f".perm-probe-{os.getpid()}"
         try:
             probe.touch()
