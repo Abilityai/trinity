@@ -133,6 +133,16 @@ def _load_crud(monkeypatch):
     git_service.check_remote_branch_exists = AsyncMock(return_value=True)
     git_service.reserve_and_generate_instance_id = AsyncMock(
         return_value=("iid-1", "main"))
+    # #2069: `_apply_github_env` now gates GIT_SYNC_AUTO on the real
+    # `_git_auto_sync_baked` predicate (the single owner). A bare MagicMock is
+    # TRUTHY, which would set GIT_SYNC_AUTO for every case; give the mock a
+    # faithful copy so these tests exercise the real gating. The REAL predicate's
+    # matrix is guard-tested in `test_2069_gitignore_at_creation::TestBakePredicate`.
+    git_service._git_auto_sync_baked = (
+        lambda config, github_repo, github_pat, fork_upstream: bool(github_repo)
+        and bool(github_pat)
+        and (not config.source_mode or bool(fork_upstream))
+    )
 
     github_service_mod = MagicMock()
     github_service_mod.GitHubError = _GitHubError

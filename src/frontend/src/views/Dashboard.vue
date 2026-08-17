@@ -822,6 +822,27 @@ function applyDeepLinkFilters() {
 }
 
 onMounted(async () => {
+  // Document-level interaction is armed FIRST, above every await (#2200).
+  //
+  // The fleet paints as soon as fetchAgents() ALONE resolves (the
+  // `agents.length > 0` template gate), but the await below waits on the
+  // SLOWEST of five fetches. Registering down there left a window — ~50ms
+  // measured, but `max(five) - fetchAgents()` and so unbounded on a large
+  // fleet or a cold DB — in which the dashboard rendered as interactive and
+  // every `/` was silently dropped. The slot was inherited, not chosen: the
+  // ent#261 hotkey was appended beside handleClickOutside, whose position had
+  // silently become post-await when PERF-269 introduced the parallel fetch.
+  //
+  // Safe by construction: neither handler reads fetched data — every guard in
+  // handleDashboardKeydown reads the event or a setup()-created ref, and
+  // handleClickOutside is a no-op while showTagDropdown is false. Registering
+  // early only means `/` and click-outside work sooner.
+  //
+  // Do NOT move these below an await. Guarded by
+  // tests/unit/mountListenerOrdering.spec.js.
+  document.addEventListener('click', handleClickOutside) // tag dropdown dismiss
+  document.addEventListener('keydown', handleDashboardKeydown) // ent#261 type-to-filter + Esc backstop
+
   // Initialize system views store (restores persisted view selection)
   systemViewsStore.initialize()
 
@@ -861,11 +882,6 @@ onMounted(async () => {
   if (networkStore.isTimelineMode) {
     networkStore.startActivityRefresh()
   }
-
-  // Add click outside listener for tag dropdown
-  document.addEventListener('click', handleClickOutside)
-  // Type-to-filter hotkey + Esc backstop (ent#261) — Dashboard-scoped.
-  document.addEventListener('keydown', handleDashboardKeydown)
 })
 
 onUnmounted(() => {

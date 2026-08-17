@@ -90,6 +90,11 @@ turnkey SQLite→Postgres data-copy tool today (tracked with the migration work 
     "SELECT version_num FROM alembic_version;"
   ```
 - Agents list, schedules, and recent executions render as expected in the UI.
+- **The canary invariant harness (CANARY-001) is backend-agnostic since #1540** —
+  every SQL-tier collector reads the configured backend via the
+  `get_engine()`/`DATABASE_URL` seam, so it is safe to keep `CANARY_ENABLED=1` on
+  PostgreSQL. Do **not** re-derive the retired SQLite-only constraint from this
+  doc; run-state is observable at `GET /api/canary/status` (#2217).
 
 ## Release-notes announcement (draft copy for the next release)
 

@@ -2321,6 +2321,69 @@ class RunCycleResponse(BaseModel):
     )
 
 
+class CanaryStatusResponse(BaseModel):
+    """Run-state of the canary harness (#2217) — `GET /api/canary/status`.
+
+    Answers the "is the harness actually running" question that a disabled
+    canary (zero violations, byte-identical to a clean fleet) otherwise hides.
+    Plain fields only — no canary-lib symbols — so this lives in models.py
+    rather than following the `RunCycleRequest` in-router exception (Inv #14).
+    """
+
+    enabled: bool = Field(
+        ...,
+        description="CANARY_ENABLED == '1'. Answers the disabled case; "
+        "default-OFF is the normal state for most installs.",
+    )
+    status: str = Field(
+        ...,
+        description=(
+            "Derived liveness: 'disabled' (never an alarm, Redis never read), "
+            "'unknown' (enabled but no readable cursor — fail-open, never an "
+            "alarm), 'stale' (enabled, cursor older than stale_after_seconds — "
+            "the incident case), or 'healthy'."
+        ),
+    )
+    last_cycle_at: Optional[str] = Field(
+        None,
+        description=(
+            "ISO-Z from the shared canary:last_cycle_at cursor — the "
+            "collection-START instant of the last cycle the leader completed "
+            "(lags real completion by up to one cycle's duration). null = no "
+            "cycle recorded yet / cursor unreadable / disabled."
+        ),
+    )
+    seconds_since_last_cycle: Optional[int] = Field(
+        None,
+        description="Age of last_cycle_at, clamped max(0, int(age)) so clock "
+        "skew never yields a negative int; null when unknown/disabled.",
+    )
+    interval_seconds: int = Field(
+        ..., description="Scheduled cycle interval (CANARY_INTERVAL_SECONDS, 300 default)."
+    )
+    stale_after_seconds: int = Field(
+        ...,
+        description=(
+            "The staleness bound: _max_failover_seconds + _MAX_CYCLE_LEASE_SECONDS "
+            "(≈1680s at defaults) — provably above both the leader-failover window "
+            "and a maxed-out-but-healthy cycle. Explicit + testable."
+        ),
+    )
+    alert_sink_configured: bool = Field(
+        ...,
+        description=(
+            "Whether CANARY_SLACK_WEBHOOK_URL is set. A cycling canary with no "
+            "sink persists violations but pushes nothing — surfaced separately "
+            "from `status` (liveness and can-it-alert are orthogonal facts)."
+        ),
+    )
+    redis_available: Optional[bool] = Field(
+        None,
+        description="Whether the cursor read succeeded (distinguishes Redis "
+        "down from just-booted); null when not consulted (disabled).",
+    )
+
+
 # =============================================================================
 # Event Subscriptions Models (routers/event_subscriptions.py)
 # =============================================================================

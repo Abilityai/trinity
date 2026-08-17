@@ -48,7 +48,9 @@ from typing import Dict, List, Optional, Tuple
 from fastapi import HTTPException
 
 from ..models import ExecutionLogEntry, ExecutionMetadata
-from ..model_context import CODEX_CONTEXT_WINDOW, resolve_context_window
+# CODEX_CONTEXT_WINDOW is re-exported deliberately: it is the legacy-family
+# window and is referenced as a module attribute by tests. Not dead code.
+from ..model_context import CODEX_CONTEXT_WINDOW, resolve_context_window  # noqa: F401
 from ..state import agent_state
 from ..utils.credential_sanitizer import (
     sanitize_dict,
@@ -78,34 +80,189 @@ _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="codex-subproc"
 # GPT-5 context window (input). Cosmetic — drives the context gauge only.
 # Single-sourced from the shared model catalog (#1521); imported above.
 
-# Codex / GPT-5 pricing per 1K tokens (USD). Codex reports no cost; we derive
-# it from token counts. ``cached`` is the discounted rate for cached input
-# tokens. Bump deliberately when OpenAI pricing changes (#1137-style).
+# ---------------------------------------------------------------------------
+# Pricing (#1187, corrected #2207)
+# ---------------------------------------------------------------------------
+# Codex reports NO cost of its own (``cost_reporting: "estimated"``), so the
+# number computed here IS the number Trinity records — it feeds
+# ``schedule_executions.cost``, agent analytics, cost-threshold alerts, and the
+# loop cost budget ``max_cost_usd`` (#1155). A budget is a SPEND CONTROL, so an
+# understated rate is not a cosmetic metric error: it is a control bypass. Rates
+# are therefore chosen to fail toward OVER-reporting, mirroring the safe-failure
+# direction the context catalog argues for in ``model_context.py``.
+#
+# Rates are USD **per 1,000,000 tokens**, stated exactly as OpenAI publishes
+# them, so this table can be diffed against the rate card by eye. (#2207 changed
+# the unit from per-1K: the defect being fixed was a stale transcription, and
+# per-1K forced mental arithmetic on every audit.)
+#
+#   ``input``/``cached``/``output``  — standard tier.
+#   ``long_*``                       — the >272K-input tier, present ONLY for
+#                                      models OpenAI publishes one for.
+#
+# Canonical rate card (keep this comment as the bump-anchor):
+#     https://developers.openai.com/api/docs/pricing
+#     https://learn.chatgpt.com/docs/models   (which ids Codex accepts)
+# Last synced: 2026-08-15 (#2207)
+#
+# CACHE WRITES ARE PRICED, because Codex does report them. A real gpt-5.6-sol
+# turn on codex-cli 0.147.0 emits:
+#     "usage": {"input_tokens": 11398, "cached_input_tokens": 0,
+#               "cache_write_input_tokens": 11395, "output_tokens": 6, ...}
+# i.e. ``cache_write_input_tokens`` is a SUBSET of ``input_tokens`` — the same
+# subset trap as ``reasoning_output_tokens`` ⊂ ``output_tokens``. Input therefore
+# decomposes three ways and each part bills at its own rate:
+#     plain = input_tokens - cached_input_tokens - cache_write_input_tokens
+# Writes carry a 1.25x surcharge on gpt-5.4+; on that measured turn 99.97% of the
+# input were writes, so ignoring them under-reports the input side by ~25%.
+#
+# STILL out of scope: fast mode (~2x) is genuinely unobservable — nothing in the
+# event stream distinguishes it. That omission understates cost, is bounded, and
+# is documented rather than guessed.
+#
+# ``gpt-5.3-codex`` is deliberately absent: it is still reachable with an API key
+# but OpenAI publishes no rate for it, so it resolves to ``default`` (which
+# over-reports) rather than carrying a number we cannot source. Same for
+# ``gpt-5.3-codex-spark``. NEVER add a rate that is not on the card.
+LONG_CONTEXT_THRESHOLD_TOKENS = 272_000
+"""Input-token count above which the long-context tier applies.
+
+NOT a context window. The collision with the old flat ``CODEX_CONTEXT_WINDOW``
+value is exactly the confusion #2207 was filed about: 272K is the price break,
+while the 5.6 family's actual window is 1,050,000.
+"""
+
+# Field order mirrors the rate card left-to-right: standard tier, then the
+# >272K long tier. ``cache_write`` is present ONLY for the models OpenAI lists as
+# supporting prompt caching (the 5.6 family, 5.5, 5.4). It is deliberately absent
+# from -mini/-nano/-pro and the legacy families: the 1.25x rule is published, but
+# the list of models it applies to is ALSO published, and inferring a surcharge
+# onto a model outside that list is exactly the "never add a rate that is not on
+# the card" violation this table exists to prevent. Absent -> writes bill at the
+# plain input rate (see calculate_codex_cost).
 CODEX_PRICING: Dict[str, Dict[str, float]] = {
-    "gpt-5.1-codex": {"input": 0.00125, "cached": 0.000125, "output": 0.01},
-    "gpt-5.1-codex-max": {"input": 0.00125, "cached": 0.000125, "output": 0.01},
-    "gpt-5-codex": {"input": 0.00125, "cached": 0.000125, "output": 0.01},
-    "gpt-5.1": {"input": 0.00125, "cached": 0.000125, "output": 0.01},
-    "gpt-5": {"input": 0.00125, "cached": 0.000125, "output": 0.01},
-    "gpt-5-mini": {"input": 0.00025, "cached": 0.000025, "output": 0.002},
-    "gpt-5-nano": {"input": 0.00005, "cached": 0.000005, "output": 0.0004},
-    # Unknown / future model → GPT-5 standard pricing.
-    "default": {"input": 0.00125, "cached": 0.000125, "output": 0.01},
+    # --- GPT-5.6 (current; the Codex default is sol) --------------------------
+    "gpt-5.6-sol": {
+        "input": 5.00, "cached": 0.50, "cache_write": 6.25, "output": 30.00,
+        "long_input": 10.00, "long_cached": 1.00,
+        "long_cache_write": 12.50, "long_output": 45.00,
+    },
+    "gpt-5.6-terra": {
+        "input": 2.00, "cached": 0.20, "cache_write": 2.50, "output": 12.00,
+        "long_input": 4.00, "long_cached": 0.40,
+        "long_cache_write": 5.00, "long_output": 18.00,
+    },
+    "gpt-5.6-luna": {
+        "input": 0.20, "cached": 0.02, "cache_write": 0.25, "output": 1.20,
+        "long_input": 0.40, "long_cached": 0.04,
+        "long_cache_write": 0.50, "long_output": 1.80,
+    },
+    # --- GPT-5.5 -------------------------------------------------------------
+    "gpt-5.5": {
+        "input": 5.00, "cached": 0.50, "cache_write": 6.25, "output": 30.00,
+        "long_input": 10.00, "long_cached": 1.00,
+        "long_cache_write": 12.50, "long_output": 45.00,
+    },
+    # Pro tiers publish no cached rate; ``cached`` mirrors ``input`` so a cached
+    # token is never billed at a discount we cannot source (over-reports, safe).
+    "gpt-5.5-pro": {
+        "input": 30.00, "cached": 30.00, "output": 180.00,
+        "long_input": 60.00, "long_cached": 60.00, "long_output": 270.00,
+    },
+    # --- GPT-5.4 (retires from Codex 2026-08-31; still on the API rate card) --
+    "gpt-5.4": {
+        "input": 2.50, "cached": 0.25, "cache_write": 3.125, "output": 15.00,
+        "long_input": 5.00, "long_cached": 0.50,
+        "long_cache_write": 6.25, "long_output": 22.50,
+    },
+    "gpt-5.4-mini": {"input": 0.75, "cached": 0.075, "output": 4.50},
+    "gpt-5.4-nano": {"input": 0.20, "cached": 0.02, "output": 1.25},
+    "gpt-5.4-pro": {
+        "input": 30.00, "cached": 30.00, "output": 180.00,
+        "long_input": 60.00, "long_cached": 60.00, "long_output": 270.00,
+    },
+    # --- GPT-5.2 -------------------------------------------------------------
+    "gpt-5.2": {"input": 1.75, "cached": 0.175, "output": 14.00},
+    "gpt-5.2-pro": {"input": 21.00, "cached": 21.00, "output": 168.00},
+    # --- GPT-5.1 / GPT-5 (legacy; still resolvable for API-key callers) -------
+    # The ``-codex`` variants carry no separate rate-card entry and bill at their
+    # base model's rate; the explicit keys below are kept as documentation (the
+    # variant-suffix rule in _resolve_pricing would reach the same rates anyway).
+    "gpt-5.1-codex": {"input": 1.25, "cached": 0.125, "output": 10.00},
+    "gpt-5.1-codex-max": {"input": 1.25, "cached": 0.125, "output": 10.00},
+    "gpt-5.1": {"input": 1.25, "cached": 0.125, "output": 10.00},
+    "gpt-5-codex": {"input": 1.25, "cached": 0.125, "output": 10.00},
+    "gpt-5": {"input": 1.25, "cached": 0.125, "output": 10.00},
+    "gpt-5-mini": {"input": 0.25, "cached": 0.025, "output": 2.00},
+    "gpt-5-nano": {"input": 0.05, "cached": 0.005, "output": 0.40},
+    "gpt-5-pro": {"input": 15.00, "cached": 15.00, "output": 120.00},
+    # --- Fallback ------------------------------------------------------------
+    # Deliberately the flagship (gpt-5.6-sol) rate, NOT the cheapest tier. Two
+    # reasons, and the first is the common case rather than an edge case:
+    #   1. An agent that pins no model reaches here. ``_CodexParseState.model``
+    #      is the caller-supplied value and ``thread.started`` carries only a
+    #      thread id, so an unpinned turn is priced with ``model=None`` while the
+    #      CLI actually runs its own default — which IS gpt-5.6-sol.
+    #   2. An id we have never seen is more likely a NEWER (pricier) model than
+    #      an older one. Guessing cheap silently under-bills; guessing flagship
+    #      over-bills a budget into stopping early. Only one of those is safe.
+    "default": {
+        "input": 5.00, "cached": 0.50, "cache_write": 6.25, "output": 30.00,
+        "long_input": 10.00, "long_cached": 1.00,
+        "long_cache_write": 12.50, "long_output": 45.00,
+    },
 }
+
+# Bounded so a pathological stream of unknown ids cannot grow this without limit.
+_WARNED_UNKNOWN_MODELS: set = set()
+_MAX_WARNED_MODELS = 64
 
 
 def _resolve_pricing(model: Optional[str]) -> Dict[str, float]:
-    """Pricing for ``model`` — exact key first, then longest matching prefix,
-    then the ``default`` fallback (never KeyErrors)."""
+    """Pricing for ``model`` — exact key, then longest *variant* prefix, then
+    ``default``. Total function: never raises, always returns a rate dict.
+
+    THE PREFIX MATCH IS BOUNDARY-AWARE, and that is the point (#2207). A bare
+    ``startswith`` makes every key a catch-all for future generations: with
+    ``gpt-5`` in the table, a ``gpt-5.7-sol`` released tomorrow silently resolves
+    to the oldest, cheapest rate in the file — which is the very defect this
+    table was rewritten to fix, pre-armed for the next release. So a prefix only
+    matches when the remainder begins with ``-`` (a VARIANT or date suffix of
+    the same model) and never when it begins with ``.`` (a new version number):
+
+        gpt-5.1-codex-2025-11-01  -> gpt-5.1-codex   (remainder "-2025-11-01")
+        gpt-5-mini-2025-xx        -> gpt-5-mini      (remainder "-2025-xx")
+        gpt-5.2-codex             -> gpt-5.2         (remainder "-codex")
+        gpt-5.7-sol               -> default         (remainder ".7-sol")
+
+    An unknown id is logged ONCE (not per turn — this runs on every completed
+    turn) so a newly-shipped model is visible in the log without flooding it.
+    The dedup set is capped; past the cap ids beyond it warn every time rather
+    than going silent, because a noisy unknown-model signal beats a hidden one.
+    """
     if not model:
         return CODEX_PRICING["default"]
-    key = model.lower()
+    key = model.strip().lower()
+    if not key:
+        return CODEX_PRICING["default"]
     if key in CODEX_PRICING:
         return CODEX_PRICING[key]
-    # Longest-prefix match so "gpt-5.1-codex-2025-xx" resolves to the codex rate.
-    candidates = [k for k in CODEX_PRICING if k != "default" and key.startswith(k)]
+    candidates = [
+        k
+        for k in CODEX_PRICING
+        if k != "default" and key.startswith(k) and key[len(k) :].startswith("-")
+    ]
     if candidates:
         return CODEX_PRICING[max(candidates, key=len)]
+    if key not in _WARNED_UNKNOWN_MODELS:
+        if len(_WARNED_UNKNOWN_MODELS) < _MAX_WARNED_MODELS:
+            _WARNED_UNKNOWN_MODELS.add(key)
+        logger.warning(
+            "_resolve_pricing: unrecognized Codex model %r; billing at the "
+            "flagship default rate (over-reports rather than under-reports). "
+            "Add it to CODEX_PRICING in codex_runtime.py if it is real.",
+            model,
+        )
     return CODEX_PRICING["default"]
 
 
@@ -114,6 +271,7 @@ def calculate_codex_cost(
     cached_input_tokens: int,
     output_tokens: int,
     model: Optional[str] = None,
+    cache_write_input_tokens: int = 0,
 ) -> float:
     """Estimated USD cost for a Codex turn.
 
@@ -121,15 +279,55 @@ def calculate_codex_cost(
     ``output_tokens`` once, never ``output_tokens + reasoning_output_tokens``.
     Cached input tokens bill at the cheaper cached rate; only the uncached
     remainder bills at the full input rate.
+
+    ``cache_write_input_tokens`` is likewise a SUBSET of ``input_tokens`` and
+    bills at its own surcharged rate, so input splits three ways — plain, cached
+    reads, cache writes — and the three must sum back to ``input_tokens``, never
+    exceed it.
+
+    Rates in ``CODEX_PRICING`` are per 1,000,000 tokens (#2207). A prompt over
+    ``LONG_CONTEXT_THRESHOLD_TOKENS`` escalates the whole request to the model's
+    long-context rates where it has them.
+
+    ``cache_write_input_tokens`` defaults to 0 and is the LAST parameter so the
+    existing positional call sites keep working unchanged.
     """
     pricing = _resolve_pricing(model)
-    uncached_input = max(0, input_tokens - cached_input_tokens)
+    # Long-context tier: OpenAI prices the FULL request at 2x input / 1.5x output
+    # once the prompt exceeds 272K input tokens. Only applied for models that
+    # publish such a tier — the older families cannot reach the threshold anyway
+    # (their whole window is <= 272K), so a blanket rule would be fiction.
+    use_long = (
+        input_tokens > LONG_CONTEXT_THRESHOLD_TOKENS and "long_input" in pricing
+    )
+    input_rate = pricing["long_input"] if use_long else pricing["input"]
+    cached_rate = pricing["long_cached"] if use_long else pricing["cached"]
+    output_rate = pricing["long_output"] if use_long else pricing["output"]
+    # A model with no published cache-write surcharge bills writes as plain input
+    # (the pre-gpt-5.4 behaviour) rather than inventing a multiplier.
+    write_key = "long_cache_write" if use_long else "cache_write"
+    write_rate = pricing.get(write_key, input_rate)
+
     cached = max(0, cached_input_tokens)
-    input_cost = (uncached_input / 1000) * pricing["input"] + (
-        cached / 1000
-    ) * pricing["cached"]
-    output_cost = (output_tokens / 1000) * pricing["output"]
-    return round(input_cost + output_cost, 6)
+    writes = max(0, cache_write_input_tokens)
+    # Both counters are subsets of input_tokens, but they arrive from an external
+    # process: clamp so a malformed payload can never bill a negative plain
+    # remainder (which would silently REDUCE the total) or over-count the input.
+    if cached + writes > input_tokens:
+        writes = max(0, min(writes, input_tokens))
+        cached = max(0, min(cached, input_tokens - writes))
+    plain_input = max(0, input_tokens - cached - writes)
+
+    input_cost = (
+        (plain_input / 1_000_000) * input_rate
+        + (cached / 1_000_000) * cached_rate
+        + (writes / 1_000_000) * write_rate
+    )
+    # Same external-payload defence on the output side: a negative count would
+    # otherwise SUBTRACT from the bill. The loop budget (#1155) ignores
+    # non-positive costs fail-open, so a negative here reads as "free".
+    output_cost = (max(0, output_tokens) / 1_000_000) * output_rate
+    return round(max(0.0, input_cost + output_cost), 6)
 
 
 # ---------------------------------------------------------------------------
@@ -553,13 +751,16 @@ def _process_codex_event(event: dict, state: _CodexParseState) -> None:
         usage = event.get("usage") or {}
         input_tokens = int(usage.get("input_tokens") or 0)
         cached = int(usage.get("cached_input_tokens") or 0)
+        # Subset of input_tokens, surcharged on gpt-5.4+ (#2207). Verified
+        # present on codex-cli 0.147.0; absent on older payloads -> 0.
+        cache_writes = int(usage.get("cache_write_input_tokens") or 0)
         output_tokens = int(usage.get("output_tokens") or 0)
         # reasoning_output_tokens is a subset of output_tokens — do NOT add it.
         state.metadata.input_tokens = input_tokens
         state.metadata.output_tokens = output_tokens
         state.metadata.cache_read_tokens = cached
         state.metadata.cost_usd = calculate_codex_cost(
-            input_tokens, cached, output_tokens, state.model
+            input_tokens, cached, output_tokens, state.model, cache_writes
         )
 
     elif event_type == "turn.failed":
@@ -607,7 +808,11 @@ def parse_codex_jsonl(
     ``response_text`` is the JSONL-assembled fallback (the live path overrides
     it with the ``-o`` file)."""
     metadata = ExecutionMetadata()
-    metadata.context_window = CODEX_CONTEXT_WINDOW
+    # Model-aware, not flat (#2207): the 5.6 family's window is 1.05M, not 272K.
+    # The live path already resolves per-model via get_context_window(); this
+    # entrypoint hardcoded the legacy constant, so tests and production disagreed
+    # about the very value under test.
+    metadata.context_window = resolve_context_window(model)
     state = _CodexParseState(execution_log=[], metadata=metadata, response_parts=[], model=model)
     raw_messages: List[Dict] = []
     for line in lines:
@@ -701,7 +906,7 @@ class CodexRuntime(AgentRuntime):
             return False
 
     def get_default_model(self) -> str:
-        return "gpt-5.1-codex"
+        return "gpt-5.6-sol"
 
     def get_context_window(self, model: Optional[str] = None) -> int:
         """Fallback context window for Codex/GPT-5 models (#1521).

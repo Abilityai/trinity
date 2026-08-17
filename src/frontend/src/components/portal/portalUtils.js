@@ -83,18 +83,31 @@ export function shouldMarkTurnRead(completedSessionId, openSessionId) {
   return !!completedSessionId && completedSessionId === openSessionId
 }
 
-// #2133: how long the client may wait for a reply before concluding it has lost
-// track of the turn. The server sends this on the 202 (`wait_budget_seconds`)
-// because the server owns the turn timeout; this is only the fallback for an
-// older backend, and it must be sized the same way — TWO attempts, each of which
-// can exceed `timeout_seconds` (the dispatch adds HTTP slack and the #678
-// reader-race retry adds a whole second call on top).
+// #2133/#2214: how long the client may wait for a reply before concluding it
+// has lost track of the turn. The server owns the turn timeout and sends the
+// budget with every dispatch (`wait_budget_seconds` on the 202) and every
+// reattach (`in_flight_wait_budget_seconds` on the history response), so a
+// current backend never forces the client to guess.
 //
-// Exported so a test can assert it against the server's value instead of
-// re-declaring the arithmetic and passing vacuously.
-export const PORTAL_TURN_TIMEOUT_S = 300
-export const PORTAL_ATTEMPT_CEILING_S = PORTAL_TURN_TIMEOUT_S + 10 + 300
-export const REPLY_MAX_WAIT_MS_FALLBACK = (2 * PORTAL_ATTEMPT_CEILING_S + 60) * 1000
+// This literal is therefore DELIBERATELY FROZEN at the pre-#2214 server bound
+// — `(2 × (300 + 10 + 300) + 60)s` — because its only remaining audience is a
+// backend that predates the per-agent bound, whose real ceiling WAS exactly
+// this number. Do NOT "sync" it with the new server arithmetic: the server
+// bound is per-agent now (there is no one number to mirror), and re-sizing this
+// to, say, the 3600-default arithmetic would make a client of an OLD backend
+// wait ~2h for a turn that server killed at ~21min. When the budget field is
+// unreadable on a NEW backend, under-waiting degrades to the honest
+// "lost track — check shortly" message with no Retry — never a double-bill.
+export const REPLY_MAX_WAIT_MS_FALLBACK = (2 * (300 + 10 + 300) + 60) * 1000
+
+// #2214: the budget pick, extracted from the component so it is testable
+// without a mount harness (the ent#392 rule — decidable logic lives here).
+// A positive server budget wins; anything else (absent field from an old
+// backend, 0, NaN, negative) falls back to the frozen literal above.
+export function resolveWaitBudgetMs(budgetSeconds) {
+  const s = Number(budgetSeconds)
+  return s > 0 ? s * 1000 : REPLY_MAX_WAIT_MS_FALLBACK
+}
 
 // ent#361: @mentioning another agent from a 1:1 turns it into a group chat.
 //
@@ -495,6 +508,74 @@ export function starterFor(p) {
 // playbooks, and the roster is fetched once at mount. "This agent has no
 // playbooks exposed" would therefore be a false claim about operator
 // configuration for the ordinary state of an idle fleet.
+// ---------------------------------------------------------------------------
+// #2196 — the availability chip
+// ---------------------------------------------------------------------------
+//
+// ONE rule, here, consumed by every surface that renders it (sidebar row today;
+// picker, @-typeahead and briefing line next). Four inline `v-if`s across four
+// components is how four surfaces end up disagreeing about the same agent — and
+// there is no component-mount harness in this project (`package.json` carries no
+// @vue/test-utils, jsdom or happy-dom), so a rule expressed in a template can
+// only be guarded by regexing source, which catches deletion but never a wrong
+// rule. A pure function is genuinely unit-tested.
+
+export const AVAILABILITY_READY = 'ready'
+export const AVAILABILITY_STOPPED = 'stopped'
+export const AVAILABILITY_UNAVAILABLE = 'unavailable'
+export const AVAILABILITY_UNKNOWN = 'unknown'
+
+/**
+ * The chip for one roster card, or `null` when nothing should be rendered.
+ *
+ * Null for `ready` AND for `unknown`: `unknown` means Trinity could not read
+ * container state at all (an unreadable Docker socket marks every card at once),
+ * so labelling it would put a warning on the whole roster over an infrastructure
+ * fault the viewer can neither see nor act on. Fail-open — render as before.
+ *
+ * `detailed` distinguishes STOPPED from NO-CONTAINER, and defaults to false.
+ * That is a disclosure decision, not a formatting one: to an external client the
+ * two states differ only in whether the operator deleted or lost the agent, and
+ * neither is actionable for them (starting an agent is an operator action, and
+ * the Workspace deliberately has no start control). A platform session — an
+ * operator looking at their own fleet — sees the distinction, because for them
+ * it is the difference between "start it" and "find out what happened to it".
+ *
+ * Nothing here is derived from a Docker string: `availability` is one of four
+ * server-chosen constants, and an unrecognised value renders nothing.
+ */
+export function availabilityChip(agent, { detailed = false } = {}) {
+  const state = String(agent?.availability ?? '')
+  if (state !== AVAILABILITY_STOPPED && state !== AVAILABILITY_UNAVAILABLE) return null
+
+  const owner = String(agent?.owner ?? '').trim()
+  // The card already carries the owner, so naming them costs nothing and is far
+  // more actionable than "its owner".
+  const who = owner ? owner : 'its owner'
+
+  if (!detailed) {
+    return {
+      state,
+      label: 'Unavailable',
+      variant: 'warning',
+      title: `This agent can't take a message right now — ask ${who} to start it.`,
+    }
+  }
+  return state === AVAILABILITY_STOPPED
+    ? {
+      state,
+      label: 'Stopped',
+      variant: 'warning',
+      title: `This agent is stopped — ask ${who} to start it.`,
+    }
+    : {
+      state,
+      label: 'Unavailable',
+      variant: 'danger',
+      title: `This agent has no running container — ask ${who} to start it.`,
+    }
+}
+
 export const EMPTY_REASON_NO_PLAYBOOKS = 'No playbooks are available for this agent right now.'
 export const EMPTY_REASON_NO_PEERS = 'No other agents are shared with you.'
 export const EMPTY_REASON_NO_MENTIONABLE_PEERS =
@@ -745,4 +826,156 @@ export function clampActiveIndex(current, length) {
   const n = Number.isInteger(length) ? length : 0
   if (n <= 0) return -1
   return Number.isInteger(current) && current >= 0 && current < n ? current : -1
+}
+
+// ---------------------------------------------------------------------------
+// #2212 — dictation: which mic path to take, and what to SAY when it fails.
+//
+// Measured in Playwright's Chromium (secure context, mic permission granted,
+// fake audio device): `webkitSpeechRecognition` exists, `start()` does not
+// throw, and then NOTHING happens — no `start`, no `audiostart`, no `result`,
+// no `error`, no `end` inside 15s. `continuous` also defaults to `false`, so
+// even on a build where the service does answer, recognition ends at the first
+// pause. That API is a browser-hosted, Google-backed service: we cannot fix it,
+// cannot see into it, and it is the branch the component preferred whenever the
+// object merely EXISTED.
+//
+// So the preference inverts: when the platform can transcribe server-side, we
+// record locally and upload, because that path is ours end to end (a real HTTP
+// status, a real error string, a real transcript). Web Speech stays as the
+// no-key fallback — free and often fine in official Chrome — rather than the
+// default.
+// ---------------------------------------------------------------------------
+
+// Below this, a "recording" is a click-through, not speech (~0.12s of Opus;
+// a 2s clip measures ~24 KB). Kept as a named constant because it is also the
+// threshold the "too short" message describes.
+export const MIN_RECORDING_BYTES = 1500
+
+// A speech attempt that produced no result and no error still failed, and the
+// user needs to hear that rather than watch the mic quietly switch itself off.
+export const SPEECH_NO_RESULT_MESSAGE =
+  "Didn't catch anything — try again and speak once the mic turns red."
+
+// The measured Chromium case: `start()` returns and the engine never reports
+// anything at all. Without a watchdog the button stays lit forever, which is
+// the one state that cannot be recovered from by waiting.
+export const SPEECH_UNRESPONSIVE_MESSAGE =
+  "Your browser's dictation service didn't respond — type your message instead."
+
+export const RECORDING_TOO_SHORT_MESSAGE =
+  'That recording was too short — hold the mic on while you speak.'
+
+export const TRANSCRIPT_EMPTY_MESSAGE =
+  "Didn't catch that — try again, or type your message instead."
+
+export const TTS_FAILED_MESSAGE =
+  "Couldn't play that reply aloud — the text is above."
+
+// How long to wait for the browser's speech engine to say ANYTHING before
+// declaring it unresponsive. Long enough not to trip a slow-but-working start,
+// short enough that a dead engine does not look like a hung UI.
+export const SPEECH_START_TIMEOUT_MS = 4000
+
+// `serverStt` is the platform's honest answer ("an ElevenLabs key resolves"),
+// NOT a browser capability — the previous gate mixed the two, so an instance
+// with no provider still rendered a mic that could not work.
+//
+//   record  → MediaRecorder + POST /stt   (ours: real errors, real transcript)
+//   speech  → browser Web Speech API      (no key needed; unfixable when broken)
+//   null    → no mic control at all       (rather than a dead affordance)
+export function resolveMicMode({ speechApi = false, canRecord = false, serverStt = false } = {}) {
+  if (canRecord && serverStt) return 'record'
+  if (speechApi) return 'speech'
+  return null
+}
+
+// SpeechRecognitionErrorEvent.error codes. `aborted` returns null: it is what
+// the user's own Stop click raises, and an "error" notice for a deliberate stop
+// teaches people the feature is broken when it just obeyed them.
+const SPEECH_ERROR_MESSAGES = {
+  'not-allowed':
+    'Microphone access is blocked — allow it for this site in your browser, then try again.',
+  'service-not-allowed':
+    "Your browser wouldn't let its dictation service run — type your message instead.",
+  network:
+    "Your browser's dictation service is unreachable — type your message instead.",
+  'audio-capture': 'No microphone was found — check your input device.',
+  'no-speech': "Didn't hear anything — try again and speak once the mic turns red.",
+  'language-not-supported': 'Your browser cannot dictate in this language.',
+  'bad-grammar': 'Your browser rejected the dictation request — type your message instead.',
+}
+
+export function speechErrorMessage(code) {
+  if (code === 'aborted') return null
+  if (code && SPEECH_ERROR_MESSAGES[code]) return SPEECH_ERROR_MESSAGES[code]
+  // An unknown code is still a code: naming it beats "something went wrong",
+  // and it is the string a support conversation actually needs.
+  return code
+    ? `Dictation stopped (${code}) — type your message instead.`
+    : 'Dictation stopped unexpectedly — type your message instead.'
+}
+
+// getUserMedia / MediaRecorder rejections are DOMExceptions distinguished only
+// by `name`. A denied permission previously returned from `catch {}` with no
+// state change at all, which is indistinguishable from "started, then stopped".
+export function recorderErrorMessage(err) {
+  switch (err?.name) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return 'Microphone access is blocked — allow it for this site in your browser, then try again.'
+    case 'NotFoundError':
+    case 'OverconstrainedError':
+      return 'No microphone was found — check your input device.'
+    case 'NotReadableError':
+      return 'Your microphone is in use by another app — close it and try again.'
+    default:
+      return "Couldn't start the microphone — type your message instead."
+  }
+}
+
+// The /stt endpoint already answers with user-facing strings ("Voice input is
+// not available", "Recording is too long", "Didn't catch that — please try
+// again"); the component was throwing them away in a bare `catch {}`.
+export function transcriptionErrorMessage(err) {
+  const detail = err?.response?.data?.detail
+  if (typeof detail === 'string' && detail.trim()) return detail.trim()
+  if (!err?.response) return "Couldn't reach Trinity to transcribe that — type your message instead."
+  if (err.response.status === 429) return 'Too many voice messages just now — wait a moment and try again.'
+  if (err.response.status === 413) return 'That recording is too long.'
+  if (err.response.status === 404) return 'Voice input is not set up on this workspace — type your message instead.'
+  return `Transcription failed (error ${err.response.status}) — type your message instead.`
+}
+
+// One verdict for a finished dictation attempt, so "what do we tell the user"
+// is decided in exactly one place instead of across three event handlers that
+// each fire in a different order per engine.
+//
+// Precedence is deliberate: an unresponsive engine outranks everything (it is
+// the state the user cannot escape by waiting), then an explicit error code,
+// then "we got words" (say nothing — the transcript IS the feedback), and the
+// remaining case — ended, no words, no reason — is the silent failure this
+// issue was filed for.
+export function speechAttemptOutcome({ gotText = false, errorCode = null, timedOut = false } = {}) {
+  if (timedOut) return SPEECH_UNRESPONSIVE_MESSAGE
+  if (errorCode) return speechErrorMessage(errorCode)   // null when the user stopped it
+  if (gotText) return null
+  return SPEECH_NO_RESULT_MESSAGE
+}
+
+// What the recorded clip actually IS. Measured (Playwright, fake mic):
+//
+//   Chromium  rec.mimeType = "audio/webm;codecs=opus", chunk.type = same
+//   Firefox   rec.mimeType = ""                      , chunk.type = "audio/ogg; codecs=opus"
+//
+// The component read `rec.mimeType || 'audio/webm'`, so every Firefox clip — the
+// engine that has no Web Speech API and therefore ALWAYS records — was uploaded
+// as `voice.webm` with `content-type: audio/webm` while containing Ogg. The
+// chunks carry the truth when the recorder does not, so they are the fallback
+// ahead of the constant.
+export function resolveRecordingMimeType(recorderMimeType, chunks = []) {
+  const fromRecorder = (recorderMimeType || '').trim()
+  if (fromRecorder) return fromRecorder
+  const fromChunk = (Array.isArray(chunks) ? chunks : []).find((c) => (c?.type || '').trim())
+  return (fromChunk?.type || '').trim() || 'audio/webm'
 }

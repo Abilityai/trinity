@@ -59,11 +59,34 @@
       </div>
     </div>
 
+    <!-- Exactly LEGEND_ROWS whole rows (#2228). The clamp below hides a third
+         row outright rather than slicing one, and `legendFit` guarantees there
+         is nothing in it to hide — anything that would not fit is handed to the
+         `+N` chip, which names it rather than dropping it silently. -->
     <div class="ex-legend">
-      <span v-for="b in legend" :key="b.name" class="ex-key" :title="`${b.name}: ${b.total}`">
-        <i :class="'ex-dot ex-bk-' + b.token"></i>{{ b.name }}
+      <span
+        v-for="k in legend.shown"
+        :key="k.fail ? '\u0000failed' : k.name"
+        class="ex-key"
+        :class="{ 'ex-key-fail': k.fail }"
+        :title="`${k.name}: ${k.total}`"
+      >
+        <i class="ex-dot" :class="k.fail ? 'ex-dot-fail' : 'ex-bk-' + k.token"></i>{{ k.name }}
       </span>
-      <span v-if="head.failed" class="ex-key ex-key-fail"><i class="ex-dot ex-dot-fail"></i>failed</span>
+      <span v-if="legend.hidden.length" class="ex-key ex-key-more" :title="hiddenTitle">
+        <!-- Dots only while they still identify WHICH buckets are hidden. Past
+             three the swatches stop being a mapping and become decoration, so
+             the count carries it alone and the title stays authoritative. -->
+        <template v-if="legend.hidden.length <= 3">
+          <i
+            v-for="k in legend.hidden"
+            :key="k.name"
+            class="ex-dot"
+            :class="k.fail ? 'ex-dot-fail' : 'ex-bk-' + k.token"
+          ></i>
+        </template>
+        +{{ legend.hidden.length }}
+      </span>
     </div>
   </InfoTile>
 </template>
@@ -98,9 +121,12 @@ import { computed } from 'vue'
 import InfoTile from '../InfoTile.vue'
 import { useFleetGridStore } from '@/stores/fleetGrid'
 import {
+  CHART_HEIGHT,
   chartColumns,
   headline,
-  presentBuckets,
+  legendFit,
+  legendKeys,
+  RAIL_HEIGHT,
   tileState,
 } from '@/utils/executionsTile'
 
@@ -115,9 +141,23 @@ const gridStore = useFleetGridStore()
 const buckets = computed(() => gridStore.execTimeline || [])
 const head = computed(() => headline(buckets.value))
 const columns = computed(() =>
-  chartColumns(buckets.value, { triggerOrder: gridStore.execTriggerOrder }),
+  chartColumns(buckets.value, {
+    triggerOrder: gridStore.execTriggerOrder,
+    chartHeight: CHART_HEIGHT,
+    railHeight: RAIL_HEIGHT,
+  }),
 )
-const legend = computed(() => presentBuckets(gridStore.execTriggerOrder, buckets.value))
+const legend = computed(() =>
+  legendFit(legendKeys(gridStore.execTriggerOrder, buckets.value)),
+)
+
+/**
+ * What the `+N` chip is standing in for. Bucket names and counts only — the
+ * same backend vocabulary the columns already report on hover.
+ */
+const hiddenTitle = computed(
+  () => `Not shown: ${legend.value.hidden.map((k) => `${k.name}: ${k.total}`).join(' · ')}`,
+)
 
 const state = computed(() =>
   tileState({
@@ -168,6 +208,10 @@ function retry() {
   align-items: baseline;
   gap: 4px;
   font-size: 12px;
+  /* Pinned, not inherited: with the default line-height the baseline-aligned
+     mix of 20px and 12px text made this box 22.1px, and every px here comes
+     straight out of the legend at the other end of a fixed-height tile. */
+  line-height: 1;
   color: var(--gv-muted);
   margin-bottom: 6px;
 }
@@ -211,7 +255,11 @@ function retry() {
   display: flex;
   align-items: flex-end;
   gap: 2px;
-  height: 78px;
+  /* CHART_HEIGHT + COL_GAP + RAIL_HEIGHT + this padding, from
+     utils/executionsTile.js — the tallest a column can be, and nothing more.
+     It carried 4px of dead space, which is part of how the body came to
+     overflow (#2228). Pinned by executionsTile.spec.js. */
+  height: 70px;
   padding-bottom: 2px;
 }
 .ex-col {
@@ -247,30 +295,66 @@ function retry() {
   border-radius: 1px;
 }
 
+/* The legend occupies a WHOLE number of rows (#2228).
+   `max-height: 26px` was ~1.7 rows, so `overflow: hidden` cut row two through
+   its glyphs instead of hiding it. Pitch is now pinned rather than inherited:
+   `--ex-row` is set as `.ex-key`'s line-height, so the clamp is arithmetic over
+   values this file owns and cannot drift with a font change.
+   The row count MUST equal `LEGEND_ROWS` in utils/executionsTile.js — the
+   packer decides what fits, this decides how much is shown, and a disagreement
+   reintroduces silent truncation. Pinned by executionsTile.spec.js. */
 .ex-legend {
+  --ex-row: 13px;
+  --ex-row-gap: 2px;
   display: flex;
   flex-wrap: wrap;
-  gap: 2px 8px;
+  column-gap: 8px;
+  row-gap: var(--ex-row-gap);
   margin-top: 6px;
   font-size: 10px;
   color: var(--gv-muted);
   overflow: hidden;
-  max-height: 26px;
+  /* HEIGHT, not max-height: a ceiling grows and shrinks with the key count, so
+     the chart above would resize every time a bucket appeared or went quiet.
+     Reserved space is the price of a layout that never moves.
+     2 rows: 13 + 2 + 13 = 28px. A third row would begin at 30px and is
+     therefore hidden whole — rows are never partially rendered. */
+  height: calc(var(--ex-row) * 2 + var(--ex-row-gap));
 }
 .ex-key {
   display: inline-flex;
   align-items: center;
   gap: 3px;
   white-space: nowrap;
+  /* Pins the row pitch the clamp is computed from. */
+  line-height: var(--ex-row);
+  /* A key wider than the whole row is force-placed by the packer rather than
+     dropped; clip it here so it cannot widen the tile. */
+  max-width: 100%;
+  overflow: hidden;
 }
 .ex-key-fail {
   color: var(--gv-red-text);
+}
+/* The overflow chip. Zero vertical padding keeps it on the same 13px pitch as
+   every other key, so it can never be the thing that creates a third row. */
+.ex-key-more {
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--gv-seg-bg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
 }
 .ex-dot {
   width: 6px;
   height: 6px;
   border-radius: 2px;
   display: inline-block;
+  /* A flex item by virtue of `.ex-key`; without this the swatch is the first
+     thing squeezed when a long label meets `overflow: hidden`, and a legend
+     whose colour chip has been compressed to a sliver decodes nothing. */
+  flex: none;
 }
 .ex-dot-fail {
   background: var(--gv-red);

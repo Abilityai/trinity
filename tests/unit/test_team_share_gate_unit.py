@@ -25,7 +25,7 @@ import pytest
 
 
 _candidates = [
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src", "backend")),
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "backend")),
     "/app",
 ]
 _backend_path = next(

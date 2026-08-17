@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import axios from 'axios'
 import { useAuthStore } from './auth'
+import { once } from '../utils/inflight'
 
 /**
  * Session tab store (SESSION_TAB_2026-04 Phase 3.2).
@@ -79,9 +80,23 @@ export const useSessionsStore = defineStore('sessions', {
       if (this.featureFlagsLoaded && !force) return
       const authStore = useAuthStore()
       try {
-        const r = await axios.get('/api/settings/feature-flags', {
-          headers: authStore.authHeader,
-        })
+        // #2198: shared with `stores/enterprise.js`, which parses a disjoint
+        // slice of the SAME payload — two HTTP calls for one document on every
+        // authenticated page. `once`, not `dedupe`: the two were measured 319 ms
+        // apart, so the second starts after the first has resolved and a
+        // pure in-flight join does not reach it.
+        //
+        // Shared fetch rather than making one store call the other: delegation
+        // would require sessions.js to start retaining `enterprise_features`
+        // (it derives `a2aAvailable` inline and stores nothing), couple two
+        // domain-scoped stores against design-system-contract:87, and risk an
+        // import cycle. `force` is threaded through, so `Settings.vue`'s
+        // explicit refresh still refetches.
+        const r = await once(
+          'featureFlags',
+          () => axios.get('/api/settings/feature-flags', { headers: authStore.authHeader }),
+          { force }
+        )
         this.sessionTabEnabled = !!r.data?.session_tab_enabled
         this.voiceAvailable = !!r.data?.voice_available
         this.workspaceAvailable = !!r.data?.workspace_available

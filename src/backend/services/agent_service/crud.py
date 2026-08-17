@@ -41,6 +41,7 @@ from services.template_service import (
     generate_credential_files,
 )
 from services.template_schedules import normalize_declared_schedules
+from services.template_plugins import normalize_declared_plugins
 from services import git_service
 from services.settings_service import get_anthropic_api_key, resolve_github_pat, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
@@ -337,6 +338,11 @@ class _TemplateResolution:
     # key at all, so merging the two would change credential generation for
     # every GitHub agent. One normalized carrier, two producers.
     declared_schedules: list = field(default_factory=list)
+    # #1704: NORMALIZED declared `plugins:` (Claude Code marketplace plugins),
+    # fed by ALL THREE resolver branches — same one-carrier-two-producers shape
+    # as `declared_schedules`, NOT folded into `template_data` (the `github:`
+    # path never populates it). Empty dict = opt-in no-op.
+    declared_plugins: dict = field(default_factory=dict)
     # trinity-enterprise#15: staged backend-materialized snapshot for the
     # "copy" import intent. When set, `github_repo_for_agent` stays None by
     # design — the container gets NO GitHub env, no git-config row, no PAT.
@@ -578,6 +584,26 @@ def _declared_schedules_for_snapshot(snapshot) -> list:
             snapshot.source_repo, e,
         )
         return []
+
+
+def _declared_plugins_for_snapshot(snapshot) -> dict:
+    """Normalized `plugins:` for a copy-intent agent, read from the STAGED tree
+    (#1704) — twin of `_declared_schedules_for_snapshot`. Non-fatal: plugins are
+    advisory, so any read failure yields the opt-in empty declaration."""
+    template_yaml = Path(snapshot.staging_dir) / "template.yaml"
+    if not template_yaml.is_file():
+        return {}
+    try:
+        metadata = load_template_yaml(template_yaml.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            return {}
+        return normalize_declared_plugins(metadata.get("plugins"))
+    except Exception as e:  # noqa: BLE001 — plugins are advisory, never fatal
+        logger.warning(
+            "snapshot-import: could not read template.yaml plugins for %s: %s",
+            snapshot.source_repo, e,
+        )
+        return {}
 
 
 def _gate_tokenless_request(
@@ -1315,6 +1341,9 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
                 tr.declared_schedules = _declared_schedules_for_snapshot(
                     tr.copy_snapshot
                 )
+                tr.declared_plugins = _declared_plugins_for_snapshot(
+                    tr.copy_snapshot
+                )
                 return tr
 
             (
@@ -1336,6 +1365,9 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             )
             tr.declared_schedules = normalize_declared_schedules(
                 source_metadata.get("schedules")
+            )
+            tr.declared_plugins = normalize_declared_plugins(
+                source_metadata.get("plugins")
             )
             (
                 tr.github_repo_for_agent,
@@ -1367,6 +1399,9 @@ async def _resolve_template(config: AgentConfig, current_user: User) -> _Templat
             # construction, so neither source can quietly diverge.
             tr.declared_schedules = normalize_declared_schedules(
                 tr.template_data.get("schedules")
+            )
+            tr.declared_plugins = normalize_declared_plugins(
+                tr.template_data.get("plugins")
             )
     return tr
 
@@ -1532,6 +1567,15 @@ def _build_base_env(config: AgentConfig) -> dict:
     if _stall_limit:
         env_vars['AGENT_TOOL_STALL_LIMIT_S'] = _stall_limit
 
+    # #2127: operator-configurable headless early-finalize idle ceiling. Same
+    # propagation idiom as the stall limit above — unset leaves the agent-side
+    # default (300s). This is the documented escape hatch for the known bound
+    # that agents with an execution timeout under the ceiling lose #970's early
+    # finalize, so it has to actually be settable end to end.
+    _idle_finalize = (os.getenv('AGENT_IDLE_FINALIZE_S') or '').strip()
+    if _idle_finalize:
+        env_vars['AGENT_IDLE_FINALIZE_S'] = _idle_finalize
+
     # GUARD-001: per-agent guardrails overrides (empty by default; baseline
     # is always applied inside the container).
     _guardrails = db.get_guardrails_config(config.name)
@@ -1667,7 +1711,13 @@ def _apply_github_env(
         # ent#123: `and github_pat_for_agent` is a belt — tokenless is
         # provably source-mode+non-fork today, but auto-push must never
         # engage without credentials if that restriction is ever relaxed.
-        if (not config.source_mode or fork_upstream_repo) and github_pat_for_agent:
+        # #2069: this exact condition is the single owner
+        # `git_service._git_auto_sync_baked`, shared with the creation-time
+        # `.gitignore` merge spawn so the merge covers EXACTLY the population
+        # whose in-container auto-sync loop commits (ephemeral ghosts included).
+        if git_service._git_auto_sync_baked(
+            config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
+        ):
             env_vars['GIT_SYNC_AUTO'] = 'true'
 
         # Source mode (default): Track source branch directly for pull-only sync
@@ -2187,11 +2237,12 @@ async def _materialize_agent_files(
     github_pat_for_agent: Optional[str] = None,
     declared_schedules: Optional[list] = None,
     owner_username: str = "",
+    declared_plugins: Optional[dict] = None,
 ) -> None:
     """Materialize the S4 persistent-state allowlist (#383), the declared
-    data_paths (#1169) and the declared `schedules:` (trinity-enterprise#89)
-    into the agent, then opt non-source-mode GitHub agents into the auto-sync
-    heartbeat (#389). All four are non-fatal."""
+    data_paths (#1169), the declared `plugins:` (#1704) and the declared
+    `schedules:` (trinity-enterprise#89) into the agent, then opt non-source-mode
+    GitHub agents into the auto-sync heartbeat (#389). All are non-fatal."""
     # S4 (#383): Materialize persistent-state allowlist into the agent.
     # Runtime sync/reset paths read `.trinity/persistent-state.yaml`;
     # template.yaml is only read at creation (10-min cache), so this
@@ -2231,6 +2282,25 @@ async def _materialize_agent_files(
             f"{config.name}: {e}"
         )
 
+    # #1704: materialize the template's declared Claude Code `plugins:` into a
+    # COMMITTED `.trinity/plugins.yaml`, so the plugin selection survives a
+    # git-based reconstitution (the boot hook re-installs anything missing).
+    # Opt-in (empty = no-op) and ghost-skipped: an ephemeral agent never
+    # recreates and never persists. Non-fatal — sits inside the destructive
+    # rollback fence, so a raise here must never cost a successful creation
+    # (`declared_plugins` comes from the resolver, NOT `template_data`, since the
+    # `github:` path never populates the latter).
+    if declared_plugins and not config.ephemeral:
+        try:
+            await git_service.materialize_plugins(
+                config.name, declared_plugins
+            )
+        except Exception as e:
+            logger.warning(
+                f"[#1704] Failed to materialize plugins.yaml for "
+                f"{config.name}: {e}"
+            )
+
     # trinity-enterprise#89: materialize the template's declared `schedules:`.
     # The ghost skip lives HERE rather than in the helper: schedules on an
     # ephemeral agent are a 400 by ent#69 fleet hygiene, and a new caller must
@@ -2263,6 +2333,22 @@ async def _materialize_agent_files(
             logger.warning(
                 f"Failed to enable auto-sync for {config.name}: {e}"
             )
+
+    # #2069: the fleet-wide `.gitignore` merge never ran at creation, so the
+    # 15-min in-container auto-sync loop (on from birth for the GIT_SYNC_AUTO
+    # set — non-source/fork `github:` agents, ephemeral ghosts INCLUDED) staged
+    # `.trinity/` runtime state + the root-level `.env`/`.mcp.json` into a
+    # user-owned repo before any Push could migrate the list. Land the canonical
+    # list after startup.sh's FULL git setup (gated inside the merge on
+    # agent-server /health readiness, which follows the clone+checkout at
+    # startup.sh:517) and before the first auto-sync cycle. Fire-and-forget so it
+    # adds no creation latency; non-fatal. Gated on the SAME ENV predicate that
+    # bakes GIT_SYNC_AUTO (NOT the DB-flag block above, which excludes ghosts),
+    # so the merge covers exactly the auto-committing population.
+    if git_service._git_auto_sync_baked(
+        config, github_repo_for_agent, github_pat_for_agent, fork_upstream_repo
+    ):
+        git_service.spawn_gitignore_merge_after_clone(config.name)
 
 
 def _rollback_failed_creation(handles: _RollbackHandles) -> None:
@@ -2390,6 +2476,185 @@ def _created_by_this_attempt(container, floor_ts: Optional[str]) -> bool:
         return False
 
 
+# #2215 D2: bounded port-bind-conflict retry around `_create_agent_container`.
+# The per-port Redis reservation (docker_service, D1) is fail-open, so a Redis
+# outage/restart, an expired reservation, or a foreign host process can still
+# surface as a bind failure at `containers.run` — this belt converges those
+# within the same create call, before the caller (e.g. a first-run seed deploy)
+# computes a permanently-latched `partial`.
+_PORT_BIND_RETRY_MAX_ATTEMPTS = 3
+
+
+def _is_port_bind_conflict(exc: BaseException) -> bool:
+    """True when the failure is Docker failing to BIND the published SSH port.
+
+    Deliberately NARROW — exactly two daemon phrasings:
+      * "port is already allocated"  (docker-proxy, native Linux)
+      * "address already in use"     (userland-proxy phrasing, Docker Desktop)
+    and deliberately NOT the generic "conflict": daemon-unreachable / timeout /
+    name-conflict errors must bubble immediately without burning retries.
+
+    NOTE the overlap with `_is_container_name_conflict`, whose text fallback
+    matches the bare substring "already in use" — which Docker Desktop's bind
+    failure CONTAINS. A bind conflict proves `containers.create` SUCCEEDED
+    (only the start/bind failed) — the exact opposite of a name conflict (the
+    daemon created NOTHING) — so wherever both could match, bind must be
+    classified FIRST (see `_reclaim_failed_creation_container`). Duck-typed,
+    cycle-guarded cause/context walk, mirroring `_is_container_name_conflict`
+    (never `isinstance` against the docker module — it may be a test double).
+    """
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        # Defensive str(): docker.errors.APIError.__str__ dereferences response
+        # attributes and can itself raise on a partial/stubbed response object —
+        # and this classifier runs inside the never-raises reclaim (D2b), where
+        # a raise would REPLACE the creation error being reported.
+        try:
+            text = str(exc).lower()
+        except Exception:
+            text = ""
+        if "port is already allocated" in text or "address already in use" in text:
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+async def _cleanup_bind_failed_container(agent_name: str, floor_ts: Optional[str]) -> bool:
+    """Remove the Created container a failed port bind left behind (#2215 D2).
+
+    A bind failure means `containers.create` succeeded and only the start
+    failed — the daemon holds a Created `agent-{name}` husk that would 409 the
+    next attempt's name. Runs on EVERY bind-classified attempt, the final one
+    included, so a bind husk is never handed to the generic ent#313 reclaim
+    still on the name.
+
+    Returns True only when the name is PROVABLY clear for another attempt
+    (husk removed, or no container exists). Returns False on ANY doubt —
+    ownership row present, lookup failure, unprovable provenance, removal
+    failure — so the caller aborts retries and re-raises the ORIGINAL bind
+    error (the outer ent#313 reclaim then takes its own gated removal shot via
+    the bind-before-name precedence guard there). Proceeding after a failed
+    removal would make the next attempt 409 against our OWN husk, which the
+    reclaim reads as "not ours" and strands.
+
+    The lookup is a direct `containers.get`, NOT `get_agent_container`: that
+    helper flattens a lookup FAILURE into "absent", and here absent means
+    "safe to retry" while failure must abort. NotFound is duck-typed off the
+    response status (the `_is_container_name_conflict` rationale — the docker
+    module may be a test double).
+    """
+    try:
+        if db.is_agent_name_reserved(agent_name):
+            # Ownership-gate parity with the ent#313 reclaim: on a shared
+            # daemon the name may be claimed by an agent that is not ours.
+            logger.warning(
+                "#2215: %s has an ownership row — leaving its container alone; "
+                "aborting port retries",
+                agent_name,
+            )
+            return False
+    except Exception as lookup_exc:  # noqa: BLE001 — fail closed
+        logger.warning(
+            "#2215: ownership lookup failed for %s (%s) — aborting port retries",
+            agent_name,
+            lookup_exc,
+        )
+        return False
+    try:
+        target = docker_client.containers.get(f"agent-{agent_name}")
+    except Exception as lookup_exc:  # noqa: BLE001
+        status = getattr(getattr(lookup_exc, "response", None), "status_code", None)
+        if status == 404:
+            # No husk — the daemon kept nothing; the name is clear.
+            return True
+        logger.warning(
+            "#2215: container lookup failed for %s (%s) — aborting port retries",
+            agent_name,
+            lookup_exc,
+        )
+        return False
+    if not _created_by_this_attempt(target, floor_ts):
+        logger.warning(
+            "#2215: a container named agent-%s exists but is not provably this "
+            "attempt's — aborting port retries",
+            agent_name,
+        )
+        return False
+    try:
+        await container_remove(target, force=True)
+    except Exception as remove_exc:  # noqa: BLE001
+        logger.warning(
+            "#2215: could not remove the bind-failed container for %s (%s) — "
+            "aborting port retries",
+            agent_name,
+            remove_exc,
+        )
+        return False
+    logger.info(
+        "#2215: removed the bind-failed container for %s before the port retry",
+        agent_name,
+    )
+    return True
+
+
+async def _run_agent_container_with_port_retry(
+    config: AgentConfig,
+    volumes: dict,
+    env_vars: dict,
+    current_user: User,
+    ephemeral_expires_at: Optional[str],
+    handles: "_RollbackHandles",
+    auto_allocated_port: bool,
+):
+    """`_create_agent_container` with a bounded port-bind-conflict retry (#2215).
+
+    The D1 reservation is fail-open, so a collision can still surface at
+    `containers.run` (Redis down/restarted, reservation expired, a foreign
+    process on the host). On a bind-classified failure, in strict order:
+    (1) record the failed port; (2) clean up the leaked husk — on EVERY
+    bind-classified attempt, the final one included; (3) if attempts remain,
+    re-allocate with the failed ports excluded and retry. Bounded at
+    `_PORT_BIND_RETRY_MAX_ATTEMPTS` total attempts, and gated on the port
+    having been AUTO-allocated — a caller-pinned port never silently moves.
+    Any cleanup doubt aborts and re-raises the ORIGINAL bind error, never the
+    cleanup error. Mutating `config.port` between attempts is safe: it is
+    consumed only inside `_create_agent_container` (label + ports map, rebuilt
+    per call) and no DB copy of the port exists anywhere.
+    """
+    attempted_ports: set = set()
+    attempt = 1
+    while True:
+        try:
+            return await _create_agent_container(
+                config, volumes, env_vars, current_user, ephemeral_expires_at
+            )
+        except Exception as exc:  # noqa: BLE001 — non-bind re-raised immediately
+            if not auto_allocated_port or not _is_port_bind_conflict(exc):
+                raise
+            attempted_ports.add(config.port)
+            if not await _cleanup_bind_failed_container(
+                config.name, handles.container_floor_ts
+            ):
+                # Cleanup doubt: abort — the bare raise re-raises the ORIGINAL
+                # bind error, so the outer ent#313 reclaim gets its own shot.
+                raise
+            if attempt >= _PORT_BIND_RETRY_MAX_ATTEMPTS:
+                raise
+            new_port = get_next_available_port(exclude=attempted_ports)
+            logger.warning(
+                "#2215: port %s was already bound — retrying %s on port %s "
+                "(attempt %d/%d)",
+                config.port,
+                config.name,
+                new_port,
+                attempt + 1,
+                _PORT_BIND_RETRY_MAX_ATTEMPTS,
+            )
+            config.port = new_port
+            attempt += 1
+
+
 async def _reclaim_failed_creation_container(
     handles: _RollbackHandles, container, exc: BaseException
 ) -> None:
@@ -2452,7 +2717,12 @@ async def _reclaim_failed_creation_container(
         return
 
     if target is None:
-        if _is_container_name_conflict(exc):
+        # #2215 D2b: classify bind-conflict BEFORE the name-conflict decline —
+        # Docker Desktop's bind failure ("… bind: address already in use")
+        # contains the name-conflict text fallback's substring, but a bind
+        # conflict proves the create SUCCEEDED, so fall through to the
+        # fail-closed lookup + ownership + provenance gates instead.
+        if _is_container_name_conflict(exc) and not _is_port_bind_conflict(exc):
             logger.info(
                 "ent#313: creation of %s hit a container-name conflict — the "
                 "existing container is not ours, leaving it untouched",
@@ -2756,8 +3026,10 @@ async def create_agent_internal(
     if config.runtime:
         config.runtime = config.runtime.lower()
 
-    if config.port is None:
-        config.port = get_next_available_port()
+    # #2215: the SSH-port allocation moved INTO the docker try-block below (just
+    # before the container run) — see the comment there. `config.port` is
+    # consumed only by `_create_agent_container`, so nothing between here and
+    # there needs it.
 
     # CRED-002: Credentials are now injected directly into agents after creation
     # via the inject_credentials endpoint, not auto-injected during creation.
@@ -2856,8 +3128,33 @@ async def create_agent_internal(
                 cred_files_volume,
                 tr.template_shared_folders,
             )
-            container = await _create_agent_container(
-                config, volumes, env_vars, current_user, ephemeral_expires_at
+            # #2215: allocate the SSH port HERE — inside the rollback fence and
+            # as close to `containers.run` as possible. Two reasons it is not
+            # up with the other pre-try resolution steps: (1) the allocator now
+            # fails LOUD on a Docker listing fault (a swallowed fault would
+            # allocate 2222 over the existing fleet), and a raise before this
+            # try would strand the `agent_git_config` reservation
+            # `_resolve_template` already wrote — after which every create of
+            # that name fails `agent_git_config already exists`, Cornelius's
+            # next-boot retry included; (2) the per-port Redis reservation is
+            # TTL-bounded (600s), so the ent#15 snapshot prepopulate and the
+            # volume builds above must not eat into it. `auto_allocated_port`
+            # is captured BEFORE the mutation — captured after it, the gate is
+            # always-False and the bind-conflict retry ships dead. Only an
+            # auto-allocated port may move between attempts; a caller-pinned
+            # port never silently changes (a published port differing from the
+            # requested one is a surprise with security texture).
+            auto_allocated_port = config.port is None
+            if config.port is None:
+                config.port = get_next_available_port()
+            container = await _run_agent_container_with_port_retry(
+                config,
+                volumes,
+                env_vars,
+                current_user,
+                ephemeral_expires_at,
+                handles,
+                auto_allocated_port,
             )
             created_container = container
             agent_status = get_agent_status_from_container(container)
@@ -2886,6 +3183,7 @@ async def create_agent_internal(
                 tr.github_pat_for_agent,
                 tr.declared_schedules,
                 current_user.username,
+                tr.declared_plugins,
             )
             return agent_status
         except Exception as e:

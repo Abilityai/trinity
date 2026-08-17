@@ -39,6 +39,7 @@ _SUPPLIED_BY_HELPERS = {
     "ANTHROPIC_API_KEY",          # auth env, resolved from the persisted mode
     "AGENT_GUARDRAILS",           # lifecycle.py:491 (GUARD-001)
     "AGENT_TOOL_STALL_LIMIT_S",   # lifecycle.py:501
+    "AGENT_IDLE_FINALIZE_S",      # #2127, same propagation idiom as the stall limit
 }
 
 

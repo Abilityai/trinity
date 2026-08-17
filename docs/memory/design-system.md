@@ -356,7 +356,7 @@ The behavioral half of the standard (the visual half is §1–6). Confirmed in t
 20. Color via semantic tokens only; shared primitives; both themes first-class (#1430).
 21. Frontend invariants hold: domain-scoped stores, a single API client; loading flags live in stores, not components.
 22. Times carry honest context — relative for recency, absolute with timezone on hover or detail (see `docs/TIMEZONE_HANDLING.md`).
-23. Keyboard baseline: visible focus everywhere, Esc closes overlays, modals trap focus, tab order matches visual order.
+23. Keyboard baseline: visible focus everywhere, Esc closes overlays, modals trap focus, tab order matches visual order. Handlers are armed at mount, above every `await` — never behind fetched data. A surface that renders as interactive must already be interactive; this is the input-side twin of #15's honest-state rule for output. (#2200: the Dashboard `/` hotkey registered after `await Promise.allSettled([...5 fetches])` while the fleet painted on `fetchAgents()` alone, so keystrokes were silently dropped for an unbounded window. Guarded by `src/frontend/tests/unit/mountListenerOrdering.spec.js`.)
 24. Identity is encoded in form as well as color — classes and states are distinguishable by shape or icon, never by hue alone.
 25. Meaningful errors everywhere: every failure surface says what happened, what it means, and what to do — in user vocabulary; stack traces and HTTP codes go behind a details disclosure, never the headline.
 26. Expectation setting: non-instant actions state what will happen and roughly how long; multi-step operations show staged progress; say where the result will appear.

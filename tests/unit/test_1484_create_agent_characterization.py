@@ -1093,3 +1093,35 @@ async def test_case21_fork_destination_race_loser_rolls_back(crud_env, monkeypat
     assert exc.value.detail["code"] == "FORK_DESTINATION_IN_USE"
     ctx["db"].delete_git_config.assert_called_once_with("z-loser")
     ctx["docker_utils"].containers_run.assert_not_awaited()
+
+
+# ===========================================================================
+# Case 22 — #2215: a raising allocator lands INSIDE the rollback fence
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_case22_allocator_raise_rolls_back_gitconfig_and_mcp_key(
+        crud_env, monkeypatch):
+    """#2215 made `get_next_available_port` fail LOUD on a Docker listing fault
+    (it used to degrade to the empty set and hand out 2222). A raise there must
+    reach the same rollback as any other in-try failure: `_resolve_template`
+    has already written the `agent_git_config` reservation, and a stranded row
+    makes every later create of that name fail `agent_git_config already
+    exists` (Cornelius's next-boot retry included — a permanent seed failure
+    by a new route). Pinned so the allocation call cannot drift back out of
+    the docker try-block."""
+    crud, ctx = crud_env
+    _script_github_template(ctx)
+    _patch_repo_validation(monkeypatch, crud)
+    monkeypatch.setattr(
+        crud, "get_next_available_port",
+        MagicMock(side_effect=RuntimeError(
+            "cannot allocate a port: Docker listing failed (read timed out)")))
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        await crud.create_agent_internal(_github_config("rb-alloc"), _user(), None)
+    assert exc.value.status_code == 500
+    ctx["db"].delete_git_config.assert_called_once_with("rb-alloc")
+    ctx["db"].delete_agent_mcp_api_key.assert_called_once_with("rb-alloc")
+    ctx["docker_utils"].containers_run.assert_not_awaited()

@@ -19,6 +19,7 @@ import json
 import logging
 import math
 import os
+import re
 import subprocess
 import threading
 import time
@@ -118,6 +119,123 @@ def _resolve_stall_limit_s() -> float:
         )
         return _STALL_LIMIT_DEFAULT_S
     return val
+
+
+# #2127: background-task types `claude --print` does NOT wait for. Everything
+# else in the ledger gates the early-finalize.
+#
+# A DENYLIST, not an allowlist, and the direction is load-bearing. The CLI waits
+# for background subagents and workflows because "their result is part of the
+# final output", but grants a background *shell* only a ~5s grace before killing
+# it (measured: 5.09s). So a shell must never hold the finalize — that is #970's
+# original problem domain (a lingering child holding the pipe), and gating on it
+# would re-open the bug this gate preserves the fix for.
+#
+# Failure directions decide the shape: an allowlist that has not heard of a new
+# waited type (a workflow) leaves #2127 in place for it, silently, which is the
+# exact class being fixed. A denylist that has not heard of a new NON-waited type
+# costs a bounded extra wait, floored by `effective_timeout`. Unknown types are
+# counted and logged once so the vocabulary can be learned from production
+# instead of guessed (learnings.md 2026-07-16: a guard inherits the blind spot of
+# the one call form it was written against).
+_NON_WAITED_BG_TASK_TYPES = frozenset({"local_bash", "local_shell"})
+
+# #2127: how long the stream must be SILENT before an early finalize is allowed.
+#
+# The background-task ledger alone is not sufficient, and the gap is not
+# theoretical — it is the shape the issue actually reports. Once the fan-out
+# finishes, the ledger drains to `[]` while the model is still composing the
+# synthesis those subagents were spawned to produce; the ledger says "idle" and
+# the deliverable is still minutes away. Measured: 5 subagents reported by
+# t+27.8s (ledger 0) and the real FINAL REPORT arrived at t+55.9s — a 28s window
+# in which the ledger-only gate would have stood aside and let the kill land on
+# "ECHO reported.".
+#
+# Output idleness is what #970's own failure actually is: claude ALIVE, blocked
+# on an MCP stdio child, emitting nothing. "Still producing output" therefore
+# separates the two cases directly, where the ledger only proxies for one of
+# them.
+#
+# The value is set by what a HEALTHY run's longest silence can be. That is not
+# thinking (`thinking_tokens` flows about every 1.6s) but the generation of one
+# long assistant message: Trinity does not pass --include-partial-messages, so a
+# message is a SINGLE stdout line emitted only when complete. Measured on Claude
+# Code 2.1.220: a 9,840-char message = **40.54s of dead air** (vs a 7.33s worst
+# gap across three fan-out runs), scaling at roughly 4ms/char.
+#
+# 300s is ~7.4x that measurement, and the error costs are wildly asymmetric:
+# too LARGE only delays the pathological #970 finalize (still 24x better than
+# the 2h wedge it replaced, and the answer is correct either way), while too
+# SMALL destroys a finished deliverable and records it as success. Bias
+# generous. Env-tunable for an operator who hits an even longer generation.
+_IDLE_FINALIZE_DEFAULT_S = 300.0
+
+
+def _resolve_idle_finalize_s() -> float:
+    """Resolved early-finalize idle ceiling (seconds), read fresh per run.
+
+    Mirrors :func:`_resolve_stall_limit_s`: blank/absent/non-numeric/non-finite
+    all fall back to the default with a warning, so a typo cannot brick the
+    executor. Unlike the stall limit there is no disable sentinel — a ``<= 0``
+    value would restore the exact #2127 kill, so it is refused.
+    """
+    raw = os.environ.get("AGENT_IDLE_FINALIZE_S")
+    if raw is None or not raw.strip():
+        return _IDLE_FINALIZE_DEFAULT_S
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        val = math.nan
+    if not math.isfinite(val) or val <= 0:
+        logger.warning(
+            "[Headless Task] Invalid AGENT_IDLE_FINALIZE_S=%r — using default %.0fs "
+            "(a non-positive value would re-open #2127)",
+            raw, _IDLE_FINALIZE_DEFAULT_S,
+        )
+        return _IDLE_FINALIZE_DEFAULT_S
+    return val
+
+# Module-level so the once-per-process warning is not re-armed per run.
+_seen_unknown_bg_task_types: set = set()
+
+
+def _count_waited_bg_tasks(msg: Dict) -> int:
+    """In-flight background tasks `claude --print` will WAIT for, per #2127.
+
+    Reads a ``system/background_tasks_changed`` event, whose ``tasks`` array is a
+    **full snapshot** of what is currently in flight (measured — it goes
+    ``[A] -> [A,B] -> [A,B,C] -> [B,C] -> [B] -> []``), so no delta bookkeeping
+    or task_id correlation is needed: the latest event is the whole truth.
+
+    Returns 0 for a malformed or absent ``tasks`` array. That direction is
+    deliberate: 0 degrades to the pre-#2127 behaviour (early-finalize as before),
+    whereas treating "unparseable" as "still busy" would invent a hang class that
+    never existed. A gate that cannot read its own signal must not become the new
+    outage.
+
+    Reads ``task_type`` only — never ``description`` or ``prompt``, which carry
+    the subagent's prompt text, and never ``summary``, which carries its output.
+    """
+    tasks = msg.get("tasks")
+    if not isinstance(tasks, list):
+        return 0
+    waited = 0
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        task_type = task.get("task_type")
+        if task_type in _NON_WAITED_BG_TASK_TYPES:
+            continue
+        if task_type not in ("local_agent",) and task_type not in _seen_unknown_bg_task_types:
+            _seen_unknown_bg_task_types.add(task_type)
+            logger.info(
+                "[Headless Task] Unrecognised background task_type=%r — counting it "
+                "as waited-for (#2127 denylist). If `claude --print` does not "
+                "actually wait for it, add it to _NON_WAITED_BG_TASK_TYPES.",
+                task_type,
+            )
+        waited += 1
+    return waited
 
 
 def _open_tool_exceeding(ctx: HeadlessRunContext, limit_s: float) -> Optional[str]:
@@ -254,6 +372,21 @@ _RECOVERY_NOTICE = (
     "deliverable. (#1870)"
 )
 
+# #2127: the operator-visible half. The gate keeps Trinity from killing a turn
+# mid-wait, but the CLI can still stop waiting on its own (its background-wait
+# ceiling, or an external kill) and finalize with the fan-out unfinished. That
+# run is recorded SUCCESS with a real cost, and its stored response is whatever
+# the model last said — typically "I'll wait for the notification", which reads
+# exactly like a completed answer. Say so in the response itself: a metadata flag
+# alone is invisible until something consumes it, and `recovered_terminal` (#1870)
+# is the standing proof of that (still unconsumed, ent#333).
+_BG_PENDING_NOTICE = (
+    "> ⚠️ Incomplete fan-out: this turn ended while background subagent work was "
+    "still in flight, so the answer below may be an interim status rather than "
+    "the finished result. Re-run the task, or raise the agent's execution "
+    "timeout if the fan-out needs longer. (#2127)"
+)
+
 
 def _try_recover_completed_turn(ctx: "HeadlessRunContext") -> bool:
     """#1870: salvage a turn Claude Code mislabelled `error_during_execution`.
@@ -315,30 +448,98 @@ def _try_recover_completed_turn(ctx: "HeadlessRunContext") -> bool:
     return True
 
 
+# #1853: the strict JSONL-filename UUID shape. A persisted ``claude_session_id``
+# must be a real session id — it points at
+# ``~/.claude/projects/.../<uuid>.jsonl`` and is what the reaper's keep-set /
+# reap_jsonl match on — and the fallback source ``ctx.claude_session_uuid`` can be
+# an untrusted ``resume_session_id`` straight from the /task request body (a
+# log-forging vector; ``sanitize_dict`` does not strip newlines). Mirrors the
+# reaper's ``_UUID_RE`` (session_cleanup_service.py); the agent server cannot
+# import the backend, so the shape is restated here.
+_SESSION_ID_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def _valid_session_id(session_id: Optional[str]) -> Optional[str]:
+    """Return ``session_id`` iff it is a strict UUID (the JSONL filename shape),
+    else ``None`` — the persisted ``claude_session_id`` fallback guard (#1853,
+    FI-1)."""
+    if session_id and _SESSION_ID_UUID_RE.match(session_id):
+        return session_id
+    return None
+
+
 def _timeout_504_detail(
     ctx: "HeadlessRunContext",
     message: str,
     termination_reason: str,
     stalled_tool: Optional[str] = None,
 ) -> Dict:
-    """Structured 504 body for an agent-side timeout kill (#1094, #1201).
+    """Structured 504 body for an agent-side timeout kill (#1094, #1201, #1853).
 
     Carries the telemetry accumulated before the kill (cost / context / tool
     calls) under ``metadata`` — the same sanitized
     ``ExecutionMetadata.model_dump()`` shape the #678 empty-result body uses —
-    so the backend's HTTPError salvage (`task_execution_service.py` HTTPError
-    branch) persists cost/context onto the timed-out FAILED row instead of
-    writing it bare. ``termination_reason`` ("max_duration" | "stall_no_output")
-    and the timeout-failure semantics are unchanged.
+    plus the full stream-json transcript under ``execution_log`` (#1853), so the
+    backend's HTTPError salvage (`task_execution_service.py` HTTPError branch)
+    persists cost / context / session_id AND the transcript onto the timed-out
+    FAILED row instead of writing it bare. ``termination_reason``
+    ("max_duration" | "stall_no_output") and the timeout-failure semantics are
+    unchanged.
     """
+    meta = sanitize_dict(ctx.metadata.model_dump())
+    # #1853: persist a session id pointing at the on-disk JSONL even when the
+    # reader race wedged before Claude echoed its id — validated, since the
+    # fallback can be an untrusted resume_session_id.
+    meta["session_id"] = _valid_session_id(
+        ctx.metadata.session_id or ctx.claude_session_uuid
+    )
     detail: Dict = {
         "message": message,
         "termination_reason": termination_reason,
-        "metadata": sanitize_dict(ctx.metadata.model_dump()),
+        "metadata": meta,
+        # #1853: the full stream-json transcript (in-memory, so present for short
+        # runs too). Backend sanitizes it with sanitize_execution_log.
+        "execution_log": ctx.raw_messages,
     }
     if stalled_tool is not None:
         detail["stalled_tool"] = stalled_tool
     return detail
+
+
+def _execution_error_502_detail(ctx: "HeadlessRunContext", message: str) -> Dict:
+    """Structured 502 body for a Claude Code ``error_during_execution`` (#1853).
+
+    Mirrors ``_timeout_504_detail``: carries the telemetry accumulated before the
+    failure (``metadata``) plus the full stream-json transcript
+    (``execution_log`` = ``ctx.raw_messages``), so the backend's HTTPError salvage
+    persists cost / context / session_id AND the transcript onto the FAILED row
+    instead of writing it bare — making the whole ``error_during_execution``
+    failure class diagnosable after the fact.
+
+    The ``message`` text is unchanged from the pre-#1853 bare body, so #1938's
+    error-string fix and the backend's resume-not-found self-heal (which reads
+    ``detail["message"]``) are preserved.
+    """
+    meta = sanitize_dict(ctx.metadata.model_dump())
+    # Persist a session id pointing at the on-disk JSONL even when the reader
+    # race wedged before Claude echoed its id. VALIDATE it: the fallback
+    # ctx.claude_session_uuid can be an untrusted resume_session_id (a
+    # log-forging vector — sanitize_dict does not strip newlines).
+    meta["session_id"] = _valid_session_id(
+        ctx.metadata.session_id or ctx.claude_session_uuid
+    )
+    return {
+        "message": message,
+        "metadata": meta,
+        # The full stream-json transcript SUCCESS sends as ``execution_log``
+        # (routers/chat.py = raw_messages). In-memory, so present for short runs
+        # too (no #678 JSONL dependency). Backend sanitizes it with
+        # sanitize_execution_log — same as the SUCCESS branch.
+        "execution_log": ctx.raw_messages,
+    }
 
 
 @dataclass
@@ -377,6 +578,20 @@ class HeadlessRunContext:
     auth_abort_reason: List[str] = field(default_factory=list)
     permission_mode_validated: bool = False
     result_seen: threading.Event = field(default_factory=threading.Event)  # #970: claude emitted {"type":"result"}
+    # #2127: background tasks still in flight that `claude --print` WAITS for.
+    # Rebound (never mutated in place) by the stdout reader from each
+    # `background_tasks_changed` snapshot; read by the wait loop and finalize.
+    # A plain int needs no lock — rebinding an attribute is atomic under the GIL,
+    # and both readers want "the latest value", never a consistent multi-field
+    # view. `result_seen` is the sibling precedent for reader-thread -> wait-loop
+    # signalling.
+    waited_bg_tasks: int = 0
+    # #2127: `time.monotonic()` of the most recent stdout line. Rebound by the
+    # reader on EVERY line (parsed or not — an unparseable line is still proof
+    # the process is producing), read by the wait loop. Same atomic-rebind
+    # rationale as `waited_bg_tasks`. Seeded at spawn so a run that has emitted
+    # nothing is not mistaken for one that has gone quiet.
+    last_stdout_at: float = 0.0
     stdout_exc: List[BaseException] = field(default_factory=list)
     # #1094: which termination path fired, so the terminal 504 carries a
     # distinct reason instead of always claiming the max-duration timeout.
@@ -484,8 +699,9 @@ def _setup_headless_command(
         # recovery code can fire when the stdout reader thread wedges.
         # Short fan-out / utility tasks stay disk-cheap; long deliverable
         # tasks (the real telemetry-loss pain) get a recovery surface.
-        # The retention sweep in session_cleanup_service.py reaps these
-        # JSONLs after 24h so disk cost stays bounded.
+        # The retention sweep in session_cleanup_service.py reaps these JSONLs
+        # on a 6h cycle once they pass a 1h age guard (1-7h effective, #1853),
+        # so disk cost stays bounded.
         effective_persist = persist_session or (timeout_seconds > _JSONL_PERSIST_THRESHOLD_S)
         if persist_session is False and timeout_seconds > _JSONL_PERSIST_THRESHOLD_S:
             logger.info(
@@ -606,9 +822,31 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
         text=True,
         bufsize=1,  # Line buffered
         start_new_session=True,
-        env=build_execution_env({EXECUTION_TAG_NAME: ctx.task_session_id}),
+        env=build_execution_env({
+            EXECUTION_TAG_NAME: ctx.task_session_id,
+            # #2127: how long `claude --print` waits for background subagents /
+            # workflows before giving up on them. Its own default is 10 min,
+            # which silently truncates any fan-out longer than that — including
+            # runs well inside this agent's configured budget (default 3600s).
+            #
+            # Derived from the execution timeout rather than exposed as a second
+            # knob (Quality Bar #2 — one operator lever). The CLI's wait starts
+            # at the first end_turn, i.e. strictly after process start, so this
+            # ceiling can never fire before Trinity's own deadline: it removes
+            # the CLI as a competing time bound and leaves `effective_timeout`
+            # the single authority. Not set to 0 (wait forever) deliberately —
+            # that would delete the CLI's runaway guard entirely.
+            "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": str(int(ctx.effective_timeout * 1000)),
+        }),
     )
     ctx.process = process
+    # #2127: seed the idle clock HERE, at spawn — before the reader threads
+    # start, so a genuine stamp can never be clobbered by the seed. (The
+    # dataclass default of 0.0 would read as maximally idle; seeding late, after
+    # the readers are running, only ever pushes the clock forward and merely
+    # delays the finalize, but it makes the value mean two different things
+    # depending on a thread race, which is not worth the ambiguity.)
+    ctx.last_stdout_at = time.monotonic()
     # Issue #407: capture pgid now — after wait() reaps the parent,
     # the pid is gone and we lose the ability to signal the group.
     ctx.process_pgid = _capture_pgid(process)
@@ -655,6 +893,12 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
             for line in iter(process.stdout.readline, ''):
                 if not line:
                     break
+                # #2127: proof of life for the early-finalize idle gate. Stamped
+                # BEFORE any parsing and for every line, including one that fails
+                # to parse — an unparseable line is still evidence the process is
+                # producing, and the gate asks "is it working", not "is it
+                # working correctly".
+                ctx.last_stdout_at = time.monotonic()
                 # Issue #285: stderr thread detected auth failure
                 if ctx.auth_abort_event.is_set():
                     logger.info("[Headless Task] Stdout loop exiting due to auth abort")
@@ -736,12 +980,25 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
                         ctx.response_parts,
                     )
 
-                    # #970 early-completion: the result line is the definitive
-                    # end of a `claude --print` turn. Signal it AFTER parsing so
+                    # #970 early-completion: a result line ends a `claude --print`
+                    # turn SEGMENT. Signal it AFTER parsing so
                     # metadata/response_parts are populated; the wait loop can
                     # then finalize even if the process lingers in teardown.
+                    #
+                    # #2127: it is NOT necessarily the end of the run. A turn that
+                    # fans out to background subagents emits one result per
+                    # segment (measured: 3-5), and the CLI stays alive between
+                    # them to await the completion notifications. The wait loop
+                    # pairs this signal with `waited_bg_tasks` so an intermediate
+                    # segment cannot trigger the kill.
                     if isinstance(raw_msg, dict) and raw_msg.get("type") == "result":
                         ctx.result_seen.set()
+                    elif (
+                        isinstance(raw_msg, dict)
+                        and raw_msg.get("type") == "system"
+                        and raw_msg.get("subtype") == "background_tasks_changed"
+                    ):
+                        ctx.waited_bg_tasks = _count_waited_bg_tasks(raw_msg)
                 except RuntimeError:
                     raise  # Re-raise permission-mode failures
                 except Exception as line_err:  # noqa: BLE001
@@ -815,13 +1072,40 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
     ctx.stall_limit_s = stall_limit
     stall_enabled = stall_limit > 0
     stalled_tool: Optional[str] = None
+    deferred_logged = False  # #2127: one deferral log per run, not per poll
+    idle_limit = _resolve_idle_finalize_s()
     try:
         while True:
             try:
                 ctx.return_code = process.wait(timeout=_WAIT_POLL_S)
                 break
             except subprocess.TimeoutExpired:
-                if ctx.result_seen.is_set():
+                # #2127: `result_seen` alone is NOT proof the run is over. When a
+                # turn fans out to background subagents, the CLI emits a result
+                # per segment and deliberately keeps running to await their
+                # completion — "their result is part of the final output". Killing
+                # here recorded that turn as SUCCESS with the model's "I'll wait
+                # for the notification" placeholder as its response, and the
+                # actual work discarded. Hold the finalize while the CLI's own
+                # ledger says work it waits for is still in flight; the
+                # `effective_timeout` budget below stays the unconditional
+                # backstop, so this can defer the kill but never remove it.
+                idle_for = time.monotonic() - ctx.last_stdout_at
+                may_finalize = (
+                    ctx.result_seen.is_set()
+                    and not ctx.waited_bg_tasks
+                    and idle_for >= idle_limit
+                )
+                if ctx.result_seen.is_set() and not may_finalize and not deferred_logged:
+                    deferred_logged = True   # once per run, not once per 2s poll
+                    logger.info(
+                        "[Headless Task] Task %s emitted a result but is still "
+                        "working — deferring finalize (#2127): %d background "
+                        "task(s) in flight, last output %.1fs ago (idle ceiling "
+                        "%.0fs)",
+                        ctx.task_session_id, ctx.waited_bg_tasks, idle_for, idle_limit,
+                    )
+                if may_finalize:
                     logger.warning(
                         f"[Headless Task] Task {ctx.task_session_id} produced a result "
                         f"but did not exit — finalizing early, terminating teardown"
@@ -1116,9 +1400,12 @@ def _finalize_headless_result(
         if not _try_recover_completed_turn(ctx):
             err = sanitize_text(ctx.metadata.error_message or "Execution error")
             logger.error(f"[Headless Task] Claude Code execution error: {err[:300]}")
+            # #1853: carry the telemetry + full transcript (structured body) so
+            # the backend salvages cost / context / session_id + execution_log
+            # onto the FAILED row. `message` text is unchanged (preserves #1938).
             raise HTTPException(
                 status_code=502,
-                detail=f"Execution error: {err[:300]}",
+                detail=_execution_error_502_detail(ctx, f"Execution error: {err[:300]}"),
             )
 
     # Issue #520 + Session-tab pipe race recovery: clean exit
@@ -1196,6 +1483,22 @@ def _finalize_headless_result(
                 status_code=500,
                 detail="Task returned empty response"
             )
+
+    # #2127: the CLI finalized while background work it waits for was still in
+    # flight. The gate above stops Trinity from causing this; reaching here means
+    # the CLI stopped waiting on its own. Placed AFTER the empty-response
+    # handling on purpose — prepending earlier would make `response_text` truthy
+    # and silently route a genuinely empty result past the #160 branch, turning a
+    # detectable failure into a notice with nothing behind it.
+    if ctx.waited_bg_tasks:
+        ctx.metadata.background_tasks_pending_at_exit = ctx.waited_bg_tasks
+        logger.warning(
+            "event=headless_background_tasks_pending_at_exit task=%s pending=%d "
+            "— turn finalized with background subagent work unfinished; the "
+            "stored response may be an interim status (#2127)",
+            ctx.task_session_id, ctx.waited_bg_tasks,
+        )
+        response_text = f"{_BG_PENDING_NOTICE}\n\n{response_text}"
 
     # Count unique tools used
     tool_use_count = len([e for e in ctx.execution_log if e.type == "tool_use"])

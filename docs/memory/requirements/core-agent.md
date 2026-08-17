@@ -352,6 +352,36 @@
   plus a reattach poller, #1376/#759), so absorbing it into a non-streaming
   Workspace is not a regression. Workspace streaming is tracked separately in
   abilityai/trinity-enterprise#286 and is **not** a prerequisite of this change.
+- **Turn bound = the agent's own timeout (#2214, 2026-08-15)**: a Workspace turn
+  is bounded by the agent's `execution_timeout_seconds` (TIMEOUT-001, #665), not
+  a flat 300s constant. The engine owns the read —
+  `session_turn_service.resolve_turn_timeout(agent_name)`, beside
+  `resolve_lock_ttl` — read-side clamped to TIMEOUT-001's own range [60, 7200]
+  (the #506 stray-row pattern), fail-open to the platform default 3600 (the
+  *default*, deliberately not the lock's fallback-to-*cap*: an over-TTL lock is a
+  harmless auto-expiring key, an over-long turn is billable work).
+  `start_portal_turn` resolves **once per turn** and threads the same value to
+  the marker TTL, the 202 `wait_budget_seconds`, and the dispatch, so the three
+  cannot disagree; the derived bounds (`portal_attempt_ceiling_seconds` =
+  timeout + 10 + `_AUTO_RETRY_MAX_TIMEOUT_S` (imported, never copied);
+  `portal_max_turn_seconds` = 2 × ceiling + 60 — the cold retry re-runs the whole
+  turn) are pure functions of it, and the old module constants are deleted so a
+  missed consumer fails loudly at import. **No Workspace clamp below the agent
+  cap** — a clamp under 7200 re-introduces the silent-override bug for exactly
+  the upper half of the range TIMEOUT-001 sells; the accepted cost is a bigger
+  orphaned-marker window (hard-kill only — graceful shutdown clears the marker in
+  `finally`), absolute worst `portal_max_turn_seconds(7200)` = 15,080s, precedent
+  the Session surface's own ≤7230s in-flight sentinel. Operator recovery for an
+  orphaned marker: `DEL portal_inflight:{session}` (the same manual-DEL escape
+  the engine documents for its lock keys). A reloading client's wait budget rides
+  the history response (`in_flight_wait_budget_seconds` = the marker's remaining
+  TTL; fail-open to the full per-agent budget on an unreadable TTL), so reattach
+  respects the same bound. A turn that hits the bound 504s naming the agent's
+  limit. Configurability is by derivation: operators set the bound where they
+  already set the agent timeout (`PUT /api/agents/{name}/timeout`). Long-timeout
+  **headless** integrators should prefer the streaming route — the synchronous
+  `POST .../chat` holds a byte-silent HTTP response for the whole turn, which is
+  proxy read-timeout territory at hour scale.
 - **Flow**: `docs/memory/feature-flows/session-tab.md`
 
 ### 5.10 Workspace sidebar IA — agents block, starred chats, unread badges
@@ -370,6 +400,25 @@
   - Agents block renders **first**, on its own surface (card + ring); each row
     carries avatar, name, description, and a count badge when that agent has
     replies the viewer has not read
+  - **A row may also carry an availability state (#2196).** Roster membership is
+    a DB fact (`agent_ownership` / `agent_sharing`); whether the agent's
+    container currently exists and runs is a Docker fact **projected onto** the
+    card as `availability` — `ready` | `stopped` | `unavailable` | `unknown` —
+    and is **never** a membership filter. `stopped` and `unavailable` render a
+    chip explaining the state and naming the next action ("ask *{owner}* to
+    start it"); `ready` and `unknown` render as before. Nothing is hidden and no
+    control is disabled: a client whose agents are all stopped must still get a
+    Workspace they can read, star and search. The field's footprint is reserved
+    so a row does not reflow as an agent starts or stops, and the roster is not
+    re-sorted by it (rows would jump)
+  - **`unknown` is the fail-open default, deliberately inverted** from the other
+    roster capability bits (`voice_available`, `multi_agent_chat_available`),
+    which fail closed. Those bits' bug is *promising an affordance that cannot
+    work*; this field's bug is *denying a working agent* — and at scale
+    *emptying a paying customer's roster over an infrastructure fault*, since
+    every Docker read in the platform collapses "no container" and "Docker could
+    not be asked" into the same falsy value. When Docker is unreadable every
+    card reads `unknown` and the roster renders exactly as it does today
   - The aggregate "waiting on you" count sits on the **wordmark**, since the
     agents block now occupies the top of a scrolling region
   - Starred chats are **lifted out of** the date groups, not copied above them —
@@ -392,7 +441,10 @@
   "never read" as "all unread" would have badged every historical conversation
   in every install the day this shipped. A cursor is written the first time the
   viewer opens or sends in a thread.
-- **Endpoints**: `GET /api/enterprise/client-portal/chat-state`,
+- **Endpoints**: `GET /api/enterprise/client-portal/sessions` (#2198 — the whole
+  sidebar list in ONE viewer-scoped call, replacing one per-agent call per rostered
+  agent; roster-scoped by the same set the per-agent gate enforces, no cap and no
+  `total`, rate-limited per viewer), `GET /api/enterprise/client-portal/chat-state`,
   `PUT|DELETE .../chat-state/{kind}/{id}/star`, `POST .../chat-state/{kind}/{id}/read`.
   No roster gate (every row is keyed by the caller's own email) and no existence
   check on the id — a 404 for an unknown chat would be an enumeration oracle
@@ -476,9 +528,27 @@
     an image avatar with light edges does not bleed into the surface behind it.
     One shared component, fourteen call sites; `box-sizing: border-box` keeps
     every outer footprint unchanged
-  - Everything DB-sourced, so a **stopped** agent renders degraded, not empty:
-    health `unknown` (monitoring is default-OFF, so "unhealthy" would be a lie),
-    empty sections, and a failing data source degrades that section only
+  - Everything DB-sourced, so an agent that cannot currently run renders
+    degraded, not empty: health `unknown` (monitoring is default-OFF, so
+    "unhealthy" would be a lie), empty sections, and a failing data source
+    degrades that section only
+  - **The two non-running states are distinct and both render (#2196)**: (a) a
+    **stopped** agent — container exists, not running — and (b) an agent with
+    **no container at all**, which #1747 documents as a *routine* state (an
+    agent's identity lives in `agent_ownership`, not Docker; #834 Phase 1c
+    recovery reaches it by design, as does a `docker system prune` or a crash
+    mid-create). Neither is hidden from the roster or the page. The decision
+    recorded for #2196's AC #2: **the ownership row is authoritative for
+    membership; container state is projected onto the card**. The header renders
+    availability as its **own labelled fact beside health**, never folded into
+    the health dot — health is the last persisted `agent_health_checks` row and
+    is stale by design, availability is a live read, and one widget carrying two
+    freshness semantics tells the viewer neither
+  - This is also why the Workspace roster and `GET /api/agents` legitimately
+    disagree (#2196 AC #4): the fleet list iterates Docker and so omits these
+    agents entirely, while the roster lists them and says why. Making the two
+    agree literally would require rewriting `/api/agents`, which #1747 argues
+    against; the difference is documented rather than papered over
   - Endpoints: `GET /agents/{name}/page?window=`, `.../reports`,
     `.../reports/{id}` (optional `rows_offset`/`rows_limit` window a tabular payload,
     #2162 — two query params on the existing route, not a second route) under the

@@ -18,12 +18,33 @@ import sys
 backend_path = os.path.join(os.path.dirname(__file__), '..', 'src', 'backend')
 sys.path.insert(0, backend_path)
 
+# #1895: confine these import-time stubs to THIS file so they cannot leak into a
+# LATER unit file's collection-time import (the conftest per-test restore runs
+# only once collection has finished — too late for a cross-file collection leak).
+# Sanctioned _STUBBED_MODULE_NAMES/_restore_sys_modules pair (precedent:
+# tests/unit/test_telegram_webhook_backfill.py); the restore is called once the
+# collection-time `from models import` has bound what it needs.
+_STUBBED_MODULE_NAMES = ['utils', 'utils.helpers']
+_SAVED_STUBBED_MODULES = {_k: sys.modules.get(_k) for _k in _STUBBED_MODULE_NAMES}
+
+
+def _restore_sys_modules():
+    for _k in _STUBBED_MODULE_NAMES:
+        _v = _SAVED_STUBBED_MODULES[_k]
+        if _v is not None:
+            sys.modules[_k] = _v
+        else:
+            sys.modules.pop(_k, None)
+
+
 # Mock the utils.helpers module before importing models
 sys.modules['utils'] = MagicMock()
 sys.modules['utils.helpers'] = MagicMock()
 sys.modules['utils.helpers'].to_utc_iso = lambda x: x.isoformat() if x else None
 
 from models import ActivityType, ParallelTaskRequest, TaskExecutionStatus
+
+_restore_sys_modules()
 
 
 class TestSelfTaskActivityType:
