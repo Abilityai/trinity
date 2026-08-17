@@ -132,7 +132,14 @@
         <form v-else class="flex items-end gap-2" @submit.prevent="send">
           <!-- ent#392: `@` typeahead over the room's WAKE-SET. Same anchored
                wrapper as the 1:1 composer; it must carry the flex sizing the
-               textarea used to hold, or the field collapses to content width. -->
+               textarea used to hold, or the field collapses to content width.
+
+               #2259: and the same `block` on the textarea. A `<textarea>` is
+               inline-block, so in this block wrapper it sat on the baseline and
+               the line box reserved 6px below it; `items-end` then aligned Send
+               to that dead space instead of to the visible input edge. Twin of
+               PortalConversation — the two composers are the same markup in two
+               files, so a fix landing in only one silently keeps the bug. -->
           <div ref="composerWrap" class="relative flex-1 min-w-0">
             <PortalTypeahead
               v-if="typeaheadOpen"
@@ -149,7 +156,7 @@
               v-model="input"
               rows="1"
               :placeholder="placeholder"
-              class="w-full resize-none rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm px-4 py-2.5 leading-6 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
+              class="block w-full resize-none rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm px-4 py-2.5 leading-6 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
               @keydown="onComposerKeydown"
               @input="onComposerInput"
               @click="onComposerCaret"
@@ -158,7 +165,7 @@
           </div>
           <button
             type="submit"
-            class="shrink-0 p-2.5 rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 transition"
+            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 transition"
             :disabled="!input.trim() || sending"
             title="Send"
           >
@@ -580,12 +587,23 @@ watch(() => props.roomId, async () => {
   loading.value = true
   resetTypeahead()
   await load({ full: true })
+  // Same reason as on mount: switching rooms can swap a closed room for an open
+  // one, which mounts a fresh textarea that has never been measured.
+  autoGrowAfterUpdate()
 })
 
 onMounted(async () => {
   document.addEventListener('click', onDocClick)
   window.addEventListener('resize', onViewportResize)
   await load({ full: true })
+  // #2259: and only NOW — the composer sits behind `v-if="!isClosed"`, so before
+  // the room resolves there is no textarea to measure and an eager call would
+  // silently no-op on the null ref. Without this the field mounts with `overflow-y`
+  // still at its stylesheet `auto`: the very state #2211 replaced with an explicit
+  // `hidden` ("the scrollbar must be gone rather than merely unused"). It is
+  // invisible at rest only because the untouched `rows="1"` box happens to fit its
+  // one line — a coincidence, not the contract.
+  autoGrowAfterUpdate()
   startPolling()
 })
 // Review finding: `overflow-y` is now pinned, so the height must be recomputed when

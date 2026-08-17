@@ -682,7 +682,10 @@ describe('PortalConversation wiring', () => {
   it('anchors the popup without collapsing the flex field', () => {
     const src = convSource()
     expect(src).toContain('relative flex-1 min-w-0')
-    expect(src).toMatch(/<textarea[\s\S]{0,400}class="w-full/)
+    // Matched on the class LIST, not on `class="w-full` — #2259 prepends `block`
+    // to the same attribute, and an anchored match would read that as the field
+    // having lost its width.
+    expect(src).toMatch(/<textarea[\s\S]{0,400}class="[^"]*\bw-full\b/)
   })
 
   it('advertises both triggers in the placeholder, and @ only with the capability', () => {

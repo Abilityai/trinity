@@ -166,9 +166,17 @@
         </div>
         <form class="flex items-end gap-2" @submit.prevent="send">
           <input ref="fileInput" type="file" class="hidden" @change="onPickFile" />
+          <!-- #2259: the composer's action buttons are `h-11 w-11` (44px, on the
+               4px grid) rather than `p-2.5` around a 20px icon (40px, off it).
+               `items-end` pins them to the bottom so they stay beside the LAST
+               line as the field grows, and at 44px against the 46px single-line
+               composer the icon's centre lands within 1px of the text line in
+               both states. Sizing the box explicitly (instead of padding an
+               icon) also keeps the three buttons identical when one of them
+               swaps its glyph. -->
           <button
             type="button"
-            class="shrink-0 p-2.5 rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
             title="Attach a file for the agent"
             @click="fileInput?.click()"
           >
@@ -177,7 +185,7 @@
           <button
             v-if="sttSupported"
             type="button"
-            class="shrink-0 p-2.5 rounded-xl transition disabled:opacity-50"
+            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl transition disabled:opacity-50"
             :class="listening ? 'text-status-danger-600 dark:text-status-danger-400 animate-pulse' : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800'"
             :title="micTitle"
             :aria-label="micTitle"
@@ -191,7 +199,16 @@
                wrapper is new. It must inherit the flex sizing the textarea used
                to carry (`flex-1 min-w-0`) — a bare `relative` div collapses the
                field to content width — and it deliberately carries no z-index,
-               so it creates no stacking context of its own. -->
+               so it creates no stacking context of its own.
+
+               #2259: it must ALSO not be taller than the textarea it wraps. A
+               `<textarea>` is inline-block, so inside this block wrapper it sat
+               on the baseline and the line box reserved 6px of descender space
+               below it. `items-end` aligns the flex ITEM — this wrapper — so the
+               buttons bottom-aligned to that dead space and Send hung 6px below
+               the visible input edge. The `block` on the textarea removes the
+               line box entirely; it also re-anchors the typeahead's
+               `absolute bottom-full` to the real field. Do not drop it. -->
           <div ref="composerWrap" class="relative flex-1 min-w-0">
             <PortalTypeahead
               v-if="typeaheadOpen"
@@ -209,7 +226,7 @@
               v-model="input"
               rows="1"
               :placeholder="composerPlaceholder"
-              class="w-full resize-none rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-gray-100 px-4 py-2.5 leading-6 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
+              class="block w-full resize-none rounded-2xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-gray-100 px-4 py-2.5 leading-6 focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500 focus:outline-none max-h-40"
               @input="onComposerInput"
               @keydown="onComposerKeydown"
               @click="onComposerCaret"
@@ -218,7 +235,7 @@
           </div>
           <button
             type="submit"
-            class="shrink-0 p-2.5 rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 disabled:hover:bg-action-primary-600 transition"
+            class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 disabled:hover:bg-action-primary-600 transition"
             :disabled="sending || !input.trim()"
             title="Send"
           >
