@@ -96,6 +96,33 @@ Rules worth knowing:
 
 See [Scheduling](../automation/scheduling.md).
 
+### Declared Plugins
+
+A template can also declare which Claude Code marketplace plugins its agent depends on, in a `plugins:` block in `template.yaml`:
+
+```yaml
+plugins:
+  marketplaces:
+    - name: abilityai
+      source: abilityai/abilities        # owner/repo shorthand, or an https:// URL
+  installed:
+    - trinity@abilityai                  # plugin@marketplace
+    - agent-dev@abilityai
+```
+
+Trinity materializes the block at creation as a committed, secret-free `~/.trinity/plugins.yaml` in the agent's workspace, and on **every container boot** the agent re-installs anything declared but missing — headlessly, with no one at a terminal. That is what makes the plugin selection survive a rebuild onto a fresh volume or a move to another host: before this, plugins installed by hand lived only in gitignored Claude Code state and were lost the moment the workspace was reconstituted from git.
+
+Rules worth knowing:
+
+- Declare what the agent's skills actually use — each entry is a fetch at boot. Every marketplace named in `installed:` must appear under `marketplaces:`. Always include `trinity@abilityai` if you deploy with the abilities toolkit; it is what lets the deployed agent run `/trinity:sync` and onboard itself in place.
+- `plugin@marketplace` pins the plugin's *identity*, not a commit — a re-install fetches the marketplace's current content.
+- Plugins installed later by hand (`/plugin install` inside the agent) are **not** captured back into the manifest; add them to `template.yaml` too or they will not survive a reconstitution.
+- A private marketplace is fetched with the agent's GitHub token at boot; a public one needs only network access. On an air-gapped instance the boot log names what was withheld and startup continues — a plugin problem never fails the boot.
+- Adding the block to an *existing* agent's `template.yaml` takes effect on its next restart. The abilities `/trinity:onboard` (in place) and `/trinity:sync plugins` skills can install the difference immediately — see [Abilities Marketplace](../automation/abilities-marketplace.md).
+- The `enabledPlugins:` mapping shape from Claude Code's own `settings.json` (`trinity@abilityai: true`) is accepted as an alternative to `installed:`.
+
+The manifest is agent-writable, so it is parsed defensively: names and marketplace sources are validated (no embedded credentials, no path traversal), a malformed block is reported rather than acted on, and every install runs with a timeout and never prompts.
+
 ### Importing an Existing GitHub Repository
 
 When you create an agent from a repository you already have — rather than a curated template — you choose **how** Trinity should take it on:
@@ -182,9 +209,11 @@ The agent's container is labeled so it can be discovered and managed by the plat
 - Template metadata from GitHub is cached for 10 minutes. Changes to `template.yaml` may not appear immediately.
 - A **copy**-intent agent has no upstream by design. If both its container and its workspace volume are lost, a rebuild produces an empty workspace rather than re-fetching — Trinity will not silently pull whatever the source repository looks like *now*. Export the agent's data periodically if that matters; the creation audit entry records the source repo and exact commit.
 - An unresolvable or invalid local template id is rejected at creation rather than producing an empty agent.
+- Declared `plugins:` are re-installed by the agent image at boot; agents built from an image that predates the feature keep whatever is on their volume but do not self-heal until the base image is rebuilt.
 
 ## See Also
 
 - [Credential Management](../credentials/credential-management.md) -- How credentials are supplied to agents
 - [GitHub PAT Setup](../integrations/github-pat-setup.md) -- Required for private templates and fork-to-own
 - [Scheduling](../automation/scheduling.md) -- Running agents on a schedule
+- [Abilities Marketplace](../automation/abilities-marketplace.md) -- The Claude Code plugins a template's `plugins:` block typically declares, and the skills that keep them in sync

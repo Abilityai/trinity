@@ -135,6 +135,14 @@ Because skills carry executable scripts, and with fleet re-inject on, a source t
 
 Yes. A `schedules:` block in `template.yaml` is materialized as real schedules when the agent is created, through the UI, the API, and MCP alike. Each entry needs a `name`, a strict 5-field `cron`, and a `message`; up to 20 per template. A malformed entry is dropped with a named error rather than failing the creation, and every materialized schedule inherits the agent's execution timeout so it can never exceed the agent's own cap. See [Creating Agents](../agents/creating-agents.md).
 
+## What should a schedule's message contain?
+
+Ideally a single line that invokes one of the agent's skills by name — `/daily-briefing` — and nothing else: no inline instructions, arguments, or business logic. The logic then lives in the versioned playbook, so changing what a scheduled run does is an edit to the skill, and the execution history shows *which* playbook ran. A prose message is a second, unversioned copy of the procedure that drifts from the skill it describes. The abilities wizards generate schedules in this shape and `/create-agent:review` flags prose messages as findings. See [Scheduling](../automation/scheduling.md#schedules-from-a-template).
+
+## My scheduled skill hangs every run and burns its whole timeout — why?
+
+The skill almost certainly asks a question at one of its decision points. On an unattended cron there is nobody to answer, so every run blocks on the prompt until the execution times out with nothing committed. The fix belongs in the skill, not in the schedule message: give it a headless run mode — the abilities convention is a `--autonomous` argument, so the schedule message becomes `/<skill> --autonomous` — in which the skill never prompts, takes the safe default at each gate, never takes a destructive path a gate was protecting, and records any non-trivial decision as a `needs-attention` line instead of guessing. The orchestrator bundle's gated skills already ship this mode. See [Abilities Marketplace](../automation/abilities-marketplace.md#playbook-calls-the-unit-of-inter-agent-work).
+
 ## Can I use a legacy timezone name like `US/Eastern` in a schedule?
 
 Yes — legacy IANA aliases such as `US/Eastern`, `Asia/Calcutta`, and `Europe/Kiev` resolve correctly. A timezone the platform genuinely cannot resolve is rejected when you create the schedule, with a message naming the problem, rather than being accepted and then silently never firing. See [Scheduling](../automation/scheduling.md).
