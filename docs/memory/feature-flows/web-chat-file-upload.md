@@ -208,7 +208,7 @@ Images are passed through to Claude Code via `--input-format stream-json` as con
 | All non-image writes fail | 502 | `"File upload failed: could not write to agent workspace."` |
 | Single file rejected (size) | — | Description appended to prompt: `"{name} — rejected (exceeds X limit)"` |
 | Single file rejected (MIME mismatch) | — | Description: `"{name} — rejected (file type mismatch)"` |
-| Unsupported format (PDF, ZIP, video) | — | Description: `"{name} — unsupported format ({mime}). Text, CSV, JSON, and image files are supported."` |
+| Unsupported format (PDF, tar/gzip/rar, video, audio) | — | Description: `"{name} — unsupported format ({mime}). Text, CSV, JSON, ZIP, and image files are supported."` (ZIP allowed since 2026-08) |
 | File count exceeds max | — | Description: `"({n} more file(s) skipped — max {max} per message)"` |
 | Total image size exceeded | — | Description: `"{name} — skipped (total image size limit reached)"` |
 | Client-side oversized file | — | `alert()` shown in browser, file not added to `pendingFiles` |
