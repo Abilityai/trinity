@@ -394,15 +394,25 @@ onMounted(async () => {
   window.addEventListener('online', onNet)
   window.addEventListener('offline', onNet)
   document.addEventListener('click', onDocClick)
+  window.addEventListener('resize', onViewportResize)
   if (props.prefill) input.value = props.prefill
   if (props.sessionId) await loadThread(props.sessionId)
   else messages.value = []
-  autoGrow()
+  autoGrowAfterUpdate()   // `props.prefill` was assigned above; wait for the patch
 })
+// Review finding: `overflow-y` is now pinned, so the height must be recomputed when
+// the box REWRAPS — narrowing the window (or opening a drawer) makes a fitting draft
+// taller, and a stale `hidden` would leave that text invisible and unscrollable
+// where it previously scrolled. Cheap: one listener, only while mounted.
+function onViewportResize() {
+  autoGrow()
+}
+
 onBeforeUnmount(() => {
   window.removeEventListener('online', onNet)
   window.removeEventListener('offline', onNet)
   document.removeEventListener('click', onDocClick)
+  window.removeEventListener('resize', onViewportResize)
   cleanupVoice()
 })
 
@@ -433,12 +443,22 @@ function autoGrow() {
   const el = textarea.value
   if (!el) return
   el.style.height = 'auto'
-  // The three measurements the pure resolver needs; `height: auto` first so
-  // `scrollHeight` reports the content's natural height rather than the current one.
   const { height, overflowY } = resolveComposerGrowth(el, COMPOSER_MAX_PX)
   el.style.height = height + 'px'
   el.style.overflowY = overflowY
 }
+
+// Review finding: `autoGrow()` reads the DOM, but Vue patches `v-model` on the NEXT
+// microtask — so every call that follows a programmatic `input.value = ...` (send,
+// clear, restore-on-failure, dictation, typeahead pick) measured the OLD content.
+// Before this PR that only meant "did not resize"; now that `overflow-y` is managed
+// explicitly it also means a taller value can be left clipped AND unscrollable. So
+// programmatic mutations use this deferred form, and the direct `@input` path keeps
+// the synchronous one (the DOM is already current there).
+function autoGrowAfterUpdate() {
+  nextTick(autoGrow)
+}
+
 
 // ---- ent#392: composer typeahead (`/` playbooks, `@` agents) -----------------
 //
@@ -893,7 +913,7 @@ async function send() {
     const others = mentionedAgents(text, props.roster, { exclude: [props.agent.name] })
     if (others.length) {
       input.value = ''
-      autoGrow()
+      autoGrowAfterUpdate()
       emit('escalate-to-room', { agents: [props.agent.name, ...others], message: text })
       return
     }
@@ -901,7 +921,7 @@ async function send() {
 
   const index = messages.value.push({ role: 'user', content: text, failed: false, error: null }) - 1
   input.value = ''
-  autoGrow()
+  autoGrowAfterUpdate()
   await scrollDown()
   const res = await deliver(text)
   if (res !== true) markFailed(index, text, res?.error, { retryable: !res?.lost })
@@ -983,7 +1003,7 @@ function appendTranscript(text) {
   const t = (text || '').trim()
   if (!t) return
   input.value = input.value ? `${input.value} ${t}` : t
-  resetTypeahead(); autoGrow()
+  resetTypeahead(); autoGrowAfterUpdate()
 }
 function toggleMic() {
   if (!sttSupported.value || transcribing.value) return
@@ -1101,7 +1121,11 @@ defineExpose({ focusComposer: () => textarea.value?.focus() })
    looser rhythm reads as a lopsided bubble. */
 .prose-portal :deep(p:first-child) { margin-top: 0; }
 .prose-portal :deep(p:last-child) { margin-bottom: 0; }
-.prose-portal :deep(pre) { overflow-x: auto; background: rgba(0,0,0,0.06); padding: 0.5rem; border-radius: 0.375rem; }
+.prose-portal :deep(pre) { overflow-x: auto; padding: 0.5rem; border-radius: 0.375rem; }
+/* Token-based tint rather than an `rgba()` literal: the design contract
+   forbids hardcoded colors, and the raw-color ratchet counts them. Applied
+   via @apply so light/dark both come from the gray scale. */
+.prose-portal :deep(pre) { @apply bg-gray-100 dark:bg-gray-800; }
 .prose-portal :deep(code) { font-size: 0.8em; }
 .prose-portal :deep(ul) { list-style: disc; padding-left: 1.25rem; }
 .prose-portal :deep(a) { text-decoration: underline; }

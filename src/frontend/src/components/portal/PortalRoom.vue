@@ -405,20 +405,33 @@ function autoGrow() {
   const el = textarea.value
   if (!el) return
   el.style.height = 'auto'
-  // The three measurements the pure resolver needs; `height: auto` first so
-  // `scrollHeight` reports the content's natural height rather than the current one.
   const { height, overflowY } = resolveComposerGrowth(el, COMPOSER_MAX_PX)
   el.style.height = height + 'px'
   el.style.overflowY = overflowY
 }
 
+// Review finding: `autoGrow()` reads the DOM, but Vue patches `v-model` on the NEXT
+// microtask — so every call that follows a programmatic `input.value = ...` (send,
+// clear, restore-on-failure, dictation, typeahead pick) measured the OLD content.
+// Before this PR that only meant "did not resize"; now that `overflow-y` is managed
+// explicitly it also means a taller value can be left clipped AND unscrollable. So
+// programmatic mutations use this deferred form, and the direct `@input` path keeps
+// the synchronous one (the DOM is already current there).
+function autoGrowAfterUpdate() {
+  nextTick(autoGrow)
+}
+
+
 function onComposerInput(e) {
+  // Review finding: this must run BEFORE the paste/drop early-return. Pasting a long
+  // message otherwise left the box one line tall — and with `overflow-y` now managed,
+  // a prior keystroke's `hidden` would leave the pasted text clipped AND unscrollable.
+  autoGrow()
   if (e?.inputType === 'insertFromPaste' || e?.inputType === 'insertFromDrop') {
     closeTypeahead()
     return
   }
   refreshTypeahead(e?.target)
-  autoGrow()
 }
 
 function onComposerCaret(e) { refreshTypeahead(e?.target) }
@@ -462,6 +475,9 @@ function acceptActive(index) {
   nextTick(() => {
     const el = textarea.value
     if (el) { el.focus(); el.setSelectionRange(caret, caret) }
+    // Review finding: PortalConversation regrows here and this file did not, so a
+    // mention insert that wrapped to a second line left the field one line tall.
+    autoGrow()
   })
 }
 
@@ -507,7 +523,7 @@ async function send() {
   sending.value = true
   sendError.value = null
   input.value = ''
-  autoGrow()   // #2211: shrink back, and leave no scrollbar behind
+  autoGrowAfterUpdate()   // deferred: Vue patches the textarea next tick
   resetTypeahead()
   try {
     await store.postRoomMessage(props.roomId, text)
@@ -568,11 +584,41 @@ watch(() => props.roomId, async () => {
 
 onMounted(async () => {
   document.addEventListener('click', onDocClick)
+  window.addEventListener('resize', onViewportResize)
   await load({ full: true })
   startPolling()
 })
+// Review finding: `overflow-y` is now pinned, so the height must be recomputed when
+// the box REWRAPS — narrowing the window (or opening a drawer) makes a fitting draft
+// taller, and a stale `hidden` would leave that text invisible and unscrollable
+// where it previously scrolled. Cheap: one listener, only while mounted.
+function onViewportResize() {
+  autoGrow()
+}
+
 onBeforeUnmount(() => {
   document.removeEventListener('click', onDocClick)
+  window.removeEventListener('resize', onViewportResize)
   stopPolling()
 })
 </script>
+
+<style scoped>
+/* Review finding: `prose-portal` was applied in this file's template but DEFINED
+   only in PortalConversation's scoped block, so it was inert here — room transcripts
+   got neither the #2211 paragraph rhythm nor the pre-existing overflow guard, and a
+   wide code block overflowed the bubble. Kept byte-identical to the conversation's
+   copy so the two surfaces cannot drift; a shared stylesheet is the follow-up, not a
+   change to smuggle into a readability fix. */
+.prose-portal :deep(p) { margin: 0.5rem 0; }
+.prose-portal :deep(p:first-child) { margin-top: 0; }
+.prose-portal :deep(p:last-child) { margin-bottom: 0; }
+.prose-portal :deep(pre) { overflow-x: auto; padding: 0.5rem; border-radius: 0.375rem; }
+/* Token-based tint rather than an `rgba()` literal: the design contract
+   forbids hardcoded colors, and the raw-color ratchet counts them. Applied
+   via @apply so light/dark both come from the gray scale. */
+.prose-portal :deep(pre) { @apply bg-gray-100 dark:bg-gray-800; }
+.prose-portal :deep(code) { font-size: 0.8em; }
+.prose-portal :deep(ul) { list-style: disc; padding-left: 1.25rem; }
+.prose-portal :deep(a) { text-decoration: underline; }
+</style>
