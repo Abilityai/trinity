@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 # tests/utils/ shadows src/backend/utils/, so we import via importlib with an explicit path
-_mod_path = Path(__file__).resolve().parent.parent / "src" / "backend" / "utils" / "password_validation.py"
+_mod_path = Path(__file__).resolve().parent.parent.parent / "src" / "backend" / "utils" / "password_validation.py"
 _spec = importlib.util.spec_from_file_location("password_validation", _mod_path)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)

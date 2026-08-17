@@ -323,12 +323,16 @@
                       :disabled="savingPlatformDefaultModel"
                       class="block flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-action-primary-500 focus:border-action-primary-500 dark:bg-gray-700 dark:text-white text-sm"
                     >
-                      <option value="claude-sonnet-4-6">Claude Sonnet 4.6 — Fast + smart (recommended)</option>
-                      <option value="claude-fable-5">Claude Fable 5 — Most capable, longest tasks (latest)</option>
-                      <option value="claude-sonnet-5">Claude Sonnet 5 — Fast + smart, 1M context (latest)</option>
-                      <option value="claude-opus-4-8">Claude Opus 4.8 — Most capable Opus</option>
-                      <option value="claude-opus-4-7">Claude Opus 4.7</option>
-                      <option value="claude-opus-4-6">Claude Opus 4.6</option>
+                      <!-- Options derive from the single source of truth
+                           (src/constants/modelCatalog.js, generated from
+                           services/model_catalog.py, #2086). "(recommended)" is
+                           pinned to the catalog `recommended` flag == the
+                           platform default (#831), NOT the loaded value. -->
+                      <option
+                        v-for="m in adminDefaultModels"
+                        :key="m.id"
+                        :value="m.id"
+                      >{{ m.label }} — {{ m.note }}{{ m.recommended ? ' (recommended)' : '' }}</option>
                     </select>
                     <button
                       @click="savePlatformDefaultModel"
@@ -2376,6 +2380,7 @@ import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.
 import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
 import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'
 import { SETTINGS_NUMBER_INPUT_CLASS } from '../components/settings/fieldStyles'
+import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 
@@ -2707,6 +2712,10 @@ const adminEmailCurrent = computed(() => {
 
 // Platform default model (#831)
 const platformDefaultModelValue = ref('claude-sonnet-4-6')
+// Admin fleet-default dropdown options — the catalog filtered to models an admin
+// may set as the platform default. Haiku is deliberately excluded (#1080). Order
+// follows the catalog; "(recommended)" rides the `recommended` flag in the template.
+const adminDefaultModels = MODEL_CATALOG.filter((m) => m.adminDefaultSelectable)
 const savingPlatformDefaultModel = ref(false)
 const platformDefaultModelSaveSuccess = ref(false)
 

@@ -255,7 +255,7 @@ project_trinity/
 
 3. **Port conflicts**: Agents use incrementing SSH ports (2222+). Check for conflicts.
 
-4. **Data persistence**: SQLite at `~/trinity-data/trinity.db` (bind mount). Redis for secrets (Docker volume). Run `scripts/deploy/backup-database.sh` before major changes.
+4. **Data persistence**: SQLite at `~/trinity-data/trinity.db` (bind mount). Redis for secrets (Docker volume). Backups are automatic (#2216): nightly at 03:30 UTC plus a boot-time pre-migration copy, under `~/trinity-data/backups/` (`/data/backups/` in-container); status via `GET /api/settings/retention` → `backup`.
 
 5. **Logging via Vector**: All container logs are captured by Vector and written to JSON files. Query logs with `jq` or grep.
 

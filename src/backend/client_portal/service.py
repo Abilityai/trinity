@@ -264,9 +264,142 @@ def _default_voice_id() -> str | None:
         return None
 
 
-def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None) -> PortalAgentCard:
+# ---------------------------------------------------------------------------
+# #2196 — container state as a PROJECTION onto the roster, never a filter
+# ---------------------------------------------------------------------------
+#
+# The `agent_ownership` row is authoritative for who is on this roster. Whether
+# the agent's container currently exists and runs is a separate fact, resolved
+# here and attached to the card. It is deliberately NOT resolved in
+# `_roster_rows` (which stays pure SQL, so #2198's batch-sessions gate does not
+# inherit a Docker read) and NOT inside `_agent_briefing` (so #2163 stays free to
+# defer, bound or cache the briefing).
+
+# Docker's vocabulary and the card's are different words for related facts, and
+# passing one through as the other puts "running" onto a Literal["ready", ...].
+# ONE translation table, shared by both seams — two functions that must agree on
+# a mapping are exactly where a mapping drifts.
+_DOCKER_STATE_TO_AVAILABILITY = {
+    "running": "ready",
+    "stopped": "stopped",
+    "missing": "unavailable",
+}
+
+# Fail-OPEN: `unknown` means "Docker could not be asked", which is not evidence
+# the agent is down. The dominant fault modes — a daemon restart, a socket
+# permission change, a wrong `group_add` GID — leave agent containers running
+# and serving HTTP over the agent network, so refusing the turn would deny a
+# healthy agent. Defined once, so a later "consistency" tidy cannot restore the
+# fail-CLOSED bug this replaces (which refused every Workspace turn instance-wide
+# on one unreadable socket).
+_TURN_ALLOWED_AVAILABILITY = ("ready", "unknown")
+
+
+def _to_availability(docker_state) -> str:
+    """The single translation point between the two vocabularies.
+
+    Enum-guarded per VALUE, not merely per type: an unrecognised Docker string
+    (or a MagicMock, or None) resolves to `unknown`, which renders as today.
+    """
+    if not isinstance(docker_state, str):
+        return "unknown"
+    return _DOCKER_STATE_TO_AVAILABILITY.get(docker_state, "unknown")
+
+
+def _availability_allows_turn(availability: str) -> bool:
+    """Whether a turn may be dispatched. See `_TURN_ALLOWED_AVAILABILITY`."""
+    return availability in _TURN_ALLOWED_AVAILABILITY
+
+
+async def _availability_map(names: list[str]) -> dict[str, str]:
+    """`{agent_name: availability}` for exactly `names`, in one Docker call.
+
+    Two guards, both load-bearing:
+
+    * **The result is narrowed to `names`.** The underlying call sees EVERY
+      agent container on the host, including agents outside this caller's
+      roster and other tenants'. That map must never be returned, logged or
+      attached to a response.
+    * **The return type is validated** before it is trusted. A dozen test
+      modules install a `MagicMock` at `sys.modules["services.docker_service"]`,
+      and a MagicMock's `agent_container_states()` returns a truthy MagicMock
+      that is neither a dict nor None — left unguarded it would silently invert
+      the fail-open default inside the suite meant to prove it. Same shape as
+      `a2a_outbound`'s `isinstance(ResolvedEndpoint)` check, except that one
+      fails CLOSED (it decides where a credential is sent) and this one fails
+      OPEN (it decides whether to deny a working agent).
+
+    A name absent from a VALID map is `unavailable` — that is the real #2196
+    signal. An invalid or `None` map is `unknown` for every name.
+    """
+    if not names:
+        return {}                      # zero rows ⇒ zero Docker calls
+    try:
+        from services.docker_utils import agent_container_states_async
+        states = await agent_container_states_async()
+    except Exception as e:  # noqa: BLE001 — a roster must never 500 over Docker
+        logger.warning("[#2196] batch container-state read failed: %s", e)
+        return {n: "unknown" for n in names}
+    if not isinstance(states, dict):
+        # None (Docker unreadable) or a stubbed module — the safe direction.
+        return {n: "unknown" for n in names}
+    return {n: _to_availability(states.get(n, "missing")) for n in names}
+
+
+async def _agent_availability(agent_name: str) -> str:
+    """One agent's availability. Single Docker read, never the batch — routing
+    one agent through the fleet call is the cost #2160 exists to remove.
+
+    Same enum guard and same fail-open direction as `_availability_map`.
+    """
+    try:
+        from services.docker_utils import agent_container_state_async
+        state = await agent_container_state_async(agent_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[#2196] container-state read failed for %s: %s", agent_name, e)
+        return "unknown"
+    return _to_availability(state)
+
+
+# Client-visible copy. No infrastructure jargon — the viewer may be an external
+# client with no Trinity account. `POST /api/agents/{name}/start` recreates a
+# missing container (#1559), so "its owner needs to start it" is the correct next
+# action for BOTH non-running states. Neither says "try again": for these two
+# states retrying cannot work, which is the misleading half of the old copy.
+_AVAILABILITY_REFUSAL = {
+    "unavailable": "This agent isn't available right now — its owner needs to start it.",
+    "stopped": "This agent isn't running right now — its owner needs to start it.",
+}
+
+
+def _refusal_detail(availability: str) -> str:
+    """The 502 body for a turn refused BEFORE anything is created."""
+    return _AVAILABILITY_REFUSAL.get(
+        availability, "This agent can't take a message right now — its owner needs to start it."
+    )
+
+
+def _turn_failed_detail(availability: str) -> str:
+    """The 502 body for a turn that RAN and did not come back.
+
+    Distinct from `_refusal_detail`: here retrying genuinely may help, so the
+    instruction stays — but "it may be offline" is only honest when we could not
+    read the agent's state at dispatch.
+    """
+    if availability == "unknown":
+        return "The agent couldn't respond (it may be offline). Please try again."
+    return "The agent couldn't respond. Please try again."
+
+
+def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
+                 availability: str = "unknown") -> PortalAgentCard:
     """One roster row → one card. Shared by the roster and the single-agent
-    lookup (#2160) so the two cannot disagree about how a card is built."""
+    lookup (#2160) so the two cannot disagree about how a card is built.
+
+    `availability` (#2196) is THREADED IN, never computed here: the roster
+    resolves it for the whole set in one Docker call while the agent page
+    resolves one agent's, and a per-card read would put the fleet cost back.
+    """
     from services import tts_service
     name = r["agent_name"]
     updated = r.get("avatar_updated_at")
@@ -301,6 +434,7 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None) 
                 default_voice_id=default_voice_id,
             )
         ),
+        availability=availability,
     )
 
 
@@ -338,8 +472,12 @@ async def get_agent_card(email: str | None, agent_name: str,
                 if r["agent_name"] == agent_name), None)
     if row is None:
         return None
-    card = _row_to_card(row, tts_service.is_available(), _default_voice_id())
-    briefing = await _agent_briefing(agent_name)   # exactly one, not N
+    # #2196: the SINGLE tri-state read, not the batch — one agent's page must
+    # not pay a fleet-scale Docker call, which is this function's whole point.
+    availability = await _agent_availability(agent_name)
+    card = _row_to_card(row, tts_service.is_available(), _default_voice_id(),
+                        availability=availability)
+    briefing = await _agent_briefing(agent_name, availability)   # exactly one, not N
     if isinstance(briefing, tuple):
         card.description, card.playbooks = briefing
     return card
@@ -378,12 +516,23 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     # (somehow) shared must appear once, and the shared row carries the sharing
     # metadata this roster was built around.
     rows = _roster_rows(email, include_owned)
-    cards = [_row_to_card(r, tts_ready, default_voice) for r in rows]
+    # #2196: container state for the whole set in ONE Docker call, resolved here
+    # beside the other once-per-load facts — not in `_roster_rows` (pure SQL, so
+    # #2198's batch-sessions gate does not inherit a Docker read) and not inside
+    # `_agent_briefing` (so #2163 can defer/bound/cache the briefing freely).
+    # It also REPLACES the per-card `get_agent_container()` the briefing used to
+    # make and throw away: N inspects become one list call.
+    availability = await _availability_map([r["agent_name"] for r in rows])
+    cards = [
+        _row_to_card(r, tts_ready, default_voice,
+                     availability=availability.get(r["agent_name"], "unknown"))
+        for r in rows
+    ]
 
     # #138 briefing enrichment — parallel + fail-soft (see _agent_briefing).
     import asyncio
     briefings = await asyncio.gather(
-        *[_agent_briefing(c.name) for c in cards], return_exceptions=True
+        *[_agent_briefing(c.name, c.availability) for c in cards], return_exceptions=True
     )
     for card, b in zip(cards, briefings):
         if isinstance(b, tuple):
@@ -473,7 +622,7 @@ def _use_case_hints(use_cases) -> list[PortalPlaybook]:
     return hints
 
 
-async def _agent_briefing(agent_name: str):
+async def _agent_briefing(agent_name: str, availability: str = "ready"):
     """Best-effort ``(description, hints)`` for the #138 new-chat briefing.
 
     Live agent data from ``/api/template/info`` — the template ``description``
@@ -483,15 +632,32 @@ async def _agent_briefing(agent_name: str):
     playbook is exposed. The curated exposable-skills config (ent#178) slots
     into this same seam once it exists. Any failure (agent stopped, slow, no
     connector) yields ``(None, [])`` so the roster stays fast and never errors.
+
+    #2196: this used to make its OWN ``get_agent_container()`` call per card and
+    throw the answer away, collapsing "no container" / "stopped" / "HTTP failed"
+    into one ``(None, [])``. The caller now resolves that state once — for the
+    whole roster in a single Docker call — and hands it in, so the enrichment
+    costs N HTTP calls instead of N inspects + N HTTP calls, and the answer is
+    used rather than discarded.
+
+    ``availability`` defaults to ``"ready"`` — "the caller asserts this agent can
+    run" — which is the honest contract for a direct call and keeps the existing
+    one-argument call sites and stubs working.
+
+    ``unknown`` is ATTEMPTED, not skipped, and the asymmetry with the turn gate
+    is deliberate rather than an oversight: this function reaches the agent at
+    ``http://agent-{name}:8000`` **by DNS over the agent network**, so a backend
+    Docker-socket fault — the exact class this design is built around — says
+    nothing about whether the agent answers HTTP. Skipping on ``unknown`` would
+    turn one unreadable socket into "no briefings fleet-wide" while every
+    briefing would in fact have worked.
     """
-    from services.docker_service import get_agent_container
     from services.agent_auth import agent_httpx_client
     from services.connector_service import resolve_exposed_playbooks
     from database import db as core_db
 
     try:
-        container = get_agent_container(agent_name)
-        if not container or getattr(container, "status", "") != "running":
+        if availability not in ("ready", "unknown"):
             return None, []
 
         base = f"http://agent-{agent_name}:8000"
@@ -655,11 +821,23 @@ def agent_on_roster(agent_name: str, email: str | None,
     no way to grant themselves access. Harmless while the Workspace was a
     secondary surface; fatal once it is the only one.
     """
-    if agent_name in {r["agent_name"] for r in db.get_shared_roster(email or "")}:
-        return True
+    return agent_name in roster_agent_names(email, include_owned)
+
+
+def roster_agent_names(email: str | None, include_owned: bool) -> set[str]:
+    """The set of agent names on the caller's roster — THE access boundary.
+
+    #2198: extracted so the per-agent gate above and the cross-agent batch read
+    (`list_all_sessions`) resolve membership through one implementation rather
+    than two that merely happen to agree. The batch's tenant scope is exactly
+    this set; if it could drift from what `agent_on_roster` enforces, the
+    sidebar would either leak threads for an agent the caller cannot open or
+    hide threads for one they can.
+    """
+    names = {r["agent_name"] for r in db.get_shared_roster(email or "")}
     if include_owned:
-        return agent_name in {r["agent_name"] for r in db.get_owned_roster(email or "")}
-    return False
+        names |= {r["agent_name"] for r in db.get_owned_roster(email or "")}
+    return names
 
 
 _HISTORY_CONTEXT_MESSAGES = 20  # last ~10 turns fed back to the model as context
@@ -919,7 +1097,9 @@ def _build_portal_system_prompt(agent_name: str, email: str) -> str | None:
 async def portal_chat(agent_name: str, message: str, email: str,
                       session_id: str | None = None,
                       include_owned: bool = False,
-                      execution_id: str | None = None) -> dict:
+                      execution_id: str | None = None,
+                      turn_timeout_seconds: int | None = None,
+                      availability: str | None = None) -> dict:
     """Run one client chat turn against a rostered agent as a standard platform
     execution (``triggered_by="public"`` — the external-caller path, observable +
     cost-tracked). Scoped to the caller's roster; raises ``ClientPortalError`` on
@@ -934,19 +1114,48 @@ async def portal_chat(agent_name: str, message: str, email: str,
     subscribe to the live stream while this coroutine is still running. The
     turn itself is identical either way — this function stays the one place a
     portal turn happens, which is what keeps the streaming path from becoming a
-    second, drifting implementation."""
+    second, drifting implementation.
+
+    #2214: ``turn_timeout_seconds`` is the per-turn bound. The streaming path
+    (`start_portal_turn`) resolves it ONCE and passes it, so marker TTL, 202
+    budget and dispatch share one number; the synchronous `POST .../chat` path
+    passes nothing (it sets no marker) and this resolves it here."""
     if not agent_on_roster(agent_name, email, include_owned):
         # Uniform 404 — never disclose whether an agent the client can't reach exists.
         raise ClientPortalError(404, "Agent not found")
+
+    # #2196: refuse a turn the agent cannot run — HERE, before anything is
+    # created or written.
+    #
+    # This path had NO liveness gate at all. Its 502 lives at the far end, after
+    # `_persist_user_turn`, so a containerless agent left the client's thread
+    # holding a durable user message with no reply plus an orphan execution row —
+    # the worse of the two paths, because the wreckage persists in the
+    # conversation. It is not a dead path either: `/chat` is the documented
+    # headless integration surface (ent#83) AND the browser's fallback when
+    # streaming fails.
+    #
+    # Placed after the roster gate (so a non-holder cannot use a state-dependent
+    # refusal as an existence oracle) and before `_resolve_session_id` (so a
+    # refused turn does not even open a thread). `start_portal_turn` passes the
+    # state it already resolved, so a streamed turn still costs one Docker read.
+    if availability is None:
+        availability = await _agent_availability(agent_name)
+    if not _availability_allows_turn(availability):
+        raise ClientPortalError(502, _refusal_detail(availability))
 
     # Imported here, like every other service this module reaches for: the
     # portal package is imported during app construction, and the execution
     # stack it pulls in is heavier than this module's own import cost.
     from services.session_turn_service import (
         ResumeLockBusy,
+        resolve_turn_timeout,
         run_resumable_turn,
         supports_session_resume,
     )
+
+    turn_timeout = (turn_timeout_seconds if turn_timeout_seconds is not None
+                    else resolve_turn_timeout(agent_name))
 
     session_id = _resolve_session_id(agent_name, email, session_id)
     client_message = message  # what the client typed — persisted verbatim (no context/manifest)
@@ -1097,7 +1306,7 @@ async def portal_chat(agent_name: str, message: str, email: str,
             source_channel=PORTAL_SOURCE_CHANNEL,   # #2157: which public surface this is
             on_resume_failure=_on_resume_failure,
             source_user_email=email,
-            timeout_seconds=PORTAL_TURN_TIMEOUT_SECONDS,
+            timeout_seconds=turn_timeout,   # #2214: the agent's own bound, resolved above
             images=images or None,      # referenced inbox images as vision input (#78)
             system_prompt=system_prompt,
             execution_id=execution_id,  # ent#286: pre-created row, so the client can already be watching
@@ -1115,8 +1324,18 @@ async def portal_chat(agent_name: str, message: str, email: str,
         if "at capacity" in err:
             raise ClientPortalError(429, "The agent is busy. Please try again shortly.")
         if "timed out" in err:
-            raise ClientPortalError(504, "The request timed out — try a simpler message.")
-        raise ClientPortalError(502, "The agent couldn't respond (it may be offline). Please try again.")
+            # #2214: name the bound that was actually enforced — with honest
+            # rounding (a 90s bound reported as "1-minute" would be a lie, so
+            # short bounds speak in seconds).
+            limit = (f"{turn_timeout}-second" if turn_timeout < 120
+                     else f"{round(turn_timeout / 60)}-minute")
+            raise ClientPortalError(
+                504, f"The request timed out after the agent's {limit} limit."
+            )
+        # #2196: the turn RAN and did not come back, so retrying may genuinely
+        # help and the instruction stays — but "it may be offline" is only
+        # honest when we could not read the agent's state at dispatch.
+        raise ClientPortalError(502, _turn_failed_detail(availability))
 
     # Cache the id the turn ran under so the NEXT turn resumes it.
     #
@@ -1204,48 +1423,85 @@ def _inflight_exec_key(execution_id: str) -> str:
     return f"portal_inflight_exec:{execution_id}"
 
 
-# The bound on ONE portal turn (the `timeout_seconds` passed to the turn below).
-PORTAL_TURN_TIMEOUT_SECONDS = 300
-
+# The bound on ONE portal turn is the agent's own `execution_timeout_seconds`
+# (TIMEOUT-001; default 3600, operator range 60–7200), resolved per turn via the
+# engine's `resolve_turn_timeout` (#2214). The old `PORTAL_TURN_TIMEOUT_SECONDS
+# = 300` silently overrode that knob on the surface clients actually use; the
+# constants it fed are now pure functions of the per-turn value, and the old
+# names are deleted — not aliased — so any missed consumer fails loudly at
+# import instead of silently keeping the 300s arithmetic.
+#
 # The bound on a turn's whole LIFE, which is what the marker and the client must
 # be sized against — #2133.
 #
 # `run_resumable_turn` can run the turn TWICE: a resume whose JSONL is gone
 # fails, and the cold retry re-runs the WHOLE thing. So the worst legitimate
-# case is two full timeouts, not one. Sizing either bound at a single timeout
+# case is two full attempts, not one. Sizing either bound at a single timeout
 # reintroduces exactly what #2120 fixed — the marker expires, the client is told
 # "nothing is running", and a live, already-billed turn is declared not
 # delivered — and it does so precisely on the cold-retry path that fix existed
 # for.
 #
-# Still nowhere near the old hour: an hour-long marker is a spinner that
-# outlives the work, so a backend restart mid-turn would leave the composer
-# disabled for the rest of it.
-# What ONE attempt can actually cost, which is not `timeout_seconds`:
-#   + 10   `execute_task` dispatches with `timeout_seconds + 10` (HTTP slack)
-#   + 300  the #678 reader-race auto-retry runs a SECOND http call, capped at
-#          `_AUTO_RETRY_MAX_TIMEOUT_S`, ON TOP of whatever attempt 1 burned
-#          (unlike the SUB-003 retry, which is capped to the remaining budget)
-PORTAL_ATTEMPT_CEILING_SECONDS = PORTAL_TURN_TIMEOUT_SECONDS + 10 + 300
+# One number per turn, by construction: `start_portal_turn` resolves the agent's
+# timeout ONCE and threads the same value to the marker TTL, the 202
+# `wait_budget_seconds`, and the dispatch — so a mid-turn `PUT /timeout` cannot
+# make them disagree.
 
-# ...and the turn can run TWO attempts, because a resume whose JSONL is gone
-# re-runs the whole thing cold. Sizing the marker at one attempt — or at two bare
-# timeouts, as this first did — expires it while the turn is live, and the client
-# then offers a Retry for work already billed. `tests/unit/test_2133_*` pins this
-# against the real constants so a change to either drifts loudly.
-PORTAL_MAX_TURN_SECONDS = 2 * PORTAL_ATTEMPT_CEILING_SECONDS + 60
-PORTAL_INFLIGHT_TTL_SECONDS = PORTAL_MAX_TURN_SECONDS
+
+def portal_attempt_ceiling_seconds(turn_timeout: int) -> int:
+    """What ONE attempt can actually cost — which is not `timeout_seconds`:
+
+      + 10   `execute_task` dispatches with `timeout_seconds + 10` (HTTP slack)
+      + cap  the #678 reader-race auto-retry runs a SECOND http call, capped at
+             `_AUTO_RETRY_MAX_TIMEOUT_S`, ON TOP of whatever attempt 1 burned
+             (unlike the SUB-003 retry, which is capped to the remaining budget)
+
+    The retry cap is IMPORTED, not copied, so it cannot drift — and imported
+    function-locally, like every other service this module reaches for (the
+    execution stack's import chain is heavier than this module's own cost, and
+    ~19 test files import `client_portal.service` bare).
+    """
+    from services.task_execution_service import _AUTO_RETRY_MAX_TIMEOUT_S
+    return turn_timeout + 10 + int(_AUTO_RETRY_MAX_TIMEOUT_S)
+
+
+def portal_max_turn_seconds(turn_timeout: int) -> int:
+    """...and the turn can run TWO attempts, because a resume whose JSONL is
+    gone re-runs the whole thing cold; +60 slack. This is the marker TTL AND the
+    client's wait budget — one number, or the client gives up on (and offers a
+    Retry for) a turn the server still counts as running.
+
+    At the agent-timeout cap (7200) this reaches 15,080s (~4.2h) — the absolute
+    worst any marker can live, and a deliberate decision (#2214), not drift: a
+    Workspace clamp below the agent cap would re-introduce the silent-override
+    bug for the upper half of the range TIMEOUT-001 sells. An orphaned marker
+    needs a HARD kill (graceful shutdown clears it in `finally`), its blast
+    radius is one thread's composer, and the Session surface's own in-flight
+    sentinel has run unclamped at `min(timeout+30, 7230)` for the same sentinel
+    class all along. Operator escape: `DEL portal_inflight:{session}`.
+    `tests/unit/test_2133_*` pins this arithmetic so a change drifts loudly.
+    """
+    return 2 * portal_attempt_ceiling_seconds(turn_timeout) + 60
 
 
 def mark_turn_inflight(session_id: str, execution_id: str,
-                       ttl_seconds: int = PORTAL_INFLIGHT_TTL_SECONDS) -> None:
+                       ttl_seconds: int | None = None) -> None:
     """Record that ``session_id`` has a turn running, and WHICH one.
 
     The value is the execution id, not a bare flag: a client that reloads has
     lost the id it was streaming, and this is where it gets it back. Mirrors the
     Session tab's `session_inflight:` sentinel (#759), which exists for exactly
     this reattach problem. TTL is the backstop for a backend that dies mid-turn.
+
+    ``ttl_seconds`` is a None-sentinel resolved at CALL time (#2214): the old
+    module-constant default was bound at definition time, which is exactly where
+    a per-agent value cannot live. `start_portal_turn` — the only production
+    caller — always passes the per-turn value; a bare call sizes the marker for
+    the platform-default timeout.
     """
+    if ttl_seconds is None:
+        from services.session_turn_service import TURN_TIMEOUT_FALLBACK_SECONDS
+        ttl_seconds = portal_max_turn_seconds(TURN_TIMEOUT_FALLBACK_SECONDS)
     try:
         from redis_breaker_util import get_breaker_redis
         client = get_breaker_redis()
@@ -1388,7 +1644,7 @@ def _fail_unstarted_execution(execution_id: str, reason: str) -> None:
 
 
 def _agent_is_running(agent_name: str) -> bool:
-    """Whether the agent could take a turn right now.
+    """Whether the agent could take a turn right now — the named boolean seam.
 
     A named seam rather than an inline Docker call, so a caller (and a test) has
     ONE unambiguous thing to reason about. The inline version resolved
@@ -1398,12 +1654,23 @@ def _agent_is_running(agent_name: str) -> bool:
     `.status` is never "running", so a healthy agent read as stopped.
 
     Fails OPEN: a Docker read error is not evidence the agent is down, and
-    refusing a healthy turn is the worse error.
+    refusing a healthy turn is the worse error. **That was documented and not
+    true (#2196):** `get_agent_container` had already swallowed the exception and
+    returned None, so `bool(None)` was False and the `except` branch below was
+    unreachable — one unreadable socket refused EVERY Workspace turn on the
+    instance. Rebuilt over the tri-state read, the documented behaviour is now
+    the actual behaviour, and the rule itself lives in
+    `_availability_allows_turn` so this and the turn paths cannot drift.
+
+    Synchronous by design — this is the pre-#2196 signature, which the ent#286
+    tests patch and call directly. The turn paths do NOT call it: they need the
+    resolved state for the refusal copy as well as the gate, and calling both
+    would cost two Docker reads per turn, so they await `_agent_availability`
+    once and derive both from it through the same predicate.
     """
-    from services.docker_service import get_agent_container
+    from services.docker_service import agent_container_state
     try:
-        container = get_agent_container(agent_name)
-        return bool(container) and getattr(container, "status", None) == "running"
+        return _availability_allows_turn(_to_availability(agent_container_state(agent_name)))
     except Exception as e:  # noqa: BLE001
         logger.warning("portal running-check failed for %s: %s", agent_name, e)
         return True
@@ -1431,10 +1698,15 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
     # execution row are left behind — and the client, having been told the turn
     # started, has no error to show. The synchronous path surfaces exactly this
     # as a 502, so this says the same thing at the same moment in the flow.
-    if not _agent_is_running(agent_name):
-        raise ClientPortalError(
-            502, "The agent couldn't respond (it may be offline). Please try again."
-        )
+    #
+    # #2196: ONE Docker read, resolved AFTER the roster gate (a state-dependent
+    # refusal reached before `agent_on_roster` would be an existence oracle for
+    # a non-holder — the Invariant #8 class) and used for BOTH the gate and the
+    # copy. Checking a boolean and then re-reading the state to word the refusal
+    # would cost two reads on the hottest portal path.
+    availability = await _agent_availability(agent_name)
+    if not _availability_allows_turn(availability):
+        raise ClientPortalError(502, _refusal_detail(availability))
 
     # Resolve the thread up front so the client can adopt it immediately rather
     # than waiting for the turn; `portal_chat` resolving it again is idempotent.
@@ -1462,12 +1734,23 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
         # back a turn the client can never watch.
         raise ClientPortalError(500, "Could not start the conversation. Please try again.")
 
-    mark_turn_inflight(session_id, execution_id)
+    # #2214: resolve the agent's timeout ONCE per turn, here, and thread the
+    # same value to the marker TTL, the 202 budget, and the dispatch. Three
+    # independent reads would let a mid-turn `PUT /timeout` make the marker,
+    # the client's budget and the actual turn disagree about one turn's life.
+    from services.session_turn_service import resolve_turn_timeout
+    turn_timeout = resolve_turn_timeout(agent_name)
+    wait_budget = portal_max_turn_seconds(turn_timeout)
+
+    mark_turn_inflight(session_id, execution_id, ttl_seconds=wait_budget)
 
     async def _run() -> None:
         try:
             await portal_chat(agent_name, message, email, session_id=session_id,
-                              include_owned=include_owned, execution_id=execution_id)
+                              include_owned=include_owned, execution_id=execution_id,
+                              turn_timeout_seconds=turn_timeout,
+                              # #2196: already resolved above — one Docker read per turn.
+                              availability=availability)
         except ClientPortalError as e:
             # The client sees this on the stream (the agent's log ends) and in
             # the execution row; there is no request left to raise into.
@@ -1490,11 +1773,12 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
     # #2133: the client must not invent its own ceiling. It waits on the marker,
     # and the marker's life is decided here — so the budget travels with the
     # dispatch rather than being duplicated as a frontend constant that silently
-    # drifts the next time this timeout changes.
+    # drifts the next time this timeout changes. #2214: it is the SAME value the
+    # marker TTL was set from, by construction.
     return {
         "execution_id": execution_id,
         "session_id": session_id,
-        "wait_budget_seconds": PORTAL_MAX_TURN_SECONDS,
+        "wait_budget_seconds": wait_budget,
     }
 
 
@@ -1524,6 +1808,30 @@ def list_sessions(agent_name: str, email: str, include_owned: bool = False) -> d
     if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
     return {"agent_name": agent_name, "sessions": db.list_portal_sessions(agent_name, email)}
+
+
+def list_all_sessions(email: str, include_owned: bool = False) -> dict:
+    """Every thread the caller has, across every agent on their roster (#2198).
+
+    Replaces the sidebar's N+1: `clientPortal.fetchAllSessions()` called the
+    per-agent route once per rostered agent — on bootstrap, on every thread open
+    and on every completed turn — and each of those cost 2-3 DB queries, because
+    `list_sessions` re-resolves the roster through `agent_on_roster` before
+    touching the session table. This resolves the roster ONCE and issues one
+    session query.
+
+    Scoped by `roster_agent_names`, the same set `agent_on_roster` enforces, so
+    the batch returns exactly the union of what the per-agent route would.
+    Filtering on `client_email` alone would be the one way to get this wrong: it
+    would re-surface threads for an agent that was un-shared, which the per-agent
+    gate hides today.
+    """
+    names = sorted(roster_agent_names(email, include_owned))
+    if not names:
+        # Nothing to ask, and the expanding bindparam would raise on an empty
+        # list. Return before touching the DB at all.
+        return {"sessions": []}
+    return {"sessions": db.list_portal_sessions_for_agents(email, names)}
 
 
 def create_session(agent_name: str, email: str, include_owned: bool = False) -> dict:
@@ -1616,11 +1924,46 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
     # streaming. It arrives here, on the fetch the client already makes on
     # mount, so reattaching costs no extra round trip.
     inflight = get_turn_inflight(session_id) if session_id else None
+
+    # #2214: ...and how long it may honestly wait for that turn — the marker's
+    # REMAINING Redis TTL, read in the same client call. The budget was fixed at
+    # dispatch; recomputing a fresh full budget here would over-wait by however
+    # long the turn has already run. GET then TTL as two plain calls — the -2
+    # branch below covers the race between them.
+    wait_budget = None
+    if inflight is not None:
+        try:
+            from redis_breaker_util import get_breaker_redis
+            client = get_breaker_redis()
+            ttl = int(client.ttl(_inflight_key(session_id))) if client is not None else None
+            if ttl is not None:
+                if ttl == -2:
+                    # The marker vanished between the GET and the TTL read: its
+                    # budget is exhausted, and "nothing running" is exactly what
+                    # a GET 1ms later would have said. The client's idle-give-up
+                    # then resolves it in seconds instead of a whole extra
+                    # budget.
+                    inflight = None
+                elif ttl == -1:
+                    # No expiry — unexpected for this key (every writer sets
+                    # `ex=`). Genuinely unknown state: fail OPEN to the full
+                    # per-agent budget. Over-waiting is the safe direction
+                    # (#2133) — a `lost` verdict never retries, so under-waiting
+                    # only costs a premature "check shortly" message, but it is
+                    # still the dishonest one.
+                    from services.session_turn_service import resolve_turn_timeout
+                    wait_budget = portal_max_turn_seconds(resolve_turn_timeout(agent_name))
+                else:
+                    wait_budget = ttl
+        except Exception as e:  # noqa: BLE001 — budget None → the client falls back
+            logger.warning("portal inflight TTL read failed for %s: %s", session_id, e)
+
     return {
         "agent_name": agent_name,
         "session_id": session_id,
         "messages": messages,
         "in_flight_execution_id": inflight,
+        "in_flight_wait_budget_seconds": wait_budget,
     }
 
 
@@ -1750,7 +2093,10 @@ async def portal_upload_document(agent_name: str, email: str, filename: str, dat
 
     container = get_agent_container(agent_name)
     if not container:
-        raise ClientPortalError(502, "The agent is not available. Try again later.")
+        # #2196: "Try again later" was wrong for the state that actually reaches
+        # here most often — an agent with no container, where waiting never
+        # helps. Same next action as the chat refusals, from the same table.
+        raise ClientPortalError(502, _AVAILABILITY_REFUSAL["unavailable"])
     # A stopped container still resolves; the docker exec below would raise. Give
     # the client a clear, non-500 signal instead.
     if getattr(container, "status", "running") != "running":

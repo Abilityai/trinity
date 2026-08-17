@@ -112,6 +112,15 @@ class ExecutionMetadata(BaseModel):
     # additive, defaulted, rides the existing metadata.model_dump(); the
     # backend ignores unknown metadata keys, so old-backend/new-image is safe.
     recovered_terminal: bool = False
+    # #2127: count of background tasks `claude --print` still had in flight when
+    # it exited — i.e. it stopped waiting for work whose result was meant to be
+    # part of this turn's output (its own wait ceiling, or a kill). 0 on every
+    # healthy run, including a fan-out that drained normally. Additive: the
+    # backend reads metadata as a plain dict, so nothing needs to know about it.
+    # Consumption (a UI badge) rides with the ent#333 follow-up that surfaces
+    # `recovered_terminal`; until then the response-text notice is the only
+    # operator-visible channel, which is why the notice is not optional.
+    background_tasks_pending_at_exit: int = 0
     model_name: Optional[str] = None  # Actual model id from assistant.message.model (e.g., "claude-sonnet-4-5") — #678
     # #1187: typed terminal-result seed (the #945 taxonomy). Populated by
     # newer runtimes (Codex) and currently UNUSED by the backend in the MVP —

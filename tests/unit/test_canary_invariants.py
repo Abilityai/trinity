@@ -764,17 +764,6 @@ def leaked_magicmock_database(monkeypatch):
     return leaked
 
 
-# Override the package-wide autouse fixtures.
-@pytest.fixture(scope="session")
-def api_client():
-    yield None
-
-
-@pytest.fixture(autouse=True)
-def cleanup_after_test():
-    yield
-
-
 # ---------------------------------------------------------------------------
 # Helpers — populate fixtures
 # ---------------------------------------------------------------------------

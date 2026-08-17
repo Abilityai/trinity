@@ -15,7 +15,7 @@ A template selects the runtime in `template.yaml`:
 ```yaml
 runtime:
   type: codex          # claude-code (default) | gemini-cli | codex
-  model: gpt-5.1-codex # optional model override
+  model: gpt-5.6-sol   # optional model override
 ```
 
 The runtime is fixed when the agent is created. To change it, recreate the agent from a template that declares a different runtime — there is no post-creation switch.
@@ -42,7 +42,7 @@ Set the runtime in the template's `template.yaml`:
 | Field | Values | Default | Notes |
 |-------|--------|---------|-------|
 | `runtime.type` | `claude-code`, `gemini-cli`, `codex` | `claude-code` | Selects the harness |
-| `runtime.model` | runtime-specific model id (e.g. `gpt-5.1-codex`) | runtime default | Optional override |
+| `runtime.model` | runtime-specific model id (e.g. `gpt-5.6-sol`) | runtime default | Optional override — pin it, so recorded cost is attributable |
 
 A Codex agent reads its identity and instructions from `AGENTS.md`. Trinity mirrors the template's `CLAUDE.md` into `AGENTS.md` at startup, so a single instruction file works across runtimes.
 

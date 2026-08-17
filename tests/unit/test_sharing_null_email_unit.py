@@ -21,7 +21,7 @@ import pytest
 # (repo/tests/*.py → repo/src/backend) or inside a container where /app is the
 # backend root.
 _candidates = [
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src", "backend")),
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "backend")),
     "/app",
 ]
 _backend_path = next((p for p in _candidates if os.path.isdir(os.path.join(p, "db", "agent_settings"))), None)

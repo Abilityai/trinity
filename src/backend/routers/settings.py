@@ -175,6 +175,10 @@ async def get_public_feature_flags(
     )
     from services.entitlement_service import entitlement_service
     from services import a2a_outbound_service
+    # Function-local (#2217): a top-level import would pull the whole canary
+    # package into the settings-router load; the handler pattern here is
+    # function-local imports.
+    from services.canary_service import canary_service
     voice_available = VOICE_ENABLED and bool(GEMINI_API_KEY)
     # Brain Orb flags are RUNTIME-RESOLVED (#85): system_settings override →
     # BRAIN_ORB_* env opt-in → OFF. An admin flip via PUT /api/settings/brain-orb
@@ -225,6 +229,11 @@ async def get_public_feature_flags(
         # points. Lets an operator confirm via the API whether the correlated-
         # failure controls are armed during a soak. NOT a UI surface.
         "redelivery_governor_enabled": REDELIVERY_GOVERNOR_ENABLED,
+        # Canary run-state (#2217) — observability-only boolean, beside the
+        # other observability flags; any authed user, public-safe. Whether
+        # the canary harness is enabled. Last-cycle/stale/sink detail stays
+        # admin-only on GET /api/canary/status.
+        "canary_enabled": canary_service.is_enabled(),
         # Outbound voice replies (ent#117) — true when an ElevenLabs key resolves
         # (stored setting → ELEVENLABS_API_KEY env). Gates the agent-level Voice
         # config UI + the send_voice_reply capability. Non-sensitive boolean.
@@ -522,6 +531,7 @@ async def get_retention_status(
          FLOOR_SCHEDULES, db.count_soft_deleted_schedules_past_retention),
     )
     pending_acknowledgements = []
+    blocked_sweeps = []
     for _key, _label, _floor, _count_fn in _ack_sweeps:
         _window = _ops_int(_key)
         if _window <= 0:
@@ -532,9 +542,10 @@ async def get_retention_status(
             floor=_floor,
         )
         # Only "over_threshold" is a genuine pending-approval. `count_failed` /
-        # `ack_lookup_failed` are fail-closed error states, not approvable, and
-        # an already-acked sweep returns allowed=True (so it drops off the list —
-        # the single-use, no-stale-state guarantee the panel needs).
+        # `count_uninterpretable` / `count_negative` / `ack_lookup_failed` are
+        # fail-closed error states, not approvable, and an already-acked sweep
+        # returns allowed=True (so it drops off the list — the single-use,
+        # no-stale-state guarantee the panel needs).
         if not _verdict.allowed and _verdict.reason == "over_threshold":
             pending_acknowledgements.append({
                 "key": _key,
@@ -542,6 +553,21 @@ async def get_retention_status(
                 "window_days": _window,
                 "candidate_count": _verdict.candidates,
                 "floor": _floor,
+            })
+        elif not _verdict.allowed:
+            # #1833: NOT approvable is not the same as NOT worth showing. Before
+            # #1833 an uninterpretable count raised out of `evaluate` and took
+            # this whole endpoint down with a 500 — ugly, but loud. Now it
+            # refuses, so without this the sweep is blocked forever in
+            # `cleanup_service` while the panel renders a clean "nothing
+            # pending" — the guard's own anti-pattern ("a guard that fails open
+            # manufactures confidence") relocated from the prune to the operator
+            # surface. Identifiers and reason codes ONLY, the same SECURITY rule
+            # as the alarm payload: no counts of row content, no sample rows.
+            blocked_sweeps.append({
+                "key": _key,
+                "window_days": _window,
+                "reason": _verdict.reason,
             })
 
     return {
@@ -567,16 +593,52 @@ async def get_retention_status(
         # #1709: sweeps a cleanup cycle would refuse right now, awaiting an admin
         # ack via POST /api/settings/retention/acknowledge. Empty ⇒ nothing pending.
         "pending_acknowledgements": pending_acknowledgements,
+        # #1833: sweeps the guard is refusing for a reason this panel cannot
+        # offer an approve control for (the count failed / could not be
+        # interpreted / was a negative error sentinel, or the ack lookup itself
+        # failed). Blocked, not pending. SCOPE: the same two ack-gated sweeps
+        # `_ack_sweeps` re-runs above — the other six windows are not evaluated
+        # here at all, so a refusal on those reaches an operator only through the
+        # durable operator-queue alarm `cleanup_service` raises.
+        "blocked_sweeps": blocked_sweeps,
         "windows": {
             # Log archival (env-driven; LOG_* escape hatch)
             "log_retention_days": int(os.getenv("LOG_RETENTION_DAYS", "5")),
             "log_archive_enabled": os.getenv("LOG_ARCHIVE_ENABLED", "true").lower() == "true",
-            # Execution + health + soft-delete (OPS settings, 0 = disabled)
-            **{k: _ops_int(k) for k in RETENTION_OPS_KEYS},
+            # Execution + health + soft-delete (OPS settings, 0 = disabled).
+            # #2216: `backup_retention_days` is EXCLUDED here — _ops_int's
+            # garbage→0 coercion means "sweep disabled" for row windows but
+            # "keep backups forever" (the #1871 disk-fill trap) for backups,
+            # so on a malformed stored row this map and the backup service
+            # would disagree inside ONE response. The key is reported only in
+            # the `backup` block below, through the service's own inverted
+            # reader (garbage → 14). Pinned by
+            # tests/unit/test_2216_backup_observability.py.
+            **{
+                k: _ops_int(k)
+                for k in RETENTION_OPS_KEYS
+                if k != "backup_retention_days"
+            },
             # Audit log — exempt from the community floor (365-day integrity floor)
             "audit_log_retention_days": audit_days,
         },
+        # #2216: automatic database-backup status (BKUP-014) — durable
+        # system_settings keys + a live /data/backups listing, rendered by
+        # the one shared reader. `scope: "same-disk"` is the machine-readable
+        # boundary statement (protects against corruption/slips, not disk loss).
+        "backup": await _backup_block(),
     }
+
+
+async def _backup_block():
+    """Backup status for GET /retention — fail-soft: a broken block must not
+    take down the whole retention panel."""
+    try:
+        from services.db_backup_service import build_backup_status_block
+        return await build_backup_status_block()
+    except Exception as e:
+        logger.error(f"Could not build backup status block: {e}")
+        return {"error": "unavailable"}
 
 
 # ============================================================================

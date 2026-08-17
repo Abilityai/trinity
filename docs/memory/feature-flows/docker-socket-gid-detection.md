@@ -133,3 +133,11 @@ under a race is harmless. Still degrades to `[]` (never raises).
   the same Docker SDK surface
 - [container-capabilities.md](container-capabilities.md) — non-root container
   capability baseline
+- [workspace-agent-page.md](workspace-agent-page.md) — the first surface to
+  distinguish *this fault* from "the agent has no container" (#2196). Every older
+  Docker helper collapses the two into one falsy value (`list_all_agents_fast`
+  → `[]`, `get_agent_container` → `None`), which is exactly why a wrong GID here
+  reads downstream as "you have no agents" rather than as an infrastructure
+  fault. `docker_service.agent_container_states()` /
+  `agent_container_state(name)` return `None` for *unreadable* and a real answer
+  otherwise, so a consumer can render the difference

@@ -636,6 +636,54 @@ Edited from the Sharing tab.
 - **FR-6 — Group chats**: applied to group channels too (group surfaces are
   public-facing).
 
+### 47.2 Selectable Model Catalog — Single Source of Truth (#2086)
+
+**Description**: The selectable Claude-model catalog was hand-maintained in three
+independent places (the #894 backend allow-list, the `ModelSelector.vue` picker,
+and the `Settings.vue` admin fleet-default dropdown) with no shared registry, so
+the copies drifted silently — worst asymmetrically, since the allow-list is a
+*validation* set (a shipping model missing there is rejected **422** on `PUT
+.../public-channel-model`, unselectable even via the API, while the frontend lists
+degrade quietly). #2086 centralizes it.
+
+- **FR-1 — Single source**: `src/backend/services/model_catalog.py` defines
+  `MODEL_CATALOG` (ordered `ModelEntry` list: `id`, `label`, `note`, and the
+  policy flags). It is a **stdlib-only leaf** (imports nothing from
+  `settings_service`/`database`) so codegen and the parity test load it DB-free.
+- **FR-2 — Two policy dimensions + a display marker**:
+  - `public_channel` — selectable as the #894 per-agent public-channel override
+    (`settings_service.PUBLIC_CHANNEL_MODELS` **re-exports** the derived set).
+  - `admin_default_selectable` — offered in the admin fleet-default dropdown.
+    Enforces the **#1080** posture: Haiku is public-channel-selectable but NOT
+    admin-default (an admin must not be able to default the whole fleet to the
+    cheap tier); the two legacy ids are picker-only (neither flag).
+  - `recommended` — drives the admin dropdown's "(recommended)" marker; exactly
+    one entry, **pinned to `PLATFORM_DEFAULT_MODEL_VALUE`** (#831, out of scope to
+    change) rather than the loaded value.
+- **FR-3 — Generated frontend mirror**: `scripts/gen_model_catalog.py` emits the
+  checked-in, do-not-edit `src/frontend/src/constants/modelCatalog.js` (Vite-bundled,
+  CSP-clean `'self'` asset). `ModelSelector.vue` derives its picker and `Settings.vue`
+  its admin dropdown from it. **No consumer keeps its own literal model list.**
+- **FR-4 — CI guard**: `tests/unit/test_2086_model_catalog_parity.py` (rides
+  `backend-unit-test.yml`, no `paths:` filter → every PR) **byte-matches** the
+  committed JS against `render_js()` AND **structurally validates** the parsed
+  records against the Python source (a wrong-but-fresh emitter fails too).
+- **FR-5 — Preserved behavior**: `db.get_public_channel_model` still degrades an
+  allow-list-absent stored value to the platform default (#1080); `ModelSelector.vue`
+  still accepts free-text ids (incl. the `[1m]` extended-context suffix).
+- **FR-6 — Adding a model is a single-file edit** (the human control the guard
+  can NOT provide): the guard catches consumer-vs-source drift, not
+  source-vs-reality staleness (Anthropic ships a model, nobody edits the catalog →
+  all lists stay green but the model is unselectable). **When Anthropic ships a
+  selectable Claude model, add one `ModelEntry` to `MODEL_CATALOG` and re-run
+  `python scripts/gen_model_catalog.py`.** This is the docs/PR-checklist step the
+  AC requires ("docs say where the file is").
+- **FR-7 — Known-deferred display drift**: `routers/ops.py::_format_model_name` and
+  its frontend twin `stores/observability.js::formatModelName` are display
+  prettifiers with no model list (a new id renders via their title-case fallback).
+  They are the same drift class but are **deliberately out of scope** for #2086 —
+  tracked as a follow-up, not silently folded into the centralized catalog.
+
 ### 48.1 Voice Replies v2 — Voice as a Per-Message Capability (trinity-enterprise#117)
 
 **Description**: Reworks outbound voice replies (ElevenLabs TTS) so that voice is

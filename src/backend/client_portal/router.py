@@ -57,6 +57,7 @@ from .models import (
     PortalRoster,
     PortalSearchResults,
     PortalSession,
+    PortalAllSessions,
     PortalSessions,
     PortalAgentPage,
     PortalAgentReports,
@@ -474,6 +475,44 @@ def portal_search(q: str = "", limit: int = 30, principal: PortalPrincipal = Dep
     # No agent gate here: search is scoped to the caller's own portal rows by
     # email, so there is no roster decision to mirror.
     return service.search_chats(principal.email, q, limit=min(max(limit, 1), 50))
+
+
+@router.get("/sessions", response_model=PortalAllSessions)
+def portal_all_sessions(principal: PortalPrincipal = Depends(get_portal_principal)):
+    """Every conversation thread the signed-in viewer has, across every agent on
+    their roster — the Workspace sidebar's list, in one call (#2198).
+
+    Declared HERE, beside `/my-agents`, `/search` and `/chat-state`, because it is
+    the same kind of thing: viewer-scoped, no agent parameter. `Portal.vue` already
+    articulated the shape when `/chat-state` was added — "kept out of
+    `fetchAllSessions` on purpose: that call fans out over the roster and degrades
+    per agent, while this is one call for the whole viewer". Sessions now join it.
+
+    Invariant #4: this router has no top-level `/{param}` catch-all today (every
+    segment-1 is a literal), so `sessions` cannot be shadowed — but keeping it in
+    this block means a future catch-all cannot capture it either.
+
+    Invariant #8: no agent parameter, so there is no existence oracle to probe —
+    strictly LESS enumerable than the per-agent route it replaces.
+    """
+    email = principal.email
+    # ent#358: the scope of what a caller can DO must equal what they can SEE.
+    include_owned = principal.is_platform
+
+    from services import rate_limiter
+
+    # This becomes the hottest authenticated read in the Workspace — six
+    # `refreshThreads()` call sites including every thread open and every
+    # completed turn — and unlike the fan-out it replaces it is no longer even
+    # incidentally throttled by the browser's per-host connection cap (and in
+    # production, behind cloudflared/HTTP-2, there is no such cap at all). There
+    # is no global limiter middleware, so every bounded portal surface enforces
+    # explicitly; this follows `portal_report_detail`.
+    rate_limiter.enforce(f"portal_sessions_all:{email}", 120, 60)
+    try:
+        return service.list_all_sessions(email, include_owned=include_owned)
+    except ClientPortalError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
 # --- Per-user chat state: stars + unread (ent#359) ----------------------------

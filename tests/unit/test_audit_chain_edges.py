@@ -57,6 +57,43 @@ def mod():
     return m
 
 
+@pytest.fixture(autouse=True)
+def _restore_hash_chain_setting():
+    """Snapshot and restore the durable ``audit_hash_chain_enabled`` setting
+    around every test in this file.
+
+    #2026 moved the flag to ``system_settings`` on the real global ``db``, so
+    ``test_enabling_the_hash_chain_survives_a_restart`` now exercises a genuine
+    durable write and left ``audit_hash_chain_enabled='true'`` set for the rest
+    of the pytest process. A later test that calls
+    ``platform_audit_service.log()`` then silently takes the CHAINED writer
+    instead of the plain one — the #1966 order-dependent flake surfaced by the
+    #1853 test-file reordering (``test_audit_chain_edges`` -> ``test_1966``).
+    Mirrors the autouse restore ``tests/test_audit_log_unit.py`` already keeps
+    for the same #762 reason; restoring the real seam keeps the durable-write
+    tests honest instead of weakening them. No-op for the tests here that never
+    touch the real setting.
+    """
+    try:
+        import services.platform_audit_service as m
+    except ImportError:  # pragma: no cover - backend venv required
+        yield
+        return
+    key = m.PlatformAuditService.HASH_CHAIN_SETTING
+    try:
+        before = m.db.get_setting_value(key)
+    except Exception:  # pragma: no cover - no real settings seam in this env
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            m.db.set_setting(key, before if before is not None else "false")
+        except Exception:  # pragma: no cover - best-effort restore
+            pass
+
+
 def _rows(mod, monkeypatch, rows):
     monkeypatch.setattr(mod.db, "get_audit_entries_range",
                         lambda s, e: rows, raising=False)

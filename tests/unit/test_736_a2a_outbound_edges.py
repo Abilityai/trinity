@@ -883,20 +883,8 @@ def test_G4_a_blank_credential_never_overwrites_a_stored_one(store, credential):
     assert store.resolve_endpoint("bot", "partner").credential is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG (finding F5b): a WHITESPACE-ONLY credential is the one blank "
-        "spelling that destroys the stored secret. `upsert_endpoint` skips the "
-        "header-safety check on it (`if credential.strip() and …`) but then takes "
-        "the `elif credential:` branch, because '   ' is truthy, and writes "
-        "`''`. So `None` and `''` preserve, `'   '` silently clears — a fourth "
-        "path through a model the docstring describes as three (omit / set / "
-        "clear_credential). Not reachable over HTTP (the request model normalises "
-        "blank to None), so this is a public-module-function defect, not an API "
-        "one. Tracked as ent#396. See /edge-cases report 2026-08-13."
-    ),
-)
+# Fixed by #2175 F5b: every blank credential spelling now collapses to None in a
+# single normalisation, so this is a live regression test rather than an xfail.
 def test_G4_a_whitespace_only_credential_does_not_silently_clear_the_stored_one(store):
     store.upsert_endpoint("partner", PEER_URL, "real-secret")
     store.upsert_endpoint("partner", PEER_URL, "   ")

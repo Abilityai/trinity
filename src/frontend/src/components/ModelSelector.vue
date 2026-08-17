@@ -59,6 +59,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { MODEL_CATALOG } from '../constants/modelCatalog'
 
 const props = defineProps({
   modelValue: {
@@ -85,26 +86,13 @@ const props = defineProps({
 
 const emit = defineEmits(['update:modelValue'])
 
-// Canonical model list — synced from https://platform.claude.com/docs/en/about-claude/models/overview
-// Last updated: 2026-07-08 (#1521)
-// Aliases are undated and resolve to the latest snapshot; do NOT append date suffixes
-// to a current-gen alias. A removed preset is only hidden from the picker, not blocked
-// (free-text passthrough still accepts any string). Append [1m] to a value for the 1M
-// extended-context beta (e.g. 'claude-sonnet-4-6[1m]').
-const PRESET_MODELS = [
-  // Claude 5 family (latest generation, native 1M context)
-  { value: 'claude-fable-5', label: 'Claude Fable 5', note: 'Most capable — longest tasks (latest)' },
-  { value: 'claude-sonnet-5', label: 'Claude Sonnet 5', note: 'Fast + smart, 1M context (latest)' },
-  // Current generation
-  { value: 'claude-opus-4-8', label: 'Claude Opus 4.8', note: 'Most capable Opus' },
-  { value: 'claude-opus-4-7', label: 'Claude Opus 4.7', note: 'Current' },
-  { value: 'claude-opus-4-6', label: 'Claude Opus 4.6', note: 'Current' },
-  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', note: 'Fast + smart' },
-  { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', note: 'Fastest, cheapest' },
-  // Legacy (still active)
-  { value: 'claude-opus-4-5-20251101', label: 'Claude Opus 4.5', note: 'Legacy' },
-  { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5', note: 'Legacy' },
-]
+// Picker presets derived from the single source of truth,
+// `src/constants/modelCatalog.js` (GENERATED from `services/model_catalog.py`,
+// #2086 — do not hand-edit the constant; run `scripts/gen_model_catalog.py`).
+// A removed preset is only hidden from the picker, not blocked: free-text
+// passthrough (onInput below) still accepts any string, including the `[1m]`
+// extended-context suffix (e.g. 'claude-sonnet-4-6[1m]').
+const PRESET_MODELS = MODEL_CATALOG.map((m) => ({ value: m.id, label: m.label, note: m.note }))
 
 const showDropdown = ref(false)
 const highlightedIndex = ref(-1)

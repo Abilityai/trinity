@@ -195,6 +195,14 @@ _ALLOWED_HEADER_NAMES = frozenset({
     "authorization", "x-api-key", "user-agent", "accept", "content-type",
 })
 
+#: RFC 6598 shared address space (CGNAT). Python's `ipaddress` reports it as
+#: NEITHER `is_private` NOR `is_reserved` (trinity-enterprise#14 S3), so the
+#: six borrowed predicates below all answer False for it (trinity-enterprise#394).
+#: Deliberately duplicated from `utils/url_validation._SHARED_ADDRESS_SPACE`:
+#: this file is vendored byte-identically into the agent image (Invariant #5)
+#: and structurally cannot import `src/backend`. Parsed once, at import.
+_SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
+
 
 # ---------------------------------------------------------------------------
 # Helpers (private)
@@ -279,8 +287,8 @@ def _resolves_to_private_ip(hostname: str) -> bool:
     """Best-effort DNS check (mirrors SEC-179 / #179).
 
     Returns True if the hostname resolves to ANY private/loopback/link-local/
-    multicast IP. On DNS failure: True (fail closed). Used to block IMDS,
-    localhost, RFC 1918, and similar SSRF targets.
+    multicast/CGNAT (RFC 6598) IP. On DNS failure: True (fail closed). Used
+    to block IMDS, localhost, RFC 1918, and similar SSRF targets.
     """
     try:
         # getaddrinfo returns a list of (family, type, proto, canonname, sockaddr).
@@ -294,6 +302,12 @@ def _resolves_to_private_ip(hostname: str) -> bool:
             ip = ipaddress.ip_address(sockaddr[0])
         except (ValueError, IndexError):
             continue
+        # The v4 view: itself when v4, its payload when IPv4-MAPPED
+        # (`::ffff:a.b.c.d`), else None. Never `ip.version == 4` — the ent#393
+        # defect: the mapped form reports version 6 and the six stdlib checks
+        # below delegate through `ipv4_mapped` themselves, so CGNAT — the one
+        # range whose refusal is our own — must do the delegation too.
+        v4 = ip if ip.version == 4 else ip.ipv4_mapped
         if (
             ip.is_private
             or ip.is_loopback
@@ -301,6 +315,7 @@ def _resolves_to_private_ip(hostname: str) -> bool:
             or ip.is_multicast
             or ip.is_reserved
             or ip.is_unspecified
+            or (v4 is not None and v4 in _SHARED_ADDRESS_SPACE)
         ):
             return True
     return False

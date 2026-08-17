@@ -349,9 +349,18 @@ def upsert_endpoint(
     regardless: a stored row is not trusted, a DNS record can move, and the
     settings row could be written by some future path that skips this function.
 
-    A credential is **write-only**: omitted leaves an existing one untouched
-    (so an operator can rename or repoint without re-typing a secret they may
-    not have), and `clear_credential=True` removes it.
+    A credential is **write-only**, and there are exactly THREE paths (#2175 F5b):
+    omitting it leaves an existing one untouched (so an operator can rename or
+    repoint without re-typing a secret they may not have), passing one sets it,
+    and `clear_credential=True` is the only way to remove it. **Every blank
+    spelling — `None`, `""`, `"   "` — means "leave it alone."** A whitespace-only
+    value used to be a fourth path that silently destroyed the stored secret: it
+    skipped the header-safety check (`if credential.strip() and …`) and then took
+    the `elif credential:` branch, because `"   "` is truthy, writing `""`. Not
+    reachable over HTTP — `A2AOutboundEndpointUpsert._validate_credential`
+    normalises a blank `SecretStr` to `None` — but this is a public module
+    function, and "blank clears the secret" is the wrong default for a value the
+    caller may hold no other copy of.
     """
     import uuid
 
@@ -384,6 +393,13 @@ def upsert_endpoint(
                 "Endpoint credential contains characters that are not valid in an "
                 "HTTP header (whitespace, line breaks or control characters)."
             )
+    # #2175 F5b: ONE normalisation, immediately after the checks above — every
+    # blank spelling collapses to None ("leave it alone") before either write
+    # path can see it. Done here rather than at each branch so a future third
+    # write site cannot reintroduce the fourth path. The length cap is still
+    # measured on the raw value, so the bound an operator is told about does not
+    # move when their secret has surrounding whitespace.
+    clean_credential = (credential or "").strip() or None
     try:
         validate_a2a_endpoint_url(clean_url)
     except A2AEndpointUrlError as exc:
@@ -397,8 +413,8 @@ def upsert_endpoint(
             record["url"] = clean_url
             if clear_credential:
                 record.pop("credential", None)
-            elif credential:
-                record["credential"] = credential.strip()
+            elif clean_credential:
+                record["credential"] = clean_credential
             _store_endpoint_records(records)
             return _public_record(record)
 
@@ -424,8 +440,8 @@ def upsert_endpoint(
         "name": clean_name,
         "url": clean_url,
     }
-    if credential and not clear_credential:
-        record["credential"] = credential.strip()
+    if clean_credential and not clear_credential:
+        record["credential"] = clean_credential
     records.append(record)
     _store_endpoint_records(records)
     return _public_record(record)

@@ -116,9 +116,20 @@ test.describe('System install surface', () => {
     // table), so an unscoped getByText is a strict-mode violation. Scoping also
     // makes this assert the name is in the AGENTS table specifically, rather than
     // `.first()`, which would pass on whichever element happened to come first.
-    const agentsSection = page.locator('section').filter({
-      has: page.getByRole('heading', { name: /Agents to create/ }),
-    })
+    //
+    // Anchored on the heading's NEAREST ancestor section (#2199). The previous
+    // `page.locator('section').filter({ has: heading })` was necessary but not
+    // sufficient: `filter({ has })` matches EVERY section containing the
+    // heading, and ent#384 wrapped this surface in the Library's own tabbed
+    // `<section id="systems">` (views/Library.vue). Both the outer wrapper and
+    // the inner agents section then matched, the outer one holds all four
+    // renders, and the assertion resolved to 4 elements again. `.last()` would
+    // work today but is positional — a second wrapper is exactly how this broke
+    // twice, so anchor upward from the heading instead, which is stable no
+    // matter how many ancestors are added.
+    const agentsSection = page
+      .getByRole('heading', { name: /Agents to create/ })
+      .locator('xpath=ancestor::section[1]')
     await expect(agentsSection.getByText('e2e-preview-only-alpha')).toBeVisible()
     await expect(agentsSection.getByText('e2e-preview-only-beta')).toBeVisible()
 

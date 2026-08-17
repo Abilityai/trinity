@@ -11,7 +11,13 @@ priority: 10  # Lower = higher in list (after system templates)
 # Use the OpenAI Codex runtime instead of Claude Code
 runtime:
   type: codex
-  model: gpt-5.1-codex
+  # Pinned, NOT omitted (#2207). Omitting it lets the CLI pick its own default,
+  # but Trinity prices a turn from the model string IT was given — an unpinned
+  # turn arrives at calculate_codex_cost() as model=None, because Codex's
+  # thread.started event carries only a thread id and never the resolved model.
+  # So "inherit the CLI default" silently means "cost is estimated from a
+  # fallback rate". Pin it and the recorded cost is attributable.
+  model: gpt-5.6-sol
 
 resources:
   cpu: "2"

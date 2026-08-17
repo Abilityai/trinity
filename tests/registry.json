@@ -1505,6 +1505,32 @@
       "description": "Failed-creation container reclaim (ent#313): a create that fails after containers.run must leave no orphan container, no unreclaimable volume and no name-keyed Redis state. Covers both arrival shapes — handle in hand (later step raised) and NO handle (the reported 60s Docker read timeout, where the daemon created the container and the client never got it, so it is re-derived by name). Pins every fail-closed gate on that re-derived path, because a name resolves to another install's live agent on a shared Docker daemon: 409 name conflict (daemon created nothing) → refuse; existing agent_ownership row (a concurrent creation won the name) → refuse; trinity.created label older than the attempt's floor, missing, or unparseable → refuse; missing floor → refuse; DB or Docker lookup error → refuse. Also: Redis cleared when the container is provably gone (removed or never created) and NOT when removal failed (the slot ZSET isn't idle); every failure swallowed so the original creation error is what the caller reports; and an AST guard that create_agent_internal actually AWAITS the reclaim, so the unit tests can't stay green while nothing calls it. Also pins the never-raises contract under a stubbed docker module: the first version used isinstance(exc, docker.errors.APIError), which raises TypeError wherever docker is a test double and replaced the real creation error with an unrelated one (caught by the full suite via test_fork_to_own / test_1484); the 409 check is duck-typed on .response.status_code now."
     },
     {
+      "file": "unit/test_2215_port_allocation.py",
+      "feature": "#2215",
+      "added": "2026-08-16",
+      "categories": [
+        "backend",
+        "unit",
+        "docker",
+        "agents",
+        "reliability"
+      ],
+      "description": "Atomic SSH-port allocation via a per-port Redis reservation (#2215 D1). `get_next_available_port()` was an unlocked check-then-act: two concurrent creators (the fresh-install seeders under `--workers 2`) read the same `trinity.ssh-port` label snapshot, computed the same `max+1`, and the second `containers.run` failed `Bind for 0.0.0.0:X failed: port is already allocated` — after which the default-system deploy latches `default_system_seeded` on a permanently-incomplete `partial`. The regression is pinned DETERMINISTICALLY, with no timing: two SEQUENTIAL calls against an UNCHANGED stubbed Docker snapshot must return DIFFERENT ports (pre-fix: the same port — the race in unit form), with a bounded threaded belt (N concurrent calls -> N distinct ports) beside it. Gate ORDER is load-bearing and pinned: the SETNX reservation is the LAST gate, after the label scan and `is_port_available`, so a host-bound candidate the scan walks past never leaves a 600s reservation behind. SETNX contention -> continue scanning (never return the contended port unreserved, which would hand out a port exactly while the race is happening); a RAISED Redis error fails OPEN with exactly one reservation attempt and the client resolved once per call. `exclude=` binds the forward scan AND the 2222-2500 fallback scan (merged once, before both loops). Every reservation carries `ex=600`: a dropped TTL would make a stale key permanently unallocatable, since no reaper exists. The label scan is STRICT — a Docker listing fault RAISES rather than degrading to `list_all_agents_fast`'s `[]`, which would compute `start_port = 2222` and confidently reserve an existing agent's port (`is_port_available` is netns-blind in production, so nothing downstream would catch it) — while demo mode (`docker_client is None`) still allocates from the base. Also pins the stated guarantee BOUNDARY: Redis-down double assignment is convergent, driven through a D2-shaped `exclude=` retry to distinct final ports. `reserve_port_for_recreate` sets WITHOUT NX (the recreating agent's own port; a stale key must never block it) and is fail-open. Harness: real modules captured at module scope and re-owned per test, `redis_breaker_util` INCLUDED — it is not on conftest's invariant list, and a leaked MagicMock makes every SETNX \"succeed\" and silently defeats the race tests; `is_port_available` is ALWAYS stubbed (it binds real sockets); fakeredis over hand-rolled stubs (honors nx/ex); all thread coordination bounded so a deadlock cannot hang the randomized suite."
+    },
+    {
+      "file": "unit/test_2215_create_port_retry.py",
+      "feature": "#2215",
+      "added": "2026-08-16",
+      "categories": [
+        "backend",
+        "agents",
+        "unit",
+        "reliability",
+        "lifecycle"
+      ],
+      "description": "Bounded port-bind-conflict retry in the create path plus the reclaim precedence guard (#2215 D2/D2b). The D1 reservation is fail-open, so a collision can still surface at `containers.run` — Redis down/restarted, an expired reservation, a foreign host process — and `_run_agent_container_with_port_retry` converges it within the same create call, before a first-run seed deploy computes a permanently-latched `partial`. The cross-phase theme all three plan reviewers hit independently: `_is_container_name_conflict`'s text fallback matches the bare substring \"already in use\", which Docker Desktop's bind failure (\"… bind: address already in use\") CONTAINS — but a bind conflict proves `containers.create` SUCCEEDED (the daemon holds a Created husk of OURS) while a name conflict proves it created NOTHING, so misordering them strands the husk, 409s every retry of the name, and lets Cornelius's next-boot 409-convergence burn the durable seed flag on a dead container (the #1790 latch). Pins the classifier vocabulary (narrow two-phrase bind match, the documented Desktop overlap, and disjointness where it must hold — never `isinstance` against the docker module, which may be a test double, and never the generic \"conflict\", so daemon-unreachable/timeout errors bubble without burning retries); the strict per-attempt ORDER (record failed port -> clean up the husk -> reallocate with `exclude=` -> retry) with cleanup on EVERY bind-classified attempt, the final one INCLUDED, so a bind husk is never handed to the generic ent#313 reclaim still on the name; and abort-on-any-cleanup-doubt (ownership row present, lookup failure, unprovable provenance, removal failure) re-raising the ORIGINAL bind error rather than the cleanup error, because proceeding after a failed removal makes the next attempt 409 against our own husk, which the reclaim then reads as \"not ours\" and strands. Cleanup uses a direct `containers.get`, not `get_agent_container`, whose flattening of a lookup FAILURE into \"absent\" would read as \"safe to retry\". Non-bind errors and caller-pinned ports never retry; attempts bounded at 3; exhausted retries reach the unchanged rollback + reclaim. D2b: a bind error arriving at `_reclaim_failed_creation_container` with no handle re-derives the container under the ent#313 fail-closed gates instead of declining. Wiring guards close the ship-dead failure modes: `create_agent_internal` awaits the WRAPPER (not the raw create), and `auto_allocated_port` is captured BEFORE the port mutation — captured after, the gate is always-False and the whole retry ships inert. Harness mirrors test_ent313_failed_creation_container_reclaim.py: the real crud module with its Docker/DB seams monkeypatched BY OBJECT (crud from-imports at module top, so `crud.<name>` is where the code resolves), no sys.modules writes."
+    },
+    {
       "file": "unit/test_1951_slack_inbound_media.py",
       "feature": "#1951",
       "added": "2026-08-03",
@@ -1940,6 +1966,32 @@
       "description": "The .trinity/ authored-vs-runtime split survives a backend Push (#2070). Every Push runs `git rm --cached` over tracked-but-now-ignored files; the fleet list ignored `.trinity/` WHOLESALE, so template-committed content there was untracked and its deletion pushed, guarded only by a hardcoded two-entry pathspec that was wrong three times (brain-orb ent#76, setup.sh — swept live — and pre-check #2070, the SCHED-COND-001 hook the platform's own docs tell authors to commit). Silent by construction: only the index is touched, so the working tree keeps running and the failure lands one re-clone/recreate later as an agent with no hook, whose every cron tick then runs a full LLM turn. Runs the REAL `_build_gitignore_merge_command` + `_build_rm_cached_ignored_command` against REAL git repos in tmp (the defect is in git's own descend/negation semantics, which a mocked container cannot express). Asserts the SPLIT, never the current exemption strings: 8 authored paths survive, 9 runtime files stay untracked, a fresh clone still RUNS the hook, the superseded wholesale line is replaced (append-only would be inert — git never descends into a dir-form exclusion), user rules merely mentioning .trinity are preserved, the merge is idempotent, exemptions are derived from `_TRINITY_AUTHORED_PATHS`, and a newly-invented runtime file needs no action. Mutation-verified 4 ways (wholesale ignore restored 5F, hardcoded exemptions 1F, no stale-line migration 2F, pre-check dropped from the set 4F)."
     },
     {
+      "file": "unit/test_2069_gitignore_at_creation.py",
+      "feature": "#2069",
+      "added": "2026-08-16",
+      "categories": [
+        "backend",
+        "git",
+        "agents",
+        "unit",
+        "reliability",
+        "security"
+      ],
+      "description": "The fleet-wide `.gitignore` merge now runs at agent CREATION (#2069). `_GITIGNORE_PATTERNS` was applied only on Push/init, never at creation, so a `github:` agent whose 15-min in-container auto-sync loop is on from birth (the GIT_SYNC_AUTO set — non-source/fork agents, ephemeral ghosts INCLUDED) auto-committed `.trinity/` runtime state and the root-level `.env`/`.mcp.json` into its user-owned repo before any Push could migrate the list. Loads the REAL git_service (heavy deps mocked) through crud.git_service so the predicate, merge builders and readiness poller are production code. (1) Merge behaviour (AC#2): the real `_build_gitignore_merge_command` output run against real tmp git repos — no-.gitignore template gets the full list, a partial one is preserved+completed, and after the merge a bare `git add -A` stages NONE of .env/.mcp.json/.trinity/*/content/*/.claude/projects while genuine code + the .gitignore itself ARE staged; #2070 authored hooks (.trinity/pre-check) stay includable. (2) Idempotence/#953 (AC#4): an EXACT-seed template committed to a bare origin shows no `M .gitignore`; run-twice is a no-op (no pattern duplicated); a stale wholesale `.trinity/` line yields a LEGITIMATE supersede→append edit (#2070) — proving the no-drift contract is scoped to already-canonical templates. (3) Readiness gating (AC#1/R1): merge_gitignore_after_clone waits while /health is down and times out cleanly with no exception; once ready ∧ .git present it runs `_build_gitignore_merge_command` against the toplevel and NEVER `_build_rm_cached_ignored_command` (creation is PREVENT, not REMEDIATE); skips a ready-but-no-.git failed clone and an unresolved `_git_toplevel` None; and a hung docker exec is `asyncio.wait_for`-bounded (a missing wrap would hang the test); and the readiness poll runs OUTSIDE `_gitignore_merge_semaphore` so a slow-/never-booting agent parked in its /health wait cannot head-of-line-block a healthy already-ready agent's Docker-exec merge — pinned with a 1-permit semaphore, since the pre-fix in-semaphore poll would deadlock the fast agent. (4) `_git_auto_sync_baked` matrix (R2): fork-to-own AND non-source AND ephemeral non-source github+PAT bake (the ghost is never operator-Pushed, so the merge MUST cover it — the predicate ignores config.ephemeral), while source-mode-non-fork, local/no-repo, no-PAT and ephemeral-source-mode do NOT — and `_materialize_agent_files` fires spawn_gitignore_merge_after_clone on EXACTLY that predicate (the AC#6 regression, real predicate flowing through crud). (5) Start/recreate wiring (T1): an AST structural guard that start_agent_internal fires the spawn gated on db.get_git_auto_sync_enabled and NOWHERE ungated (fleet remediation for existing leakers; ghosts never recreate so the DB flag is complete). No Docker, no live backend, no Redis."
+    },
+    {
+      "file": "unit/test_2069_gitignore_merge_caller_guard.py",
+      "feature": "#2069",
+      "added": "2026-08-16",
+      "categories": [
+        "backend",
+        "git",
+        "unit",
+        "guard"
+      ],
+      "description": "AST writer-SET guard that `_GITIGNORE_PATTERNS` stays the single source of truth (#2069 AC#3 / R4, the test_ent109_git_env_seam precedent). Pins TWO sets in git_service.py: (a) the functions calling `_build_gitignore_merge_command` == {_migrate_workspace_gitignore, initialize_git_in_container, merge_gitignore_after_clone} exactly — a fourth caller is a fourth application point to re-reason about; and (b) the load-bearing half — the functions with an ast.Name LOAD of `_GITIGNORE_PATTERNS` == {_build_gitignore_merge_command} only, which catches the bypass where a new writer feeds the constant into the generic `_build_gitignore_append_command(git_dir, _GITIGNORE_PATTERNS)` (already called with a DIFFERENT list) or hand-rolls a shell append — neither of which a callers-only guard would see. AST, not grep: docstring mentions are ast.Constant not ast.Name, and a black reflow can split a call across lines. Scope is git_service.py only; compatibility/fixes.py is a documented out-of-scope cross-module consumer."
+    },
+    {
       "file": "unit/test_2080_harness_contract.py",
       "feature": "#2080",
       "added": "2026-08-10",
@@ -2146,6 +2198,106 @@
         "unit"
       ],
       "description": "#2114 subscription-shadow guard: arm_subscription_auth_guard trigger matrix (baseline-token arms; empty-string token, non-Claude runtime, terminal-auth, platform-key, .env-managed auth all inert), override-layer semantics (hot-reload window without baseline, extra-last precedence, explicit override beats arm), observability (per-key WARNING memo with active invalidation via re-add, mirror deliberately unguarded while env_drift_report carries suppressed_for_spawn incl. keys absent from .env — the widened iteration set), and the DELIBERATELY UNFIXED stale-.env-OAuth residual pinned by name. Standalone module load by path (test_1999 idiom); names-only logging asserted (stale value must not appear in caplog.text)."
+    },
+    {
+      "file": "unit/test_1833_retention_guard_contract.py",
+      "feature": "#1833",
+      "added": "2026-08-12",
+      "categories": [
+        "backend",
+        "unit",
+        "retention",
+        "reliability"
+      ],
+      "description": "#1833 retention blast-radius guard contract: `evaluate` refuses instead of raising. Every uninterpretable count shape (None/str/object/Mock/dict/list/bytes/tuple/type) -> `count_uninterpretable`; a `__le__` (or `__lt__`) returning a TRUTHY NON-BOOL refuses — the fail-OPEN a `bool()`-only fix would ship, and the one test that goes red against it; negative counts refuse as error sentinels (`count_negative`, previously allowed through); the three error reasons stay distinguishable; `verdict.candidates` is always an int so the alarm context survives `json.dumps(allow_nan=False)`; NaN/float behaviour deliberately unchanged; the refusal reaches the operator queue through the real `_guard_allows`; an undecidable refusal does not prescribe an acknowledgement no ack path ever reads; and the second, UNWRAPPED consumer `GET /api/settings/retention` returns 200 with the sweep under `blocked_sweeps` instead of 500-ing the approve panel. Doubles only, no backend. Review pass added: no refusal path raises when the caught exception's `__str__` raises (the sibling of the #1834 test, for the function #1833 is named after — `evaluate` passed the raw exception into deferred `%s` on all three refusal paths and raised out of a REFUSAL under a re-raising handler); a negative count whose `__repr__` also raises still refuses; the uninterpretable log names WHICH comparison misbehaved; and an over-threshold count that cannot be represented as an int (NaN/inf/Decimal) no longer renders \"-1 candidate(s) exceeds threshold\" — it keeps the acknowledge instruction, which is asserted to actually work rather than assumed."
+    },
+    {
+      "file": "unit/test_1834_retention_alarm_retry.py",
+      "feature": "#1834",
+      "added": "2026-08-12",
+      "categories": [
+        "backend",
+        "unit",
+        "retention",
+        "reliability",
+        "operator-queue"
+      ],
+      "description": "#1834 refusal-alarm retry: a failed `create_operator_queue_item` is re-attempted every cycle for the life of the refusal episode (the memo used to be written before the attempt, permanently suppressing its own retry). Covers the retry through two REAL `_run_cleanup_inner` cycles (the issue's literal claim is 'no later CYCLE retries it'); never-give-up + escalate-exactly-once, with the budget read from `ALARM_ESCALATION_AGE_SECONDS` rather than hard-coded and the clock driven via the injectable `_RG._clock`; the transition ERROR still firing once per episode while retrying; freshness keyed on (window, REASON) so #1833's new signal is not swallowed; delivery meaning 'did not raise' under ON CONFLICT DO NOTHING; two-worker convergence on one alarm; and both directions of the #1644 invariant that the queue item authorizes nothing. Doubles only, no backend."
+    },
+    {
+      "file": "unit/test_2127_background_task_gate.py",
+      "feature": "#2127",
+      "added": "2026-08-14",
+      "categories": [
+        "agent-server",
+        "unit",
+        "headless",
+        "reliability"
+      ],
+      "description": "Fan-out turn no longer killed mid-wait (#2127): `claude --print` emits one result line per turn segment and stays alive to await background subagents, so the #970 early-finalize now requires result_seen AND an empty background-task ledger AND a quiet stream. Covers the pure _count_waited_bg_tasks denylist (local_bash/local_shell excluded, unknown types counted, malformed ledger degrades to 0); the ledger half via a replayed fan-out-still-running stream; the IDLE half via the ledger-empty-while-composing stream (the shape the issue actually reports — measured 5 subagents done at t+27.8s, real FINAL REPORT at t+55.9s), each asserted on END STATE and each verified failing without its half of the gate; unparseable output counting as proof-of-life; the AGENT_IDLE_FINALIZE_S resolver fallbacks (<=0 refused — it would restore the #2127 kill); a pin that the 300s default keeps ≥5x headroom over the measured 40.54s single-message silence; #970 preserved when there is no fan-out; the effective_timeout backstop still bounding a subagent that never completes; the pending-at-exit notice + metadata flag; and a parity guard that BOTH claude spawn sites set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS."
+    },
+    {
+      "file": "unit/test_2216_backup_primitives.py",
+      "feature": "#2216",
+      "added": "2026-08-16",
+      "categories": [
+        "backend",
+        "unit",
+        "infrastructure",
+        "database"
+      ],
+      "description": "Database-backup primitives (#2216, db/backup_primitives.py). The copy is the safe primitive, not the incident's raw cp: the online-backup API yields a consistent standalone snapshot that survives a writer committing mid-copy, is a point-in-time snapshot rather than a live view, and is written 0600 then atomically replaced (last-writer-wins on one intact file, never torn). Thread-affinity contract pinned by driving the sync worker through asyncio.to_thread — both sqlite3 connections open AND close inside it, so none ever crosses a thread (learnings 2026-07-20). Verification rejects a corrupt and an empty copy, so a failed copy never enters the artifact namespace. Prune's two bounds are the whole safety story and both are pinned at their boundaries: the fixed BACKUP_MIN_KEEP floor holds at retention_days=1 (the #1644 'small valid integer is the catastrophic input' case), is asserted >= 2 AND asserted NOT to be settings-backed, holds across artifact patterns, and exactly-floor deletes zero while floor+1 deletes exactly the oldest; nothing inside the window is ever pruned; only the three known artifact patterns are scanned, so foreign files are never collateral. Plus day-keyed naming (every generated name matches a prune pattern, tmp names are pid-suffixed and match none), the aged *.tmp.* orphan sweep (reclaims 25h, keeps fresh, ignores artifacts), the duration WARNING naming the 30s DELETE-mode busy-timeout wall, the DB_BACKUP_ENABLED reader shared with the service, and an import-graph guard that the leaf never imports database/services (it is called from init_database() at import time). Stdlib sqlite3 only, no Docker."
+    },
+    {
+      "file": "unit/test_2216_db_backup_service.py",
+      "feature": "#2216",
+      "added": "2026-08-16",
+      "categories": [
+        "backend",
+        "unit",
+        "infrastructure",
+        "database",
+        "reliability"
+      ],
+      "description": "Daily database-backup service (#2216, services/db_backup_service.py). Run orchestration: day-keyed idempotence (second run same day no-ops), the DB_BACKUP_ENABLED off path touching nothing, and durable system_settings status on every terminal (ent#236 — in-process state is invisible to the other worker). The Redis lease is pinned as duplicate-I/O SUPPRESSION, never a correctness boundary: taken/released, a held lease skips, Redis down fails OPEN to the day-key guard alone, release is own-token compare-and-delete (a foreign token is never deleted), and the TTL is derived from PG_DUMP_TIMEOUT_SECONDS so retuning the dump timeout visibly re-opens the math (learnings 2026-07-31). Prune runs on EVERY attempt — success, failure, and the no-space skip — which is the Catch-22 regression guard: prune-only-on-success means a full disk skips the backup, bypasses the prune, and an operator lowering the window frees nothing. Free-space preflight skips loudly with an alarm; an unavailable size estimate proceeds rather than failing closed. The alarm has two triggers because 'does not fail silently' must hold over time: the edge fires exactly once per failure episode and re-arms only after a success intervenes, and the staleness re-alarm never fires while fresh, fires past the 3-day threshold, then respects the 7-day re-fire window, covers an install that never succeeded at all, and agrees with the status block's own `stale` flag. Knobs: malformed and out-of-range env values fall back with a WARNING while an unset one is silent (#1871 shape), and the retention reader's INVERTED coercion (garbage → 14, never → 0 keep-forever) is parametrized. PG arm with the subprocess mocked: the conninfo URI normalizes the SQLAlchemy driver suffix away and strips the password while PRESERVING query params (?sslmode=require survives — re-parsing into -h/-p/-U would permanently break managed PG), the password reaches pg_dump via PGPASSWORD env ONLY and never argv, a no-password URL leaves PGPASSWORD unset, an unparseable URL never echoes the URL (no password in the log or the durable status), non-zero exit raises with size-capped stderr, a missing binary names the image rebuild (#1814 class), and the timeout path KILLS AND REAPS the child (wait_for cancels the await, never the process) before unlinking the partial tmp and reaching status + alarm."
+    },
+    {
+      "file": "unit/test_2216_boot_pre_migration_backup.py",
+      "feature": "#2216",
+      "added": "2026-08-16",
+      "categories": [
+        "backend",
+        "unit",
+        "infrastructure",
+        "database",
+        "migrations"
+      ],
+      "description": "Boot-time pre-migration backup (#2216) — a contract mostly about what the hook must NOT do, because it runs inside init_database() at import time where a raise crash-loops the backend permanently (the #1638 seed contract). Asserts an arbitrary exception never propagates out of the hook; that the two skip classes stay DISTINCT branches rather than one blanket except — a fresh install (no schema_migrations, and separately an empty one) skips SILENTLY at INFO, since a first boot must not emit a scary ERROR, while a corrupt file is the loud path; that no pending migrations means no backup, and DB_BACKUP_ENABLED=false skips the boot hook too (the disable knob covers BOTH producers, not just the nightly job); and that when migrations are pending the artifact exists BEFORE the migration mutates the DB, with status rows written durably. The corrupt-DB case is pinned against the real incident: the source is overwritten with the literal `HTTP/1.1 200 OK` + `server: uvicorn` bytes from the issue's hexdump, and the test asserts run_all_migrations on the same connection still raises the SAME exception type as pre-change — the incident's fingerprint must survive the feature that exists because of it — while the failed backup evicts no healthy artifact and unlinks its own tmp."
+    },
+    {
+      "file": "unit/test_2216_backup_restore_roundtrip.py",
+      "feature": "#2216",
+      "added": "2026-08-16",
+      "categories": [
+        "backend",
+        "unit",
+        "infrastructure",
+        "database"
+      ],
+      "description": "AC#5 exercised restore (#2216) — the proof that the produced artifact IS a recovery point, not merely a produced file. Replays the incident end to end against a scratch DB: seed rows, take a backup exactly the way the daily job does (copy → verify → atomic replace into the day-keyed artifact name), overwrite the SOURCE header with the incident's literal `HTTP/1.1 200 OK` bytes so it becomes unreadable with the production signature (sqlite3.DatabaseError: file is not a database), then restore by the documented procedure — remove the stale -wal/-shm/-journal sidecars, copy the artifact over the source — and assert row equality with the seed. Repeated for a pre-migration-*.db artifact, so both producers are proven restorable by the same procedure the user doc publishes."
+    },
+    {
+      "file": "unit/test_2216_backup_observability.py",
+      "feature": "#2216",
+      "added": "2026-08-16",
+      "categories": [
+        "backend",
+        "unit",
+        "infrastructure",
+        "settings",
+        "security"
+      ],
+      "description": "Backup observability + knob plumbing (#2216). GET /api/settings/retention carries the `backup` block (scope, enabled, retention_days, min_keep) AND EXCLUDES backup_retention_days from the generic `windows` map — the generic _ops_int coerces garbage → 0 meaning 'sweep disabled', which for backups means 'keep forever', so on one malformed row the two readers would disagree inside a single response; the test plants that malformed row and asserts the ONE rendered number is the shared reader's 14. A failing backup-block read degrades the block rather than 500ing the whole retention GET. Write path: the ops-config route validates 1..3650 and rejects 0 by design (0 = keep-forever is the #1871 disk-fill trap; disabling backups is the separate DB_BACKUP_ENABLED knob), the generic PUT /api/settings/{key} catch-all 422-blocks it via RETENTION_OPS_KEYS membership (which also means /ops/reset skips it), and it is deliberately NOT a community-floor seed key (floor-seeding would push the window DOWN, the destructive direction here). Alarm plumbing cannot be silenced or mis-scanned: `db-backup-` is a reserved operator-queue id prefix (else an agent pre-creates the id and on_conflict_do_nothing silences the platform's own failure alarm), the `_db-backup` sentinel is uncreatable as an agent name (sanitize_agent_name strips the leading underscore), and the canary L-03 exclusion is asserted by service↔canary constant parity plus a predicate check over every sentinel — the #1644 test's shape, extended because the single-value exclusion became a tuple and _retention-guard must still be covered. Isolated file-load of routers/settings.py (the test_retention_floor idiom) so pytest-randomly orderings cannot pollute the import."
     }
   ]
 }

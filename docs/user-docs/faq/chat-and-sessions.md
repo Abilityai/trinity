@@ -24,7 +24,7 @@ It's the size of the most recent assistant turn's cache as a fraction of the mod
 
 ## Is the context window always 200K tokens?
 
-No — the denominator is model-specific. Trinity prefers the context window the runtime itself reports for the model that actually ran; when that's unavailable it falls back to a per-model catalog (for example, Gemini and 1M-context Claude models such as Sonnet 5 report a 1M window, Codex around 272K, and plain Claude models default to 200K as a safe floor). So the percentage-used bar rescales to whichever model ran, and the same percentage can mean very different absolute token counts on different agents. See [Agent Runtimes](../agents/agent-runtimes.md).
+No — the denominator is model-specific. Trinity prefers the context window the runtime itself reports for the model that actually ran; when that's unavailable it falls back to a per-model catalog (for example, Gemini and 1M-context Claude models such as Sonnet 5 report a 1M window, Codex around 1.05M on the gpt-5.6 family and around 272K on older ones, and plain Claude models default to 200K as a safe floor). So the percentage-used bar rescales to whichever model ran, and the same percentage can mean very different absolute token counts on different agents. See [Agent Runtimes](../agents/agent-runtimes.md).
 
 ## How do I make the agent forget the conversation and start fresh?
 
