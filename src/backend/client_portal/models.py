@@ -50,6 +50,16 @@ class PortalAgentCard(BaseModel):
     avatar_url: Optional[str] = None
     shared_at: Optional[str] = None
     voice_available: bool = False    # #78: portal voice (ElevenLabs key + agent voice set)
+    # #2212 — whether the platform can TRANSCRIBE, i.e. exactly the `/stt` gate:
+    # an ElevenLabs key resolves. Deliberately a SEPARATE bit from
+    # `voice_available`: output additionally needs an effective voice to speak
+    # WITH, input does not, so collapsing the two would either hide a working mic
+    # or render a dead one. Fails CLOSED for the same reason `voice_available`
+    # does — the bug it guards against is promising an affordance that cannot
+    # work. The client uses it to prefer the server path (recorded audio → /stt,
+    # which answers with real statuses and real messages) over the browser Web
+    # Speech API, and to drop the mic entirely when neither path can work.
+    stt_available: bool = False
     # #138 briefing — ships with the roster at sign-in so the new-chat screen
     # renders with zero extra fetches. Best-effort live data (a stopped/slow
     # agent yields None/[]). `playbooks` is the hint-card set (ent#380): the

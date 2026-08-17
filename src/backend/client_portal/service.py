@@ -434,6 +434,11 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
                 default_voice_id=default_voice_id,
             )
         ),
+        # #2212: voice INPUT needs the platform key only — no agent voice, since
+        # nothing is spoken back. `tts_ready` IS `transcribe_portal_audio`'s own
+        # gate (`tts_service.is_available()`), so the mic the client sees and the
+        # endpoint it would call cannot disagree.
+        stt_available=bool(tts_ready),
         availability=availability,
     )
 
