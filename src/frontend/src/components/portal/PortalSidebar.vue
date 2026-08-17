@@ -187,14 +187,22 @@
     </div>
 
     <!-- Footer: signed-in email + sign out -->
+    <!-- #2258: ONE button, labelled for what it does to THIS principal. A
+         platform user's workspace session IS their platform session (ent#357),
+         so for them the action signs out of Trinity and the label says so —
+         never "Sign out" for something narrower, never "Leave" for something
+         wider. Same element for both kinds (no v-if swap: the #2159 focus
+         lesson); only the accessible name changes. -->
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 p-3 flex items-center gap-2">
       <div class="min-w-0 flex-1">
-        <div class="text-xs text-gray-400">Signed in</div>
+        <div class="text-xs text-gray-400">{{ isPlatformSession ? 'Signed in to Trinity' : 'Signed in' }}</div>
         <div class="text-sm truncate" :title="clientEmail">{{ clientEmail }}</div>
       </div>
       <button
+        type="button"
         class="shrink-0 p-2 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-white dark:hover:bg-gray-900 transition"
-        title="Sign out"
+        :title="signOutLabel"
+        :aria-label="signOutLabel"
         @click="$emit('sign-out')"
       >
         <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
@@ -210,6 +218,7 @@ import ChatRow from './PortalChatRow.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import {
   groupThreadsByDate, partitionStarred, unreadByAgent, totalUnread, availabilityChip,
+  signOutLabelFor,
 } from './portalUtils'
 
 const props = defineProps({
@@ -231,6 +240,9 @@ const emit = defineEmits([
 ])
 
 const isSearching = computed(() => (props.search || '').trim().length >= 2)
+
+// #2258: the accessible name of the footer button, per principal kind.
+const signOutLabel = computed(() => signOutLabelFor(props.isPlatformSession))
 
 const split = computed(() => partitionStarred(props.threads))
 const starred = computed(() => split.value.starred)

@@ -1,7 +1,17 @@
 <template>
   <div class="h-screen flex flex-col bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 overflow-hidden">
+    <!-- ============================ SIGNING OUT ========================== -->
+    <!-- #2258: holds the frame while the platform credential is being revoked.
+         Without it, a platform user sees the OTP form — "enter the email an
+         operator shared agents with" — for the beat between `logout()` and
+         the /login push: the exact confusion ent#357 removed. Same footprint
+         as the sign-in card (contract #4). -->
+    <div v-if="signingOut" class="flex-1 flex items-center justify-center px-4" aria-live="polite">
+      <p class="text-sm text-gray-500 dark:text-gray-400">Signing out…</p>
+    </div>
+
     <!-- ============================ SIGN-IN ============================ -->
-    <div v-if="!store.isClientSignedIn" class="flex-1 flex items-center justify-center px-4">
+    <div v-else-if="!store.isClientSignedIn" class="flex-1 flex items-center justify-center px-4">
       <div class="w-full max-w-sm">
         <div class="flex items-center gap-2 mb-6">
           <svg class="w-7 h-7 text-action-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
@@ -264,7 +274,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE } from '@/stores/clientPortal'
+import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
 import PortalConversation from '@/components/portal/PortalConversation.vue'
 import PortalBriefing from '@/components/portal/PortalBriefing.vue'
@@ -745,15 +755,37 @@ async function bootstrap() {
 onMounted(async () => { if (store.isClientSignedIn) await bootstrap() })
 onBeforeUnmount(() => { clearInterval(resendTimer); clearTimeout(searchTimer) })
 
-function onSignOut() {
-  store.signOut()
-  threads.value = []; activeAgentName.value = null; pendingSession.value = null
-  step.value = 'email'; email.value = ''; code.value = ''
-  // Leave ANY specific route (rationale in newChatWithAgent) — otherwise a
-  // sign-out carries that room id (#2128) or agent name into the next session's
-  // address bar. The query matters most here: `?agent=X` survives the path
-  // check and is re-read by the next `bootstrap()`, so the next person to sign
-  // in on this browser lands on "You don't have access to X".
-  escapeStage()
+// #2258: true from the click until the credential is gone and the route has
+// moved. Gates the template's first branch so neither principal sees a state
+// that lies about them mid-flight, and makes the handler idempotent against a
+// double click while `logout()` is on the wire.
+const signingOut = ref(false)
+
+// #2258: the decision — which credential to end, in what order, and where to
+// land — lives in `store.signOutEverywhere()`, where a unit test can pin it.
+// This handler only resets view-local state and performs the navigation the
+// store names: a platform user signed out of Trinity, so they go to the
+// platform login; a client stays on the Workspace, which now shows the OTP
+// form because BOTH ways of being signed in are gone.
+async function onSignOut() {
+  if (signingOut.value) return
+  signingOut.value = true
+  try {
+    const target = await store.signOutEverywhere()
+    threads.value = []; activeAgentName.value = null; pendingSession.value = null
+    step.value = 'email'; email.value = ''; code.value = ''
+    if (target === PLATFORM_LOGIN_ROUTE) {
+      await router.push(PLATFORM_LOGIN_ROUTE)
+      return
+    }
+    // Leave ANY specific route (rationale in newChatWithAgent) — otherwise a
+    // sign-out carries that room id (#2128) or agent name into the next session's
+    // address bar. The query matters most here: `?agent=X` survives the path
+    // check and is re-read by the next `bootstrap()`, so the next person to sign
+    // in on this browser lands on "You don't have access to X".
+    escapeStage()
+  } finally {
+    signingOut.value = false
+  }
 }
 </script>
