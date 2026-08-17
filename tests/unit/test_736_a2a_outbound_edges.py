@@ -17,7 +17,7 @@ that the taxonomy's null/optional row exists to separate, the IPv6 transition
 prefixes an attacker reaches for once the plain IPv4-mapped form is blocked, and
 the cross-namespace collisions in the endpoint store.
 
-The sweep found six defects. Two remain strict-``xfail`` (F3, F5b): they
+The sweep found six defects. One remains strict-``xfail`` (F5b): it
 are real, recorded rather than patched, because this file's job is to find them
 and fixing product code is a separate decision. ``strict=True`` matters — each
 one turns into a FAILURE the moment the defect is fixed, so the fix cannot land
@@ -30,14 +30,16 @@ Each names its matrix row, its finding id and its tracker issue; see
 +=========+========+==================================================+========+
 | F1      | ent#399| ``_same_origin`` compares IPv6 literals textually | FIXED  |
 | F2      | ent#398| port ``:0`` normalised three ways in one path    | FIXED  |
-| F3      | ent#397| refusal ``reason`` reverse-engineered from prose | xfail  |
+| F3      | ent#397| refusal ``reason`` reverse-engineered from prose | FIXED  |
 | F4      | ent#395| ``remove_endpoint`` can delete two endpoints     | FIXED  |
 | F5b     | ent#396| a whitespace-only credential clears the secret   | xfail  |
 +---------+--------+--------------------------------------------------+--------+
 
-**F1, F2 and F4 were fixed while this sweep was open**, which is why their
+**F1, F2, F3 and F4 were fixed while this sweep was open**, which is why their
 markers are gone rather than pending. F1 landed in #2181 (``canonical_origin_host``
-compares IP literals as addresses); its E6 test now asserts the property directly. F2 landed in #2180 (one shared ``effective_port``
+compares IP literals as addresses); its E6 test now asserts the property directly.
+F3 landed in #2182 (``PublicUrlRefusal`` carries the kind from the raise site,
+mapped through one table); its D12 test now asserts the reason directly. F2 landed in #2180 (one shared ``effective_port``
 consumed by validation, connection pinning and origin comparison); its D7 test
 now asserts the three agreeing. F4 landed in #2177 (first-match-wins delete,
 shared with ``resolve_endpoint``); that PR's own regression suite — including
@@ -936,8 +938,22 @@ def _raised_reasons() -> set:
 
 
 def _endpoint_url_reasons() -> set:
+    """Every reason `validate_a2a_endpoint_url` can actually produce.
+
+    ent#397 moved most of these out of literal raise sites and into the
+    `_A2A_REASON_BY_KIND` table, so a literals-only scan under-reports: it
+    stopped seeing `endpoint_private_address` and `endpoint_dns_failure` even
+    though both are still produced, which made H1 report a live reason as a
+    dead map entry. Both production sites are read — the remaining literals
+    AND the table's values — so this stays a scan of what the module emits
+    rather than of how it happens to spell it this month.
+    """
     src = (_BACKEND / "utils" / "url_validation.py").read_text()
-    return set(re.findall(r'A2AEndpointUrlError\(\s*"([a-z_]+)"', src))
+    literal = set(re.findall(r'A2AEndpointUrlError\(\s*"([a-z_]+)"', src))
+    block = re.search(r"_A2A_REASON_BY_KIND\s*=\s*\{(.*?)\}", src, re.S)
+    assert block, "the kind->reason table moved or was renamed"
+    mapped = set(re.findall(r':\s*"([a-z_]+)"', block.group(1)))
+    return literal | mapped
 
 
 def _status_map() -> dict:
@@ -983,19 +999,6 @@ def test_H1_the_declared_reason_vocabulary_matches_what_is_raised():
 # --------------------------------------------------------------------------- #
 # D10/D12 — FINDING F3: reason codes are derived by substring-matching prose
 # --------------------------------------------------------------------------- #
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG (finding F3): `validate_a2a_endpoint_url` derives its machine-readable "
-        "`reason` by substring-matching the human message — the exact fragility "
-        "`A2AEndpointUrlError`'s own docstring warns against. The DNS-failure "
-        "message interpolates the hostname, and `canonical_host` passes hosts "
-        "containing spaces, so a host spelled 'an internal address.example' is "
-        "reported as `endpoint_private_address` when it merely failed to resolve. "
-        "Same HTTP status either way, so no bypass — a wrong reason code and a "
-        "misleading operator message. Tracked as ent#397. See /edge-cases report 2026-08-13."
-    ),
-)
 def test_D12_a_dns_failure_is_never_misreported_as_a_private_address(dns_fails):
     with pytest.raises(A2AEndpointUrlError) as exc:
         validate_a2a_endpoint_url("https://an internal address.example/a2a")

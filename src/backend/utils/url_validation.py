@@ -511,6 +511,32 @@ def canonical_origin_host(hostname: str) -> Optional[str]:
     return canonical_host(hostname)
 
 
+#: Why `_validate_public_https_url` refused, set at the raise site (ent#397).
+PUBLIC_URL_REFUSAL_KINDS = ("invalid", "not_https", "credentials",
+                            "private_address", "dns_failure")
+
+class PublicUrlRefusal(ValueError):
+    """A refusal from `_validate_public_https_url`, carrying WHY at the raise site.
+
+    `kind` is one of `PUBLIC_URL_REFUSAL_KINDS` and is set where the refusal
+    happens; the message stays free to be reworded (ent#397). The A2A validator
+    used to recover its machine-readable `reason` by substring-matching this
+    message — so a host spelled `an internal address.example` that merely failed
+    to resolve was reported as `endpoint_private_address`, because the DNS message
+    interpolates the hostname. No bypass (both map to the same HTTP status), but
+    the operator is told the opposite of what happened and any consumer branching
+    on `reason` branches wrongly.
+
+    It subclasses `ValueError` so every existing caller — the template-registry
+    validator among them — keeps catching exactly what it caught before, with the
+    same message. The kind is additive.
+    """
+
+    def __init__(self, kind: str, message: str):
+        super().__init__(message)
+        self.kind = kind
+
+
 def _validate_public_https_url(
     url: str,
     *,
@@ -551,29 +577,29 @@ def _validate_public_https_url(
     `socket.getaddrinfo`.
     """
     if not url or not url.strip():
-        raise ValueError(f"{label} cannot be empty")
+        raise PublicUrlRefusal("invalid", f"{label} cannot be empty")
 
     url = url.strip()
 
     if len(url) > max_len:
-        raise ValueError(f"{label} is too long (max {max_len} characters)")
+        raise PublicUrlRefusal("invalid", f"{label} is too long (max {max_len} characters)")
 
     try:
         parsed = urlparse(url)
     except Exception:
-        raise ValueError("Invalid URL format")
+        raise PublicUrlRefusal("invalid", "Invalid URL format")
 
     if parsed.scheme != "https":
-        raise ValueError(f"{label} must use HTTPS")
+        raise PublicUrlRefusal("not_https", f"{label} must use HTTPS")
 
     # `username`/`password` are None when absent. Check the raw netloc too: a
     # malformed authority can carry an `@` that urlparse folds into the host.
     if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
-        raise ValueError(credential_advice)
+        raise PublicUrlRefusal("credentials", credential_advice)
 
     hostname = canonical_host(parsed.hostname or "")
     if not hostname:
-        raise ValueError(f"{label} must have a valid hostname")
+        raise PublicUrlRefusal("invalid", f"{label} must have a valid hostname")
 
     try:
         # ent#398: the ONE normalisation, shared with `_pinned_url` and
@@ -583,13 +609,13 @@ def _validate_public_https_url(
     except ValueError:
         # urlparse raises on a non-numeric / out-of-range port only when `.port`
         # is read, so this is the first place a junk authority surfaces.
-        raise ValueError(f"{label} must have a valid hostname")
+        raise PublicUrlRefusal("invalid", f"{label} must have a valid hostname")
 
     resolve = resolver or socket.getaddrinfo
     try:
         resolved = resolve(hostname, port)
     except socket.gaierror:
-        raise ValueError(f"{host_label} could not be resolved ({hostname})")
+        raise PublicUrlRefusal("dns_failure", f"{host_label} could not be resolved ({hostname})")
 
     addresses: List[str] = []
     for entry in resolved:
@@ -601,15 +627,15 @@ def _validate_public_https_url(
             # An address the stdlib itself cannot parse is not one we are going
             # to vet — refuse rather than skip (skipping is how a bad record
             # passes through unexamined).
-            raise ValueError(internal_advice)
+            raise PublicUrlRefusal("private_address", internal_advice)
         if _is_internal_address(ip):
-            raise ValueError(internal_advice)
+            raise PublicUrlRefusal("private_address", internal_advice)
         addresses.append(str(ip))
 
     if not addresses:
         # An empty resolver result is indistinguishable from "nothing to check"
         # and would sail through the loop above. Treat it as unresolvable.
-        raise ValueError(f"{host_label} could not be resolved ({hostname})")
+        raise PublicUrlRefusal("dns_failure", f"{host_label} could not be resolved ({hostname})")
 
     return ValidatedPublicUrl(
         url=url, hostname=hostname, port=port, addresses=tuple(addresses)
@@ -680,6 +706,19 @@ A2A_URL_REASONS = {
     "endpoint_invalid": "endpoint_invalid",
 }
 
+#: `PublicUrlRefusal.kind` -> A2A reason code (ent#397). One table, so a new kind
+#: is a visible edit here rather than a silent fall-through to `endpoint_invalid`.
+#: `credentials` maps to `endpoint_invalid` deliberately: that is the code this
+#: refusal has always carried, and inventing a new one would change the route's
+#: HTTP mapping under a bug fix.
+_A2A_REASON_BY_KIND = {
+    "invalid": "endpoint_invalid",
+    "not_https": "endpoint_not_https",
+    "credentials": "endpoint_invalid",
+    "private_address": "endpoint_private_address",
+    "dns_failure": "endpoint_dns_failure",
+}
+
 
 class A2AEndpointUrlError(ValueError):
     """A registered A2A endpoint URL that must not be fetched.
@@ -732,17 +771,30 @@ def validate_a2a_endpoint_url(url: str) -> ValidatedPublicUrl:
                 "A2A endpoint must be reachable on the public internet."
             ),
         )
-    except ValueError as exc:
-        message = str(exc)
-        if "must use HTTPS" in message:
+    except PublicUrlRefusal as exc:
+        # ent#397: the reason comes from WHERE the refusal was raised, never from
+        # what its message says. This block used to substring-match its own prose
+        # — the exact fragility `A2AEndpointUrlError`'s docstring warns against —
+        # and the DNS message interpolates the hostname, so a host spelled
+        # `an internal address.example` that merely failed to resolve reported
+        # `endpoint_private_address`. Same HTTP status either way, so nothing was
+        # admitted that should not be; the operator was told the opposite of what
+        # happened, and any consumer branching on `reason` branched wrongly.
+        if exc.kind == "not_https":
+            # The one refusal whose A2A wording differs from the shared message:
+            # this path carries a credential, so it says why it is not upgraded.
             raise A2AEndpointUrlError(
                 "endpoint_not_https",
                 "A2A endpoint URL must use HTTPS. Re-register this endpoint with "
                 "an https:// URL — the call is refused rather than silently "
                 "upgraded, because a credential would otherwise travel in clear.",
             ) from None
-        if "internal address" in message:
-            raise A2AEndpointUrlError("endpoint_private_address", message) from None
-        if "could not be resolved" in message:
-            raise A2AEndpointUrlError("endpoint_dns_failure", message) from None
-        raise A2AEndpointUrlError("endpoint_invalid", message) from None
+        raise A2AEndpointUrlError(
+            _A2A_REASON_BY_KIND.get(exc.kind, "endpoint_invalid"), str(exc)
+        ) from None
+    except ValueError as exc:
+        # A refusal raised without a kind — a caller predating ent#397, or a
+        # future edit that forgets one. `endpoint_invalid` is the honest answer:
+        # we do not know which refusal this was, and guessing from the prose is
+        # the defect above.
+        raise A2AEndpointUrlError("endpoint_invalid", str(exc)) from None
