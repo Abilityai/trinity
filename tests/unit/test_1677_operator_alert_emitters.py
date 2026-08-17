@@ -63,6 +63,11 @@ _ALLOWED_CALLERS = {
         "the facade delegation itself (the _operator_queue_ops.create_item spelling)",
     ("services/agent_client.py", "_emit_dormant_alert"):
         "platform-only: edge-triggered after consecutive failed CB probes (cb-dormant)",
+    ("services/archive_storage.py", "_alarm_unwritable_archive_dir"):
+        "platform-only: raised from probe_archive_writability() at the start of an "
+        "archival RUN (daily maintenance cadence), and the id is bucketed per path "
+        "per UTC day — with on_conflict_do_nothing that is <=1 row/path/day even in "
+        "a restart loop; no agent input reaches it (#2205, mirrors #2216)",
     ("services/db_backup_service.py", "DBBackupService._emit_alarm"):
         "platform-only: edge-triggered on the durable prior-status transition "
         "(ok->failed), plus a staleness re-alarm throttled to weekly; volume is "
