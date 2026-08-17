@@ -68,7 +68,7 @@
 
     <!-- Transcript -->
     <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5">
-      <div class="max-w-3xl mx-auto space-y-4">
+      <div class="max-w-4xl mx-auto space-y-6">
         <p v-if="loading" class="text-center text-sm text-gray-400">Loading…</p>
 
         <div v-for="m in messages" :key="m.seq">
@@ -80,14 +80,14 @@
           </p>
 
           <div v-else-if="isMine(m)" class="flex justify-end">
-            <div class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-2 text-sm whitespace-pre-wrap bg-action-primary-600 text-white">{{ m.content }}</div>
+            <div class="max-w-[85%] rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap bg-action-primary-600 text-white">{{ m.content }}</div>
           </div>
 
           <div v-else class="flex items-start gap-2.5">
             <PortalAvatar :name="m.sender_identity" :size="28" class="mt-0.5" />
             <div class="max-w-[85%]">
               <div class="text-xs text-gray-500 dark:text-gray-400 mb-0.5">{{ m.sender_identity }}</div>
-              <div class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3.5 py-2 text-sm prose-portal" v-html="render(m.content)"></div>
+              <div class="rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3.5 py-3 text-sm leading-relaxed prose-portal" v-html="render(m.content)"></div>
             </div>
           </div>
         </div>
@@ -122,7 +122,7 @@
 
     <!-- Composer -->
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 sm:px-6 py-3">
-      <div class="max-w-3xl mx-auto">
+      <div class="max-w-4xl mx-auto">
         <!-- A closed room is a dead end unless it SAYS so. Rooms end on their
              own (message budget, cost cap, TTL) — silence would read as the
              agents having stopped answering. -->
@@ -200,6 +200,7 @@ import PortalTypeahead from './PortalTypeahead.vue'
 import {
   applyTypeaheadInsert,
   boundCandidates,
+  resolveComposerGrowth,
   buildMentionToken,
   clampActiveIndex,
   detectTypeaheadTrigger,
@@ -387,12 +388,37 @@ function refreshTypeahead(el) {
   if (!typeaheadTrigger.value) activeIndex.value = -1
 }
 
+// #2211: the room composer had NO auto-grow at all — the issue assumed this file
+// carried a copy of `PortalConversation`'s `autoGrow()`, and it does not. So the
+// composer never grew past its single `rows="1"` line: a long message scrolled
+// inside a one-line box, which is a worse version of the symptom reported next
+// door. It gets the CORRECTED implementation rather than a copy of the buggy one.
+//
+// `scrollHeight` EXCLUDES the border under `box-sizing: border-box`, and this
+// textarea has a 1px border per side — assigning it directly leaves the field 2px
+// short of the line it must hold, which is what put a scrollbar in an EMPTY
+// composer. The border box is measured, not hardcoded, so a future `border-2`
+// cannot silently reintroduce it.
+const COMPOSER_MAX_PX = 160   // matches the `max-h-40` class on the textarea
+
+function autoGrow() {
+  const el = textarea.value
+  if (!el) return
+  el.style.height = 'auto'
+  // The three measurements the pure resolver needs; `height: auto` first so
+  // `scrollHeight` reports the content's natural height rather than the current one.
+  const { height, overflowY } = resolveComposerGrowth(el, COMPOSER_MAX_PX)
+  el.style.height = height + 'px'
+  el.style.overflowY = overflowY
+}
+
 function onComposerInput(e) {
   if (e?.inputType === 'insertFromPaste' || e?.inputType === 'insertFromDrop') {
     closeTypeahead()
     return
   }
   refreshTypeahead(e?.target)
+  autoGrow()
 }
 
 function onComposerCaret(e) { refreshTypeahead(e?.target) }
@@ -481,6 +507,7 @@ async function send() {
   sending.value = true
   sendError.value = null
   input.value = ''
+  autoGrow()   // #2211: shrink back, and leave no scrollbar behind
   resetTypeahead()
   try {
     await store.postRoomMessage(props.roomId, text)

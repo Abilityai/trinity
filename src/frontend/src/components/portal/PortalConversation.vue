@@ -73,7 +73,7 @@
 
     <!-- Messages -->
     <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5">
-      <div class="max-w-3xl mx-auto space-y-4">
+      <div class="max-w-4xl mx-auto space-y-6">
         <div v-if="loadingHistory" class="text-center text-sm text-gray-400 mt-10">Loading…</div>
 
         <!-- Briefing (new-chat state) rendered by the parent via slot -->
@@ -83,7 +83,7 @@
           <PortalAvatar v-if="m.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <div v-if="m.role === 'user'" class="max-w-[85%] flex flex-col items-end gap-1">
             <div
-              class="rounded-2xl rounded-br-md px-3.5 py-2 text-sm whitespace-pre-wrap"
+              class="rounded-2xl rounded-br-md px-3.5 py-3 text-sm leading-relaxed whitespace-pre-wrap"
               :class="m.failed ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-800 dark:text-status-danger-200 ring-1 ring-status-danger-300 dark:ring-status-danger-800' : 'bg-action-primary-600 text-white'"
             >{{ m.content }}</div>
             <p
@@ -101,7 +101,7 @@
           </div>
           <div
             v-else
-            class="max-w-[85%] rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3.5 py-2 text-sm prose-portal"
+            class="max-w-[85%] rounded-2xl rounded-bl-md bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 px-3.5 py-3 text-sm leading-relaxed prose-portal"
             v-html="render(m.content)"
           ></div>
         </div>
@@ -130,7 +130,7 @@
 
     <!-- Composer -->
     <div class="shrink-0 border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 sm:px-6 py-3">
-      <div class="max-w-3xl mx-auto">
+      <div class="max-w-4xl mx-auto">
         <p v-if="offline" class="mb-2 text-xs text-status-warning-600 dark:text-status-warning-400 flex items-center gap-1.5">
           <span class="w-1.5 h-1.5 rounded-full bg-status-warning-500"></span>
           You appear to be offline — messages will send once you're reconnected.
@@ -251,6 +251,7 @@ import {
   dismissAfterInsert,
   filterAgentCandidates,
   filterPlaybookCandidates,
+  resolveComposerGrowth,
   isSuppressed,
   nextActiveIndex,
   nextDismissState,
@@ -424,11 +425,19 @@ async function scrollDown() {
   await nextTick()
   if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight
 }
+// #2211: the composer's growth ceiling, matching the `max-h-40` class on the
+// textarea (40 * 4px). Named so the class and the JS cannot drift apart.
+const COMPOSER_MAX_PX = 160
+
 function autoGrow() {
   const el = textarea.value
   if (!el) return
   el.style.height = 'auto'
-  el.style.height = Math.min(el.scrollHeight, 160) + 'px'
+  // The three measurements the pure resolver needs; `height: auto` first so
+  // `scrollHeight` reports the content's natural height rather than the current one.
+  const { height, overflowY } = resolveComposerGrowth(el, COMPOSER_MAX_PX)
+  el.style.height = height + 'px'
+  el.style.overflowY = overflowY
 }
 
 // ---- ent#392: composer typeahead (`/` playbooks, `@` agents) -----------------
@@ -1084,7 +1093,14 @@ defineExpose({ focusComposer: () => textarea.value?.focus() })
 </script>
 
 <style scoped>
-.prose-portal :deep(p) { margin: 0.25rem 0; }
+/* #2211: 8px between paragraphs, not 4px. At `text-sm` with the bubble's own
+   padding, 4px read as a single dense block; 8px is the next step on the 4px
+   grid the design contract defines (4 tight / 8 related / 12 grouped). */
+.prose-portal :deep(p) { margin: 0.5rem 0; }
+/* First and last paragraph must not double up with the bubble padding, or the
+   looser rhythm reads as a lopsided bubble. */
+.prose-portal :deep(p:first-child) { margin-top: 0; }
+.prose-portal :deep(p:last-child) { margin-bottom: 0; }
 .prose-portal :deep(pre) { overflow-x: auto; background: rgba(0,0,0,0.06); padding: 0.5rem; border-radius: 0.375rem; }
 .prose-portal :deep(code) { font-size: 0.8em; }
 .prose-portal :deep(ul) { list-style: disc; padding-left: 1.25rem; }
