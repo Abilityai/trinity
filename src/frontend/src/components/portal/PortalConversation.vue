@@ -199,6 +199,7 @@
               :rows="typeaheadRows"
               :active-index="activeIndex"
               :overflow="typeaheadBound.overflow"
+              :hidden-count="typeaheadHidden"
               :empty-message="typeaheadEmpty || ''"
               @pick="acceptActive"
               @hover="activeIndex = $event"
@@ -251,10 +252,12 @@ import {
   dismissAfterInsert,
   filterAgentCandidates,
   filterPlaybookCandidates,
-  resolveComposerGrowth,
+  hiddenPlaybookCount,
+  playbookSearchSource,
   isSuppressed,
   nextActiveIndex,
   nextDismissState,
+  resolveComposerGrowth,
   resolveComposerKey,
   starterFor,
   typeaheadEmptyMessage,
@@ -473,7 +476,14 @@ const typeaheadResult = computed(() => {
   const t = typeaheadTrigger.value
   if (!t) return null
   if (t.kind === '/') {
-    return { kind: '/', enabled: true, ...filterPlaybookCandidates(props.agent?.playbooks, t.query) }
+    // #2213: search the SEARCHABLE set, not the card-bounded `playbooks` — the
+    // latter stops at 24 (the hint-grid bound), which made every skill past it
+    // unmatchable by name with nothing on screen saying so.
+    return {
+      kind: '/',
+      enabled: true,
+      ...filterPlaybookCandidates(playbookSearchSource(props.agent), t.query),
+    }
   }
   return {
     kind: '@',
@@ -488,6 +498,18 @@ const typeaheadResult = computed(() => {
 })
 
 const typeaheadBound = computed(() => boundCandidates(typeaheadResult.value?.items || []))
+// #2213: rows the popup could not RENDER are `typeaheadBound.overflow`; skills that
+// never reached the client at all are this. Two different omissions, so the popup
+// is told about them separately rather than adding them into one misleading number.
+const typeaheadHidden = computed(() => {
+  // Review finding: only on a BARE `/`. Mid-query the same number reads as "N more
+  // results matching what you typed", which is false — these are entries that never
+  // reached the browser and no amount of typing will surface them. On a bare trigger
+  // it reads correctly as a property of the list.
+  if (typeaheadResult.value?.kind !== '/') return 0
+  if (typeaheadTrigger.value?.query) return 0
+  return hiddenPlaybookCount(props.agent, playbookSearchSource(props.agent).length)
+})
 
 // The two empty conditions are NOT the same: a source with nothing in it shows
 // one honest line, while a query that matches nothing CLOSES the popup (AC#6 —

@@ -981,6 +981,59 @@ export function resolveRecordingMimeType(recorderMimeType, chunks = []) {
 }
 
 // ---------------------------------------------------------------------------
+// #2213 — the `/` typeahead must search every skill the agent offers
+// ---------------------------------------------------------------------------
+//
+// `playbooks[]` is bounded for the hint-card grid (24 server-side, #2101), and
+// the composer's `/` popup searched that same array — so on an agent with 33
+// client-visible skills the tail was unreachable. Measured on a live instance:
+// `GET /api/skills` in the container returned 33, the roster payload carried 24,
+// and typing "probe 27" matched 0 rows with nothing on screen saying why.
+//
+// The roster now also ships `searchable_playbooks` (the same client-visible set,
+// search-bounded, no descriptions) and `playbooks_total`. Search reads the former;
+// `hiddenPlaybookCount` turns the latter into the honest "N not shown".
+
+export function playbookSearchSource(agent) {
+  const searchable = agent?.searchable_playbooks
+  // Fall back to the card list when the field is absent, so a client talking to
+  // an older backend keeps working exactly as before rather than losing `/`.
+  if (!Array.isArray(searchable) || !searchable.length) {
+    return Array.isArray(agent?.playbooks) ? agent.playbooks : []
+  }
+  // Review finding: `searchable_playbooks` deliberately ships without descriptions
+  // (that is what keeps 200 entries cheap), and the popup renders
+  // `secondary: c.description || ''` — so EVERY row lost its subtitle, including on
+  // agents with fewer than 24 skills whose descriptions did ship on the card list.
+  // Merge them back by title: the cards are a prefix of the same set, so this
+  // restores the subtitle wherever one exists and leaves it blank only for the tail
+  // that genuinely has none.
+  const described = new Map(
+    (Array.isArray(agent?.playbooks) ? agent.playbooks : [])
+      .filter((p) => p && p.description)
+      .map((p) => [p.title, p.description]),
+  )
+  if (!described.size) return searchable
+  return searchable.map((p) => (
+    p && !p.description && described.has(p.title)
+      ? { ...p, description: described.get(p.title) }
+      : p
+  ))
+}
+
+// How many client-visible skills exist that the popup cannot even search. This is
+// the difference between a bounded list and a dishonest one: `boundCandidates`
+// already reports the rows it did not RENDER, but a payload-level truncation is
+// invisible to it — the rows never arrived.
+export function hiddenPlaybookCount(agent, searchableLength) {
+  const total = Number(agent?.playbooks_total)
+  if (!Number.isFinite(total) || total <= 0) return 0
+  const have = Number.isInteger(searchableLength)
+    ? searchableLength
+    : playbookSearchSource(agent).length
+  return Math.max(0, total - have)
+}
+
 // #2211 — composer auto-grow, without the scrollbar in an empty field
 // ---------------------------------------------------------------------------
 //

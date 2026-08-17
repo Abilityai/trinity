@@ -67,10 +67,17 @@
     <p v-else-if="emptyMessage" class="px-3 py-2.5 text-xs text-gray-500 dark:text-gray-400">{{ emptyMessage }}</p>
 
     <div
-      v-if="overflow > 0"
+      v-if="overflow > 0 || hiddenCount > 0"
       class="px-3 py-1.5 border-t border-gray-100 dark:border-gray-800 text-[11px] text-gray-400 dark:text-gray-500"
     >
-      {{ overflow }} more — keep typing to filter
+      <span v-if="overflow > 0">{{ overflow }} more — keep typing to filter</span>
+      <!-- #2213: two DIFFERENT omissions, said separately. `overflow` is rows this
+           popup chose not to draw and typing will reach; `hiddenCount` is skills
+           that never reached the browser, which typing cannot reach — so it must
+           not be folded into the same number, and it must say what to do instead. -->
+      <span v-if="hiddenCount > 0" :class="overflow > 0 ? 'block' : ''">
+        {{ hiddenCount }} more not listed here — ask for it by name
+      </span>
     </div>
 
     <p class="sr-only" aria-live="polite">{{ status }}</p>
@@ -85,6 +92,9 @@ const props = defineProps({
   rows: { type: Array, default: () => [] },        // [{key, primary, secondary}]
   activeIndex: { type: Number, default: -1 },
   overflow: { type: Number, default: 0 },
+  // #2213: client-visible skills that were truncated out of the PAYLOAD, i.e. not
+  // searchable at all. Distinct from `overflow` (present but not rendered).
+  hiddenCount: { type: Number, default: 0 },
   emptyMessage: { type: String, default: '' },
 })
 defineEmits(['pick', 'hover'])
@@ -96,7 +106,10 @@ const heading = computed(() => (props.kind === '/' ? 'Playbooks' : 'Agents'))
 const status = computed(() => {
   if (!props.rows.length) return props.emptyMessage || 'No suggestions'
   const n = props.rows.length + props.overflow
-  return `${n} suggestion${n === 1 ? '' : 's'}. Use the arrow keys to choose one.`
+  const hidden = props.hiddenCount > 0
+    ? ` ${props.hiddenCount} further playbook${props.hiddenCount === 1 ? '' : 's'} are not listed and must be asked for by name.`
+    : ''
+  return `${n} suggestion${n === 1 ? '' : 's'}. Use the arrow keys to choose one.${hidden}`
 })
 
 // Keep the chosen row in view without moving the page (principle 5: updates

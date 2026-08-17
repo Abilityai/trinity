@@ -66,6 +66,20 @@ class PortalAgentCard(BaseModel):
     # exposed-playbook tier, else the template `use_cases` fallback.
     description: Optional[str] = None
     playbooks: list[PortalPlaybook] = Field(default_factory=list)
+    # #2213 — the composer's `/` typeahead searches only what shipped, and
+    # `playbooks` is bounded for the hint-card GRID (24, #2101). On an agent with
+    # 33 client-visible skills that made the tail unreachable: typing the 27th
+    # skill's name matched nothing, silently. These two fields separate the two
+    # jobs.
+    #
+    # `searchable_playbooks` is the same client-visible set at a search-sized
+    # bound, carrying title + starter_prompt only (no descriptions — that is what
+    # keeps a 200-entry list small). `playbooks_total` is the count BEFORE either
+    # bound, so the UI can say "N not shown" instead of rendering a short list
+    # that looks complete. Both default empty/0, so an older payload degrades to
+    # today's behaviour rather than failing validation.
+    searchable_playbooks: list[PortalPlaybook] = Field(default_factory=list)
+    playbooks_total: int = 0
     # #2196 — whether this agent can currently run. Roster MEMBERSHIP is a DB
     # fact (`agent_ownership` / `agent_sharing`); this is a Docker fact
     # PROJECTED onto the card, and is never a membership filter. A live
