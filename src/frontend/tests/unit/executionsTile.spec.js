@@ -368,6 +368,15 @@ describe('#2228 legend fitting', () => {
     expect(Number(h[1])).toBe(CHART_HEIGHT + COL_GAP + RAIL_HEIGHT + CHART_PAD)
   })
 
+  it('renders the failure rail only when there is one, so every column ends on the baseline', () => {
+    // `.ex-col` spaces stack and rail with `gap`, and flex gap applies to a
+    // 0px-tall item exactly as to a 6px one. An always-present empty rail
+    // therefore lifted every failure-free stack 2px above the chart baseline
+    // while a real rail reached it — the red read as hanging BELOW the chart.
+    // The rail has to be absent, not merely 0px, for the columns to align.
+    expect(TILE_CSS).toMatch(/<i\s+v-if="col\.failPx"\s+class="ex-rail"/)
+  })
+
   it('draws the chart against the same budget the CSS reserves', () => {
     // The defaults are what the component relies on; a column taller than the
     // container it is drawn into overflows into the legend's rows.
