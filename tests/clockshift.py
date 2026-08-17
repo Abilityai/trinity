@@ -28,9 +28,26 @@ that binds the name at import time. Override the distance with
 
 Known limits, stated so a green run is not over-read: it moves
 `datetime.datetime.now/utcnow/today` and `time.time`. It does NOT move a
-database's own clock (`CURRENT_TIMESTAMP`, `now()`), nor any C-level time source
-a dependency reads directly, so a test whose expectations come from SQL-side
-time is out of its reach.
+database's own clock (`CURRENT_TIMESTAMP`, `now()`), nor the FILESYSTEM's, nor any
+C-level time source a dependency reads directly, so a test whose expectations come
+from SQL-side or inode time is out of its reach.
+
+The filesystem case is not hypothetical — a full-suite run at +365 days left
+exactly four failures beyond the environment-specific set, all of it one root
+cause, and it breaks in BOTH directions:
+
+  * `test_1595_git_maintenance.py::TestReapStaleGitLitter::test_fresh_locks_kept`
+    and `test_2216_backup_primitives.py::TestTmpSweep::test_sweeps_aged_orphan_keeps_fresh`
+    write a file NOW (real mtime) and expect the code to judge it fresh; against a
+    shifted `now` it looks a year old and gets reaped.
+  * `test_2216_db_backup_service.py::TestPreflightAndFailure::test_prune_runs_{even_when_backup_fails,on_no_space_skip_too}`
+    are the mirror: an artifact meant to be out-of-window looks freshly created,
+    so the prune correctly leaves it and the assertion fails.
+
+Those four tests are CORRECT; the instrument cannot see their clock. So a
+mtime-driven sweep test is not evidence of calendar rot under this harness, and
+shifting inode times (an `os.stat` interception) would be a much larger instrument
+than the problem justifies. Read a shifted run's failures with that in mind.
 
 One false-positive class is handled rather than documented, because a sweep whose
 output has to be triaged by hand is not a verdict. `datetime` cannot be patched
