@@ -1,0 +1,74 @@
+"""Run the suite as if the machine clock were a year ahead (#2243).
+
+    PYTHONPATH=tests python -m pytest tests/unit -q -p clockshift
+
+(`PYTHONPATH=tests` because `-p` resolves plugins before pytest has put `tests/`
+on `sys.path`, and this file deliberately is not a `conftest` — it must not load
+for runs that did not ask for it.)
+
+Why this exists. Three sets of tests were permanently red on `dev` for one
+reason: they asserted against literal calendar strings — an hour bucket
+(`"2026-08-14T09"`) that the gap-filled axis stops reaching, and a `started_at`
+anchor (`"2026-01-01T00:00:00.000000Z"`) whose `duration_ms = now − started_at`
+grew past int32 and raised `NumericValueOutOfRange` on PostgreSQL. Both passed
+the day they were written and failed every day after. A grep can find date-shaped
+strings, but it cannot tell an inert fixture value from one that is compared
+against *now* — so the class is closed by running the clock forward and reading
+the failures, not by eyeballing literals.
+
+Not a test dependency and not a `freezegun`: it shifts the two clocks test code
+actually reads and adds nothing to `requirements`. Deliberately opt-in — it is a
+diagnostic for "is this suite date-independent?", not something CI runs by
+default.
+
+Loaded with `-p` so it lands BEFORE test modules run their
+`from datetime import datetime`, which is what makes the shift visible to code
+that binds the name at import time. Override the distance with
+`CLOCKSHIFT_DAYS` (e.g. `CLOCKSHIFT_DAYS=-400` to run a year in the past).
+
+Known limits, stated so a green run is not over-read: it moves
+`datetime.datetime.now/utcnow/today` and `time.time`. It does NOT move a
+database's own clock (`CURRENT_TIMESTAMP`, `now()`), nor any C-level time source
+a dependency reads directly, so a test whose expectations come from SQL-side
+time is out of its reach.
+"""
+from __future__ import annotations
+
+import datetime as _dt
+import os
+import time as _time
+
+_DAYS = int(os.environ.get("CLOCKSHIFT_DAYS", "365"))
+SHIFT = _dt.timedelta(days=_DAYS)
+
+_real_datetime = _dt.datetime
+
+
+class _ShiftedDatetime(_real_datetime):
+    """`datetime` with the three "what time is it" constructors moved.
+
+    A subclass, not a stub: instances stay real `datetime`s, so comparisons and
+    arithmetic against values parsed from the database keep working.
+    """
+
+    @classmethod
+    def now(cls, tz=None):
+        return _real_datetime.now(tz) + SHIFT
+
+    @classmethod
+    def utcnow(cls):
+        return _real_datetime.utcnow() + SHIFT
+
+    @classmethod
+    def today(cls):
+        return _real_datetime.today() + SHIFT
+
+
+_dt.datetime = _ShiftedDatetime
+
+_real_time = _time.time
+_time.time = lambda: _real_time() + SHIFT.total_seconds()
+
+
+def pytest_report_header(config):  # noqa: ARG001 — pytest hook signature
+    return f"clockshift: clocks moved {_DAYS:+d} days (#2243)"

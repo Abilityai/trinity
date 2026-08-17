@@ -129,15 +129,36 @@ def ops(db_backend):
         sys.modules.pop(_m, None)
 
 
+# A5b inserts `started_at=None` ON PURPOSE, to prove the NOT NULL constraint is
+# what stands between production and the `parse_iso_timestamp(None)` crash. So
+# "caller said nothing" needs a sentinel distinct from `None`; defaulting on
+# `None` would silently turn that probe into a passing insert (#2243).
+_UNSET = object()
+
+
 def insert_execution(
     exec_id: str,
     *,
     status: str = "running",
     agent_name: str = "agent-1",
-    started_at: str = "2026-01-01T00:00:00.000000Z",
+    started_at=_UNSET,
     **extra,
 ) -> str:
-    """Insert a ``schedule_executions`` row through the active engine."""
+    """Insert a ``schedule_executions`` row through the active engine.
+
+    ``started_at`` defaults to a few minutes ago, NOT a fixed calendar date
+    (#2243). The terminal write computes ``duration_ms = now − started_at``, so a
+    literal anchor produces a duration that grows by ~31.5 billion ms a year: the
+    old default (``2026-01-01T00:00:00.000000Z``) had already passed int32, which
+    is why nine of these cases raised ``NumericValueOutOfRange`` on PostgreSQL
+    while SQLite — untyped — kept quietly widening the value.
+
+    The column width is a separate product concern; this default is what makes
+    the tests date-independent, and it would keep them passing after the column
+    is widened, because a fixed anchor's duration only ever grows.
+    """
+    if started_at is _UNSET:
+        started_at = _recent_iso()
     cols = {
         "id": exec_id,
         "schedule_id": "sched-1",
@@ -164,6 +185,16 @@ def column_of(exec_id: str, col: str):
 
 def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+# A duration the int32 column holds comfortably, and one that stays the same size
+# whatever year the suite runs in (#2243).
+_RECENT_MINUTES = 5
+
+
+def _recent_iso() -> str:
+    """``utc_now_iso()``-shaped timestamp a few minutes in the past."""
+    return _iso(datetime.now(timezone.utc) - timedelta(minutes=_RECENT_MINUTES))
 
 
 # ===========================================================================
@@ -369,17 +400,34 @@ def test_a6_skewed_row_clamps_to_zero(ops):
 # ===========================================================================
 
 
+def _same_instant_in(form: str) -> str:
+    """One instant a few minutes ago, rendered in each stored form in the wild.
+
+    The formats are the point of A7; the fixed calendar date they used to carry
+    was not, and it is what pushed ``duration_ms`` past int32 (#2243). Deriving
+    all four from one recent instant keeps the variety and bounds the duration —
+    and, because it is a single instant, the four cases stay directly comparable.
+    """
+    moment = datetime.now(timezone.utc) - timedelta(minutes=_RECENT_MINUTES)
+    if form == "naive":       # scheduler pre-#1474 legacy
+        return moment.replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%S")
+    if form == "zulu":        # utc_now_iso() form
+        return _iso(moment)
+    if form == "utc-offset":  # explicit UTC offset
+        return moment.replace(microsecond=0).isoformat()
+    if form == "plus5":       # non-UTC offset, same instant
+        return moment.replace(microsecond=0).astimezone(
+            timezone(timedelta(hours=5))
+        ).isoformat()
+    raise AssertionError(f"unknown form {form!r}")
+
+
 @pytest.mark.parametrize(
-    "started_at",
-    [
-        "2026-01-01T00:00:00",  # naive (scheduler pre-#1474 legacy)
-        "2026-01-01T00:00:00.000000Z",  # utc_now_iso() form
-        "2026-01-01T00:00:00+00:00",  # explicit UTC offset
-        "2026-01-01T05:00:00+05:00",  # non-UTC offset
-    ],
+    "form",
+    ["naive", "zulu", "utc-offset", "plus5"],
     ids=["A7-naive", "A7-zulu", "A7-utc-offset", "A7-plus5-offset"],
 )
-def test_a7_mixed_timestamp_formats_do_not_raise(ops, started_at):
+def test_a7_mixed_timestamp_formats_do_not_raise(ops, form):
     """A7 — the ``aware − naive`` TypeError class (#1474) must not reappear.
 
     ``parse_iso_timestamp`` normalizes naive → UTC-aware before the subtraction,
@@ -387,12 +435,16 @@ def test_a7_mixed_timestamp_formats_do_not_raise(ops, started_at):
     ``Z`` rows, offset-bearing rows) computes a duration rather than exploding
     mid-terminal-write. A crash here would strand the row ``running`` forever.
     """
-    eid = insert_execution(
-        f"a7-{started_at[-6:]}", status="running", started_at=started_at
-    )
+    started_at = _same_instant_in(form)
+    eid = insert_execution(f"a7-{form}", status="running", started_at=started_at)
 
     assert ops.update_execution_status(eid, "success") is True
-    assert isinstance(column_of(eid, "duration_ms"), int)
+    duration = column_of(eid, "duration_ms")
+    assert isinstance(duration, int)
+    # The naive form is read as UTC, so all four describe the same instant and
+    # land in the same bounded range — a form parsed with the wrong offset would
+    # show up here as a ±5h duration rather than a few minutes.
+    assert 0 <= duration < 2 * _RECENT_MINUTES * 60 * 1000
 
 
 # ===========================================================================
