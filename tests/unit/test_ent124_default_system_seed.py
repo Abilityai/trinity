@@ -426,16 +426,94 @@ def test_lock_held_by_other_worker_skips(env):
     assert env.settings.get("default_system_seeded") is None
 
 
-def test_lock_winner_deploys_and_releases(env):
+def _store_backed_redis():
+    """A MagicMock Redis that honours SETNX + GET + DELETE against a real dict —
+    so the #1920 compare-and-delete release (`SingleFlightLock.release_if_owned`)
+    can match the internally-minted token. A bare MagicMock returns a fresh
+    MagicMock on GET (never == the token), which would wrongly read as 'not our
+    lock'; and a fixed `set.return_value` can't model SETNX losing on a held key."""
     redis = MagicMock()
-    redis.set.return_value = True
+    store = {}
+
+    def _set(key, val, nx=None, ex=None):
+        if nx and key in store:
+            return None  # SETNX loses on an already-held key
+        store[key] = val
+        return True
+
+    redis.set.side_effect = _set
+    redis.get.side_effect = lambda key: store.get(key)
+    redis.delete.side_effect = lambda key: store.pop(key, None)
+    redis.store = store
+    return redis
+
+
+def test_lock_winner_deploys_and_releases(env):
+    """#1920: release is an ownership-checked compare-and-delete against the
+    minted token — it deletes our own live lock (not a tokenless delete)."""
+    redis = _store_backed_redis()
     env.monkeypatch.setattr(sss, "get_breaker_redis", lambda: redis)
 
     result = _run()
 
     env.deploy.assert_awaited_once()
-    redis.delete.assert_called_once()
+    # The SETNX stored a real uuid token; the release GET matched it -> DELETE.
+    redis.delete.assert_called_once_with(sss._PROVISION_LOCK_KEY)
     assert result["action"] == "created"
+    assert redis.store.get(sss._PROVISION_LOCK_KEY) is None  # lock is free again
+
+
+def test_release_never_deletes_a_successor_lock(env):
+    """THE #1920 property: worker A's TTL lapses, worker B acquires a FRESH
+    lock, A finishes and releases — A's compare-and-delete must leave B's live
+    lock intact (the pre-#1920 tokenless `delete` removed it)."""
+    redis = _store_backed_redis()
+    env.monkeypatch.setattr(sss, "get_breaker_redis", lambda: redis)
+
+    # A acquires (via the real _acquire_lock, minting A's token).
+    lock_a = svc._acquire_lock()
+    assert lock_a is not None
+
+    # A's lease TTL-expires and worker B SETNX-acquires a fresh token.
+    redis.store[sss._PROVISION_LOCK_KEY] = "worker-B-token"
+
+    # A finishes and releases — must NOT touch B's live lock.
+    svc._release_lock(lock_a)
+    redis.delete.assert_not_called()
+    assert redis.store[sss._PROVISION_LOCK_KEY] == "worker-B-token"
+
+
+def test_lock_fails_open_when_redis_down_and_still_seeds(env):
+    """Redis unreachable (client None) → the lock fails open (sole worker) and
+    the seed still runs; release is a safe no-op."""
+    env.monkeypatch.setattr(sss, "get_breaker_redis", lambda: None)
+
+    result = _run()
+
+    env.deploy.assert_awaited_once()
+    assert result["action"] == "created"
+
+
+def test_two_overlapping_in_process_passes_do_not_leak(env):
+    """The lock is LOCAL to each pass (never on the singleton), so pass B's
+    acquire can't make pass A's `finally` no-op and leak A's real lock for the
+    TTL. Both passes run against ONE store-backed Redis: the winner deploys +
+    releases, the loser skips, and the key ends up free."""
+    redis = _store_backed_redis()
+    env.monkeypatch.setattr(sss, "get_breaker_redis", lambda: redis)
+
+    # Pass A acquires first (real token minted, key now set).
+    lock_a = svc._acquire_lock()
+    assert lock_a is not None
+    # Pass B, concurrently, finds the key held → skips (no lock object).
+    lock_b = svc._acquire_lock()
+    assert lock_b is None
+
+    # A finishes and releases its OWN lock — the key is freed exactly once.
+    svc._release_lock(lock_a)
+    svc._release_lock(lock_b)  # no-op: B never held anything
+    redis.delete.assert_called_once_with(sss._PROVISION_LOCK_KEY)
+    assert redis.store.get(sss._PROVISION_LOCK_KEY) is None
 
 
 # --- the orchestrator (persisted first-run verdict) ------------------------------
@@ -576,10 +654,20 @@ def test_pass_lock_winner_runs_both_seeders_and_releases(orch, pass_redis):
 
 def test_pass_lock_release_leaves_a_foreign_token_alone(orch, pass_redis):
     """#1919: after a TTL lapse a sibling may hold a LIVE lease under our key —
-    a blind DELETE would release it. Compare-and-delete must no-op."""
+    a blind DELETE would release it. Compare-and-delete must no-op.
+
+    Driven through a lock that genuinely WON and then lost the key, because
+    `SingleFlightLock.release_if_owned` gates on the stable acquire-time
+    `held`: a never-acquired lock no-ops before it ever compares, so it would
+    pass this assertion even against a blind delete and prove nothing (#1920).
+    """
+    lock = sss._acquire_pass_lock()
+    assert lock is not None and lock.held
+
+    # Our TTL lapsed and a sibling re-took the key under a live lease.
     pass_redis.set("first_run_seed:provision", "foreign-token", ex=900)
 
-    sss._release_pass_lock("my-token")
+    lock.release_if_owned()
 
     assert pass_redis.get("first_run_seed:provision") == "foreign-token"
 

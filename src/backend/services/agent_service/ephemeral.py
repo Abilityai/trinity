@@ -17,11 +17,10 @@ in that degraded mode).
 """
 
 import logging
-import uuid
 from typing import Optional
 
 from database import db
-from redis_breaker_util import get_breaker_redis
+from redis_breaker_util import get_breaker_redis, SingleFlightLock
 
 logger = logging.getLogger(__name__)
 
@@ -115,23 +114,18 @@ async def discard_ephemeral_agent(agent_name: str, reason: str = "expired") -> b
         return False
     owner_id = info.get("owner_id") if info else None
 
-    # --- per-agent discard lock (SETNX + TTL, fail-open) ---
-    lock_key = _DISCARD_LOCK_KEY.format(agent_name=agent_name)
-    lock_token = uuid.uuid4().hex
-    client = get_breaker_redis()
-    held = False
-    if client is not None:
-        try:
-            held = bool(
-                client.set(lock_key, lock_token, nx=True, ex=_DISCARD_LOCK_TTL_SECONDS)
-            )
-            if not held:
-                logger.info(
-                    f"[ephemeral] discard of {agent_name} already in flight — skipping"
-                )
-                return False
-        except Exception:
-            client = None  # fail-open: proceed unlocked
+    # --- per-agent discard lock (SETNX + TTL, fail-open) via the shared
+    #     ownership-checked primitive (#1920) ---
+    lock = SingleFlightLock(
+        _DISCARD_LOCK_KEY.format(agent_name=agent_name),
+        _DISCARD_LOCK_TTL_SECONDS,
+        client=get_breaker_redis(),
+    )
+    if not lock.acquire():
+        logger.info(
+            f"[ephemeral] discard of {agent_name} already in flight — skipping"
+        )
+        return False
 
     try:
         # 0. Durable intent marker (only meaningful while the row exists).
@@ -208,13 +202,8 @@ async def discard_ephemeral_agent(agent_name: str, reason: str = "expired") -> b
             logger.info(f"[ephemeral] discarded ghost agent {agent_name} ({reason})")
         return purged
     finally:
-        if held and client is not None:
-            try:
-                # Release only our own lock (compare-and-delete).
-                if client.get(lock_key) == lock_token.encode() or client.get(lock_key) == lock_token:
-                    client.delete(lock_key)
-            except Exception:
-                pass
+        # Ownership-checked compare-and-delete; no-op when the lock failed open.
+        lock.release_if_owned()
 
 
 def release_ephemeral_slot(owner_id: int) -> None:

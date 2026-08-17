@@ -2194,6 +2194,12 @@ lifespan (safety-net, gated on `setup_completed`, strong task ref) both call
 3. Runs `system_seed_service.ensure_seeded(fresh=verdict)`:
    - Skips (no flag burn): Docker unavailable, disable sentinel, verdict
      undetermined, admin missing (pre-setup), manifest unavailable, lock held.
+     The `system_seed:provision` lock is taken + released through the shared
+     `redis_breaker_util.SingleFlightLock` (#1920): a unique per-acquire token
+     + compare-and-delete release (kept LOCAL to the pass, never on the module
+     singleton), so a slow pass whose TTL lapsed can no longer delete a
+     *successor's* live lock — the pre-#1920 tokenless `delete`. This is class
+     hygiene, NOT the double-seed guard (the existence backstop below is that).
    - Converges the flag without deploying: verdict not-fresh, or **existence
      backstop** — any final `{system}-{short}` name already reserved
      (`is_agent_name_reserved`, soft-deleted included). The backstop is the

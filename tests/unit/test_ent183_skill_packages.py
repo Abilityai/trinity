@@ -854,15 +854,38 @@ class TestInjectOrchestration:
 
 class TestLockSemantics:
     def test_release_only_deletes_own_token(self, service):
+        """#1920: `_release_inject_lock` now takes the `SingleFlightLock` object
+        (or the `None` fail-open sentinel) and delegates to the primitive's
+        ownership-checked compare-and-delete. A non-lock sentinel is a no-op; a
+        held lock deletes only when the stored token is still ours (the full
+        ownership matrix is pinned by test_1920_single_flight_lock)."""
+        from redis_breaker_util import SingleFlightLock
+
         fake = MagicMock()
-        service._redis = fake
-        # Successor holds a different token → release must NOT delete.
-        fake.get.return_value = "someone-elses-token"
-        service._release_inject_lock("my-token", "agent-x")
+        store = {}
+        fake.set.side_effect = (
+            lambda k, v, nx=None, ex=None: None
+            if (nx and k in store)
+            else (store.__setitem__(k, v) or True)
+        )
+        fake.get.side_effect = lambda k: store.get(k)
+        fake.delete.side_effect = lambda k: store.pop(k, None)
+
+        # Fail-open sentinel (no lock held) → release is a no-op.
+        service._release_inject_lock(None, "agent-x")
         fake.delete.assert_not_called()
-        # Own token → release deletes.
-        fake.get.return_value = "my-token"
-        service._release_inject_lock("my-token", "agent-x")
+
+        lock = SingleFlightLock("skill_inject:agent-x", 1800, client=fake)
+        assert lock.acquire()  # held; unique token minted into the store
+
+        # Successor holds a different token → release must NOT delete.
+        store["skill_inject:agent-x"] = "someone-elses-token"
+        service._release_inject_lock(lock, "agent-x")
+        fake.delete.assert_not_called()
+
+        # Own token back → release deletes exactly our key.
+        store["skill_inject:agent-x"] = lock.token
+        service._release_inject_lock(lock, "agent-x")
         fake.delete.assert_called_once_with("skill_inject:agent-x")
 
     def test_lock_ttl_covers_one_restore_attempt(self):
