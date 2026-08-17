@@ -2298,6 +2298,18 @@
         "security"
       ],
       "description": "Backup observability + knob plumbing (#2216). GET /api/settings/retention carries the `backup` block (scope, enabled, retention_days, min_keep) AND EXCLUDES backup_retention_days from the generic `windows` map — the generic _ops_int coerces garbage → 0 meaning 'sweep disabled', which for backups means 'keep forever', so on one malformed row the two readers would disagree inside a single response; the test plants that malformed row and asserts the ONE rendered number is the shared reader's 14. A failing backup-block read degrades the block rather than 500ing the whole retention GET. Write path: the ops-config route validates 1..3650 and rejects 0 by design (0 = keep-forever is the #1871 disk-fill trap; disabling backups is the separate DB_BACKUP_ENABLED knob), the generic PUT /api/settings/{key} catch-all 422-blocks it via RETENTION_OPS_KEYS membership (which also means /ops/reset skips it), and it is deliberately NOT a community-floor seed key (floor-seeding would push the window DOWN, the destructive direction here). Alarm plumbing cannot be silenced or mis-scanned: `db-backup-` is a reserved operator-queue id prefix (else an agent pre-creates the id and on_conflict_do_nothing silences the platform's own failure alarm), the `_db-backup` sentinel is uncreatable as an agent name (sanitize_agent_name strips the leading underscore), and the canary L-03 exclusion is asserted by service↔canary constant parity plus a predicate check over every sentinel — the #1644 test's shape, extended because the single-value exclusion became a tuple and _retention-guard must still be covered. Isolated file-load of routers/settings.py (the test_retention_floor idiom) so pytest-randomly orderings cannot pollute the import."
+    },
+    {
+      "file": "unit/test_2212_portal_stt_gate.py",
+      "feature": "#2212",
+      "added": "2026-08-17",
+      "categories": [
+        "backend",
+        "unit",
+        "client-portal",
+        "voice"
+      ],
+      "description": "Portal dictation gate (#2212). `stt_available` is a SEPARATE roster-card bit from `voice_available`: transcription needs only the platform ElevenLabs key, narration additionally needs an effective voice, so the single-bit design could not express \"can dictate, cannot narrate\" — which is why the mic rendered on a pure browser capability check and was a dead control on a provider-less instance. Asserts the truth table in both directions (key without voice → stt yes / tts no; no key → both no, failing closed like `voice_available`), that the model default is absent-not-present so an older payload hides the mic rather than rendering a dead one, and — the load-bearing one — that the card bit and `transcribe_portal_audio`'s own 404 gate are the SAME condition, since drift between what the client sees and what /stt will do IS the dead-control bug. Pure unit: no DB, no HTTP, no ElevenLabs."
     }
   ]
 }

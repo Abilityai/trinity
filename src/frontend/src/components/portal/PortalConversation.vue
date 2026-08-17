@@ -135,6 +135,23 @@
           <span class="w-1.5 h-1.5 rounded-full bg-status-warning-500"></span>
           You appear to be offline — messages will send once you're reconnected.
         </p>
+        <!-- #2212: every voice failure says what happened here. Voice is an
+             assist, never a blocker, so this is an inline notice next to a
+             composer that still works — not a modal. -->
+        <p
+          v-if="voiceError"
+          class="mb-2 text-xs text-status-danger-600 dark:text-status-danger-400 flex items-start gap-1.5"
+          role="status"
+          aria-live="polite"
+        >
+          <span class="mt-1 w-1.5 h-1.5 rounded-full bg-status-danger-500 shrink-0"></span>
+          <span class="flex-1">{{ voiceError }}</span>
+          <button
+            type="button"
+            class="shrink-0 underline hover:no-underline text-gray-500 dark:text-gray-400"
+            @click="voiceError = ''"
+          >Dismiss</button>
+        </p>
         <!-- Attached (uploaded to the agent inbox) file chips -->
         <div v-if="attachments.length" class="mb-2 flex flex-wrap gap-1.5">
           <span
@@ -162,7 +179,9 @@
             type="button"
             class="shrink-0 p-2.5 rounded-xl transition disabled:opacity-50"
             :class="listening ? 'text-status-danger-600 dark:text-status-danger-400 animate-pulse' : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800'"
-            :title="transcribing ? 'Transcribing…' : (listening ? 'Listening… click to stop' : 'Speak your message')"
+            :title="micTitle"
+            :aria-label="micTitle"
+            :aria-pressed="listening"
             :disabled="transcribing"
             @click="toggleMic"
           >
@@ -238,10 +257,24 @@ import {
   resolveComposerKey,
   starterFor,
   typeaheadEmptyMessage,
+  MIN_RECORDING_BYTES,
+  RECORDING_TOO_SHORT_MESSAGE,
+  SPEECH_START_TIMEOUT_MS,
+  TRANSCRIPT_EMPTY_MESSAGE,
+  TTS_FAILED_MESSAGE,
+  recorderErrorMessage,
+  resolveMicMode,
+  resolveRecordingMimeType,
+  speechAttemptOutcome,
+  speechErrorMessage,
+  transcriptionErrorMessage,
 } from './portalUtils'
 
 const props = defineProps({
-  agent: { type: Object, required: true },      // {name, owner, avatar_url, description, playbooks, voice_available}
+  // `stt_available` (#2212) is the platform's ability to transcribe server-side
+  // (an ElevenLabs key resolves) — a different fact from `voice_available`,
+  // which additionally needs an effective voice to speak WITH.
+  agent: { type: Object, required: true },      // {name, owner, avatar_url, description, playbooks, voice_available, stt_available}
   roster: { type: Array, default: () => [] },
   sessionId: { type: String, default: null },   // current thread, or null for a new chat
   prefill: { type: String, default: '' },
@@ -878,9 +911,22 @@ async function retry(i) {
 // ---- Voice: speak replies (TTS) + dictate (STT) — carried over from #78 -------
 const SpeechRec = typeof window !== 'undefined' ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null
 const canRecord = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia && typeof MediaRecorder !== 'undefined'
-const micMode = SpeechRec ? 'speech' : (canRecord ? 'record' : null)
-const sttSupported = micMode !== null
+// #2212: the mic used to prefer the browser Web Speech API whenever the object
+// merely existed — a Google-hosted service that reports nothing at all in
+// Chromium (measured) and ends at the first pause everywhere. Recording + our
+// own /stt wins when the platform can transcribe; see `resolveMicMode`.
+const micMode = computed(() => resolveMicMode({
+  speechApi: !!SpeechRec,
+  canRecord,
+  serverStt: !!props.agent.stt_available,
+}))
+// No mic button at all when neither path can work, so the control is never a
+// dead affordance on an instance with no voice provider.
+const sttSupported = computed(() => micMode.value !== null)
 const ttsEnabled = computed(() => !!props.agent.voice_available)
+// The one place any voice failure becomes words. Every path below sets it
+// instead of returning silently, which is what made this read as "just dies".
+const voiceError = ref('')
 
 // #2157: the speaker choice sticks per client+agent instead of resetting to off
 // on every page load. Narration was already hard to find — an agent that had
@@ -895,12 +941,18 @@ watch(voiceMode, (on) => {
   try { localStorage.setItem(voiceModeKey.value, on ? '1' : '0') } catch { /* private mode: session-only */ }
 })
 // Switching agents adopts that agent's own remembered choice.
-watch(() => props.agent?.name, () => { stopSpeaking(); voiceMode.value = loadVoiceMode() })
+watch(() => props.agent?.name, () => { stopSpeaking(); voiceError.value = ''; voiceMode.value = loadVoiceMode() })
 const speaking = ref(false)
 const listening = ref(false)
 const transcribing = ref(false)
+const micTitle = computed(() => (
+  transcribing.value ? 'Transcribing…'
+    : listening.value ? 'Listening… click to stop'
+      : 'Speak your message'
+))
 const audioEl = ref(null)
 let recog = null, mediaRec = null, mediaStream = null, recChunks = [], lastAudioUrl = null
+let speechWatchdog = null
 
 function revokeAudio() { if (lastAudioUrl) { URL.revokeObjectURL(lastAudioUrl); lastAudioUrl = null } }
 async function speak(text) {
@@ -908,44 +960,121 @@ async function speak(text) {
   speaking.value = true
   try {
     const url = await store.synthesizeTts(props.agent.name, text)
-    if (!url) { speaking.value = false; return }
+    // The store answers `null` for every failure shape, so this is the only
+    // place narration can report that it did not happen (#2212).
+    if (!url) { speaking.value = false; voiceError.value = TTS_FAILED_MESSAGE; return }
     revokeAudio(); lastAudioUrl = url
     if (audioEl.value) { audioEl.value.src = url; await audioEl.value.play() } else speaking.value = false
-  } catch { speaking.value = false }
+  } catch { speaking.value = false; voiceError.value = TTS_FAILED_MESSAGE }
 }
 function stopSpeaking() { if (audioEl.value) audioEl.value.pause(); speaking.value = false }
-function toggleMic() {
-  if (!sttSupported || transcribing.value) return
-  micMode === 'speech' ? toggleSpeech() : toggleRecord()
+// Dictated text lands at the end of whatever is already typed — one place, so
+// the two mic paths cannot drift on how a transcript is applied.
+function appendTranscript(text) {
+  const t = (text || '').trim()
+  if (!t) return
+  input.value = input.value ? `${input.value} ${t}` : t
+  resetTypeahead(); autoGrow()
 }
+function toggleMic() {
+  if (!sttSupported.value || transcribing.value) return
+  voiceError.value = ''
+  micMode.value === 'speech' ? toggleSpeech() : toggleRecord()
+}
+function clearSpeechWatchdog() { if (speechWatchdog) { clearTimeout(speechWatchdog); speechWatchdog = null } }
 function toggleSpeech() {
   if (listening.value) { try { recog?.stop() } catch { /* noop */ } return }
-  recog = new SpeechRec(); recog.lang = 'en-US'; recog.interimResults = false; recog.maxAlternatives = 1
-  recog.onresult = (e) => { const t = e.results?.[0]?.[0]?.transcript || ''; if (t) { input.value = input.value ? `${input.value} ${t}` : t; resetTypeahead(); autoGrow() } }
-  recog.onend = () => { listening.value = false }
-  recog.onerror = () => { listening.value = false }
+  recog = new SpeechRec()
+  recog.lang = 'en-US'
+  // `continuous` defaults to false — recognition ends at the first pause, which
+  // on its own reads as "the mic died" mid-sentence (#2212).
+  recog.continuous = true
+  recog.interimResults = false
+  recog.maxAlternatives = 1
+  // Local to THIS attempt: a stale flag from the previous one would decide the
+  // next attempt's verdict. `settle` runs once, whichever handler gets there
+  // first — engines disagree on whether `error` is followed by `end`.
+  let gotText = false, errorCode = null, timedOut = false, settled = false
+  const settle = () => {
+    if (settled) return
+    settled = true
+    clearSpeechWatchdog()
+    listening.value = false
+    const message = speechAttemptOutcome({ gotText, errorCode, timedOut })
+    if (message) voiceError.value = message
+  }
+  recog.onstart = () => { clearSpeechWatchdog() }
+  recog.onresult = (e) => {
+    // With `continuous` the event carries only the results from `resultIndex`
+    // on, and interim ones are filtered out by `isFinal`.
+    let text = ''
+    for (let i = e.resultIndex ?? 0; i < (e.results?.length || 0); i++) {
+      const r = e.results[i]
+      if (r?.isFinal) text += r[0]?.transcript || ''
+    }
+    if (!text.trim()) return
+    gotText = true
+    appendTranscript(text)
+  }
+  // The error CODE is the signal this component used to throw away; it is the
+  // whole difference between "blocked permission" and "service unreachable".
+  recog.onerror = (e) => { errorCode = e?.error || ''; settle() }
+  recog.onend = () => settle()
   listening.value = true
-  try { recog.start() } catch { listening.value = false }
+  // Measured in Chromium: `start()` resolves and the engine then emits NO event
+  // of any kind, so without this the button stays lit forever with no recourse.
+  speechWatchdog = setTimeout(() => {
+    speechWatchdog = null
+    if (settled) return
+    timedOut = true
+    settle()
+    try { recog?.abort() } catch { /* noop */ }
+  }, SPEECH_START_TIMEOUT_MS)
+  try { recog.start() } catch (e) {
+    settled = true
+    clearSpeechWatchdog()
+    listening.value = false
+    // `start()` throws InvalidStateError only when a session is already live.
+    voiceError.value = e?.name === 'InvalidStateError'
+      ? 'Dictation is already running — stop it and try again.'
+      : speechErrorMessage('')
+  }
 }
 async function toggleRecord() {
   if (listening.value) { try { mediaRec?.stop() } catch { /* noop */ } return }
-  try { mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true }) } catch { return }
+  try { mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true }) }
+  catch (e) { voiceError.value = recorderErrorMessage(e); return }
   recChunks = []
-  mediaRec = new MediaRecorder(mediaStream)
+  try { mediaRec = new MediaRecorder(mediaStream) }
+  catch (e) { stopStream(); voiceError.value = recorderErrorMessage(e); return }
   mediaRec.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data) }
+  mediaRec.onerror = (e) => {
+    listening.value = false; stopStream()
+    voiceError.value = recorderErrorMessage(e?.error || e)
+  }
   mediaRec.onstop = async () => {
     stopStream(); listening.value = false
-    const blob = new Blob(recChunks, { type: mediaRec?.mimeType || 'audio/webm' }); recChunks = []
-    if (blob.size < 1500) return
+    // Firefox leaves `mediaRec.mimeType` empty and puts the real type on the
+    // chunks; mislabelling Ogg as WebM is a silent upload bug (#2212).
+    const type = resolveRecordingMimeType(mediaRec?.mimeType, recChunks)
+    const blob = new Blob(recChunks, { type }); recChunks = []
+    if (blob.size < MIN_RECORDING_BYTES) { voiceError.value = RECORDING_TOO_SHORT_MESSAGE; return }
     transcribing.value = true
-    try { const t = await store.transcribeStt(props.agent.name, blob); if (t) { input.value = input.value ? `${input.value} ${t}` : t; resetTypeahead(); autoGrow() } }
-    catch { /* keep text mode */ } finally { transcribing.value = false }
+    try {
+      const t = await store.transcribeStt(props.agent.name, blob)
+      if (t) appendTranscript(t)
+      else voiceError.value = TRANSCRIPT_EMPTY_MESSAGE
+    } catch (e) {
+      // /stt answers with a user-facing `detail`; it used to be swallowed.
+      voiceError.value = transcriptionErrorMessage(e)
+    } finally { transcribing.value = false }
   }
   listening.value = true
-  try { mediaRec.start(200) } catch { listening.value = false; stopStream() }
+  try { mediaRec.start(200) } catch (e) { listening.value = false; stopStream(); voiceError.value = recorderErrorMessage(e) }
 }
 function stopStream() { try { mediaStream?.getTracks().forEach((t) => t.stop()) } catch { /* noop */ } mediaStream = null }
 function cleanupVoice() {
+  clearSpeechWatchdog()
   try { recog?.stop() } catch { /* noop */ }
   try { if (mediaRec && mediaRec.state !== 'inactive') mediaRec.stop() } catch { /* noop */ }
   stopStream(); stopSpeaking(); revokeAudio()

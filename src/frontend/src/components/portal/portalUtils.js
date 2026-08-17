@@ -827,3 +827,155 @@ export function clampActiveIndex(current, length) {
   if (n <= 0) return -1
   return Number.isInteger(current) && current >= 0 && current < n ? current : -1
 }
+
+// ---------------------------------------------------------------------------
+// #2212 — dictation: which mic path to take, and what to SAY when it fails.
+//
+// Measured in Playwright's Chromium (secure context, mic permission granted,
+// fake audio device): `webkitSpeechRecognition` exists, `start()` does not
+// throw, and then NOTHING happens — no `start`, no `audiostart`, no `result`,
+// no `error`, no `end` inside 15s. `continuous` also defaults to `false`, so
+// even on a build where the service does answer, recognition ends at the first
+// pause. That API is a browser-hosted, Google-backed service: we cannot fix it,
+// cannot see into it, and it is the branch the component preferred whenever the
+// object merely EXISTED.
+//
+// So the preference inverts: when the platform can transcribe server-side, we
+// record locally and upload, because that path is ours end to end (a real HTTP
+// status, a real error string, a real transcript). Web Speech stays as the
+// no-key fallback — free and often fine in official Chrome — rather than the
+// default.
+// ---------------------------------------------------------------------------
+
+// Below this, a "recording" is a click-through, not speech (~0.12s of Opus;
+// a 2s clip measures ~24 KB). Kept as a named constant because it is also the
+// threshold the "too short" message describes.
+export const MIN_RECORDING_BYTES = 1500
+
+// A speech attempt that produced no result and no error still failed, and the
+// user needs to hear that rather than watch the mic quietly switch itself off.
+export const SPEECH_NO_RESULT_MESSAGE =
+  "Didn't catch anything — try again and speak once the mic turns red."
+
+// The measured Chromium case: `start()` returns and the engine never reports
+// anything at all. Without a watchdog the button stays lit forever, which is
+// the one state that cannot be recovered from by waiting.
+export const SPEECH_UNRESPONSIVE_MESSAGE =
+  "Your browser's dictation service didn't respond — type your message instead."
+
+export const RECORDING_TOO_SHORT_MESSAGE =
+  'That recording was too short — hold the mic on while you speak.'
+
+export const TRANSCRIPT_EMPTY_MESSAGE =
+  "Didn't catch that — try again, or type your message instead."
+
+export const TTS_FAILED_MESSAGE =
+  "Couldn't play that reply aloud — the text is above."
+
+// How long to wait for the browser's speech engine to say ANYTHING before
+// declaring it unresponsive. Long enough not to trip a slow-but-working start,
+// short enough that a dead engine does not look like a hung UI.
+export const SPEECH_START_TIMEOUT_MS = 4000
+
+// `serverStt` is the platform's honest answer ("an ElevenLabs key resolves"),
+// NOT a browser capability — the previous gate mixed the two, so an instance
+// with no provider still rendered a mic that could not work.
+//
+//   record  → MediaRecorder + POST /stt   (ours: real errors, real transcript)
+//   speech  → browser Web Speech API      (no key needed; unfixable when broken)
+//   null    → no mic control at all       (rather than a dead affordance)
+export function resolveMicMode({ speechApi = false, canRecord = false, serverStt = false } = {}) {
+  if (canRecord && serverStt) return 'record'
+  if (speechApi) return 'speech'
+  return null
+}
+
+// SpeechRecognitionErrorEvent.error codes. `aborted` returns null: it is what
+// the user's own Stop click raises, and an "error" notice for a deliberate stop
+// teaches people the feature is broken when it just obeyed them.
+const SPEECH_ERROR_MESSAGES = {
+  'not-allowed':
+    'Microphone access is blocked — allow it for this site in your browser, then try again.',
+  'service-not-allowed':
+    "Your browser wouldn't let its dictation service run — type your message instead.",
+  network:
+    "Your browser's dictation service is unreachable — type your message instead.",
+  'audio-capture': 'No microphone was found — check your input device.',
+  'no-speech': "Didn't hear anything — try again and speak once the mic turns red.",
+  'language-not-supported': 'Your browser cannot dictate in this language.',
+  'bad-grammar': 'Your browser rejected the dictation request — type your message instead.',
+}
+
+export function speechErrorMessage(code) {
+  if (code === 'aborted') return null
+  if (code && SPEECH_ERROR_MESSAGES[code]) return SPEECH_ERROR_MESSAGES[code]
+  // An unknown code is still a code: naming it beats "something went wrong",
+  // and it is the string a support conversation actually needs.
+  return code
+    ? `Dictation stopped (${code}) — type your message instead.`
+    : 'Dictation stopped unexpectedly — type your message instead.'
+}
+
+// getUserMedia / MediaRecorder rejections are DOMExceptions distinguished only
+// by `name`. A denied permission previously returned from `catch {}` with no
+// state change at all, which is indistinguishable from "started, then stopped".
+export function recorderErrorMessage(err) {
+  switch (err?.name) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return 'Microphone access is blocked — allow it for this site in your browser, then try again.'
+    case 'NotFoundError':
+    case 'OverconstrainedError':
+      return 'No microphone was found — check your input device.'
+    case 'NotReadableError':
+      return 'Your microphone is in use by another app — close it and try again.'
+    default:
+      return "Couldn't start the microphone — type your message instead."
+  }
+}
+
+// The /stt endpoint already answers with user-facing strings ("Voice input is
+// not available", "Recording is too long", "Didn't catch that — please try
+// again"); the component was throwing them away in a bare `catch {}`.
+export function transcriptionErrorMessage(err) {
+  const detail = err?.response?.data?.detail
+  if (typeof detail === 'string' && detail.trim()) return detail.trim()
+  if (!err?.response) return "Couldn't reach Trinity to transcribe that — type your message instead."
+  if (err.response.status === 429) return 'Too many voice messages just now — wait a moment and try again.'
+  if (err.response.status === 413) return 'That recording is too long.'
+  if (err.response.status === 404) return 'Voice input is not set up on this workspace — type your message instead.'
+  return `Transcription failed (error ${err.response.status}) — type your message instead.`
+}
+
+// One verdict for a finished dictation attempt, so "what do we tell the user"
+// is decided in exactly one place instead of across three event handlers that
+// each fire in a different order per engine.
+//
+// Precedence is deliberate: an unresponsive engine outranks everything (it is
+// the state the user cannot escape by waiting), then an explicit error code,
+// then "we got words" (say nothing — the transcript IS the feedback), and the
+// remaining case — ended, no words, no reason — is the silent failure this
+// issue was filed for.
+export function speechAttemptOutcome({ gotText = false, errorCode = null, timedOut = false } = {}) {
+  if (timedOut) return SPEECH_UNRESPONSIVE_MESSAGE
+  if (errorCode) return speechErrorMessage(errorCode)   // null when the user stopped it
+  if (gotText) return null
+  return SPEECH_NO_RESULT_MESSAGE
+}
+
+// What the recorded clip actually IS. Measured (Playwright, fake mic):
+//
+//   Chromium  rec.mimeType = "audio/webm;codecs=opus", chunk.type = same
+//   Firefox   rec.mimeType = ""                      , chunk.type = "audio/ogg; codecs=opus"
+//
+// The component read `rec.mimeType || 'audio/webm'`, so every Firefox clip — the
+// engine that has no Web Speech API and therefore ALWAYS records — was uploaded
+// as `voice.webm` with `content-type: audio/webm` while containing Ogg. The
+// chunks carry the truth when the recorder does not, so they are the fallback
+// ahead of the constant.
+export function resolveRecordingMimeType(recorderMimeType, chunks = []) {
+  const fromRecorder = (recorderMimeType || '').trim()
+  if (fromRecorder) return fromRecorder
+  const fromChunk = (Array.isArray(chunks) ? chunks : []).find((c) => (c?.type || '').trim())
+  return (fromChunk?.type || '').trim() || 'audio/webm'
+}
