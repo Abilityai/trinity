@@ -31,6 +31,19 @@ Known limits, stated so a green run is not over-read: it moves
 database's own clock (`CURRENT_TIMESTAMP`, `now()`), nor any C-level time source
 a dependency reads directly, so a test whose expectations come from SQL-side
 time is out of its reach.
+
+One false-positive class is handled rather than documented, because a sweep whose
+output has to be triaged by hand is not a verdict. `datetime` cannot be patched
+in place (a C type with immutable attributes), so the shift installs a subclass —
+which splits the class identity: a library imported AFTER the swap type-checks
+against the subclass, while a value produced by code that imported `datetime`
+BEFORE it is an instance of the original. PyJWT does exactly this
+(`isinstance(payload["exp"], datetime)` in `api_jwt.encode`, guarding the
+datetime→epoch conversion), so under a naive swap ~30 auth/session tests failed
+with `TypeError: Object of type datetime is not JSON serializable` — a harness
+artifact indistinguishable, in a failure list, from a real calendar bug. The
+metaclass below makes `isinstance(any_real_datetime, _ShiftedDatetime)` true, so
+both identities satisfy such a check.
 """
 from __future__ import annotations
 
@@ -44,7 +57,23 @@ SHIFT = _dt.timedelta(days=_DAYS)
 _real_datetime = _dt.datetime
 
 
-class _ShiftedDatetime(_real_datetime):
+class _AnyDatetime(type):
+    """Make `isinstance(x, _ShiftedDatetime)` true for ANY real `datetime`.
+
+    Without this the swap narrows a widely-used type test: a real `datetime`
+    (built by a module that bound the name before the swap) is not an instance of
+    the subclass, so a library checking `isinstance(value, datetime)` silently
+    takes its else-branch. See the module docstring for the PyJWT case.
+    """
+
+    def __instancecheck__(cls, obj):
+        return isinstance(obj, _real_datetime)
+
+    def __subclasscheck__(cls, sub):
+        return issubclass(sub, _real_datetime)
+
+
+class _ShiftedDatetime(_real_datetime, metaclass=_AnyDatetime):
     """`datetime` with the three "what time is it" constructors moved.
 
     A subclass, not a stub: instances stay real `datetime`s, so comparisons and
