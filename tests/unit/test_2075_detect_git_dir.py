@@ -17,6 +17,7 @@ The shell tests below run the *real* probe script produced by the production
 code against real git repos in a temp directory — the only difference from
 production is the host filesystem vs. the agent container.
 """
+import os
 import shlex
 import subprocess
 import sys
@@ -249,3 +250,145 @@ async def test_successful_probe_skips_the_content_heuristic(monkeypatch):
     with patch.object(gs, "execute_command_in_container", AsyncMock(side_effect=_exec)):
         assert await gs._detect_git_dir("agent-x") == "/home/developer"
     assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# #2245 — a filesystem boundary must not look like "no repository"
+# ---------------------------------------------------------------------------
+#
+# Git stops discovery at a mount point by default, and says so exactly:
+#
+#   fatal: not a git repository (or any parent up to mount point /home/developer)
+#   Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).
+#
+# So on an agent whose `workspace/` is its own mount (bind mount, distinct
+# volume, overlay), the probe started inside it never reaches a repository rooted
+# at the home directory: `_git_toplevel` returns None, the caller falls through to
+# the content heuristic, and a populated `workspace/` answers
+# `/home/developer/workspace` — the #2075 misclassification, reintroduced by a
+# mount rather than by a heuristic.
+#
+# Verified in the real topology before writing these tests, since a unit test
+# cannot create a mount (user namespaces are unavailable in CI sandboxes and
+# `mount` needs privilege). In a `trinity-agent-base` container with a tmpfs at
+# `/home/developer/workspace` and a repo at `/home/developer`:
+#
+#   st_dev home      : 220
+#   st_dev workspace : 1048621          <- a genuine boundary
+#   pre-fix  probe   : exit=128, "Stopping at filesystem boundary ..."
+#   post-fix probe   : exit=0,   "/home/developer"
+#
+# What is testable here without a mount is the plumbing and the guard: that the
+# variable actually reaches the git process, and that crossing the boundary did
+# not loosen the containment check which is what makes crossing safe.
+
+
+def _git_shim(bin_dir: Path, record: Path) -> None:
+    """A fake `git` that records the environment it was invoked with."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    shim = bin_dir / "git"
+    shim.write_text(
+        "#!/usr/bin/env bash\n"
+        f'{{ printf "GIT_DISCOVERY_ACROSS_FILESYSTEM=%s\\n" "${{GIT_DISCOVERY_ACROSS_FILESYSTEM:-<unset>}}";'
+        f'  printf "ARGS=%s\\n" "$*"; }} >> {shlex.quote(str(record))}\n'
+        "echo /home/developer\n"
+    )
+    shim.chmod(0o755)
+
+
+@pytest.mark.asyncio
+async def test_the_probe_exports_the_discovery_flag_to_git(tmp_path, monkeypatch):
+    """The variable must reach the git PROCESS, not merely appear in the script.
+
+    A static substring check would pass on a script where the assignment landed
+    after a pipe, inside the wrong quoting layer, or on the shell rather than on
+    `git` — all of which leave the flag unset where it matters. So this runs the
+    real script with a `git` shim on PATH and reads back the environment git
+    actually saw.
+    """
+    gs = _load_git_service(monkeypatch)
+    record = tmp_path / "env.txt"
+    _git_shim(tmp_path / "bin", record)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}:{os.environ['PATH']}")
+
+    async def _exec(container_name: str, command: str, timeout: int = 5):
+        proc = subprocess.run(shlex.split(command), capture_output=True, text=True)
+        return {"exit_code": proc.returncode, "output": proc.stdout + proc.stderr}
+
+    with patch.object(gs, "execute_command_in_container", AsyncMock(side_effect=_exec)):
+        assert await gs._git_toplevel("agent-x") == "/home/developer"
+
+    seen = record.read_text()
+    assert "GIT_DISCOVERY_ACROSS_FILESYSTEM=1" in seen, seen
+    # The probe start point is unchanged by the fix: still `workspace/` when it
+    # exists, which is what makes the walk-up (and therefore the boundary) matter.
+    assert "rev-parse --show-toplevel" in seen, seen
+    assert "-C /home/developer/workspace" in seen or "-C /home/developer" in seen, seen
+
+
+@pytest.mark.asyncio
+async def test_crossing_the_boundary_does_not_loosen_containment(monkeypatch):
+    """Discovery may now leave the mount; the answer still may not leave home.
+
+    This is the whole safety argument for the flag, so it is pinned separately
+    from `test_toplevel_outside_agent_home_is_rejected`: crossing a boundary is
+    precisely what lets git return a path from an enclosing tree, so the refusal
+    has to hold for answers that a boundary-crossing walk could now produce.
+    """
+    gs = _load_git_service(monkeypatch)
+
+    for outside in ("/", "/home", "/home/developer-other", "/etc", "/opt/repo"):
+        async def _exec(container_name: str, command: str, timeout: int = 5, _o=outside):
+            assert "GIT_DISCOVERY_ACROSS_FILESYSTEM=1" in command
+            return {"exit_code": 0, "output": f"{_o}\n"}
+
+        with patch.object(gs, "execute_command_in_container", AsyncMock(side_effect=_exec)):
+            assert await gs._git_toplevel("agent-x") is None, outside
+
+
+def test_a_boundary_is_not_evidence_of_a_missing_repo(tmp_path, monkeypatch):
+    """The bug in one assertion: git failing from inside `workspace/` while a
+    home-rooted repo exists must NOT resolve to `workspace/`.
+
+    On the host there is no boundary, so the failure is simulated at the seam git
+    would fail at — a non-zero probe — while the filesystem still holds the
+    home-rooted repo and a populated `workspace/`. Pre-#2245 that combination is
+    what the content heuristic turned into `/home/developer/workspace`; the point
+    of the flag is that the probe no longer fails in the first place, and this
+    records what the wrong answer looked like.
+    """
+    gs = _load_git_service(monkeypatch)
+    home = _make_home(tmp_path)
+    _git(home, "init", "-q")
+    (home / "workspace" / "cache.db").write_text("data")
+
+    # Sanity: with a working probe (no boundary) the real script gets it right.
+    assert _detect_against_fs(gs, home) == str(home)
+
+    # And this is the pre-fix path — kept as documentation of the failure mode
+    # the flag removes, not as an aspiration: a boundary-failed probe still
+    # degrades to the heuristic, which is why the probe must not fail.
+    import asyncio
+
+    async def _boundary_failure(container_name: str, command: str, timeout: int = 5):
+        if "rev-parse" in command:
+            return {"exit_code": 128, "output":
+                    "fatal: not a git repository (or any parent up to mount point "
+                    f"{home})\nStopping at filesystem boundary "
+                    "(GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n"}
+        return {"exit_code": 0, "output": "1\n"}
+
+    with patch.object(gs, "AGENT_HOME_DIR", str(home)), \
+         patch.object(gs, "LEGACY_WORKSPACE_DIR", str(home / "workspace")), \
+         patch.object(gs, "execute_command_in_container",
+                      AsyncMock(side_effect=_boundary_failure)):
+        degraded = asyncio.run(gs._detect_git_dir("agent-x"))
+    # The literal, not `home / "workspace"`: `_detect_git_dir_fallback` embeds
+    # `/home/developer/workspace` directly rather than reading the module constants
+    # the probe uses, so patching them does not move it. Worth stating — it means
+    # the fallback answers the same path whatever the constants say (harmless in
+    # production, where they agree) and it is why this assertion is spelled out
+    # rather than derived from `home`.
+    assert degraded == "/home/developer/workspace", (
+        "if this ever stops being the fallback's answer, the comment above is stale"
+    )

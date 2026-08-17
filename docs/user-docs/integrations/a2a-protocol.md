@@ -159,6 +159,10 @@ curl -X PUT http://localhost:8000/api/settings/a2a_outbound_enabled \
 
 `GET /api/settings/feature-flags` reports `a2a_outbound_available` so you can confirm it took.
 
+Once a stored setting exists it wins in both directions, and the environment variable is ignored until you clear the row with `DELETE /api/settings/a2a_outbound_enabled`. If `.env` says `true` and the feature still looks off, that stored row is why.
+
+There is **no settings panel** for the endpoint registry — it is an API-only surface. Don't go hunting for it next to the per-agent A2A tab.
+
 ### Register an endpoint (admin, human-only)
 
 An agent **cannot supply a URL**. It picks a target by *name* from a list an administrator registered:
@@ -172,6 +176,12 @@ curl -X PUT http://localhost:8000/api/settings/a2a-endpoints \
         "credentials": "their-api-token"
       }'
 ```
+
+Registry rules worth knowing before your first attempt:
+
+- **Upsert is by name.** Re-sending the same `name` updates that endpoint. Omitting `credentials` on an update **keeps** the stored secret; send `"clear_credentials": true` to remove it.
+- **Credentials must be printable ASCII with no whitespace or line breaks** (≤8192 chars). A token pasted with a trailing newline is rejected with `422` — that is the single most common first-try failure.
+- **Up to 50 endpoints**, and each URL is SSRF-validated when you register it *and* re-validated on every call.
 
 ```bash
 # List them (credentials are never returned — only whether one is set)
@@ -214,6 +224,15 @@ get_a2a_task(agent_name="my-agent", endpoint="research-partner", task_id="<task_
 | `text` | The remote's answer (capped at 32 KB, truncation marked) |
 | `task_id` / `context_id` | Handles for polling or continuing the conversation |
 | `protocol_version` | The A2A dialect negotiated from the remote's card |
+| `truncated` | `true` when the reply exceeded the 32 KB response cap and was cut |
+| `endpoint` | Which registered endpoint answered |
+| `replayed` | `true` when this is a deduplicated replay of an earlier identical call, not a fresh answer |
+
+Messages are capped at **100,000 characters** on the way out.
+
+Pass the current `execution_id` alongside `dedup_label` when you have one: together they make the call at-most-once even if the turn itself is re-delivered.
+
+A few behaviors that surprise people, all deliberate: the **calling agent's container does not need to be running** (the backend places the call, not the container); **read-only mode and the autonomy switch do not gate outbound calls**; and an **ephemeral agent's own key cannot place them** at all.
 
 ### Trinity → Trinity
 
@@ -228,9 +247,19 @@ Register the remote instance's agent endpoint (`https://their-trinity.example.co
 | `endpoint_not_https` (400) | The registered URL is `http://`. Re-register it as `https://` — Trinity refuses rather than silently upgrading, so a credential never travels in clear |
 | `endpoint_private_address` (400) | The hostname resolves inside your network |
 | `card_origin_mismatch` (502) | The remote's agent card points somewhere other than the registered host. Trinity refuses: a card cannot redirect a credentialed call |
+| `endpoint_dns_failure` (400) | The hostname does not resolve. Trinity treats a DNS failure as fatal rather than retrying blindly |
+| `card_url_ambiguous` (502) | The remote's card declares a URL that doesn't unambiguously match what you registered. Register the origin, or a URL matching the card's declared `url` exactly |
+| `unsupported_protocol_version` (502) | The remote speaks A2A `1.x`, which Trinity deliberately refuses — there is no peer to verify that dialect against |
+| `message_too_long` (422) | The message exceeds 100,000 characters |
 | `timeout` (504) | The remote took too long. If it accepted a task, poll with `get_a2a_task` |
 | 409 | The same labelled call is already in flight — use a distinct `dedup_label` |
-| 429 | Too many outbound calls (per-agent or fleet-wide) |
+| 429 | Too many outbound calls: the limit is **30 per minute per agent** and **120 per minute fleet-wide** |
+
+### Timeouts, and what "it failed" actually means
+
+A single call is bounded at **30 seconds** for the remote's reply and **45 seconds** wall-clock including the card fetch. The MCP tool gives up on its own side a little earlier (`MCP_A2A_TIMEOUT_MS`, 40 seconds by default) so it can hand the agent a structured receipt instead of an opaque network error.
+
+That receipt matters: a timed-out `call_a2a_agent` returns `possibly_delivered: true`. The remote may well have accepted and run the task. **Do not simply re-send** — poll with `get_a2a_task` if you have a `task_id`, or reuse the same `dedup_label`, which replays the earlier answer rather than paying for the work twice.
 
 ---
 
@@ -263,9 +292,11 @@ Register the remote instance's agent endpoint (`https://their-trinity.example.co
 | POST | `/api/agents/{agent}/a2a/call` | Bearer (owner/shared; an agent key only as itself) | Task a registered external A2A agent |
 | POST | `/api/agents/{agent}/a2a/task` | same | Poll a remote task by id |
 | GET/PUT | `/api/settings/a2a-endpoints` | admin, human-only | List / register endpoints |
-| DELETE | `/api/settings/a2a-endpoints/{name}` | admin, human-only | Remove an endpoint |
+| DELETE | `/api/settings/a2a-endpoints/{ref}` | admin, human-only | Remove an endpoint — `ref` is its id **or** its name |
 
-All four return `404` while `A2A_OUTBOUND_ENABLED` is off.
+The two agent routes return `404` while outbound calling is off. The three settings routes are **not** gated by the flag: an admin can register endpoints before switching the feature on, which is the intended order.
+
+`GET /api/settings/a2a-endpoints` answers `{"endpoints": [{"id": …, "name": …, "url": …, "has_credentials": true}], "enabled": false}` — credentials are write-only and never echoed back, and `enabled` is a second way to confirm the flag.
 
 ### JSON-RPC methods
 

@@ -1033,3 +1033,30 @@ export function hiddenPlaybookCount(agent, searchableLength) {
     : playbookSearchSource(agent).length
   return Math.max(0, total - have)
 }
+
+// #2211 — composer auto-grow, without the scrollbar in an empty field
+// ---------------------------------------------------------------------------
+//
+// `scrollHeight` EXCLUDES the border under `box-sizing: border-box`, and the
+// composer has a 1px border per side. Assigning `height = scrollHeight` therefore
+// left the field 2px shorter than the single line it must hold, so the browser
+// showed a vertical scrollbar at ZERO characters. `overflow-y` was also never
+// toggled, so the scrollbar stayed available below the ceiling.
+//
+// Pure so it can be tested without a DOM: the caller reads the three measurements
+// and applies the result. It also lives here because BOTH composers
+// (PortalConversation, PortalRoom) need it — two copies of this arithmetic is how
+// one of them silently keeps the bug.
+export function resolveComposerGrowth(metrics, max) {
+  const { scrollHeight = 0, offsetHeight = 0, clientHeight = 0 } = metrics || {}
+  const ceiling = Number.isFinite(max) && max > 0 ? max : 160
+  // Measured, not hardcoded as 2: a future `border-2` must not reintroduce this.
+  const borderY = Math.max(0, offsetHeight - clientHeight)
+  const wanted = Math.max(0, scrollHeight) + borderY
+  return {
+    height: Math.min(wanted, ceiling),
+    // Below the ceiling there is nothing to scroll, so the scrollbar must be gone
+    // rather than merely unused.
+    overflowY: wanted > ceiling ? 'auto' : 'hidden',
+  }
+}

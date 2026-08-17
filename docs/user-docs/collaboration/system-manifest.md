@@ -17,8 +17,8 @@ Recipe-based multi-agent deployment via YAML manifest files. Deploy entire agent
 
 ## Installing a system from the UI
 
-Go to **Library → Systems** (`/library#systems`). You need the **creator** role or
-above, because installing a system creates agents — below that role the section is
+Go to **Library → Systems** (`/library?tab=systems`). You need the **creator** role or
+above, because installing a system creates agents — below that role the tab is
 not shown at all.
 
 Pick one of three sources:
@@ -108,7 +108,7 @@ agents:
         cron: "0 9 * * *"
         message: "Create today's content plan"
   writer:
-    template: local:business-assistant
+    template: local:scribe
     folders: { expose: true, consume: true }
     tags: [worker]
 permissions:
