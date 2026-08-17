@@ -44,7 +44,29 @@ function composerForm(src) {
   // Comments are stripped, not skipped past: the block explaining THIS fix names
   // `<textarea>` in prose, and a tag matcher run over the raw source picks that
   // up and then asserts the layout of a sentence.
-  return src.slice(start, end).replace(/<!--[\s\S]*?-->/g, '')
+  return stripHtmlComments(src.slice(start, end))
+}
+
+/**
+ * Remove every `<!-- … -->` span. Index-walked rather than a single regex
+ * `replace`: this is a source-text scrub of a checked-in SFC, not an HTML
+ * sanitizer, but CodeQL cannot tell the two apart and flags a one-pass
+ * `<!--…-->` replace as an incomplete multi-character sanitization (a `<!--`
+ * assembled from the halves of two removed spans survives it). The walk has no
+ * such residue: everything between an opener and its closer is dropped, and an
+ * unterminated opener drops the rest of the input.
+ */
+function stripHtmlComments(text) {
+  let out = ''
+  let i = 0
+  for (;;) {
+    const open = text.indexOf('<!--', i)
+    if (open === -1) return out + text.slice(i)
+    out += text.slice(i, open)
+    const close = text.indexOf('-->', open + 4)
+    if (close === -1) return out
+    i = close + 3
+  }
 }
 
 const SURFACES = [
