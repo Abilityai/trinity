@@ -323,6 +323,8 @@ def test_clear_staged_wipes_both_keys(scrub):
     m.clear_staged()
     assert fake.hlen(m._STAGED_HASH) == 0
     assert fake.zcard(m._STAGED_ZSET) == 0
+
+
 # ===========================================================================
 # Chokepoint scrubs (ent#279 PR-2) — the wired-set behaviour, end to end.
 #
@@ -652,6 +654,28 @@ class TestChatExecutionChokepoints:
         assert PLAIN not in error_msg
         assert MARK in error_msg
         assert status_code == 503
+
+    def test_parse_agent_http_error_scrubs_raw_body_before_truncation(self):
+        # R10 / learnings 2026-07-24: the non-JSON fallback truncates the body to
+        # 500 chars. A secret STRADDLING that cut must be scrubbed BEFORE the
+        # slice, or its leading fragment (chars 490-499 here) survives unmatched.
+        from services import chat_execution_service as ces
+        from unittest.mock import MagicMock, patch
+
+        e = MagicMock()
+        e.response = MagicMock()
+        e.response.status_code = 502
+        e.response.json.side_effect = ValueError("not JSON")
+        # PLAIN starts at char 490, so it spans the 500-char boundary; filler is
+        # all 'x' so any PLAIN prefix in the output comes only from the secret.
+        e.response.text = ("x" * 490) + PLAIN + ("y" * 200)
+        with patch.object(ces, "get_staged_values", lambda: [PLAIN]):
+            error_msg, status_code, _meta = ces._parse_agent_http_error(e, "agent-y")
+        # Neither the whole secret nor its truncated leading fragment survives.
+        assert PLAIN not in error_msg
+        assert PLAIN[:10] not in error_msg
+        assert status_code == 502
+        assert len(error_msg) <= 500
 
 
 # ---------------------------------------------------------------------------

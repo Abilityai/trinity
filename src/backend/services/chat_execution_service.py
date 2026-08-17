@@ -540,6 +540,11 @@ def _parse_agent_http_error(e, name: str):
     error_msg = f"HTTP error: {type(e).__name__}"
     agent_status_code = None
     partial_metadata: dict = {}
+    # ent#279: read the staged set ONCE up front so the raw-text fallback can be
+    # scrubbed BEFORE it is truncated (R10 / learnings 2026-07-24) -- a secret
+    # straddling the 500-char cut would otherwise leave a partial fragment no
+    # rendition matches. scrub_text is a no-op on an empty staged set.
+    _staged = get_staged_values()
     if hasattr(e, "response") and e.response is not None:
         agent_status_code = e.response.status_code
         try:
@@ -553,13 +558,12 @@ def _parse_agent_http_error(e, name: str):
                 error_msg = error_data["detail"]
         except Exception:
             if e.response.text:
-                error_msg = e.response.text[:500]
-    # ent#279: scrub the (agent-authored) HTTP error body HERE -- the single point
-    # where error_msg is finalized -- so it is redacted before _finalize_http_failure
+                error_msg = scrub_text(_staged, e.response.text)[:500]
+    # ent#279: scrub the finalized (agent-authored) error body -- covering the
+    # structured-detail paths -- so it is redacted before _finalize_http_failure
     # logs it to the Vector-captured platform log AND persists it to the FAILED
     # row. Scrubbing only at the persist site would leave the log with the secret
     # the DB row scrubbed.
-    _staged = get_staged_values()
     if _staged:
         error_msg = scrub_text(_staged, error_msg)
     return error_msg, agent_status_code, partial_metadata
